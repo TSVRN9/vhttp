@@ -334,10 +334,14 @@ pub fn is_ack_eliciting(frames: &[Frame]) -> (r: bool)
 }
 
 /// A packet payload of kind `k` as a server receives it: its frames, PADDING dropped.
+/// Every frame consumes at least one byte, so there are at most `b.len()` of them.
+// ponytail: a run of 1-byte frames (PING) gives one `Frame` per byte, bounded by the
+// datagram size; coalesce PINGs if a caller ever holds many payloads at once.
 pub fn parse_payload(b: &[u8], k: PacketKind) -> (r: Result<Vec<Frame>, u64>)
     ensures
         match r {
-            Ok(v) => rfc_payload(b@, k) == Ok::<Seq<SpecFrame>, u64>(frames_view(v@)),
+            Ok(v) => rfc_payload(b@, k) == Ok::<Seq<SpecFrame>, u64>(frames_view(v@))
+                && v@.len() <= b@.len(),
             Err(e) => rfc_payload(b@, k) == Err::<Seq<SpecFrame>, u64>(e),
         },
 {
@@ -357,6 +361,7 @@ pub fn parse_payload(b: &[u8], k: PacketKind) -> (r: Result<Vec<Frame>, u64>)
     while p < b.len()
         invariant
             p <= b.len(),
+            out@.len() <= p,
             rfc_frames(b@, 0, k) == prepend(frames_view(out@), rfc_frames(b@, p as int, k)),
         decreases b.len() - p,
     {
@@ -368,6 +373,9 @@ pub fn parse_payload(b: &[u8], k: PacketKind) -> (r: Result<Vec<Frame>, u64>)
             Ok(x) => x,
             Err(e) => return Err(e),
         };
+        proof {
+            lemma_decode_len_bounds(c@);
+        }
         if ty > FRAME_HANDSHAKE_DONE {
             return Err(FRAME_ENCODING_ERROR);
         }
