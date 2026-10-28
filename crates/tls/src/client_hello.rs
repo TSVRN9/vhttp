@@ -34,13 +34,16 @@ pub struct SpecChFields {
 //       Extension extensions<8..2^16-1>;
 //   } ClientHello;
 // "All versions of TLS allow an extensions field to optionally follow the compression_methods
-// field.": the end of the body there means no extension block.
+// field.": the end of the body there means no extension block. The block's floor is 0, not
+// TLS 1.3's 8: without supported_versions this is a TLS 1.2 ClientHello (§4.1.2), whose block
+// is `<0..2^16-1>`, and Appendix D.2 answers it with protocol_version, not decode_error. Every
+// accepted ClientHello still has at least 8 bytes of extensions (step 9).
 /// The `extensions` field after the compression methods: `Some(None)` when absent.
 pub open spec fn rfc_ch_ext_block(rest: Seq<u8>) -> Option<Option<Seq<SpecExt>>> {
     if rest.len() == 0 {
         Some(None)
     } else {
-        match rfc_vec_exact(rest, 8, 0xffff) {
+        match rfc_vec_exact(rest, 0, 0xffff) {
             None => None,
             Some(c) => match rfc_ext_list(c) {
                 None => None,
@@ -104,8 +107,8 @@ pub proof fn lemma_ch_ext_block_canonical(rest: Seq<u8>)
     if rest.len() == 0 {
         assert(rest =~= seq![]);
     } else if let Some(Some(l)) = rfc_ch_ext_block(rest) {
-        let (c, e) = rfc_vec(rest, 8, 0xffff).unwrap();
-        lemma_vec_canonical(rest, 8, 0xffff, c, e);
+        let (c, e) = rfc_vec(rest, 0, 0xffff).unwrap();
+        lemma_vec_canonical(rest, 0, 0xffff, c, e);
         theorem_ext_list_canonical(c);
         assert(e =~= seq![]);
         assert(rest =~= spec_vec_bytes(0xffff, c));
@@ -198,7 +201,7 @@ impl View for ClientHello {
 }
 
 /// The extensions of `f`, empty when the block is absent.
-pub open spec fn ch_exts(f: SpecChFields) -> Seq<SpecExt> {
+pub open spec fn rfc_ch_exts(f: SpecChFields) -> Seq<SpecExt> {
     match f.exts {
         Some(l) => l,
         None => seq![],
@@ -229,7 +232,7 @@ pub open spec fn rfc_client_hello(body: Seq<u8>) -> Result<SpecClientHello, u64>
         //# length) MUST terminate the connection with a "decode_error" alert.
         None => Err(ALERT_DECODE_ERROR),
         Some(f) => {
-            let x = ch_exts(f);
+            let x = rfc_ch_exts(f);
             let sn = spec_find(x, EXT_SERVER_NAME);
             let sg = spec_find(x, EXT_SUPPORTED_GROUPS);
             let sa = spec_find(x, EXT_SIGNATURE_ALGORITHMS);
@@ -485,7 +488,7 @@ fn parse_ch_fields(b: &[u8]) -> (r: Option<ChFields>)
     } else {
         let rest = slice_subrange(b, e3, b.len());
         assert(rest@ =~= b@.skip(e3 as int));
-        match read_exact(rest, 8, 0xffff) {
+        match read_exact(rest, 0, 0xffff) {
             None => return None,
             Some((s, e)) => match parse_ext_list(slice_subrange(rest, s, e)) {
                 None => return None,
@@ -554,7 +557,7 @@ pub fn parse_client_hello(body: &[u8]) -> (r: Result<ClientHello, u64>)
         Some(l) => l,
         None => Vec::new(),
     };
-    assert(x.deep_view() =~= ch_exts(fv));
+    assert(x.deep_view() =~= rfc_ch_exts(fv));
     // 2
     if let Err(e) = check_ch_exts(&x) {
         return Err(e);

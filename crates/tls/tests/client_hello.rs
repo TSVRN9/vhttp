@@ -147,7 +147,12 @@ fn rfc8448_s4_psk_not_last() {
         let i = e.iter().position(|(t, _)| *t == 0x29).unwrap();
         e.insert(i, qtp());
     });
-    assert!(p(&m).is_ok());
+    let c = p(&m).unwrap();
+    assert_eq!(c.transport_params, vec![0x01, 0x00]);
+    assert_eq!(c.groups, Some(vec![0x1d, 0x17, 0x18, 0x19, 0x100, 0x101, 0x102, 0x103, 0x104]));
+    let x = hex("e4ffb68ac05f8d96c99da26698346c6be16482badddafe051a66b4f18d668f0b");
+    assert_eq!(c.key_shares, Some(vec![KeyShareEntry { group: 0x1d, key_exchange: x }]));
+    assert_eq!(c.server_name, Some(b"server".to_vec()));
 }
 
 #[test]
@@ -192,7 +197,8 @@ fn ch_errors() {
         ("suites odd length", with_head(A2_CH, odd_suites), 0x132),
         ("suites empty", with_head(A2_CH, head(0x0303, &[], &[], &[0])), 0x132),
         ("compression empty", with_head(A2_CH, head(0x0303, &[], &[0x1301], &[])), 0x132),
-        ("block of 4", join_ch(&h, &[(0x1234, vec![])]), 0x132),
+        ("block of 4, no versions", join_ch(&h, &[(0x1234, vec![])]), 0x146),
+        ("empty block, no versions", join_ch(&h, &[]), 0x146),
         ("trailing byte", trailing, 0x132),
         ("key_share 00", with(A2_CH, |e| set(e, 0x33, vec![0])), 0x132),
         ("early_data [0]", with(A2_CH, |e| e.push((0x2a, vec![0]))), 0x132),
@@ -242,6 +248,37 @@ fn ch_errors() {
             "order: bodies before legacy_version",
             with(&with_head(A2_CH, head(0x0300, &[], &[0x1301], &[0])), |e| set(e, 0x33, vec![0])),
             0x132,
+        ),
+        (
+            "order: legacy_version before compression",
+            with_head(A2_CH, head(0x0300, &[], &[0x1301], &[1])),
+            0x146,
+        ),
+        (
+            "order: versions before compression",
+            with(&with_head(A2_CH, head(0x0303, &[], &[0x1301], &[1])), |e| remove(e, 0x2b)),
+            0x146,
+        ),
+        (
+            "order: compression before session id",
+            with_head(A2_CH, head(0x0303, &[7; 32], &[0x1301], &[1])),
+            0x12f,
+        ),
+        (
+            "order: session id before cookie",
+            with(&with_head(A2_CH, head(0x0303, &[7; 32], &[0x1301], &[0])), |e| {
+                e.push((0x2c, hex("0001aa")))
+            }),
+            0x0a,
+        ),
+        (
+            "order: duplicate before bodies",
+            with(A2_CH, |e| {
+                set(e, 0x33, vec![0]);
+                e.insert(0, (0x0a0a, vec![]));
+                e.insert(1, (0x0a0a, vec![]));
+            }),
+            0x12f,
         ),
     ];
     for (name, m, want) in rows {
