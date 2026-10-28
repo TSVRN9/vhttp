@@ -148,6 +148,41 @@ pub open spec fn spec_sha256(m: Seq<u8>) -> Seq<u8> {
     sha256_words_be(sha256_blocks(SHA256_H0@, sha256_pad(m)))
 }
 
+proof fn lemma_sha256_words_be_len(w: Seq<u32>)
+    ensures
+        sha256_words_be(w).len() == 4 * w.len(),
+    decreases w.len(),
+{
+    if w.len() > 0 {
+        lemma_sha256_words_be_len(w.drop_last());
+        lemma_i2osp_len(w.last() as nat, 4);
+    }
+}
+
+proof fn lemma_sha256_blocks_len(h: Seq<u32>, m: Seq<u8>)
+    requires
+        h.len() == 8,
+    ensures
+        sha256_blocks(h, m).len() == 8,
+    decreases m.len(),
+{
+    if m.len() >= 64 {
+        let c = sha256_compress(h, m.take(64));
+        assert(c.len() == 8);
+        lemma_sha256_blocks_len(c, m.skip(64));
+    }
+}
+
+/// `spec_sha256` yields 32 octets.
+pub proof fn lemma_spec_sha256_len(m: Seq<u8>)
+    ensures
+        spec_sha256(m).len() == 32,
+{
+    assert(SHA256_H0@.len() == 8);
+    lemma_sha256_blocks_len(SHA256_H0@, sha256_pad(m));
+    lemma_sha256_words_be_len(sha256_blocks(SHA256_H0@, sha256_pad(m)));
+}
+
 /// Trusted shim: the body is RustCrypto sha2; the ensures is the trusted statement.
 #[verifier::external_body]
 pub fn sha256(msg: &[u8]) -> (r: [u8; 32])

@@ -34,7 +34,7 @@ fn sha256_constants_from_roots() {
         n += 1;
     }
     for t in 0..64 {
-        // 2^35 bounds the cube root of p<<96 (< 2^105)
+        // 2^36 bounds the cube root of p<<96 (< 2^105, so the root is < 2^35)
         assert_eq!(SHA256_K[t], iroot(primes[t] << 96, 3, 1 << 36) as u32, "K[{t}]");
     }
     for i in 0..8 {

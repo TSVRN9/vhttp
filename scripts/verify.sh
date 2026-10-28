@@ -13,7 +13,7 @@ done
 # TRUSTED.md, and the attribute count must equal the number of `| crypto::` rows.
 fail() { echo "verify.sh: escape gate: $*" >&2; exit 1; }
 rc=0
-hits=$(grep -rnE 'admit\(|assume\(|external_body|assume_specification|verifier::external|verifier\(external|\baxiom\b' "$root/crates" --include='*.rs') || rc=$?
+hits=$(grep -rnE 'admit[[:space:]]*\(|assume[[:space:]]*\(|external_body|assume_specification|verifier[[:space:]]*(::|\()[[:space:]]*external|\baxiom\b' "$root/crates" --include='*.rs') || rc=$?
 [ "$rc" -le 1 ] || fail "grep failed (rc=$rc)"
 bad=$(printf '%s\n' "$hits" | awk -v pre="$root/crates/crypto/src/" 'NF { f=$0; sub(/:[0-9]+:.*/, "", f); t=$0; sub(/^[^:]*:[0-9]+:[ \t]*/, "", t); if (index(f, pre) != 1 || t != "#[verifier::external_body]") print }')
 [ -z "$bad" ] || fail "unaccounted escape:
@@ -23,7 +23,8 @@ named=0
 for f in "$root"/crates/crypto/src/*.rs; do
     [ -f "$f" ] || continue
     mod=$(basename "$f" .rs)
-    for fn in $(awk '/^[ \t]*#\[verifier::external_body\]/ { p = 1; next } p && match($0, /fn [A-Za-z_0-9]+/) { print substr($0, RSTART + 3, RLENGTH - 3); p = 0 }' "$f"); do
+    for fn in $(awk '/^[ \t]*#\[verifier::external_body\]/ { p = 1; next } p && /^[ \t]*\/\// { next } p && /(proof|spec)[ \t]+fn / { print "NOT-EXEC-FN"; p = 0; next } p && match($0, /fn [A-Za-z_0-9]+/) { print substr($0, RSTART + 3, RLENGTH - 3); p = 0 }' "$f"); do
+        [ "$fn" != NOT-EXEC-FN ] || fail "$mod.rs: external_body on a proof/spec fn"
         named=$((named + 1))
         grep -qF "| crypto::$mod::$fn: " "$root/TRUSTED.md" || fail "crypto::$mod::$fn has no TRUSTED.md row"
     done
