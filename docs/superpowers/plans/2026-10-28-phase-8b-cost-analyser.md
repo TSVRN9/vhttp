@@ -10,11 +10,11 @@
 - `ctcore::syntax::*`;
 - `sem.rs`'s `run_fn`/`run_from`/`exec_stmts`/`exec_intr`/`call_enter`/`call_leave`/`init_entry`/`len_ok`, with steps in `Res`;
 - `ct.rs`'s `wf`;
-- the driver's `translate()` and its manifest.
+- the driver's `translate_closure()` and its manifest (preflight). `translate_closure` is label-free; 8a's check mode applies the root-label rule separately.
 
 **Branch:** `phase-8b`, cut from `main` **after `phase-8a` merges**. The escape count stays at main's value (4, or 3/2 if 5c landed).
 
-**Architecture.** All new code is additive. **No 8a file changes**, except `crates/ctcore/src/lib.rs` (new `mod` lines and re-exports), `tools/ct-driver/src/main.rs` (the `cost` mode) and `scripts/ct-check.sh`.
+**Architecture.** All new code is additive. **No 8a file changes**, except `crates/ctcore/src/lib.rs` (new `mod` lines and re-exports), `tools/ct-driver/src/main.rs` (the `cost` mode), `tools/ct-driver/src/manifest.rs` (the `cost-root` kind; 8a's loader rejects unknown kinds), `tools/ct-fixtures/src/lib.rs` (cost fixtures) and `scripts/ct-check.sh` (preflight).
 - `crates/ctcore/src/cost.rs` holds the trusted cost spec:
   - atoms, polynomials, facts and certificates;
   - `cert_sem_ok`/`cert_for`;
@@ -103,7 +103,7 @@
 **Consumes:** merged 8a.
 
 - [ ] **Step 1: 8a interfaces present.**
-  - `grep -n 'pub open spec fn \(run_fn\|run_from\|exec_stmts\|exec_intr\|call_enter\|call_leave\|init_entry\|len_ok\|wf\)' crates/ctcore/src/*.rs` finds each exactly once.
+  - `grep -n 'pub open spec fn \(run_fn\|run_from\|exec_stmts\|exec_intr\|call_enter\|call_leave\|init_entry\|len_ok\|wf\)(' crates/ctcore/src/*.rs` finds each exactly once. The `(` keeps `wf` from also matching `wf_body` (preflight).
   - `Res` is `Option<(Frame, Seq<Event>, nat)>`.
   - Record the escape count from `scripts/verify.sh`.
 - [ ] **Step 2: Census.**
@@ -316,10 +316,10 @@
 - Modify: `tools/ct-driver/src/main.rs` (`CT_MODE=cost`), `tools/ct-driver/src/manifest.rs` (the `cost-root <def-path>` line kind), `tools/ct-fixtures/src/lib.rs` (cost fixtures), `scripts/ct-check.sh`
 - Create: `tools/ct-fixtures/expected-cost.txt`
 
-**Consumes:** `ctcore::analyze`, 8a's `translate()`.
+**Consumes:** `ctcore::analyze`, 8a's `translate_closure()` (preflight).
 
 **Interfaces (produces):**
-- **Cost mode** translates from the `cost-root` lines. It reads no labels, so 8a's root-label rule doesn't apply here.
+- **Cost mode** translates from the `cost-root` lines. It reads no labels. `translate_closure` applies no label rule, so 8a's root-label rule, which runs in check mode only, doesn't apply here (preflight).
   - It keeps only cost roots whose crate prefix is the crate being compiled, and analyses each root's closure as its own `Program`, as in 8a.
   - ct-check.sh fails if any `cost-root` got no verdict line in any crate.
 - **It calls `analyze` and writes `cost-<crate>.txt`**, one line per cost root:

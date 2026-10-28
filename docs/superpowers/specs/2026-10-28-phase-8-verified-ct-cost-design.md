@@ -83,9 +83,10 @@ Its job is to make "constant-time style" a checked property of `crates/crypto`, 
 **D3. The declassify marker is an identity function.** It is `crate::ct::declassify(x)`, recognized by def path and mapped to the core intrinsic `Declassify`.
 - MIR has no statement attributes, so a branch-level attribute cannot reach the checker. A fn-level attribute naming a callee is coarser and harder to review.
 - The cost is a one-line code edit at each point.
-- The definition, identical whoever adds it first (8a Task 9 or 5c Task 7):
+- The definition, identical whoever adds it first (8a Task 9 or 5c Task 7). These are the exact bytes of `crates/crypto/src/ct.rs` (preflight):
   ```rust
-  // crates/crypto/src/ct.rs   (lib.rs: `pub(crate) mod ct;`)
+  use vstd::prelude::*;
+
   verus! {
   /// Constant-time checker marker: the result is treated as public. Every call site has a
   /// `ct-declassify:` row in TRUSTED.md.
@@ -95,6 +96,9 @@ Its job is to make "constant-time style" a checked property of `crates/crypto`, 
   { x }
   }
   ```
+- `lib.rs` gets `pub(crate) mod ct;` on the line after `pub mod bytes;` (preflight).
+- **Never `use crate::ct;`**, and put no `ct::` attribute in `lib.rs` (preflight). With the module `ct` in scope, `ct::secret` resolves to the module and fails with E0433, but only under `--cfg ct_check`.
+- Call the marker as `crate::ct::declassify(..)`, or import the fn with `use crate::ct::declassify;`.
 
 **D4. Refinement of controller call 3 ("an unlabeled reachable fn is an error").**
 - ct-discipline.md says public-only exec fns get no comment, e.g. `sec1_decode_exec`, which `p256_ecdh` reaches. Requiring a label there would be a retrofit beyond turning comments into attributes. The rules below stay fail-closed:
@@ -139,7 +143,11 @@ Its job is to make "constant-time style" a checked property of `crates/crypto`, 
 - The inference has no correctness proof and needs none.
 - Soundness doesn't need an acyclic call graph either. The inference simply returns `None` for recursive SCCs.
 
-**D10. Label inference is unverified exec.** Its output only reaches the verdict through the verified `check_prog`, whose `ensures r == ok_prog(..)` ties it to the theorem. A wrong inference can only cause a rejection.
+**D10. Label inference is unverified exec.** Its output only reaches the verdict through verified code (preflight):
+- `check_prog`, whose `ensures r == ok_prog(..)` ties it to the theorem;
+- a verified `decl_ok` check: every declared-secret parameter is secret in the inferred labels.
+
+All-public labels satisfy `ok_prog` for any program. So without `decl_ok`, a wrong inference could cause a vacuous accept. With both checks, a wrong inference can only cause a rejection.
 
 ## Architecture
 
@@ -157,7 +165,7 @@ tools/ct-driver/          unverified rustc_private driver (own [workspace]); lin
   src/translate.rs        MIR (rustc_public) -> ctcore::syntax, 1:1
   src/manifest.rs         line-format manifest reader
   src/interp.rs           test-only core interpreter (selftest; not in the TCB)
-  manifest.txt            roots, intrinsic mappings, label lines, excludes, translate-crates
+  manifest.txt            roots, intrinsic mappings, label lines, translate-crates (preflight)
 tools/ct-fixtures/        plain-Rust crate (own [workspace]): positive and negative controls
   src/lib.rs, expected.txt
 scripts/ct-check.sh       builds the driver, runs it over crypto (+ the negative control) and the fixtures
@@ -293,7 +301,10 @@ pub struct Program { pub fns: Vec<Body> }
 **Runs.**
 - `run_from(p, f, b, fr, fuel) -> Option<(Frame, Seq<Event>, nat)>` decreases fuel. Every block transition and every call consumes 1 fuel.
 - `run_fn(p, f, fr, fuel) = run_from(p, f, 0, fr, fuel)`.
-- `init_entry(p, f, args: Seq<Val>, slots: Seq<Val>) -> Frame` is the frame the theorems quantify over.
+- `init_entry(p, f, args: Seq<Val>, slots: Seq<Val>) -> Frame` is the frame the theorems quantify over (preflight):
+  - for every `Ty::Mut`-typed parameter, it places `Mut(Slot(j), [])` in local `1 + j`, ignoring `args[j]` there;
+  - it places `args[j]` in the other parameter locals, and `Unit` everywhere else;
+  - `slots` become the frame's slots.
 
 **Events:** `enum Event { Cond(u128), Idx(u128), DivOps(u128, u128), Shamt(u128), Declass(Val), Alloc(u128), Range(u128, u128) }`.
 
@@ -344,6 +355,7 @@ pub struct Program { pub fns: Vec<Body> }
 | `Switch`, `Assert` | condition public |
 | `Call(Fn(g))` | each arg ⊑ g's param label (`==` for `Mut`-typed params); g's return label ⊑ `wr(dst)` |
 | `Call(Intr)` | per-intrinsic: `Declassify` result may be public; `VecWithCapacity` n public; `VecSet`/`VecIndex` i public; `SliceSubrange` lo, hi public; `VecPush`/`VecExtendFromSlice`/`VecSet` value ⊑ target; `VecAsSlice`/`VecIndex`/`SliceSubrange`/`SliceToVec` result ⊒ source; `VecLen` public |
+| `Call(Intr(Wrapping(op, ty)))` | as `Bin` (preflight): Div/Rem both operands public, Shl/Shr rhs public, otherwise the join |
 
 **`wf(p)`, the supported subset:**
 - `Ty::Mut` only as a top-level local type: not in `Tuple`/`Adt`/`Array`/`Slice`/`Vec`/`Shr`, and not as local 0;
@@ -351,7 +363,7 @@ pub struct Program { pub fns: Vec<Body> }
 - block targets are in range;
 - arity matches.
 
-`ok_prog(p, ls)` = `wf(p)` ∧ every body ok under its labels.
+`ok_prog(p, ls)` = `wf(p)` ∧ `ls.len() == p.fns.len()` ∧ every `ls[f].locals.len() == p.fns[f].locals.len()` ∧ every body ok under its labels (preflight).
 
 **Agreement.**
 - `agree(p, ls, f, fr1, fr2)`: public locals and slots are equal; secret ones are `shape_eq`.
@@ -376,7 +388,7 @@ pub proof fn theorem_ct(p: Program, ls: Seq<FnLab>, f: nat, a1: Seq<Val>, a2: Se
     }),
 ```
 
-**Reading:** two complete runs from inputs that agree on public parameters (and on shapes) produce:
+**Reading:** take two runs that both complete at a common fuel, from inputs that agree on public parameters (and on shapes). They produce the results below. The theorem is termination-insensitive, and it says nothing about runs that complete at different fuels (preflight).
 - the same leakage trace;
 - the same step count;
 - publicly-equal outputs (the return value and the `&mut` slots);
@@ -385,9 +397,11 @@ unless they first differ at a declassified value.
 
 **Exec checker:** `pub fn check_prog(p: &Program, ls: &Vec<FnLab>) -> (r: bool) ensures r == ok_prog(*p, ls@)`.
 
-**API** (`lib.rs`): `pub fn check_program(p: &Program, decl: &Vec<Option<Vec<bool>>>) -> (r: Result<Vec<FnLab>, Vec<Reject>>) ensures r is Ok ==> ok_prog(*p, r->Ok_0@)`.
-- It runs inference, then `check_prog`.
-- It returns `Ok` only when `check_prog` returned true.
+**API** (`lib.rs`): `pub fn check_program(p: &Program, decl: &Vec<Option<Vec<bool>>>) -> (r: Result<Vec<FnLab>, Vec<Reject>>) ensures r is Ok ==> ok_prog(*p, r->Ok_0@) && decl_ok(decl@, r->Ok_0@)` (preflight).
+- `decl_ok(decl, ls)` (spec, `ct.rs`) is `forall f, j. decl[f] is Some && decl[f]->0@[j] ==> ls[f].locals@[1 + j]` (preflight).
+- `decl[f]` has one entry per MIR argument, with `false` for ghost/unit params (preflight).
+- It runs inference, then `check_prog`, then a verified exec `decl_ok` check (preflight).
+- It returns `Ok` only when both checks returned true.
 - On failure, `explain` (exec, unverified) gives the rejection sites.
 
 ## Front end (tools/ct-driver; trusted, kept 1:1)
@@ -401,7 +415,8 @@ unless they first differ at a declassified value.
 
 **Per-root programs.**
 - Each root's reachable closure is translated and checked as **its own `Program`**, by one `check_program` call per root.
-- So a rejected or untranslatable root never prevents a verdict on another root, and every `ok` verdict is backed by `check_prog`'s ensures for exactly that closure.
+- So a rejected or untranslatable root never prevents a verdict on another root, and every `ok` verdict is backed by `check_program`'s ensures for exactly that closure.
+- Translation (`translate_closure`) applies no label rule (preflight). Check mode applies the root-label and attribute rules afterwards. So the selftest and 8b's cost mode reuse the same translation.
 - During a multi-crate build, the driver keeps only the manifest roots whose crate prefix is the crate being compiled. ct-check.sh asserts that every manifest root got a verdict in some crate.
 
 **Mapping.** Anything not listed here is rejected with its span.
@@ -414,6 +429,7 @@ unless they first differ at a declassified value.
 | `Cast(IntToInt)`, `Cast(PointerCoercion(Unsize))` | `Cast`, `Use` |
 | `Aggregate(Tuple/Array/Adt)`, `Repeat`, `Ref(Shared/Mut)`, `Discriminant`, `CopyForDeref` | same-named core forms |
 | `Aggregate(Closure)` | `Lit(Unit)`: ghost closures only; calling a closure is rejected |
+| `Cast(PointerCoercion(ClosureFnPointer))` of a closure-ZST constant | `Lit(Unit)`, only when the result flows solely into a `GhostUnit` call: the erased `Ghost(..)` argument residue (spike `encrypt_rk` MIR) (preflight) |
 | `Copy`/`Move` operands | `Copy` |
 | scalar constants; ZST constants (fn items, unit, `PhantomData`, `Ghost<_>`) | `Const`, `Lit(Unit)` |
 | constant refs/arrays of ints (promoteds, `const` arrays) | `Lit(ConstVal)`, decoded little-endian from the allocation |
@@ -422,7 +438,7 @@ unless they first differ at a declassified value.
 | `Drop` of a type whose drop glue only frees `Vec` buffers | `Goto` |
 | `Call` | `Fn(i)` or `Intr(k)`, by the lookup order below |
 
-- Types map structurally to `Ty`. `Ghost<_>`/`Tracked<_>` map to `Unit`, `Vec<T>` to `Ty::Vec`, and `&T`/`&mut T` to `Shr`/`Mut`.
+- Types map structurally to `Ty`. `Ghost<_>`/`Tracked<_>` map to `Unit`, and so do fn-pointer types, but only for that residue (preflight). `Vec<T>` maps to `Ty::Vec`, and `&T`/`&mut T` to `Shr`/`Mut`.
 - Floats, `char`, raw pointers, `Box`, `dyn` and `unsafe` are rejected.
 
 **Callee lookup**, for a resolved Instance's def path:
@@ -441,19 +457,24 @@ root <def-path>                        # CT root; must resolve and carry a ct:: 
 intr <def-path> <Intrinsic>[ <BinOp> <IntTy>]
 label <def-path> secret(a,b) public(c) # for bodies that can't be annotated (third-party)
 translate-crate <crate>                # foreign crates whose bodies may be translated
-exclude <def-path> <reason...>         # never entered; listed in the report
 ```
+- There is no `exclude` kind (preflight). A path that no root reaches needs no line. A reached callee is either translated, mapped by an `intr` line, or `Unresolved`; it is never skipped.
 - The `intr` paths are written from the driver's `census` output. They are never guessed.
+- Census lines, manifest matching and report lines all use one key (preflight): the resolved `Instance`'s item path (`CrateDef::name()` of `instance.def`), with every `::<…>` generic-argument list removed.
+- `intr` lines need not resolve in a given build (preflight).
+- An `intr` path inside the analysed crate is a loader error, except `<crate>::ct::declassify` (preflight).
 - Expected keys include the `Vec::with_capacity`, `push`, `extend_from_slice` and `as_slice` def paths; vstd's `Vec` `set` and `slice_subrange`/`slice_to_vec`; `u32::wrapping_add`; `Ghost::assume_new_fallback`; and `crypto::ct::declassify`.
 
 **Report** (`$CT_OUT/report-<crate>.txt`), one line per item:
 ```
 checked <def-path> secret=<params> ret=<s|p>
-declassify <root-or-fn def-path>#<k> <file>:<line>
-reject <def-path> <reason> <file>:<line>
+declassify <fn def-path>#<k> <file>:<line>
+reject <root def-path> <Kind> <file>:<line>
 root <def-path> ok
-exclude <def-path> <reason>
 ```
+- There is one `reject` line per (root, kind, site) (preflight). A secret div or index also trips rustc's div-by-zero or bounds `Assert`, so that site reports both kinds.
+- `declassify` lines are keyed by the def path of the fn that contains the call, numbered per fn, and deduplicated across roots (preflight).
+- `secret=` is printed from the checked labels, not from the attributes (preflight).
 
 ## Labels and declassification
 
@@ -473,7 +494,7 @@ Roots (manifest), with their labels:
 - `hkdf_extract`: public(salt), secret(ikm)
 - `hkdf_expand`: secret(prk), public(info, len)
 
-The RSA path is excluded (`exclude crypto::rsa::rsa_pss_sha256_sign shim; RUSTSEC-2023-0071 row`).
+No root reaches the RSA path, so it needs no manifest line (preflight).
 
 **Declassify sites.**
 
@@ -498,10 +519,10 @@ New rows:
 | Item | File | Why trusted | Removed |
 |---|---|---|---|
 | CT front end: MIR→core translator, attribute reader, manifest reader | `tools/ct-driver/src/` | unverified, rustc_private. It must map MIR 1:1 per the spec's table and reject everything else. The `&` snapshot and `&mut` copy-in/copy-out semantics rely on rustc's borrow checker. Tested by tools/ct-fixtures and the interpreter self-test, not proved | never |
-| CT manifest: each `intr` line asserts a std/vstd fn behaves as its core intrinsic; each `label`/`exclude` line is reviewed | `tools/ct-driver/manifest.txt` | std/vstd bodies are not translated | never |
+| CT manifest: each `intr` line asserts a std/vstd fn behaves as its core intrinsic; each `label` line is reviewed (preflight) | `tools/ct-driver/manifest.txt` | std/vstd bodies are not translated | never |
 | CT core semantics and leakage model | `crates/ctcore/src/sem.rs`, the spec fns in `ct.rs` | events: branch/assert conditions, indices, div/rem operands (all widths), shift amounts, allocation sizes, subslice bounds, declassified values, steps. Shapes are public. The `binop`/`cast` transcription of Rust release semantics is hand-written | never |
 | Compiler and CPU preserve MIR-level CT | (toolchain) | analysis uses `-Zinline-mir=no`, the shipped build doesn't; LLVM may reintroduce branches or tables; variable-latency instructions beyond div/shift, caches beyond indices, speculation. Binary-level (dudect-style) checks are a later item | never |
-| `ct-declassify: crypto::gcm::aes128_gcm_open#0: tag-compare outcome is public (accept/reject)` | `crates/crypto/src/gcm.rs` | NI is relative to declassified values | never |
+| ct-declassify: crypto::gcm::aes128_gcm_open#0: tag-compare outcome (accept/reject) is public; the caller learns it anyway | `crates/crypto/src/gcm.rs` | NI is relative to declassified values (the row text is unbackticked, so the gate's `^| ct-declassify: ` grep matches it) (preflight) | never |
 
 Changed rows and lines:
 - **The AES/GCM timing row** becomes: "MIR-level constant time proved by `ctcore::theorem_ct` for `crypto::{aes,gcm,sha256,hmac,hkdf}` (scripts/ct-check.sh in verify.sh). Below MIR, see the compiler/CPU row."
@@ -513,19 +534,23 @@ Changed rows and lines:
 
 ## verify.sh integration (8a Task 10)
 
-After the crate loop and `duvet report`, and before the escape gate, verify.sh runs `"$root/scripts/ct-check.sh"`. ct-check.sh:
+After the crate loop and `duvet report`, and before the escape gate, verify.sh runs `"$root/scripts/ct-check.sh"`.
+
+Before each analysis build, ct-check.sh deletes the old report and runs `cargo clean --release -p <crate>` in that build's own `--target-dir` (preflight). Cargo skips fresh crates, and manifests and `CT_*` are not cargo inputs.
+
+ct-check.sh:
 1. builds the driver;
 2. runs it over `crypto` and requires 0 `reject` lines and every manifest root `ok`;
-3. runs it over `crypto` with `--cfg ct_negative` and requires **exactly** the one reject `crypto::ct_negative::secret_branch … secret switch condition`;
+3. runs it over `crypto` with `--cfg ct_negative` and requires **exactly** the one reject `reject crypto::ct_negative::secret_branch SecretSwitch …` (preflight);
 4. runs the fixtures and diffs their report against `tools/ct-fixtures/expected.txt`;
-5. prints `ct-check: crypto ok (F fns, R roots, D declassify); negative control rejected; fixtures N/N`.
+5. prints one line per run (preflight): `ct-check: fixtures N/N`, `ct-check: selftest V/V`, `ct-check: crypto ok (F fns, R roots, D declassify)` and `ct-check: negative control rejected`.
 
 Then the **declassify gate**:
 - every `declassify X#k` report line has a TRUSTED.md row starting `| ct-declassify: X#k: `;
 - the row count equals the line count;
-- the number of `declassify(` matches in `crates/crypto/src/*.rs`, with `ct.rs` excluded (the definition is `declassify<T>(`), equals that count too.
+- the number of non-comment `declassify(` lines under `crates/crypto/src/` equals that count too (preflight). The search is recursive and excludes `ct.rs`, where the definition is `declassify<T>(`.
 
-The final line becomes `verify.sh: all crates verified, duvet ok, ct ok (D declassify), escapes accounted (4)`.
+The final line becomes `verify.sh: all crates verified, duvet ok, ct ok (D declassify), escapes accounted (E)`, where E is main's escape count (preflight).
 
 ## Cost analyser (8b)
 
