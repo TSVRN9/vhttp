@@ -26,11 +26,10 @@ Columns: `§` section, `Topic`, `#MUST/MUST NOT` (MUST, MUST NOT, REQUIRED, SHAL
 - `N/A (binds spec authors)`: the rule binds authors of future specifications, extensions or applications, not an implementation (RFC 9001 §5.1, §6.6, §9.2, §9.4; RFC 8446 Appendix E exporters).
 - `N/A (boilerplate)`: the BCP 14 keyword-definition paragraph; the keywords there are not requirements.
 - `Declined (optional: X)`: the rule only matters for an optional feature we decline. Declined features: 0-RTT, resumption/PSK, connection migration (initiating it), Retry, NEW_TOKEN issuance (sending NEW_TOKEN is a MAY, RFC 9000 §8.1.3; receiving-side rules stay Phase 3), server push, QPACK dynamic table (capacity advertised as 0), ChaCha20-Poly1305, AES-256-GCM, X25519, client certificates, HTTP/3 extensions (datagrams, WebTransport, extended CONNECT), TLS 1.2-and-older compatibility, and CONNECT/proxying. A MUST about how to refuse or ignore a declined feature (discard 0-RTT packets, no `early_data` in EncryptedExtensions, reject PUSH_PROMISE, still answer PATH_CHALLENGE) is not declined; it carries its phase.
-- `REINTERPRET`: a literal MUST we satisfy by reading it as not applying. Each needs an entry in the design spec's "Calls I made". Only the RSA rows (RFC 8446 §4.2.3, §4.4.3, §9.1) remain; they fall under the single RSA bullet in "Calls I made" ("RSA under RFC 8446 §9.1"), which awaits user review.
 
 ### Notes that bind later phases
 
-- CONNECT: RFC 9114 §4.4 rows are `Declined (optional: CONNECT/proxying)`. An origin server need not implement CONNECT (RFC 9110 §9.1 mandates only GET and HEAD), but Phase 2 must still answer a CONNECT request with an error status, not drop or reset it.
+- CONNECT: RFC 9114 §4.4 rows are `Declined (optional: CONNECT/proxying)`. An origin server need not implement CONNECT (RFC 9110 §9.1 mandates only GET and HEAD), but Phase 2b answers a well-formed CONNECT with `501 Not Implemented` and a malformed one with H3_MESSAGE_ERROR (not drop or reset).
 - RFC 8446 §9.2 cookie: Phase 4 parses the cookie extension and rejects a cookie we never issued.
 - Tracking granularity: a section row with `partial` covers every non-`(req)` keyword in the section as Phase-N work; the `(req)` rows under it are the exceptions.
 
@@ -77,7 +76,7 @@ Matrix total = sum of the section rows' counts (`(req)` rows excluded). It equal
 | 4.3.1 (req) | Omit :authority when translating from HTTP/1.1 | 1 | no | N/A (intermediary-only) | "this pseudo-header field MUST be omitted when translating from an HTTP/1.1 request that has a request target in a method-specific form" - applies to a translator/client, we never translate |
 | 4.3.1 (req) | Intermediary creates Host | 1 | no | N/A (intermediary-only) | "An intermediary that converts an HTTP/3 request to HTTP/1.1 MUST create a Host field ..." - we are not an intermediary. (Handler boundary may still expose :authority as Host.) |
 | 4.3.2 | Response Pseudo-Header Fields | 1 | yes | 2 | :status MUST be in every response we generate |
-| 4.4 | The CONNECT Method | 4 | partial | 2 | We do not implement CONNECT proxying; CONNECT requests are validated per 4.3.1 and refused |
+| 4.4 | The CONNECT Method | 4 | partial | 2 | A well-formed CONNECT is answered with `501 Not Implemented` (RFC 9110 §9.1: an origin server SHOULD answer an unimplemented method with 501). A malformed CONNECT (RFC 9114 §4.4 form rules) is H3_MESSAGE_ERROR. Both are Phase 2b. |
 | 4.4 (req) | CONNECT request construction | 1 | no | N/A (client-only) | "A CONNECT request MUST be constructed as follows ..." (sender-side) |
 | 4.4 (req) | Only DATA after CONNECT completes | 1 | no | Declined (optional: CONNECT/proxying) | "Receipt of any other known frame type MUST be treated as a connection error of type H3_FRAME_UNEXPECTED." Applies only to an established tunnel; we never accept CONNECT, so no tunnel exists |
 | 4.4 (req) | Proxy closes TCP on stream/QUIC error | 1 | no | Declined (optional: CONNECT/proxying) | "if a proxy detects an error with the stream or the QUIC connection, it MUST close the TCP connection." No TCP connection is ever opened |
@@ -92,12 +91,12 @@ Matrix total = sum of the section rows' counts (`(req)` rows excluded). It equal
 | 6.2.2 (req) | Push ID used once per push stream header | 1 | no | Declined (optional: server push) | "Each push ID MUST only be used once in a push stream header." We send no push streams |
 | 6.2.2 (req) | Client detects duplicate push ID | 1 | no | N/A (client-only) | Client treats duplicate push ID as H3_ID_ERROR |
 | 6.2.3 | Reserved Stream Types | 1 | yes | 2 | Reserved (0x1f*N+0x21) streams have no meaning on receipt; treated as unknown |
-| 7.1 | Frame Layout | 4 | yes | 2 | Payload exactly the fields: extra or short = H3_FRAME_ERROR; redundant lengths self-consistent; truncated last frame on clean stream end = H3_FRAME_ERROR |
+| 7.1 | Frame Layout | 4 | yes | 2 | Payload exactly the fields: extra or short = H3_FRAME_ERROR; redundant lengths self-consistent; truncated last frame on clean stream end = H3_FRAME_ERROR ✅ 2a (layout only): crates/h3/src/frame.rs; open for 2b: placement, and truncated last frame on clean stream end = H3_FRAME_ERROR (needs stream end) |
 | 7.2.1 | DATA | 2 | yes | 2 | DATA only on request/response streams; DATA on control stream = H3_FRAME_UNEXPECTED |
 | 7.2.2 | HEADERS | 1 | yes | 2 | HEADERS on control stream = H3_FRAME_UNEXPECTED |
-| 7.2.3 | CANCEL_PUSH | 3 | yes | 2 | Not on control stream = H3_FRAME_UNEXPECTED; push ID above allowed = H3_ID_ERROR; server receiving for unmentioned push ID = H3_ID_ERROR (with push declined, always H3_ID_ERROR) |
-| 7.2.4 | SETTINGS | 7 | yes | 2 | Once, first on control stream; second SETTINGS or SETTINGS elsewhere = H3_FRAME_UNEXPECTED; no duplicate identifiers; ignore unknown identifiers |
-| 7.2.4.1 | Defined SETTINGS Parameters | 3 | yes | 2 | Grease settings have no meaning; reserved HTTP/2-era identifiers never sent, receipt = H3_SETTINGS_ERROR |
+| 7.2.3 | CANCEL_PUSH | 3 | yes | 2 | Not on control stream = H3_FRAME_UNEXPECTED; push ID above allowed = H3_ID_ERROR; server receiving for unmentioned push ID = H3_ID_ERROR (with push declined, always H3_ID_ERROR) ✅ 2a (layout only): crates/h3/src/frame.rs; open for 2b: control-stream placement H3_FRAME_UNEXPECTED, push-ID H3_ID_ERROR rules |
+| 7.2.4 | SETTINGS | 7 | yes | 2 | Once, first on control stream; second SETTINGS or SETTINGS elsewhere = H3_FRAME_UNEXPECTED; no duplicate identifiers; ignore unknown identifiers ✅ 2a (layout only): crates/h3/src/frame.rs; open for 2b: once/first on control stream, second or misplaced SETTINGS = H3_FRAME_UNEXPECTED |
+| 7.2.4.1 | Defined SETTINGS Parameters | 3 | yes | 2 | Grease settings have no meaning; reserved HTTP/2-era identifiers never sent, receipt = H3_SETTINGS_ERROR ✅ 2a: crates/h3/src/frame.rs (payload decode rejects reserved and duplicate IDs; grease/unknown are ignored by construction) |
 | 7.2.4.2 | Initialization | 10 | partial | 2 | Server: no frames/requests invalid under peer settings; no waiting for peer data before sending SETTINGS; send SETTINGS as soon as transport ready (3 total) |
 | 7.2.4.2 (req) | Client complies with stored settings (0-RTT) | 1 | no | N/A (client-only) | "A client MUST comply with stored settings ... when attempting 0-RTT." |
 | 7.2.4.2 (req) | Client complies with new server settings | 1 | no | N/A (client-only) | "Once a server has provided new settings, clients MUST comply with those values." |
@@ -106,7 +105,7 @@ Matrix total = sum of the section rows' counts (`(req)` rows excluded). It equal
 | 7.2.4.2 (req) | Server includes all non-default settings | 1 | no | Declined (optional: 0-RTT) | Sentence is scoped to the 0-RTT-accepted case |
 | 7.2.4.2 (req) | Incompatible settings after 0-RTT = H3_SETTINGS_ERROR | 1 | no | N/A (client-only) | Client-side check (client receives server SETTINGS) |
 | 7.2.4.2 (req) | Omitted non-default setting after 0-RTT = H3_SETTINGS_ERROR | 1 | no | N/A (client-only) | Client-side check |
-| 7.2.5 | PUSH_PROMISE | 8 | partial | 2 | Server receiving PUSH_PROMISE (client MUST NOT send) = connection error H3_FRAME_UNEXPECTED |
+| 7.2.5 | PUSH_PROMISE | 8 | partial | 2 | Server receiving PUSH_PROMISE (client MUST NOT send) = connection error H3_FRAME_UNEXPECTED open for 2b: server rejects every PUSH_PROMISE with H3_FRAME_UNEXPECTED (dispatch on frame type before payload parse) |
 | 7.2.5 (req) | Server push ID within MAX_PUSH_ID | 1 | no | Declined (optional: server push) | "A server MUST NOT use a push ID that is larger than the client has provided in a MAX_PUSH_ID frame" |
 | 7.2.5 (req) | Client rejects larger push ID | 1 | no | N/A (client-only) | Client H3_ID_ERROR |
 | 7.2.5 (req) | Repeated push ID has identical request headers | 2 | no | Declined (optional: server push) | "the decompressed request header sets MUST contain the same fields in the same order, and ... exact matches" |
@@ -114,16 +113,16 @@ Matrix total = sum of the section rows' counts (`(req)` rows excluded). It equal
 | 7.2.5 (req) | PUSH_PROMISE on control stream (client) | 1 | no | N/A (client-only) | Client H3_FRAME_UNEXPECTED |
 | 7.2.5 (req) | Client MUST NOT send PUSH_PROMISE | 1 | no | N/A (client-only) | Sender-side client rule (server-side enforcement is the section row) |
 | 7.2.6 | GOAWAY | 2 | no | N/A (client-only) | Both MUSTs are client receive rules (stream ID type check; GOAWAY not on control stream) |
-| 7.2.7 | MAX_PUSH_ID | 4 | partial | 2 | Server: MAX_PUSH_ID not on control stream = H3_FRAME_UNEXPECTED; smaller value than before = H3_ID_ERROR; never send MAX_PUSH_ID |
+| 7.2.7 | MAX_PUSH_ID | 4 | partial | 2 | Server: MAX_PUSH_ID not on control stream = H3_FRAME_UNEXPECTED; smaller value than before = H3_ID_ERROR; never send MAX_PUSH_ID ✅ 2a (layout only): crates/h3/src/frame.rs; open for 2b: control-stream placement H3_FRAME_UNEXPECTED, non-decreasing H3_ID_ERROR |
 | 7.2.7 (req) | Client treats MAX_PUSH_ID as error | 1 | no | N/A (client-only) | "A client MUST treat the receipt of a MAX_PUSH_ID frame as a connection error of type H3_FRAME_UNEXPECTED." |
-| 7.2.8 | Reserved Frame Types | 3 | yes | 2 | Grease frames ignored on receipt; HTTP/2-era reserved types never sent, receipt = H3_FRAME_UNEXPECTED |
+| 7.2.8 | Reserved Frame Types | 3 | yes | 2 | Grease frames ignored on receipt; HTTP/2-era reserved types never sent, receipt = H3_FRAME_UNEXPECTED ✅ 2a (layout only): crates/h3/src/frame.rs; open for 2b: receipt of HTTP/2-reserved types = H3_FRAME_UNEXPECTED; grease ignore on receipt |
 | 8 | Error Handling | 1 | yes | 2 | Unexpected-context or unknown error code treated as H3_NO_ERROR |
 | 9 | Extensions to HTTP/3 | 4 | partial | 2 | Ignore unknown values in extensible elements; discard unknown uni stream types; no extension used without negotiation (we implement none) |
 | 9 (req) | Extension setting defaults disabled | 1 | no | Declined (optional: HTTP/3 extensions) | Obligation on extension definitions |
 | 10.3 | Intermediary-Encapsulation Attacks | 2 | yes | 2 | Invalid field names / invalid field-value characters = malformed |
 | 10.4 | Cacheability of Pushed Responses | 1 | no | Declined (optional: server push) | Multi-tenant push authority; we never push |
 | 10.6 | Use of Compression | 2 | yes | 2 | Satisfied structurally: static-table-only QPACK (no dynamic table) and no content compression |
-| 10.8 | Frame Parsing | 1 | yes | 2 | Frame length must exactly match its fields (see 7.1) |
+| 10.8 | Frame Parsing | 1 | yes | 2 | Frame length must exactly match its fields (see 7.1) ✅ 2a: crates/h3/src/frame.rs |
 | 10.9 | Early Data | 1 | no | Declined (optional: 0-RTT) | Anti-replay mitigations apply only when HTTP/3 accepts 0-RTT; we never do |
 | 11.2.1 | Frame Types | 4 | no | N/A (IANA procedure) | IANA registry rules; not endpoint behavior |
 | 11.2.2 | Settings Parameters | 3 | no | N/A (IANA procedure) | IANA registry rules; not endpoint behavior |
@@ -137,38 +136,38 @@ Total keyword count: 157 across 44 sections.
 | § | Topic | #MUST/MUST NOT | Server applies? | Phase | Notes |
 |---|---|---|---|---|---|
 | 1.1 | Conventions and Definitions | 5 | no | N/A (boilerplate) | BCP 14 boilerplate listing the keywords; not a requirement. |
-| 2.1 | Encoder: field order | 1 | yes | 2 | Response encoder MUST emit representations in input order. |
+| 2.1 | Encoder: field order | 1 | yes | 2 | Response encoder MUST emit representations in input order. ✅ 2a: crates/h3/src/qpack/field_section.rs |
 | 2.1.1 | Limits on dynamic table insertions | 1 | no | Declined (optional: QPACK dynamic table) | Encoder must not insert when nothing evictable; we never insert. |
 | 2.1.2 | Blocked streams | 2 | partial | 2 | Encoder limit on blocked streams is moot (no dynamic refs); decoder rule row below binds. |
 | 2.1.2 (req) | Encoder limits blocked streams | 1 | no | Declined (optional: QPACK dynamic table) | "An encoder MUST limit the number of streams that could become blocked to the value of SETTINGS_QPACK_BLOCKED_STREAMS at all times." |
-| 2.1.2 (req) | Decoder: too many blocked streams | 1 | yes | 2 | "If a decoder encounters more blocked streams than it promised to support, it MUST treat this as a connection error of type QPACK_DECOMPRESSION_FAILED." With capacity 0 and blocked-streams limit 0, any Required Insert Count > 0 is this error. |
-| 2.2 | Decoder: field order | 1 | yes | 2 | Request decoder MUST emit field lines in encoded order. |
-| 2.2.1 | Blocked decoding | 1 | yes | 2 | RIC smaller than expected is QPACK_DECOMPRESSION_FAILED. |
+| 2.1.2 (req) | Decoder: too many blocked streams | 1 | yes | 2 | "If a decoder encounters more blocked streams than it promised to support, it MUST treat this as a connection error of type QPACK_DECOMPRESSION_FAILED." With capacity 0 and blocked-streams limit 0, any Required Insert Count > 0 is this error. ✅ 2a: crates/h3/src/qpack/field_section.rs |
+| 2.2 | Decoder: field order | 1 | yes | 2 | Request decoder MUST emit field lines in encoded order. ✅ 2a: crates/h3/src/qpack/field_section.rs |
+| 2.2.1 | Blocked decoding | 1 | yes | 2 | RIC smaller than expected is QPACK_DECOMPRESSION_FAILED. ✅ 2a: crates/h3/src/qpack/field_section.rs |
 | 2.2.2.1 | Section Acknowledgment emission | 1 | no | Declined (optional: QPACK dynamic table) | Only after decoding dynamic-table references, which we reject (see 2.2.3); never emitted. |
-| 2.2.3 | Invalid references | 2 | yes | 2 | Dynamic ref in field line -> QPACK_DECOMPRESSION_FAILED; encoder-instruction ref to evicted entry -> QPACK_ENCODER_STREAM_ERROR (at capacity 0 any such instruction is an error). |
-| 3.1 | Static table | 2 | yes | 2 | Invalid static index: QPACK_DECOMPRESSION_FAILED on request stream, QPACK_ENCODER_STREAM_ERROR on encoder stream. |
+| 2.2.3 | Invalid references | 2 | yes | 2 | Dynamic ref in field line -> QPACK_DECOMPRESSION_FAILED; encoder-instruction ref to evicted entry -> QPACK_ENCODER_STREAM_ERROR (at capacity 0 any such instruction is an error). ✅ 2a (field-line half): crates/h3/src/qpack/field_section.rs; ✅ 2a (encoder-instruction half): crates/h3/src/qpack/instructions.rs |
+| 3.1 | Static table | 2 | yes | 2 | Invalid static index: QPACK_DECOMPRESSION_FAILED on request stream, QPACK_ENCODER_STREAM_ERROR on encoder stream. ✅ 2a (table + lookup): crates/h3/src/qpack/static_table.rs; ✅ 2a (request-stream index error): crates/h3/src/qpack/field_section.rs; ✅ 2a (encoder-stream half): crates/h3/src/qpack/instructions.rs |
 | 3.2 | Dynamic table: duplicates | 1 | no | Declined (optional: QPACK dynamic table) | Duplicates not an error; no inserts are possible at capacity 0. |
 | 3.2.2 | Capacity and eviction | 2 | partial | 2 | Encoder eviction rule is declined; decoder error rule binds. |
 | 3.2.2 (req) | Encoder must not evict non-evictable | 1 | no | Declined (optional: QPACK dynamic table) | "The encoder MUST NOT cause a dynamic table entry to be evicted unless that entry is evictable." |
-| 3.2.2 (req) | Entry larger than capacity | 1 | yes | 2 | "the decoder MUST treat this as a connection error of type QPACK_ENCODER_STREAM_ERROR." At capacity 0 every Insert is oversized. |
+| 3.2.2 (req) | Entry larger than capacity | 1 | yes | 2 | "the decoder MUST treat this as a connection error of type QPACK_ENCODER_STREAM_ERROR." At capacity 0 every Insert is oversized. ✅ 2a: crates/h3/src/qpack/instructions.rs |
 | 3.2.3 | Maximum dynamic table capacity | 4 | partial | 2 | Mixed; see rows. |
 | 3.2.3 (req) | Encoder capacity <= maximum | 1 | no | Declined (optional: QPACK dynamic table) | "The encoder MUST NOT set a dynamic table capacity that exceeds this maximum" (we never send Set Capacity). |
 | 3.2.3 (req) | Remembered non-zero value (0-RTT) | 1 | no | Declined (optional: 0-RTT) | "If the remembered value is non-zero, the server MUST send the same non-zero value in its SETTINGS frame." We never accept 0-RTT; advertised value is always 0. |
-| 3.2.3 (req) | Capacity zero: no inserts, no encoder instructions | 2 | yes | 2 | "the encoder MUST NOT insert entries into the dynamic table and MUST NOT send any encoder instructions on the encoder stream." Binds our response encoder; we advertise 0. |
-| 4.1.1 | Prefixed integers | 1 | yes | 2 | Decode integers up to 62 bits (prefix-integer codec, distinct from QUIC varint). |
+| 3.2.3 (req) | Capacity zero: no inserts, no encoder instructions | 2 | yes | 2 | "the encoder MUST NOT insert entries into the dynamic table and MUST NOT send any encoder instructions on the encoder stream." Binds our response encoder; we advertise 0. Encoder side holds by absence: this crate has no encoder-instruction serializer. ✅ 2a: crates/h3/src/qpack/instructions.rs |
+| 4.1.1 | Prefixed integers | 1 | yes | 2 | Decode integers up to 62 bits (prefix-integer codec, distinct from QUIC varint). ✅ 2a: crates/h3/src/qpack/int.rs |
 | 4.2 | Encoder and decoder streams | 6 | yes | 2 | One of each at most (second -> H3_STREAM_CREATION_ERROR); never close; closure -> H3_CLOSED_CRITICAL_STREAM; MUST accept peer-created QPACK streams even though capacity is 0. |
 | 4.3.1 | Set Dynamic Table Capacity | 3 | partial | 2 | Mixed; see rows. |
 | 4.3.1 (req) | New capacity <= limit (sender) | 1 | no | Declined (optional: QPACK dynamic table) | "The new capacity MUST be lower than or equal to the limit described in Section 3.2.3." We never send it. |
-| 4.3.1 (req) | Decoder rejects over-limit capacity | 1 | yes | 2 | "The decoder MUST treat a new dynamic table capacity value that exceeds this limit as a connection error of type QPACK_ENCODER_STREAM_ERROR." Any non-zero capacity is over our limit of 0. |
+| 4.3.1 (req) | Decoder rejects over-limit capacity | 1 | yes | 2 | "The decoder MUST treat a new dynamic table capacity value that exceeds this limit as a connection error of type QPACK_ENCODER_STREAM_ERROR." Any non-zero capacity is over our limit of 0. ✅ 2a: crates/h3/src/qpack/instructions.rs |
 | 4.3.1 (req) | No eviction of non-evictable entries | 1 | no | Declined (optional: QPACK dynamic table) | "This MUST NOT cause the eviction of entries that are not evictable." |
-| 4.4.1 | Section Acknowledgment received | 1 | yes | 2 | We send no dynamic refs, so any Section Acknowledgment is QPACK_DECODER_STREAM_ERROR. |
-| 4.4.3 | Insert Count Increment received | 1 | yes | 2 | Increment of zero, or beyond what we sent (always 0 sent), is QPACK_DECODER_STREAM_ERROR. |
-| 4.5.1.1 | Required Insert Count | 1 | yes | 2 | Unproducible EncodedInsertCount -> QPACK_DECOMPRESSION_FAILED. |
-| 4.5.1.2 | Base | 2 | yes | 2 | Base MUST NOT be negative; Sign=1 invalid when RIC <= Delta Base (decoder check on request field sections). |
-| 4.5.4 | Literal with name reference | 2 | partial | 2 | Decoder must accept N bit; forwarding rule below is intermediary-only. |
+| 4.4.1 | Section Acknowledgment received | 1 | yes | 2 | We send no dynamic refs, so any Section Acknowledgment is QPACK_DECODER_STREAM_ERROR. ✅ 2a: crates/h3/src/qpack/instructions.rs |
+| 4.4.3 | Insert Count Increment received | 1 | yes | 2 | Increment of zero, or beyond what we sent (always 0 sent), is QPACK_DECODER_STREAM_ERROR. ✅ 2a: crates/h3/src/qpack/instructions.rs |
+| 4.5.1.1 | Required Insert Count | 1 | yes | 2 | Unproducible EncodedInsertCount -> QPACK_DECOMPRESSION_FAILED. ✅ 2a: crates/h3/src/qpack/field_section.rs |
+| 4.5.1.2 | Base | 2 | yes | 2 | Base MUST NOT be negative; Sign=1 invalid when RIC <= Delta Base (decoder check on request field sections). ✅ 2a: crates/h3/src/qpack/field_section.rs |
+| 4.5.4 | Literal with name reference | 2 | partial | 2 | Decoder must accept N bit; forwarding rule below is intermediary-only. ✅ 2a: crates/h3/src/qpack/field_section.rs |
 | 4.5.4 (req) | N-bit literal must be forwarded as literal | 1 | no | N/A (intermediary-only) | "when a peer sends a field line that it received represented as a literal field line with the 'N' bit set, it MUST use a literal representation to forward this field line." We are an origin server and never forward request fields, so the rule is read as not applying. Cheap to honor if a proxy mode is ever added. |
 | 7.1.3 | Never-indexed literals | 3 | no | N/A (intermediary-only) | All three MUSTs govern intermediaries re-encoding fields ("An intermediary MUST NOT re-encode a value that uses a literal representation with the 'N' bit set..."). Origin server, never re-encodes received fields; read as not applying. |
-| 7.4 | Implementation limits | 1 | yes | 2 | Value too large to decode: QPACK_DECOMPRESSION_FAILED (request stream) or appropriate connection error (encoder/decoder stream). |
+| 7.4 | Implementation limits | 1 | yes | 2 | Value too large to decode: QPACK_DECOMPRESSION_FAILED (request stream) or appropriate connection error (encoder/decoder stream). A TooLarge value on a request stream is reported as QPACK_DECOMPRESSION_FAILED and escalated by the HTTP/3 layer to a connection error, as permitted by RFC 9114 §8 ("An endpoint MAY choose to treat a stream error as a connection error"). ✅ 2a (prefix ints): crates/h3/src/qpack/int.rs; ✅ 2a (string lengths): crates/h3/src/qpack/field_section.rs; ✅ 2a (encoder/decoder streams): crates/h3/src/qpack/instructions.rs |
 
 Total keyword count: 44 across 22 sections.
 
@@ -259,8 +258,11 @@ Total keyword count: 44 across 22 sections.
 | 9.5 (req) | Do not reuse CID from more than one local address | 1 | no | Declined (optional: connection migration) | Applies when initiating/probing. |
 | 9.5 (req) | Do not reuse CID when sending to more than one destination address | 1 | yes | 3 | Applies when responding to a migrated peer. |
 | 9.6.1 | Communicating a preferred address | 1 | no | N/A (client-only) | Client keeps using original address; we never advertise preferred_address. |
-| 9.6.2 | Migration to a preferred address | 4 | no | Declined (optional: connection migration) | 2 client-only MUSTs; server MUSTs apply only when advertising preferred_address, which we do not. |
-| 9.6.3 | Interaction of client migration and preferred address | 2 | no | Declined (optional: connection migration) | Client-only abandon rule; server protection rule only for preferred_address. |
+| 9.6.2 | Migration to a preferred address | 4 | no | Declined (optional: connection migration) | Client-only MUSTs are the rows below; server MUSTs apply only when advertising preferred_address, which we do not. |
+| 9.6.2 (req) | Client validates the preferred address before migrating | 1 | no | N/A (client-only) | "A client that migrates to a preferred address MUST validate the address it chooses before migrating" |
+| 9.6.2 (req) | Client does not reuse preferred addresses for other connections | 1 | no | N/A (client-only) | "A client MUST NOT use these for other connections, including connections that are resumed from the current connection." |
+| 9.6.3 | Interaction of client migration and preferred address | 2 | no | Declined (optional: connection migration) | Client-only abandon rule is the row below; server protection rule only for preferred_address. |
+| 9.6.3 (req) | Client abandons original-address validation once the preferred address validates | 1 | no | N/A (client-only) | "the client MUST abandon validation of the original address and migrate to using the server's preferred address" |
 | 9.7 | Use of IPv6 flow label and migration | 1 | yes | 3 | Conditional on setting IPv6 flow labels; shell leaves kernel default. |
 | 10.1 | Idle timeout | 1 | yes | 3 | Idle timeout at least 3x PTO. |
 | 10.2.1 | Closing connection state | 2 | yes | 3 | Limit closing-state sends to 3x received / unvalidated address. |
@@ -351,10 +353,10 @@ Total keyword count: 44 across 22 sections.
 | 19.17 | PATH_CHALLENGE frames | 1 | yes | 3 | Recipient MUST generate PATH_RESPONSE with same data (see 8.2.2 rows). |
 | 19.20 | HANDSHAKE_DONE frames | 2 | yes | 3 | Server sends only after handshake complete; receipt is PROTOCOL_VIOLATION. |
 | 19.21 | Extension frames | 3 | no | Declined (optional: HTTP/3 extensions) | Applies only to endpoints using extension frames; unknown frame handling is in 12.4. |
-| 21.5 | Request forgery attacks | 1 | no | N/A (client-only) | Requirement on future extensions, not an endpoint. |
+| 21.5 | Request forgery attacks | 1 | no | N/A (binds spec authors) | Requirement on future extensions, not an endpoint. |
 | 21.5.3 | Request forgery with preferred addresses | 1 | no | N/A (client-only) | Client must not send non-probing frames to unvalidated preferred address. |
 | 21.11 | Stateless reset oracle | 2 | yes | 3 | No reset for CIDs possibly active elsewhere with same static key. |
-| 21.12 | Version downgrade | 1 | no | N/A (client-only) | Requirement on future versions, not an endpoint. |
+| 21.12 | Version downgrade | 1 | no | N/A (binds spec authors) | Requirement on future versions, not an endpoint. |
 | 22.1.2 | Selecting codepoints | 1 | no | N/A (IANA procedure) | IANA procedure, not an endpoint requirement. |
 | 22.1.3 | Reclaiming provisional codepoints | 3 | no | N/A (IANA procedure) | IANA procedure. |
 | 22.1.4 | Permanent registrations | 1 | no | N/A (IANA procedure) | IANA procedure. |
@@ -465,7 +467,7 @@ Total keyword count: 38 across 19 sections.
 | 4.1.2 | Client Hello | 16 | partial | 4 | Server-side rules: reject non-null compression (illegal_parameter), ignore unknown cipher suites/extensions, unexpected_message on ClientHello after handshake |
 | 4.1.2 (req) | Client sends ClientHello first / same ClientHello after HRR / legacy_version 0x0303 / legacy_session_id rules | 6 | no | N/A (client-only) | "it is REQUIRED to send the ClientHello as its first TLS message"; "the client MUST send the same ClientHello without modification"; client-side field constraints |
 | 4.1.2 (req) | Compatibility-mode legacy_session_id | 2 | no | Declined (optional: TLS 1.2-and-older compatibility) | "In compatibility mode this field MUST be non-empty"; QUIC forbids compat mode (RFC 9001 §8.4); server SHOULD error on non-empty value (see RFC 9001 table) |
-| 4.1.2 (req) | Renegotiation / previous-version ClientHello, pre-1.3 compression and decode_error rules | 5 | no | Declined (optional: TLS 1.2-and-older compatibility) | "MUST retain the previous protocol version"; "MUST NOT negotiate TLS 1.3"; prior-version procedures |
+| 4.1.2 (req) | renegotiation of pre-1.3 sessions / pre-1.3 extension-block rules | 5 | no | Declined (optional: TLS 1.2-and-older compatibility) | "MUST retain the previous protocol version"; "MUST NOT negotiate TLS 1.3"; prior-version procedures |
 | 4.1.3 | Server Hello | 16 | partial | 4 | Server-side: legacy_version 0x0303, random independent of ClientHello.random, compression 0, supported_versions present, only required extensions |
 | 4.1.3 (req) | Client-side ServerHello checks | 4 | no | N/A (client-only) | "A client which receives a legacy_session_id_echo ... / cipher suite not offered MUST abort"; downgrade-sentinel checks |
 | 4.1.3 (req) | Downgrade sentinel in ServerHello.Random | 4 | no | Declined (optional: TLS 1.2-and-older compatibility) | "TLS 1.3 servers which negotiate TLS 1.2 or below ... MUST set the last 8 bytes"; we never negotiate older versions |
@@ -475,10 +477,10 @@ Total keyword count: 38 across 19 sections.
 | 4.2.1 | Supported Versions | 16 | partial | 4 | Server: use only supported_versions (not legacy_version), ignore unknown versions, reply with 0x0304 and legacy_version 0x0303 |
 | 4.2.1 (req) | Server supporting TLS 1.2 / negotiating pre-1.3 | 3 | no | Declined (optional: TLS 1.2-and-older compatibility) | "servers ... which also support TLS 1.2 MUST negotiate TLS 1.2"; "MUST NOT send supported_versions" when negotiating pre-1.3 |
 | 4.2.1 (req) | Client-side supported_versions rules | 6 | no | N/A (client-only) | Client MUST send extension, check it first in ServerHello, abort on bad selected version |
-| 4.2.2 | Cookie | 3 | no | 4 | Client copies cookie; clients MUST NOT reuse cookies; "Servers operating statelessly MUST ignore these records" refers to CCS records, which QUIC lacks (RFC 9001 §8.4). We emit no cookies |
+| 4.2.2 | Cookie | 3 | yes | 4 | Client copies cookie; clients MUST NOT reuse cookies; "Servers operating statelessly MUST ignore these records" refers to CCS records, which QUIC lacks (RFC 9001 §8.4). We emit no cookies |
 | 4.2.3 | Signature Algorithms | 16 | partial | 4 | Server: missing signature_algorithms when authenticating with certificate -> missing_extension; key type must match signature algorithm; no SHA-1-signed certificate unless unavoidable |
-| 4.2.3 (req) | RSA signature scheme requirements (rsaEncryption OID, RSASSA-PSS OID, salt length, DER params, identical params) | 6 | no | REINTERPRET | We use an ECDSA P-256 certificate only (ecdsa_secp256r1_sha256) and never request client certs, so no RSA key/signature is produced or verified; MUSTs conditioned on RSA keys/signatures do not arise See "Calls I made" in the design spec (RSA under RFC 8446 §9.1). |
-| 4.2.3 (req) | Deprecated algorithms MUST NOT be offered or negotiated (MD5, SHA-224, DSA) | 2 | yes | 4 | We implement only ecdsa_secp256r1_sha256 |
+| 4.2.3 (req) | RSA signature scheme requirements (rsaEncryption OID, RSASSA-PSS OID, salt length, DER params, identical params) | 6 | yes | 4 | User decision 2026-10-27 (design spec, "Calls I made": RSA (RFC 8446 §9.1)): rsa_pkcs1_sha256 and rsa_pss_rsae_sha256 are recognized in signature_algorithms / signature_algorithms_cert when selecting the chain to send; the server only signs, so peer-signature MUSTs do not arise. |
+| 4.2.3 (req) | Deprecated algorithms MUST NOT be offered or negotiated (MD5, SHA-224, DSA) | 2 | yes | 4 | We sign with ecdsa_secp256r1_sha256 and rsa_pss_rsae_sha256 (RSA key supported) |
 | 4.2.3 (req) | TLS 1.2 negotiation rules for signature schemes / curves / PSS | 3 | no | Declined (optional: TLS 1.2-and-older compatibility) | "implementations MUST be prepared to accept a signature that uses any curve ..." when TLS 1.2 negotiated |
 | 4.2.3 (req) | Client lists legacy algorithms lowest priority | 1 | no | N/A (client-only) | "Clients offering these values MUST list them as the lowest priority" |
 | 4.2.5 | OID Filters | 6 | no | Declined (optional: client certificates) | Only in CertificateRequest, which we never send |
@@ -509,8 +511,8 @@ Total keyword count: 38 across 19 sections.
 | 4.4.2.2 | Server Certificate Selection | 7 | yes | 4 | X.509v3, ECDSA P-256 key compatible with client's signature_algorithms, digitalSignature key usage, chain signed with client-advertised algorithms; abort alert is client-side |
 | 4.4.2.3 | Client Certificate Selection | 3 | no | Declined (optional: client certificates) | Client-side |
 | 4.4.2.4 | Receiving a Certificate Message | 2 | no | Declined (optional: client certificates) | Server never receives a Certificate; empty-cert check is client-side; MD5 check applies to chain validation |
-| 4.4.3 | Certificate Verify | 10 | partial | 4 | Server MUST send; algorithm one offered by client, compatible with key; SHA-1 MUST NOT be used; ecdsa_secp256r1_sha256 only |
-| 4.4.3 (req) | "RSA signatures MUST use an RSASSA-PSS algorithm" | 1 | no | REINTERPRET | ECDSA P-256 certificate only; no RSA signatures are generated See "Calls I made" in the design spec (RSA under RFC 8446 §9.1). |
+| 4.4.3 | Certificate Verify | 10 | partial | 4 | Server MUST send; algorithm one offered by client, compatible with key; SHA-1 MUST NOT be used; ecdsa_secp256r1_sha256 and rsa_pss_rsae_sha256 signing supported |
+| 4.4.3 (req) | "RSA signatures MUST use an RSASSA-PSS algorithm" | 1 | yes | 4 | User decision 2026-10-27 (design spec, "Calls I made": RSA (RFC 8446 §9.1)): an RSA certificate signs CertificateVerify with rsa_pss_rsae_sha256 only (RSASSA-PSS, MGF1-SHA256, salt length 32). |
 | 4.4.3 (req) | Client CertificateVerify send/verify | 3 | no | Declined (optional: client certificates) | "Clients MUST send this message whenever authenticating via a certificate"; "receiver ... MUST verify the signature" (server never receives one) |
 | 4.4.4 | Finished | 3 | yes | 4 | Verify client Finished, decrypt_error on mismatch; following records under application traffic keys (QUIC keys via RFC 9001 §5) |
 | 4.5 | End of Early Data | 4 | partial | 4 | "Servers MUST NOT send this message" (QUIC also forbids it; RFC 9001 §8.3) |
@@ -534,7 +536,7 @@ Total keyword count: 38 across 19 sections.
 | 8 | 0-RTT and Anti-Replay | 3 | no | Declined (optional: 0-RTT) | We never accept 0-RTT |
 | 8.2 | Client Hello Recording | 3 | no | Declined (optional: 0-RTT) | Anti-replay storage for 0-RTT |
 | 9.1 | Mandatory-to-Implement Cipher Suites | 3 | partial | 4 | MUST implement TLS_AES_128_GCM_SHA256 (our only suite; primitives in Phase 5); MUST support secp256r1 key exchange and ecdsa_secp256r1_sha256 |
-| 9.1 (req) | "MUST support digital signatures with rsa_pkcs1_sha256 (for certificates), rsa_pss_rsae_sha256 (for CertificateVerify and certificates)" | 1 | no | REINTERPRET | We serve an ECDSA P-256 certificate and never request client certificates, so we neither sign nor validate RSA; the RSA schemes are only needed for RSA certificate chains / client certs See "Calls I made" in the design spec (RSA under RFC 8446 §9.1). |
+| 9.1 (req) | "MUST support digital signatures with rsa_pkcs1_sha256 (for certificates), rsa_pss_rsae_sha256 (for CertificateVerify and certificates)" | 1 | yes | 5 | User decision 2026-10-27 (design spec, "Calls I made": RSA (RFC 8446 §9.1)): RSASSA-PSS-SHA256 signing primitive (bignum modexp, CRT, MGF1, EMSA-PSS), 2048-4096-bit modulus. No RSA verification: client certificates are declined, so the server verifies no peer signatures. |
 | 9.2 | Mandatory-to-Implement Extensions | 13 | partial | 4 | Implement supported_versions, signature_algorithms, signature_algorithms_cert, supported_groups, key_share, server_name; missing_extension abort for CH lacking required extensions; send supported_versions/key_share when applicable |
 | 9.2 (req) | "MUST implement ... cookie" | 1 | yes | 4 | "MUST implement ... cookie". Basis is RFC 8446 §4.2.2 (server cookie emission is a MAY), so "implement" means handle the extension; rejecting a cookie we never issued is our policy choice, not a MUST. Not a reinterpretation. |
 | 9.2 (req) | pre_shared_key / psk_key_exchange_modes REQUIRED for PSK | 2 | no | Declined (optional: resumption/PSK) | "\"pre_shared_key\" is REQUIRED for PSK key agreement"; "\"psk_key_exchange_modes\" is REQUIRED for PSK key agreement". PSK declined. |

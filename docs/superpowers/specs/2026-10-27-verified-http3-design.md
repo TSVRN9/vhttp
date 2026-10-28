@@ -15,7 +15,10 @@ Calls I made (the user can override them):
   - **One curve: P-256 for both key exchange (secp256r1) and signatures (ECDSA P-256).** Both are MUST-implement in RFC 8446 §9.1, browsers accept them, and one set of field-arithmetic proofs covers both.
   - **X25519 comes later.** It's a SHOULD. Browsers that only send an X25519 key share get a HelloRetryRequest asking for secp256r1, which is conformant.
   - **Cipher suite: TLS_AES_128_GCM_SHA256 only.** It's the MUST, and QUIC Initial packets need AES-128-GCM anyway.
-- **RSA under RFC 8446 §9.1: I'm reinterpreting a literal MUST.** The RFC says compliant apps MUST support rsa_pkcs1_sha256 and rsa_pss_rsae_sha256. My reading is that a server with an ECDSA certificate that never requests client certificates never produces or checks an RSA signature, so it can skip RSA. **This needs your review.** Following the text literally means RSA-PSS signing and PKCS#1 verification, which requires bignum modular-exponentiation proofs: an extra sub-phase in phase 5. Any other MUST I reinterpret will be listed here the same way.
+- **RSA (RFC 8446 §9.1), user decision 2026-10-27.** RSA is implemented literally.
+  - The server can be configured with an RSA certificate and key. It then signs CertificateVerify with rsa_pss_rsae_sha256: RSASSA-PSS, MGF1-SHA256, salt length 32 (RFC 8446 §4.2.3).
+  - rsa_pkcs1_sha256 and rsa_pss_rsae_sha256 are recognized in the client's `signature_algorithms` / `signature_algorithms_cert` when choosing which configured chain to send.
+  - **Ruling:** no RSA *verification* code is written. The server verifies no peer signatures, because client certificates are declined. "Support for certificates" is met by sending chains signed with those schemes and by negotiating the codepoints. Revisit this if client authentication is ever added.
 - **"No migration" has a narrow meaning:** we send `disable_active_migration` and never initiate migration. Path validation (PATH_CHALLENGE → PATH_RESPONSE) is still implemented, because it's a MUST.
 - **ECDSA nonces are deterministic (RFC 6979, HMAC-DRBG).** Signing then doesn't depend on the RNG, and proofs reuse the HMAC proofs.
 - **Sans-IO core.** The verified code is pure state machines that take bytes, time and random values as inputs. A thin, unverified shell owns the UDP socket, clock, getrandom and timers. It starts as a blocking `std::net::UdpSocket` loop; an async (tokio) shell can come later for production. Verified code avoids async, trait objects and closures.
@@ -32,7 +35,7 @@ Calls I made (the user can override them):
 
 - rustc, Verus, Z3, and vstd's specs of std.
 - The OS UDP stack, the clock, and getrandom (used for connection IDs, the ECDHE private key and stateless-reset tokens).
-- The unverified IO shell and the `main` binary, including loading the certificate chain and parsing the PEM/PKCS#8 P-256 private key.
+- The unverified IO shell and the `main` binary, including loading the certificate chain and parsing the PEM/PKCS#8 P-256 private key and, when configured, the PKCS#8 RSA private key.
 - **The hand-written Verus formalization of each RFC** (`spec` modules). Proofs show the code matches these specs; they can't show the specs match the RFC text. Keeping the specs small and readable, with each one citing its RFC section, is how the risk stays manageable.
 - **Temporary:** each crypto `external_body` backed by the RustCrypto shim (phases 3–4). Phase 5 removes every one of these entries.
 
@@ -92,7 +95,7 @@ Parsers and serializers use `vest_lib` combinators, with round-trip and reject-m
 2. **`h3`.** Frame codecs (DATA, HEADERS, SETTINGS, GOAWAY, CANCEL_PUSH, MAX_PUSH_ID, PUSH_PROMISE rejection, reserved/unknown frame types); QPACK static table + Huffman with zero dynamic capacity and stream-level error rules; HTTP/3 stream and connection rules as a pure state machine, with error codes per RFC 9114 §8.
    **Exit:** proofs verify; RFC 9204 Appendix B examples (static-only) pass.
 3. **`quic` + crypto specs.**
-   - First, add `crypto` with **spec** functions transcribed from FIPS 180-4/197, SP 800-38D, RFC 2104/5869/6979 and SEC1. Add their exec signatures as `external_body`, with `ensures` clauses stated in terms of those specs and backed by a RustCrypto shim. Upper layers prove against the specs from day one.
+   - First, add `crypto` with **spec** functions transcribed from FIPS 180-4/197, SP 800-38D, RFC 2104/5869/6979 and SEC1. Add their exec signatures as `external_body`, with `ensures` clauses stated in terms of those specs and backed by a RustCrypto shim. Upper layers prove against the specs from day one. Include RSASSA-PSS-SHA256 signing (2048–4096-bit modulus).
    - QUIC: long/short headers, all transport frames, transport parameters, packet-number encoding/decoding, stream states, connection/stream flow control, ACK generation, idle timeout, close/draining, version negotiation, stateless reset, anti-amplification, minimum Initial datagram size, path validation and connection-ID management.
 
    **Exit:** proofs verify; the `server` shell exchanges Initial packets with a test harness.
@@ -109,7 +112,7 @@ Parsers and serializers use `vest_lib` combinators, with round-trip and reject-m
    Vest has already done TLS 1.3 message formats; reuse its approach.
 
    **Exit:** proofs verify; RFC 9001 Appendix A sample packets reproduce byte-for-byte; **first real interop**: `curl --http3` and the quiche client fetch a response.
-5. **`crypto` implementations.** Replace each `external_body` with verified code behind the same `ensures`, in this order: SHA-256 → HMAC → HKDF → AES-128 → GCM → P-256 (field, scalar, point ops) → ECDH → ECDSA (RFC 6979). Upper layers need no changes. This is the largest phase. Bit-vector and nonlinear arithmetic proofs come in small lemma steps, using Verus `by (bit_vector)` / `by (nonlinear_arith)`.
+5. **`crypto` implementations.** Replace each `external_body` with verified code behind the same `ensures`, in this order: SHA-256 → HMAC → HKDF → AES-128 → GCM → P-256 (field, scalar, point ops) → ECDH → ECDSA (RFC 6979) → RSASSA-PSS-SHA256 signing (bignum modexp, CRT, MGF1, EMSA-PSS encoding). Upper layers need no changes. This is the largest phase. Bit-vector and nonlinear arithmetic proofs come in small lemma steps, using Verus `by (bit_vector)` / `by (nonlinear_arith)`.
    **Exit:** proofs verify; NIST CAVP + Wycheproof vectors pass; the RustCrypto shim and its `TRUSTED.md` entries are gone.
 6. **Loss recovery & congestion control (RFC 9002).** RTT estimation, PTO, NewReno, plus proofs of invariants such as bytes in flight ≤ cwnd.
    **Exit:** proofs verify; behavior stays stable under induced loss.
