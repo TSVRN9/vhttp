@@ -61,3 +61,16 @@ fn prefix_int_too_many_cont() {
     b.push(0x00);
     assert_eq!(parse_prefix_int(5, &b), PrefixInt::TooLarge);
 }
+
+#[test]
+fn prefix_int_cont_cap_boundary() {
+    // 10 continuation bytes (PREFIX_INT_MAX_CONT) decode; the 11th is TooLarge.
+    let mut b = vec![0x1f];
+    b.extend([0x80; 9]);
+    b.push(0x00);
+    assert_eq!(parse_prefix_int(5, &b), PrefixInt::Value { value: 31, consumed: 11 });
+    let mut b = vec![0x1f];
+    b.extend([0x80; 10]);
+    b.push(0x00);
+    assert_eq!(parse_prefix_int(5, &b), PrefixInt::TooLarge);
+}

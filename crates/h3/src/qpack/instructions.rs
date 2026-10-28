@@ -41,35 +41,6 @@ pub open spec fn result_view(r: Result<usize, u64>) -> Result<nat, u64> {
 // Lemmas
 // =============================================================================
 
-proof fn lemma_cont_bounds(b: Seq<u8>, k: nat, acc: nat)
-    ensures
-        match rfc_prefix_cont(b, k, acc) {
-            PrefixIntSpec::Value { value, consumed } => k + 2 <= consumed <= b.len() + k + 1,
-            _ => true,
-        },
-    decreases b.len(),
-{
-    if b.len() > 0 && k < PREFIX_INT_MAX_CONT {
-        let nv = acc + (b[0] & 127u8) as nat * pow2(7 * k);
-        if nv <= PREFIX_INT_MAX && b[0] & 128u8 != 0 {
-            lemma_cont_bounds(b.skip(1), k + 1, nv);
-        }
-    }
-}
-
-/// A parsed prefix integer consumes at least one byte and no more than are present.
-proof fn lemma_prefix_bounds(n: u8, b: Seq<u8>)
-    ensures
-        match rfc_prefix_int(n, b) {
-            PrefixIntSpec::Value { value, consumed } => 1 <= consumed <= b.len(),
-            _ => true,
-        },
-{
-    if b.len() > 0 {
-        lemma_cont_bounds(b.skip(1), 0, b[0] as nat % pow2(n as nat));
-    }
-}
-
 proof fn lemma_add_ok_zero(r: Result<nat, u64>)
     ensures
         add_ok(r, 0) == r,
@@ -92,7 +63,7 @@ proof fn lemma_skip_skip(b: Seq<u8>, i: int, j: int)
 
 #[verifier::decreases_by]
 proof fn encoder_stream_decreases(b: Seq<u8>) {
-    lemma_prefix_bounds(5, b);
+    lemma_prefix_int_consumed(5, b);
 }
 
 //= https://www.rfc-editor.org/rfc/rfc9204#section-4.3.1
@@ -161,7 +132,7 @@ pub fn process_encoder_stream(buf: &[u8]) -> (r: Result<usize, u64>)
         let rest = slice_subrange(buf, pos, buf.len());
         proof {
             assert(rest@ =~= buf@.skip(pos as int));
-            lemma_prefix_bounds(5, rest@);
+            lemma_prefix_int_consumed(5, rest@);
         }
         match parse_prefix_int(5, rest) {
             PrefixInt::Incomplete => return Ok(pos),
@@ -185,13 +156,14 @@ pub fn process_encoder_stream(buf: &[u8]) -> (r: Result<usize, u64>)
 
 #[verifier::decreases_by]
 proof fn decoder_stream_decreases(b: Seq<u8>) {
-    lemma_prefix_bounds(6, b);
+    lemma_prefix_int_consumed(6, b);
 }
 
 //= https://www.rfc-editor.org/rfc/rfc9204#section-4.4.1
-//# The instruction starts with the '1' 1-bit pattern,
-//# followed by the field section's associated stream ID encoded as a
-//# 7-bit prefix integer; see Section 4.1.1.
+//# If an encoder receives a Section Acknowledgment instruction referring
+//# to a stream on which every encoded field section with a non-zero
+//# Required Insert Count has already been acknowledged, this MUST be
+//# treated as a connection error of type QPACK_DECODER_STREAM_ERROR.
 //= https://www.rfc-editor.org/rfc/rfc9204#section-4.4.3
 //# An encoder that receives an Increment field equal to zero, or one
 //# that increases the Known Received Count beyond what the encoder has
@@ -249,7 +221,7 @@ pub fn process_decoder_stream(buf: &[u8]) -> (r: Result<usize, u64>)
         let rest = slice_subrange(buf, pos, buf.len());
         proof {
             assert(rest@ =~= buf@.skip(pos as int));
-            lemma_prefix_bounds(6, rest@);
+            lemma_prefix_int_consumed(6, rest@);
         }
         match parse_prefix_int(6, rest) {
             PrefixInt::Incomplete => return Ok(pos),

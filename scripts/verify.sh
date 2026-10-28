@@ -8,10 +8,8 @@ for c in "$root"/crates/*/; do
     (cd "$c" && cargo verus verify)
 done
 (cd "$root" && duvet report)
-# Escape accounting: every file in crates/ holding an escape token must be named in TRUSTED.md.
-hits=$(grep -rlE 'admit\(|assume\(|external_body|assume_specification|verifier::external|axiom fn' "$root/crates" --include='*.rs' || true)
-for f in $hits; do
-    rel=${f#"$root"/}
-    grep -qF "$rel" "$root/TRUSTED.md" || { echo "verify.sh: escape in $rel has no TRUSTED.md entry" >&2; exit 1; }
-done
-echo "verify.sh: all crates verified, duvet ok, escapes accounted"
+# Escape gate: no escape token anywhere in crates/ (Phase 3 reintroduces per-hit accounting).
+rc=0
+grep -rnE 'admit\(|assume\(|external_body|assume_specification|verifier::external|verifier\(external|\baxiom\b' "$root/crates" --include='*.rs' || rc=$?
+[ "$rc" -eq 1 ] || { echo "verify.sh: escape found in crates/ (or grep failed, rc=$rc)" >&2; exit 1; }
+echo "verify.sh: all crates verified, duvet ok, no escapes"
