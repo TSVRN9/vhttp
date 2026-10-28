@@ -85,7 +85,7 @@ Matrix total = sum of the section rows' counts (`(req)` rows excluded). It equal
 | 5.2 | Connection Shutdown | 3 | yes | 2 | No new requests/pushes after GOAWAY received (we never initiate); our GOAWAY ids non-increasing; received GOAWAY with larger id = H3_ID_ERROR (client GOAWAY carries a push ID) ✅ 2b (peer GOAWAY with larger id = H3_ID_ERROR): crates/h3/src/uni.rs; ✅ 2b (our GOAWAY ids non-increasing, client-bidi (≡ 0 mod 4, RFC 9114 §7.2.6) and above every accepted request: `theorem_wf` over `highest_accepted`, which `req_call` raises to each accepted stream's ID; new requests at or above it rejected with H3_REQUEST_REJECTED): crates/h3/src/conn.rs |
 | 5.4 | Transport Closure | 1 | no | N/A (client-only) | Client assumption about unacknowledged requests |
 | 6.1 | Bidirectional Streams | 1 | no | N/A (client-only) | Client treats server-initiated bidi stream as H3_STREAM_CREATION_ERROR |
-| 6.2 | Unidirectional Streams | 5 | yes | 2 | Our transport params must allow peer >=3 uni streams (value chosen in h3 config, encoded in phase 3/4); unknown stream types: abort reading/discard, never an error (2); no state-changing stream types until peer supports; tolerate uni stream closed/reset before header ✅ 2b: crates/h3/src/uni.rs; crates/h3/src/limits.rs (`MIN_PEER_UNI_STREAMS`); ✅ 2b (sender side: we open only the control stream, stream 3): crates/h3/src/conn.rs (open: transport parameter encoded in Phase 3) |
+| 6.2 | Unidirectional Streams | 5 | yes | 2 | Our transport params must allow peer >=3 uni streams (value chosen in h3 config, encoded in phase 3/4); unknown stream types: abort reading/discard, never an error (2); no state-changing stream types until peer supports; tolerate uni stream closed/reset before header ✅ 2b: crates/h3/src/uni.rs; crates/h3/src/limits.rs (`MIN_PEER_UNI_STREAMS`); ✅ 2b (sender side: we open only the control stream, stream 3): crates/h3/src/conn.rs (open: 3c `Streams::new` requires `initial_max_streams_uni >= 3`; encoded by 3d `local_tp_ok`, closed in 3d) |
 | 6.2.1 | Control Streams | 6 | yes | 2 | Open one control stream with SETTINGS first; non-SETTINGS first frame = H3_MISSING_SETTINGS; second control stream = H3_STREAM_CREATION_ERROR; never close it nor STOP_SENDING it (2); closure = H3_CLOSED_CRITICAL_STREAM ✅ 2b (receive side): crates/h3/src/uni.rs; ✅ 2b (sender side: our control stream opened with SETTINGS first and never FIN-ed or reset, `start`/`shutdown` outputs pinned exactly; STOP_SENDING and RESET_STREAM only on request streams, so never on the peer's control stream; a second peer control stream = H3_STREAM_CREATION_ERROR end to end, `uni_fed` over `uni_seen()`; peer STOP_SENDING on stream 3 = H3_CLOSED_CRITICAL_STREAM; peer reset of its control stream = H3_CLOSED_CRITICAL_STREAM): crates/h3/src/conn.rs (`outs_ok`) |
 | 6.2.2 | Push Streams | 3 | partial | 2 | Client-initiated push stream received = connection error H3_STREAM_CREATION_ERROR (rejection rule, implemented) ✅ 2b: crates/h3/src/uni.rs |
 | 6.2.2 (req) | Push ID used once per push stream header | 1 | no | Declined (optional: server push) | "Each push ID MUST only be used once in a push stream header." We send no push streams |
@@ -178,13 +178,13 @@ Total keyword count: 44 across 22 sections.
 | 1.2 | Terms and Definitions (BCP 14 boilerplate) | 5 | no | N/A (boilerplate) | Keyword-definition boilerplate, not a requirement; no phase bucket fits, N/A used. |
 | 2.1 | Stream types and identifiers | 1 | yes | 3 | Never reuse a stream ID. ✅ 3c: crates/quic/src/stream_id.rs |
 | 2.2 | Sending and receiving data | 3 | yes | 3 | Ordered delivery; same data at same offset; respect peer flow limits. 3c: reassembly.rs ordered delivery (closed in Task 6); 3c: recv_stream.rs (closed in Task 6) |
-| 3.2 | Receiving stream states | 1 | yes | 3 | Opening stream N implicitly creates all lower-numbered streams of that type. |
+| 3.2 | Receiving stream states | 1 | yes | 3 | Opening stream N implicitly creates all lower-numbered streams of that type. ✅ 3c: crates/quic/src/streams.rs |
 | 3.3 | Permitted frame types | 2 | yes | 3 | No frames from terminal states; no STREAM/STREAM_DATA_BLOCKED after RESET_STREAM. ✅ 3c: crates/quic/src/send_stream.rs |
 | 3.5 | Solicited state transitions | 1 | yes | 3 | STOP_SENDING in Ready/Send must trigger RESET_STREAM. |
 | 4.1 | Data flow control | 3 | yes | 3 | Do not exceed limits; FLOW_CONTROL_ERROR on violation; ignore non-increasing MAX_DATA/MAX_STREAM_DATA. |
 | 4.2 | Increasing flow control limits | 1 | yes | 3 | Do not wait for *_BLOCKED before raising credit. |
 | 4.4 | Handling stream cancellation | 1 | yes | 3 | Keep flow control state until terminal. |
-| 4.5 | Stream final size | 2 | yes | 3 | Account final size in connection flow control; no data at/after final size. 3c: recv_stream.rs (closed in Task 5) |
+| 4.5 | Stream final size | 2 | yes | 3 | Account final size in connection flow control; no data at/after final size. ✅ 3c: crates/quic/src/streams.rs |
 | 4.6 | Controlling concurrency | 5 | yes | 3 | Stream limit > 2^60 is an error; STREAM_LIMIT_ERROR; ignore non-increasing MAX_STREAMS. ✅ 3c: crates/quic/src/stream_id.rs |
 | 5.1 | Connection ID | 3 | yes | 3 | CIDs must not be correlatable by observers; no zero-length-CID port sharing (we issue non-zero CIDs). |
 | 5.1 (req) | Same CID not issued twice on a connection | 1 | yes | 3 | "the same connection ID MUST NOT be issued more than once on the same connection". |
@@ -324,18 +324,18 @@ Total keyword count: 44 across 22 sections.
 | 18.2 (req) | Server treats receipt of server-only parameter as TRANSPORT_PARAMETER_ERROR | 1 | yes | 3 | original_destination_connection_id, preferred_address, retry_source_connection_id, stateless_reset_token. ✅ 3b: crates/quic/src/tp.rs |
 | 19.3 | ACK frames | 1 | yes | 3 | Handle both ACK types (with/without ECN). ✅ 3b: crates/quic/src/ack.rs |
 | 19.3.1 | ACK ranges | 1 | yes | 3 | Negative computed PN is FRAME_ENCODING_ERROR. ✅ 3b: crates/quic/src/ack.rs |
-| 19.4 | RESET_STREAM frames | 1 | yes | 3 | STREAM_STATE_ERROR for send-only stream. |
-| 19.5 | STOP_SENDING frames | 2 | yes | 3 | STREAM_STATE_ERROR cases. |
+| 19.4 | RESET_STREAM frames | 1 | yes | 3 | STREAM_STATE_ERROR for send-only stream. ✅ 3c: crates/quic/src/streams.rs |
+| 19.5 | STOP_SENDING frames | 2 | yes | 3 | STREAM_STATE_ERROR cases. ✅ 3c: crates/quic/src/streams.rs |
 | 19.6 | CRYPTO frames | 1 | yes | 3 | Offset limit error. ✅ 3b: crates/quic/src/frame.rs |
 | 19.7 | NEW_TOKEN frames | 4 | partial | 3 | Server row below; others client-only/declined. ✅ 3b: crates/quic/src/frame.rs |
 | 19.7 (req) | Token MUST NOT be empty | 1 | no | Declined (optional: NEW_TOKEN issuance) | Sender rule; we never send NEW_TOKEN. |
 | 19.7 (req) | Client empty-token error; clients MUST NOT send NEW_TOKEN | 2 | no | N/A (client-only) |  |
 | 19.7 (req) | Server treats receipt of NEW_TOKEN as PROTOCOL_VIOLATION | 1 | yes | 3 | ✅ 3b: crates/quic/src/frame.rs |
-| 19.8 | STREAM frames | 2 | yes | 3 | STREAM_STATE_ERROR; offset/length limit. 3b codec: crates/quic/src/frame.rs (closed in 3c) |
+| 19.8 | STREAM frames | 2 | yes | 3 | STREAM_STATE_ERROR; offset/length limit. ✅ 3c: crates/quic/src/streams.rs |
 | 19.9 | MAX_DATA frames | 2 | yes | 3 | FLOW_CONTROL_ERROR on excess. |
 | 19.10 | MAX_STREAM_DATA frames | 4 | yes | 3 |  |
 | 19.11 | MAX_STREAMS frames | 4 | yes | 3 | ✅ 3c: crates/quic/src/stream_id.rs |
-| 19.13 | STREAM_DATA_BLOCKED frames | 1 | yes | 3 |  |
+| 19.13 | STREAM_DATA_BLOCKED frames | 1 | yes | 3 | ✅ 3c: crates/quic/src/streams.rs |
 | 19.14 | STREAMS_BLOCKED frames | 1 | yes | 3 | ✅ 3b: crates/quic/src/frame.rs |
 | 19.15 | NEW_CONNECTION_ID frames | 8 | yes | 3 | Each requirement has its own row. |
 | 19.15 (req) | Length < 1 or > 20 is FRAME_ENCODING_ERROR | 1 | yes | 3 | ✅ 3b: crates/quic/src/frame.rs |
