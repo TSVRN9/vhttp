@@ -3,3 +3,4 @@
 /.duvet/reports/
 /.duvet/specifications/
 /.duvet/requirements/
+.verus-solver-log*
