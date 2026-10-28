@@ -335,6 +335,7 @@ fn ghash_padded(
     ensures
         r == ghash(h, s.take(off + (data@ + zero_pad16(data@)).len())),
 {
+    hide(spec_aes128_encrypt);
     hide(gf128_mul);
     let ghost p = data@ + zero_pad16(data@);
     let mut y = y;
@@ -528,6 +529,7 @@ fn gctr_append(
         final(out)@ == old(out)@ + gctr(key, nonce@ + i2osp(c0 as nat, 4), x@),
 {
     hide(spec_aes128_encrypt);
+    hide(gf128_mul);
     hide(key_word);
     let ghost target = old(out)@ + gctr(key, nonce@ + i2osp(c0 as nat, 4), x@);
     let mut c = c0;
@@ -740,3 +742,17 @@ pub fn aes128_gcm_open(key: &[u8], nonce: &[u8], aad: &[u8], ct: &[u8]) -> (r: O
 }
 
 } // verus!
+
+#[cfg(test)]
+mod tests {
+    // GCM spec test case 2 (K = 0^128, P = 0^128): H, C and GHASH_H(A = {}, C).
+    #[test]
+    fn ghash_tc2() {
+        let h = 0x66e94bd4ef8a2c3b884cfa59ca342b2eu128;
+        assert_eq!(crate::aes::aes128_encrypt_block(&[0; 16], &[0; 16]), h.to_be_bytes());
+        let c = 0x0388dace60b6a392f328c2b971b2fe78u128;
+        let y = super::gf128_mul_exec(c, h);
+        // the length block: len(A) = 0, len(C) = 128 bits
+        assert_eq!(super::gf128_mul_exec(y ^ 128, h), 0xf38cbb1ad69223dcc3457ae5b6b0f885u128);
+    }
+}
