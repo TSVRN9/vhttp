@@ -494,7 +494,7 @@ RFC 9001 §8.4 is an N/A (client-only) row. Task 5 adds to its Notes: `server SH
   - **`ch_errors`.** This is a table whose head or extension edits come from `head`/`with`. Each row is `(edit, expected)`:
     - **Truncation:** drop the last byte of A.2 → `0x132`.
     - **Field bounds:** session id of 33 bytes → `0x132`; suites of odd length 3 → `0x132`; suites of length 0 → `0x132`; compression of length 0 → `0x132`.
-    - **Extension block framing:** block length 4 (one empty extension) → `0x132` (`<8..>`); a trailing byte after the block → `0x132`.
+    - **Extension block framing:** block length 4 (one empty extension, no supported_versions) → `0x146` (floor 0, then D.2); a trailing byte after the block → `0x132`.
     - **Bad bodies:** key_share body `00` → `0x132`; early_data body `[0]` → `0x132`; ALPN `0003000141` → `0x132`.
     - **Version:** no extension block → `0x146`; `legacy_version` `0x0300` → `0x146`; supported_versions `[0x0303]` → `0x146`; supported_versions absent → `0x146`.
     - **Compression:** `[0, 1]` → `0x12f`; `[1]` → `0x12f`.
