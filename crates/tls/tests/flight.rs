@@ -151,3 +151,13 @@ fn random_from_rand() {
     assert_eq!(sa[..6], sb[..6]);
     assert_eq!(sa[38..], sb[38..]);
 }
+
+#[test]
+fn secrets_debug_redacted() {
+    let e = TlsEvent::Secrets { level: Level::Handshake, client: [0x5c; 32], server: [0xa7; 32] };
+    let s = format!("{e:?}");
+    for leak in ["92", "167", "5c5c", "a7a7", "5C5C", "A7A7"] {
+        assert!(!s.contains(leak), "{s}");
+    }
+    assert!(s.contains("Handshake") && s.contains("32"), "{s}");
+}
