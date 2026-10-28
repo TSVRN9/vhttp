@@ -1197,6 +1197,7 @@ impl<'a> ServerHandshake<'a> {
         }
     }
 
+    // ponytail: secrets not wiped; zeroize on Failed/Complete when 4c owns key lifetime
     fn fail(&mut self, e: u64)
         ensures
             final(self)@ == spec_failed(old(self)@, e),
