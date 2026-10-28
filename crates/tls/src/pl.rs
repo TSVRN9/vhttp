@@ -221,6 +221,7 @@ pub fn read_vec(b: &[u8], pos: usize, floor: usize, ceiling: usize) -> (r: Optio
         r is None <==> rfc_vec(b@.skip(pos as int), floor as nat, ceiling as nat) is None,
         r matches Some((s, e)) ==> rfc_vec(b@.skip(pos as int), floor as nat, ceiling as nat)
             == Some((b@.subrange(s as int, e as int), b@.skip(e as int))),
+        r matches Some((s, e)) ==> pos <= s <= e <= b@.len(),
 {
     let ghost t = b@.skip(pos as int);
     let avail = b.len() - pos;
