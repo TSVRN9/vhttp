@@ -74,3 +74,15 @@ pub(crate) fn p256_ecdh(d: &[u8], peer: &[u8]) -> Option<[u8; 32]> {
     let pk = p256::PublicKey::from_sec1_bytes(peer).ok()?;
     Some((*p256::ecdh::diffie_hellman(sk.to_nonzero_scalar(), pk.as_affine()).raw_secret_bytes()).into())
 }
+
+pub(crate) fn p256_ecdsa_sign(d: &[u8], msg: &[u8]) -> Option<[u8; 64]> {
+    use p256::ecdsa::signature::Signer;
+    // unreachable: requires d@.len() == 32
+    let d: [u8; 32] = d.try_into().unwrap();
+    let sk = p256::ecdsa::SigningKey::from_bytes((&d).into()).ok()?;
+    // unreachable: sign's internal expect needs try_sign to fail, and it cannot: from_bytes
+    // accepted d (1 <= d < n, requires d@.len() == 32), requires msg@.len() <= MAX_INPUT_LEN keeps
+    // the SHA-256 input under its length limit, and sign_prehash loops until a k is suitable.
+    let sig: p256::ecdsa::Signature = sk.sign(msg);
+    Some(sig.to_bytes().into())
+}
