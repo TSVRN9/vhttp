@@ -615,6 +615,19 @@ pub open spec fn spec_frame_bytes(f: SpecFrame) -> Seq<u8> {
     spec_varint(spec_frame_type(f)) + spec_frame_body(f)
 }
 
+/// What a frame a server accepts under type `ty` satisfies: we could send it back, it is not
+/// HANDSHAKE_DONE, and the type `serialize_frame` writes for it is `ty`, or for STREAM another
+/// STREAM type (the written OFF and LEN bits are canonical).
+pub open spec fn frame_received(ty: u64, f: SpecFrame) -> bool {
+    &&& frame_wf(f)
+    &&& !(f is HandshakeDone)
+    &&& if FRAME_STREAM_MIN <= ty <= FRAME_STREAM_MAX {
+        FRAME_STREAM_MIN <= spec_frame_type(f) <= FRAME_STREAM_MAX
+    } else {
+        spec_frame_type(f) == ty
+    }
+}
+
 // =============================================================================
 // Proofs
 // =============================================================================
@@ -877,6 +890,7 @@ proof fn lemma_close_rt(app: bool, ec: u64, ft: u64, reason: Seq<u8>, rest: Seq<
 }
 
 /// `lemma_body_roundtrip` for PADDING through STREAM (split for the rlimit).
+#[verifier::spinoff_prover]
 proof fn lemma_body_roundtrip_a(f: SpecFrame, rest: Seq<u8>)
     requires
         frame_wf(f),
@@ -986,8 +1000,71 @@ proof fn lemma_body_roundtrip(f: SpecFrame, rest: Seq<u8>)
     }
 }
 
+/// Every varint `rfc_vint` reads inside `b` fits in 62 bits and ends after `p`, inside `b`.
+proof fn lemma_vints_ok(b: Seq<u8>)
+    ensures
+        forall|p: int|
+            0 <= p <= b.len() && (#[trigger] rfc_vint(b, p)) is Some ==> p < rfc_vint(b, p).unwrap().1
+                <= b.len() && rfc_vint(b, p).unwrap().0 <= VARINT_MAX,
+{
+    lemma_decoded_bounded();
+    assert forall|p: int| 0 <= p <= b.len() && (#[trigger] rfc_vint(b, p)) is Some implies p
+        < rfc_vint(b, p).unwrap().1 <= b.len() && rfc_vint(b, p).unwrap().0 <= VARINT_MAX by {
+        lemma_decode_len_bounds(b.skip(p));
+    }
+}
+
+/// `frame_received` for the fields of PADDING through STREAM (split for the rlimit).
+#[verifier::spinoff_prover]
+proof fn lemma_fields_received_a(ty: u64, b: Seq<u8>)
+    requires
+        ty <= FRAME_STREAM_MAX,
+        ty != FRAME_ACK && ty != FRAME_ACK_ECN && ty != FRAME_NEW_TOKEN,
+    ensures
+        rfc_frame_fields(ty, b) matches Some((f, _)) ==> frame_received(ty, f),
+{
+    lemma_vints_ok(b);
+    if FRAME_STREAM_MIN <= ty <= FRAME_STREAM_MAX {
+        if let Some((SpecFrame::Stream { offset, fin, .. }, _)) = rfc_stream(ty, b) {
+            lemma_stream_type_bits(if offset > 0 { 4 } else { 0 }, if fin { 1 } else { 0 });
+        }
+    }
+}
+
+/// `frame_received` for the fields of MAX_DATA through CONNECTION_CLOSE.
+#[verifier::spinoff_prover]
+proof fn lemma_fields_received_b(ty: u64, b: Seq<u8>)
+    requires
+        FRAME_MAX_DATA <= ty <= FRAME_CONNECTION_CLOSE_APP,
+    ensures
+        rfc_frame_fields(ty, b) matches Some((f, _)) ==> frame_received(ty, f),
+{
+    lemma_vints_ok(b);
+}
+
+/// Every frame body a server accepts under a known type `ty` is `frame_received`, and every
+/// rejection is FRAME_ENCODING_ERROR or PROTOCOL_VIOLATION.
+pub proof fn lemma_frame_body_received(ty: u64, b: Seq<u8>)
+    requires
+        ty <= FRAME_HANDSHAKE_DONE,
+    ensures
+        rfc_frame_body(ty, b) matches Ok((f, _)) ==> frame_received(ty, f),
+        rfc_frame_body(ty, b) matches Err(e) ==> e == FRAME_ENCODING_ERROR || e
+            == PROTOCOL_VIOLATION,
+{
+    if ty == FRAME_NEW_TOKEN || ty == FRAME_HANDSHAKE_DONE {
+    } else if ty == FRAME_ACK || ty == FRAME_ACK_ECN {
+        lemma_ack_received(ty, b);
+    } else if ty <= FRAME_STREAM_MAX {
+        lemma_fields_received_a(ty, b);
+    } else {
+        lemma_fields_received_b(ty, b);
+    }
+}
+
 /// Parsing what `serialize_frame` wrote, followed by anything, recovers the frame and
 /// consumes exactly its bytes. HANDSHAKE_DONE is excluded: a server sends it but rejects it.
+#[verifier::spinoff_prover]
 pub proof fn theorem_frame_roundtrip(f: SpecFrame, rest: Seq<u8>)
     requires
         frame_wf(f),
