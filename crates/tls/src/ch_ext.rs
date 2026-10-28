@@ -147,6 +147,11 @@ pub open spec fn rfc_sn_list(b: Seq<u8>) -> Option<Option<Seq<u8>>>
     }
 }
 
+//= https://www.rfc-editor.org/rfc/rfc8446#section-9.2
+//# Additionally, all implementations MUST support the use of the
+//# "server_name" extension with applications capable of using it.
+// by construction: parsed and exposed as ClientHello.server_name; a single-certificate
+// server is not capable of using it, so nothing is acknowledged (Decision 11).
 pub open spec fn rfc_server_name(d: Seq<u8>) -> Option<Option<Seq<u8>>> {
     match rfc_vec_exact(d, 1, 0xffff) {
         Some(c) => rfc_sn_list(c),

@@ -1,6 +1,12 @@
 //! RFC 8446 §4 handshake message framing over a byte stream (QUIC CRYPTO data): a
 //! transcribed spec of "the first complete message", a reassembling reader proven equal to
 //! it, and proofs that framing is canonical and independent of how the stream is chunked.
+//!
+//= https://www.rfc-editor.org/rfc/rfc8446#appendix-D
+//# The value of
+//# TLSPlaintext.legacy_record_version MUST be ignored by all
+//# implementations.
+// by construction: QUIC CRYPTO frames carry bare handshake messages; there is no record layer.
 use vstd::prelude::*;
 use crate::codes::*;
 // Used only in ghost code, which a plain `cargo build` erases.
@@ -22,6 +28,11 @@ pub open spec fn rfc_next_message(buf: Seq<u8>, expect: u8) -> Result<Option<nat
     if buf.len() == 0 {
         Ok(None)
     } else if buf[0] != expect {
+        //= https://www.rfc-editor.org/rfc/rfc8446#appendix-D.5
+        //# Implementations MUST NOT negotiate TLS 1.3 or later
+        //# using an SSL version 2.0 compatible CLIENT-HELLO.
+        // by construction: an SSL 2.0 CLIENT-HELLO starts with a length byte with 0x80 set,
+        // never HT_CLIENT_HELLO (1), so it is unexpected_message here.
         Err(ALERT_UNEXPECTED_MESSAGE)
     } else if buf.len() < 4 {
         Ok(None)
