@@ -18,6 +18,26 @@ fn fips197_aes128() {
     );
 }
 
+#[test]
+fn aes_matches_rustcrypto() {
+    use aes::cipher::{BlockCipherEncrypt, KeyInit};
+    for i in 0..256usize {
+        let k: [u8; 16] = core::array::from_fn(|j| (i * 29 + j * 7 + 3) as u8);
+        let b: [u8; 16] = core::array::from_fn(|j| (i + 17 * j) as u8);
+        let mut want = b;
+        aes::Aes128::new(&k.into()).encrypt_block((&mut want).into());
+        assert_eq!(aes128_encrypt_block(&k, &b), want, "key {k:02x?} block {b:02x?}");
+    }
+}
+
+#[test]
+fn rfc9001_hp_masks() {
+    // RFC 9001 A.2
+    assert_eq!(aes128_encrypt_block(&h("9f50449e04a0e810283a1e9933adedd2"), &h("d1b1c98dd7689fb8ec11d242b123dc9b"))[..5], h("437b9aec36")[..]);
+    // RFC 9001 A.3
+    assert_eq!(aes128_encrypt_block(&h("c206b8d9b9f0f37644430b490eeaa314"), &h("2cd0991cd25b0aac406a5816b6394100"))[..5], h("2ec0d8356a")[..]);
+}
+
 const K4: &str = "feffe9928665731c6d6a8f9467308308";
 const IV4: &str = "cafebabefacedbaddecaf888";
 const AAD4: &str = "feedfacedeadbeeffeedfacedeadbeefabaddad2";

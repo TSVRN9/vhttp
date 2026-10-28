@@ -1,16 +1,6 @@
 //! Trusted shim: every RustCrypto call lives here. Plain Rust outside `verus!`; removed in phase 5.
 use sha2::{Digest, Sha256};
 
-pub(crate) fn aes128_encrypt_block(key: &[u8], block: &[u8]) -> [u8; 16] {
-    use aes::cipher::{BlockCipherEncrypt, KeyInit};
-    // unreachable: requires key@.len() == 16
-    let k: [u8; 16] = key.try_into().unwrap();
-    // unreachable: requires block@.len() == 16
-    let mut b: [u8; 16] = block.try_into().unwrap();
-    aes::Aes128::new(&k.into()).encrypt_block((&mut b).into());
-    b
-}
-
 pub(crate) fn aes128_gcm_seal(key: &[u8], nonce: &[u8], aad: &[u8], pt: &[u8]) -> Vec<u8> {
     use aes_gcm::aead::{Aead, KeyInit, Payload};
     // unreachable: requires key@.len() == 16

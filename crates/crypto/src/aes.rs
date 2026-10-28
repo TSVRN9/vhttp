@@ -1,4 +1,4 @@
-//! AES-128 block cipher (FIPS 197): spec and an exec signature backed by the trusted shim.
+//! AES-128 block cipher (FIPS 197): spec and verified constant-time-style exec code.
 #[allow(unused_imports)]
 use crate::bytes::*;
 use vstd::prelude::*;
@@ -200,6 +200,8 @@ proof fn bv_sel8(a: u8, b: u8) by (bit_vector)
 {
 }
 
+// FIPS 197 §4.2: xor associativity and identity on bytes; 0u8 ^ p == p gives gmul_ct's
+// invariant on loop entry (acc = 0).
 proof fn bv_xor8(p: u8, q: u8, s: u8) by (bit_vector)
     ensures
         ((p ^ q) ^ s) == (p ^ (q ^ s)),
@@ -442,7 +444,6 @@ proof fn lemma_sbox_chain(x: u8)
 
 // FIPS 197 §5.1.1: constant-time S-box, no table and no branch on x.
 // ponytail: S-box = 13 constant-time GF(2^8) multiplies (8 masked steps each) + affine, ≈<measured> µs per AES block (release, Task 5 gcm_64kib); upgrade: Boyar–Peralta bitsliced circuit, proved by the same chunk lemmas, or AES-NI behind an equivalence proof
-#[allow(dead_code)] // used from Task 3
 pub(crate) fn sbox_ct(x: u8) -> (r: u8)
     ensures
         r == sbox(x),
@@ -467,8 +468,280 @@ pub(crate) fn sbox_ct(x: u8) -> (r: u8)
         ^ 0x63
 }
 
-/// Trusted shim: the body is RustCrypto aes; the ensures is the trusted statement.
-#[verifier::external_body]
+// FIPS 197 §5.1.1 SubBytes.
+fn sub_bytes_exec(s: &[u8; 16]) -> (r: [u8; 16])
+    ensures
+        r@ == sub_bytes(s@),
+{
+    hide(sbox);
+    let mut r = [0u8; 16];
+    let mut i: usize = 0;
+    while i < 16
+        invariant
+            i <= 16,
+            forall|j: int| 0 <= j < i ==> #[trigger] r@[j] == sbox(s@[j]),
+        decreases 16 - i,
+    {
+        r[i] = sbox_ct(s[i]);
+        i += 1;
+    }
+    assert(r@ =~= sub_bytes(s@));
+    r
+}
+
+// FIPS 197 §5.1.2 ShiftRows; the index depends only on the public position i.
+fn shift_rows_exec(s: &[u8; 16]) -> (r: [u8; 16])
+    ensures
+        r@ == shift_rows(s@),
+{
+    let mut r = [0u8; 16];
+    let mut i: usize = 0;
+    while i < 16
+        invariant
+            i <= 16,
+            forall|j: int| 0 <= j < i ==> r@[j] == s@[j % 4 + 4 * (((j / 4) + (j % 4)) % 4)],
+        decreases 16 - i,
+    {
+        r[i] = s[i % 4 + 4 * ((i / 4 + i % 4) % 4)];
+        i += 1;
+    }
+    assert(r@ =~= shift_rows(s@));
+    r
+}
+
+// FIPS 197 §5.1.3 MixColumns.
+fn mix_columns_exec(s: &[u8; 16]) -> (r: [u8; 16])
+    ensures
+        r@ == mix_columns(s@),
+{
+    hide(gmul);
+    let mut out = [0u8; 16];
+    let mut i: usize = 0;
+    while i < 16
+        invariant
+            i <= 16,
+            forall|j: int|
+                0 <= j < i ==> out@[j] == gmul(2, s@[4 * (j / 4) + j % 4]) ^ gmul(
+                    3,
+                    s@[4 * (j / 4) + (j % 4 + 1) % 4],
+                ) ^ s@[4 * (j / 4) + (j % 4 + 2) % 4] ^ s@[4 * (j / 4) + (j % 4 + 3) % 4],
+        decreases 16 - i,
+    {
+        let r = i % 4;
+        let c = i / 4;
+        out[i] = gmul_ct(2, s[4 * c + r]) ^ gmul_ct(3, s[4 * c + (r + 1) % 4]) ^ s[4 * c + (r + 2)
+            % 4] ^ s[4 * c + (r + 3) % 4];
+        i += 1;
+    }
+    assert(out@ =~= mix_columns(s@));
+    out
+}
+
+// FIPS 197 §5.2: rk holds the 44 expanded-key words w[0..44] of key, 4 bytes each.
+pub(crate) closed spec fn rk_ok(rk: Seq<u8>, key: Seq<u8>) -> bool {
+    rk.len() == 176 && forall|j: nat|
+        j < 44 ==> rk.subrange(4 * j as int, 4 * j + 4 as int) == #[trigger] key_word(key, j)
+}
+
+// FIPS 197 §5.1.4: round key `r` is bytes 16r..16r+16 of the expanded key.
+proof fn lemma_round_key(rk: Seq<u8>, key: Seq<u8>, r: nat)
+    requires
+        rk_ok(rk, key),
+        r <= 10,
+    ensures
+        rk.subrange(16 * r as int, 16 * r + 16 as int) =~= round_key(key, r),
+{
+    hide(key_word);
+    let w0 = key_word(key, 4 * r);
+    let w1 = key_word(key, 4 * r + 1);
+    let w2 = key_word(key, 4 * r + 2);
+    let w3 = key_word(key, 4 * r + 3);
+    assert(rk.subrange(16 * r as int, 16 * r + 16 as int) =~= w0 + w1 + w2 + w3);
+}
+
+// FIPS 197 §5.1.4 AddRoundKey with round key `round` read from the expanded key.
+fn add_round_key_exec(s: &[u8; 16], rk: &[u8; 176], round: usize, Ghost(key): Ghost<Seq<u8>>) -> (r:
+    [u8; 16])
+    requires
+        rk_ok(rk@, key),
+        round <= 10,
+    ensures
+        r@ == add_round_key(s@, key, round as nat),
+{
+    hide(key_word);
+    let mut out = [0u8; 16];
+    let mut i: usize = 0;
+    while i < 16
+        invariant
+            i <= 16,
+            round <= 10,
+            forall|j: int| 0 <= j < i ==> #[trigger] out@[j] == s@[j] ^ rk@[16 * round + j],
+        decreases 16 - i,
+    {
+        out[i] = s[i] ^ rk[16 * round + i];
+        i += 1;
+    }
+    proof {
+        lemma_round_key(rk@, key, round as nat);
+    }
+    assert(out@ =~= add_round_key(s@, key, round as nat));
+    out
+}
+
+// FIPS 197 §5.2, Algorithm 2 (Nk = 4): the 44-word key schedule, one word per step.
+#[verifier::spinoff_prover]
+pub(crate) fn expand_key(key: &[u8]) -> (rk: [u8; 176])
+    requires
+        key@.len() == 16,
+    ensures
+        rk_ok(rk@, key@),
+{
+    hide(sbox);
+    let mut rk = [0u8; 176];
+    let mut i: usize = 0;
+    while i < 16
+        invariant
+            key.len() == 16,
+            i <= 16,
+            forall|j: int| 0 <= j < i ==> rk@[j] == key@[j],
+        decreases 16 - i,
+    {
+        rk[i] = key[i];
+        i += 1;
+    }
+    assert forall|j: nat| j < 4 implies rk@.subrange(4 * j as int, 4 * j + 4 as int) == #[trigger] key_word(
+        key@,
+        j,
+    ) by {
+        assert(rk@.subrange(4 * j as int, 4 * j + 4 as int) =~= key@.subrange(4 * j as int, 4 * j + 4 as int));
+    }
+    let mut i: usize = 4;
+    let mut rc: u8 = 1;
+    while i < 44
+        invariant
+            4 <= i <= 44,
+            forall|j: nat|
+                j < i ==> rk@.subrange(4 * j as int, 4 * j + 4 as int) == #[trigger] key_word(key@, j),
+            rc == rcon((i / 4) as nat),
+        decreases 44 - i,
+    {
+        let ghost old = rk@;
+        let ghost prev = key_word(key@, (i - 1) as nat);
+        let ghost back = key_word(key@, (i - 4) as nat);
+        let p = 4 * (i - 1);
+        let w0 = rk[p];
+        let w1 = rk[p + 1];
+        let w2 = rk[p + 2];
+        let w3 = rk[p + 3];
+        proof {
+            assert(prev[0] == w0 && prev[1] == w1 && prev[2] == w2 && prev[3] == w3);
+        }
+        // FIPS 197 §5.2: temp = SubWord(RotWord(temp)) xor Rcon[i/Nk] when i mod Nk = 0.
+        let (t0, t1, t2, t3) = if i % 4 == 0 {
+            (sbox_ct(w1) ^ rc, sbox_ct(w2) ^ 0, sbox_ct(w3) ^ 0, sbox_ct(w0) ^ 0)
+        } else {
+            (w0, w1, w2, w3)
+        };
+        let ghost temp = if i % 4 == 0 {
+            xor_bytes(sub_word(rot_word(prev)), seq![rcon((i / 4) as nat), 0u8, 0u8, 0u8])
+        } else {
+            prev
+        };
+        proof {
+            assert(temp[0] == t0 && temp[1] == t1 && temp[2] == t2 && temp[3] == t3);
+        }
+        let q = 4 * (i - 4);
+        let b0 = rk[q];
+        let b1 = rk[q + 1];
+        let b2 = rk[q + 2];
+        let b3 = rk[q + 3];
+        proof {
+            assert(back[0] == b0 && back[1] == b1 && back[2] == b2 && back[3] == b3);
+        }
+        rk[4 * i] = b0 ^ t0;
+        rk[4 * i + 1] = b1 ^ t1;
+        rk[4 * i + 2] = b2 ^ t2;
+        rk[4 * i + 3] = b3 ^ t3;
+        proof {
+            assert(key_word(key@, i as nat) == xor_bytes(back, temp));
+            assert forall|j: nat| j < i + 1 implies rk@.subrange(4 * j as int, 4 * j + 4 as int)
+                == #[trigger] key_word(key@, j) by {
+                if j < i {
+                    assert(rk@.subrange(4 * j as int, 4 * j + 4 as int) =~= old.subrange(
+                        4 * j as int,
+                        4 * j + 4 as int,
+                    ));
+                } else {
+                    assert(rk@.subrange(4 * j as int, 4 * j + 4 as int) =~= xor_bytes(back, temp));
+                }
+            }
+        }
+        // FIPS 197 §5.2: Rcon[j + 1] = xtime(Rcon[j]) for j >= 1.
+        if (i + 1) % 4 == 0 {
+            proof {
+                assert((i + 1) / 4 == i / 4 + 1);
+            }
+            rc = xtime_ct(rc);
+        }
+        i += 1;
+    }
+    rk
+}
+
+// FIPS 197 §5.1, Algorithm 1 (Nr = 10) on an expanded key.
+#[verifier::spinoff_prover]
+pub(crate) fn encrypt_rk(rk: &[u8; 176], Ghost(key): Ghost<Seq<u8>>, block: &[u8]) -> (r: [u8; 16])
+    requires
+        rk_ok(rk@, key),
+        block@.len() == 16,
+    ensures
+        r@ == spec_aes128_encrypt(key, block@),
+{
+    hide(key_word);
+    hide(sbox);
+    hide(round_key);
+    hide(sub_bytes);
+    hide(shift_rows);
+    hide(mix_columns);
+    // FIPS 197 §5.1.4: the initial AddRoundKey, round key 0.
+    let mut st = [0u8; 16];
+    let mut k: usize = 0;
+    while k < 16
+        invariant
+            block.len() == 16,
+            k <= 16,
+            forall|j: int| 0 <= j < k ==> #[trigger] st@[j] == block@[j] ^ rk@[j],
+        decreases 16 - k,
+    {
+        st[k] = block[k] ^ rk[k];
+        k += 1;
+    }
+    proof {
+        lemma_round_key(rk@, key, 0);
+        assert(st@ =~= add_round_key(block@, key, 0));
+    }
+    let mut r: usize = 1;
+    while r < 10
+        invariant
+            1 <= r <= 10,
+            rk_ok(rk@, key),
+            st@ == aes128_rounds(key, block@, (r - 1) as nat),
+        decreases 10 - r,
+    {
+        st = add_round_key_exec(
+            &mix_columns_exec(&shift_rows_exec(&sub_bytes_exec(&st))),
+            rk,
+            r,
+            Ghost(key),
+        );
+        r += 1;
+    }
+    // FIPS 197 §5.1: the final round omits MixColumns.
+    add_round_key_exec(&shift_rows_exec(&sub_bytes_exec(&st)), rk, 10, Ghost(key))
+}
+
+/// FIPS 197 §5.1 (Nr = 10), §5.2 (Nk = 4); verified against spec_aes128_encrypt.
+// ponytail: key schedule recomputed per call (40 S-boxes, ≈<measured>% of one block); add a pub expanded-key type if packet-rate profiling shows it
 pub fn aes128_encrypt_block(key: &[u8], block: &[u8]) -> (r: [u8; 16])
     requires
         key@.len() == 16,
@@ -476,7 +749,8 @@ pub fn aes128_encrypt_block(key: &[u8], block: &[u8]) -> (r: [u8; 16])
     ensures
         r@ == spec_aes128_encrypt(key@, block@),
 {
-    crate::shim::aes128_encrypt_block(key, block)
+    let rk = expand_key(key);
+    encrypt_rk(&rk, Ghost(key@), block)
 }
 
 } // verus!
