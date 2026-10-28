@@ -205,31 +205,6 @@ pub open spec fn ch_exts(f: SpecChFields) -> Seq<SpecExt> {
     }
 }
 
-//= https://www.rfc-editor.org/rfc/rfc8446#section-6
-//# Peers which receive a message which
-//# cannot be parsed according to the syntax (e.g., have a length
-//# extending beyond the message boundary or contain an out-of-range
-//# length) MUST terminate the connection with a "decode_error" alert.
-//= https://www.rfc-editor.org/rfc/rfc8446#section-6
-//# Peers which receive a message which is syntactically correct but
-//# semantically invalid (e.g., a DHE share of p - 1, or an invalid enum)
-//# MUST terminate the connection with an "illegal_parameter" alert.
-//= https://www.rfc-editor.org/rfc/rfc8446#section-4.1.2
-//# If the list contains cipher suites that the server
-//# does not recognize, support, or wish to use, the server MUST
-//# ignore those cipher suites and process the remaining ones as
-//# usual.
-//= https://www.rfc-editor.org/rfc/rfc8446#section-4.1.2
-//# Servers MUST ignore unrecognized extensions.
-//= https://www.rfc-editor.org/rfc/rfc8446#section-9.3
-//# A server receiving a ClientHello MUST correctly ignore all
-//# unrecognized cipher suites, extensions, and other parameters.
-//= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.10
-//# A server which receives an "early_data" extension MUST behave in one
-//# of three ways:
-//= https://www.rfc-editor.org/rfc/rfc8446#section-4.4.2.1
-//# TLS 1.3 servers MUST be
-//# able to process ClientHello messages that include it
 /// The ClientHello a server accepts, or the alert for the first failing check:
 /// 1. the field layer does not parse: decode_error;
 /// 2. the extension-block rules (duplicates, pre_shared_key last, oid_filters);
@@ -247,6 +222,11 @@ pub open spec fn ch_exts(f: SpecChFields) -> Seq<SpecExt> {
 /// the quic_transport_parameters content (4c parses it with quic::tp) are not acted on.
 pub open spec fn rfc_client_hello(body: Seq<u8>) -> Result<SpecClientHello, u64> {
     match rfc_ch_fields(body) {
+        //= https://www.rfc-editor.org/rfc/rfc8446#section-6
+        //# Peers which receive a message which
+        //# cannot be parsed according to the syntax (e.g., have a length
+        //# extending beyond the message boundary or contain an out-of-range
+        //# length) MUST terminate the connection with a "decode_error" alert.
         None => Err(ALERT_DECODE_ERROR),
         Some(f) => {
             let x = ch_exts(f);
@@ -262,9 +242,18 @@ pub open spec fn rfc_client_hello(body: Seq<u8>) -> Result<SpecClientHello, u64>
             let sc = spec_find(x, EXT_SIGNATURE_ALGORITHMS_CERT);
             let ks = spec_find(x, EXT_KEY_SHARE);
             let tp = spec_find(x, EXT_QUIC_TRANSPORT_PARAMETERS);
+            //= https://www.rfc-editor.org/rfc/rfc8446#section-6
+            //# Peers which receive a message which is syntactically correct but
+            //# semantically invalid (e.g., a DHE share of p - 1, or an invalid enum)
+            //# MUST terminate the connection with an "illegal_parameter" alert.
             if rfc_ch_ext_check(x) is Err {
                 // 2: duplicates, pre_shared_key not last, oid_filters (ext.rs).
                 Err(rfc_ch_ext_check(x)->Err_0)
+            //= https://www.rfc-editor.org/rfc/rfc8446#section-6
+            //# Peers which receive a message which
+            //# cannot be parsed according to the syntax (e.g., have a length
+            //# extending beyond the message boundary or contain an out-of-range
+            //# length) MUST terminate the connection with a "decode_error" alert.
             // 3: each recognized body by its grammar; step 2 left one of each type at most.
             } else if sn matches Some(d) && rfc_server_name(d) is None {
                 Err(ALERT_DECODE_ERROR)
@@ -290,15 +279,51 @@ pub open spec fn rfc_client_hello(body: Seq<u8>) -> Result<SpecClientHello, u64>
                 Err(ALERT_DECODE_ERROR)
             } else if f.legacy_version <= SSL30 {
                 // 4
+                //= https://www.rfc-editor.org/rfc/rfc8446#appendix-D.5
+                //# Any endpoint
+                //# receiving a Hello message with ClientHello.legacy_version or
+                //# ServerHello.legacy_version set to 0x0300 MUST abort the handshake
+                //# with a "protocol_version" alert.
                 Err(ALERT_PROTOCOL_VERSION)
             } else if sv is None || !rfc_versions(sv.unwrap()).unwrap().contains(TLS13) {
                 // 5
+                //= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.1
+                //# If this extension is present in the ClientHello, servers MUST NOT use
+                //# the ClientHello.legacy_version value for version negotiation and MUST
+                //# use only the "supported_versions" extension to determine client
+                //# preferences.
+                //= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.1
+                //# Servers MUST only select a version of TLS present in
+                //# that extension and MUST ignore any unknown versions that are present
+                //# in that extension.
+                //= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.1
+                //# Servers MUST be prepared to
+                //# receive ClientHellos that include this extension but do not include
+                //# 0x0304 in the list of versions.
+                //= https://www.rfc-editor.org/rfc/rfc8446#appendix-D.2
+                //# If the "supported_versions" extension is absent and the
+                //# server only supports versions greater than
+                //# ClientHello.legacy_version, the server MUST abort the handshake with
+                //# a "protocol_version" alert.
                 Err(ALERT_PROTOCOL_VERSION)
             } else if f.compression != seq![0u8] {
                 // 6
+                //= https://www.rfc-editor.org/rfc/rfc8446#section-4.1.2
+                //# For every TLS 1.3 ClientHello, this vector
+                //# MUST contain exactly one byte, set to zero, which corresponds to
+                //# the "null" compression method in prior versions of TLS.
+                //= https://www.rfc-editor.org/rfc/rfc8446#section-4.1.2
+                //# If a
+                //# TLS 1.3 ClientHello is received with any other value in this
+                //# field, the server MUST abort the handshake with an
+                //# "illegal_parameter" alert.
                 Err(ALERT_ILLEGAL_PARAMETER)
             } else if f.legacy_session_id.len() != 0 {
                 // 7
+                //= https://www.rfc-editor.org/rfc/rfc9001#section-8.4
+                //# A server SHOULD treat the receipt of a
+                //# TLS ClientHello with a non-empty legacy_session_id field as a
+                //# connection error of type PROTOCOL_VIOLATION.
                 Err(PROTOCOL_VIOLATION)
             } else if ck is Some {
                 // 8
@@ -306,9 +331,51 @@ pub open spec fn rfc_client_hello(body: Seq<u8>) -> Result<SpecClientHello, u64>
             } else if sa is None || (pk is None && sg is None) || ((sg is Some) != (ks is Some))
                 || (pk is Some && pm is None) || tp is None {
                 // 9
+                //= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.3
+                //# If a server is authenticating via
+                //# a certificate and the client has not sent a "signature_algorithms"
+                //# extension, then the server MUST abort the handshake with a
+                //# "missing_extension" alert (see Section 9.2).
+                //= https://www.rfc-editor.org/rfc/rfc8446#section-9.2
+                //# -  If not containing a "pre_shared_key" extension, it MUST contain
+                //# both a "signature_algorithms" extension and a "supported_groups"
+                //# extension.
+                //= https://www.rfc-editor.org/rfc/rfc8446#section-9.2
+                //# -  If containing a "supported_groups" extension, it MUST also contain
+                //# a "key_share" extension, and vice versa.
+                //= https://www.rfc-editor.org/rfc/rfc8446#section-9.2
+                //# Servers receiving a ClientHello which does not conform to these
+                //# requirements MUST abort the handshake with a "missing_extension"
+                //# alert.
+                //= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.9
+                //# If clients offer
+                //# "pre_shared_key" without a "psk_key_exchange_modes" extension,
+                //# servers MUST abort the handshake.
+                //= https://www.rfc-editor.org/rfc/rfc9001#section-8.2
+                //# endpoints that
+                //# receive ClientHello or EncryptedExtensions messages without the
+                //# quic_transport_parameters extension MUST close the connection with an
+                //# error of type 0x016d (equivalent to a fatal TLS missing_extension
+                //# alert, see Section 4.8).
                 Err(ALERT_MISSING_EXTENSION)
             } else {
                 // 10
+                //= https://www.rfc-editor.org/rfc/rfc8446#section-4.1.2
+                //# If the list contains cipher suites that the server
+                //# does not recognize, support, or wish to use, the server MUST
+                //# ignore those cipher suites and process the remaining ones as
+                //# usual.
+                //= https://www.rfc-editor.org/rfc/rfc8446#section-4.1.2
+                //# Servers MUST ignore unrecognized extensions.
+                //= https://www.rfc-editor.org/rfc/rfc8446#section-9.3
+                //# A server receiving a ClientHello MUST correctly ignore all
+                //# unrecognized cipher suites, extensions, and other parameters.
+                //= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.10
+                //# A server which receives an "early_data" extension MUST behave in one
+                //# of three ways:
+                //= https://www.rfc-editor.org/rfc/rfc8446#section-4.4.2.1
+                //# TLS 1.3 servers MUST be
+                //# able to process ClientHello messages that include it
                 Ok(
                     SpecClientHello {
                         random: f.random,
@@ -471,68 +538,6 @@ fn has_u16(v: &Vec<u16>, t: u16) -> (r: bool)
     false
 }
 
-//= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.1
-//# If this extension is present in the ClientHello, servers MUST NOT use
-//# the ClientHello.legacy_version value for version negotiation and MUST
-//# use only the "supported_versions" extension to determine client
-//# preferences.
-//= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.1
-//# Servers MUST only select a version of TLS present in
-//# that extension and MUST ignore any unknown versions that are present
-//# in that extension.
-//= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.1
-//# Servers MUST be prepared to
-//# receive ClientHellos that include this extension but do not include
-//# 0x0304 in the list of versions.
-//= https://www.rfc-editor.org/rfc/rfc8446#appendix-D.2
-//# If the "supported_versions" extension is absent and the
-//# server only supports versions greater than
-//# ClientHello.legacy_version, the server MUST abort the handshake with
-//# a "protocol_version" alert.
-//= https://www.rfc-editor.org/rfc/rfc8446#appendix-D.5
-//# Any endpoint
-//# receiving a Hello message with ClientHello.legacy_version or
-//# ServerHello.legacy_version set to 0x0300 MUST abort the handshake
-//# with a "protocol_version" alert.
-//= https://www.rfc-editor.org/rfc/rfc8446#section-4.1.2
-//# For every TLS 1.3 ClientHello, this vector
-//# MUST contain exactly one byte, set to zero, which corresponds to
-//# the "null" compression method in prior versions of TLS.
-//= https://www.rfc-editor.org/rfc/rfc8446#section-4.1.2
-//# If a
-//# TLS 1.3 ClientHello is received with any other value in this
-//# field, the server MUST abort the handshake with an
-//# "illegal_parameter" alert.
-//= https://www.rfc-editor.org/rfc/rfc9001#section-8.4
-//# A server SHOULD treat the receipt of a
-//# TLS ClientHello with a non-empty legacy_session_id field as a
-//# connection error of type PROTOCOL_VIOLATION.
-//= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.3
-//# If a server is authenticating via
-//# a certificate and the client has not sent a "signature_algorithms"
-//# extension, then the server MUST abort the handshake with a
-//# "missing_extension" alert (see Section 9.2).
-//= https://www.rfc-editor.org/rfc/rfc8446#section-9.2
-//# -  If not containing a "pre_shared_key" extension, it MUST contain
-//# both a "signature_algorithms" extension and a "supported_groups"
-//# extension.
-//= https://www.rfc-editor.org/rfc/rfc8446#section-9.2
-//# -  If containing a "supported_groups" extension, it MUST also contain
-//# a "key_share" extension, and vice versa.
-//= https://www.rfc-editor.org/rfc/rfc8446#section-9.2
-//# Servers receiving a ClientHello which does not conform to these
-//# requirements MUST abort the handshake with a "missing_extension"
-//# alert.
-//= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.9
-//# If clients offer
-//# "pre_shared_key" without a "psk_key_exchange_modes" extension,
-//# servers MUST abort the handshake.
-//= https://www.rfc-editor.org/rfc/rfc9001#section-8.2
-//# endpoints that
-//# receive ClientHello or EncryptedExtensions messages without the
-//# quic_transport_parameters extension MUST close the connection with an
-//# error of type 0x016d (equivalent to a fatal TLS missing_extension
-//# alert, see Section 4.8).
 /// `body` is the ClientHello after its 4-byte handshake header.
 pub fn parse_client_hello(body: &[u8]) -> (r: Result<ClientHello, u64>)
     ensures
