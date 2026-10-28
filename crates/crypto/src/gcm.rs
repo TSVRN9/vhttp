@@ -1,4 +1,4 @@
-//! AES-128-GCM (NIST SP 800-38D, 96-bit IV, 128-bit tag): spec and exec signatures backed by the trusted shim.
+//! AES-128-GCM (NIST SP 800-38D, 96-bit IV, 128-bit tag): spec and verified exec.
 #[allow(unused_imports)]
 use crate::aes::*;
 #[allow(unused_imports)]
@@ -146,7 +146,7 @@ proof fn bv_gf128_step(x: u128, z: u128, v: u128, s: u128) by (bit_vector)
 }
 
 // SP 800-38D §6.3 Algorithm 1: constant-time x . y in GF(2^128).
-// ponytail: 128 masked shift/xor steps per 16-byte block, ≈<measured> µs/block; upgrade:
+// ponytail: 128 masked shift/xor steps per 16-byte block, ≈0.16 µs/block (release); upgrade:
 // carry-less multiply (PCLMULQDQ) behind an equivalence lemma. 4-bit Shoup tables are faster
 // but index by H, so not constant-time style
 fn gf128_mul_exec(x: u128, y: u128) -> (r: u128)
@@ -513,7 +513,6 @@ pub proof fn lemma_gctr_len(key: Seq<u8>, icb: Seq<u8>, x: Seq<u8>)
 }
 
 // SP 800-38D §6.5 GCTR from counter block nonce || [c0]_32, appended to out.
-#[allow(dead_code)]  // used from Task 5
 fn gctr_append(
     rk: &[u8; 176],
     Ghost(key): Ghost<Seq<u8>>,
@@ -602,7 +601,6 @@ proof fn lemma_pad16(d: Seq<u8>)
 }
 
 // SP 800-38D §7.1 steps 1, 2, 5, 6: the tag GCTR_K(J0, GHASH_H(A || 0^v || C || 0^u || lengths)).
-#[allow(dead_code)]  // used from Task 5
 fn gcm_tag_exec(
     rk: &[u8; 176],
     Ghost(key): Ghost<Seq<u8>>,
@@ -713,8 +711,14 @@ fn gcm_tag_exec(
     t
 }
 
-/// Trusted shim: the body is RustCrypto aes-gcm; the ensures is the trusted statement.
-#[verifier::external_body]
+// The tag compare: one masked step, so diff stays 0 exactly while the bytes match.
+proof fn bv_ctacc(acc: u8, a: u8, b: u8) by (bit_vector)
+    ensures
+        ((acc | (a ^ b)) == 0) == (acc == 0 && a == b),
+{
+}
+
+/// SP 800-38D §7.1 (96-bit IV, 128-bit tag); verified against spec_gcm_seal.
 pub fn aes128_gcm_seal(key: &[u8], nonce: &[u8], aad: &[u8], pt: &[u8]) -> (r: Vec<u8>)
     requires
         key@.len() == 16,
@@ -724,11 +728,27 @@ pub fn aes128_gcm_seal(key: &[u8], nonce: &[u8], aad: &[u8], pt: &[u8]) -> (r: V
     ensures
         r@ == spec_gcm_seal(key@, nonce@, aad@, pt@),
 {
-    crate::shim::aes128_gcm_seal(key, nonce, aad, pt)
+    hide(spec_aes128_encrypt);
+    hide(gf128_mul);
+    hide(key_word);
+    let rk = expand_key(key);
+    let mut out: Vec<u8> = Vec::with_capacity(pt.len() + 16);
+    // SP 800-38D §7.1 step 3: C = GCTR_K(inc32(J0), P), inc32(J0) = nonce || [2]_32.
+    proof {
+        lemma_j0(nonce@);
+    }
+    gctr_append(&rk, Ghost(key@), nonce, 2, pt, &mut out);
+    assert(out@ =~= gctr(key@, inc32(gcm_j0(nonce@)), pt@));
+    proof {
+        lemma_gctr_len(key@, inc32(gcm_j0(nonce@)), pt@);
+    }
+    // SP 800-38D §7.1 steps 4-7: the tag over A and C; the output is C || T.
+    let t = gcm_tag_exec(&rk, Ghost(key@), nonce, aad, out.as_slice());
+    out.extend_from_slice(t.as_slice());
+    out
 }
 
-/// Trusted shim: the body is RustCrypto aes-gcm; the ensures is the trusted statement.
-#[verifier::external_body]
+/// SP 800-38D §7.2; verified against spec_gcm_open. The tag is checked before any plaintext is produced.
 pub fn aes128_gcm_open(key: &[u8], nonce: &[u8], aad: &[u8], ct: &[u8]) -> (r: Option<Vec<u8>>)
     requires
         key@.len() == 16,
@@ -738,7 +758,59 @@ pub fn aes128_gcm_open(key: &[u8], nonce: &[u8], aad: &[u8], ct: &[u8]) -> (r: O
     ensures
         r.deep_view() == spec_gcm_open(key@, nonce@, aad@, ct@),
 {
-    crate::shim::aes128_gcm_open(key, nonce, aad, ct)
+    hide(spec_aes128_encrypt);
+    hide(gf128_mul);
+    hide(key_word);
+    if ct.len() < 16 {
+        return None;
+    }
+    let rk = expand_key(key);
+    let n = ct.len() - 16;
+    let c = vstd::slice::slice_subrange(ct, 0, n);
+    // SP 800-38D §7.2 steps 2, 3, 5-7: T' over A and C.
+    let t = gcm_tag_exec(&rk, Ghost(key@), nonce, aad, c);
+    assert(t@ == gcm_tag(key@, nonce@, aad@, ct@.subrange(0, ct.len() - 16)));
+    // SP 800-38D §7.2 step 8: compare T with T', all 16 bytes, no early exit.
+    let mut diff: u8 = 0;
+    let mut i: usize = 0;
+    while i < 16
+        invariant
+            n + 16 == ct.len(),
+            i <= 16,
+            (diff == 0) == (ct@.subrange(n as int, n + i) =~= t@.take(i as int)),
+        decreases 16 - i,
+    {
+        proof {
+            bv_ctacc(diff, ct@[n + i], t@[i as int]);
+            let s0 = ct@.subrange(n as int, n + i);
+            let t0 = t@.take(i as int);
+            let s1 = ct@.subrange(n as int, n + i + 1);
+            let t1 = t@.take(i + 1);
+            assert(s1 =~= s0.push(ct@[n + i]));
+            assert(t1 =~= t0.push(t@[i as int]));
+            if s1 =~= t1 {
+                assert(s1.drop_last() =~= t1.drop_last());
+                assert(s1[i as int] == t1[i as int]);
+            }
+        }
+        diff = diff | (ct[n + i] ^ t[i]);
+        i += 1;
+    }
+    assert(t@.take(16) =~= t@);
+    assert((diff == 0) == (ct@.subrange(ct.len() - 16, ct.len() as int) == t@));
+    // ponytail: the only branch on tag bytes; it reveals only accept/reject, which the caller
+    // learns anyway
+    if diff != 0 {
+        return None;
+    }
+    // SP 800-38D §7.2 step 4: P = GCTR_K(inc32(J0), C), only after the tag matched.
+    let mut out: Vec<u8> = Vec::with_capacity(c.len());
+    proof {
+        lemma_j0(nonce@);
+    }
+    gctr_append(&rk, Ghost(key@), nonce, 2, c, &mut out);
+    assert(out@ =~= gctr(key@, inc32(gcm_j0(nonce@)), c@));
+    Some(out)
 }
 
 } // verus!

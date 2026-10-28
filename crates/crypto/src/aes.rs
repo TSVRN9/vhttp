@@ -443,7 +443,9 @@ proof fn lemma_sbox_chain(x: u8)
 }
 
 // FIPS 197 §5.1.1: constant-time S-box, no table and no branch on x.
-// ponytail: S-box = 13 constant-time GF(2^8) multiplies (8 masked steps each) + affine, ≈<measured> µs per AES block (release, Task 5 gcm_64kib); upgrade: Boyar–Peralta bitsliced circuit, proved by the same chunk lemmas, or AES-NI behind an equivalence proof
+// ponytail: S-box = 13 constant-time GF(2^8) multiplies (8 masked steps each) + affine,
+// ≈9.2 µs per AES block (release, Task 5 gcm_64kib); upgrade: Boyar–Peralta bitsliced circuit,
+// proved by the same chunk lemmas, or AES-NI behind an equivalence proof
 pub(crate) fn sbox_ct(x: u8) -> (r: u8)
     ensures
         r == sbox(x),
@@ -745,7 +747,7 @@ pub(crate) fn encrypt_rk(rk: &[u8; 176], Ghost(key): Ghost<Seq<u8>>, block: &[u8
 }
 
 /// FIPS 197 §5.1 (Nr = 10), §5.2 (Nk = 4); verified against spec_aes128_encrypt.
-// ponytail: key schedule recomputed per call (40 S-boxes, ≈<measured>% of one block); add a pub
+// ponytail: key schedule recomputed per call (40 S-boxes, ≈22% of one block); add a pub
 // expanded-key type if packet-rate profiling shows it
 pub fn aes128_encrypt_block(key: &[u8], block: &[u8]) -> (r: [u8; 16])
     requires
