@@ -4,6 +4,7 @@ pub mod client_hello;
 pub mod codes;
 pub mod config;
 pub mod ext;
+pub mod flight;
 pub mod handshake;
 pub mod hkdf_label;
 pub mod negotiate;
