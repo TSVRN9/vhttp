@@ -179,7 +179,7 @@ Total keyword count: 44 across 22 sections.
 | 2.1 | Stream types and identifiers | 1 | yes | 3 | Never reuse a stream ID. ✅ 3c: crates/quic/src/stream_id.rs |
 | 2.2 | Sending and receiving data | 3 | yes | 3 | Ordered delivery; same data at same offset; respect peer flow limits. 3c: reassembly.rs ordered delivery (closed in Task 6); 3c: recv_stream.rs (closed in Task 6) |
 | 3.2 | Receiving stream states | 1 | yes | 3 | Opening stream N implicitly creates all lower-numbered streams of that type. |
-| 3.3 | Permitted frame types | 2 | yes | 3 | No frames from terminal states; no STREAM/STREAM_DATA_BLOCKED after RESET_STREAM. |
+| 3.3 | Permitted frame types | 2 | yes | 3 | No frames from terminal states; no STREAM/STREAM_DATA_BLOCKED after RESET_STREAM. ✅ 3c: crates/quic/src/send_stream.rs |
 | 3.5 | Solicited state transitions | 1 | yes | 3 | STOP_SENDING in Ready/Send must trigger RESET_STREAM. |
 | 4.1 | Data flow control | 3 | yes | 3 | Do not exceed limits; FLOW_CONTROL_ERROR on violation; ignore non-increasing MAX_DATA/MAX_STREAM_DATA. |
 | 4.2 | Increasing flow control limits | 1 | yes | 3 | Do not wait for *_BLOCKED before raising credit. |
