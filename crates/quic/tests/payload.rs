@@ -85,6 +85,10 @@ fn empty_and_padding() {
     assert_eq!(parse_payload(&[0x00, 0x00, 0x00], PacketKind::Initial), Ok(vec![]));
     let b = [&[0x01u8][..], &[0u8; 1000][..]].concat();
     assert_eq!(parse_payload(&b, PacketKind::Handshake), Ok(vec![Frame::Ping]));
+    let b = [0x01, 0x00, 0x00, 0x00, 0x01];
+    assert_eq!(parse_payload(&b, PacketKind::Initial), Ok(vec![Frame::Ping, Frame::Ping]));
+    let b = [0x01, 0x00, 0x00, 0x10, 0x05, 0x00];
+    assert_eq!(parse_payload(&b, PacketKind::OneRtt), Ok(vec![Frame::Ping, Frame::MaxData(5)]));
 }
 
 #[test]
