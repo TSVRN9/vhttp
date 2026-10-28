@@ -25,6 +25,8 @@ pub open spec fn len_width(ceiling: nat) -> nat {
 // RFC 8446 §3.3: "All values, here and elsewhere in the specification, are transmitted in
 // network byte (big-endian) order".
 /// Big-endian value of `b.take(w)`, for `w <= 3` (every width this crate reads).
+/// Callers pass `len_width(..)` or the literal 3 (the §4 uint24 handshake length);
+/// any `w > 3` silently reads as width 3.
 pub open spec fn be(b: Seq<u8>, w: nat) -> nat {
     if w == 0 {
         0
@@ -38,6 +40,7 @@ pub open spec fn be(b: Seq<u8>, w: nat) -> nat {
 }
 
 /// The `w`-byte big-endian encoding of `x` (`w <= 3`); the inverse of `be` for `x < 256^w`.
+/// Same width contract as `be`: any `w > 3` silently writes 3 bytes.
 pub open spec fn spec_be_bytes(x: nat, w: nat) -> Seq<u8> {
     if w == 0 {
         seq![]
