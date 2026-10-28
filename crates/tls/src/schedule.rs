@@ -8,6 +8,13 @@
 //# application.
 // vacuous: no exporter is offered; QUIC (RFC 9001) uses none
 //
+//= https://www.rfc-editor.org/rfc/rfc8446#section-7.5
+//= type=exception
+//= reason=binds authors of future specifications, not an implementation
+//# Future
+//# specifications MUST NOT define a use of exporters that permit both an
+//# empty context and no context with the same label.
+//
 // RFC 8446 §4.4.1: "when the server responds to a ClientHello with a HelloRetryRequest, the
 // value of ClientHello1 is replaced with a special synthetic handshake message of handshake type
 // "message_hash" containing Hash(ClientHello1). I.e.,
@@ -179,22 +186,8 @@ pub fn finished_key(base: &[u8; 32]) -> (r: [u8; 32])
         r@ == spec_finished_key(base@),
 {
     let empty: Vec<u8> = Vec::new();
-    let v = hkdf_expand_label(base, &LABEL_FINISHED, empty.as_slice(), 32);
     assert(empty@ == Seq::<u8>::empty());
-    let mut r = [0u8; 32];
-    let mut i: usize = 0;
-    while i < 32
-        invariant
-            i <= 32,
-            v@.len() == 32,
-            forall|j: int| 0 <= j < i ==> r@[j] == v@[j],
-        decreases 32 - i,
-    {
-        r[i] = v[i];
-        i += 1;
-    }
-    assert(r@ =~= v@);
-    r
+    hkdf_expand_label_32(base, &LABEL_FINISHED, empty.as_slice())
 }
 
 /// `th` is Transcript-Hash(Handshake Context, Certificate*, CertificateVerify*).

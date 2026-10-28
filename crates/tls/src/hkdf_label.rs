@@ -78,13 +78,15 @@ pub fn hkdf_expand_label(secret: &[u8; 32], label: &[u8], context: &[u8], len: u
     r
 }
 
-pub fn derive_secret(secret: &[u8; 32], label: &[u8], transcript_hash: &[u8; 32]) -> (r: [u8; 32])
+/// HKDF-Expand-Label with Length = Hash.length = 32, as an array.
+pub fn hkdf_expand_label_32(secret: &[u8; 32], label: &[u8], context: &[u8]) -> (r: [u8; 32])
     requires
         label_ok(label@),
+        context@.len() <= 255,
     ensures
-        r@ == spec_hkdf_expand_label(secret@, label@, transcript_hash@, 32),
+        r@ == spec_hkdf_expand_label(secret@, label@, context@, 32),
 {
-    let v = hkdf_expand_label(secret, label, transcript_hash.as_slice(), 32);
+    let v = hkdf_expand_label(secret, label, context, 32);
     let mut r = [0u8; 32];
     let mut i: usize = 0;
     while i < 32
@@ -99,6 +101,15 @@ pub fn derive_secret(secret: &[u8; 32], label: &[u8], transcript_hash: &[u8; 32]
     }
     assert(r@ =~= v@);
     r
+}
+
+pub fn derive_secret(secret: &[u8; 32], label: &[u8], transcript_hash: &[u8; 32]) -> (r: [u8; 32])
+    requires
+        label_ok(label@),
+    ensures
+        r@ == spec_hkdf_expand_label(secret@, label@, transcript_hash@, 32),
+{
+    hkdf_expand_label_32(secret, label, transcript_hash.as_slice())
 }
 
 } // verus!
