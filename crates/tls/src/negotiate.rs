@@ -39,12 +39,12 @@ pub enum Choice {
 // rsaEncryption OID is a property of the configured certificate (TRUSTED.md, config row).
 //= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.3
 //= type=exception
-//= reason=rsa_pss_pss_* is never selected: an RSA key signs only rsa_pss_rsae_sha256
+//= reason=binds the signer of an RSASSA-PSS-keyed certificate; we sign CertificateVerify only with rsa_pss_rsae_sha256 and pass certificates through opaque
 //# The length of the Salt MUST be equal to the length of the digest
 //# algorithm.
 //= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.3
 //= type=exception
-//= reason=rsa_pss_pss_* is never selected: an RSA key signs only rsa_pss_rsae_sha256
+//= reason=binds the signer of an RSASSA-PSS-keyed certificate; we sign CertificateVerify only with rsa_pss_rsae_sha256 and pass certificates through opaque
 //# If the public key is carried in an X.509 certificate,
 //# it MUST use the RSASSA-PSS OID [RFC5756].
 //= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.3
@@ -63,6 +63,12 @@ pub enum Choice {
 //# A TLS-compliant application MUST support digital signatures with
 //# rsa_pkcs1_sha256 (for certificates), rsa_pss_rsae_sha256 (for
 //# CertificateVerify and certificates), and ecdsa_secp256r1_sha256.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.3
+//= type=exception
+//= reason=client-only
+//# Clients which desire the
+//# server to authenticate itself via a certificate MUST send the
+//# "signature_algorithms" extension.
 /// §4.2.3: "If no "signature_algorithms_cert" extension is present, then the
 /// "signature_algorithms" extension also applies to signatures appearing in certificates."
 pub open spec fn cert_offered(ch: SpecClientHello) -> Seq<u16> {
@@ -81,7 +87,11 @@ pub open spec fn chain_fits(c: SpecCertChain, offered: Seq<u16>) -> bool {
 }
 
 pub open spec fn is_sha1(s: u16) -> bool {
-    s == RSA_PKCS1_SHA1 || s == ECDSA_SHA1
+    s == RSA_PKCS1_SHA1 || s == DSA_SHA1_RESERVED || s == ECDSA_SHA1
+}
+
+pub open spec fn no_sha1(c: SpecCertChain) -> bool {
+    forall|k: int| 0 <= k < c.chain_schemes.len() ==> !is_sha1(#[trigger] c.chain_schemes[k])
 }
 
 pub open spec fn sha1_ok(c: SpecCertChain, offered: Seq<u16>) -> bool {
@@ -91,27 +101,30 @@ pub open spec fn sha1_ok(c: SpecCertChain, offered: Seq<u16>) -> bool {
         )
 }
 
-/// `strict`: the chain is signed only with offered schemes; otherwise only its SHA-1 schemes
-/// need to be offered.
-pub open spec fn chain_ok(ch: SpecClientHello, c: SpecCertChain, strict: bool) -> bool {
-    key_usable(ch, c) && if strict {
+/// The chain test of selection pass `pass`:
+/// 0. signed only with offered schemes, none of them SHA-1;
+/// 1. signed only with offered schemes;
+/// 2. (the fallback) every SHA-1 scheme in it is offered.
+pub open spec fn chain_ok(ch: SpecClientHello, c: SpecCertChain, pass: u8) -> bool {
+    key_usable(ch, c) && if pass == 0 {
+        chain_fits(c, cert_offered(ch)) && no_sha1(c)
+    } else if pass == 1 {
         chain_fits(c, cert_offered(ch))
     } else {
         sha1_ok(c, cert_offered(ch))
     }
 }
 
-/// The least `i >= k` with `chain_ok(ch, cfg[i], strict)`. Indices past `usize::MAX` are not
-/// searched; no exec config reaches them.
-pub open spec fn scan_chain(cfg: Seq<SpecCertChain>, ch: SpecClientHello, strict: bool, k: nat) -> Option<nat>
+/// The least `i >= k` with `chain_ok(ch, cfg[i], pass)`.
+pub open spec fn scan_chain(cfg: Seq<SpecCertChain>, ch: SpecClientHello, pass: u8, k: nat) -> Option<nat>
     decreases cfg.len() - k,
 {
-    if k >= cfg.len() || k > usize::MAX {
+    if k >= cfg.len() {
         None
-    } else if chain_ok(ch, cfg[k as int], strict) {
+    } else if chain_ok(ch, cfg[k as int], pass) {
         Some(k)
     } else {
-        scan_chain(cfg, ch, strict, k + 1)
+        scan_chain(cfg, ch, pass, k + 1)
     }
 }
 
@@ -160,18 +173,29 @@ pub open spec fn scan_chain(cfg: Seq<SpecCertChain>, ch: SpecClientHello, strict
 //# TLS 1.3 servers MUST NOT offer a SHA-1 signed certificate unless
 //# no valid certificate chain can be produced without it (see
 //# Section 4.4.2.2).
+//= https://www.rfc-editor.org/rfc/rfc8446#section-4.4.2.2
+//= type=exception
+//= reason=client-only
+//# If the client cannot construct an acceptable chain using the provided
+//# certificates and decides to abort the handshake, then it MUST abort
+//# the handshake with an appropriate certificate-related alert (by
+//# default, "unsupported_certificate"; see Section 6.2 for more
+//# information).
 pub open spec fn rfc_select_chain(cfg: Seq<SpecCertChain>, ch: SpecClientHello) -> Option<nat> {
-    match scan_chain(cfg, ch, true, 0) {
+    match scan_chain(cfg, ch, 0, 0) {
         Some(i) => Some(i),
-        None => scan_chain(cfg, ch, false, 0),
+        None => match scan_chain(cfg, ch, 1, 0) {
+            Some(i) => Some(i),
+            None => scan_chain(cfg, ch, 2, 0),
+        },
     }
 }
 
-/// The least `j >= k` with `ks[j].group == SECP256R1`, bounded like `scan_chain`.
+/// The least `j >= k` with `ks[j].group == SECP256R1`.
 pub open spec fn scan_share(ks: Seq<SpecKeyShare>, k: nat) -> Option<nat>
     decreases ks.len() - k,
 {
-    if k >= ks.len() || k > usize::MAX {
+    if k >= ks.len() {
         None
     } else if ks[k as int].group == SECP256R1 {
         Some(k)
@@ -296,24 +320,26 @@ pub open spec fn rfc_negotiate(ch: SpecClientHello, cfg: Seq<SpecCertChain>, aft
 // Theorems
 // =============================================================================
 
-proof fn lemma_scan_chain(cfg: Seq<SpecCertChain>, ch: SpecClientHello, strict: bool, k: nat)
+proof fn lemma_scan_chain(cfg: Seq<SpecCertChain>, ch: SpecClientHello, pass: u8, k: nat)
     ensures
-        scan_chain(cfg, ch, strict, k) matches Some(i) ==> k <= i < cfg.len() && i <= usize::MAX
-            && chain_ok(ch, cfg[i as int], strict),
+        scan_chain(cfg, ch, pass, k) matches Some(i) ==> k <= i < cfg.len() && chain_ok(
+            ch,
+            cfg[i as int],
+            pass,
+        ),
     decreases cfg.len() - k,
 {
-    if k < cfg.len() && k <= usize::MAX && !chain_ok(ch, cfg[k as int], strict) {
-        lemma_scan_chain(cfg, ch, strict, k + 1);
+    if k < cfg.len() && !chain_ok(ch, cfg[k as int], pass) {
+        lemma_scan_chain(cfg, ch, pass, k + 1);
     }
 }
 
 proof fn lemma_scan_share(ks: Seq<SpecKeyShare>, k: nat)
     ensures
-        scan_share(ks, k) matches Some(j) ==> k <= j < ks.len() && j <= usize::MAX
-            && ks[j as int].group == SECP256R1,
+        scan_share(ks, k) matches Some(j) ==> k <= j < ks.len() && ks[j as int].group == SECP256R1,
     decreases ks.len() - k,
 {
-    if k < ks.len() && k <= usize::MAX && ks[k as int].group != SECP256R1 {
+    if k < ks.len() && ks[k as int].group != SECP256R1 {
         lemma_scan_share(ks, k + 1);
     }
 }
@@ -325,7 +351,12 @@ pub proof fn theorem_no_second_hrr(ch: SpecClientHello, cfg: Seq<SpecCertChain>)
 {
 }
 
+/// The bounds hold for every exec value (`Vec` lengths are `usize`); they make the `as usize`
+/// indices in `Choice` round-trip.
 pub proof fn theorem_proceed_facts(ch: SpecClientHello, cfg: Seq<SpecCertChain>, h: bool)
+    requires
+        cfg.len() <= usize::MAX,
+        ch.key_shares matches Some(ks) ==> ks.len() <= usize::MAX,
     ensures
         rfc_negotiate(ch, cfg, h) matches Ok(Choice::Proceed { chain, scheme, share }) ==> {
             &&& chain < cfg.len()
@@ -338,8 +369,9 @@ pub proof fn theorem_proceed_facts(ch: SpecClientHello, cfg: Seq<SpecCertChain>,
             &&& a.contains(H3_ALPN@)
         },
 {
-    lemma_scan_chain(cfg, ch, true, 0);
-    lemma_scan_chain(cfg, ch, false, 0);
+    lemma_scan_chain(cfg, ch, 0, 0);
+    lemma_scan_chain(cfg, ch, 1, 0);
+    lemma_scan_chain(cfg, ch, 2, 0);
     if let Some(ks) = ch.key_shares {
         lemma_scan_share(ks, 0);
     }
@@ -385,30 +417,38 @@ fn has_h3(a: &Vec<Vec<u8>>) -> (r: bool)
     false
 }
 
-/// `strict ? every scheme offered : every SHA-1 scheme offered`.
-fn schemes_ok(schemes: &Vec<u16>, offered: &Vec<u16>, strict: bool) -> (r: bool)
+/// One scheme's test in selection pass `pass` (see `chain_ok`).
+pub open spec fn scheme_ok(pass: u8, offered: Seq<u16>, s: u16) -> bool {
+    if pass == 0 {
+        offered.contains(s) && !is_sha1(s)
+    } else if pass == 1 {
+        offered.contains(s)
+    } else {
+        is_sha1(s) ==> offered.contains(s)
+    }
+}
+
+fn schemes_ok(schemes: &Vec<u16>, offered: &Vec<u16>, pass: u8) -> (r: bool)
     ensures
-        r == if strict {
-            forall|k: int| 0 <= k < schemes@.len() ==> offered@.contains(#[trigger] schemes@[k])
-        } else {
-            forall|k: int|
-                0 <= k < schemes@.len() && is_sha1(#[trigger] schemes@[k]) ==> offered@.contains(
-                    schemes@[k],
-                )
-        },
+        r == forall|k: int| 0 <= k < schemes@.len() ==> scheme_ok(pass, offered@, #[trigger] schemes@[k]),
 {
     let mut i: usize = 0;
     while i < schemes.len()
         invariant
             i <= schemes@.len(),
-            forall|k: int|
-                0 <= k < i ==> (strict || is_sha1(#[trigger] schemes@[k])) ==> offered@.contains(
-                    schemes@[k],
-                ),
+            forall|k: int| 0 <= k < i ==> scheme_ok(pass, offered@, #[trigger] schemes@[k]),
         decreases schemes@.len() - i,
     {
         let s = schemes[i];
-        if (strict || s == RSA_PKCS1_SHA1 || s == ECDSA_SHA1) && !has_u16(offered, s) {
+        let sha1 = s == RSA_PKCS1_SHA1 || s == DSA_SHA1_RESERVED || s == ECDSA_SHA1;
+        let ok = if pass == 0 {
+            !sha1 && has_u16(offered, s)
+        } else if pass == 1 {
+            has_u16(offered, s)
+        } else {
+            !sha1 || has_u16(offered, s)
+        };
+        if !ok {
             return false;
         }
         i += 1;
@@ -416,13 +456,13 @@ fn schemes_ok(schemes: &Vec<u16>, offered: &Vec<u16>, strict: bool) -> (r: bool)
     true
 }
 
-fn select_chain(ch: &ClientHello, cfg: &ServerConfig, strict: bool) -> (r: Option<usize>)
+fn select_chain(ch: &ClientHello, cfg: &ServerConfig, pass: u8) -> (r: Option<usize>)
     ensures
-        r == (match scan_chain(cfg@, ch@, strict, 0) {
+        r == (match scan_chain(cfg@, ch@, pass, 0) {
             Some(i) => Some(i as usize),
             None => None::<usize>,
         }),
-        r matches Some(i) ==> i < cfg@.len() && scan_chain(cfg@, ch@, strict, 0) == Some(i as nat),
+        r matches Some(i) ==> i < cfg@.len() && scan_chain(cfg@, ch@, pass, 0) == Some(i as nat),
 {
     let offered = match &ch.sig_algs_cert {
         Some(s) => s,
@@ -440,13 +480,13 @@ fn select_chain(ch: &ClientHello, cfg: &ServerConfig, strict: bool) -> (r: Optio
         invariant
             i <= cfg@.len(),
             offered@ == cert_offered(ch@),
-            scan_chain(cfg@, ch@, strict, 0) == scan_chain(cfg@, ch@, strict, i as nat),
+            scan_chain(cfg@, ch@, pass, 0) == scan_chain(cfg@, ch@, pass, i as nat),
         decreases cfg@.len() - i,
     {
         let c = &cfg.chains[i];
         assert(cfg@[i as int] == c@);
         let usable = has_u16(&ch.sig_algs, key_scheme_of(&c.key));
-        let fits = schemes_ok(&c.chain_schemes, offered, strict);
+        let fits = schemes_ok(&c.chain_schemes, offered, pass);
         assert(cfg@[i as int].chain_schemes == c.chain_schemes@);
         assert(offered@ == cert_offered(ch@));
         if usable && fits {
@@ -494,11 +534,14 @@ pub fn negotiate(ch: &ClientHello, cfg: &ServerConfig, after_hrr: bool) -> (r: R
     if !h3 {
         return Err(ALERT_NO_APPLICATION_PROTOCOL);
     }
-    let i = match select_chain(ch, cfg, true) {
+    let i = match select_chain(ch, cfg, 0) {
         Some(i) => i,
-        None => match select_chain(ch, cfg, false) {
+        None => match select_chain(ch, cfg, 1) {
             Some(i) => i,
-            None => return Err(ALERT_HANDSHAKE_FAILURE),
+            None => match select_chain(ch, cfg, 2) {
+                Some(i) => i,
+                None => return Err(ALERT_HANDSHAKE_FAILURE),
+            },
         },
     };
     let scheme = key_scheme_of(&cfg.chains[i].key);
