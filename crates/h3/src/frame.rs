@@ -199,20 +199,6 @@ pub open spec fn spec_frame_bytes(ty: u64, payload: Seq<u8>) -> Seq<u8> {
     spec_frame_header_bytes(ty, payload.len() as u64).add(payload)
 }
 
-pub open spec fn spec_pair_bytes(x: (u64, u64)) -> Seq<u8> {
-    spec_varint(x.0).add(spec_varint(x.1))
-}
-
-pub open spec fn spec_settings_payload(s: Seq<(u64, u64)>) -> Seq<u8>
-    decreases s.len(),
-{
-    if s.len() == 0 {
-        Seq::empty()
-    } else {
-        spec_pair_bytes(s[0]).add(spec_settings_payload(s.skip(1)))
-    }
-}
-
 // =============================================================================
 // Varint lemmas
 // =============================================================================
@@ -589,29 +575,6 @@ fn parse_settings(payload: &[u8]) -> (r: Result<Frame, u64>)
 // Frame serialization
 // =============================================================================
 
-pub proof fn lemma_settings_payload_snoc(s: Seq<(u64, u64)>, x: (u64, u64))
-    ensures
-        spec_settings_payload(s.push(x)) == spec_settings_payload(s).add(spec_pair_bytes(x)),
-    decreases s.len(),
-{
-    if s.len() == 0 {
-        assert(s.push(x)[0] == x);
-        assert(spec_settings_payload(s) == Seq::<u8>::empty());
-        assert(s.push(x).skip(1) =~= Seq::<(u64, u64)>::empty());
-        assert(spec_settings_payload(Seq::<(u64, u64)>::empty()) == Seq::<u8>::empty());
-        assert(spec_pair_bytes(x).add(Seq::empty()) =~= spec_pair_bytes(x));
-        assert(Seq::<u8>::empty().add(spec_pair_bytes(x)) =~= spec_pair_bytes(x));
-    } else {
-        assert(s.push(x).skip(1) =~= s.skip(1).push(x));
-        lemma_settings_payload_snoc(s.skip(1), x);
-        assert(s.push(x)[0] == s[0]);
-        assert(spec_pair_bytes(s[0]).add(spec_settings_payload(s.skip(1)).add(spec_pair_bytes(x)))
-            =~= spec_pair_bytes(s[0]).add(spec_settings_payload(s.skip(1))).add(
-            spec_pair_bytes(x),
-        ));
-    }
-}
-
 /// Writes a complete SETTINGS frame (type 0x04).
 pub fn serialize_settings(settings: &[(u64, u64)], out: &mut Vec<u8>)
     requires
@@ -621,7 +584,7 @@ pub fn serialize_settings(settings: &[(u64, u64)], out: &mut Vec<u8>)
                 <= VARINT_MAX,
         rfc_settings_valid(settings@),
     ensures
-        final(out)@ == old(out)@.add(spec_frame_bytes(FRAME_SETTINGS, spec_settings_payload(settings@))),
+        final(out)@ == old(out)@.add(spec_frame_bytes(FRAME_SETTINGS, spec_pairs_bytes(settings@))),
 {
     let mut body: Vec<u8> = Vec::new();
     let mut i: usize = 0;
@@ -632,14 +595,14 @@ pub fn serialize_settings(settings: &[(u64, u64)], out: &mut Vec<u8>)
             forall|k: int|
                 0 <= k < settings@.len() ==> (#[trigger] settings@[k]).0 <= VARINT_MAX
                     && settings@[k].1 <= VARINT_MAX,
-            body@ == spec_settings_payload(settings@.take(i as int)),
+            body@ == spec_pairs_bytes(settings@.take(i as int)),
             body@.len() <= 16 * i,
         decreases settings@.len() - i,
     {
         let (id, v) = settings[i];
         proof {
             assert(settings@.take(i as int + 1) =~= settings@.take(i as int).push(settings@[i as int]));
-            lemma_settings_payload_snoc(settings@.take(i as int), settings@[i as int]);
+            lemma_pairs_bytes_snoc(settings@.take(i as int), settings@[i as int]);
             theorem_serialize_matches_rfc(id);
             theorem_serialize_matches_rfc(v);
         }
@@ -703,7 +666,7 @@ proof fn lemma_settings_payload_parses(s: Seq<(u64, u64)>)
         forall|i: int|
             0 <= i < s.len() ==> (#[trigger] s[i]).0 <= VARINT_MAX && s[i].1 <= VARINT_MAX,
     ensures
-        rfc_settings_pairs(spec_settings_payload(s)) == Some(s),
+        rfc_settings_pairs(spec_pairs_bytes(s)) == Some(s),
     decreases s.len(),
 {
     if s.len() == 0 {
@@ -716,7 +679,7 @@ proof fn lemma_settings_payload_parses(s: Seq<(u64, u64)>)
             assert(tail[i] == s[i + 1]);
         }
         lemma_settings_payload_parses(tail);
-        lemma_pair_parses(s[0], spec_settings_payload(tail));
+        lemma_pair_parses(s[0], spec_pairs_bytes(tail));
         assert(seq![s[0]].add(tail) =~= s);
     }
 }
@@ -728,7 +691,7 @@ pub proof fn theorem_settings_roundtrip(s: Seq<(u64, u64)>)
             0 <= i < s.len() ==> (#[trigger] s[i]).0 <= VARINT_MAX && s[i].1 <= VARINT_MAX,
         rfc_settings_valid(s),
     ensures
-        rfc_frame_payload(FRAME_SETTINGS, spec_settings_payload(s)) == Ok::<SpecFrame, u64>(
+        rfc_frame_payload(FRAME_SETTINGS, spec_pairs_bytes(s)) == Ok::<SpecFrame, u64>(
             SpecFrame::Settings(s),
         ),
 {

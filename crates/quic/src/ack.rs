@@ -250,20 +250,6 @@ pub open spec fn spec_ack_type(a: SpecAck) -> u64 {
     }
 }
 
-pub open spec fn spec_pair_bytes(x: (u64, u64)) -> Seq<u8> {
-    spec_varint(x.0) + spec_varint(x.1)
-}
-
-pub open spec fn spec_ranges_bytes(r: Seq<(u64, u64)>) -> Seq<u8>
-    decreases r.len(),
-{
-    if r.len() == 0 {
-        Seq::empty()
-    } else {
-        spec_pair_bytes(r[0]) + spec_ranges_bytes(r.skip(1))
-    }
-}
-
 pub open spec fn spec_ecn_bytes(ecn: Option<(u64, u64, u64)>) -> Seq<u8> {
     match ecn {
         Some((e0, e1, ce)) => spec_varint(e0) + spec_varint(e1) + spec_varint(ce),
@@ -274,7 +260,7 @@ pub open spec fn spec_ecn_bytes(ecn: Option<(u64, u64, u64)>) -> Seq<u8> {
 /// Everything after the type.
 pub open spec fn spec_ack_body(a: SpecAck) -> Seq<u8> {
     spec_varint(a.largest) + (spec_varint(a.delay) + (spec_varint(a.ranges.len() as u64) + (
-    spec_varint(a.first_range) + (spec_ranges_bytes(a.ranges) + spec_ecn_bytes(a.ecn)))))
+    spec_varint(a.first_range) + (spec_pairs_bytes(a.ranges) + spec_ecn_bytes(a.ecn)))))
 }
 
 /// The whole frame, type included.
@@ -326,21 +312,21 @@ pub(crate) proof fn lemma_varint_at(b: Seq<u8>, p: int, v: u64, tail: Seq<u8>)
 proof fn lemma_ranges_parse(b: Seq<u8>, p: int, r: Seq<(u64, u64)>, tail: Seq<u8>)
     requires
         0 <= p <= b.len(),
-        b.skip(p) == spec_ranges_bytes(r) + tail,
+        b.skip(p) == spec_pairs_bytes(r) + tail,
         forall|i: int|
             0 <= i < r.len() ==> (#[trigger] r[i]).0 <= VARINT_MAX && r[i].1 <= VARINT_MAX,
     ensures
-        rfc_ack_pairs(b, p, r.len()) == Some((r, p + spec_ranges_bytes(r).len())),
-        b.skip(p + spec_ranges_bytes(r).len()) == tail,
+        rfc_ack_pairs(b, p, r.len()) == Some((r, p + spec_pairs_bytes(r).len())),
+        b.skip(p + spec_pairs_bytes(r).len()) == tail,
     decreases r.len(),
 {
     if r.len() == 0 {
         assert(r =~= Seq::<(u64, u64)>::empty());
-        assert(spec_ranges_bytes(r) + tail =~= tail);
+        assert(spec_pairs_bytes(r) + tail =~= tail);
     } else {
         let (g, l) = r[0];
         let r1 = r.skip(1);
-        let rb1 = spec_ranges_bytes(r1);
+        let rb1 = spec_pairs_bytes(r1);
         assert(b.skip(p) =~= spec_varint(g) + (spec_varint(l) + (rb1 + tail)));
         lemma_varint_at(b, p, g, spec_varint(l) + (rb1 + tail));
         let p1 = p + spec_varint(g).len();
@@ -355,26 +341,6 @@ proof fn lemma_ranges_parse(b: Seq<u8>, p: int, r: Seq<(u64, u64)>, tail: Seq<u8
     }
 }
 
-proof fn lemma_ranges_bytes_snoc(s: Seq<(u64, u64)>, x: (u64, u64))
-    ensures
-        spec_ranges_bytes(s.push(x)) == spec_ranges_bytes(s) + spec_pair_bytes(x),
-    decreases s.len(),
-{
-    if s.len() == 0 {
-        assert(s.push(x)[0] == x);
-        assert(s.push(x).skip(1) =~= Seq::<(u64, u64)>::empty());
-        assert(spec_ranges_bytes(s) == Seq::<u8>::empty());
-        assert(spec_ranges_bytes(Seq::<(u64, u64)>::empty()) == Seq::<u8>::empty());
-        assert(spec_pair_bytes(x) + Seq::empty() =~= Seq::<u8>::empty() + spec_pair_bytes(x));
-    } else {
-        assert(s.push(x)[0] == s[0]);
-        assert(s.push(x).skip(1) =~= s.skip(1).push(x));
-        lemma_ranges_bytes_snoc(s.skip(1), x);
-        assert(spec_pair_bytes(s[0]) + (spec_ranges_bytes(s.skip(1)) + spec_pair_bytes(x))
-            =~= spec_pair_bytes(s[0]) + spec_ranges_bytes(s.skip(1)) + spec_pair_bytes(x));
-    }
-}
-
 /// Every field of `spec_ack_body(a) + rest` reads back where `rfc_ack` looks for it.
 proof fn lemma_ack_layout(a: SpecAck, rest: Seq<u8>)
     requires
@@ -386,7 +352,7 @@ proof fn lemma_ack_layout(a: SpecAck, rest: Seq<u8>)
             let n2 = spec_varint(a.delay).len();
             let n3 = spec_varint(a.ranges.len() as u64).len();
             let n4 = spec_varint(a.first_range).len();
-            let q = n1 + n2 + n3 + n4 + spec_ranges_bytes(a.ranges).len();
+            let q = n1 + n2 + n3 + n4 + spec_pairs_bytes(a.ranges).len();
             &&& rfc_varint_decode(b) == Some((n1, a.largest))
             &&& rfc_varint_decode(b.skip(n1 as int)) == Some((n2, a.delay))
             &&& rfc_varint_decode(b.skip((n1 + n2) as int)) == Some((n3, a.ranges.len() as u64))
@@ -403,7 +369,7 @@ proof fn lemma_ack_layout(a: SpecAck, rest: Seq<u8>)
     // Each decode fact comes from `lemma_varint_at`; unfolding the decoder only adds noise.
     hide(rfc_varint_decode);
     let cnt = a.ranges.len() as u64;
-    let rb = spec_ranges_bytes(a.ranges);
+    let rb = spec_pairs_bytes(a.ranges);
     let eb = spec_ecn_bytes(a.ecn);
     // The body's suffixes: body = v(largest) + k1, k1 = v(delay) + k2, ...
     let k4 = rb + eb;
@@ -736,13 +702,13 @@ pub fn serialize_ack(a: &AckFrame, out: &mut Vec<u8>)
         invariant
             i <= a.ranges@.len(),
             ack_encodable(a@),
-            out@ == head + spec_ranges_bytes(a.ranges@.take(i as int)),
+            out@ == head + spec_pairs_bytes(a.ranges@.take(i as int)),
         decreases a.ranges@.len() - i,
     {
         let (gap, len) = a.ranges[i];
         proof {
             assert(a.ranges@.take(i + 1) =~= a.ranges@.take(i as int).push(a.ranges@[i as int]));
-            lemma_ranges_bytes_snoc(a.ranges@.take(i as int), a.ranges@[i as int]);
+            lemma_pairs_bytes_snoc(a.ranges@.take(i as int), a.ranges@[i as int]);
             assert(a.ranges@[i as int].0 <= VARINT_MAX);
         }
         let ghost before = out@;
@@ -752,8 +718,8 @@ pub fn serialize_ack(a: &AckFrame, out: &mut Vec<u8>)
             assert(before + spec_varint(gap) + spec_varint(len) =~= before + spec_pair_bytes(
                 (gap, len),
             ));
-            assert(head + spec_ranges_bytes(a.ranges@.take(i as int)) + spec_pair_bytes((gap, len))
-                =~= head + (spec_ranges_bytes(a.ranges@.take(i as int)) + spec_pair_bytes(
+            assert(head + spec_pairs_bytes(a.ranges@.take(i as int)) + spec_pair_bytes((gap, len))
+                =~= head + (spec_pairs_bytes(a.ranges@.take(i as int)) + spec_pair_bytes(
                 (gap, len),
             )));
         }

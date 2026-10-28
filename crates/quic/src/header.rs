@@ -8,6 +8,7 @@ use vstd::prelude::*;
 use vstd::slice::{slice_subrange, slice_to_vec};
 use wire::varint::*;
 
+use crate::ack::*;
 use crate::codes::*;
 use crate::pn::*;
 
@@ -599,22 +600,6 @@ fn copy_range(b: &[u8], from: usize, len: usize) -> (r: Vec<u8>)
     slice_to_vec(slice_subrange(b, from, from + len))
 }
 
-/// The varint at `b[at..]`.
-fn varint_at(b: &[u8], at: usize) -> (r: Option<(usize, u64)>)
-    requires
-        at <= b.len(),
-    ensures
-        match r {
-            Some((n, v)) => rfc_varint_decode(b@.skip(at as int)) == Some((n as nat, v)) && at
-                + n <= b.len(),
-            None => rfc_varint_decode(b@.skip(at as int)) is None,
-        },
-{
-    let rest = slice_subrange(b, at, b.len());
-    assert(rest@ =~= b@.skip(at as int));
-    parse_varint(rest)
-}
-
 pub fn parse_long_header(b: &[u8]) -> (r: Option<Header>)
     ensures
         match r {
@@ -717,7 +702,8 @@ pub fn parse_header(b: &[u8], dcid_len: usize) -> (r: Option<Header>)
     }
 }
 
-fn put_slice(s: &[u8], out: &mut Vec<u8>)
+/// Appends `s`.
+pub(crate) fn put_slice(s: &[u8], out: &mut Vec<u8>)
     ensures
         final(out)@ == old(out)@ + s@,
 {
