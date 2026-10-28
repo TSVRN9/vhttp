@@ -809,12 +809,13 @@ pub open spec fn resp_header_ok(h: (Seq<u8>, Seq<u8>)) -> bool {
 //# equal the sum of the DATA frame lengths received.
 // RFC 9110 §8.6: "A server MUST NOT send a Content-Length header field in any response with
 // a status code of 1xx (Informational) or 204 (No Content)." A response to HEAD (§9.3.2) and a
-// 304 (§15.4.5) may carry the content-length a GET / 200 would have had.
-/// A `content-length` header, if that is what `h` is: none on a 204; unconstrained on a HEAD
-/// response or a 304; otherwise exactly `body_len`.
+// 304 (§15.4.5) may carry the content-length a GET / 200 would have had; its syntax
+// (`1*DIGIT`) still binds (§2.2).
+/// A `content-length` header, if that is what `h` is: none on a 204; a valid value always;
+/// equal to `body_len` except on a HEAD response or a 304.
 pub open spec fn resp_cl_ok(h: (Seq<u8>, Seq<u8>), body_len: int, status: u16, head: bool) -> bool {
-    h.0 == lit_content_length() ==> status != 204 && (head || status == 304 || (cl_valid(h.1)
-        && digits_val(h.1) == body_len))
+    h.0 == lit_content_length() ==> status != 204 && cl_valid(h.1) && (head || status == 304
+        || digits_val(h.1) == body_len)
 }
 
 //= https://www.rfc-editor.org/rfc/rfc9114#section-4.1
@@ -823,8 +824,8 @@ pub open spec fn resp_cl_ok(h: (Seq<u8>, Seq<u8>), body_len: int, status: u16, h
 //# final response to the same request.
 /// A final response we may send (`head`: it answers a HEAD request): status 200-599 (an
 /// interim 1xx is never the whole response; HTTP/3 has no 101, RFC 9114 §4.5), valid headers,
-/// content-length as `resp_cl_ok` allows, and no content for HEAD, 204 or 304 (RFC 9110
-/// §9.3.2, §15.3.5, §15.4.5).
+/// content-length as `resp_cl_ok` allows, and no content for HEAD, 204, 205 or 304 (RFC 9110
+/// §9.3.2, §15.3.5, §15.3.6, §15.4.5).
 pub open spec fn valid_response(r: SpecResponse, head: bool) -> bool {
     &&& 200 <= r.status <= 599
     &&& forall|i: int|
@@ -834,7 +835,7 @@ pub open spec fn valid_response(r: SpecResponse, head: bool) -> bool {
             r.status,
             head,
         )
-    &&& (head || r.status == 204 || r.status == 304) ==> r.body.len() == 0
+    &&& (head || r.status == 204 || r.status == 205 || r.status == 304) ==> r.body.len() == 0
 }
 
 // =============================================================================
@@ -1501,11 +1502,8 @@ fn resp_cl_ok_x(f: &FieldLine, body_len: usize, status: u16, head: bool) -> (r: 
     if status == 204 {
         return false;
     }
-    if head || status == 304 {
-        return true;
-    }
     match parse_cl(&f.value) {
-        Some(x) => x == body_len as u64,
+        Some(x) => head || status == 304 || x == body_len as u64,
         None => false,
     }
 }
@@ -1517,7 +1515,7 @@ pub fn check_response(r: &Response, head: bool) -> (ok: bool)
     if r.status < 200 || r.status > 599 {
         return false;
     }
-    if (head || r.status == 204 || r.status == 304) && r.body.len() > 0 {
+    if (head || r.status == 204 || r.status == 205 || r.status == 304) && r.body.len() > 0 {
         return false;
     }
     let mut i = 0;

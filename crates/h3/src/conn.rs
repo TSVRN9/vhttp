@@ -404,6 +404,23 @@ pub open spec fn has_request(o: Seq<SpecOutput>) -> bool {
     exists|i: int| 0 <= i < o.len() && (#[trigger] o[i]) is Request
 }
 
+/// "HEAD"
+pub open spec fn lit_head_method() -> Seq<u8> {
+    seq![72u8, 69u8, 65u8, 68u8]
+}
+
+pub open spec fn is_head_request(o: SpecOutput) -> bool {
+    match o {
+        SpecOutput::Request { head, .. } => head.method == lit_head_method(),
+        _ => false,
+    }
+}
+
+/// `o` delivers a request whose method is HEAD.
+pub open spec fn head_req(o: Seq<SpecOutput>) -> bool {
+    exists|i: int| 0 <= i < o.len() && is_head_request(#[trigger] o[i])
+}
+
 /// `o` is what the connection outputs for new request-machine events `evs` on stream `id`,
 /// given the trailer section `tr` held from earlier calls, the machine's error `err` and the
 /// call's context `cx`. A CONNECT is answered 501 (RFC 9110 §9.1: an unimplemented method) and a
@@ -1259,6 +1276,7 @@ fn answer(e: &mut ReqEntry, status: u16, fin: bool, peer: Option<u64>, out: &mut
         final(e).stream == old(e).stream,
         final(e).trailers == old(e).trailers,
         final(e).head == old(e).head,
+        final(e).is_head == old(e).is_head,
         !final(e).rx_open && !final(e).send_open,
         final(e).fin_seen == (old(e).fin_seen || fin),
 {
@@ -1357,6 +1375,47 @@ proof fn lemma_answered_shape(id: u64, status: u16, cx: Ctx, o: Seq<SpecOutput>)
             if i > 0 {
                 assert(o[i] == o.skip(1)[i - 1]);
             }
+        }
+    }
+}
+
+proof fn lemma_head_req_push(a: Seq<SpecOutput>, x: SpecOutput)
+    ensures
+        head_req(a.push(x)) == (head_req(a) || is_head_request(x)),
+{
+    if head_req(a) {
+        let i = choose|i: int| 0 <= i < a.len() && is_head_request(#[trigger] a[i]);
+        assert(a.push(x)[i] == a[i]);
+    }
+    if is_head_request(x) {
+        assert(a.push(x)[a.len() as int] == x);
+    }
+    if head_req(a.push(x)) {
+        let i = choose|i: int| 0 <= i < a.push(x).len() && is_head_request(#[trigger] a.push(x)[i]);
+        if i < a.len() {
+            assert(a.push(x)[i] == a[i]);
+        }
+    }
+}
+
+/// `b` adds no Request output.
+proof fn lemma_head_req_concat(a: Seq<SpecOutput>, b: Seq<SpecOutput>)
+    requires
+        !has_request(b),
+    ensures
+        head_req(a + b) == head_req(a),
+{
+    if head_req(a) {
+        let i = choose|i: int| 0 <= i < a.len() && is_head_request(#[trigger] a[i]);
+        assert((a + b)[i] == a[i]);
+    }
+    if head_req(a + b) {
+        let i = choose|i: int| 0 <= i < (a + b).len() && is_head_request(#[trigger] (a + b)[i]);
+        if i >= a.len() {
+            assert((a + b)[i] == b[i - a.len()]);
+            assert(b[i - a.len()] is Request);
+        } else {
+            assert((a + b)[i] == a[i]);
         }
     }
 }
@@ -1616,6 +1675,7 @@ fn deliver(
         ),
         answered == !no_internal(ev),
         final(e).head == (old(e).head || has_request(added(old(out)@, final(out)@))),
+        final(e).is_head == (old(e).is_head || head_req(added(old(out)@, final(out)@))),
         answered ==> !final(e).rx_open && !final(e).send_open && final(e).fin_seen == (old(
             e,
         ).fin_seen || fin),
@@ -1679,6 +1739,7 @@ fn deliver(
             cx == (Ctx { fin, peer, send_open: old(e).send_open }),
             forall|i: int| 0 <= i < k ==> !internal_head(#[trigger] ev[i]),
             e.head == (old(e).head || has_request(added(o0, out@))),
+            e.is_head == (old(e).is_head || head_req(added(o0, out@))),
         decreases n - k,
     {
         let ghost tr = fields_view(e.trailers@);
@@ -1704,6 +1765,7 @@ fn deliver(
                     lemma_answered_shape(id, 501, cx, added(o1, out@));
                     lemma_req_concat(added(o0, o1), added(o1, out@), false);
                     lemma_has_request_concat(added(o0, o1), added(o1, out@));
+                    lemma_head_req_concat(added(o0, o1), added(o1, out@));
                     assert(internal_head(ev[k as int]));
                 }
                 return true;
@@ -1716,17 +1778,22 @@ fn deliver(
                         lemma_answered_shape(id, 421, cx, added(o1, out@));
                         lemma_req_concat(added(o0, o1), added(o1, out@), false);
                         lemma_has_request_concat(added(o0, o1), added(o1, out@));
+                        lemma_head_req_concat(added(o0, o1), added(o1, out@));
                         assert(internal_head(ev[k as int]));
                     }
                     return true;
                 }
                 e.head = true;
                 let head_method: [u8; 4] = [72u8, 69u8, 65u8, 68u8];
-                e.is_head = eq_bytes(req.method.as_slice(), &head_method);
+                proof {
+                    assert(head_method@ =~= lit_head_method());
+                }
+                e.is_head = e.is_head || eq_bytes(req.method.as_slice(), &head_method);
                 let w = Output::Request { stream_id: e.id, head: req };
                 proof {
                     lemma_deliver(id, ev, k as int, tr, tr, tr0, err, cx, o0, o1, w);
                     lemma_has_request_push(added(o0, o1), w@);
+                    lemma_head_req_push(added(o0, o1), w@);
                 }
                 out.push(w);
             },
@@ -1735,6 +1802,7 @@ fn deliver(
                 proof {
                     lemma_deliver(id, ev, k as int, tr, tr, tr0, err, cx, o0, o1, w);
                     lemma_has_request_push(added(o0, o1), w@);
+                    lemma_head_req_push(added(o0, o1), w@);
                 }
                 out.push(w);
             },
@@ -1765,6 +1833,7 @@ fn deliver(
                     assert(fields_view(e.trailers@) =~= Seq::<(Seq<u8>, Seq<u8>)>::empty());
                     lemma_deliver(id, ev, k as int, tr, Seq::empty(), tr0, err, cx, o0, o1, w);
                     lemma_has_request_push(added(o0, o1), w@);
+                    lemma_head_req_push(added(o0, o1), w@);
                 }
                 out.push(w);
             },
@@ -1882,6 +1951,7 @@ fn feed_req(e: &mut ReqEntry, data: &[u8], fin: bool, peer: Option<u64>, out: &m
         !closing ==> final(e).send_open == (old(e).send_open && req_err(final(e).stream.all(), fin)
             is None && no_internal(final(e).stream.emitted().skip(old(e).stream.emitted().len() as int))),
         final(e).head == (old(e).head || has_request(added(old(out)@, final(out)@))),
+        final(e).is_head == (old(e).is_head || head_req(added(old(out)@, final(out)@))),
 {
     hide(request::rfc_req);
     let ghost id = e.id;
@@ -1933,6 +2003,7 @@ fn feed_req(e: &mut ReqEntry, data: &[u8], fin: bool, peer: Option<u64>, out: &m
             }
         }
         lemma_has_request_concat(added(o0, o2), added(o2, out@));
+        lemma_head_req_concat(added(o0, o2), added(o2, out@));
     }
     closing
 }
@@ -2140,6 +2211,8 @@ pub open spec fn state_before(c0: H3Conn, id: u64) -> ReqState {
 /// - Unless the connection closed: the stream is still received exactly when there was no
 ///   FIN, no error and no internal answer, and it is respondable exactly when, besides no error
 ///   and no internal answer, our sending part was open and a head was delivered (now or before).
+///   While still tracked, its whole state is given: in particular `is_head` holds exactly when a
+///   delivered request (now or before) had the method HEAD.
 pub open spec fn req_fed(c0: H3Conn, c1: H3Conn, id: u64, data: Seq<u8>, fin: bool, o: Seq<SpecOutput>) -> bool {
     let b0 = if c0.req_receiving(id) { c0.req_hist(id).0 } else { Seq::<u8>::empty() };
     let e0 = if c0.req_receiving(id) { c0.req_hist(id).1 } else { Seq::<SpecReqEvent>::empty() };
@@ -2163,6 +2236,15 @@ pub open spec fn req_fed(c0: H3Conn, c1: H3Conn, id: u64, data: Seq<u8>, fin: bo
     &&& !c1.closed() ==> c1.req_receiving(id) == (err is None && !fin && no_internal(ne))
     &&& !c1.closed() ==> c1.req_respondable(id) == (err is None && no_internal(ne) && s0.send_open
         && (s0.head || has_request(o)))
+    &&& !c1.closed() && c1.req_known(id) ==> c1.req_state(id) == Some(
+        ReqState {
+            receiving: err is None && !fin && no_internal(ne),
+            head: s0.head || has_request(o),
+            send_open: s0.send_open && err is None && no_internal(ne),
+            fin_seen: fin,
+            is_head: s0.is_head || head_req(o),
+        },
+    )
 }
 
 /// The last SETTINGS_MAX_FIELD_SECTION_SIZE in `p`, else `cur`.
@@ -2242,7 +2324,10 @@ pub open spec fn req_call(c0: H3Conn, c1: H3Conn, id: u64, data: Seq<u8>, fin: b
     &&& !c0.req_known(id) && rejected_id(c0, id) ==> o == rejected_outs(id, fin) && !c1.closed()
         && !c1.req_receiving(id) && !c1.req_respondable(id)
     &&& c0.req_known(id) && !c0.req_receiving(id) ==> o == Seq::<SpecOutput>::empty() && !c1.closed()
-        && !c1.req_receiving(id) && c1.req_respondable(id) == c0.req_respondable(id)
+        && !c1.req_receiving(id) && c1.req_respondable(id) == c0.req_respondable(id) && (
+    c1.req_known(id) ==> c1.req_state(id) == Some(
+        ReqState { fin_seen: c0.req_state(id)->0.fin_seen || fin, ..c0.req_state(id)->0 },
+    ))
     &&& (c0.req_receiving(id) || (!c0.req_known(id) && !rejected_id(c0, id))) ==> req_fed(
         c0,
         c1,
@@ -3066,6 +3151,14 @@ impl H3Conn {
             final(self).req_receiving(old(self).reqs@[i as int].id) == old(self).req_receiving(
                 old(self).reqs@[i as int].id,
             ),
+            final(self).req_known(old(self).reqs@[i as int].id) ==> final(self).req_state(
+                old(self).reqs@[i as int].id,
+            ) == Some(
+                ReqState {
+                    send_open: false,
+                    ..old(self).req_state(old(self).reqs@[i as int].id)->0
+                },
+            ),
     {
         let ghost c0 = *self;
         let ghost id = self.reqs@[i as int].id;
@@ -3251,10 +3344,16 @@ impl H3Conn {
             !old(self).closed() && stream_id == 3 ==> added(old(out)@, final(out)@) == seq![
                 SpecOutput::CloseConnection { code: H3_CLOSED_CRITICAL_STREAM },
             ],
+            !old(self).closed() ==> !final(self).req_respondable(stream_id),
             !old(self).closed() && stream_id != 3 ==> added(old(out)@, final(out)@) == Seq::<
                 SpecOutput,
-            >::empty() && !final(self).closed() && !final(self).req_respondable(stream_id)
-                && final(self).req_receiving(stream_id) == old(self).req_receiving(stream_id),
+            >::empty() && !final(self).closed() && final(self).req_receiving(stream_id) == old(
+                self,
+            ).req_receiving(stream_id) && (final(self).req_known(stream_id) ==> old(self).req_known(
+                stream_id,
+            ) && final(self).req_state(stream_id) == Some(
+                ReqState { send_open: false, ..old(self).req_state(stream_id)->0 },
+            )),
     {
         let ghost c0 = *self;
         if self.closed {
@@ -3265,6 +3364,14 @@ impl H3Conn {
         }
         if stream_id == 3 {
             self.close(H3_CLOSED_CRITICAL_STREAM, out);
+            proof {
+                assert(!c0.rstate@.contains_key(3)) by {
+                    if c0.rstate@.contains_key(3) {
+                        let k = choose|k: int| 0 <= k < c0.reqs@.len() && (#[trigger] c0.reqs@[k]).id == 3;
+                        assert(req_entry_ok(c0.reqs@[k]));
+                    }
+                }
+            }
             return;
         }
         match find_req(&self.reqs, stream_id) {
@@ -3296,6 +3403,9 @@ impl H3Conn {
     /// `resp` would be malformed for this request (`check_response`; a HEAD request, tracked per
     /// stream, takes no content), the stream has no delivered request or
     /// already has a response, or the field section exceeds the peer's limit.
+    ///
+    /// Caller's obligation (RFC 9110 §8.6 MUST NOT; the transport can't check it): on a response
+    /// to HEAD, or a 304, a `content-length` must be the length a GET would have had (a 200).
     pub fn send_response(&mut self, stream_id: u64, resp: &Response, out: &mut Vec<Output>) -> (r: Result<(), ()>)
         requires
             old(self).wf(),
@@ -3311,7 +3421,10 @@ impl H3Conn {
                 resp@,
                 old(self).req_state(stream_id)->0.is_head,
             ) && fits_peer(old(self).peer_max_field_section(), fields_size(resp_fields(resp@)))
-                && one_response(added(old(out)@, final(out)@), stream_id, resp@) && !final(self).req_respondable(stream_id),
+                && one_response(added(old(out)@, final(out)@), stream_id, resp@) && !final(self).req_respondable(stream_id)
+                && (final(self).req_known(stream_id) ==> final(self).req_state(stream_id) == Some(
+                ReqState { send_open: false, ..old(self).req_state(stream_id)->0 },
+            )),
             r is Err ==> final(out)@ == old(out)@ && final(self).req_state(stream_id) == old(self).req_state(stream_id),
             old(self).closed() || !old(self).req_respondable(stream_id) || !valid_response(
                 resp@,

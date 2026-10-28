@@ -226,6 +226,9 @@ fn bad_response_rejected() {
         resp(200, &[("content-length", "x")], "hi"),
         resp(204, &[], "hi"),
         resp(304, &[], "hi"),
+        resp(205, &[], "hi"),
+        // A 304's content-length is unconstrained in value, not in syntax.
+        resp(304, &[("content-length", "x")], ""),
     ] {
         let mut c = ready(&[]);
         let mut out = Vec::new();
@@ -512,7 +515,7 @@ fn head_req() -> Vec<u8> {
 /// RFC 9110 §8.6, §9.3.2, §15.3.5, §15.4.5.
 #[test]
 fn head_and_bodiless_statuses() {
-    let cases: [(Vec<u8>, Response, bool); 4] = [
+    let cases: [(Vec<u8>, Response, bool); 6] = [
         // HEAD: the GET's content-length, no content.
         (head_req(), resp(200, &[("content-length", "5")], ""), true),
         (head_req(), resp(200, &[], "hi"), false),
@@ -520,6 +523,10 @@ fn head_and_bodiless_statuses() {
         (get("/"), resp(304, &[("content-length", "5")], ""), true),
         // 204: no content-length at all.
         (get("/"), resp(204, &[("content-length", "0")], ""), false),
+        // HEAD: the value is free, the syntax is not.
+        (head_req(), resp(200, &[("content-length", "x")], ""), false),
+        // A GET response still needs content-length equal to the body.
+        (get("/"), resp(200, &[("content-length", "5")], ""), false),
     ];
     for (req, r, ok) in cases {
         let mut c = ready(&[]);
