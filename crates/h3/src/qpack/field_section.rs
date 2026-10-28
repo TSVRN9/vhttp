@@ -1095,12 +1095,59 @@ proof fn lemma_literal_line(name: Seq<u8>, value: Seq<u8>)
     lemma_string_roundtrip(7, 0x00, value);
 }
 
-fn encode_field_line(f: &FieldLine, out: &mut Vec<u8>)
+/// A prefix integer below 128 takes at most two bytes.
+proof fn lemma_prefix_small(n: u8, flags: u8, v: u64)
     requires
-        f.name@.len() <= PREFIX_INT_MAX,
-        f.value@.len() <= PREFIX_INT_MAX,
+        1 <= n <= 8,
+        v < 128,
+    ensures
+        spec_prefix_int_bytes(n, flags, v).len() <= 2,
+{
+    let m = (0xffu8 >> (8 - n) as u8);
+    if v >= m {
+        assert(spec_prefix_cont_bytes((v - m) as u64).len() == 1);
+    }
+}
+
+proof fn lemma_name_line_len(i: u64, value: Seq<u8>)
+    requires
+        i < 128,
+    ensures
+        value.len() < 128 ==> spec_prefix_int_bytes(4, 0x50, i).len() + spec_prefix_int_bytes(
+            7,
+            0x00,
+            value.len() as u64,
+        ).len() <= 4,
+{
+    lemma_prefix_small(4, 0x50, i);
+    if value.len() < 128 {
+        lemma_prefix_small(7, 0x00, value.len() as u64);
+    }
+}
+
+proof fn lemma_literal_line_len(name: Seq<u8>, value: Seq<u8>)
+    ensures
+        name.len() < 128 && value.len() < 128 ==> spec_prefix_int_bytes(
+            3,
+            0x20,
+            name.len() as u64,
+        ).len() + spec_prefix_int_bytes(7, 0x00, value.len() as u64).len() <= 4,
+{
+    if name.len() < 128 && value.len() < 128 {
+        lemma_prefix_small(3, 0x20, name.len() as u64);
+        lemma_prefix_small(7, 0x00, value.len() as u64);
+    }
+}
+
+// `f` appears only in the spec, which a plain `cargo build` erases.
+#[allow(unused_variables)]
+fn encode_exact_line(f: &FieldLine, i: u64, out: &mut Vec<u8>)
+    requires
+        i < STATIC_TABLE_LEN,
+        spec_static_entry(i as nat) == Some((f.name@, f.value@)),
     ensures
         final(out)@.len() > old(out)@.len(),
+        f.name@.len() < 128 && f.value@.len() < 128 ==> final(out)@.len() <= old(out)@.len() + 260,
         final(out)@.subrange(0, old(out)@.len() as int) == old(out)@,
         rfc_field_line(final(out)@.skip(old(out)@.len() as int)) == Some(
             (f@, (final(out)@.len() - old(out)@.len()) as nat),
@@ -1110,44 +1157,95 @@ fn encode_field_line(f: &FieldLine, out: &mut Vec<u8>)
     proof {
         lemma2_to64();
     }
-    match find_static(f.name.as_slice(), f.value.as_slice()) {
-        StaticMatch::Exact(i) => {
-            serialize_prefix_int(6, 0xc0, i, out);
-            proof {
-                let e = spec_prefix_int_bytes(6, 0xc0, i);
-                assert(out@.skip(o.len() as int) =~= e);
-                lemma_exact_line(i, f@);
-                assert(rfc_field_line(out@.skip(o.len() as int)) == Some((f@, e.len())));
-            }
-        },
-        StaticMatch::Name(i) => {
-            serialize_prefix_int(4, 0x50, i, out);
-            encode_string(7, 0x00, f.value.as_slice(), out);
-            proof {
-                let e = spec_prefix_int_bytes(4, 0x50, i) + (spec_prefix_int_bytes(
-                    7,
-                    0x00,
-                    f.value@.len() as u64,
-                ) + f.value@);
-                assert(out@.skip(o.len() as int) =~= e);
-                lemma_name_line(i, f.name@, f.value@);
-                assert(rfc_field_line(out@.skip(o.len() as int)) == Some((f@, e.len())));
-            }
-        },
-        StaticMatch::None => {
-            encode_string(3, 0x20, f.name.as_slice(), out);
-            encode_string(7, 0x00, f.value.as_slice(), out);
-            proof {
-                let e = (spec_prefix_int_bytes(3, 0x20, f.name@.len() as u64) + f.name@) + (
-                spec_prefix_int_bytes(7, 0x00, f.value@.len() as u64) + f.value@);
-                assert(out@.skip(o.len() as int) =~= e);
-                lemma_literal_line(f.name@, f.value@);
-                assert(rfc_field_line(out@.skip(o.len() as int)) == Some((f@, e.len())));
-            }
-        },
-    }
+    serialize_prefix_int(6, 0xc0, i, out);
     proof {
+        lemma_prefix_small(6, 0xc0, i);
+        let e = spec_prefix_int_bytes(6, 0xc0, i);
+        assert(out@.skip(o.len() as int) =~= e);
+        lemma_exact_line(i, f@);
+        assert(rfc_field_line(out@.skip(o.len() as int)) == Some((f@, e.len())));
         assert(out@.subrange(0, o.len() as int) =~= o);
+    }
+}
+
+fn encode_name_line(f: &FieldLine, i: u64, out: &mut Vec<u8>)
+    requires
+        i < STATIC_TABLE_LEN,
+        spec_name_is(i as nat, f.name@),
+        f.value@.len() <= PREFIX_INT_MAX,
+    ensures
+        final(out)@.len() > old(out)@.len(),
+        f.name@.len() < 128 && f.value@.len() < 128 ==> final(out)@.len() <= old(out)@.len() + 260,
+        final(out)@.subrange(0, old(out)@.len() as int) == old(out)@,
+        rfc_field_line(final(out)@.skip(old(out)@.len() as int)) == Some(
+            (f@, (final(out)@.len() - old(out)@.len()) as nat),
+        ),
+{
+    let ghost o = out@;
+    proof {
+        lemma2_to64();
+    }
+    serialize_prefix_int(4, 0x50, i, out);
+    encode_string(7, 0x00, f.value.as_slice(), out);
+    proof {
+        lemma_name_line_len(i, f.value@);
+        let e = spec_prefix_int_bytes(4, 0x50, i) + (spec_prefix_int_bytes(
+            7,
+            0x00,
+            f.value@.len() as u64,
+        ) + f.value@);
+        assert(out@.skip(o.len() as int) =~= e);
+        lemma_name_line(i, f.name@, f.value@);
+        assert(rfc_field_line(out@.skip(o.len() as int)) == Some((f@, e.len())));
+        assert(out@.subrange(0, o.len() as int) =~= o);
+    }
+}
+
+fn encode_literal_line(f: &FieldLine, out: &mut Vec<u8>)
+    requires
+        f.name@.len() <= PREFIX_INT_MAX,
+        f.value@.len() <= PREFIX_INT_MAX,
+    ensures
+        final(out)@.len() > old(out)@.len(),
+        f.name@.len() < 128 && f.value@.len() < 128 ==> final(out)@.len() <= old(out)@.len() + 260,
+        final(out)@.subrange(0, old(out)@.len() as int) == old(out)@,
+        rfc_field_line(final(out)@.skip(old(out)@.len() as int)) == Some(
+            (f@, (final(out)@.len() - old(out)@.len()) as nat),
+        ),
+{
+    let ghost o = out@;
+    proof {
+        lemma2_to64();
+    }
+    encode_string(3, 0x20, f.name.as_slice(), out);
+    encode_string(7, 0x00, f.value.as_slice(), out);
+    proof {
+        lemma_literal_line_len(f.name@, f.value@);
+        let e = (spec_prefix_int_bytes(3, 0x20, f.name@.len() as u64) + f.name@) + (
+        spec_prefix_int_bytes(7, 0x00, f.value@.len() as u64) + f.value@);
+        assert(out@.skip(o.len() as int) =~= e);
+        lemma_literal_line(f.name@, f.value@);
+        assert(rfc_field_line(out@.skip(o.len() as int)) == Some((f@, e.len())));
+        assert(out@.subrange(0, o.len() as int) =~= o);
+    }
+}
+
+fn encode_field_line(f: &FieldLine, out: &mut Vec<u8>)
+    requires
+        f.name@.len() <= PREFIX_INT_MAX,
+        f.value@.len() <= PREFIX_INT_MAX,
+    ensures
+        final(out)@.len() > old(out)@.len(),
+        f.name@.len() < 128 && f.value@.len() < 128 ==> final(out)@.len() <= old(out)@.len() + 260,
+        final(out)@.subrange(0, old(out)@.len() as int) == old(out)@,
+        rfc_field_line(final(out)@.skip(old(out)@.len() as int)) == Some(
+            (f@, (final(out)@.len() - old(out)@.len()) as nat),
+        ),
+{
+    match find_static(f.name.as_slice(), f.value.as_slice()) {
+        StaticMatch::Exact(i) => encode_exact_line(f, i, out),
+        StaticMatch::Name(i) => encode_name_line(f, i, out),
+        StaticMatch::None => encode_literal_line(f, out),
     }
 }
 
@@ -1168,6 +1266,10 @@ pub fn encode_field_section(fields: &[FieldLine], out: &mut Vec<u8>)
         rfc_decode_field_section(final(out)@.skip(old(out)@.len() as int)) == Ok::<_, u64>(
             fields_view(fields@),
         ),
+        (forall|i: int|
+            0 <= i < fields@.len() ==> #[trigger] fields@[i].name@.len() < 128
+                && fields@[i].value@.len() < 128) ==> final(out)@.len() <= old(out)@.len() + 2
+            + 260 * fields@.len(),
 {
     out.push(0);
     out.push(0);
@@ -1182,6 +1284,9 @@ pub fn encode_field_section(fields: &[FieldLine], out: &mut Vec<u8>)
             i <= fields@.len(),
             out@ == old(out)@ + seq![0u8, 0u8] + enc,
             rfc_field_lines(enc) == Some(fields_view(fields@.take(i as int))),
+            enc.len() <= 260 * i || !(forall|j: int|
+                0 <= j < fields@.len() ==> #[trigger] fields@[j].name@.len() < 128
+                    && fields@[j].value@.len() < 128),
             forall|j: int|
                 0 <= j < fields@.len() ==> #[trigger] fields@[j].name@.len() <= PREFIX_INT_MAX
                     && fields@[j].value@.len() <= PREFIX_INT_MAX,
