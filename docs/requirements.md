@@ -91,12 +91,12 @@ Matrix total = sum of the section rows' counts (`(req)` rows excluded). It equal
 | 6.2.2 (req) | Push ID used once per push stream header | 1 | no | Declined (optional: server push) | "Each push ID MUST only be used once in a push stream header." We send no push streams |
 | 6.2.2 (req) | Client detects duplicate push ID | 1 | no | N/A (client-only) | Client treats duplicate push ID as H3_ID_ERROR |
 | 6.2.3 | Reserved Stream Types | 1 | yes | 2 | Reserved (0x1f*N+0x21) streams have no meaning on receipt; treated as unknown |
-| 7.1 | Frame Layout | 4 | yes | 2 | Payload exactly the fields: extra or short = H3_FRAME_ERROR; redundant lengths self-consistent; truncated last frame on clean stream end = H3_FRAME_ERROR ✅ 2a: crates/h3/src/frame.rs |
+| 7.1 | Frame Layout | 4 | yes | 2 | Payload exactly the fields: extra or short = H3_FRAME_ERROR; redundant lengths self-consistent; truncated last frame on clean stream end = H3_FRAME_ERROR ✅ 2a (layout only): crates/h3/src/frame.rs; open for 2b: placement, and truncated last frame on clean stream end = H3_FRAME_ERROR (needs stream end) |
 | 7.2.1 | DATA | 2 | yes | 2 | DATA only on request/response streams; DATA on control stream = H3_FRAME_UNEXPECTED |
 | 7.2.2 | HEADERS | 1 | yes | 2 | HEADERS on control stream = H3_FRAME_UNEXPECTED |
-| 7.2.3 | CANCEL_PUSH | 3 | yes | 2 | Not on control stream = H3_FRAME_UNEXPECTED; push ID above allowed = H3_ID_ERROR; server receiving for unmentioned push ID = H3_ID_ERROR (with push declined, always H3_ID_ERROR) ✅ 2a: crates/h3/src/frame.rs |
-| 7.2.4 | SETTINGS | 7 | yes | 2 | Once, first on control stream; second SETTINGS or SETTINGS elsewhere = H3_FRAME_UNEXPECTED; no duplicate identifiers; ignore unknown identifiers ✅ 2a: crates/h3/src/frame.rs |
-| 7.2.4.1 | Defined SETTINGS Parameters | 3 | yes | 2 | Grease settings have no meaning; reserved HTTP/2-era identifiers never sent, receipt = H3_SETTINGS_ERROR ✅ 2a: crates/h3/src/frame.rs |
+| 7.2.3 | CANCEL_PUSH | 3 | yes | 2 | Not on control stream = H3_FRAME_UNEXPECTED; push ID above allowed = H3_ID_ERROR; server receiving for unmentioned push ID = H3_ID_ERROR (with push declined, always H3_ID_ERROR) ✅ 2a (layout only): crates/h3/src/frame.rs; open for 2b: control-stream placement H3_FRAME_UNEXPECTED, push-ID H3_ID_ERROR rules |
+| 7.2.4 | SETTINGS | 7 | yes | 2 | Once, first on control stream; second SETTINGS or SETTINGS elsewhere = H3_FRAME_UNEXPECTED; no duplicate identifiers; ignore unknown identifiers ✅ 2a (layout only): crates/h3/src/frame.rs; open for 2b: once/first on control stream, second or misplaced SETTINGS = H3_FRAME_UNEXPECTED |
+| 7.2.4.1 | Defined SETTINGS Parameters | 3 | yes | 2 | Grease settings have no meaning; reserved HTTP/2-era identifiers never sent, receipt = H3_SETTINGS_ERROR ✅ 2a (layout only): crates/h3/src/frame.rs; open for 2b: none beyond layout; grease/unknown settings are ignored by the consumer in 2b |
 | 7.2.4.2 | Initialization | 10 | partial | 2 | Server: no frames/requests invalid under peer settings; no waiting for peer data before sending SETTINGS; send SETTINGS as soon as transport ready (3 total) |
 | 7.2.4.2 (req) | Client complies with stored settings (0-RTT) | 1 | no | N/A (client-only) | "A client MUST comply with stored settings ... when attempting 0-RTT." |
 | 7.2.4.2 (req) | Client complies with new server settings | 1 | no | N/A (client-only) | "Once a server has provided new settings, clients MUST comply with those values." |
@@ -105,7 +105,7 @@ Matrix total = sum of the section rows' counts (`(req)` rows excluded). It equal
 | 7.2.4.2 (req) | Server includes all non-default settings | 1 | no | Declined (optional: 0-RTT) | Sentence is scoped to the 0-RTT-accepted case |
 | 7.2.4.2 (req) | Incompatible settings after 0-RTT = H3_SETTINGS_ERROR | 1 | no | N/A (client-only) | Client-side check (client receives server SETTINGS) |
 | 7.2.4.2 (req) | Omitted non-default setting after 0-RTT = H3_SETTINGS_ERROR | 1 | no | N/A (client-only) | Client-side check |
-| 7.2.5 | PUSH_PROMISE | 8 | partial | 2 | Server receiving PUSH_PROMISE (client MUST NOT send) = connection error H3_FRAME_UNEXPECTED ✅ 2a: crates/h3/src/frame.rs |
+| 7.2.5 | PUSH_PROMISE | 8 | partial | 2 | Server receiving PUSH_PROMISE (client MUST NOT send) = connection error H3_FRAME_UNEXPECTED ✅ 2a (layout only): crates/h3/src/frame.rs; open for 2b: H3_FRAME_UNEXPECTED for PUSH_PROMISE received by the server |
 | 7.2.5 (req) | Server push ID within MAX_PUSH_ID | 1 | no | Declined (optional: server push) | "A server MUST NOT use a push ID that is larger than the client has provided in a MAX_PUSH_ID frame" |
 | 7.2.5 (req) | Client rejects larger push ID | 1 | no | N/A (client-only) | Client H3_ID_ERROR |
 | 7.2.5 (req) | Repeated push ID has identical request headers | 2 | no | Declined (optional: server push) | "the decompressed request header sets MUST contain the same fields in the same order, and ... exact matches" |
@@ -113,9 +113,9 @@ Matrix total = sum of the section rows' counts (`(req)` rows excluded). It equal
 | 7.2.5 (req) | PUSH_PROMISE on control stream (client) | 1 | no | N/A (client-only) | Client H3_FRAME_UNEXPECTED |
 | 7.2.5 (req) | Client MUST NOT send PUSH_PROMISE | 1 | no | N/A (client-only) | Sender-side client rule (server-side enforcement is the section row) |
 | 7.2.6 | GOAWAY | 2 | no | N/A (client-only) | Both MUSTs are client receive rules (stream ID type check; GOAWAY not on control stream) |
-| 7.2.7 | MAX_PUSH_ID | 4 | partial | 2 | Server: MAX_PUSH_ID not on control stream = H3_FRAME_UNEXPECTED; smaller value than before = H3_ID_ERROR; never send MAX_PUSH_ID ✅ 2a: crates/h3/src/frame.rs |
+| 7.2.7 | MAX_PUSH_ID | 4 | partial | 2 | Server: MAX_PUSH_ID not on control stream = H3_FRAME_UNEXPECTED; smaller value than before = H3_ID_ERROR; never send MAX_PUSH_ID ✅ 2a (layout only): crates/h3/src/frame.rs; open for 2b: control-stream placement H3_FRAME_UNEXPECTED, non-decreasing H3_ID_ERROR |
 | 7.2.7 (req) | Client treats MAX_PUSH_ID as error | 1 | no | N/A (client-only) | "A client MUST treat the receipt of a MAX_PUSH_ID frame as a connection error of type H3_FRAME_UNEXPECTED." |
-| 7.2.8 | Reserved Frame Types | 3 | yes | 2 | Grease frames ignored on receipt; HTTP/2-era reserved types never sent, receipt = H3_FRAME_UNEXPECTED ✅ 2a: crates/h3/src/frame.rs |
+| 7.2.8 | Reserved Frame Types | 3 | yes | 2 | Grease frames ignored on receipt; HTTP/2-era reserved types never sent, receipt = H3_FRAME_UNEXPECTED ✅ 2a (layout only): crates/h3/src/frame.rs; open for 2b: receipt of HTTP/2-reserved types = H3_FRAME_UNEXPECTED; grease ignore on receipt |
 | 8 | Error Handling | 1 | yes | 2 | Unexpected-context or unknown error code treated as H3_NO_ERROR |
 | 9 | Extensions to HTTP/3 | 4 | partial | 2 | Ignore unknown values in extensible elements; discard unknown uni stream types; no extension used without negotiation (we implement none) |
 | 9 (req) | Extension setting defaults disabled | 1 | no | Declined (optional: HTTP/3 extensions) | Obligation on extension definitions |
