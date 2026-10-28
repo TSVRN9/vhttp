@@ -457,6 +457,53 @@ pub fn serialize_certificate(chain: &Vec<Vec<u8>>, out: &mut Vec<u8>)
     put_hs(out, HT_CERTIFICATE, &body);
 }
 
+/// Decides `serialize_certificate`'s precondition for a runtime chain. Each length is checked
+/// before it is added, so the running total stays below 2^25 and cannot overflow.
+pub fn cert_chain_fits(chain: &Vec<Vec<u8>>) -> (r: bool)
+    ensures
+        r == cert_chain_ok(chain.deep_view()),
+{
+    let ghost cs = chain.deep_view();
+    if chain.len() == 0 {
+        return false;
+    }
+    let mut total: usize = 0;
+    let mut i: usize = 0;
+    assert(cs.take(0) =~= Seq::<Seq<u8>>::empty());
+    while i < chain.len()
+        invariant
+            i <= chain.len(),
+            cs == chain.deep_view(),
+            cs.len() >= 1,
+            forall|k: int| 0 <= k < i ==> 1 <= #[trigger] cs[k].len() <= 0xff_ffff,
+            total == spec_cert_entries_bytes(cs.take(i as int)).len(),
+            total + 4 <= 0xff_ffff,
+        decreases chain.len() - i,
+    {
+        assert(chain.deep_view()[i as int] == chain[i as int]@);
+        let n = chain[i].len();
+        if n == 0 || n > 0xff_ffff {
+            assert(!(1 <= cs[i as int].len() <= 0xff_ffff));
+            return false;
+        }
+        proof {
+            let t = cs.take(i as int + 1);
+            assert(t.drop_last() =~= cs.take(i as int));
+            assert(t.last() == cs[i as int]);
+            lemma_vec_len(0xff_ffff, cs[i as int]);
+            lemma_vec_len(0xffff, seq![]);
+            lemma_entries_mono(cs, i as int + 1);
+        }
+        if total + n + 5 + 4 > 0xff_ffff {
+            return false;
+        }
+        total = total + n + 5;
+        i += 1;
+    }
+    assert(cs.take(i as int) =~= cs);
+    true
+}
+
 pub fn serialize_certificate_verify(scheme: u16, signature: &[u8], out: &mut Vec<u8>)
     requires
         !spec_reserved_scheme(scheme),

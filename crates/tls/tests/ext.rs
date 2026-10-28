@@ -123,3 +123,21 @@ fn find_first() {
     let d = exts(&[(7, &[1]), (7, &[2])]);
     assert_eq!(find_ext(&d, 7), Some(0));
 }
+
+#[test]
+fn seen_word_edges() {
+    let l = exts(&[(0, &[]), (63, &[]), (64, &[]), (0xffbf, &[]), (0xffc0, &[]), (0xffff, &[])]);
+    assert_eq!(check_ch_exts(&l), Ok(()));
+    assert_eq!(check_ch_exts(&exts(&[(0xffff, &[]), (0xffc0, &[]), (0xffff, &[])])), Err(0x12f));
+    assert_eq!(check_ch_exts(&exts(&[(63, &[]), (0, &[]), (63, &[])])), Err(0x12f));
+}
+
+/// Smoke check (debug build): the per-ClientHello seen table on curl's extension list.
+#[test]
+fn curl_check_repeated() {
+    let l: Vec<Ext> = split_ch(CURL_CH).1.into_iter().map(|(ty, data)| Ext { ty, data }).collect();
+    assert!(l.len() > 1);
+    for _ in 0..1000 {
+        assert_eq!(check_ch_exts(&l), Ok(()));
+    }
+}

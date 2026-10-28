@@ -145,3 +145,18 @@ fn reserved_edges() {
         assert!(!is_reserved_group(g), "{g:#x}");
     }
 }
+
+#[test]
+fn chain_fits() {
+    let der = R5_CERT[11..443].to_vec();
+    assert!(cert_chain_fits(&vec![der.clone()]));
+    assert!(cert_chain_fits(&vec![der, vec![0x30, 0x00]]));
+    assert!(!cert_chain_fits(&vec![]));
+    assert!(!cert_chain_fits(&vec![vec![]]));
+    assert!(!cert_chain_fits(&vec![vec![1], vec![]]));
+    // 3 + n + 2 + 4 <= 0xff_ffff: n = 0xff_fff6 fits, one more byte does not.
+    assert!(cert_chain_fits(&vec![vec![0; 0xff_fff6]]));
+    assert!(!cert_chain_fits(&vec![vec![0; 0xff_fff7]]));
+    assert!(!cert_chain_fits(&vec![vec![0; 0xff_ffff]]));
+    assert!(!cert_chain_fits(&vec![vec![0; 0x80_0000], vec![0; 0x80_0000]]));
+}
