@@ -55,7 +55,7 @@ All probes live in `<scratch>/probe-5d/`, where `<scratch>` is `/tmp/claude-1000
     - Measured:
       - plain mod-p RCB associativity, 2.1 ms per evaluation (`fpr.rs`);
       - a real 80-evaluation chunk, 0.27–0.30 s wall at `--rlimit 4` (`gr.rs`, points from `py/gen_r.py` with real square roots);
-      - the negative control (formula coefficient −3 → −2) fails at once.
+      - the negative control (formula coefficient −3 → −2) fails at once. `gr.rs` on disk still holds that −2 control; restore `let w = -3 * …` before re-running it. Re-timed with −3: ≈ 0.10 s per 40-evaluation chunk (preflight).
     - Total: 1300 x-points × 8 signs ≈ 22 s of compute. This holds **only with literal constants**; see the Global Constraints `compute_only` bullet.
   - **No certificates from a CAS are needed for the group law.** The curve equations enter through the y-component representation, and the grid does the rest.
     - sympy (scratch venv, since deleted) served only the planner: to confirm identities and to factor p−1 and n−1. The factorizations are committed as data and re-checked by `compute_only`.
@@ -101,7 +101,7 @@ All probes live in `<scratch>/probe-5d/`, where `<scratch>` is `/tmp/claude-1000
     - every x ∈ [1, q) is a power of a (order argument plus pigeonhole over vstd `Set` with `lemma_map_size` and `lemma_subset_equality`);
     - hence `is_prime(q)` (`crate::rsa::is_prime`, reused) and FLT for q.
   - The certificate tree has 26 nodes > 2¹⁶ for p and n together (`py/pratt.json`, sympy `factorint` in 1.3 s). Primes < 2¹⁶ use trial division up to √r (recursion ≤ 256 deep).
-  - Measured: a 256-bit modexp under compute takes about 30 ms (`me.rs`).
+  - Measured: a 256-bit modexp under compute takes at most about 30 ms (`me.rs`). The preflight re-timing of a 16-op chain chunk, ≈ 0.09 s, puts it nearer 6 ms (preflight).
 - **D4. No 2-torsion: f(x) = x³ − 3x + b has no root mod p.**
   - g = x^p mod f is computed by square-and-multiply on quadratics mod (f, p), under compute.
   - Then a Bezout certificate u·f + v·(g − x) ≡ 1 (gcd degree 0; planner Python check).
@@ -118,7 +118,7 @@ All probes live in `<scratch>/probe-5d/`, where `<scratch>` is `/tmp/claude-1000
     - Russinoff (EPTCS 249.3, copy in `<scratch>/probe-5d/dl-russinoff/r.txt`) is the template for "computationally surveyable", and the RCB/Bosma–Lenstra law removes the cases.
 - **D6. 5d lemma 2 (kG ≠ O) costs little once lemma 1 holds.**
   - nG = O is a spec-level double-and-add chain: 255 doublings plus 166 adds (popcount(n) = 167).
-  - It runs on `padd_fast`, `point_add` with `finv` replaced by a `powmod` proven equal, at about 8 ms per point op under compute (`me.rs`). That is 3.4 s in 32 chunks of 8 bits, with 33 generated checkpoint points as literals.
+  - It runs on `padd_fast`, `point_add` with `finv` replaced by a `powmod` proven equal, at about 8 ms per point op under compute (`me.rs`; preflight re-timing ≈ 6 ms, modexp included). That is 3.4 s in 32 chunks of 8 bits, with 33 generated checkpoint points as literals.
   - The order argument: kG = O with 1 ≤ k < n, together with FLT for n (k·k^(n−2) = 1 + t·n), gives G = (k·m)G = O. That is a contradiction.
   - **Feasible without new TCB.**
 - **D7. Proof-time budget.** The 5d compute total is about 35 s:
@@ -127,7 +127,7 @@ All probes live in `<scratch>/probe-5d/`, where `<scratch>` is `/tmp/claude-1000
   - Pratt ≈ 2.5 s;
   - small identities ≈ 1 s;
   - torsion ≈ 0.2 s;
-  - constants ≈ 0.4 s.
+  - constants ≈ 0.02 s (preflight: measured ≈ 20 ms per os2ip constant, and one lemma for all of them is fine).
 
   Z3 proofs are expected to take ≈ 30–60 s more. Crypto's `cargo verus verify` therefore grows by about 1–1.5 min. No single function may exceed 60 s.
 
@@ -135,7 +135,7 @@ All probes live in `<scratch>/probe-5d/`, where `<scratch>` is `/tmp/claude-1000
 
 - **Spec freeze.** No edits to `crates/crypto/src/{p256,ecdsa,rsa,bytes,sha256,aes,gcm,hmac,hkdf}.rs`. 5d adds:
   - `mod p256_group;` in `lib.rs`;
-  - the directory `crates/crypto/src/p256_group/`;
+  - the directory `crates/crypto/src/p256_group/`. Its `mod.rs` starts with `#![allow(dead_code)]`: the module is private, and ghost-only types (`Q2`, `MP`, `RF`, `Proj`, …) otherwise make `cargo build` warn (preflight);
   - `scripts/gen_p256_group.py`, `scripts/p256_pratt.json`, `scripts/p256_pratt_factor.py`;
   - one TRUSTED.md row.
 
@@ -144,7 +144,9 @@ All probes live in `<scratch>/probe-5d/`, where `<scratch>` is `/tmp/claude-1000
   - No `external_body`, `assume(`, `admit(`, `assume_specification` or `axiom`, not even in comments, and no lemma named `*assume*`/`*axiom*`.
   - `scripts/verify.sh` prints `escapes accounted (4)` after every task.
   - `rlimit`, `spinoff_prover`, `hide`, `reveal_with_fuel` are allowed; each `rlimit` is listed in the report with its time.
-- **Exported interface: exact, frozen by 5c Tasks 6–7.** It lives in `crates/crypto/src/p256_group/mod.rs`:
+- **Exported interface: exact, frozen by 5c Tasks 6–7.** Both lemmas are defined in `crates/crypto/src/p256_group/mod.rs`.
+  - Never use `use` to re-export a proof fn: proof fns are erased, so `cargo build` fails with E0432. A lemma proved in a submodule is reached through a `mod.rs` wrapper that calls it (preflight).
+  - The statements:
   ```rust
   pub(crate) proof fn lemma_scalar_mult_double(j: nat, pt: SpecPoint)
       requires pt is Infinity || (pt is Affine && on_curve(pt->0, pt->1)),
@@ -158,10 +160,21 @@ All probes live in `<scratch>/probe-5d/`, where `<scratch>` is `/tmp/claude-1000
     - the generated modules (`pratt`, `torsion_cert`, `grid_small`, `grid_assoc_a`…`grid_assoc_d`, `chain`);
     - `field::lemma_group_consts`;
     - `order::lemma_g_curve_pt`;
+    - `assoc_id::lemma_assoc_degrees` (preflight);
     - the smoke lemmas named in Tasks 1, 4 and 5.
-  - **Where it is never allowed:** `pow`, `finv`, `point_add`, `scalar_mult`, or any `MP`/`RF`/`Seq` value. Compute only over ints < 2⁶⁰⁰ and small structs of them.
+  - **Where it is never allowed** (preflight):
+    - `pow`, `finv`, `point_add` or `scalar_mult`;
+    - formal objects built by `rcb_f`/`idf_*`;
+    - any Seq longer than about 64.
+  - **What it may touch** (preflight): ints < 2⁶⁰⁰, small structs of them, and small literal Seq tables, namely:
+    - the factor lists `FS_i` and the Lucas smoke's `seq!`;
+    - the degree tables `RD`;
+    - the bit strings `BITS_k`;
+    - the grid data;
+    - the Task 5 smoke's tiny RF.
   - **Literal constants only.** Every spec fn that compute evaluates (`rcb`, `id_*`, `assoc_minor`, the grid cells, `qmul`/`qpow`, `padd_fast`, `chain`, `lucas_ok` inputs) reduces by `% P_LIT()`, uses `B_LIT()` and the literal `G_LIT()`, and never calls `p256_p()`, `p256_b()`, `p256_n()`, `p256_g()`, `fmod` or `on_curve`.
-    - `P_LIT`, `N_LIT`, `B_LIT`, `GX_LIT`, `GY_LIT` and `G_LIT` are `pub(crate) open spec fn`s returning int literals, in `field.rs`. Proofs bridge them with `lemma_group_consts`.
+    - `P_LIT`, `N_LIT`, `B_LIT`, `GX_LIT`, `GY_LIT` and `G_LIT` are `pub(crate) open spec fn`s returning int literals, in `field.rs`. Each carries `#[allow(non_snake_case)]`, because Verus warns on uppercase fn names (preflight). Proofs bridge them with `lemma_group_consts`.
+    - **Visibility** (preflight): every new open spec fn is `pub(crate)`, because Verus rejects a `pub open spec fn` that references a `pub(crate)` fn. `curve_pt` may stay `pub`, since it uses only `pub` items.
     - Probe: going through `os2ip` is 60× slower (D1).
   - **Shape:** one assert per proof fn.
   - **Chunks to `forall`.** Each chunk's compute assert ensures a recursive range predicate, e.g. `cells_ok(i, j, lo, hi)` (recursion on `hi − lo`). One induction lemma per grid family, written once (`lemma_cells_forall` in `red.rs`, reused by `grid_small.rs` and `assoc_id.rs`), turns the chunk conjunction into the `forall` premise of `lemma_identity`. Never one Z3 query over all chunks.
@@ -214,7 +227,7 @@ All probes live in `<scratch>/probe-5d/`, where `<scratch>` is `/tmp/claude-1000
 ### Task 1: Elementary number theory and the Lucas theorem (`nt.rs`)
 
 **Files:**
-- Create: `crates/crypto/src/p256_group/mod.rs`, containing `mod nt;` and the module docs. Later tasks add their `mod` lines.
+- Create: `crates/crypto/src/p256_group/mod.rs`, whose first line is `#![allow(dead_code)]` (preflight), followed by `mod nt;` and the module docs. Later tasks add their `mod` lines.
 - Create: `crates/crypto/src/p256_group/nt.rs`.
 - Modify: `crates/crypto/src/lib.rs`, adding `mod p256_group;`.
 
@@ -248,7 +261,7 @@ All probes live in `<scratch>/probe-5d/`, where `<scratch>` is `/tmp/claude-1000
 - [ ] **Step 2:** Implement in the order listed: `powmod`, then gcd and Bezout, then Euclid, then factor hitting, then `lemma_lucas`.
 - [ ] **Step 3: Mutations**, each failing on a named postcondition:
   - `powmod` odd step multiplies by `a + 1`;
-  - `lucas_ok` drops the `!= 1` checks: `lemma_lucas` must fail, and `lucas_ok(9, 2, seq![(2, 3)])` is the counter-model;
+  - `lucas_ok` drops the `!= 1` checks: `lemma_lucas` must fail, and `lucas_ok(9, 8, seq![(2, 3)])` is the counter-model (8⁸ ≡ 1 mod 9; a = 2 fails the first check, since 2⁸ mod 9 = 4) (preflight);
   - `trial_ok` stops at ⌊√r⌋ − 1.
 - [ ] **Step 4:** Run the four checks (generator check n/a) and `--rlimit 4` on `p256_group::nt`. Escape count **4**.
 - [ ] **Step 5: Commit:** `feat(crypto): verified Lucas primality theorem and FLT for certified moduli (p256_group::nt)`
@@ -268,14 +281,15 @@ All probes live in `<scratch>/probe-5d/`, where `<scratch>` is `/tmp/claude-1000
 - **`pratt.rs`**, generated:
   - per node q (26 nodes):
     - consts `Q_i`, `A_i` and `FS_i`;
-    - `proof fn lemma_cert_i()` ensuring `lucas_ok(Q_i, A_i, FS_i)`, with one compute assert per checked power. Split the p and n nodes per factor so each assert is ≤ 0.15 s;
+    - one `proof fn lemma_cert_i_k()` per checked power. Each holds one compute assert, ensuring one `powmod(...) == 1` or `!= 1` fact, at ≤ 0.15 s (preflight);
+    - `proof fn lemma_cert_i()` ensuring `lucas_ok(Q_i, A_i, FS_i)`. It is assembled from the `lemma_cert_i_k` facts by unfolding the fs-recursion (`reveal_with_fuel`, |fs| ≤ 12), with no compute (preflight);
   - `proof fn lemma_prime_i()` ensuring `is_prime(Q_i)`, from `lemma_lucas` and the children's `lemma_prime_*` or `lemma_trial_prime`, emitted leaves-first;
   - exports `pub(crate) proof fn lemma_p_prime()` and `lemma_n_prime()`, ensuring `is_prime(p256_p() as nat)` and `is_prime(p256_n() as nat)`.
 - **`field.rs`:**
   - `pub(crate) open spec fn P_LIT() -> int`, `N_LIT`, `B_LIT`, `GX_LIT`, `GY_LIT` (int literals) and `G_LIT() -> SpecPoint` (`Affine(GX_LIT(), GY_LIT())`).
   - `pub(crate) proof fn lemma_group_consts()` (compute): `p256_p() == P_LIT()`, `p256_n() == N_LIT()`, `p256_b() == B_LIT()`, and `p256_g() == G_LIT()`.
   - `lemma_flt_p(x: int)`: requires `fmod(x) != 0`; ensures `fmod(pow(x, (p256_p() − 1) as nat)) == 1`.
-  - `lemma_flt_n(x: int)`: the same mod n.
+  - `lemma_flt_n(x: int)`: requires `x % p256_n() != 0`; ensures `pow(x, (p256_n() - 1) as nat) % p256_n() == 1` (preflight).
   - `lemma_finv_mul(x: int)`: requires `fmod(x) != 0`; ensures `fmod(x * finv(x)) == 1`.
   - `lemma_finv_unique(x: int, w: int)`: requires `fmod(x * w) == 1`; ensures `finv(x) == fmod(w)`.
   - `lemma_no_zero_div(a: int, b: int)`: requires `fmod(a * b) == 0`; ensures `fmod(a) == 0 || fmod(b) == 0`.
@@ -309,8 +323,8 @@ All probes live in `<scratch>/probe-5d/`, where `<scratch>` is `/tmp/claude-1000
 - `lemma_qmul_ev(a, b, r)`: requires `fmod(r*r*r − 3*r + p256_b()) == 0`; ensures `fmod(qev(qmul(a, b), r)) == fmod(qev(a, r) * qev(b, r))`.
 - `lemma_qpow_ev(e, r)`: same requires; ensures `fmod(qev(qpow(X, e), r)) == fmod(pow(r, e))`.
 - **Generated:**
-  - `lemma_xp_mod_f()` (compute): `qpow(X, p) == G_LIT`, split into ≤ 0.15 s pieces by exponent prefix if needed;
-  - `lemma_bezout_cert()` (compute): `u·f + v·(G_LIT − x) ≡ 1`, as a polynomial identity of degree ≤ 4 checked coefficientwise.
+  - `lemma_xp_mod_f()` (compute): `qpow(X, p) == XP_POLY`, split into ≤ 0.15 s pieces by exponent prefix if needed. It is named `XP_POLY` because `G_LIT` is the generator point (preflight);
+  - `lemma_bezout_cert()` (compute): `u·f + v·(XP_POLY − x) ≡ 1`, as a polynomial identity of degree ≤ 4 checked coefficientwise (preflight).
 - **Export:** `pub(crate) proof fn lemma_no_2_torsion(x: int)`, ensuring `fmod(x * x * x - 3 * x + p256_b()) != 0`.
 
 - [ ] **Step 1:** Generator section, then the generated file. Verify it alone.
@@ -379,6 +393,7 @@ All probes live in `<scratch>/probe-5d/`, where `<scratch>` is `/tmp/claude-1000
 
 **Interfaces:**
 - **Component conventions.** Components are indexed by s ∈ [0, 8), a bitmask over {y0, y1, y2}.
+  - Indices and masks are `u8`: Verus rejects `^`/`&` on `nat`, while `u8` xor/and evaluate under compute, and `(s ^ r) < 8` holds by `bit_vector` (preflight).
   - `fx(i: nat) -> MP` is the formal x_i³ − 3x_i + B_LIT in 3 variables.
 - **Formal ops.** `type RF = Seq<MP>` (length 8).
   - `rf_add`, `rf_k(c)`, `rf_x(i)`, `rf_y(i)`;
@@ -392,6 +407,7 @@ All probes live in `<scratch>/probe-5d/`, where `<scratch>` is `/tmp/claude-1000
   - `type RD = Seq<Seq<int>>` (8 × 3). A row `[−1, −1, −1]` means "component is the zero polynomial".
   - `rd_add` (max; −1 is the identity), and `rd_mul`, which for component r is the max over s with both inputs non-zero of `da[s] + db[s^r] + 3·[i ∈ s & (s^r)]` per variable i.
   - `rfits(a, d)`, `lemma_rfits_add`, `lemma_rfits_mul`.
+  - A sentinel row is evaluative: `forall xs: ev(a[s], xs) == 0`, exactly over int. It can't be structural (`a[s] == K(0)`), because `rf_mul` never produces a structural `K(0)`, and `lemma_rfits_mul` would be unprovable (preflight).
 - **Hadamard.** `lemma_hadamard(c: Seq<int>, ys: Seq<int>)`:
   - requires `forall i: fmod(ys[i]) != 0`, and for all 8 sign patterns σ, `fmod(Σ_s χ_σ(s)·yw(ys, s)·c[s]) == 0`;
   - ensures `forall s: fmod(c[s]) == 0`.
@@ -403,6 +419,9 @@ All probes live in `<scratch>/probe-5d/`, where `<scratch>` is `/tmp/claude-1000
     - `on3`-style facts at the grid: `fmod(gy[k][t]²) == fmod(f(gx[k][t]))`, both nonzero;
     - `forall` grid indices i, j, l and σ ∈ [0, 8): `fmod(rval(g, [gx0[i], gx1[j], gx2[l]], σ·[gy0[i], gy1[j], gy2[l]])) == 0`;
   - ensures `forall|xs, ys| on3(xs, ys) ==> fmod(rval(g, xs, ys)) == 0`.
+  - One- and two-point identities (preflight):
+    - each unused variable gets a 1-point grid (degree 0);
+    - callers satisfy `on3` with a repeated point, e.g. `xs = [x1, x2, x1]`, so `lemma_g_curve_pt` (Task 10) is never needed earlier.
 - **Smoke lemmas:**
   - `lemma_identity_smoke()`: (y0 + y1)² − f(x0) − f(x1) − 2y0y1 ≡ 0 through `lemma_identity`, with a 4×4 grid (x-degree 3). Its grid premise is one inline compute over a 4 × 4 × 8-sign spec fn, about 128 tiny evaluations.
   - `lemma_identity_nonvacuous()`: the grid premises of the smoke lemma hold, `on3` holds at a concrete G-based point, and `rfits` holds for the smoke polynomial.
@@ -439,11 +458,17 @@ All probes live in `<scratch>/probe-5d/`, where `<scratch>` is `/tmp/claude-1000
   - `lemma_rcb_scale_l(k, a, b)`: `rcb(sc(k, a), b) == sc(k*k, rcb(a, b))` (`sc` scales and `fmod`s all coordinates); and `_r`;
   - `lemma_rcb_inf_l(yv, b)`: `rcb(Proj { x: 0, y: yv, z: 0 }, b) == sc(yv*yv*b.y, b)`.
 - **Exported identity lemmas**, each over plain values for all xs, ys with `on3`: `lemma_id_chord_x`, `_chord_y`, `_chord_z`, `_dbl_x`, `_dbl_y`, `_dbl_z`, `_inv_x`, `_inv_z`, `_inv_y`, `_closure_chord`, `_closure_dbl`, each ensuring `fmod(id_<name>(xs, ys)) == 0`.
+  - The `id_inv_*` identities (I8) take Q = `Proj { x: x, y: P_LIT() − y, z: 1 }`, so that in the spec's P+(−P) branch y2 == p − y1 holds exactly, and no rcb-congruence lemma is needed (preflight).
   - RES1 and RES2 are y-free and go through `lemma_grid` directly, as `lemma_res1(x1, x2)` and `lemma_res2(x1, x2, e)`.
 - **`grid_small.rs`**, generated:
   - grid x-values: the first 13 x ≥ 0 with f(x) a nonzero square mod p, `[0, 5, 6, 8, 9, 12, 13, 17, 23, 24, 25, 26, 29]` (planner check), and their roots;
   - one chunk lemma per identity and grid slice (≤ 0.15 s each);
   - one compute lemma per identity checking its degree table against the grid sizes;
+  - `lemma_grid_pts_ok()` (compute, over the 13 literal points with `P_LIT`/`B_LIT`, then bridged by `lemma_group_consts`) discharges `lemma_identity`'s grid premises. Task 7 reuses it (preflight). For every t:
+    - `gy(t)² ≡ f(gx(t))`;
+    - `gx(t) ≢ 0` and `gy(t) ≢ 0`;
+    - the `gx` values are pairwise distinct mod p;
+  - `lemma_grid_seq()` states that the `Seq` literals `lemma_identity` takes equal the index fns `gx(i)`/`gy(i)` the chunks evaluate. Task 7 reuses it (preflight);
   - chunks ensure `cells_ok`-style range predicates, glued by `lemma_cells_forall` (Global Constraints).
 
 - [ ] **Step 1:** Generator `grid` section, with the Python self-check printing `all identities zero on grid: 13/13` and `rcb vs point_add: 203/203`. Emit `grid_small.rs`.
@@ -468,10 +493,14 @@ All probes live in `<scratch>/probe-5d/`, where `<scratch>` is `/tmp/claude-1000
 **Interfaces:**
 - `spec fn assoc_minor(m: nat, xs, ys) -> int` for m ∈ {0, 1, 2}: the m-th 2×2 minor of `rcb(rcb(A0, A1), A2)` against `rcb(A0, rcb(A1, A2))`, with `Ai = Proj { x: xs[i], y: ys[i], z: 1 }`. Its formal and degree mirrors come via Task 6's link and fits lemmas.
 - `proof fn lemma_assoc_degrees()` (compute, in `assoc_id.rs`): every non-sentinel degree row of the three minors is ≤ (9, 12, 9).
+  - Its cost is unprobed: about 100+ `rd_mul`s, each 64 pairs × 3. Time it first.
+  - Fallback if it exceeds 0.15 s: the generator emits each rcb level's degree table as a literal, checked by one compute `rcb_d(lit, lit) == lit` per level (preflight).
 - **Generated chunks.**
   - Chunk `lemma_assoc_i_j_h` ensures `assoc_cell(i, j, 5h..5h+5)`: all three minors are 0 at the 5 × 8 sign points. Each body is one compute assert of about 40 plain evaluations, 0.12 s.
   - 260 chunks: grids |S0| = 10, |S1| = 13, |S2| = 10 from the table above.
-  - Each chunk ensures `assoc_cells_ok(i, j, lo, hi)`. `assoc_id.rs` glues all 260 chunks through `lemma_cells_forall`, with no single query over all chunks.
+  - Each chunk ensures `assoc_cells_ok(i, j, lo, hi)`.
+  - Each generated `grid_assoc_*` module also emits a glue lemma for its i-range, with one call per chunk (≤ 78 calls).
+  - `assoc_id.rs` calls the four glue lemmas, then `lemma_cells_forall`, together with `lemma_grid_pts_ok` and `lemma_grid_seq` from `grid_small`. No single query runs over all chunks (preflight).
 - **Export:** `pub(crate) proof fn lemma_rcb_assoc_minors(xs: Seq<int>, ys: Seq<int>)`: requires `on3(xs, ys)`; ensures the three minors ≡ 0.
 
 - [ ] **Step 1:** Generator section; the self-check prints `assoc: 10400/10400 sign-points zero`. Emit the four modules.
@@ -498,12 +527,18 @@ All probes live in `<scratch>/probe-5d/`, where `<scratch>` is `/tmp/claude-1000
   - `pub open spec fn curve_pt(p: SpecPoint) -> bool { p is Infinity || (p is Affine && on_curve(p->0, p->1)) }`.
   - `spec fn enc(p: SpecPoint) -> Proj`: Infinity ↦ (0, 1, 0), Affine ↦ (x, y, 1).
   - `spec fn dec(a: Proj) -> SpecPoint`: if `fmod(a.z) != 0` then `Affine(fmod(a.x * finv(a.z)), fmod(a.y * finv(a.z)))`, else Infinity.
-  - `spec fn valid(a: Proj) -> bool`: either (`fmod(a.z) != 0` and `curve_pt(dec(a))`), or (`fmod(a.z) == 0`, `fmod(a.x) == 0` and `fmod(a.y) != 0`).
+  - `spec fn valid(a: Proj) -> bool` (preflight):
+    - first, `0 <= a.x < p256_p() && 0 <= a.y < p256_p() && 0 <= a.z < p256_p()`. This range is needed because `lemma_rcb_inf_l` and `lemma_rcb_scale_*` are exact equalities. `enc` of a `curve_pt` and every `rcb` output (`% P_LIT()`) satisfy it;
+    - then either (`fmod(a.z) != 0` and `curve_pt(dec(a))`), or (`fmod(a.z) == 0`, `fmod(a.x) == 0` and `fmod(a.y) != 0`).
   - `lemma_dec_enc(p)` and `lemma_enc_valid(p)`.
 - **`lemma_w_nonzero(x1: int, x2: int)`:** ensures `fmod(W(x1, x2)) != 0`. Uses RES1, RES2, `lemma_finv_mul` and `lemma_no_2_torsion`, by D2's two cases.
 - **`lemma_rcb_correct_aff(p, q)`:** requires both Affine and `curve_pt`; ensures `valid(rcb(enc(p), enc(q)))` and `dec(rcb(enc(p), enc(q))) == point_add(p, q)`. It splits on the spec's exact conditions:
   - `x1 != x2`: chord; I2, I3, I4, `lemma_w_nonzero`, I10a;
-  - `x1 == x2 && fmod(y1 + y2) == 0`: I8a–c, then the doubling case on (p, p), then `lemma_no_2_torsion` on 2p;
+  - `x1 == x2 && fmod(y1 + y2) == 0`, in this order (preflight):
+    1. `lemma_no_2_torsion(x1)` gives y1 ≢ 0, and with it y2 == p − y1, as I8's `P_LIT() − y` form requires;
+    2. I8a–c;
+    3. the doubling case on (p, p);
+    4. `lemma_no_2_torsion` on 2p;
   - else doubling: prove `y2 == y1` first; then I5–I7 and I10b.
 - **`lemma_rcb_correct(a, b)`:** requires `valid(a)` and `valid(b)`; ensures `valid(rcb(a, b))` and `dec(rcb(a, b)) == point_add(dec(a), dec(b))`. It uses `lemma_rcb_inf_l`, `_symm`, `_scale_l`/`_r` and `lemma_rcb_correct_aff`.
 - **`lemma_dec_prop(a, b)`:** requires `valid(a)`, `valid(b)` and the three minors ≡ 0; ensures `dec(a) == dec(b)`.
@@ -511,6 +546,9 @@ All probes live in `<scratch>/probe-5d/`, where `<scratch>` is `/tmp/claude-1000
   - `pub(crate) proof fn lemma_point_add_closed(p, q)`: requires `curve_pt(p)` and `curve_pt(q)`; ensures `curve_pt(point_add(p, q))`;
   - `pub(crate) proof fn lemma_point_add_assoc(p, q, r)`: requires `curve_pt` for all three; ensures `point_add(point_add(p, q), r) == point_add(p, point_add(q, r))`. Any Infinity is handled by unfolding `point_add`; all-affine goes through `lemma_rcb_assoc_minors`, `lemma_rcb_correct` ×4 and `lemma_dec_prop`.
 - **`proof fn lemma_group_spot()`** (no compute on `point_add`): with G from `lemma_group_consts`, show `dec(rcb(enc(G), enc(neg(G)))) is Infinity` and that `valid` holds for `rcb(enc(G), enc(G))`. This guards Review Focus 1 and 5.
+  - `spec fn neg(p: SpecPoint) -> SpecPoint` maps `Affine(x, y)` to `Affine(x, P_LIT() − y)` and Infinity to Infinity.
+  - The Infinity part is ground Z3 on `rcb(...).z == 0`.
+  - `valid` comes from `lemma_rcb_correct_aff(G, G)`, because `dec` involves `finv`, which neither Z3 nor compute may evaluate (preflight).
 
 - [ ] **Step 1:** Write `lemma_group_spot` and the two export signatures. They are RED.
 - [ ] **Step 2:** Implement in the order listed, with `#[verifier::spinoff_prover]` on each case lemma.
@@ -551,7 +589,7 @@ All probes live in `<scratch>/probe-5d/`, where `<scratch>` is `/tmp/claude-1000
 
 **Files:**
 - Create: `crates/crypto/src/p256_group/order.rs`, plus `chain.rs` (@generated).
-- Modify: `mod.rs` and the generator (`chain` section).
+- Modify: `mod.rs` (its `mod` line and the `lemma_scalar_mult_g_nonzero` wrapper) (preflight) and the generator (`chain` section).
 
 **Interfaces:**
 - `proof fn lemma_g_curve_pt()` (compute on literals, via `lemma_group_consts`): ensures `curve_pt(p256_g())`.
@@ -566,10 +604,11 @@ All probes live in `<scratch>/probe-5d/`, where `<scratch>` is `/tmp/claude-1000
 - **`chain.rs`**, generated:
   - 33 checkpoint points `PT_k` (PT_0 = G, PT_32 = Infinity) and exponents `E_k`;
   - chunk lemmas `lemma_chain_k()` ensuring `chain(PT_k, BITS_k) == PT_{k+1}` (compute, 8 bits, ≤ 0.15 s; the first chunk has 7 bits, since n's top bit seeds E_0 = 1);
-  - `lemma_n_bits()` (compute): `E_32 == p256_n()` and `E_{k+1} == E_k · 2^|BITS_k| + be_val(BITS_k)`.
+  - `lemma_n_bits()` (compute): `E_32 == N_LIT()`, bridged to `p256_n()` by `lemma_group_consts` (preflight), and `E_{k+1} == E_k · 2^|BITS_k| + be_val(BITS_k)`.
 - **Exports:**
   - `pub(crate) proof fn lemma_n_g_inf()`: ensures `scalar_mult(p256_n() as nat, p256_g()) is Infinity`;
-  - `lemma_scalar_mult_g_nonzero(k)`: exactly the Global Constraints statement.
+  - `lemma_scalar_mult_g_nonzero(k)`: exactly the Global Constraints statement. It is defined in `mod.rs` as a wrapper whose body is `{ order::lemma_g_order(k); }`; there is no `use` re-export (preflight).
+  - `pub(crate) proof fn lemma_g_order(k: nat)` in `order.rs`, with the same requires and ensures (preflight).
     - Proof: suppose kG is Infinity. Take m = `powmod(k, n − 2, n)`; by `lemma_flt_n`, k·m = 1 + t·n.
     - `lemma_scalar_mult_add`, by induction on m, gives (k·m)G = O; and (t·n)G = O via `lemma_n_g_inf`.
     - So G = O, contradicting `p256_g() is Affine`.
