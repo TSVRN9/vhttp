@@ -487,7 +487,7 @@ Total keyword count: 38 across 19 sections.
 | 4.2.6 | Post-Handshake Client Authentication | 2 | partial | 4 | Server MUST NOT send the post_handshake_auth extension (we never do) |
 | 4.2.6 (req) | "Servers MUST NOT send a post-handshake CertificateRequest to clients which do not offer this extension" | 1 | no | Declined (optional: client certificates) | We never send CertificateRequest |
 | 4.2.7 | Supported Groups | 1 | no | N/A (client-only) | "Clients MUST NOT act upon any information found in supported_groups prior to ..." |
-| 4.2.8 | Key Share | 13 | partial | 4 | Server: key_share in same group as selected client share, MUST NOT send entry for group not in supported_groups; only secp256r1 supported; ignore other groups' shares |
+| 4.2.8 | Key Share | 13 | partial | 4 | Server: key_share in same group as selected client share, MUST NOT send entry for group not in supported_groups; only secp256r1 supported; ignore other groups' shares; 4a codec: crates/tls/src/ch_ext.rs (closed in 4b) |
 | 4.2.8 (req) | Client key_share construction and HRR/ServerHello checks | 9 | no | N/A (client-only) | Entries match supported_groups order, no duplicates, replace key_share after HRR, illegal_parameter checks |
 | 4.2.8.1 | Diffie-Hellman Parameters | 1 | no | Declined (optional: X25519) | Finite-field DH; only secp256r1 supported (groups beyond secp256r1 declined) |
 | 4.2.8.2 | ECDHE Parameters | 1 | partial | 5 | Validate peer public value Q is on curve for secp256r1; secp384r1/secp521r1 not supported |
