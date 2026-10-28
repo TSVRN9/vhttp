@@ -676,40 +676,33 @@ pub fn parse_ack(ty: u64, b: &[u8]) -> (r: Result<(AckFrame, usize), u64>)
     }
 }
 
-/// Writes the whole ACK frame, type included: 0x03 iff it carries ECN counts.
-#[verifier::spinoff_prover]
-pub fn serialize_ack(a: &AckFrame, out: &mut Vec<u8>)
+/// Writes the (Gap, ACK Range Length) pairs back to back.
+fn put_ranges(r: &Vec<(u64, u64)>, out: &mut Vec<u8>)
     requires
-        ack_encodable(a@),
-        rfc_ack_ranges_valid(a.largest, a.first_range, a.ranges@),
+        forall|i: int|
+            0 <= i < r@.len() ==> (#[trigger] r@[i]).0 <= VARINT_MAX && r@[i].1 <= VARINT_MAX,
     ensures
-        final(out)@ == old(out)@ + spec_ack_bytes(a@),
+        final(out)@ == old(out)@ + spec_pairs_bytes(r@),
 {
-    let ghost start = old(out)@;
-    let ty = if a.ecn.is_some() {
-        FRAME_ACK_ECN
-    } else {
-        FRAME_ACK
-    };
-    put_varint(ty, out);
-    put_varint(a.largest, out);
-    put_varint(a.delay, out);
-    put_varint(a.ranges.len() as u64, out);
-    put_varint(a.first_range, out);
     let ghost head = out@;
     let mut i: usize = 0;
-    while i < a.ranges.len()
+    proof {
+        assert(r@.take(0) =~= Seq::<(u64, u64)>::empty());
+        assert(head + Seq::<u8>::empty() =~= head);
+    }
+    while i < r.len()
         invariant
-            i <= a.ranges@.len(),
-            ack_encodable(a@),
-            out@ == head + spec_pairs_bytes(a.ranges@.take(i as int)),
-        decreases a.ranges@.len() - i,
+            i <= r@.len(),
+            forall|j: int|
+                0 <= j < r@.len() ==> (#[trigger] r@[j]).0 <= VARINT_MAX && r@[j].1 <= VARINT_MAX,
+            out@ == head + spec_pairs_bytes(r@.take(i as int)),
+        decreases r@.len() - i,
     {
-        let (gap, len) = a.ranges[i];
+        let (gap, len) = r[i];
         proof {
-            assert(a.ranges@.take(i + 1) =~= a.ranges@.take(i as int).push(a.ranges@[i as int]));
-            lemma_pairs_bytes_snoc(a.ranges@.take(i as int), a.ranges@[i as int]);
-            assert(a.ranges@[i as int].0 <= VARINT_MAX);
+            assert(r@.take(i + 1) =~= r@.take(i as int).push(r@[i as int]));
+            lemma_pairs_bytes_snoc(r@.take(i as int), r@[i as int]);
+            assert(r@[i as int].0 <= VARINT_MAX);
         }
         let ghost before = out@;
         put_varint(gap, out);
@@ -718,34 +711,67 @@ pub fn serialize_ack(a: &AckFrame, out: &mut Vec<u8>)
             assert(before + spec_varint(gap) + spec_varint(len) =~= before + spec_pair_bytes(
                 (gap, len),
             ));
-            assert(head + spec_pairs_bytes(a.ranges@.take(i as int)) + spec_pair_bytes((gap, len))
-                =~= head + (spec_pairs_bytes(a.ranges@.take(i as int)) + spec_pair_bytes(
-                (gap, len),
-            )));
+            assert(head + spec_pairs_bytes(r@.take(i as int)) + spec_pair_bytes((gap, len)) =~= head
+                + (spec_pairs_bytes(r@.take(i as int)) + spec_pair_bytes((gap, len))));
         }
         i = i + 1;
     }
     proof {
-        assert(a.ranges@.take(a.ranges@.len() as int) =~= a.ranges@);
+        assert(r@.take(r@.len() as int) =~= r@);
     }
-    let ghost mid = out@;
+}
+
+/// Writes the whole ACK frame, type included: 0x03 iff it carries ECN counts.
+pub fn serialize_ack(a: &AckFrame, out: &mut Vec<u8>)
+    requires
+        ack_encodable(a@),
+        rfc_ack_ranges_valid(a.largest, a.first_range, a.ranges@),
+    ensures
+        final(out)@ == old(out)@ + spec_ack_bytes(a@),
+{
+    hide(rfc_ack_ranges_valid);
+    hide(spec_pairs_bytes);
+    let ghost x0 = old(out)@;
+    let ty = if a.ecn.is_some() {
+        FRAME_ACK_ECN
+    } else {
+        FRAME_ACK
+    };
+    put_varint(ty, out);
+    let ghost x1 = out@;
+    put_varint(a.largest, out);
+    let ghost x2 = out@;
+    put_varint(a.delay, out);
+    let ghost x3 = out@;
+    put_varint(a.ranges.len() as u64, out);
+    let ghost x4 = out@;
+    put_varint(a.first_range, out);
+    let ghost x5 = out@;
+    put_ranges(&a.ranges, out);
+    let ghost x6 = out@;
     match a.ecn {
         Some((e0, e1, ce)) => {
             put_varint(e0, out);
             put_varint(e1, out);
             put_varint(ce, out);
-            proof {
-                assert(out@ =~= mid + spec_ecn_bytes(a.ecn));
-            }
         },
-        None => {
-            proof {
-                assert(out@ =~= mid + spec_ecn_bytes(a.ecn));
-            }
-        },
+        None => {},
     }
     proof {
-        assert(out@ =~= start + spec_ack_bytes(a@));
+        let e = spec_ecn_bytes(a.ecn);
+        assert(out@ =~= x6 + e);
+        // Re-associate `x0 + v1 + ... + v5 + ranges + ecn` one step at a time.
+        let t5 = spec_pairs_bytes(a.ranges@) + e;
+        let t4 = spec_varint(a.first_range) + t5;
+        let t3 = spec_varint(a.ranges@.len() as u64) + t4;
+        let t2 = spec_varint(a.delay) + t3;
+        let t1 = spec_varint(a.largest) + t2;
+        lemma_assoc(x5, spec_pairs_bytes(a.ranges@), e);
+        lemma_assoc(x4, spec_varint(a.first_range), t5);
+        lemma_assoc(x3, spec_varint(a.ranges@.len() as u64), t4);
+        lemma_assoc(x2, spec_varint(a.delay), t3);
+        lemma_assoc(x1, spec_varint(a.largest), t2);
+        lemma_assoc(x0, spec_varint(ty), t1);
     }
 }
 
