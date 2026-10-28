@@ -303,7 +303,7 @@ proof fn lemma_ranges_prefix(s0: int, s: Seq<(u64, u64)>, t: Seq<(u64, u64)>)
 }
 
 /// The minimal varint of `v` at offset `p` reads back, and the bytes after it are `tail`.
-proof fn lemma_varint_at(b: Seq<u8>, p: int, v: u64, tail: Seq<u8>)
+pub(crate) proof fn lemma_varint_at(b: Seq<u8>, p: int, v: u64, tail: Seq<u8>)
     requires
         0 <= p <= b.len(),
         v <= VARINT_MAX,
@@ -492,7 +492,7 @@ pub proof fn theorem_ack_roundtrip(a: SpecAck, rest: Seq<u8>)
 // =============================================================================
 
 /// The varint at offset `off`.
-fn varint_at(b: &[u8], off: usize) -> (r: Option<(usize, u64)>)
+pub(crate) fn varint_at(b: &[u8], off: usize) -> (r: Option<(usize, u64)>)
     requires
         off <= b.len(),
     ensures
