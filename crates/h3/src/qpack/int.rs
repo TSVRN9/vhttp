@@ -341,6 +341,31 @@ pub proof fn lemma_prefix_int_consumed(n: u8, b: Seq<u8>)
     }
 }
 
+proof fn lemma_cont_incomplete_len(b: Seq<u8>, k: nat, acc: nat)
+    requires
+        k <= PREFIX_INT_MAX_CONT,
+        rfc_prefix_cont(b, k, acc) is Incomplete,
+    ensures
+        b.len() + k <= PREFIX_INT_MAX_CONT,
+    decreases b.len(),
+{
+    if b.len() > 0 {
+        lemma_cont_incomplete_len(b.skip(1), k + 1, acc + (b[0] & 127u8) as nat * pow2(7 * k));
+    }
+}
+
+/// An incomplete integer is at most a prefix byte plus PREFIX_INT_MAX_CONT continuation bytes.
+pub proof fn lemma_prefix_int_incomplete_len(n: u8, b: Seq<u8>)
+    requires
+        rfc_prefix_int(n, b) is Incomplete,
+    ensures
+        b.len() <= 1 + PREFIX_INT_MAX_CONT,
+{
+    if b.len() > 0 {
+        lemma_cont_incomplete_len(b.skip(1), 0, b[0] as nat % pow2(n as nat));
+    }
+}
+
 /// Prefix stability: bytes after a complete integer don't change how it decodes.
 pub proof fn lemma_prefix_int_append(n: u8, b: Seq<u8>, t: Seq<u8>)
     requires
