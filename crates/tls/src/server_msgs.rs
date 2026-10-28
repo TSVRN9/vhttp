@@ -9,7 +9,9 @@
 //# terminate the connection with an "unexpected_message" alert.
 use vstd::prelude::*;
 use crate::codes::*;
+#[allow(unused_imports)] // spec-only under plain cargo
 use crate::ext::*;
+#[allow(unused_imports)]
 use crate::handshake::*;
 use crate::pl::*;
 
