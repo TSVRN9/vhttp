@@ -219,6 +219,92 @@ pub open spec fn rfc_decode_field_section(b: Seq<u8>) -> Result<Seq<(Seq<u8>, Se
     }
 }
 
+
+/// A field section the bounded decoder rejects: a QPACK error (a connection error code), or a
+/// decoded size over the budget.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BoundedError {
+    Qpack(u64),
+    OverBudget,
+}
+
+/// Where the field line representations start, past the prefix `rfc_decode_field_section`
+/// accepts.
+pub open spec fn rfc_section_start(b: Seq<u8>) -> Option<nat> {
+    match rfc_prefix_int(8, b) {
+        PrefixIntSpec::Value { value: ric, consumed: c } => {
+            let rest = b.skip(c as int);
+            if ric != 0 {
+                None
+            } else {
+                match rfc_prefix_int(7, rest) {
+                    PrefixIntSpec::Value { consumed: c2, .. } => {
+                        if rest[0] & 0x80u8 != 0 {
+                            None
+                        } else {
+                            Some(c + c2)
+                        }
+                    },
+                    _ => None,
+                }
+            }
+        },
+        _ => None,
+    }
+}
+
+//= https://www.rfc-editor.org/rfc/rfc9114#section-4.2.2
+//# The size of a field list is calculated based on the
+//# uncompressed size of fields, including the length of the name and
+//# value in bytes plus an overhead of 32 bytes for each field.
+pub open spec fn field_line_size(f: (Seq<u8>, Seq<u8>)) -> int {
+    f.0.len() + f.1.len() + 32int
+}
+
+/// `rfc_field_lines` with `left` bytes of decoded size to spend: each line is decoded, then
+/// charged, and the first line that does not fit is `OverBudget`.
+pub open spec fn rfc_field_lines_bounded(b: Seq<u8>, left: u64) -> Result<
+    Seq<(Seq<u8>, Seq<u8>)>,
+    BoundedError,
+>
+    decreases b.len(),
+    via field_lines_bounded_decreases
+{
+    if b.len() == 0 {
+        Ok(seq![])
+    } else {
+        match rfc_field_line(b) {
+            None => Err(BoundedError::Qpack(QPACK_DECOMPRESSION_FAILED)),
+            Some((f, c)) => if field_line_size(f) > left {
+                Err(BoundedError::OverBudget)
+            } else {
+                match rfc_field_lines_bounded(b.skip(c as int), (left - field_line_size(f)) as u64) {
+                    Ok(rest) => Ok(seq![f] + rest),
+                    Err(e) => Err(e),
+                }
+            },
+        }
+    }
+}
+
+#[verifier::decreases_by]
+proof fn field_lines_bounded_decreases(b: Seq<u8>, left: u64) {
+    if b.len() > 0 {
+        lemma_field_line_consumed(b);
+    }
+}
+
+/// `rfc_decode_field_section` under a decoded-size budget (RFC 9114 §4.2.2).
+pub open spec fn rfc_decode_field_section_bounded(b: Seq<u8>, budget: u64) -> Result<
+    Seq<(Seq<u8>, Seq<u8>)>,
+    BoundedError,
+> {
+    match rfc_section_start(b) {
+        None => Err(BoundedError::Qpack(QPACK_DECOMPRESSION_FAILED)),
+        Some(c) => rfc_field_lines_bounded(b.skip(c as int), budget),
+    }
+}
+
 // =============================================================================
 // Lemmas
 // =============================================================================
@@ -372,20 +458,71 @@ proof fn lemma_one_line(e: Seq<u8>, f: (Seq<u8>, Seq<u8>))
     assert(seq![f] + Seq::<(Seq<u8>, Seq<u8>)>::empty() =~= seq![f]);
 }
 
+
+proof fn lemma_lines_bounded_refines(b: Seq<u8>, left: u64)
+    ensures
+        rfc_field_lines_bounded(b, left) matches Ok(f) ==> rfc_field_lines(b) == Some(f),
+        rfc_field_lines_bounded(b, left) matches Err(BoundedError::Qpack(c)) ==> c
+            == QPACK_DECOMPRESSION_FAILED && rfc_field_lines(b) is None,
+    decreases b.len(),
+{
+    if b.len() > 0 {
+        lemma_field_line_consumed(b);
+        if let Some((f, c)) = rfc_field_line(b) {
+            if field_line_size(f) <= left {
+                lemma_lines_bounded_refines(b.skip(c as int), (left - field_line_size(f)) as u64);
+            }
+        }
+    }
+}
+
+/// Within budget the bounded decoder agrees with `rfc_decode_field_section`, and its QPACK
+/// errors are that decoder's errors.
+pub proof fn lemma_bounded_refines(b: Seq<u8>, budget: u64)
+    ensures
+        rfc_decode_field_section_bounded(b, budget) matches Ok(f) ==> rfc_decode_field_section(b)
+            == Ok::<_, u64>(f),
+        rfc_decode_field_section_bounded(b, budget) matches Err(BoundedError::Qpack(c))
+            ==> rfc_decode_field_section(b) == Err::<Seq<(Seq<u8>, Seq<u8>)>, u64>(c),
+{
+    lemma_prefix_int_consumed(8, b);
+    if let PrefixIntSpec::Value { consumed: c, .. } = rfc_prefix_int(8, b) {
+        let rest = b.skip(c as int);
+        lemma_prefix_int_consumed(7, rest);
+        if let PrefixIntSpec::Value { consumed: c2, .. } = rfc_prefix_int(7, rest) {
+            assert(rest.skip(c2 as int) =~= b.skip((c + c2) as int));
+            lemma_lines_bounded_refines(b.skip((c + c2) as int), budget);
+        }
+    }
+}
+
 // =============================================================================
 // Decoder
 // =============================================================================
+
+/// The string a scan located: the Huffman output, else the raw bytes `b[s..e]`.
+spec fn str_of(h: Option<Vec<u8>>, b: Seq<u8>, s: usize, e: usize) -> Seq<u8> {
+    match h {
+        Some(v) => v@,
+        None => b.subrange(s as int, e as int),
+    }
+}
 
 //= https://www.rfc-editor.org/rfc/rfc9204#section-7.4
 //# If an implementation encounters a value larger than it is able to
 //# decode, this MUST be treated as a stream error of type
 //# QPACK_DECOMPRESSION_FAILED if on a request stream
-fn decode_string(n: u8, b: &[u8]) -> (r: Option<(Vec<u8>, usize)>)
+/// Locates the string literal at the front of `b` without copying a raw (H=0) string:
+/// `(Huffman output, s, e)`, consuming `e` bytes. Only a Huffman string is allocated, and its
+/// output is bounded by the input.
+fn scan_string(n: u8, b: &[u8]) -> (r: Option<(Option<Vec<u8>>, usize, usize)>)
     requires
         1 <= n <= 7,
     ensures
         match r {
-            Some((s, c)) => c <= b@.len() && rfc_string(n, b@) == Some((s@, c as nat)),
+            Some((h, s, e)) => s <= e <= b@.len() && rfc_string(n, b@) == Some(
+                (str_of(h, b@, s, e), e as nat),
+            ),
             None => rfc_string(n, b@) is None,
         },
 {
@@ -399,23 +536,65 @@ fn decode_string(n: u8, b: &[u8]) -> (r: Option<(Vec<u8>, usize)>)
                 return None;
             }
             let end = c + len as usize;
-            let raw = slice_subrange(b, c, end);
             if (b[0] >> n) & 1 == 0 {
-                Some((slice_to_vec(raw), end))
+                Some((None, c, end))
             } else {
+                let raw = slice_subrange(b, c, end);
                 match huffman_decode(raw) {
                     Some(s) => {
                         proof {
                             let ch = choose|x: Seq<u8>| rfc_huffman_decodes(raw@, x);
                             lemma_huffman_unique(raw@, s@, ch);
                         }
-                        Some((s, end))
+                        Some((Some(s), c, end))
                     },
                     None => None,
                 }
             }
         },
         _ => None,
+    }
+}
+
+fn str_len(h: &Option<Vec<u8>>, s: usize, e: usize) -> (r: usize)
+    requires
+        s <= e,
+    ensures
+        r == match *h {
+            Some(v) => v@.len() as int,
+            None => e - s,
+        },
+{
+    match h {
+        Some(v) => v.len(),
+        None => e - s,
+    }
+}
+
+fn take_str(h: Option<Vec<u8>>, b: &[u8], s: usize, e: usize) -> (r: Vec<u8>)
+    requires
+        s <= e <= b@.len(),
+    ensures
+        r@ == str_of(h, b@, s, e),
+{
+    match h {
+        Some(v) => v,
+        None => slice_to_vec(slice_subrange(b, s, e)),
+    }
+}
+
+fn decode_string(n: u8, b: &[u8]) -> (r: Option<(Vec<u8>, usize)>)
+    requires
+        1 <= n <= 7,
+    ensures
+        match r {
+            Some((s, c)) => c <= b@.len() && rfc_string(n, b@) == Some((s@, c as nat)),
+            None => rfc_string(n, b@) is None,
+        },
+{
+    match scan_string(n, b) {
+        Some((h, s, e)) => Some((take_str(h, b, s, e), e)),
+        None => None,
     }
 }
 
@@ -578,6 +757,233 @@ fn decode_lines(lines: &[u8]) -> (r: Option<Vec<FieldLine>>)
     Some(out)
 }
 
+
+/// `a + c + 32 <= left`, computed without overflow.
+fn fits(a: usize, c: usize, left: u64) -> (r: bool)
+    ensures
+        r == (a + c + 32 <= left),
+{
+    let x = a as u64;
+    let y = c as u64;
+    x <= left && y <= left - x && 32 <= left - x - y
+}
+
+/// `decode_field_line` that charges the line against `left` before copying anything: the whole
+/// line is located first (only Huffman strings are decoded), then its size is checked, and only
+/// then are the static and raw bytes copied.
+fn decode_field_line_bounded(b: &[u8], left: u64) -> (r: Result<(FieldLine, usize), BoundedError>)
+    requires
+        b@.len() > 0,
+    ensures
+        match r {
+            Ok((f, c)) => rfc_field_line(b@) == Some((f@, c as nat)) && field_line_size(f@) <= left,
+            Err(BoundedError::Qpack(e)) => e == QPACK_DECOMPRESSION_FAILED && rfc_field_line(b@) is None,
+            Err(BoundedError::OverBudget) => rfc_field_line(b@) matches Some((f, _))
+                && field_line_size(f) > left,
+        },
+{
+    let b0 = b[0];
+    if b0 & 0x80 != 0 {
+        if b0 & 0x40 == 0 {
+            return Err(BoundedError::Qpack(QPACK_DECOMPRESSION_FAILED));
+        }
+        match parse_prefix_int(6, b) {
+            PrefixInt::Value { value, consumed } => match static_entry(value) {
+                Some((n, v)) => if fits(n.len(), v.len(), left) {
+                    Ok((FieldLine { name: slice_to_vec(n), value: slice_to_vec(v) }, consumed))
+                } else {
+                    Err(BoundedError::OverBudget)
+                },
+                None => Err(BoundedError::Qpack(QPACK_DECOMPRESSION_FAILED)),
+            },
+            _ => Err(BoundedError::Qpack(QPACK_DECOMPRESSION_FAILED)),
+        }
+    } else if b0 & 0x40 != 0 {
+        if b0 & 0x10 == 0 {
+            return Err(BoundedError::Qpack(QPACK_DECOMPRESSION_FAILED));
+        }
+        match parse_prefix_int(4, b) {
+            PrefixInt::Value { value, consumed } => match static_entry(value) {
+                Some((n, _)) => {
+                    proof {
+                        lemma_prefix_int_consumed(4, b@);
+                    }
+                    let rest = slice_subrange(b, consumed, b.len());
+                    match scan_string(7, rest) {
+                        Some((h, s, e)) => if fits(n.len(), str_len(&h, s, e), left) {
+                            Ok(
+                                (
+                                    FieldLine { name: slice_to_vec(n), value: take_str(h, rest, s, e) },
+                                    consumed + e,
+                                ),
+                            )
+                        } else {
+                            Err(BoundedError::OverBudget)
+                        },
+                        None => Err(BoundedError::Qpack(QPACK_DECOMPRESSION_FAILED)),
+                    }
+                },
+                None => Err(BoundedError::Qpack(QPACK_DECOMPRESSION_FAILED)),
+            },
+            _ => Err(BoundedError::Qpack(QPACK_DECOMPRESSION_FAILED)),
+        }
+    } else if b0 & 0x20 != 0 {
+        match scan_string(3, b) {
+            Some((h1, s1, e1)) => {
+                let rest = slice_subrange(b, e1, b.len());
+                match scan_string(7, rest) {
+                    Some((h2, s2, e2)) => if fits(
+                        str_len(&h1, s1, e1),
+                        str_len(&h2, s2, e2),
+                        left,
+                    ) {
+                        Ok(
+                            (
+                                FieldLine { name: take_str(h1, b, s1, e1), value: take_str(h2, rest, s2, e2) },
+                                e1 + e2,
+                            ),
+                        )
+                    } else {
+                        Err(BoundedError::OverBudget)
+                    },
+                    None => Err(BoundedError::Qpack(QPACK_DECOMPRESSION_FAILED)),
+                }
+            },
+            None => Err(BoundedError::Qpack(QPACK_DECOMPRESSION_FAILED)),
+        }
+    } else {
+        Err(BoundedError::Qpack(QPACK_DECOMPRESSION_FAILED))
+    }
+}
+
+/// `decode_lines` under a decoded-size budget.
+fn decode_lines_bounded(lines: &[u8], budget: u64) -> (r: Result<Vec<FieldLine>, BoundedError>)
+    ensures
+        match r {
+            Ok(v) => rfc_field_lines_bounded(lines@, budget) == Ok::<_, BoundedError>(fields_view(v@)),
+            Err(e) => rfc_field_lines_bounded(lines@, budget) == Err::<
+                Seq<(Seq<u8>, Seq<u8>)>,
+                BoundedError,
+            >(e),
+        },
+{
+    proof {
+        assert(lines@.skip(0) =~= lines@);
+        assert(fields_view(Seq::<FieldLine>::empty()) =~= Seq::empty());
+        if let Ok(r) = rfc_field_lines_bounded(lines@, budget) {
+            assert(Seq::<(Seq<u8>, Seq<u8>)>::empty() + r =~= r);
+        }
+    }
+    let mut out: Vec<FieldLine> = Vec::new();
+    let mut pos: usize = 0;
+    let mut left: u64 = budget;
+    while pos < lines.len()
+        invariant
+            pos <= lines@.len(),
+            rfc_field_lines_bounded(lines@, budget) == match rfc_field_lines_bounded(
+                lines@.skip(pos as int),
+                left,
+            ) {
+                Ok(r) => Ok(fields_view(out@) + r),
+                Err(e) => Err(e),
+            },
+        decreases lines@.len() - pos,
+    {
+        let tail = slice_subrange(lines, pos, lines.len());
+        proof {
+            assert(tail@ =~= lines@.skip(pos as int));
+        }
+        match decode_field_line_bounded(tail, left) {
+            Ok((f, k)) => {
+                let ghost left2 = (left - field_line_size(f@)) as u64;
+                proof {
+                    lemma_field_line_consumed(tail@);
+                    assert(tail@.skip(k as int) =~= lines@.skip(pos + k));
+                    assert(fields_view(out@.push(f)) =~= fields_view(out@).push(f@));
+                    if let Ok(r) = rfc_field_lines_bounded(lines@.skip(pos + k), left2) {
+                        assert(fields_view(out@) + (seq![f@] + r) =~= fields_view(out@).push(f@)
+                            + r);
+                    }
+                }
+                left = left - f.name.len() as u64 - f.value.len() as u64 - 32;
+                out.push(f);
+                pos += k;
+            },
+            Err(e) => {
+                return Err(e);
+            },
+        }
+    }
+    proof {
+        assert(lines@.skip(pos as int) =~= Seq::<u8>::empty());
+        assert(fields_view(out@) + Seq::empty() =~= fields_view(out@));
+    }
+    Ok(out)
+}
+
+fn section_start(b: &[u8]) -> (r: Option<usize>)
+    ensures
+        match r {
+            Some(c) => c <= b@.len() && rfc_section_start(b@) == Some(c as nat),
+            None => rfc_section_start(b@) is None,
+        },
+{
+    let c = match parse_prefix_int(8, b) {
+        PrefixInt::Value { value, consumed } => {
+            if value != 0 {
+                return None;
+            }
+            consumed
+        },
+        _ => return None,
+    };
+    proof {
+        lemma_prefix_int_consumed(8, b@);
+    }
+    let rest = slice_subrange(b, c, b.len());
+    let c2 = match parse_prefix_int(7, rest) {
+        PrefixInt::Value { consumed, .. } => consumed,
+        _ => return None,
+    };
+    if rest[0] & 0x80 != 0 {
+        return None;
+    }
+    proof {
+        lemma_prefix_int_consumed(7, rest@);
+        assert(rest@ =~= b@.skip(c as int));
+    }
+    Some(c + c2)
+}
+
+/// `decode_field_section` under a decoded-size budget: Σ(name + value + 32) over the lines may
+/// not exceed `budget`. Decoding stops at the first line that would, before copying it.
+pub fn decode_field_section_bounded(b: &[u8], budget: u64) -> (r: Result<
+    Vec<FieldLine>,
+    BoundedError,
+>)
+    ensures
+        match r {
+            Ok(v) => rfc_decode_field_section_bounded(b@, budget) == Ok::<_, BoundedError>(
+                fields_view(v@),
+            ),
+            Err(e) => rfc_decode_field_section_bounded(b@, budget) == Err::<
+                Seq<(Seq<u8>, Seq<u8>)>,
+                BoundedError,
+            >(e),
+        },
+{
+    match section_start(b) {
+        None => Err(BoundedError::Qpack(QPACK_DECOMPRESSION_FAILED)),
+        Some(c) => {
+            let lines = slice_subrange(b, c, b.len());
+            proof {
+                assert(lines@ =~= b@.skip(c as int));
+            }
+            decode_lines_bounded(lines, budget)
+        },
+    }
+}
+
 // =============================================================================
 // Encoder
 // =============================================================================
@@ -705,30 +1111,35 @@ fn encode_field_line(f: &FieldLine, out: &mut Vec<u8>)
         StaticMatch::Exact(i) => {
             serialize_prefix_int(6, 0xc0, i, out);
             proof {
-                assert(out@.skip(o.len() as int) =~= spec_prefix_int_bytes(6, 0xc0, i));
+                let e = spec_prefix_int_bytes(6, 0xc0, i);
+                assert(out@.skip(o.len() as int) =~= e);
                 lemma_exact_line(i, f@);
+                assert(rfc_field_line(out@.skip(o.len() as int)) == Some((f@, e.len())));
             }
         },
         StaticMatch::Name(i) => {
             serialize_prefix_int(4, 0x50, i, out);
             encode_string(7, 0x00, f.value.as_slice(), out);
             proof {
-                assert(out@.skip(o.len() as int) =~= spec_prefix_int_bytes(4, 0x50, i) + (
-                spec_prefix_int_bytes(7, 0x00, f.value@.len() as u64) + f.value@));
+                let e = spec_prefix_int_bytes(4, 0x50, i) + (spec_prefix_int_bytes(
+                    7,
+                    0x00,
+                    f.value@.len() as u64,
+                ) + f.value@);
+                assert(out@.skip(o.len() as int) =~= e);
                 lemma_name_line(i, f.name@, f.value@);
+                assert(rfc_field_line(out@.skip(o.len() as int)) == Some((f@, e.len())));
             }
         },
         StaticMatch::None => {
             encode_string(3, 0x20, f.name.as_slice(), out);
             encode_string(7, 0x00, f.value.as_slice(), out);
             proof {
-                assert(out@.skip(o.len() as int) =~= (spec_prefix_int_bytes(
-                    3,
-                    0x20,
-                    f.name@.len() as u64,
-                ) + f.name@) + (spec_prefix_int_bytes(7, 0x00, f.value@.len() as u64)
-                    + f.value@));
+                let e = (spec_prefix_int_bytes(3, 0x20, f.name@.len() as u64) + f.name@) + (
+                spec_prefix_int_bytes(7, 0x00, f.value@.len() as u64) + f.value@);
+                assert(out@.skip(o.len() as int) =~= e);
                 lemma_literal_line(f.name@, f.value@);
+                assert(rfc_field_line(out@.skip(o.len() as int)) == Some((f@, e.len())));
             }
         },
     }
@@ -797,6 +1208,7 @@ pub fn encode_field_section(fields: &[FieldLine], out: &mut Vec<u8>)
         assert(b.skip(1).skip(1) =~= enc);
         lemma2_to64();
         assert(rfc_prefix_int(8, b) == PrefixIntSpec::Value { value: 0, consumed: 1 });
+        assert(b.skip(1).len() > 0 && pow2(7) == 128 && (b.skip(1)[0] as nat) % 128 == 0);
         assert(rfc_prefix_int(7, b.skip(1)) == PrefixIntSpec::Value { value: 0, consumed: 1 });
         assert(0u8 & 0x80u8 == 0) by (bit_vector);
     }
