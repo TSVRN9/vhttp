@@ -145,7 +145,7 @@ Total keyword count: 157 across 44 sections.
 | 2.2.1 | Blocked decoding | 1 | yes | 2 | RIC smaller than expected is QPACK_DECOMPRESSION_FAILED. |
 | 2.2.2.1 | Section Acknowledgment emission | 1 | no | Declined (optional: QPACK dynamic table) | Only after decoding dynamic-table references, which we reject (see 2.2.3); never emitted. |
 | 2.2.3 | Invalid references | 2 | yes | 2 | Dynamic ref in field line -> QPACK_DECOMPRESSION_FAILED; encoder-instruction ref to evicted entry -> QPACK_ENCODER_STREAM_ERROR (at capacity 0 any such instruction is an error). |
-| 3.1 | Static table | 2 | yes | 2 | Invalid static index: QPACK_DECOMPRESSION_FAILED on request stream, QPACK_ENCODER_STREAM_ERROR on encoder stream. |
+| 3.1 | Static table | 2 | yes | 2 | Invalid static index: QPACK_DECOMPRESSION_FAILED on request stream, QPACK_ENCODER_STREAM_ERROR on encoder stream. | ✅ 2a (table + lookup): crates/h3/src/qpack/static_table.rs; open: invalid-index error mapping in Tasks 6/7
 | 3.2 | Dynamic table: duplicates | 1 | no | Declined (optional: QPACK dynamic table) | Duplicates not an error; no inserts are possible at capacity 0. |
 | 3.2.2 | Capacity and eviction | 2 | partial | 2 | Encoder eviction rule is declined; decoder error rule binds. |
 | 3.2.2 (req) | Encoder must not evict non-evictable | 1 | no | Declined (optional: QPACK dynamic table) | "The encoder MUST NOT cause a dynamic table entry to be evicted unless that entry is evictable." |
