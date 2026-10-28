@@ -1,5 +1,5 @@
-//! Proof-only check that the invariants of `flow` and `stream_id` are usable from another
-//! module through `lemma_wf` alone (their `wf` and accessors are closed).
+//! Proof-only check that the invariants of `flow`, `stream_id` and `reassembly` are usable
+//! from another module through `lemma_wf` alone (their `wf` and accessors are closed).
 use vstd::prelude::*;
 // Used only in ghost code, which a plain `cargo build` erases.
 #[allow(unused_imports)]
@@ -7,7 +7,11 @@ use crate::codes::*;
 #[allow(unused_imports)]
 use crate::flow::*;
 #[allow(unused_imports)]
+use crate::reassembly::*;
+#[allow(unused_imports)]
 use crate::stream_id::*;
+#[allow(unused_imports)]
+use wire::varint::*;
 
 verus! {
 
@@ -35,6 +39,15 @@ proof fn stream_ids_exports(s: StreamIds)
         <= s.peer_credit_spec(false).window_spec());
     assert(s.local_uni_limit() <= MAX_STREAMS_LIMIT);
     assert(s.local_uni_spec().used_spec() <= s.local_uni_limit());
+}
+
+proof fn reassembly_exports(r: Reassembly)
+    requires
+        r.wf(),
+{
+    r.lemma_wf();
+    assert(r.base() + r.buf_len() <= VARINT_MAX);
+    assert(r.base() <= rfc_contiguous(rfc_received(r.inserted())));
 }
 
 } // verus!
