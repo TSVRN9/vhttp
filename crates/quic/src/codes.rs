@@ -52,22 +52,6 @@ pub const TP_ACTIVE_CONNECTION_ID_LIMIT: u64 = 0x0e;
 pub const TP_INITIAL_SOURCE_CONNECTION_ID: u64 = 0x0f;
 pub const TP_RETRY_SOURCE_CONNECTION_ID: u64 = 0x10;
 
-//= https://www.rfc-editor.org/rfc/rfc9000#section-18.1
-//# Transport parameters with an identifier of the form "31 * N + 27"
-//# for integer values of N are reserved to exercise the requirement
-//# that unknown transport parameters be ignored.
-pub open spec fn is_reserved_tp_spec(id: u64) -> bool {
-    id >= 27 && (id - 27) % 31 == 0
-}
-
-#[verifier::when_used_as_spec(is_reserved_tp_spec)]
-pub fn is_reserved_tp(id: u64) -> (r: bool)
-    ensures
-        r == is_reserved_tp_spec(id),
-{
-    id >= 27 && (id - 27) % 31 == 0
-}
-
 pub const NO_ERROR: u64 = 0x00;
 pub const INTERNAL_ERROR: u64 = 0x01;
 pub const CONNECTION_REFUSED: u64 = 0x02;
