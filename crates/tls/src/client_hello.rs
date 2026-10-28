@@ -330,6 +330,12 @@ pub open spec fn rfc_client_hello(body: Seq<u8>) -> Result<SpecClientHello, u64>
                 Err(PROTOCOL_VIOLATION)
             } else if ck is Some {
                 // 8
+                //= https://www.rfc-editor.org/rfc/rfc8446#section-9.2
+                //# In the absence of an application profile standard specifying
+                //# otherwise, a TLS-compliant application MUST implement the following
+                //# TLS extensions:
+                // cookie: parsed at step 3 by its grammar; any cookie here is one we never
+                // issued (Decision 5: no cookie in the HelloRetryRequest), so it is rejected.
                 Err(ALERT_ILLEGAL_PARAMETER)
             } else if sa is None || (pk is None && sg is None) || ((sg is Some) != (ks is Some))
                 || (pk is Some && pm is None) || tp is None {

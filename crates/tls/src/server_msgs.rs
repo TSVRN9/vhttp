@@ -14,6 +14,19 @@
 //
 //= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.9
 //# The server MUST NOT send a "psk_key_exchange_modes" extension.
+//
+//= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.9
+//# Servers MUST NOT select a key
+//# exchange mode that is not listed by the client.
+// by construction: PSK is declined, so no mode is ever selected and no pre_shared_key is sent.
+//
+//= https://www.rfc-editor.org/rfc/rfc9001#section-4.4
+//# A server MUST NOT use post-handshake client authentication (as
+//# defined in Section 4.6.2 of [TLS13]) because the multiplexing offered
+//# by QUIC prevents clients from correlating the certificate request
+//# with the application-level event that triggered it (see
+//# [HTTP2-TLS13]).
+// by construction: there is no CertificateRequest serializer, so none is ever sent.
 use vstd::prelude::*;
 use crate::codes::*;
 #[allow(unused_imports)] // spec-only under plain cargo
@@ -253,6 +266,13 @@ fn put_hello(out: &mut Vec<u8>, random: &[u8], sid: &[u8], exts: &[u8])
     //# An endpoint MUST terminate the connection if a
     //# version of TLS older than 1.3 is negotiated.
     // Only 0x0304 is ever sent, with its one suite.
+    //= https://www.rfc-editor.org/rfc/rfc8446#appendix-D.5
+    //# Implementations MUST NOT offer or
+    //# negotiate RC4 cipher suites for any version of TLS for any reason.
+    //= https://www.rfc-editor.org/rfc/rfc8446#appendix-D.5
+    //# Ciphers with a strength less than 112 bits MUST NOT be offered or
+    //# negotiated for any version of TLS for any reason.
+    // by construction: the only suite ever selected is TLS_AES_128_GCM_SHA256 (128-bit AEAD).
     put_u16(&mut body, TLS_AES_128_GCM_SHA256);
     body.push(0);
     put_vec(&mut body, 0xffff, exts);
@@ -265,6 +285,15 @@ fn put_hello(out: &mut Vec<u8>, random: &[u8], sid: &[u8], exts: &[u8])
 //# A server which negotiates TLS 1.3 MUST respond by sending
 //# a "supported_versions" extension containing the selected version
 //# value (0x0304).
+//= https://www.rfc-editor.org/rfc/rfc8446#appendix-D.5
+//# The security of SSL 3.0 [RFC6101] is considered insufficient for the
+//# reasons enumerated in [RFC7568], and it MUST NOT be negotiated for
+//# any reason.
+//= https://www.rfc-editor.org/rfc/rfc8446#appendix-D.5
+//# The security of SSL 2.0 [SSL2] is considered insufficient for the
+//# reasons enumerated in [RFC6176], and it MUST NOT be negotiated for
+//# any reason.
+// by construction: the only selected version ever sent is 0x0304.
 fn put_sh_versions(out: &mut Vec<u8>)
     ensures
         final(out)@ == old(out)@ + spec_sh_versions_bytes(),
@@ -345,6 +374,10 @@ pub fn serialize_hello_retry_request(
 //= https://www.rfc-editor.org/rfc/rfc9001#section-8.2
 //# Endpoints
 //# MUST send the quic_transport_parameters extension
+//= https://www.rfc-editor.org/rfc/rfc9001#section-8.2
+//# Endpoints MUST NOT send this extension in a TLS connection that does
+//# not use QUIC (such as the use of TLS with TCP defined in [TLS13]).
+// by construction: this crate has no record layer; its messages travel only in QUIC CRYPTO frames.
 // ponytail: 3b's server TPs are < 256 bytes.
 pub fn serialize_encrypted_extensions(transport_params: &[u8], out: &mut Vec<u8>)
     requires
