@@ -2,7 +2,7 @@
 
 - rustc, Verus, Z3, and vstd's specs of std.
 - The OS UDP stack, the clock, and getrandom (used for connection IDs, the ECDHE private key and stateless-reset tokens).
-- The unverified IO shell and the `main` binary, including loading the certificate chain and parsing the PEM/PKCS#8 P-256 private key.
+- The unverified IO shell and the `main` binary, including loading the certificate chain and parsing the PEM/PKCS#8 P-256 private key and, when configured, the PKCS#8 RSA private key.
 - **The hand-written Verus formalization of each RFC** (`spec` modules). Proofs show the code matches these specs; they can't show the specs match the RFC text. Keeping the specs small and readable, with each one citing its RFC section, is how the risk stays manageable.
 - **Temporary:** each crypto `external_body` backed by the RustCrypto shim (phases 3-4). Phase 5 removes every one of these entries.
 

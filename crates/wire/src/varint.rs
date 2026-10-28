@@ -819,7 +819,7 @@ pub proof fn theorem_serialize_matches_rfc(v: u64)
 
 /// The serializer emits the shift/OR encoding at the shortest length, so `byte_len` is the
 /// RFC's `rfc_varint_min_len` for either `MINIMAL`.
-proof fn lemma_serialize_bytes<const MINIMAL: bool>(v: u64)
+pub proof fn lemma_serialize_bytes<const MINIMAL: bool>(v: u64)
     requires
         v <= VARINT_MAX,
     ensures
@@ -847,12 +847,20 @@ proof fn lemma_serialize_bytes<const MINIMAL: bool>(v: u64)
     quic_varint_fmt::<MINIMAL>().lemma_serialize_len(v);
     assert(s.len() == QuicVarInt::<MINIMAL>.byte_len(v));
     if v <= 63 {
+        lemma_rev1(v);
+        assert(s.len() == 1);
         assert(s =~= seq![v as u8]);
     } else if v <= 16383 {
+        lemma_rev2(v);
+        assert(s.len() == 2);
         assert(s =~= seq![(0x40 | (v >> 8)) as u8, v as u8]);
     } else if v <= 0x3FFF_FFFF {
+        lemma_rev4(v);
+        assert(s.len() == 4);
         assert(s =~= seq![(0x80 | (v >> 24)) as u8, (v >> 16) as u8, (v >> 8) as u8, v as u8]);
     } else {
+        lemma_rev8(v);
+        assert(s.len() == 8);
         assert(s =~= seq![
             (0xC0 | (v >> 56)) as u8,
             (v >> 48) as u8,
@@ -1053,6 +1061,7 @@ impl<Output: OutputBuf, const MINIMAL: bool> Serializer<Output, u64> for QuicVar
     }
 }
 
+/// Unverified callers must call `Prepare::prepare` first; for v > VARINT_MAX `length` returns 1.
 impl<const MINIMAL: bool> ByteLen<u64> for QuicVarInt<MINIMAL> {
     fn length(&self, v: &u64) -> (len: usize) {
         proof {
@@ -1083,10 +1092,6 @@ impl<const MINIMAL: bool> Prepare<u64> for QuicVarInt<MINIMAL> {
     }
 }
 
-} // verus!
-
-// Manual rather than `#[derive]`: the derive's generated items destabilise
-// `lemma_serialize_bytes` (observed). Vest's `Repeat` execs require `Copy`.
 impl<const MINIMAL: bool> Clone for QuicVarInt<MINIMAL> {
     fn clone(&self) -> Self {
         QuicVarInt
@@ -1094,3 +1099,5 @@ impl<const MINIMAL: bool> Clone for QuicVarInt<MINIMAL> {
 }
 
 impl<const MINIMAL: bool> Copy for QuicVarInt<MINIMAL> {}
+
+} // verus!
