@@ -402,6 +402,66 @@ pub const R5_CFIN: &[u8] = &[
     0x43, 0x80, 0xb1, 0x23, 0x26, 0xa5, 0x2a, 0x28, 0xb2, 0xe3, 0x68, 0xe1,
 ];
 
+/// RFC 8448 §5 second ClientHello's secp256r1 key_exchange (65 bytes, sha256 59bf36a470daac30).
+pub const P256_SHARE: &[u8] = &[
+    0x04, 0xa6, 0xda, 0x73, 0x92, 0xec, 0x59, 0x1e, 0x17, 0xab, 0xfd, 0x53,
+    0x59, 0x64, 0xb9, 0x98, 0x94, 0xd1, 0x3b, 0xef, 0xb2, 0x21, 0xb3, 0xde,
+    0xf2, 0xeb, 0xe3, 0x83, 0x0e, 0xac, 0x8f, 0x01, 0x51, 0x81, 0x26, 0x77,
+    0xc4, 0xd6, 0xd2, 0x23, 0x7e, 0x85, 0xcf, 0x01, 0xd6, 0x91, 0x0c, 0xfb,
+    0x83, 0x95, 0x4e, 0x76, 0xba, 0x73, 0x52, 0x83, 0x05, 0x34, 0x15, 0x98,
+    0x97, 0xe8, 0x06, 0x57, 0x80,
+];
+
+/// RFC 9001 A.2 ClientHello's x25519 key_exchange (32 bytes, sha256 e3859c0f808a3cc2).
+pub const X25519_SHARE: &[u8] = &[
+    0x93, 0x70, 0xb2, 0xc9, 0xca, 0xa4, 0x7f, 0xba, 0xba, 0xf4, 0x55, 0x9f,
+    0xed, 0xba, 0x75, 0x3d, 0xe1, 0x71, 0xfa, 0x71, 0xf5, 0x0f, 0x1c, 0xe1,
+    0x5d, 0x43, 0xe9, 0x94, 0xec, 0x74, 0xd7, 0x48,
+];
+
+/// A2_CH with ALPN `["h3"]` and key_share entries `shares`, then `edit` on its extensions.
+pub fn h3_ch(shares: &[(u16, Vec<u8>)], edit: impl FnOnce(&mut Vec<(u16, Vec<u8>)>)) -> Vec<u8> {
+    let (h, mut e) = split_ch(A2_CH);
+    let mut list = Vec::new();
+    for (g, kx) in shares {
+        list.extend(be16(*g as usize));
+        list.extend(be16(kx.len()));
+        list.extend(kx);
+    }
+    for (ty, d) in e.iter_mut() {
+        match *ty {
+            0x10 => *d = vec![0, 3, 2, b'h', b'3'],
+            0x33 => *d = [be16(list.len()).to_vec(), list.clone()].concat(),
+            _ => {}
+        }
+    }
+    edit(&mut e);
+    join_ch(&h, &e)
+}
+
+pub fn ecdsa() -> tls::config::SigningKey {
+    tls::config::SigningKey::EcdsaP256([1; 32])
+}
+
+pub fn rsa() -> tls::config::SigningKey {
+    let b = || vec![1u8];
+    tls::config::SigningKey::Rsa(crypto::rsa::RsaPrivateKey { n: b(), e: b(), d: b(), p: b(), q: b() })
+}
+
+/// One chain per `(key, chain_schemes)`, each a placeholder 2-byte DER (not `key_wf`).
+pub fn dummy_cfg(keys: Vec<(tls::config::SigningKey, Vec<u16>)>) -> tls::config::ServerConfig {
+    tls::config::ServerConfig {
+        chains: keys
+            .into_iter()
+            .map(|(key, chain_schemes)| tls::config::CertChain {
+                der: vec![vec![0x30, 0x00]],
+                chain_schemes,
+                key,
+            })
+            .collect(),
+    }
+}
+
 /// One length assert per vector (sha256 prefixes were checked when the vectors were copied).
 #[test]
 fn vectors_intact() {
@@ -424,4 +484,6 @@ fn vectors_intact() {
     assert_eq!(R5_HRR.len(), 176);
     assert_eq!(R5_EE.len(), 28);
     assert_eq!(R5_CFIN.len(), 36);
+    assert_eq!(P256_SHARE.len(), 65);
+    assert_eq!(X25519_SHARE.len(), 32);
 }
