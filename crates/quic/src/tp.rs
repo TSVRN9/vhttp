@@ -274,6 +274,11 @@ pub open spec fn tp_bit(id: u64) -> u32 {
 //# not support.
 //
 //= https://www.rfc-editor.org/rfc/rfc9000#section-18.1
+//# Transport parameters with an identifier of the form "31 * N + 27"
+//# for integer values of N are reserved to exercise the requirement
+//# that unknown transport parameters be ignored.
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-18.1
 //# These transport parameters
 //# have no semantics and can carry arbitrary values.
 /// One parameter `id` with value `v` applied to `t`, whose known IDs seen so far are the

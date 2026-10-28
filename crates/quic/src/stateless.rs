@@ -1,16 +1,12 @@
-//! Version Negotiation (RFC 9000 §6.1, §17.2.1) and Stateless Reset (§10.3) builders. Both
-//! are stateless; the shell calls each at most once per datagram, which keeps §17.2.1's
-//! "no more than one Version Negotiation packet" true.
+//! The Version Negotiation builder (RFC 9000 §6.1, §17.2.1). It is stateless; the shell
+//! calls it at most once per datagram, which keeps §17.2.1's "no more than one Version
+//! Negotiation packet" true. We never send a Stateless Reset (§10.3).
 use vstd::prelude::*;
-use vstd::slice::slice_subrange;
 
 use crate::codes::*;
 use crate::header::*;
 
 verus! {
-
-/// The longest Stateless Reset we send.
-pub const RESET_MAX_LEN: usize = 43;
 
 //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.1
 //# The value in the Unused field is set to an arbitrary value by the
@@ -81,58 +77,6 @@ pub open spec fn rfc_version_negotiation(d: Seq<u8>) -> Option<Seq<u8>> {
     }
 }
 
-pub open spec fn spec_reset_len(trigger_len: nat) -> nat {
-    if trigger_len - 1 < RESET_MAX_LEN {
-        (trigger_len - 1) as nat
-    } else {
-        RESET_MAX_LEN as nat
-    }
-}
-
-//= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
-//# Endpoints MUST send Stateless Resets formatted as a packet with a
-//# short header.
-//
-//= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
-//# A Stateless Reset uses an entire UDP datagram, starting with the
-//# first two bits of the packet header.  The remainder of the first byte
-//# and an arbitrary number of bytes following it are set to values that
-//# SHOULD be indistinguishable from random.  The last 16 bytes of the
-//# datagram contain a stateless reset token.
-//
-//= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
-//# An endpoint that sends a Stateless Reset in response to a packet that is
-//# 43 bytes or shorter SHOULD send a Stateless Reset that is one byte
-//# shorter than the packet it responds to.
-//
-//= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.3
-//# An endpoint MUST ensure that every Stateless Reset that it sends is
-//# smaller than the packet that triggered it, unless it maintains state
-//# sufficient to prevent looping.
-/// A Stateless Reset for a trigger of `trigger_len` bytes: `None` when no reset of at least
-/// 21 bytes is smaller than the trigger, else `[0x40 | u[0] & 0x3f] ++ u[1..L-16] ++ token`
-/// with `L = min(trigger_len - 1, 43)`.
-pub open spec fn rfc_stateless_reset(trigger_len: nat, u: Seq<u8>, token: Seq<u8>) -> Option<
-    Seq<u8>,
-> {
-    if trigger_len <= MIN_SHORT_PACKET {
-        None
-    } else {
-        Some(
-            seq![0x40u8 | (u[0] & 0x3fu8)] + u.subrange(1, spec_reset_len(trigger_len) - 16)
-                + token,
-        )
-    }
-}
-
-pub(crate) fn put_slice(s: &[u8], out: &mut Vec<u8>)
-    ensures
-        final(out)@ == old(out)@ + s@,
-{
-    out.extend_from_slice(s);
-    assert(out@ =~= old(out)@ + s@);
-}
-
 /// The Version Negotiation packet answering `datagram`, if it warrants one.
 pub fn version_negotiation(datagram: &[u8]) -> (r: Option<Vec<u8>>)
     ensures
@@ -170,49 +114,44 @@ pub fn version_negotiation(datagram: &[u8]) -> (r: Option<Vec<u8>>)
     }
 }
 
-// ponytail: fixed 43-byte cap for large triggers; vary the length if reset fingerprinting matters.
-/// A Stateless Reset for a trigger of `trigger_len` bytes, built from at least 27 unpredictable
-/// bytes and the connection's 16-byte token.
-pub fn stateless_reset(trigger_len: usize, unpredictable: &[u8], token: &[u8]) -> (r: Option<
-    Vec<u8>,
->)
-    requires
-        unpredictable.len() >= 27,
-        token.len() == RESET_TOKEN_LEN,
-    ensures
-        r.deep_view() == rfc_stateless_reset(trigger_len as nat, unpredictable@, token@),
-        r is None <==> trigger_len <= MIN_SHORT_PACKET,
-        match r {
-            None => true,
-            Some(v) => {
-                &&& MIN_SHORT_PACKET <= v.len() < trigger_len
-                &&& v.len() < 3 * trigger_len
-                &&& v[0] & 0xc0u8 == 0x40u8
-                &&& v@.skip(v.len() - RESET_TOKEN_LEN as int) == token@
-            },
-        },
-{
-    if trigger_len <= MIN_SHORT_PACKET {
-        return None;
-    }
-    let l = if trigger_len - 1 < RESET_MAX_LEN {
-        trigger_len - 1
-    } else {
-        RESET_MAX_LEN
-    };
-    let mut out: Vec<u8> = Vec::new();
-    let b0 = 0x40u8 | (unpredictable[0] & 0x3f);
-    proof {
-        let u0 = unpredictable[0];
-        assert((0x40u8 | (u0 & 0x3fu8)) & 0xc0u8 == 0x40u8) by (bit_vector);
-    }
-    out.push(b0);
-    put_slice(slice_subrange(unpredictable, 1, l - 16), &mut out);
-    put_slice(token, &mut out);
-    proof {
-        assert(out@.skip(out@.len() - 16) =~= token@);
-    }
-    Some(out)
-}
+// Sending a Stateless Reset is optional (§10.3: "An endpoint MAY send a Stateless Reset"),
+// and this server never sends one, so every sender-side requirement below holds vacuously.
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
+//= type=exception
+//= reason=We never send a Stateless Reset.
+//# Endpoints MUST send Stateless Resets formatted as a packet with a
+//# short header.
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
+//= type=exception
+//= reason=We never send a Stateless Reset.
+//# A Stateless Reset uses an entire UDP datagram, starting with the
+//# first two bits of the packet header.  The remainder of the first byte
+//# and an arbitrary number of bytes following it are set to values that
+//# SHOULD be indistinguishable from random.  The last 16 bytes of the
+//# datagram contain a stateless reset token.
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
+//= type=exception
+//= reason=We never send a Stateless Reset.
+//# An endpoint that sends a Stateless Reset in response to a packet that is
+//# 43 bytes or shorter SHOULD send a Stateless Reset that is one byte
+//# shorter than the packet it responds to.
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
+//= type=exception
+//= reason=We never send a Stateless Reset.
+//# An endpoint MUST NOT send a Stateless Reset that is three times or
+//# more larger than the packet it receives to avoid being used for
+//# amplification.
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.3
+//= type=exception
+//= reason=We never send a Stateless Reset.
+//# An endpoint MUST ensure that every Stateless Reset that it sends is
+//# smaller than the packet that triggered it, unless it maintains state
+//# sufficient to prevent looping.
+// ponytail: stateless reset sending: add the builder back with the 3x-size ensures when 3d sends resets
 
 } // verus!
