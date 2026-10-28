@@ -86,6 +86,19 @@ fn oid_filters_in_ch() {
 }
 
 #[test]
+fn oid_filters_among_others() {
+    let sv: &[u8] = &[2, 3, 4];
+    let psk: &[u8] = &[0, 1, 2, 3];
+    let oid: &[u8] = &[0, 0];
+    let mid = exts(&[(0x2b, sv), (0x30, oid), (0x2d, &[1, 1])]);
+    assert_eq!(check_ch_exts(&mid), Err(0x12f));
+    let last = exts(&[(0x2b, sv), (0x2d, &[1, 1]), (0x30, oid)]);
+    assert_eq!(check_ch_exts(&last), Err(0x12f));
+    let psk_last = exts(&[(0x2b, sv), (0x30, oid), (0x29, psk)]);
+    assert_eq!(check_ch_exts(&psk_last), Err(0x12f));
+}
+
+#[test]
 fn max_ext_count() {
     let mut tys: Vec<u16> = (0x1000..0x4fff).collect();
     assert_eq!(tys.len(), 16383);
