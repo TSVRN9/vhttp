@@ -196,9 +196,9 @@ Total keyword count: 44 across 22 sections.
 | 5.1.2 | Consuming and retiring connection IDs | 2 | yes | 3 | Retire CIDs below increased Retire Prior To before activating new one; never forget a CID without retiring it. |
 | 5.2 | Matching packets to connections | 1 | yes | 3 | Error on bad packet content or fully revert changes. |
 | 5.2.1 | Client packet handling | 1 | no | N/A (client-only) | Client discards packets with a different version. |
-| 5.2.2 | Server packet handling | 2 | yes | 3 | Drop smaller-than-1200 packets with unsupported version (no VN); drop all other unmatched packets. |
+| 5.2.2 | Server packet handling | 2 | yes | 3 | Drop smaller-than-1200 packets with unsupported version (no VN); drop all other unmatched packets. 3b codec: crates/quic/src/stateless.rs (closed in 3d) |
 | 5.2.3 | Considerations for simple load balancers | 1 | yes | 3 | Conditional on simple LB deployment; avoid stateless reset oracle (see 21.11). |
-| 6.1 | Sending Version Negotiation packets | 1 | yes | 3 | Never send VN in response to VN. |
+| 6.1 | Sending Version Negotiation packets | 1 | yes | 3 | Never send VN in response to VN. ✅ 3b: crates/quic/src/stateless.rs |
 | 6.2 | Handling Version Negotiation packets | 3 | no | N/A (client-only) | Client behavior. |
 | 7 | Cryptographic and transport handshake | 2 | yes | 3 | Handshake properties and explicit ALPN negotiation; TLS-side mechanics land in phase 4. |
 | 7.2 | Negotiating connection IDs | 6 | partial | 3 | Server rows below; 4 client-only MUSTs. |
@@ -268,10 +268,10 @@ Total keyword count: 44 across 22 sections.
 | 10.2.1 | Closing connection state | 2 | yes | 3 | Limit closing-state sends to 3x received / unvalidated address. |
 | 10.2.2 | Draining connection state | 2 | yes | 3 | No packets sent while draining. |
 | 10.2.3 | Immediate close during the handshake | 3 | yes | 3 | 1-RTT CONNECTION_CLOSE once confirmed; 0x1d to 0x1c replacement; clear reason phrase. |
-| 10.3 | Stateless reset | 5 | yes | 3 | CONNECTION_CLOSE if able; reset < 3x trigger; discard too-small packets; short header; any packet ending in valid token is a reset. |
+| 10.3 | Stateless reset | 5 | yes | 3 | CONNECTION_CLOSE if able; reset < 3x trigger; discard too-small packets; short header; any packet ending in valid token is a reset. 3b codec: crates/quic/src/stateless.rs (closed in 3d) |
 | 10.3.1 | Detecting a stateless reset | 4 | yes | 3 | Constant-time token comparison; only for used, unretired CIDs; enter draining. |
 | 10.3.2 | Calculating a stateless reset token | 5 | yes | 3 | Hard to guess; unique per CID; CID length handling; no CID reuse across static-key nodes. |
-| 10.3.3 | Looping | 1 | yes | 3 | Reset must be smaller than trigger. |
+| 10.3.3 | Looping | 1 | yes | 3 | Reset must be smaller than trigger. ✅ 3b: crates/quic/src/stateless.rs |
 | 11 | Error handling | 1 | yes | 3 | No stateless reset if connection state exists. |
 | 11.1 | Connection errors | 1 | yes | 3 | Fatal errors via CONNECTION_CLOSE. |
 | 11.2 | Stream errors | 1 | yes | 3 | RESET_STREAM only instigated by the application (HTTP/3 layer). |
@@ -299,9 +299,9 @@ Total keyword count: 44 across 22 sections.
 | 14.2.1 | Handling of ICMP messages by PMTUD | 3 | yes | 3 | Only if shell processes ICMP; vacuous otherwise. |
 | 17.1 | Packet number encoding and decoding | 2 | yes | 3 | Full PN before first ACK; size covers > 2x range. ✅ 3b: crates/quic/src/pn.rs; A.2 pseudocode under-sizes at exact powers of two; §17.1 prose used |
 | 17.2 | Long header packets | 7 | yes | 3 | Fixed bit; CID length <= 20 (drop); reserved bits PROTOCOL_VIOLATION. 3b codec: crates/quic/src/header.rs (closed in 3e) |
-| 17.2.1 | Version Negotiation packet | 6 | partial | 3 | Server rows are phase 3; one client-only. |
+| 17.2.1 | Version Negotiation packet | 6 | partial | 3 | Server rows are phase 3; one client-only. ✅ 3b: crates/quic/src/stateless.rs |
 | 17.2.1 (req) | Client ignores Unused field | 1 | no | N/A (client-only) |  |
-| 17.2.1 (req) | VN: Version 0, CIDs echoed, no version-specific CID influence, one VN per datagram | 5 | yes | 3 | Includes DCID from client SCID, SCID from client DCID, at most one VN per datagram. |
+| 17.2.1 (req) | VN: Version 0, CIDs echoed, no version-specific CID influence, one VN per datagram | 5 | yes | 3 | Includes DCID from client SCID, SCID from client DCID, at most one VN per datagram. ✅ 3b: crates/quic/src/stateless.rs |
 | 17.2.2 | Initial packet | 2 | partial | 3 | Server sends Token Length 0 (no tokens issued); client discard is client-only. ✅ 3b: crates/quic/src/header.rs (server Token Length 0) |
 | 17.2.3 | 0-RTT | 3 | partial | 3 | Two client-only MUSTs; ack-in-1-RTT rule applies. |
 | 17.2.3 (req) | New PNs; client stops 0-RTT once 1-RTT processed | 2 | no | N/A (client-only) |  |
