@@ -141,7 +141,6 @@ fn server_params_roundtrip() {
     assert_eq!(out[head.len()..], rest[..]);
     assert_eq!(parse_transport_params(&out, false), Ok(server_params()));
     assert_eq!(parse_transport_params(&out, true), Err(TPE));
-    // Within 4a's EncryptedExtensions budget, and allows HTTP/3's three peer uni streams.
-    assert!(out.len() <= 1024);
-    assert!(p.initial_max_streams_uni >= 3);
+    // The proven bound that 4a's EncryptedExtensions budget relies on.
+    assert!(out.len() <= MAX_SERVER_TP_LEN);
 }

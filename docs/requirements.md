@@ -206,7 +206,7 @@ Total keyword count: 44 across 22 sections.
 | 7.2 (req) | Server sets DCID from first received Initial | 1 | yes | 3 | "A server MUST set the Destination Connection ID it uses for sending packets based on the first received Initial packet." |
 | 7.2 (req) | Discard later Initial with different SCID | 1 | yes | 3 | Further DCID changes only via NEW_CONNECTION_ID. |
 | 7.3 | Authenticating connection IDs | 4 | partial | 3 | Server rows below; client-side checks are client-only. |
-| 7.3 (req) | Validate/send initial_source_connection_id; original_destination_connection_id sent by server | 3 | yes | 3 | Server sends correct values; validates client's initial_source_connection_id; absence is TRANSPORT_PARAMETER_ERROR. |
+| 7.3 (req) | Validate/send initial_source_connection_id; original_destination_connection_id sent by server | 3 | yes | 3 | Server sends correct values; validates client's initial_source_connection_id; absence is TRANSPORT_PARAMETER_ERROR. 3b codec: crates/quic/src/tp.rs (closed in 3d) |
 | 7.3 (req) | retry_source_connection_id presence/absence/mismatch checks | 1 | no | N/A (client-only) | Client check; server never sends Retry (declined) so never sends retry_source_connection_id. Client sending it is an error per 18.2. |
 | 7.4 | Transport parameters | 2 | yes | 3 | Invalid value is TRANSPORT_PARAMETER_ERROR; each parameter at most once. ✅ 3b: crates/quic/src/tp.rs |
 | 7.4.1 | Values of transport parameters for 0-RTT | 9 | partial | 3 | Mostly 0-RTT / client rows below. |
@@ -268,10 +268,10 @@ Total keyword count: 44 across 22 sections.
 | 10.2.1 | Closing connection state | 2 | yes | 3 | Limit closing-state sends to 3x received / unvalidated address. |
 | 10.2.2 | Draining connection state | 2 | yes | 3 | No packets sent while draining. |
 | 10.2.3 | Immediate close during the handshake | 3 | yes | 3 | 1-RTT CONNECTION_CLOSE once confirmed; 0x1d to 0x1c replacement; clear reason phrase. |
-| 10.3 | Stateless reset | 5 | yes | 3 | CONNECTION_CLOSE if able; reset < 3x trigger; discard too-small packets; short header; any packet ending in valid token is a reset. 3b codec: crates/quic/src/stateless.rs (closed in 3d) |
+| 10.3 | Stateless reset | 5 | yes | 3 | CONNECTION_CLOSE if able; reset < 3x trigger; discard too-small packets; short header; any packet ending in valid token is a reset. Sending rows (short header, < 3x trigger) vacuous: we never send a Stateless Reset (sending is a MAY); Duvet exceptions in crates/quic/src/stateless.rs. Receive side (discard too small, token match) closed in 3d |
 | 10.3.1 | Detecting a stateless reset | 4 | yes | 3 | Constant-time token comparison; only for used, unretired CIDs; enter draining. |
 | 10.3.2 | Calculating a stateless reset token | 5 | yes | 3 | Hard to guess; unique per CID; CID length handling; no CID reuse across static-key nodes. |
-| 10.3.3 | Looping | 1 | yes | 3 | Reset must be smaller than trigger. ✅ 3b: crates/quic/src/stateless.rs |
+| 10.3.3 | Looping | 1 | yes | 3 | Reset must be smaller than trigger. Vacuous: we never send a Stateless Reset; Duvet exception in crates/quic/src/stateless.rs |
 | 11 | Error handling | 1 | yes | 3 | No stateless reset if connection state exists. |
 | 11.1 | Connection errors | 1 | yes | 3 | Fatal errors via CONNECTION_CLOSE. |
 | 11.2 | Stream errors | 1 | yes | 3 | RESET_STREAM only instigated by the application (HTTP/3 layer). |
@@ -297,11 +297,11 @@ Total keyword count: 44 across 22 sections.
 | 14.1 (req) | Server limits bytes sent before address validation | 1 | yes | 3 | See 8.1 3x row. |
 | 14.2 | Path maximum transmission unit | 1 | yes | 3 | Cease sending if PMTU < 1200 (except probes/CONNECTION_CLOSE). |
 | 14.2.1 | Handling of ICMP messages by PMTUD | 3 | yes | 3 | Only if shell processes ICMP; vacuous otherwise. |
-| 17.1 | Packet number encoding and decoding | 2 | yes | 3 | Full PN before first ACK; size covers > 2x range. ✅ 3b: crates/quic/src/pn.rs; A.2 pseudocode under-sizes at exact powers of two; §17.1 prose used |
+| 17.1 | Packet number encoding and decoding | 2 | yes | 3 | Full PN before first ACK; size covers > 2x range. ✅ 3b: crates/quic/src/pn.rs; A.2 pseudocode under-sizes at exact powers of two; §17.1 prose used. Decoding is A.3 (`decode_pn`, result <= PN_MAX); `theorem_pn_len_decodes` proves a `pn_len_ok` length decodes back at a receiver that has seen the acknowledged packet; `pn_encode_len` None (more than 2^31 unacked) is a 3d internal limit |
 | 17.2 | Long header packets | 7 | yes | 3 | Fixed bit; CID length <= 20 (drop); reserved bits PROTOCOL_VIOLATION. 3b codec: crates/quic/src/header.rs (closed in 3e) |
 | 17.2.1 | Version Negotiation packet | 6 | partial | 3 | Server rows are phase 3; one client-only. ✅ 3b: crates/quic/src/stateless.rs |
 | 17.2.1 (req) | Client ignores Unused field | 1 | no | N/A (client-only) |  |
-| 17.2.1 (req) | VN: Version 0, CIDs echoed, no version-specific CID influence, one VN per datagram | 5 | yes | 3 | Includes DCID from client SCID, SCID from client DCID, at most one VN per datagram. ✅ 3b: crates/quic/src/stateless.rs |
+| 17.2.1 (req) | VN: Version 0, CIDs echoed, no version-specific CID influence, one VN per datagram | 5 | yes | 3 | Includes DCID from client SCID, SCID from client DCID, at most one VN per datagram. ✅ 3b: crates/quic/src/stateless.rs (caller binding: 3d route) |
 | 17.2.2 | Initial packet | 2 | partial | 3 | Server sends Token Length 0 (no tokens issued); client discard is client-only. ✅ 3b: crates/quic/src/header.rs (server Token Length 0) |
 | 17.2.3 | 0-RTT | 3 | partial | 3 | Two client-only MUSTs; ack-in-1-RTT rule applies. |
 | 17.2.3 (req) | New PNs; client stops 0-RTT once 1-RTT processed | 2 | no | N/A (client-only) |  |
@@ -312,7 +312,7 @@ Total keyword count: 44 across 22 sections.
 | 17.2.5.2 | Handling a Retry packet | 5 | no | N/A (client-only) |  |
 | 17.2.5.3 | Continuing a handshake after Retry | 2 | no | N/A (client-only) |  |
 | 17.3.1 | 1-RTT packet | 3 | yes | 3 | Fixed bit; reserved bits PROTOCOL_VIOLATION. 3b codec: crates/quic/src/header.rs (closed in 3e) |
-| 17.4 | Latency spin bit | 4 | yes | 3 | Simplest compliance: not support it and keep it disabled (set arbitrary, ignore incoming); keep admin-disable switch. ✅ 3b: crates/quic/src/header.rs; spin bit unsupported, so always disabled: serializer takes a caller-chosen `spin` (RECOMMENDED random per packet or per CID, supplied by 3e), never read on parse; no admin switch is needed for a feature that cannot be enabled |
+| 17.4 | Latency spin bit | 4 | yes | 3 | Simplest compliance: not support it and keep it disabled (set arbitrary, ignore incoming). ✅ 3b: crates/quic/src/header.rs; spin bit unsupported, so always disabled: serializer takes a caller-chosen `spin` (RECOMMENDED random per packet or per CID, supplied by 3e), never read on parse; no admin switch is needed for a feature that cannot be enabled |
 | 18.2 | Transport parameter definitions | 9 | partial | 3 | Rows below. ✅ 3b: crates/quic/src/tp.rs |
 | 18.2 (req) | stateless_reset_token not sent by clients | 1 | yes | 3 | Server sends it; receipt from a client is an error (see server-only row). ✅ 3b: crates/quic/src/tp.rs |
 | 18.2 (req) | preferred_address receiver rules (no new local address toward handshake address) | 1 | no | N/A (client-only) | Sent only by servers; receiver is a client. |

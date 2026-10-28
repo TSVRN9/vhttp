@@ -321,6 +321,20 @@ pub open spec fn spec_long_first_byte(ty: LongType, pn_len: u8) -> u8 {
 //# An
 //# endpoint that does not support this feature MUST disable it, as
 //# defined below.
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-17.4
+//# Implementations MUST allow administrators
+//# of clients and servers to disable the spin bit either globally or on
+//# a per-connection basis.
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-17.4
+//# Even when the spin bit is not disabled by
+//# the administrator, endpoints MUST disable their use of the spin bit
+//# for a random selection of at least one in every 16 network paths, or
+//# for one in every 16 connection IDs, in order to ensure that QUIC
+//# connections that disable the spin bit are commonly observed on the
+//# network.
+// vacuous: the spin bit is never enabled, so it is already disabled everywhere.
 /// The spin bit (0x20) is whatever the caller supplies: the feature is disabled, so the value
 /// is arbitrary (RECOMMENDED random) and never read back.
 pub open spec fn spec_short_first_byte(key_phase: bool, spin: bool, pn_len: u8) -> u8 {
