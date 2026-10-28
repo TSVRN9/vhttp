@@ -176,7 +176,7 @@ Total keyword count: 44 across 22 sections.
 | § | Topic | #MUST/MUST NOT | Server applies? | Phase | Notes |
 |---|---|---|---|---|---|
 | 1.2 | Terms and Definitions (BCP 14 boilerplate) | 5 | no | N/A (boilerplate) | Keyword-definition boilerplate, not a requirement; no phase bucket fits, N/A used. |
-| 2.1 | Stream types and identifiers | 1 | yes | 3 | Never reuse a stream ID. |
+| 2.1 | Stream types and identifiers | 1 | yes | 3 | Never reuse a stream ID. ✅ 3c: crates/quic/src/stream_id.rs |
 | 2.2 | Sending and receiving data | 3 | yes | 3 | Ordered delivery; same data at same offset; respect peer flow limits. |
 | 3.2 | Receiving stream states | 1 | yes | 3 | Opening stream N implicitly creates all lower-numbered streams of that type. |
 | 3.3 | Permitted frame types | 2 | yes | 3 | No frames from terminal states; no STREAM/STREAM_DATA_BLOCKED after RESET_STREAM. |
@@ -185,7 +185,7 @@ Total keyword count: 44 across 22 sections.
 | 4.2 | Increasing flow control limits | 1 | yes | 3 | Do not wait for *_BLOCKED before raising credit. |
 | 4.4 | Handling stream cancellation | 1 | yes | 3 | Keep flow control state until terminal. |
 | 4.5 | Stream final size | 2 | yes | 3 | Account final size in connection flow control; no data at/after final size. |
-| 4.6 | Controlling concurrency | 5 | yes | 3 | Stream limit > 2^60 is an error; STREAM_LIMIT_ERROR; ignore non-increasing MAX_STREAMS. 3b codec: crates/quic/src/tp.rs (closed in 3c) |
+| 4.6 | Controlling concurrency | 5 | yes | 3 | Stream limit > 2^60 is an error; STREAM_LIMIT_ERROR; ignore non-increasing MAX_STREAMS. ✅ 3c: crates/quic/src/stream_id.rs |
 | 5.1 | Connection ID | 3 | yes | 3 | CIDs must not be correlatable by observers; no zero-length-CID port sharing (we issue non-zero CIDs). |
 | 5.1 (req) | Same CID not issued twice on a connection | 1 | yes | 3 | "the same connection ID MUST NOT be issued more than once on the same connection". |
 | 5.1.1 | Issuing connection IDs | 4 | yes | 3 | See req rows below. |
@@ -334,7 +334,7 @@ Total keyword count: 44 across 22 sections.
 | 19.8 | STREAM frames | 2 | yes | 3 | STREAM_STATE_ERROR; offset/length limit. 3b codec: crates/quic/src/frame.rs (closed in 3c) |
 | 19.9 | MAX_DATA frames | 2 | yes | 3 | FLOW_CONTROL_ERROR on excess. |
 | 19.10 | MAX_STREAM_DATA frames | 4 | yes | 3 |  |
-| 19.11 | MAX_STREAMS frames | 4 | yes | 3 | 3b codec: crates/quic/src/frame.rs (closed in 3c) |
+| 19.11 | MAX_STREAMS frames | 4 | yes | 3 | ✅ 3c: crates/quic/src/stream_id.rs |
 | 19.13 | STREAM_DATA_BLOCKED frames | 1 | yes | 3 |  |
 | 19.14 | STREAMS_BLOCKED frames | 1 | yes | 3 | ✅ 3b: crates/quic/src/frame.rs |
 | 19.15 | NEW_CONNECTION_ID frames | 8 | yes | 3 | Each requirement has its own row. |
