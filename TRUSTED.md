@@ -14,7 +14,7 @@
 
 The shipped artifact is built by plain `cargo build` on the user's default stable rustc (unpinned; currently 1.92.0), with `verus!` erasure done by `verus_builtin_macros` (version from `Cargo.lock`, currently 0.0.0-2026-09-20-0158). Verification used Verus's own rustc 1.98.1 frontend, so the compiler that checks the proofs is not the compiler that builds the binary. No `rust-toolchain.toml` is needed.
 
-- Test-only (crates/tls dev-dependencies, not in the trusted base): ring =0.17.14; rustls =0.23.45 (Task 7)
+- Test-only (crates/tls dev-dependencies, not in the trusted base): ring =0.17.14 (build/platform lock entries: cc 1.6.0, shlex 2.0.1, find-msvc-tools 0.1.14, wasi 0.11.1, windows-sys 0.52.0, windows-targets 0.52.6, windows_* 0.52.6); rustls =0.23.45 (Task 7)
 - RustCrypto shim (crates/crypto), removed in phase 5: sha2 =0.11.1, hmac =0.13.0, hkdf =0.13.0, aes =0.9.3, aes-gcm =0.11.1, p256 =0.14.0, rsa =0.10.0-rc.19 (dev: primeorder =0.14.0, rsa with hazmat); transitively pinned by Cargo.lock: rfc6979 0.6.0, ecdsa 0.17.0, crypto-bigint 0.7.10, primeorder 0.14.0 (a normal dependency), elliptic-curve 0.14.3, ghash 0.6.0, polyval 0.7.3, ctr 0.10.1, cipher 0.5.2, digest 0.11.3
 
 ## Trusted items

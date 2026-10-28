@@ -261,7 +261,12 @@ pub open spec fn rfc_negotiate(ch: SpecClientHello, cfg: Seq<SpecCertChain>, aft
         Err(ALERT_NO_APPLICATION_PROTOCOL)
     } else {
         match rfc_select_chain(cfg, ch) {
-            // 3: §4.4.3 requires a scheme the client offered in signature_algorithms.
+            // 3
+            //= https://www.rfc-editor.org/rfc/rfc8446#section-4.4.3
+            //# If the CertificateVerify message is sent by a server, the signature
+            //# algorithm MUST be one offered in the client's "signature_algorithms"
+            //# extension unless no valid certificate chain can be produced without
+            //# unsupported algorithms (see Section 4.2.3).
             None => Err(ALERT_HANDSHAKE_FAILURE),
             Some(i) => {
                 let scheme = key_scheme(cfg[i as int].key);
