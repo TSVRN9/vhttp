@@ -14,7 +14,7 @@
 
 The shipped artifact is built by plain `cargo build` on the user's default stable rustc (unpinned; currently 1.92.0), with `verus!` erasure done by `verus_builtin_macros` (version from `Cargo.lock`, currently 0.0.0-2026-09-20-0158). Verification used Verus's own rustc 1.98.1 frontend, so the compiler that checks the proofs is not the compiler that builds the binary. No `rust-toolchain.toml` is needed.
 
-- RustCrypto shim (crates/crypto), removed in phase 5: sha2 =0.11.1
+- RustCrypto shim (crates/crypto), removed in phase 5: sha2 =0.11.1, hmac =0.13.0, hkdf =0.13.0
 
 ## Trusted items
 
@@ -25,5 +25,9 @@ The shipped artifact is built by plain `cargo build` on the user's default stabl
 | Derived `Debug`/`PartialEq`/`Eq` on `h3::qpack::int::PrefixInt` and `h3::qpack::static_table::StaticMatch` (the latter emitted by `scripts/gen_tables.py`) | `crates/h3/src/qpack/int.rs`, `crates/h3/src/qpack/static_table.rs` | Generated impls inside `verus!` are not verified; used by tests only | never (test support) |
 | Generated trusted specs `spec_static_entry` and `spec_huff_code`, produced by `scripts/gen_tables.py` from `crates/h3/rfc/*.txt`. Trusted: the excerpt fidelity, the generator, and the wrapped-row join heuristic (shared with the Rust re-parse test). Ground truth: one-time review check against rfc9204.xml (99/99) and the h2 crate's HPACK tables (257/257), plus the hand-pinned wrapped-rows test. `huff_len_info`/`huff_sorted` are proof-checked against `spec_huff_code` (not trusted) | `crates/h3/src/qpack/static_table.rs`, `crates/h3/src/qpack/huffman_table.rs` | Specs are transcribed by a script, not derived by proof | never (RFC transcription) |
 | crypto::sha256::sha256: 1 external_body (RustCrypto sha2 via shim::sha256) | crates/crypto/src/sha256.rs | exec body is unverified RustCrypto; ensures trusted | 5 |
+| crypto::hmac::hmac_sha256: 1 external_body (RustCrypto hmac via shim::hmac_sha256) | crates/crypto/src/hmac.rs | exec body is unverified RustCrypto; ensures trusted | 5 |
+| crypto::hkdf::hkdf_extract: 1 external_body (RustCrypto hkdf via shim::hkdf_extract) | crates/crypto/src/hkdf.rs | exec body is unverified RustCrypto; ensures trusted | 5 |
+| crypto::hkdf::hkdf_expand: 1 external_body (RustCrypto hkdf via shim::hkdf_expand) | crates/crypto/src/hkdf.rs | exec body is unverified RustCrypto; ensures trusted | 5 |
 | `crates/crypto/src/shim.rs`: every RustCrypto call (no escape token, but trusted code) | crates/crypto/src/shim.rs | Unverified plain Rust behind the external_body fns | 5 |
 | Constants `SHA256_K`, `SHA256_H0` and the SHA-256 specs (FIPS 180-4 transcription; constants re-derived from prime roots by `tests/sha256.rs`, spec fns not machine-checked until phase 5) | crates/crypto/src/sha256.rs, crates/crypto/src/bytes.rs | Specs are transcribed by hand, not derived by proof | never (standard transcription) |
+| HMAC/HKDF specs (RFC 2104 §2, RFC 5869 §2.2-2.3 transcription; not machine-checked until phase 5) | crates/crypto/src/hmac.rs, crates/crypto/src/hkdf.rs | Specs are transcribed by hand, not derived by proof | never (standard transcription) |
