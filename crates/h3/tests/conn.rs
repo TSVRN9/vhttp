@@ -499,3 +499,34 @@ fn only_open_directions_aborted() {
     assert_eq!(out.len(), 1);
     assert!(is_stop(&out[0], 0, H3_MESSAGE_ERROR));
 }
+
+fn head_req() -> Vec<u8> {
+    headers(&[
+        fl(":method", "HEAD"),
+        fl(":scheme", "https"),
+        fl(":authority", "example.com"),
+        fl(":path", "/"),
+    ])
+}
+
+/// RFC 9110 §8.6, §9.3.2, §15.3.5, §15.4.5.
+#[test]
+fn head_and_bodiless_statuses() {
+    let cases: [(Vec<u8>, Response, bool); 4] = [
+        // HEAD: the GET's content-length, no content.
+        (head_req(), resp(200, &[("content-length", "5")], ""), true),
+        (head_req(), resp(200, &[], "hi"), false),
+        // 304: content-length allowed, no content.
+        (get("/"), resp(304, &[("content-length", "5")], ""), true),
+        // 204: no content-length at all.
+        (get("/"), resp(204, &[("content-length", "0")], ""), false),
+    ];
+    for (req, r, ok) in cases {
+        let mut c = ready(&[]);
+        let mut out = Vec::new();
+        c.on_stream_data(0, &req, true, &mut out);
+        let mut out = Vec::new();
+        assert_eq!(c.send_response(0, &r, &mut out), if ok { Ok(()) } else { Err(()) });
+        assert_eq!(out.len(), if ok { 1 } else { 0 });
+    }
+}

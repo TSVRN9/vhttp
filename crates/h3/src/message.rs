@@ -807,26 +807,34 @@ pub open spec fn resp_header_ok(h: (Seq<u8>, Seq<u8>)) -> bool {
 //# contains a Content-Length header field (Section 8.6 of [HTTP]) is
 //# malformed if the value of the Content-Length header field does not
 //# equal the sum of the DATA frame lengths received.
-/// A `content-length` header, if that is what `h` is, states exactly `body_len`.
-pub open spec fn resp_cl_ok(h: (Seq<u8>, Seq<u8>), body_len: int) -> bool {
-    h.0 == lit_content_length() ==> cl_valid(h.1) && digits_val(h.1) == body_len
+// RFC 9110 §8.6: "A server MUST NOT send a Content-Length header field in any response with
+// a status code of 1xx (Informational) or 204 (No Content)." A response to HEAD (§9.3.2) and a
+// 304 (§15.4.5) may carry the content-length a GET / 200 would have had.
+/// A `content-length` header, if that is what `h` is: none on a 204; unconstrained on a HEAD
+/// response or a 304; otherwise exactly `body_len`.
+pub open spec fn resp_cl_ok(h: (Seq<u8>, Seq<u8>), body_len: int, status: u16, head: bool) -> bool {
+    h.0 == lit_content_length() ==> status != 204 && (head || status == 304 || (cl_valid(h.1)
+        && digits_val(h.1) == body_len))
 }
 
 //= https://www.rfc-editor.org/rfc/rfc9114#section-4.1
 //# A response MAY consist of multiple messages when and only when one or
 //# more interim responses (1xx; see Section 15.2 of [HTTP]) precede a
 //# final response to the same request.
-/// A final response we may send: status 200-599 (an interim 1xx is never the whole response;
-/// HTTP/3 has no 101, RFC 9114 §4.5), valid headers, any content-length equal to the body
-/// length, and no content for 204 or 304 (RFC 9110 §15.3.5, §15.4.5).
-pub open spec fn valid_response(r: SpecResponse) -> bool {
+/// A final response we may send (`head`: it answers a HEAD request): status 200-599 (an
+/// interim 1xx is never the whole response; HTTP/3 has no 101, RFC 9114 §4.5), valid headers,
+/// content-length as `resp_cl_ok` allows, and no content for HEAD, 204 or 304 (RFC 9110
+/// §9.3.2, §15.3.5, §15.4.5).
+pub open spec fn valid_response(r: SpecResponse, head: bool) -> bool {
     &&& 200 <= r.status <= 599
     &&& forall|i: int|
         0 <= i < r.headers.len() ==> resp_header_ok(#[trigger] r.headers[i]) && resp_cl_ok(
             r.headers[i],
             r.body.len() as int,
+            r.status,
+            head,
         )
-    &&& (r.status == 204 || r.status == 304) ==> r.body.len() == 0
+    &&& (head || r.status == 204 || r.status == 304) ==> r.body.len() == 0
 }
 
 // =============================================================================
@@ -1483,11 +1491,17 @@ fn resp_header_ok_x(f: &FieldLine) -> (r: bool)
         && f.value.len() as u64 <= PREFIX_INT_MAX
 }
 
-fn resp_cl_ok_x(f: &FieldLine, body_len: usize) -> (r: bool)
+fn resp_cl_ok_x(f: &FieldLine, body_len: usize, status: u16, head: bool) -> (r: bool)
     ensures
-        r == resp_cl_ok(f@, body_len as int),
+        r == resp_cl_ok(f@, body_len as int, status, head),
 {
     if !eq_bytes(&f.name, &x_content_length()) {
+        return true;
+    }
+    if status == 204 {
+        return false;
+    }
+    if head || status == 304 {
         return true;
     }
     match parse_cl(&f.value) {
@@ -1496,14 +1510,14 @@ fn resp_cl_ok_x(f: &FieldLine, body_len: usize) -> (r: bool)
     }
 }
 
-pub fn check_response(r: &Response) -> (ok: bool)
+pub fn check_response(r: &Response, head: bool) -> (ok: bool)
     ensures
-        ok == valid_response(r@),
+        ok == valid_response(r@, head),
 {
     if r.status < 200 || r.status > 599 {
         return false;
     }
-    if (r.status == 204 || r.status == 304) && r.body.len() > 0 {
+    if (head || r.status == 204 || r.status == 304) && r.body.len() > 0 {
         return false;
     }
     let mut i = 0;
@@ -1514,16 +1528,18 @@ pub fn check_response(r: &Response) -> (ok: bool)
                 0 <= k < i ==> resp_header_ok(#[trigger] r.headers@[k]@) && resp_cl_ok(
                     r.headers@[k]@,
                     r.body@.len() as int,
+                    r.status,
+                    head,
                 ),
         decreases r.headers.len() - i,
     {
-        if !resp_header_ok_x(&r.headers[i]) || !resp_cl_ok_x(&r.headers[i], r.body.len()) {
+        if !resp_header_ok_x(&r.headers[i]) || !resp_cl_ok_x(&r.headers[i], r.body.len(), r.status, head) {
             proof {
                 assert(r@.headers[i as int] == r.headers@[i as int]@);
-                assert(!valid_response(r@)) by {
-                    if valid_response(r@) {
+                assert(!valid_response(r@, head)) by {
+                    if valid_response(r@, head) {
                         assert(resp_header_ok(r@.headers[i as int]));
-                        assert(resp_cl_ok(r@.headers[i as int], r@.body.len() as int));
+                        assert(resp_cl_ok(r@.headers[i as int], r@.body.len() as int, r@.status, head));
                     }
                 }
             }
@@ -1534,7 +1550,7 @@ pub fn check_response(r: &Response) -> (ok: bool)
     proof {
         assert forall|k: int| 0 <= k < r@.headers.len() implies resp_header_ok(
             #[trigger] r@.headers[k],
-        ) && resp_cl_ok(r@.headers[k], r@.body.len() as int) by {
+        ) && resp_cl_ok(r@.headers[k], r@.body.len() as int, r@.status, head) by {
             assert(r@.headers[k] == r.headers@[k]@);
         }
     }
