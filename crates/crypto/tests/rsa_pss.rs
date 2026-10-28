@@ -94,3 +94,17 @@ fn pss_rsa2052_masking_kat() {
     );
     assert_eq!(s, h("04a08314b43fed2b7ea3d175947e1680f6b9b515e96c5e597935b5fcbb51e4f9e4d297e3e95b9a7d2865c5aa3d71b394295be3a0d23684d892a92fe81041304162ae6c1500e67821c05d2d8f02b654517a2a5cb890cc513be2a1e89d05ebf6cbbaf4b7ad62d4c90645952724280d5784289a0555f4d040b8f26cfbada65ac5006bc98a5920f708144f89b52d8ee326e53a64738d409ab946000965fcd0a0e717d4af6bcd5cfed126fa0088531a9b8b5fda2aded8ddf5c5bd4e4c3ab596f118847be17ebab2ba75d03854011a515e854538bcc04cc2a208d8b3c75e8d050872d6290ce7bda30129bd9c8f91ee35561465242362a9cd961fd77cc09f4c8252e751bb"));
 }
+
+// "Leading zeros allowed": zero-padded n, e, d, p and q sign identically.
+#[test]
+fn pss_zero_padded_fields() {
+    let (ours, _) = key(
+        "dd105702382f232b3681f53791e22617c7bf4e9acb81ed48daf6d6995da3eab642839aff012d2ea628b90af279fd3e6f7c93cd80f072f01ff2443b3ee8f24ed469a79613a41bd24020f92fd11059bd1d0f301b5ba7a9d3637ca8d65c1a9815417d8eab734b0b4f3a2c661d9a1a82f3ac734c40530669ab8e473045a58e65539d",
+        "ccf1e5bb90c8e9781ea75bebf10bc252e11eb023a0260f1887552a56863f4a6421e8c600bf523d6cb1b0adbdd65bfee4a88a037e3d1a415e5bb95648da5a0ca26b54f4a63948522c3d5f89b94a72efff95134d5940ce45758f308980908956588eef575b3e4bc4c368cfe813ee9c252c2b02e0df91f1aa01938d38685d60ba6f",
+    );
+    let pad = |v: &Vec<u8>| [vec![0u8; 5], v.clone()].concat();
+    let padded = RsaPrivateKey { n: pad(&ours.n), e: pad(&ours.e), d: pad(&ours.d), p: pad(&ours.p), q: pad(&ours.q) };
+    let salt: Vec<u8> = (0..32).collect();
+    let s = rsa_pss_sha256_sign(&ours, b"m", &salt).unwrap();
+    assert_eq!(rsa_pss_sha256_sign(&padded, b"m", &salt).unwrap(), s);
+}

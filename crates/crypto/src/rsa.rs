@@ -61,11 +61,12 @@ pub open spec fn bitlen(x: nat) -> nat
 }
 
 /// RFC 8017 §3.1-3.2 key validity, restricted to two primes and the 2048-4096-bit moduli we sign
-/// with: n = p q, 3 <= e < n, and e d = 1 mod lambda(n) = lcm(p - 1, q - 1), i.e. modulo both
+/// with: n = p q, 3 <= e < n, 0 < d < n (§3.2), and e d = 1 mod lambda(n) = lcm(p - 1, q - 1), i.e. modulo both
 /// p - 1 and q - 1. Primality is not provable by any verified code, so it is a `requires` that
 /// flows up to the trusted shell's key loading.
 pub open spec fn rsa_key_wf(k: RsaKeySpec) -> bool {
     is_prime(k.p) && is_prime(k.q) && k.p != k.q && k.n == k.p * k.q && 3 <= k.e && k.e < k.n
+        && 0 < k.d && k.d < k.n
         && (k.e * k.d) % ((k.p - 1) as nat) == 1 && (k.e * k.d) % ((k.q - 1) as nat) == 1
         && 2048 <= bitlen(k.n) <= 4096
 }
@@ -123,8 +124,8 @@ pub open spec fn spec_rsassa_pss_sign(k: RsaKeySpec, msg: Seq<u8>, salt: Seq<u8>
 
 /// Trusted shim: the body is RustCrypto rsa; the ensures is the trusted statement.
 /// - The ensures is one-directional: the shim returns None, where the spec has a signature, when
-///   RustCrypto rejects a key that `rsa_key_wf` allows (e >= 2^33) or when its fault check
-///   fails.
+///   RustCrypto rejects a key that `rsa_key_wf` allows: e >= 2^33 (`RsaPublicKey::MAX_PUB_EXPONENT`).
+///   No other None is known; RustCrypto's CRT fault check cannot fail for a well-formed key.
 /// - Primality in `rsa_key_wf` can be established by no verified code; it flows up to the
 ///   trusted shell's key loading.
 #[verifier::external_body]
