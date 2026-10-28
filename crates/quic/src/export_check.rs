@@ -48,6 +48,8 @@ proof fn reassembly_exports(r: Reassembly)
     r.lemma_wf();
     assert(r.base() + r.buf_len() <= VARINT_MAX);
     assert(r.base() <= rfc_contiguous(rfc_received(r.inserted())));
+    // Memory: each of `buf`/`have` holds at most twice the logical buffered length.
+    assert(r.phys_len() <= 2 * r.buf_len());
 }
 
 } // verus!
