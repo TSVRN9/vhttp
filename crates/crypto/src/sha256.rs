@@ -329,6 +329,7 @@ fn schedule(src: &[u8], off: usize) -> (w: [u32; 64])
 }
 
 // FIPS 180-4 §6.2.2 steps 1-4: compress the block src[off..off + 64] into h.
+#[verifier::spinoff_prover]
 fn compress(h: &mut [u32; 8], src: &[u8], off: usize)
     requires
         off + 64 <= src@.len(),
@@ -538,6 +539,7 @@ proof fn lemma_pad_tail(m: Seq<u8>)
 
 // FIPS 180-4 §5.1.1, §6.2: SHA-256 of prefix || msg, where prefix is empty or one block
 // (HMAC's padded key).
+#[verifier::spinoff_prover]
 pub(crate) fn sha256_cat(prefix: &[u8], msg: &[u8]) -> (r: [u8; 32])
     requires
         prefix@.len() == 0 || prefix@.len() == 64,

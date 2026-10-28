@@ -73,6 +73,29 @@ pub proof fn lemma_spec_hkdf_expand_len(prk: Seq<u8>, info: Seq<u8>, len: nat)
     lemma_hkdf_t_cat_len(prk, info, ((len + 31) / 32) as nat);
 }
 
+// buf[0..32] := t, the rest unchanged: writes T(i-1) into HKDF-Expand's reused buffer.
+fn copy_t(buf: &mut Vec<u8>, t: &[u8; 32])
+    requires
+        old(buf)@.len() >= 32,
+    ensures
+        final(buf)@ == t@ + old(buf)@.skip(32),
+{
+    let mut j: usize = 0;
+    while j < 32
+        invariant
+            j <= 32,
+            old(buf)@.len() >= 32,
+            buf@.len() == old(buf)@.len(),
+            forall|x: int| 0 <= x < j ==> #[trigger] buf@[x] == t@[x],
+            forall|x: int| j <= x < buf@.len() ==> #[trigger] buf@[x] == old(buf)@[x],
+        decreases 32 - j,
+    {
+        buf.set(j, t[j]);
+        j += 1;
+    }
+    assert(buf@ =~= t@ + old(buf)@.skip(32));
+}
+
 /// RFC 5869 §2.2; verified against spec_hkdf_extract.
 pub fn hkdf_extract(salt: &[u8], ikm: &[u8]) -> (r: [u8; 32])
     requires
@@ -85,6 +108,7 @@ pub fn hkdf_extract(salt: &[u8], ikm: &[u8]) -> (r: [u8; 32])
 }
 
 /// RFC 5869 §2.3; verified against spec_hkdf_expand. 8160 = 255 * HashLen is the output bound.
+#[verifier::spinoff_prover]
 pub fn hkdf_expand(prk: &[u8], info: &[u8], len: usize) -> (r: Vec<u8>)
     requires
         prk@.len() == 32,
@@ -142,38 +166,11 @@ pub fn hkdf_expand(prk: &[u8], info: &[u8], len: usize) -> (r: Vec<u8>)
             out@ == hkdf_t_cat(prk@, info@, i as nat).take(out@.len() as int),
         decreases n - i,
     {
-        let mut j: usize = 0;
-        while j < 32
-            invariant
-                j <= 32,
-                prk@.len() == 32,
-                info@.len() <= MAX_INPUT_LEN,
-                len <= 8160,
-                n == (len + 31) / 32,
-                1 <= i < n <= 255,
-                il == info@.len(),
-                t@ == hkdf_t(prk@, info@, i as nat),
-                out@.len() == if len < 32 * i {
-                    len as int
-                } else {
-                    32 * i
-                },
-                out@ == hkdf_t_cat(prk@, info@, i as nat).take(out@.len() as int),
-                buf@.len() == il + 33,
-                buf@.subrange(32, il + 32) == info@,
-                forall|x: int| 0 <= x < j ==> #[trigger] buf@[x] == t@[x],
-            decreases 32 - j,
-        {
-            proof {
-                assert(buf@.update(j as int, t[j as int]).subrange(32, il + 32) =~= buf@.subrange(32, il + 32));
-            }
-            buf.set(j, t[j]);
-            j += 1;
-        }
+        copy_t(&mut buf, &t);
         i += 1;
         let last = buf.len() - 1;
         proof {
-            assert(buf@.update(last as int, i as u8).subrange(32, il + 32) =~= buf@.subrange(32, il + 32));
+            assert(buf@.subrange(32, il + 32) =~= info@);
         }
         buf.set(last, i as u8);
         proof {
