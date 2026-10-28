@@ -58,6 +58,40 @@ pub const ALERT_DECODE_ERROR: u64 = 0x132;  // decode_error(50)
 pub const ALERT_PROTOCOL_VERSION: u64 = 0x146;  // protocol_version(70)
 pub const ALERT_MISSING_EXTENSION: u64 = 0x16d;  // missing_extension(109)
 
+// HandshakeType (RFC 8446 §4.4.1)
+pub const HT_MESSAGE_HASH: u8 = 254;  // message_hash
+
+// NamedGroup (RFC 8446 §4.2.7)
+pub const SECP256R1: u16 = 0x0017;  // secp256r1
+
+// SignatureScheme (RFC 8446 §4.2.3)
+pub const ECDSA_SECP256R1_SHA256: u16 = 0x0403;  // ecdsa_secp256r1_sha256
+pub const RSA_PSS_RSAE_SHA256: u16 = 0x0804;  // rsa_pss_rsae_sha256
+pub const RSA_PKCS1_SHA1: u16 = 0x0201;  // rsa_pkcs1_sha1
+pub const ECDSA_SHA1: u16 = 0x0203;  // ecdsa_sha1
+pub const DSA_SHA1_RESERVED: u16 = 0x0202;  // dsa_sha1_RESERVED (Appendix B.3.1.3)
+
+// CRYPTO_ERROR_BASE + AlertDescription (RFC 8446 §6; RFC 9001 §4.8)
+pub const ALERT_HANDSHAKE_FAILURE: u64 = 0x128;  // handshake_failure(40)
+pub const ALERT_DECRYPT_ERROR: u64 = 0x133;  // decrypt_error(51)
+pub const ALERT_INTERNAL_ERROR: u64 = 0x150;  // internal_error(80)
+pub const ALERT_NO_APPLICATION_PROTOCOL: u64 = 0x178;  // no_application_protocol(120)
+
+/// Random bytes per handshake: [0..32] ServerHello random, [32..64] ECDHE scalar, [64..96] PSS salt.
+pub const TLS_RAND_LEN: usize = 96;
+
+// HKDF-Expand-Label (RFC 8446 §7.1)
+pub const LABEL_PREFIX: [u8; 6] = *b"tls13 ";
+pub const LABEL_DERIVED: [u8; 7] = *b"derived";
+pub const LABEL_C_HS: [u8; 12] = *b"c hs traffic";
+pub const LABEL_S_HS: [u8; 12] = *b"s hs traffic";
+pub const LABEL_C_AP: [u8; 12] = *b"c ap traffic";
+pub const LABEL_S_AP: [u8; 12] = *b"s ap traffic";
+pub const LABEL_FINISHED: [u8; 8] = *b"finished";
+
+// CertificateVerify context string (RFC 8446 §4.4.3)
+pub const CV_SERVER_CONTEXT: [u8; 33] = *b"TLS 1.3, server CertificateVerify";
+
 // ponytail: largest legal ClientHello is ~131 KiB; every observed client is < 2 KiB (curl 1532 B with an ML-KEM share); raise if a client needs more.
 pub const MAX_HS_BODY: usize = 1 << 16;
 
