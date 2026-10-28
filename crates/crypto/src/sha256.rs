@@ -545,6 +545,7 @@ pub(crate) fn sha256_cat(prefix: &[u8], msg: &[u8]) -> (r: [u8; 32])
     ensures
         r@ == spec_sha256(prefix@ + msg@),
 {
+    // Keeps Z3 from unfolding the 64-round sha256_compress body, which only compress's ensures needs.
     hide(sha256_compress);
     let ghost m = prefix@ + msg@;
     let ghost pad = sha256_pad(m);
