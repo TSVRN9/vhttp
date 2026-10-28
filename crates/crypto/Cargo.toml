@@ -6,8 +6,6 @@ edition = "2021"
 [dependencies]
 vstd = "=0.0.0-2026-10-04-0306"
 sha2 = { version = "=0.11.1", default-features = false }                                         # Task 1
-hmac = { version = "=0.13.0", default-features = false }                                         # Task 2
-hkdf = { version = "=0.13.0", default-features = false }                                         # Task 2
 aes = { version = "=0.9.3", default-features = false }                                           # Task 3
 aes-gcm = { version = "=0.11.1", default-features = false, features = ["aes", "alloc"] }         # Task 3
 p256 = { version = "=0.14.0", default-features = false, features = ["arithmetic", "ecdsa", "ecdh"] }  # Task 4
@@ -16,6 +14,8 @@ rsa = { version = "=0.10.0-rc.19", default-features = false, features = ["sha2"]
 [dev-dependencies]
 primeorder = "=0.14.0"                                                                           # Task 4
 rsa = { version = "=0.10.0-rc.19", default-features = false, features = ["sha2", "hazmat"] }     # Task 6
+hmac = { version = "=0.13.0", default-features = false }                                         # 5a differential tests
+hkdf = { version = "=0.13.0", default-features = false }                                         # 5a differential tests
 
 [package.metadata.verus]
 verify = true

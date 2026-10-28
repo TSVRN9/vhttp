@@ -50,3 +50,42 @@ fn hkdf_expand_lengths() {
         h("8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8")[..]
     );
 }
+
+fn pattern(len: usize, seed: usize) -> Vec<u8> {
+    (0..len).map(|i| (i * 31 + seed) as u8).collect()
+}
+
+#[test]
+fn hmac_matches_rustcrypto() {
+    use hmac::Mac;
+    for klen in 0..=130 {
+        let key = pattern(klen, 7);
+        for mlen in [0, 1, 55, 56, 63, 64, 65, 119, 120, 300] {
+            let msg = pattern(mlen, 3);
+            let mut m = <hmac::Hmac<sha2::Sha256> as hmac::KeyInit>::new_from_slice(&key).unwrap();
+            m.update(&msg);
+            let want: [u8; 32] = m.finalize().into_bytes().into();
+            assert_eq!(hmac_sha256(&key, &msg), want, "key {klen} msg {mlen}");
+        }
+    }
+}
+
+#[test]
+fn hkdf_matches_rustcrypto() {
+    let ikm = pattern(22, 11);
+    for slen in 0..=130 {
+        let salt = pattern(slen, 5);
+        let want: [u8; 32] = hkdf::Hkdf::<sha2::Sha256>::extract(Some(&salt), &ikm).0.into();
+        assert_eq!(hkdf_extract(&salt, &ikm), want, "salt {slen}");
+    }
+    let prk = hkdf_extract(b"salt", &ikm);
+    let k = hkdf::Hkdf::<sha2::Sha256>::from_prk(&prk).unwrap();
+    for len in [0, 1, 31, 32, 33, 64, 65, 8159, 8160] {
+        for ilen in [0, 1, 300] {
+            let info = pattern(ilen, 13);
+            let mut want = vec![0u8; len];
+            k.expand(&info, &mut want).unwrap();
+            assert_eq!(hkdf_expand(&prk, &info, len), want, "len {len} info {ilen}");
+        }
+    }
+}
