@@ -3,14 +3,9 @@ use vstd::prelude::*;
 
 verus! {
 
-// ponytail: fixed cap on non-DATA control-stream frames; make it configurable if a peer needs more.
-/// A larger non-DATA frame on the peer's control stream is a connection error H3_EXCESSIVE_LOAD,
-/// decided from its header before any payload is buffered.
-pub const MAX_CONTROL_FRAME: u64 = 16384;
-
-// ponytail: bounds the O(n^2) duplicate scan in `parse_frame_payload` to 512 pairs; raise if
-// peers send larger SETTINGS.
-/// A larger SETTINGS frame is a connection error H3_EXCESSIVE_LOAD.
+// ponytail: bounds the O(n^2) duplicate scan in `parse_frame_payload` to 512 pairs, and the
+// peer control stream's buffer (`h3::uni::UNI_BUF_CAP`); raise both if peers send larger SETTINGS.
+/// A larger SETTINGS frame is a connection error H3_EXCESSIVE_LOAD, decided from its header.
 pub const MAX_SETTINGS_FRAME: u64 = 1024;
 
 //= https://www.rfc-editor.org/rfc/rfc9114#section-6.2

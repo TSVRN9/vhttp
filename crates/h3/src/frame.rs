@@ -224,10 +224,21 @@ pub open spec fn spec_settings_payload(s: Seq<(u64, u64)>) -> Seq<u8>
 
 proof fn lemma_decode_len_bounds(b: Seq<u8>)
     ensures
-        rfc_varint_decode(b) matches Some((n, _)) ==> 1 <= n <= b.len(),
+        rfc_varint_decode(b) matches Some((n, _)) ==> 1 <= n <= b.len() && n <= 8,
 {
     theorem_matches_rfc(b);
     lemma_parse_bound::<false>(b);
+}
+
+/// A buffer that does not yet hold a whole varint is shorter than 8 bytes.
+pub proof fn lemma_decode_none_short(b: Seq<u8>)
+    ensures
+        rfc_varint_decode(b) is None ==> b.len() < 8,
+{
+    if b.len() > 0 {
+        let v = b[0];
+        assert((1u8 << (v >> 6)) <= 8) by (bit_vector);
+    }
 }
 
 #[verifier::decreases_by]
@@ -461,14 +472,17 @@ pub proof fn theorem_header_roundtrip(ty: u64, len: u64)
     assert(a.add(b).skip(a.len() as int) =~= b);
 }
 
-/// A complete header occupies at least two bytes and no more than `b`.
+/// A complete header occupies 2 to 16 bytes of `b`; an incomplete one leaves `b` under 16 bytes.
 pub proof fn lemma_frame_header_bounds(b: Seq<u8>)
     ensures
-        rfc_frame_header(b) matches Some((h, _, _)) ==> 2 <= h <= b.len(),
+        rfc_frame_header(b) matches Some((h, _, _)) ==> 2 <= h <= b.len() && h <= 16,
+        rfc_frame_header(b) is None ==> b.len() < 16,
 {
     lemma_decode_len_bounds(b);
+    lemma_decode_none_short(b);
     if let Some((n1, _)) = rfc_varint_decode(b) {
         lemma_decode_len_bounds(b.skip(n1 as int));
+        lemma_decode_none_short(b.skip(n1 as int));
     }
 }
 
