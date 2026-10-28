@@ -144,24 +144,24 @@ Total keyword count: 157 across 44 sections.
 | 2.2 | Decoder: field order | 1 | yes | 2 | Request decoder MUST emit field lines in encoded order. |
 | 2.2.1 | Blocked decoding | 1 | yes | 2 | RIC smaller than expected is QPACK_DECOMPRESSION_FAILED. |
 | 2.2.2.1 | Section Acknowledgment emission | 1 | no | Declined (optional: QPACK dynamic table) | Only after decoding dynamic-table references, which we reject (see 2.2.3); never emitted. |
-| 2.2.3 | Invalid references | 2 | yes | 2 | Dynamic ref in field line -> QPACK_DECOMPRESSION_FAILED; encoder-instruction ref to evicted entry -> QPACK_ENCODER_STREAM_ERROR (at capacity 0 any such instruction is an error). |
+| 2.2.3 | Invalid references | 2 | yes | 2 | Dynamic ref in field line -> QPACK_DECOMPRESSION_FAILED; encoder-instruction ref to evicted entry -> QPACK_ENCODER_STREAM_ERROR (at capacity 0 any such instruction is an error).; encoder-instruction half ✅ 2a: crates/h3/src/qpack/instructions.rs |
 | 3.1 | Static table | 2 | yes | 2 | Invalid static index: QPACK_DECOMPRESSION_FAILED on request stream, QPACK_ENCODER_STREAM_ERROR on encoder stream. | ✅ 2a (table + lookup): crates/h3/src/qpack/static_table.rs; open: invalid-index error mapping in Tasks 6/7
 | 3.2 | Dynamic table: duplicates | 1 | no | Declined (optional: QPACK dynamic table) | Duplicates not an error; no inserts are possible at capacity 0. |
 | 3.2.2 | Capacity and eviction | 2 | partial | 2 | Encoder eviction rule is declined; decoder error rule binds. |
 | 3.2.2 (req) | Encoder must not evict non-evictable | 1 | no | Declined (optional: QPACK dynamic table) | "The encoder MUST NOT cause a dynamic table entry to be evicted unless that entry is evictable." |
-| 3.2.2 (req) | Entry larger than capacity | 1 | yes | 2 | "the decoder MUST treat this as a connection error of type QPACK_ENCODER_STREAM_ERROR." At capacity 0 every Insert is oversized. |
+| 3.2.2 (req) | Entry larger than capacity | 1 | yes | 2 | "the decoder MUST treat this as a connection error of type QPACK_ENCODER_STREAM_ERROR." At capacity 0 every Insert is oversized. ✅ 2a: crates/h3/src/qpack/instructions.rs |
 | 3.2.3 | Maximum dynamic table capacity | 4 | partial | 2 | Mixed; see rows. |
 | 3.2.3 (req) | Encoder capacity <= maximum | 1 | no | Declined (optional: QPACK dynamic table) | "The encoder MUST NOT set a dynamic table capacity that exceeds this maximum" (we never send Set Capacity). |
 | 3.2.3 (req) | Remembered non-zero value (0-RTT) | 1 | no | Declined (optional: 0-RTT) | "If the remembered value is non-zero, the server MUST send the same non-zero value in its SETTINGS frame." We never accept 0-RTT; advertised value is always 0. |
-| 3.2.3 (req) | Capacity zero: no inserts, no encoder instructions | 2 | yes | 2 | "the encoder MUST NOT insert entries into the dynamic table and MUST NOT send any encoder instructions on the encoder stream." Binds our response encoder; we advertise 0. |
+| 3.2.3 (req) | Capacity zero: no inserts, no encoder instructions | 2 | yes | 2 | "the encoder MUST NOT insert entries into the dynamic table and MUST NOT send any encoder instructions on the encoder stream." Binds our response encoder; we advertise 0. Encoder side holds by absence: this crate has no encoder-instruction serializer. ✅ 2a: crates/h3/src/qpack/instructions.rs |
 | 4.1.1 | Prefixed integers | 1 | yes | 2 | Decode integers up to 62 bits (prefix-integer codec, distinct from QUIC varint). ✅ 2a: crates/h3/src/qpack/int.rs |
 | 4.2 | Encoder and decoder streams | 6 | yes | 2 | One of each at most (second -> H3_STREAM_CREATION_ERROR); never close; closure -> H3_CLOSED_CRITICAL_STREAM; MUST accept peer-created QPACK streams even though capacity is 0. |
 | 4.3.1 | Set Dynamic Table Capacity | 3 | partial | 2 | Mixed; see rows. |
 | 4.3.1 (req) | New capacity <= limit (sender) | 1 | no | Declined (optional: QPACK dynamic table) | "The new capacity MUST be lower than or equal to the limit described in Section 3.2.3." We never send it. |
-| 4.3.1 (req) | Decoder rejects over-limit capacity | 1 | yes | 2 | "The decoder MUST treat a new dynamic table capacity value that exceeds this limit as a connection error of type QPACK_ENCODER_STREAM_ERROR." Any non-zero capacity is over our limit of 0. |
+| 4.3.1 (req) | Decoder rejects over-limit capacity | 1 | yes | 2 | "The decoder MUST treat a new dynamic table capacity value that exceeds this limit as a connection error of type QPACK_ENCODER_STREAM_ERROR." Any non-zero capacity is over our limit of 0. ✅ 2a: crates/h3/src/qpack/instructions.rs |
 | 4.3.1 (req) | No eviction of non-evictable entries | 1 | no | Declined (optional: QPACK dynamic table) | "This MUST NOT cause the eviction of entries that are not evictable." |
-| 4.4.1 | Section Acknowledgment received | 1 | yes | 2 | We send no dynamic refs, so any Section Acknowledgment is QPACK_DECODER_STREAM_ERROR. |
-| 4.4.3 | Insert Count Increment received | 1 | yes | 2 | Increment of zero, or beyond what we sent (always 0 sent), is QPACK_DECODER_STREAM_ERROR. |
+| 4.4.1 | Section Acknowledgment received | 1 | yes | 2 | We send no dynamic refs, so any Section Acknowledgment is QPACK_DECODER_STREAM_ERROR. ✅ 2a: crates/h3/src/qpack/instructions.rs |
+| 4.4.3 | Insert Count Increment received | 1 | yes | 2 | Increment of zero, or beyond what we sent (always 0 sent), is QPACK_DECODER_STREAM_ERROR. ✅ 2a: crates/h3/src/qpack/instructions.rs |
 | 4.5.1.1 | Required Insert Count | 1 | yes | 2 | Unproducible EncodedInsertCount -> QPACK_DECOMPRESSION_FAILED. |
 | 4.5.1.2 | Base | 2 | yes | 2 | Base MUST NOT be negative; Sign=1 invalid when RIC <= Delta Base (decoder check on request field sections). |
 | 4.5.4 | Literal with name reference | 2 | partial | 2 | Decoder must accept N bit; forwarding rule below is intermediary-only. |
