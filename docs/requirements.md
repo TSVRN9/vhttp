@@ -177,14 +177,14 @@ Total keyword count: 44 across 22 sections.
 |---|---|---|---|---|---|
 | 1.2 | Terms and Definitions (BCP 14 boilerplate) | 5 | no | N/A (boilerplate) | Keyword-definition boilerplate, not a requirement; no phase bucket fits, N/A used. |
 | 2.1 | Stream types and identifiers | 1 | yes | 3 | Never reuse a stream ID. ✅ 3c: crates/quic/src/stream_id.rs |
-| 2.2 | Sending and receiving data | 3 | yes | 3 | Ordered delivery; same data at same offset; respect peer flow limits. 3c: reassembly.rs ordered delivery (closed in Task 6) |
+| 2.2 | Sending and receiving data | 3 | yes | 3 | Ordered delivery; same data at same offset; respect peer flow limits. 3c: reassembly.rs ordered delivery (closed in Task 6); 3c: recv_stream.rs (closed in Task 6) |
 | 3.2 | Receiving stream states | 1 | yes | 3 | Opening stream N implicitly creates all lower-numbered streams of that type. |
 | 3.3 | Permitted frame types | 2 | yes | 3 | No frames from terminal states; no STREAM/STREAM_DATA_BLOCKED after RESET_STREAM. |
 | 3.5 | Solicited state transitions | 1 | yes | 3 | STOP_SENDING in Ready/Send must trigger RESET_STREAM. |
 | 4.1 | Data flow control | 3 | yes | 3 | Do not exceed limits; FLOW_CONTROL_ERROR on violation; ignore non-increasing MAX_DATA/MAX_STREAM_DATA. |
 | 4.2 | Increasing flow control limits | 1 | yes | 3 | Do not wait for *_BLOCKED before raising credit. |
 | 4.4 | Handling stream cancellation | 1 | yes | 3 | Keep flow control state until terminal. |
-| 4.5 | Stream final size | 2 | yes | 3 | Account final size in connection flow control; no data at/after final size. |
+| 4.5 | Stream final size | 2 | yes | 3 | Account final size in connection flow control; no data at/after final size. 3c: recv_stream.rs (closed in Task 5) |
 | 4.6 | Controlling concurrency | 5 | yes | 3 | Stream limit > 2^60 is an error; STREAM_LIMIT_ERROR; ignore non-increasing MAX_STREAMS. ✅ 3c: crates/quic/src/stream_id.rs |
 | 5.1 | Connection ID | 3 | yes | 3 | CIDs must not be correlatable by observers; no zero-length-CID port sharing (we issue non-zero CIDs). |
 | 5.1 (req) | Same CID not issued twice on a connection | 1 | yes | 3 | "the same connection ID MUST NOT be issued more than once on the same connection". |
