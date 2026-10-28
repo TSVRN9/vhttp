@@ -430,6 +430,7 @@ pub fn parse_frame_header(buf: &[u8]) -> (r: FrameHeader)
 pub fn serialize_frame_header(ty: u64, len: u64, out: &mut Vec<u8>)
     requires
         ty <= VARINT_MAX,
+        !is_h2_reserved_frame_spec(ty),
         len <= VARINT_MAX,
     ensures
         final(out)@ == old(out)@.add(spec_frame_header_bytes(ty, len)),
@@ -464,6 +465,7 @@ pub proof fn theorem_header_roundtrip(ty: u64, len: u64)
 fn put_frame(ty: u64, body: &Vec<u8>, out: &mut Vec<u8>)
     requires
         ty <= VARINT_MAX,
+        !is_h2_reserved_frame_spec(ty),
         body@.len() <= VARINT_MAX,
     ensures
         final(out)@ == old(out)@.add(spec_frame_bytes(ty, body@)),
@@ -644,6 +646,7 @@ pub fn serialize_settings(settings: &[(u64, u64)], out: &mut Vec<u8>)
         forall|i: int|
             0 <= i < settings@.len() ==> (#[trigger] settings@[i]).0 <= VARINT_MAX && settings@[i].1
                 <= VARINT_MAX,
+        rfc_settings_valid(settings@),
     ensures
         final(out)@ == old(out)@.add(spec_frame_bytes(FRAME_SETTINGS, spec_settings_payload(settings@))),
 {
