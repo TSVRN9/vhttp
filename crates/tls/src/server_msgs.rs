@@ -7,6 +7,13 @@
 //= https://www.rfc-editor.org/rfc/rfc8446#section-4.5
 //# Servers MUST NOT send this message, and clients receiving it MUST
 //# terminate the connection with an "unexpected_message" alert.
+//
+//= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.6
+//# Servers MUST NOT send this
+//# extension.
+//
+//= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.9
+//# The server MUST NOT send a "psk_key_exchange_modes" extension.
 use vstd::prelude::*;
 use crate::codes::*;
 #[allow(unused_imports)] // spec-only under plain cargo
@@ -22,17 +29,17 @@ verus! {
 // =============================================================================
 
 /// `key_share` in a ServerHello: `KeyShareEntry server_share`.
-pub open spec fn spec_sh_key_share(group: u16, kx: Seq<u8>) -> Seq<u8> {
+pub open spec fn spec_sh_key_share_bytes(group: u16, kx: Seq<u8>) -> Seq<u8> {
     spec_ext_bytes(EXT_KEY_SHARE, spec_be_bytes(group as nat, 2) + spec_vec_bytes(0xffff, kx))
 }
 
 /// `supported_versions` in a ServerHello or HelloRetryRequest: the selected version.
-pub open spec fn spec_sh_versions() -> Seq<u8> {
+pub open spec fn spec_sh_versions_bytes() -> Seq<u8> {
     spec_ext_bytes(EXT_SUPPORTED_VERSIONS, spec_be_bytes(TLS13 as nat, 2))
 }
 
 /// The ServerHello / HelloRetryRequest body around its extension block.
-pub open spec fn spec_hello_body(random: Seq<u8>, sid: Seq<u8>, exts: Seq<u8>) -> Seq<u8> {
+pub open spec fn spec_hello_body_bytes(random: Seq<u8>, sid: Seq<u8>, exts: Seq<u8>) -> Seq<u8> {
     spec_be_bytes(LEGACY_VERSION as nat, 2) + random + spec_vec_bytes(32, sid) + spec_be_bytes(
         TLS_AES_128_GCM_SHA256 as nat,
         2,
@@ -47,18 +54,18 @@ pub open spec fn spec_server_hello_bytes(
 ) -> Seq<u8> {
     spec_hs_bytes(
         HT_SERVER_HELLO,
-        spec_hello_body(random, sid, spec_sh_key_share(group, kx) + spec_sh_versions()),
+        spec_hello_body_bytes(random, sid, spec_sh_key_share_bytes(group, kx) + spec_sh_versions_bytes()),
     )
 }
 
 pub open spec fn spec_hello_retry_request_bytes(sid: Seq<u8>, selected_group: u16) -> Seq<u8> {
     spec_hs_bytes(
         HT_SERVER_HELLO,
-        spec_hello_body(
+        spec_hello_body_bytes(
             HRR_RANDOM@,
             sid,
             spec_ext_bytes(EXT_KEY_SHARE, spec_be_bytes(selected_group as nat, 2))
-                + spec_sh_versions(),
+                + spec_sh_versions_bytes(),
         ),
     )
 }
@@ -137,18 +144,21 @@ fn put_hello(out: &mut Vec<u8>, random: &[u8], sid: &[u8], exts: &[u8])
     ensures
         final(out)@ == old(out)@ + spec_hs_bytes(
             HT_SERVER_HELLO,
-            spec_hello_body(random@, sid@, exts@),
+            spec_hello_body_bytes(random@, sid@, exts@),
         ),
 {
     let mut body: Vec<u8> = Vec::new();
     put_u16(&mut body, LEGACY_VERSION);
     put_bytes(&mut body, random);
     put_vec(&mut body, 32, sid);
-    // RFC 9001 §4.2: only TLS 1.3 is ever negotiated, with its one suite.
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-4.2
+    //# An endpoint MUST terminate the connection if a
+    //# version of TLS older than 1.3 is negotiated.
+    // Only 0x0304 is ever sent, with its one suite.
     put_u16(&mut body, TLS_AES_128_GCM_SHA256);
     body.push(0);
     put_vec(&mut body, 0xffff, exts);
-    assert(body@ =~= spec_hello_body(random@, sid@, exts@));
+    assert(body@ =~= spec_hello_body_bytes(random@, sid@, exts@));
     put_hs(out, HT_SERVER_HELLO, &body);
 }
 
@@ -159,7 +169,7 @@ fn put_hello(out: &mut Vec<u8>, random: &[u8], sid: &[u8], exts: &[u8])
 //# value (0x0304).
 fn put_sh_versions(out: &mut Vec<u8>)
     ensures
-        final(out)@ == old(out)@ + spec_sh_versions(),
+        final(out)@ == old(out)@ + spec_sh_versions_bytes(),
 {
     let mut v: Vec<u8> = Vec::new();
     put_u16(&mut v, TLS13);
@@ -201,7 +211,7 @@ pub fn serialize_server_hello(
     let mut exts: Vec<u8> = Vec::new();
     put_ext(&mut exts, EXT_KEY_SHARE, &share);
     put_sh_versions(&mut exts);
-    assert(exts@ =~= spec_sh_key_share(group, key_exchange@) + spec_sh_versions());
+    assert(exts@ =~= spec_sh_key_share_bytes(group, key_exchange@) + spec_sh_versions_bytes());
     put_hello(out, random.as_slice(), session_id_echo, &exts);
 }
 
@@ -234,9 +244,7 @@ pub fn serialize_hello_retry_request(
 // RFC 8446 §4.3.1 and RFC 9001 §8.2: ALPN `h3`, then quic_transport_parameters.
 //= https://www.rfc-editor.org/rfc/rfc9001#section-8.2
 //# Endpoints
-//# MUST send the quic_transport_parameters extension; endpoints that
-//# receive ClientHello or EncryptedExtensions messages without the
-//# quic_transport_parameters extension MUST close the connection with an
+//# MUST send the quic_transport_parameters extension
 // ponytail: 3b's server TPs are < 256 bytes.
 pub fn serialize_encrypted_extensions(transport_params: &[u8], out: &mut Vec<u8>)
     requires
