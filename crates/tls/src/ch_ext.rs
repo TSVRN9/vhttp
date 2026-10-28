@@ -6,7 +6,6 @@ use vstd::slice::{slice_subrange, slice_to_vec};
 
 verus! {
 
-// RFC 8446 §4.2.8: `struct { NamedGroup group; opaque key_exchange<1..2^16-1>; } KeyShareEntry;`
 #[derive(Debug, PartialEq, Eq)]
 pub struct KeyShareEntry {
     pub group: u16,
@@ -64,6 +63,8 @@ pub open spec fn rfc_sig_schemes(d: Seq<u8>) -> Option<Seq<u16>> {
     rfc_u16_vec(d, 2, 0xfffe)
 }
 
+//= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.8
+//# opaque key_exchange<1..2^16-1>;
 /// `KeyShareEntry`s filling `b`.
 pub open spec fn rfc_key_share_list(b: Seq<u8>) -> Option<Seq<SpecKeyShare>>
     decreases b.len(),
@@ -121,7 +122,9 @@ pub open spec fn rfc_alpn(d: Seq<u8>) -> Option<Seq<Seq<u8>>> {
 
 // RFC 6066 §3: `ServerName server_name_list<1..2^16-1>`, each `NameType name_type;` then
 // `opaque HostName<1..2^16-1>` for host_name(0); any other type is `opaque<0..2^16-1>`.
-/// The first host_name in the `ServerName`s filling `b`, if the list is well formed.
+// RFC 6066 §3: "The ServerNameList MUST NOT contain more than one name of the same name_type."
+// A second host_name is rejected here (decode_error upstream).
+/// The host_name in the `ServerName`s filling `b`, if the list is well formed.
 pub open spec fn rfc_sn_list(b: Seq<u8>) -> Option<Option<Seq<u8>>>
     decreases b.len(),
 {
@@ -132,10 +135,12 @@ pub open spec fn rfc_sn_list(b: Seq<u8>) -> Option<Option<Seq<u8>>>
             None => None,
             Some((x, rest)) => match rfc_sn_list(rest) {
                 None => None,
-                Some(tail) => if b[0] == 0 {
-                    Some(Some(x))
-                } else {
+                Some(tail) => if b[0] != 0 {
                     Some(tail)
+                } else if tail is Some {
+                    None
+                } else {
+                    Some(Some(x))
                 },
             },
         }
@@ -181,6 +186,10 @@ pub open spec fn rfc_vecs_ok(b: Seq<u8>, floor: nat, ceiling: nat, trail: nat) -
 }
 
 //= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.11
+//# opaque identity<1..2^16-1>;
+//= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.11
+//# opaque PskBinderEntry<32..255>;
+//= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.11
 //# PskIdentity identities<7..2^16-1>;
 //= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.11
 //# PskBinderEntry binders<33..2^16-1>;
@@ -200,6 +209,8 @@ pub open spec fn rfc_offered_psks_ok(d: Seq<u8>) -> bool {
 
 //= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.10
 //# struct {} Empty;
+//= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.10
+//# case client_hello:         Empty;
 pub open spec fn rfc_early_data_ok(d: Seq<u8>) -> bool {
     d.len() == 0
 }
@@ -386,8 +397,16 @@ fn parse_sn_list(b: &[u8]) -> (r: Option<Option<Vec<u8>>>)
         invariant
             pos <= b@.len(),
             rfc_sn_list(b@) == match rfc_sn_list(b@.skip(pos as int)) {
-                Some(t) => Some(if first is Some { first.deep_view() } else { t }),
                 None => None,
+                Some(t) => if first is Some {
+                    if t is Some {
+                        None
+                    } else {
+                        Some(first.deep_view())
+                    }
+                } else {
+                    Some(t)
+                },
             },
         decreases b@.len() - pos,
     {
@@ -398,7 +417,10 @@ fn parse_sn_list(b: &[u8]) -> (r: Option<Option<Vec<u8>>>)
             Some(se) => se,
             None => return None,
         };
-        if is_host && first.is_none() {
+        if is_host {
+            if first.is_some() {
+                return None;
+            }
             first = Some(slice_to_vec(slice_subrange(b, s, e)));
         }
         pos = e;

@@ -79,10 +79,19 @@ fn curl_bodies() {
     let b = |ty| body(CURL_CH, ty);
     assert_eq!(parse_versions(&b(EXT_SUPPORTED_VERSIONS)), Some(vec![0x0304]));
     assert_eq!(
-        parse_groups(&b(EXT_SUPPORTED_GROUPS)).unwrap()[..4],
-        [0x11ec, 0x11eb, 0x11ed, 0x001d]
+        parse_groups(&b(EXT_SUPPORTED_GROUPS)),
+        Some(vec![
+            0x11ec, 0x11eb, 0x11ed, 0x1d, 0x17, 0x1e, 0x19, 0x18, 0x100, 0x101, 0x102, 0x103,
+            0x104
+        ])
     );
-    assert_eq!(parse_sig_schemes(&b(EXT_SIGNATURE_ALGORITHMS)).unwrap().len(), 17);
+    assert_eq!(
+        parse_sig_schemes(&b(EXT_SIGNATURE_ALGORITHMS)),
+        Some(vec![
+            0x0904, 0x0905, 0x0906, 0x0403, 0x0503, 0x0603, 0x0807, 0x0808, 0x0809, 0x080a,
+            0x080b, 0x0804, 0x0805, 0x0806, 0x0401, 0x0501, 0x0601
+        ])
+    );
     assert_eq!(
         parse_alpn(&b(EXT_ALPN)),
         Some(vec![b"h3".to_vec(), b"h3-29".to_vec()])
@@ -191,7 +200,7 @@ fn alpn_bounds() {
         "00040161 00 00", // trailing zero-length name
         "0003036161",   // ProtocolName overruns the list
         "00020161aa",   // trailing byte
-        "0005016101",   // second name overruns
+        "0004 0161 0261", // second name overruns the list
     ] {
         assert_eq!(parse_alpn(&hex(b)), None, "{b}");
     }
@@ -224,8 +233,7 @@ fn server_name_bounds() {
         "0003 00 0000",         // empty HostName
         "0004 00 0002 61",      // HostName overruns the list
         "0004 01 0002 61",      // unknown-type body overruns the list
-        "0004 00 0001 61 aa",   // trailing byte inside the list
-        "0005 00 0001 61 aa",   // trailing byte inside the list (2)
+        "0005 00 0001 61 aa", // entry cut off after the first
         "0006 00 0001 61 00 00", // second entry cut off
         "0003 00 0001 61",      // outer length shorter than entry
     ] {
@@ -246,12 +254,12 @@ fn server_name_bounds() {
     let mut e = vec![0u8];
     e.extend(vec2_claim(65533, &big));
     assert_eq!(parse_server_name(&vec2_claim(65535, &e)), None);
-    // first host_name wins; unknown types are skipped; validation continues past the first
+    // a second host_name is rejected; unknown types are skipped; validation covers the whole list
     assert_eq!(
-        sn(&hex("07 0001 aa 00 0001 61 00 0001 62".replace(' ', "").as_str())),
+        sn(&hex("07 0001 aa 00 0001 61")),
         Some(Some(b"a".to_vec()))
     );
-    assert_eq!(sn(&hex("00 0001 61 00 0001 62")), Some(Some(b"a".to_vec())));
+    assert_eq!(sn(&hex("00 0001 61 00 0001 62")), None);
     assert_eq!(sn(&hex("00 0001 61 00 0002 62")), None);
     assert_eq!(sn(&hex("00 0001 61 07")), None);
     // unknown type, empty body, then a host_name
@@ -378,4 +386,15 @@ fn offered_psks_hand_built_ticket() {
     // a 32-byte identity with a ticket age, and one 32-byte binder (RFC 8446 §4.2.11 shape)
     let b = psk_body(&identity(&[7u8; 32]), &binder(32));
     assert!(offered_psks_ok(&b));
+}
+
+#[test]
+fn r4_bodies() {
+    assert_eq!(R4_CH.len(), 512);
+    let psk = body(R4_CH, EXT_PRE_SHARED_KEY);
+    assert_eq!(psk.len(), 221);
+    assert!(offered_psks_ok(&psk));
+    assert!(early_data_ok(&body(R4_CH, EXT_EARLY_DATA)));
+    assert_eq!(parse_server_name(&body(R4_CH, EXT_SERVER_NAME)), Some(Some(b"server".to_vec())));
+    assert_eq!(bodies(R4_CH).last().unwrap().0, EXT_PRE_SHARED_KEY);
 }
