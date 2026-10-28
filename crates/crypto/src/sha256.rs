@@ -1,6 +1,8 @@
-//! SHA-256 (FIPS 180-4): spec functions and an exec signature backed by the trusted shim.
+//! SHA-256 (FIPS 180-4): spec functions and verified exec code.
 #[allow(unused_imports)]
 use crate::bytes::*;
+#[allow(unused_imports)]
+use vstd::arithmetic::div_mod::*;
 use vstd::prelude::*;
 
 verus! {
@@ -327,8 +329,6 @@ fn schedule(src: &[u8], off: usize) -> (w: [u32; 64])
 }
 
 // FIPS 180-4 §6.2.2 steps 1-4: compress the block src[off..off + 64] into h.
-// Used by sha256 from Task 2 on, which drops this allow.
-#[allow(dead_code)]
 fn compress(h: &mut [u32; 8], src: &[u8], off: usize)
     requires
         off + 64 <= src@.len(),
@@ -381,15 +381,302 @@ fn compress(h: &mut [u32; 8], src: &[u8], off: usize)
     assert(h@ =~= sha256_compress(old(h)@, block));
 }
 
-/// Trusted shim: the body is RustCrypto sha2; the ensures is the trusted statement.
-#[verifier::external_body]
+proof fn bv_div256_u32(x: u32) by (bit_vector)
+    ensures
+        x / 256 == x >> 8,
+        (x >> 8) / 256 == x >> 16,
+        (x >> 16) / 256 == x >> 24,
+        (x % 256) as u8 == x as u8,
+        ((x >> 8) % 256) as u8 == (x >> 8) as u8,
+        ((x >> 16) % 256) as u8 == (x >> 16) as u8,
+        ((x >> 24) % 256) as u8 == (x >> 24) as u8,
+{
+}
+
+proof fn bv_div256_u64(x: u64) by (bit_vector)
+    ensures
+        x / 256 == x >> 8,
+        (x >> 8) / 256 == x >> 16,
+        (x >> 16) / 256 == x >> 24,
+        (x >> 24) / 256 == x >> 32,
+        (x >> 32) / 256 == x >> 40,
+        (x >> 40) / 256 == x >> 48,
+        (x >> 48) / 256 == x >> 56,
+        (x % 256) as u8 == x as u8,
+        ((x >> 8) % 256) as u8 == (x >> 8) as u8,
+        ((x >> 16) % 256) as u8 == (x >> 16) as u8,
+        ((x >> 24) % 256) as u8 == (x >> 24) as u8,
+        ((x >> 32) % 256) as u8 == (x >> 32) as u8,
+        ((x >> 40) % 256) as u8 == (x >> 40) as u8,
+        ((x >> 48) % 256) as u8 == (x >> 48) as u8,
+        ((x >> 56) % 256) as u8 == (x >> 56) as u8,
+{
+}
+
+/// I2OSP(x, 4) of a 32-bit word is its big-endian bytes.
+proof fn lemma_i2osp_be4(x: u32)
+    ensures
+        i2osp(x as nat, 4) =~= seq![(x >> 24) as u8, (x >> 16) as u8, (x >> 8) as u8, x as u8],
+{
+    reveal_with_fuel(i2osp, 5);
+    bv_div256_u32(x);
+}
+
+/// I2OSP(x, 8) of a 64-bit word is its big-endian bytes.
+proof fn lemma_i2osp_be8(x: u64)
+    ensures
+        i2osp(x as nat, 8) =~= seq![
+            (x >> 56) as u8,
+            (x >> 48) as u8,
+            (x >> 40) as u8,
+            (x >> 32) as u8,
+            (x >> 24) as u8,
+            (x >> 16) as u8,
+            (x >> 8) as u8,
+            x as u8,
+        ],
+{
+    reveal_with_fuel(i2osp, 9);
+    bv_div256_u64(x);
+}
+
+// FIPS 180-4 §6.2.2 step 4: H_0..H_7 as 32 big-endian bytes.
+fn words_be(h: &[u32; 8]) -> (r: [u8; 32])
+    ensures
+        r@ == sha256_words_be(h@),
+{
+    let mut r = [0u8; 32];
+    let mut i: usize = 0;
+    assert(r@.take(0) =~= sha256_words_be(h@.take(0)));
+    while i < 8
+        invariant
+            i <= 8,
+            r@.take(4 * i as int) == sha256_words_be(h@.take(i as int)),
+        decreases 8 - i,
+    {
+        let x = h[i];
+        let ghost r0 = r@;
+        r[4 * i] = (x >> 24) as u8;
+        r[4 * i + 1] = (x >> 16) as u8;
+        r[4 * i + 2] = (x >> 8) as u8;
+        r[4 * i + 3] = x as u8;
+        proof {
+            lemma_i2osp_be4(x);
+            let t = h@.take(i + 1);
+            assert(t.drop_last() =~= h@.take(i as int));
+            assert(t.last() == x);
+            assert(r@.take(4 * i + 4) =~= r0.take(4 * i as int) + i2osp(x as nat, 4));
+        }
+        i += 1;
+    }
+    assert(h@.take(8) =~= h@);
+    assert(r@.take(32) =~= r@);
+    r
+}
+
+/// A message block at byte k of m is the padded message's block at k.
+proof fn lemma_pad_block(m: Seq<u8>, k: int)
+    requires
+        0 <= k,
+        k + 64 <= m.len(),
+    ensures
+        sha256_pad(m).skip(k).take(64) =~= m.subrange(k, k + 64),
+        sha256_pad(m).skip(k).skip(64) =~= sha256_pad(m).skip(k + 64),
+{
+    lemma_i2osp_len(8 * m.len(), 8);
+    let p = sha256_pad(m);
+    assert(p.len() >= m.len());
+    assert forall|j: int| 0 <= j < 64 implies #[trigger] p.skip(k).take(64)[j] == m.subrange(
+        k,
+        k + 64,
+    )[j] by {
+        assert(p[k + j] == m[k + j]);
+    }
+}
+
+/// The padded message from the last whole block of m on: the remaining bytes of m, 0x80,
+/// zeros and the 64-bit length, in one block (n = 64) or two (n = 128).
+proof fn lemma_pad_tail(m: Seq<u8>)
+    ensures
+        ({
+            let base = (64 * (m.len() / 64)) as int;
+            let n: int = if m.len() % 64 < 56 {
+                64
+            } else {
+                128
+            };
+            let p = sha256_pad(m).skip(base);
+            let r = m.len() - base;
+            &&& p.len() == n
+            &&& forall|j: int| 0 <= j < r ==> p[j] == m[base + j]
+            &&& p[r] == 0x80u8
+            &&& forall|j: int| r < j < n - 8 ==> p[j] == 0u8
+            &&& forall|j: int| n - 8 <= j < n ==> p[j] == i2osp(8 * m.len(), 8)[j - (n - 8)]
+        }),
+{
+    let l = m.len() as int;
+    let q = l / 64;
+    let r = l % 64;
+    lemma_fundamental_div_mod(l, 64);
+    lemma_mod_pos_bound(l, 64);
+    // FIPS 180-4 §5.1.1: k = (55 - l) mod 64 zero bytes, so l + 1 + k + 8 is a block multiple.
+    if r < 56 {
+        lemma_fundamental_div_mod_converse(55 - l, 64, -q, 55 - r);
+    } else {
+        lemma_fundamental_div_mod_converse(55 - l, 64, -q - 1, 119 - r);
+    }
+    lemma_i2osp_len(8 * m.len(), 8);
+    let base = 64 * q;
+    let n: int = if r < 56 {
+        64
+    } else {
+        128
+    };
+    let zeros = (55 - l) % 64;
+    assert(base + n - 8 == l + 1 + zeros);
+}
+
+// FIPS 180-4 §5.1.1, §6.2: SHA-256 of prefix || msg, where prefix is empty or one block
+// (HMAC's padded key).
+pub(crate) fn sha256_cat(prefix: &[u8], msg: &[u8]) -> (r: [u8; 32])
+    requires
+        prefix@.len() == 0 || prefix@.len() == 64,
+        prefix@.len() + msg@.len() < 0x2000_0000_0000_0000,
+    ensures
+        r@ == spec_sha256(prefix@ + msg@),
+{
+    hide(sha256_compress);
+    let ghost m = prefix@ + msg@;
+    let ghost pad = sha256_pad(m);
+    let ghost target = sha256_blocks(SHA256_H0@, pad);
+    proof {
+        lemma_i2osp_len(8 * m.len(), 8);
+        assert(pad.skip(0) =~= pad);
+    }
+    let mut h = SHA256_H0;
+    let ghost mut nb: int = 0;
+    // Invariant from here on: sha256_blocks(h@, pad.skip(k)) == target, k = bytes consumed.
+    if prefix.len() == 64 {
+        let ghost h0 = h@;
+        proof {
+            lemma_pad_block(m, 0);
+            assert(m.subrange(0, 64) =~= prefix@.subrange(0, 64));
+            assert(sha256_blocks(h0, pad.skip(0)) == sha256_blocks(
+                sha256_compress(h0, pad.skip(0).take(64)),
+                pad.skip(0).skip(64),
+            ));
+        }
+        compress(&mut h, prefix, 0);
+        proof {
+            nb = 1;
+        }
+    }
+    let mut off: usize = 0;
+    while msg.len() - off >= 64
+        invariant
+            prefix@.len() == 0 || prefix@.len() == 64,
+            prefix@.len() + msg@.len() < 0x2000_0000_0000_0000,
+            m == prefix@ + msg@,
+            pad == sha256_pad(m),
+            pad.len() >= m.len(),
+            off <= msg.len(),
+            prefix@.len() + off == 64 * nb,
+            sha256_blocks(h@, pad.skip(prefix@.len() + off)) == target,
+        decreases msg.len() - off,
+    {
+        let ghost h0 = h@;
+        proof {
+            let k = prefix@.len() + off;
+            lemma_pad_block(m, k as int);
+            assert(m.subrange(k as int, k + 64) =~= msg@.subrange(off as int, off + 64));
+            assert(sha256_blocks(h0, pad.skip(k as int)) == sha256_blocks(
+                sha256_compress(h0, pad.skip(k as int).take(64)),
+                pad.skip(k as int).skip(64),
+            ));
+        }
+        compress(&mut h, msg, off);
+        off += 64;
+        proof {
+            nb = nb + 1;
+        }
+    }
+    // FIPS 180-4 §5.1.1: the last r bytes, 0x80, zeros, then the bit length in one or two blocks.
+    let r = msg.len() - off;
+    let mut buf = [0u8; 128];
+    let mut i: usize = 0;
+    while i < r
+        invariant
+            off + r == msg.len(),
+            r < 64,
+            i <= r,
+            forall|j: int| 0 <= j < i ==> buf@[j] == msg@[off + j],
+            forall|j: int| i <= j < 128 ==> buf@[j] == 0u8,
+        decreases r - i,
+    {
+        buf[i] = msg[off + i];
+        i += 1;
+    }
+    buf[r] = 0x80;
+    let n: usize = if r < 56 {
+        64
+    } else {
+        128
+    };
+    let bits: u64 = (prefix.len() as u64 + msg.len() as u64) * 8;
+    buf[n - 8] = (bits >> 56) as u8;
+    buf[n - 7] = (bits >> 48) as u8;
+    buf[n - 6] = (bits >> 40) as u8;
+    buf[n - 5] = (bits >> 32) as u8;
+    buf[n - 4] = (bits >> 24) as u8;
+    buf[n - 3] = (bits >> 16) as u8;
+    buf[n - 2] = (bits >> 8) as u8;
+    buf[n - 1] = bits as u8;
+    let ghost k = prefix@.len() + off;
+    let ghost bb = buf@.take(n as int);
+    proof {
+        lemma_fundamental_div_mod_converse(m.len() as int, 64, nb, r as int);
+        lemma_pad_tail(m);
+        lemma_i2osp_be8(bits);
+        assert(bits as nat == 8 * m.len());
+        assert(pad.skip(k as int) =~= bb);
+    }
+    let ghost h0 = h@;
+    compress(&mut h, buf.as_slice(), 0);
+    proof {
+        assert(bb.take(64) =~= buf@.subrange(0, 64));
+        assert(sha256_blocks(h0, bb) == sha256_blocks(
+            sha256_compress(h0, bb.take(64)),
+            bb.skip(64),
+        ));
+    }
+    if n == 128 {
+        let ghost h1 = h@;
+        compress(&mut h, buf.as_slice(), 64);
+        proof {
+            let b2 = bb.skip(64);
+            assert(b2.take(64) =~= buf@.subrange(64, 128));
+            assert(sha256_blocks(h1, b2) == sha256_blocks(
+                sha256_compress(h1, b2.take(64)),
+                b2.skip(64),
+            ));
+            assert(sha256_blocks(h@, b2.skip(64)) == h@);
+        }
+    } else {
+        assert(sha256_blocks(h@, bb.skip(64)) == h@);
+    }
+    assert(h@ == target);
+    words_be(&h)
+}
+
+/// FIPS 180-4 §6.2; verified against spec_sha256.
 pub fn sha256(msg: &[u8]) -> (r: [u8; 32])
     requires
         msg@.len() <= MAX_INPUT_LEN,
     ensures
         r@ == spec_sha256(msg@),
 {
-    crate::shim::sha256(msg)
+    assert(Seq::<u8>::empty() + msg@ =~= msg@);
+    sha256_cat(&[], msg)
 }
 
 } // verus!
