@@ -5,6 +5,8 @@ use crate::bytes::*;
 use vstd::prelude::*;
 #[allow(unused_imports)]
 use vstd::arithmetic::power::*;
+#[allow(unused_imports)]
+use crate::mont::*;
 
 verus! {
 
@@ -208,6 +210,317 @@ pub fn p256_ecdh(d: &[u8], peer: &[u8]) -> (r: Option<[u8; 32]>)
         r.deep_view() == spec_p256_ecdh(d@, peer@),
 {
     crate::shim::p256_ecdh(d, peer)
+}
+
+// ---- GF(p) in Montgomery form over crate::mont (R = 2^256); values from Task 1 Step 4 ----
+
+const P_LIMBS: [u64; 4] = [0xffffffffffffffff, 0x00000000ffffffff, 0x0000000000000000, 0xffffffff00000001];
+
+// -p^-1 mod 2^64.
+const P_MP: u64 = 1;
+
+// R^2 mod p, the encode multiplier.
+const R2_P: [u64; 4] = [0x0000000000000003, 0xfffffffbffffffff, 0xfffffffffffffffe, 0x00000004fffffffd];
+
+// R mod p, the Montgomery form of 1.
+const ONE_MONT: [u64; 4] = [0x0000000000000001, 0xffffffff00000000, 0xffffffffffffffff, 0x00000000fffffffe];
+
+// 3R mod p.
+#[allow(dead_code)]  // used from Task 4
+const THREE_MONT: [u64; 4] = [0x0000000000000003, 0xfffffffd00000000, 0xffffffffffffffff, 0x00000002fffffffc];
+
+// bR mod p.
+#[allow(dead_code)]  // used from Task 4
+const B_MONT: [u64; 4] = [0xd89cdf6229c4bddf, 0xacf005cd78843090, 0xe5a220abf7212ed6, 0xdc30061d04874834];
+
+// R^-1 mod p.
+// A spec fn rather than a `spec const RINV_P`, which Verus lowers to a fn that trips the snake-case lint.
+spec fn rinv_p() -> int {
+    0xfffffffe00000003fffffffd0000000200000001fffffffe0000000300000000int
+}
+
+// p - 2, big-endian: the Fermat exponent.
+const P256_P_MINUS_2: [u8; 32] = [
+    0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfd,
+];
+
+// The SP 800-186 §3.2.1.3 constants as literals.
+pub(crate) proof fn lemma_p256_consts()
+    ensures
+        p256_p() == 0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff,
+        p256_n() == 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551,
+        p256_b() == 0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b,
+        os2ip(P256_GX@) == 0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296,
+        os2ip(P256_GY@) == 0x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5,
+{
+    assert(p256_p() == 0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff) by (compute_only);
+    assert(p256_n() == 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551) by (compute_only);
+    assert(p256_b() == 0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b) by (compute_only);
+    assert(os2ip(P256_GX@) == 0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296) by (compute_only);
+    assert(os2ip(P256_GY@) == 0x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5) by (compute_only);
+}
+
+// The Fermat exponent is p - 2.
+proof fn lemma_exp_const_p()
+    ensures
+        os2ip(P256_P_MINUS_2@) == p256_p() - 2,
+{
+    assert(os2ip(P256_P_MINUS_2@) == p256_p() - 2) by (compute_only);
+}
+
+// Montgomery decode of canonical limbs into GF(p).
+spec fn fe(l: [u64; 4]) -> int {
+    mdec(v4(l), p256_p(), rinv_p())
+}
+
+// Canonical limbs: below p.
+spec fn fe_ok(l: [u64; 4]) -> bool {
+    v4(l) < p256_p()
+}
+
+// The Montgomery constants for p, checked by Z3 on literals.
+proof fn lemma_mont_consts_p()
+    ensures
+        v4(P_LIMBS) == p256_p(),
+        p256_p() > 1,
+        (P_LIMBS[0] as int * P_MP as int + 1) % 0x1_0000_0000_0000_0000 == 0,
+        (0x1_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000 * rinv_p()) % p256_p() == 1,
+        v4(R2_P) == 0x1_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000int % p256_p(),
+        v4(ONE_MONT) == 0x1_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000int % p256_p(),
+        fe_ok(R2_P),
+        fe_ok(ONE_MONT),
+        fe_ok(THREE_MONT),
+        fe_ok(B_MONT),
+        fe(R2_P) == 0x1_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000int % p256_p(),
+        fe(B_MONT) == p256_b(),
+        fe(ONE_MONT) == 1,
+        fe(THREE_MONT) == 3,
+{
+    lemma_p256_consts();
+}
+
+// Cancelling R: if v < p and v * R == u (mod p), then v is the decode of u.
+proof fn lemma_unmont(v: int, u: int)
+    requires
+        0 <= v < p256_p(),
+        (v * 0x1_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000) % p256_p() == u % p256_p(),
+    ensures
+        v == mdec(u, p256_p(), rinv_p()),
+{
+    let (p, rr) = (p256_p(), 0x1_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000int);
+    lemma_mont_consts_p();
+    // u * ri == v * R * ri == v * (R * ri) == v (mod p)
+    vstd::arithmetic::div_mod::lemma_mul_mod_noop_left(u, rinv_p(), p);
+    vstd::arithmetic::div_mod::lemma_mul_mod_noop_left(v * rr, rinv_p(), p);
+    assert((v * rr) * rinv_p() == v * (rr * rinv_p())) by {
+        broadcast use vstd::arithmetic::mul::group_mul_properties;
+    }
+    vstd::arithmetic::div_mod::lemma_mul_mod_noop_right(v, rr * rinv_p(), p);
+    vstd::arithmetic::div_mod::lemma_small_mod(v as nat, p as nat);
+}
+
+// x * 1 == x for a product term Z3 does not simplify.
+proof fn lemma_mul_one(x: int, y: int)
+    requires
+        y == 1,
+    ensures
+        x * y == x,
+{
+    assert(x * y == x) by (nonlinear_arith)
+        requires
+            y == 1,
+    ;
+}
+
+// fe(r) == fmod(fe(a) * fe(b)).
+// ct: secret a, b
+#[allow(dead_code)]  // used from Task 4
+fn fe_mul(a: [u64; 4], b: [u64; 4]) -> (r: [u64; 4])
+    requires
+        fe_ok(a),
+        fe_ok(b),
+    ensures
+        fe_ok(r),
+        fe(r) == fmod(fe(a) * fe(b)),
+{
+    proof {
+        lemma_mont_consts_p();
+    }
+    let r = mont_mul(&a, &b, &P_LIMBS, P_MP);
+    proof {
+        lemma_mdec_mul(v4(r), v4(a), v4(b), p256_p(), 0x1_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000int, rinv_p());
+    }
+    r
+}
+
+// fe(r) == fmod(fe(a) + fe(b)).
+// ct: secret a, b
+#[allow(dead_code)]  // used from Task 4
+fn fe_add(a: [u64; 4], b: [u64; 4]) -> (r: [u64; 4])
+    requires
+        fe_ok(a),
+        fe_ok(b),
+    ensures
+        fe_ok(r),
+        fe(r) == fmod(fe(a) + fe(b)),
+{
+    proof {
+        lemma_mont_consts_p();
+    }
+    let r = add_mod(&a, &b, &P_LIMBS);
+    proof {
+        lemma_mdec_add(v4(a), v4(b), p256_p(), rinv_p());
+    }
+    r
+}
+
+// fe(r) == fmod(fe(a) - fe(b)).
+// ct: secret a, b
+#[allow(dead_code)]  // used from Task 4
+fn fe_sub(a: [u64; 4], b: [u64; 4]) -> (r: [u64; 4])
+    requires
+        fe_ok(a),
+        fe_ok(b),
+    ensures
+        fe_ok(r),
+        fe(r) == fmod(fe(a) - fe(b)),
+{
+    proof {
+        lemma_mont_consts_p();
+    }
+    let r = sub_mod(&a, &b, &P_LIMBS);
+    proof {
+        lemma_mdec_sub(v4(a), v4(b), p256_p(), rinv_p());
+    }
+    r
+}
+
+// fe(r) == finv(fe(a)) == fe(a)^(p - 2) mod p (Fermat).
+// ct: secret a
+#[allow(dead_code)]  // used from Task 4
+fn fe_inv(a: [u64; 4]) -> (r: [u64; 4])
+    requires
+        fe_ok(a),
+    ensures
+        fe_ok(r),
+        fe(r) == finv(fe(a)),
+{
+    proof {
+        lemma_mont_consts_p();
+        lemma_exp_const_p();
+    }
+    mont_pow(&a, &P256_P_MINUS_2, &P_LIMBS, P_MP, &ONE_MONT, Ghost(rinv_p()))
+}
+
+// finv only sees its argument mod p.
+proof fn lemma_finv_fmod(z: int)
+    ensures
+        finv(fmod(z)) == finv(z),
+{
+    lemma_p256_consts();
+    vstd::arithmetic::power::lemma_pow_mod_noop(z, (p256_p() - 2) as nat, p256_p());
+}
+
+// The field element encoded by b[off..off + 32], or None if that integer is >= p.
+// ct: public b, off (peer input only; never call on secret data)
+// `d` is read only by proof code, which a plain `cargo build` erases.
+#[allow(dead_code, unused_variables)]  // dead_code: used from Task 4
+fn fe_from_be(b: &[u8], off: usize) -> (r: Option<[u64; 4]>)
+    requires
+        off + 32 <= b@.len(),
+    ensures
+        r.is_none() == (os2ip(b@.subrange(off as int, off + 32)) >= p256_p()),
+        r matches Some(x) ==> fe_ok(x) && fe(x) == os2ip(b@.subrange(off as int, off + 32)),
+{
+    proof {
+        lemma_mont_consts_p();
+    }
+    let x = limbs_from_be(b, off);
+    let (d, bo) = sub4(&x, &P_LIMBS);
+    proof {
+        lemma_v4_bound(d);
+    }
+    // ct: branch on public input
+    if bo == 0 {
+        None
+    } else {
+        let r = mont_mul(&x, &R2_P, &P_LIMBS, P_MP);
+        proof {
+            let (p, rr, xv) = (p256_p(), 0x1_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000int, v4(x));
+            lemma_mdec_mul(v4(r), xv, v4(R2_P), p, rr, rinv_p());
+            // (x ri mod p) (R mod p) == x (R ri) == x (mod p)
+            lemma_mod_mul_cong(xv * rinv_p(), rr, p);
+            assert((xv * rinv_p()) * rr == xv * (rr * rinv_p())) by {
+                broadcast use vstd::arithmetic::mul::group_mul_properties;
+            }
+            vstd::arithmetic::div_mod::lemma_mul_mod_noop_right(xv, rr * rinv_p(), p);
+            lemma_v4_bound(x);
+            vstd::arithmetic::div_mod::lemma_small_mod(xv as nat, p as nat);
+        }
+        Some(r)
+    }
+}
+
+// I2OSP(fe(a), 32): decode (multiply by 1), then the limbs as big-endian octets.
+// ct: secret a
+#[allow(dead_code)]  // used from Task 4
+fn fe_to_be(a: &[u64; 4]) -> (r: [u8; 32])
+    ensures
+        r@ == i2osp(fe(*a) as nat, 32),
+{
+    proof {
+        lemma_mont_consts_p();
+    }
+    let w1: [u64; 4] = [1, 0, 0, 0];
+    let d = mont_mul(a, &w1, &P_LIMBS, P_MP);
+    proof {
+        lemma_mul_one(v4(*a), v4(w1));
+        lemma_unmont(v4(d), v4(*a));
+    }
+    limbs_to_be(&d)
+}
+
+// 1 iff fe(a) == fe(b), without branching.
+// ct: secret a, b
+#[allow(dead_code)]  // used from Task 4
+fn fe_eq(a: [u64; 4], b: [u64; 4]) -> (r: u64)
+    requires
+        fe_ok(a),
+        fe_ok(b),
+    ensures
+        r <= 1,
+        (r == 1) == (fe(a) == fe(b)),
+{
+    proof {
+        lemma_mont_consts_p();
+        if fe(a) == fe(b) {
+            lemma_mdec_inj(a, b, p256_p(), rinv_p());
+        }
+    }
+    eq4(&a, &b)
+}
+
+// 1 iff fe(a) == 0, without branching.
+// ct: secret a
+#[allow(dead_code)]  // used from Task 4
+fn fe_is_zero(a: [u64; 4]) -> (r: u64)
+    requires
+        fe_ok(a),
+    ensures
+        r <= 1,
+        (r == 1) == (fe(a) == 0),
+{
+    proof {
+        lemma_mont_consts_p();
+        let z: [u64; 4] = [0, 0, 0, 0];
+        assert(v4(z) == 0);
+        vstd::arithmetic::div_mod::lemma_small_mod(0, p256_p() as nat);
+        if fe(a) == 0 {
+            lemma_mdec_inj(a, z, p256_p(), rinv_p());
+        }
+    }
+    is_zero4(&a)
 }
 
 } // verus!
