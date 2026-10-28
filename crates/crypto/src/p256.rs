@@ -328,7 +328,7 @@ proof fn lemma_unmont(v: int, u: int)
 }
 
 // x * 1 == x for a product term Z3 does not simplify.
-proof fn lemma_mul_one(x: int, y: int)
+pub(crate) proof fn lemma_mul_one(x: int, y: int)
     requires
         y == 1,
     ensures

@@ -159,6 +159,7 @@ proof fn lemma_chain4(
 // ct: secret t, ai, b; public m, mp
 // `z` is read only by proof code, which a plain `cargo build` erases.
 #[allow(unused_variables)]
+#[verifier::spinoff_prover]
 fn mont_step(t: [u64; 5], ai: u64, b: [u64; 4], m: [u64; 4], mp: u64) -> (r: (
     [u64; 5],
     Ghost<int>,
