@@ -22,26 +22,6 @@ fn h(parts: &[&[u8]]) -> [u8; 32] {
     sha256(&parts.concat())
 }
 
-fn rsa_cfg() -> ServerConfig {
-    ServerConfig {
-        chains: vec![CertChain {
-            der: vec![RSA_CERT.to_vec()],
-            chain_schemes: vec![],
-            key: SigningKey::Rsa(rsa_key()),
-        }],
-    }
-}
-
-fn ecdsa_cfg() -> ServerConfig {
-    ServerConfig {
-        chains: vec![CertChain {
-            der: vec![ECDSA_CERT.to_vec()],
-            chain_schemes: vec![],
-            key: SigningKey::EcdsaP256(ECDSA_D),
-        }],
-    }
-}
-
 /// R5_CH2's typed fields, without its cookie, with ALPN `h3` and transport parameters `[1, 0]`.
 fn ch2() -> ClientHello {
     let (head, mut e) = split_ch(R5_CH2);
