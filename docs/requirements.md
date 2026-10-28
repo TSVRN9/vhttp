@@ -177,7 +177,7 @@ Total keyword count: 44 across 22 sections.
 |---|---|---|---|---|---|
 | 1.2 | Terms and Definitions (BCP 14 boilerplate) | 5 | no | N/A (boilerplate) | Keyword-definition boilerplate, not a requirement; no phase bucket fits, N/A used. |
 | 2.1 | Stream types and identifiers | 1 | yes | 3 | Never reuse a stream ID. ✅ 3c: crates/quic/src/stream_id.rs |
-| 2.2 | Sending and receiving data | 3 | yes | 3 | Ordered delivery; same data at same offset; respect peer flow limits. |
+| 2.2 | Sending and receiving data | 3 | yes | 3 | Ordered delivery; same data at same offset; respect peer flow limits. 3c: reassembly.rs ordered delivery (closed in Task 6) |
 | 3.2 | Receiving stream states | 1 | yes | 3 | Opening stream N implicitly creates all lower-numbered streams of that type. |
 | 3.3 | Permitted frame types | 2 | yes | 3 | No frames from terminal states; no STREAM/STREAM_DATA_BLOCKED after RESET_STREAM. |
 | 3.5 | Solicited state transitions | 1 | yes | 3 | STOP_SENDING in Ready/Send must trigger RESET_STREAM. |
@@ -215,7 +215,7 @@ Total keyword count: 44 across 22 sections.
 | 7.4.1 (req) | Server accepting 0-RTT must not reduce limits or alter values | 2 | no | Declined (optional: 0-RTT) | We never accept 0-RTT. |
 | 7.4.1 (req) | Server MUST reject 0-RTT if restored values unsupported | 1 | yes | 3 | Refusal path: we always reject 0-RTT. |
 | 7.4.2 | New transport parameters | 1 | yes | 3 | Ignore unknown transport parameters. ✅ 3b: crates/quic/src/tp.rs |
-| 7.5 | Cryptographic message buffering | 3 | yes | 3 | Buffer >= 4096 bytes out-of-order CRYPTO; CRYPTO_BUFFER_EXCEEDED; ACK packets whose CRYPTO was discarded. |
+| 7.5 | Cryptographic message buffering | 3 | yes | 3 | Buffer >= 4096 bytes out-of-order CRYPTO; CRYPTO_BUFFER_EXCEEDED; ACK packets whose CRYPTO was discarded. ✅ 3c: crates/quic/src/crypto_stream.rs |
 | 8 | Address validation | 1 | yes | 3 | 3x limit before validation; see 8.1 row. |
 | 8.1 | Address validation during connection establishment | 5 | partial | 3 | Server rows below; 3 client-only MUSTs. |
 | 8.1 (req) | Anti-amplification: send at most 3x bytes received before validation | 1 | yes | 3 | "Prior to validating the client address, servers MUST NOT send more than three times as many bytes as the number of bytes they have received." |
