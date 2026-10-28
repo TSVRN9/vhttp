@@ -102,12 +102,12 @@ fn cookie_merge() {
 #[test]
 fn response_check() {
     let r = |s: u16, n: &str, v: &str| Response { status: s, headers: vec![fl(n, v)], body: vec![] };
-    assert!(check_response(&r(200, "content-type", "text/plain")));
-    assert!(!check_response(&r(99, "content-type", "text/plain")));
-    assert!(!check_response(&r(600, "content-type", "text/plain")));
-    assert!(!check_response(&r(200, "Content-Type", "text/plain")));
-    assert!(!check_response(&r(200, "connection", "x")));
-    assert!(!check_response(&r(200, ":status", "200")));
+    assert!(check_response(&r(200, "content-type", "text/plain"), false));
+    assert!(!check_response(&r(99, "content-type", "text/plain"), false));
+    assert!(!check_response(&r(600, "content-type", "text/plain"), false));
+    assert!(!check_response(&r(200, "Content-Type", "text/plain"), false));
+    assert!(!check_response(&r(200, "connection", "x"), false));
+    assert!(!check_response(&r(200, ":status", "200"), false));
 }
 
 #[test]

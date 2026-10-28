@@ -769,7 +769,7 @@ fn fits_peer_x(fields: &[FieldLine], peer: Option<u64>) -> (r: bool)
 /// exceeds the peer's limit, or a frame would be too long to encode.
 fn write_response(id: u64, r: &Response, peer: Option<u64>, out: &mut Vec<Output>) -> (ok: bool)
     requires
-        valid_response(r@),
+        valid_response(r@, false) || valid_response(r@, true),
     ensures
         extends(old(out)@, final(out)@),
         ok ==> fits_peer(peer, fields_size(resp_fields(r@))) && one_response(
@@ -859,6 +859,8 @@ struct ReqEntry {
     fin_seen: bool,
     /// The request head was delivered to the application.
     head: bool,
+    /// The delivered request's method is HEAD (its response carries no content).
+    is_head: bool,
     /// Our sending part is open: no response, reset, or peer STOP_SENDING yet.
     send_open: bool,
     /// A trailer section received, held until the request ends.
@@ -1003,10 +1005,18 @@ pub struct ReqState {
     pub send_open: bool,
     /// The peer's sending part has ended (FIN seen).
     pub fin_seen: bool,
+    /// The delivered request's method is HEAD.
+    pub is_head: bool,
 }
 
 spec fn state_of(e: ReqEntry) -> ReqState {
-    ReqState { receiving: e.rx_open, head: e.head, send_open: e.send_open, fin_seen: e.fin_seen }
+    ReqState {
+        receiving: e.rx_open,
+        head: e.head,
+        send_open: e.send_open,
+        fin_seen: e.fin_seen,
+        is_head: e.is_head,
+    }
 }
 
 /// `st` mirrors the table: exactly its IDs, each with its entry's state.
@@ -1711,6 +1721,8 @@ fn deliver(
                     return true;
                 }
                 e.head = true;
+                let head_method: [u8; 4] = [72u8, 69u8, 65u8, 68u8];
+                e.is_head = eq_bytes(req.method.as_slice(), &head_method);
                 let w = Output::Request { stream_id: e.id, head: req };
                 proof {
                     lemma_deliver(id, ev, k as int, tr, tr, tr0, err, cx, o0, o1, w);
@@ -2108,7 +2120,7 @@ pub open spec fn frame(c0: H3Conn, c1: H3Conn, x: Option<u64>) -> bool {
 
 /// The state a request stream starts in.
 pub open spec fn fresh_state() -> ReqState {
-    ReqState { receiving: true, head: false, send_open: true, fin_seen: false }
+    ReqState { receiving: true, head: false, send_open: true, fin_seen: false, is_head: false }
 }
 
 /// The state request stream `id` was fed from: its own if it was being received, else fresh.
@@ -2805,6 +2817,7 @@ impl H3Conn {
                                 rx_open: false,
                                 fin_seen: false,
                                 head: false,
+                                is_head: false,
                                 send_open: false,
                                 trailers: Vec::new(),
                             };
@@ -2834,6 +2847,7 @@ impl H3Conn {
                     rx_open: true,
                     fin_seen: false,
                     head: false,
+                    is_head: false,
                     send_open: true,
                     trailers: Vec::new(),
                 };
@@ -3279,7 +3293,8 @@ impl H3Conn {
     //# response, the server MUST close the stream for sending.
     /// Sends `resp` on request stream `stream_id`: HEADERS (`:status` first), then DATA if the
     /// body is non-empty, then FIN. `Err` with nothing written if the connection is closed,
-    /// `resp` would violate RFC 9114 (`check_response`), the stream has no delivered request or
+    /// `resp` would be malformed for this request (`check_response`; a HEAD request, tracked per
+    /// stream, takes no content), the stream has no delivered request or
     /// already has a response, or the field section exceeds the peer's limit.
     pub fn send_response(&mut self, stream_id: u64, resp: &Response, out: &mut Vec<Output>) -> (r: Result<(), ()>)
         requires
@@ -3294,18 +3309,21 @@ impl H3Conn {
             final(self).req_receiving(stream_id) == old(self).req_receiving(stream_id),
             r is Ok ==> !old(self).closed() && old(self).req_respondable(stream_id) && valid_response(
                 resp@,
+                old(self).req_state(stream_id)->0.is_head,
             ) && fits_peer(old(self).peer_max_field_section(), fields_size(resp_fields(resp@)))
                 && one_response(added(old(out)@, final(out)@), stream_id, resp@) && !final(self).req_respondable(stream_id),
             r is Err ==> final(out)@ == old(out)@ && final(self).req_state(stream_id) == old(self).req_state(stream_id),
-            old(self).closed() || !valid_response(resp@) || !old(self).req_respondable(stream_id)
-                ==> r is Err,
+            old(self).closed() || !old(self).req_respondable(stream_id) || !valid_response(
+                resp@,
+                old(self).req_state(stream_id)->0.is_head,
+            ) ==> r is Err,
     {
         let ghost c0 = *self;
         let ghost o0 = out@;
         proof {
             Self::lemma_idle(*self, out@);
         }
-        if self.closed || !check_response(resp) {
+        if self.closed {
             return Err(());
         }
         let i = match find_req(&self.reqs, stream_id) {
@@ -3325,6 +3343,9 @@ impl H3Conn {
             assert(c0.rstate@[stream_id] == state_of(c0.reqs@[i as int]));
         }
         if !(self.reqs[i].head && self.reqs[i].send_open) {
+            return Err(());
+        }
+        if !check_response(resp, self.reqs[i].is_head) {
             return Err(());
         }
         //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4.2
