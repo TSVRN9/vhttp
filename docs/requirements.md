@@ -458,7 +458,7 @@ Total keyword count: 38 across 19 sections.
 | § | Topic | #MUST/MUST NOT | Server applies? | Phase | Notes |
 |---|---|---|---|---|---|
 | 1.1 | Conventions and Terminology | 5 | no | N/A (boilerplate) | BCP 14 boilerplate listing the keywords; no requirement |
-| 2 | Protocol Overview | 2 | yes | 4 | Server key share in same group as a client share; no application data before server Finished |
+| 2 | Protocol Overview | 2 | yes | 4 | Server key share in same group as a client share; no application data before server Finished ✅ 4b: crates/tls/src/flight.rs (secp256r1 share answers a secp256r1 KeyShareEntry; the 1-RTT secrets are the last event, after the server Finished) |
 | 2.1 | Incorrect DHE Share | 1 | yes | 4 | Abort with alert if no common parameters ✅ 4b: crates/tls/src/negotiate.rs (no suite, chain or group: handshake_failure; no ALPN: no_application_protocol) |
 | 2.2 | Resumption and Pre-Shared Key (PSK) | 1 | no | Declined (optional: resumption/PSK) | Out-of-band PSK provisioning |
 | 4 | Handshake Protocol | 2 | yes | 4 | Message ordering; unexpected_message on out-of-order handshake message; 4a codec: crates/tls/src/handshake.rs (closed in 4b) |
@@ -468,7 +468,7 @@ Total keyword count: 38 across 19 sections.
 | 4.1.2 (req) | Client sends ClientHello first / same ClientHello after HRR / legacy_version 0x0303 / legacy_session_id rules | 6 | no | N/A (client-only) | "it is REQUIRED to send the ClientHello as its first TLS message"; "the client MUST send the same ClientHello without modification"; client-side field constraints |
 | 4.1.2 (req) | Compatibility-mode legacy_session_id | 2 | no | Declined (optional: TLS 1.2-and-older compatibility) | "In compatibility mode this field MUST be non-empty"; QUIC forbids compat mode (RFC 9001 §8.4); server SHOULD error on non-empty value (see RFC 9001 table) |
 | 4.1.2 (req) | renegotiation of pre-1.3 sessions / pre-1.3 extension-block rules | 5 | no | Declined (optional: TLS 1.2-and-older compatibility) | "MUST retain the previous protocol version"; "MUST NOT negotiate TLS 1.3"; prior-version procedures |
-| 4.1.3 | Server Hello | 16 | partial | 4 | Server-side: legacy_version 0x0303, random independent of ClientHello.random, compression 0, supported_versions present, only required extensions; 4a codec: server_msgs.rs layout (closed in 4b) |
+| 4.1.3 | Server Hello | 16 | partial | 4 | Server-side: legacy_version 0x0303, random independent of ClientHello.random, compression 0, supported_versions present, only required extensions ✅ 4b: crates/tls/src/flight.rs (random = rand[0..32]; downgrade sentinel vacuous, TLS 1.3 only; layout in server_msgs.rs, 4a) |
 | 4.1.3 (req) | Client-side ServerHello checks | 4 | no | N/A (client-only) | "A client which receives a legacy_session_id_echo ... / cipher suite not offered MUST abort"; downgrade-sentinel checks |
 | 4.1.3 (req) | Downgrade sentinel in ServerHello.Random | 4 | no | Declined (optional: TLS 1.2-and-older compatibility) | "TLS 1.3 servers which negotiate TLS 1.2 or below ... MUST set the last 8 bytes"; we never negotiate older versions |
 | 4.1.4 | Hello Retry Request | 11 | partial | 4 | Server: supported_versions in HRR, no unoffered extensions except cookie, same cipher suite on updated ClientHello; 4a codec: server_msgs.rs layout (closed in 4b) |
@@ -501,9 +501,9 @@ Total keyword count: 38 across 19 sections.
 | 4.2.11 (req) | Client checks of selected_identity | 5 | no | N/A (client-only) | Client verifies server's selected_identity and key_share |
 | 4.2.11.1 | Ticket Age | 1 | no | N/A (client-only) | "Clients MUST NOT attempt to use tickets which have ages greater than ticket_lifetime" |
 | 4.2.11.3 | Processing Order | 1 | no | Declined (optional: 0-RTT) | Server flight ordering when accepting early_data |
-| 4.3.1 | Encrypted Extensions | 3 | partial | 4 | Server MUST send EncryptedExtensions immediately after ServerHello; client forbidden-extension check is client-side; 4a codec: server_msgs.rs layout (closed in 4b) |
+| 4.3.1 | Encrypted Extensions | 3 | partial | 4 | Server MUST send EncryptedExtensions immediately after ServerHello; client forbidden-extension check is client-side ✅ 4b: crates/tls/src/flight.rs (EncryptedExtensions is the first Handshake-level message; layout in server_msgs.rs, 4a) |
 | 4.3.2 | Certificate Request | 6 | no | Declined (optional: client certificates) | We never send CertificateRequest |
-| 4.4.2 | Certificate | 12 | partial | 4 | Server: send Certificate, empty certificate_request_context (SHALL be zero length), extensions match ClientHello, end-entity first, non-empty list, no OpenPGP certs; 4a codec: server_msgs.rs layout (closed in 4b) |
+| 4.4.2 | Certificate | 12 | partial | 4 | Server: send Certificate, empty certificate_request_context (SHALL be zero length), extensions match ClientHello, end-entity first, non-empty list, no OpenPGP certs ✅ 4b: crates/tls/src/flight.rs (every flight carries the configured chain's Certificate; layout in server_msgs.rs, 4a) |
 | 4.4.2 (req) | Client Certificate message rules | 4 | no | Declined (optional: client certificates) | "The client MUST send a Certificate message if and only if the server has requested client authentication"; empty-certificate and Finished rules |
 | 4.4.2 (req) | RawPublicKey certificate type | 1 | no | 4 | X.509v3 only; RawPublicKey not negotiated; ✅ 4a: crates/tls/src/server_msgs.rs |
 | 4.4.2.1 | OCSP Status and SCT Extensions | 5 | partial | 4 | Server: MUST NOT act on/send status_request_v2, MUST be able to process (ignore) ClientHello carrying it; we send no OCSP/SCT; ✅ 4a: crates/tls/src/server_msgs.rs |
@@ -530,7 +530,7 @@ Total keyword count: 38 across 19 sections.
 | 6 | Alert Protocol | 7 | partial | 4 | Alerts become CRYPTO_ERROR (0x0100 + alert) and are always fatal (RFC 9001 §4.8); decode_error/illegal_parameter mapping; forget secrets of failed connections; 4a codec: crates/tls/src/client_hello.rs (closed in 4c) |
 | 6.1 | Closure Alerts | 4 | no | 4 | replaced by QUIC (RFC 9001 §4): connection close via CONNECTION_CLOSE, no close_notify |
 | 6.2 | Error Alerts | 3 | yes | 4 | Fatal error closes connection; alert maps to QUIC error code |
-| 7.4.2 | Elliptic Curve Diffie-Hellman | 2 | partial | 4 | Do not truncate leading zeros of shared secret (P-256 X coordinate, 32 bytes) |
+| 7.4.2 | Elliptic Curve Diffie-Hellman | 2 | partial | 4 | Do not truncate leading zeros of shared secret (P-256 X coordinate, 32 bytes) ✅ 4b: crates/tls/src/flight.rs (shared secret is a [u8; 32]; all-zero secret aborts with illegal_parameter) |
 | 7.4.2 (req) | All-zero shared secret check (RFC 7748 §6) | 1 | no | Declined (optional: X25519) | Applies to X25519/X448; P-256 point validation (§4.2.8.2) precludes it |
 | 7.5 | Exporters | 2 | no | 4 | QUIC does not use TLS exporters; "Future specifications MUST NOT define a use of exporters ..." is N/A (binds spec authors), a Duvet exception in crates/tls/src/schedule.rs; ✅ 4b: crates/tls/src/schedule.rs (no exporter derived; QUIC uses none) |
 | 8 | 0-RTT and Anti-Replay | 3 | no | Declined (optional: 0-RTT) | We never accept 0-RTT |
@@ -543,7 +543,7 @@ Total keyword count: 38 across 19 sections.
 | 9.3 | Protocol Invariants | 10 | partial | 4 | Server MUST correctly ignore unrecognized cipher suites, extensions, and other parameters; client/middlebox invariants do not apply; ✅ 4a: crates/tls/src/client_hello.rs |
 | 11 | IANA Considerations | 2 | no | N/A (IANA procedure) | Registry policy for IANA/IESG; no implementation requirement |
 | Appendix B | Protocol Data Structures and Constant Values | 2 | yes | 4 | Never send the deprecated/obsolete_RESERVED values; we offer and accept one suite, so this holds by construction; ✅ 4a: crates/tls/src/server_msgs.rs |
-| Appendix C | Implementation Notes | 1 | partial | 4 | "applications MUST NOT use TLS in such a way absent explicit configuration" (no authentication mechanism): the server always authenticates with its certificate. |
+| Appendix C | Implementation Notes | 1 | partial | 4 | "applications MUST NOT use TLS in such a way absent explicit configuration" (no authentication mechanism): the server always authenticates with its certificate. ✅ 4b: crates/tls/src/flight.rs (every flight carries Certificate and CertificateVerify) |
 | Appendix D | Backward Compatibility | 18 | partial | 4 | Server rows: legacy_version / legacy_record_version ignored; negotiate via supported_versions; abort protocol_version when no TLS 1.3 offer (never fall back); never send or negotiate RC4, <112-bit ciphers, SSL 2.0/3.0, SSL 2.0-format ClientHello, legacy_version <= 0x0300 (abort protocol_version), truncated HMAC. All hold by construction (TLS 1.3 only, one suite) but each needs its Phase 4 check. Rows below carve out the exceptions; ✅ 4a: crates/tls/src/client_hello.rs + server_msgs.rs |
 | Appendix D (req) | Client-side backward-compat rules (client aborts on unacceptable version, fails 0-RTT on TLS 1.2 ServerHello, does not send SSLv2 hello) | 3 | no | N/A (client-only) | Client behaviour. |
 | Appendix D (req) | Negotiate min(legacy_version, TLS 1.2) when supported_versions absent; send change_cipher_spec in compatibility mode | 2 | no | Declined (optional: TLS 1.2-and-older compatibility) | "the server MUST negotiate the minimum of ClientHello.legacy_version and TLS 1.2"; QUIC forbids compatibility mode (RFC 9001 §8.4). We abort with protocol_version instead. |
