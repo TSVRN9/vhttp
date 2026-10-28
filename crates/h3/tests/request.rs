@@ -86,7 +86,7 @@ fn cat(parts: &[&[u8]]) -> Vec<u8> {
     parts.concat()
 }
 
-fn post_body() -> Vec<u8> {
+fn post_body_bytes() -> Vec<u8> {
     cat(&[&req("POST", &[("content-length", "5")]), &frame(0x00, b"he"), &frame(0x00, b"llo")])
 }
 
@@ -106,8 +106,8 @@ fn simple_get() {
 }
 
 #[test]
-fn post_body_test() {
-    assert_eq!(run(&post_body(), true), (Ok(()), post_events()));
+fn post_body() {
+    assert_eq!(run(&post_body_bytes(), true), (Ok(()), post_events()));
 }
 
 #[test]
@@ -143,7 +143,7 @@ fn frame_order() {
 
 #[test]
 fn trailers() {
-    let b = cat(&[&post_body(), &headers(&[fl("x-t", "1")]), &frame(0x21, b"zz")]);
+    let b = cat(&[&post_body_bytes(), &headers(&[fl("x-t", "1")]), &frame(0x21, b"zz")]);
     assert_eq!(
         run(&b, true),
         (
@@ -221,10 +221,10 @@ fn unknown_frames_ignored() {
 
 #[test]
 fn chunking() {
-    assert_eq!(run_bytewise(&post_body(), true), (Ok(()), post_events()));
+    assert_eq!(run_bytewise(&post_body_bytes(), true), (Ok(()), post_events()));
     assert_eq!(run_bytewise(&req("GET", &[]), true), (Ok(()), get_events()));
     // Two calls split inside the HEADERS payload.
-    let b = post_body();
+    let b = post_body_bytes();
     let mut s = RequestStream::new();
     let mut ev = Vec::new();
     assert_eq!(s.on_data(&b[..7], false, &mut ev), Ok(()));
