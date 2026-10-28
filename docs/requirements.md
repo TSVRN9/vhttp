@@ -376,7 +376,7 @@ Total keyword count: 307 across 115 sections.
 | 4.1.3 | Sending and Receiving Handshake Messages | 3 | yes | 4 | CRYPTO data from an earlier level MUST NOT extend past previously received data (PROTOCOL_VIOLATION); unconsumed lower-level data when higher-level keys arrive is PROTOCOL_VIOLATION. |
 | 4.2 | TLS Version | 2 | partial | 4 | Server only negotiates 1.3, so the "terminate if older than 1.3 is negotiated" rule holds by construction; ✅ 4a: crates/tls/src/client_hello.rs + server_msgs.rs |
 | 4.2 (req) | Clients MUST NOT offer TLS older than 1.3 | 1 | no | N/A (client-only) | "Clients MUST NOT offer TLS versions older than 1.3." |
-| 4.4 | Peer Authentication | 4 | partial | 4 | Server MUST NOT use post-handshake client auth and MUST NOT send post-handshake CertificateRequest. We never request client certificates at all. |
+| 4.4 | Peer Authentication | 4 | partial | 4 | Server MUST NOT use post-handshake client auth and MUST NOT send post-handshake CertificateRequest. We never request client certificates at all.; ✅ 4a: crates/tls/src/server_msgs.rs |
 | 4.4 (req) | Client authenticates server | 1 | no | N/A (client-only) | "A client MUST authenticate the identity of the server." |
 | 4.4 (req) | Client reaction to post-handshake CertificateRequest | 1 | no | N/A (client-only) | "clients MUST treat receipt of such messages as a connection error of type PROTOCOL_VIOLATION." |
 | 4.6.1 | Enabling 0-RTT | 2 | no | Declined (optional: 0-RTT) | Server MUST NOT send early_data in NewSessionTicket with max_early_data_size other than 0xffffffff. We send no NewSessionTicket and no early_data (EncryptedExtensions has none), so this holds vacuously. |
@@ -503,18 +503,18 @@ Total keyword count: 38 across 19 sections.
 | 4.2.11.3 | Processing Order | 1 | no | Declined (optional: 0-RTT) | Server flight ordering when accepting early_data |
 | 4.3.1 | Encrypted Extensions | 3 | partial | 4 | Server MUST send EncryptedExtensions immediately after ServerHello; client forbidden-extension check is client-side; 4a codec: server_msgs.rs layout (closed in 4b) |
 | 4.3.2 | Certificate Request | 6 | no | Declined (optional: client certificates) | We never send CertificateRequest |
-| 4.4.2 | Certificate | 12 | partial | 4 | Server: send Certificate, empty certificate_request_context (SHALL be zero length), extensions match ClientHello, end-entity first, non-empty list, no OpenPGP certs |
+| 4.4.2 | Certificate | 12 | partial | 4 | Server: send Certificate, empty certificate_request_context (SHALL be zero length), extensions match ClientHello, end-entity first, non-empty list, no OpenPGP certs; 4a codec: server_msgs.rs layout (closed in 4b) |
 | 4.4.2 (req) | Client Certificate message rules | 4 | no | Declined (optional: client certificates) | "The client MUST send a Certificate message if and only if the server has requested client authentication"; empty-certificate and Finished rules |
-| 4.4.2 (req) | RawPublicKey certificate type | 1 | no | 4 | X.509v3 only; RawPublicKey not negotiated |
-| 4.4.2.1 | OCSP Status and SCT Extensions | 5 | partial | 4 | Server: MUST NOT act on/send status_request_v2, MUST be able to process (ignore) ClientHello carrying it; we send no OCSP/SCT |
+| 4.4.2 (req) | RawPublicKey certificate type | 1 | no | 4 | X.509v3 only; RawPublicKey not negotiated; ✅ 4a: crates/tls/src/server_msgs.rs |
+| 4.4.2.1 | OCSP Status and SCT Extensions | 5 | partial | 4 | Server: MUST NOT act on/send status_request_v2, MUST be able to process (ignore) ClientHello carrying it; we send no OCSP/SCT; ✅ 4a: crates/tls/src/server_msgs.rs |
 | 4.4.2.1 (req) | Client OCSP status_request body | 1 | no | Declined (optional: client certificates) | "If the client opts to send an OCSP response ..." |
 | 4.4.2.2 | Server Certificate Selection | 7 | yes | 4 | X.509v3, ECDSA P-256 key compatible with client's signature_algorithms, digitalSignature key usage, chain signed with client-advertised algorithms; abort alert is client-side |
 | 4.4.2.3 | Client Certificate Selection | 3 | no | Declined (optional: client certificates) | Client-side |
 | 4.4.2.4 | Receiving a Certificate Message | 2 | no | Declined (optional: client certificates) | Server never receives a Certificate; empty-cert check is client-side; MD5 check applies to chain validation |
-| 4.4.3 | Certificate Verify | 10 | partial | 4 | Server MUST send; algorithm one offered by client, compatible with key; SHA-1 MUST NOT be used; ecdsa_secp256r1_sha256 and rsa_pss_rsae_sha256 signing supported |
+| 4.4.3 | Certificate Verify | 10 | partial | 4 | Server MUST send; algorithm one offered by client, compatible with key; SHA-1 MUST NOT be used; ecdsa_secp256r1_sha256 and rsa_pss_rsae_sha256 signing supported; 4a codec: server_msgs.rs layout (closed in 4b) |
 | 4.4.3 (req) | "RSA signatures MUST use an RSASSA-PSS algorithm" | 1 | yes | 4 | User decision 2026-10-27 (design spec, "Calls I made": RSA (RFC 8446 §9.1)): an RSA certificate signs CertificateVerify with rsa_pss_rsae_sha256 only (RSASSA-PSS, MGF1-SHA256, salt length 32). |
 | 4.4.3 (req) | Client CertificateVerify send/verify | 3 | no | Declined (optional: client certificates) | "Clients MUST send this message whenever authenticating via a certificate"; "receiver ... MUST verify the signature" (server never receives one) |
-| 4.4.4 | Finished | 3 | yes | 4 | Verify client Finished, decrypt_error on mismatch; following records under application traffic keys (QUIC keys via RFC 9001 §5) |
+| 4.4.4 | Finished | 3 | yes | 4 | Verify client Finished, decrypt_error on mismatch; following records under application traffic keys (QUIC keys via RFC 9001 §5); 4a codec: server_msgs.rs layout (closed in 4b) |
 | 4.5 | End of Early Data | 4 | partial | 4 | "Servers MUST NOT send this message" (QUIC also forbids it; RFC 9001 §8.3); ✅ 4a: crates/tls/src/client_hello.rs + server_msgs.rs (never sent; no serializer) |
 | 4.5 (req) | Client EndOfEarlyData rules | 3 | no | Declined (optional: 0-RTT) | "the client MUST send an EndOfEarlyData message after receiving the server Finished" |
 | 4.6.1 | New Session Ticket Message | 7 | no | Declined (optional: resumption/PSK) | Server sends no tickets |
@@ -542,7 +542,7 @@ Total keyword count: 38 across 19 sections.
 | 9.2 (req) | pre_shared_key / psk_key_exchange_modes REQUIRED for PSK | 2 | no | Declined (optional: resumption/PSK) | "\"pre_shared_key\" is REQUIRED for PSK key agreement"; "\"psk_key_exchange_modes\" is REQUIRED for PSK key agreement". PSK declined. |
 | 9.3 | Protocol Invariants | 10 | partial | 4 | Server MUST correctly ignore unrecognized cipher suites, extensions, and other parameters; client/middlebox invariants do not apply; ✅ 4a: crates/tls/src/client_hello.rs |
 | 11 | IANA Considerations | 2 | no | N/A (IANA procedure) | Registry policy for IANA/IESG; no implementation requirement |
-| Appendix B | Protocol Data Structures and Constant Values | 2 | yes | 4 | Never send the deprecated/obsolete_RESERVED values; we offer and accept one suite, so this holds by construction. |
+| Appendix B | Protocol Data Structures and Constant Values | 2 | yes | 4 | Never send the deprecated/obsolete_RESERVED values; we offer and accept one suite, so this holds by construction.; ✅ 4a: crates/tls/src/server_msgs.rs |
 | Appendix C | Implementation Notes | 1 | partial | 4 | "applications MUST NOT use TLS in such a way absent explicit configuration" (no authentication mechanism): the server always authenticates with its certificate. |
 | Appendix D | Backward Compatibility | 18 | partial | 4 | Server rows: legacy_version / legacy_record_version ignored; negotiate via supported_versions; abort protocol_version when no TLS 1.3 offer (never fall back); never send or negotiate RC4, <112-bit ciphers, SSL 2.0/3.0, SSL 2.0-format ClientHello, legacy_version <= 0x0300 (abort protocol_version), truncated HMAC. All hold by construction (TLS 1.3 only, one suite) but each needs its Phase 4 check. Rows below carve out the exceptions; ✅ 4a: crates/tls/src/client_hello.rs + server_msgs.rs |
 | Appendix D (req) | Client-side backward-compat rules (client aborts on unacceptable version, fails 0-RTT on TLS 1.2 ServerHello, does not send SSLv2 hello) | 3 | no | N/A (client-only) | Client behaviour. |
