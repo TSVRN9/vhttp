@@ -86,3 +86,40 @@ pub(crate) fn p256_ecdsa_sign(d: &[u8], msg: &[u8]) -> Option<[u8; 64]> {
     let sig: p256::ecdsa::Signature = sk.sign(msg);
     Some(sig.to_bytes().into())
 }
+
+struct SaltRng<'a>(&'a [u8], bool); // yields the caller's salt exactly once
+
+impl rsa::rand_core::TryRng for SaltRng<'_> {
+    type Error = core::convert::Infallible;
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        // unreachable: unblinded PSS draws only the salt, through try_fill_bytes
+        unreachable!("PSS draws only the salt")
+    }
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        // unreachable: unblinded PSS draws only the salt, through try_fill_bytes
+        unreachable!("PSS draws only the salt")
+    }
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+        // unreachable: requires salt@.len() == 32; Pss::new_with_salt(32) is unblinded and fills
+        // exactly one 32-byte salt
+        assert!(!self.1 && dst.len() == 32, "unblinded PSS draws exactly one 32-byte salt");
+        dst.copy_from_slice(self.0);
+        self.1 = true;
+        Ok(())
+    }
+}
+
+impl rsa::rand_core::TryCryptoRng for SaltRng<'_> {}
+
+// ponytail: rebuilds and re-validates the RustCrypto key on every signature; the whole shim goes in Phase 5.
+pub(crate) fn rsa_pss_sign(n: &[u8], e: &[u8], d: &[u8], p: &[u8], q: &[u8], msg: &[u8], salt: &[u8]) -> Option<Vec<u8>> {
+    let u = |b: &[u8]| rsa::BoxedUint::from_be_slice_vartime(b);
+    // d is widened past n's precision: at its natural (minimal-byte) precision, RustCrypto's CRT
+    // fault check fails for some keys whose n is not a multiple of 64 bits (e.g. 2052 bits).
+    let n = u(n);
+    let d = &d[d.iter().take_while(|&&b| b == 0).count()..];
+    let d = rsa::BoxedUint::from_be_slice(d, n.bits_precision() + 64).ok()?;
+    let key = rsa::RsaPrivateKey::from_components(n, u(e), d, vec![u(p), u(q)]).ok()?;
+    // Not pss::SigningKey + Signature::to_vec: that pads to limb width (264 bytes for a 2049-bit n).
+    key.sign_with_rng(&mut SaltRng(salt, false), rsa::Pss::<Sha256>::new_with_salt(32), &Sha256::digest(msg)).ok()
+}
