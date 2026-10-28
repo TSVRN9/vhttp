@@ -150,6 +150,40 @@ pub fn process_encoder_stream(buf: &[u8]) -> (r: Result<usize, u64>)
     }
 }
 
+/// Split: once `b` scans to `Ok(n)`, bytes appended after it are scanned as if the first `n`
+/// (complete instructions) were gone.
+pub proof fn lemma_encoder_stream_split(b: Seq<u8>, t: Seq<u8>)
+    requires
+        rfc_encoder_stream(b) is Ok,
+    ensures
+        ({
+            let n = rfc_encoder_stream(b)->Ok_0;
+            &&& n <= b.len()
+            &&& b.len() - n <= 1 + PREFIX_INT_MAX_CONT
+            &&& rfc_encoder_stream(b + t) == add_ok(rfc_encoder_stream(b.skip(n as int) + t), n)
+        }),
+    decreases b.len(),
+{
+    assert(b.skip(0) =~= b);
+    if b.len() > 0 && b[0] & 0xE0u8 == 0x20u8 {
+        assert((b + t)[0] == b[0]);
+        lemma_prefix_int_consumed(5, b);
+        if rfc_prefix_int(5, b) is Incomplete {
+            lemma_prefix_int_incomplete_len(5, b);
+        }
+        if let PrefixIntSpec::Value { value: _, consumed: c } = rfc_prefix_int(5, b) {
+            lemma_prefix_int_append(5, b, t);
+            let s = b.skip(c as int);
+            lemma_encoder_stream_split(s, t);
+            let m = rfc_encoder_stream(s)->Ok_0;
+            assert((b + t).skip(c as int) =~= s + t);
+            lemma_skip_skip(b, c as int, m as int);
+        }
+    } else if b.len() == 0 {
+        assert(b + t =~= t);
+    }
+}
+
 // =============================================================================
 // Decoder stream (RFC 9204 §4.4)
 // =============================================================================
@@ -233,6 +267,40 @@ pub fn process_decoder_stream(buf: &[u8]) -> (r: Result<usize, u64>)
                 pos += consumed;
             },
         }
+    }
+}
+
+/// Split: once `b` scans to `Ok(n)`, bytes appended after it are scanned as if the first `n`
+/// (complete instructions) were gone.
+pub proof fn lemma_decoder_stream_split(b: Seq<u8>, t: Seq<u8>)
+    requires
+        rfc_decoder_stream(b) is Ok,
+    ensures
+        ({
+            let n = rfc_decoder_stream(b)->Ok_0;
+            &&& n <= b.len()
+            &&& b.len() - n <= 1 + PREFIX_INT_MAX_CONT
+            &&& rfc_decoder_stream(b + t) == add_ok(rfc_decoder_stream(b.skip(n as int) + t), n)
+        }),
+    decreases b.len(),
+{
+    assert(b.skip(0) =~= b);
+    if b.len() > 0 && b[0] & 0xC0u8 == 0x40u8 {
+        assert((b + t)[0] == b[0]);
+        lemma_prefix_int_consumed(6, b);
+        if rfc_prefix_int(6, b) is Incomplete {
+            lemma_prefix_int_incomplete_len(6, b);
+        }
+        if let PrefixIntSpec::Value { value: _, consumed: c } = rfc_prefix_int(6, b) {
+            lemma_prefix_int_append(6, b, t);
+            let s = b.skip(c as int);
+            lemma_decoder_stream_split(s, t);
+            let m = rfc_decoder_stream(s)->Ok_0;
+            assert((b + t).skip(c as int) =~= s + t);
+            lemma_skip_skip(b, c as int, m as int);
+        }
+    } else if b.len() == 0 {
+        assert(b + t =~= t);
     }
 }
 
