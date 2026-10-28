@@ -44,6 +44,8 @@ fn proceed(chain: usize, scheme: u16, share: usize) -> Result<Choice, u64> {
 #[test]
 fn a2_alpn() {
     assert_eq!(negotiate(&p(A2_CH), &ecdsa_cfg(), false), Err(0x178));
+    let ch = h3_ch(&[p256()], |e| e.retain(|(t, _)| *t != 0x10));
+    assert_eq!(negotiate(&p(&ch), &ecdsa_cfg(), false), Err(0x178));
 }
 
 #[test]
@@ -97,6 +99,10 @@ fn chain_selection() {
     let two = || dummy_cfg(vec![(ecdsa(), vec![0x0401]), (rsa(), vec![])]);
     assert_eq!(n(two(), &[0x0403, 0x0804], None), proceed(1, 0x0804, 0));
     assert_eq!(n(two(), &[0x0403, 0x0804], Some(&[0x0401])), proceed(0, 0x0403, 0));
+    // §4.2.3: a SHA-1-free chain that fits beats an earlier one signed with an offered SHA-1.
+    let sha1_first = || dummy_cfg(vec![(ecdsa(), vec![0x0201]), (ecdsa(), vec![0x0401])]);
+    assert_eq!(n(sha1_first(), &[0x0403], Some(&[0x0201, 0x0401])), proceed(1, 0x0403, 0));
+    assert_eq!(n(dummy_cfg(vec![(ecdsa(), vec![0x0202])]), &[0x0403], None), Err(0x128));
     assert_eq!(n(dummy_cfg(vec![(ecdsa(), vec![0x0501])]), &[0x0403], None), proceed(0, 0x0403, 0));
     assert_eq!(n(dummy_cfg(vec![(ecdsa(), vec![0x0203])]), &[0x0403], None), Err(0x128));
     assert_eq!(n(dummy_cfg(vec![(rsa(), vec![])]), &[0x0403], None), Err(0x128));

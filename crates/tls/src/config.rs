@@ -100,7 +100,7 @@ impl ServerConfig {
     }
 }
 
-pub fn key_scheme_of(k: &SigningKey) -> (r: u16)
+pub(crate) fn key_scheme_of(k: &SigningKey) -> (r: u16)
     ensures
         r == key_scheme(k@),
 {

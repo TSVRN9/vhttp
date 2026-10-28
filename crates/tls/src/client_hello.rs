@@ -561,7 +561,7 @@ fn ext_data(x: &Vec<Ext>, ty: u16) -> (r: Option<&[u8]>)
     }
 }
 
-pub fn has_u16(v: &Vec<u16>, t: u16) -> (r: bool)
+pub(crate) fn has_u16(v: &Vec<u16>, t: u16) -> (r: bool)
     ensures
         r == v@.contains(t),
 {

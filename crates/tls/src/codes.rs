@@ -69,6 +69,7 @@ pub const ECDSA_SECP256R1_SHA256: u16 = 0x0403;  // ecdsa_secp256r1_sha256
 pub const RSA_PSS_RSAE_SHA256: u16 = 0x0804;  // rsa_pss_rsae_sha256
 pub const RSA_PKCS1_SHA1: u16 = 0x0201;  // rsa_pkcs1_sha1
 pub const ECDSA_SHA1: u16 = 0x0203;  // ecdsa_sha1
+pub const DSA_SHA1_RESERVED: u16 = 0x0202;  // dsa_sha1_RESERVED (Appendix B.3.1.3)
 
 // CRYPTO_ERROR_BASE + AlertDescription (RFC 8446 §6; RFC 9001 §4.8)
 pub const ALERT_HANDSHAKE_FAILURE: u64 = 0x128;  // handshake_failure(40)
