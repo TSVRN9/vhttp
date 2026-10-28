@@ -454,6 +454,161 @@ proof fn lemma_decodes_imp(input: Seq<u8>, s: Seq<u8>)
     assert(Seq::<bool>::empty() + bytes_to_bits(input) =~= bytes_to_bits(input));
 }
 
+// =============================================================================
+// Uniqueness: at most one byte string decodes from a given input
+// =============================================================================
+
+/// Only `2^l - 1` has the all-ones `l`-bit string.
+proof fn lemma_bits_of_ones(x: nat, l: nat)
+    requires
+        x < pow2(l),
+        bits_of(x, l) == ones(l),
+    ensures
+        x + 1 == pow2(l),
+    decreases l,
+{
+    if l == 0 {
+        lemma2_to64();
+    } else {
+        let l1 = (l - 1) as nat;
+        lemma_pow2_unfold(l);
+        lemma_bits_of_len(x / 2, l1);
+        assert(bits_of(x, l).drop_last() == bits_of(x / 2, l1));
+        assert(ones(l).drop_last() =~= ones(l1));
+        assert(bits_of(x, l).last() == (x % 2 == 1));
+        assert(ones(l).last());
+        lemma_bits_of_ones(x / 2, l1);
+    }
+}
+
+/// `sorted` inverts the code table: each byte sits at its code's slot.
+proof fn lemma_code_inv(a: nat)
+    requires
+        a < 256,
+    ensures
+        ({
+            let (c, l) = spec_huff_code(a);
+            let (f, _n, o) = spec_huff_len_info(l);
+            spec_huff_sorted((o + c - f) as nat) == a
+        }),
+{
+}
+
+proof fn lemma_code_inj(a: nat, b: nat)
+    requires
+        a < 256,
+        b < 256,
+        code_bits(a) == code_bits(b),
+    ensures
+        a == b,
+{
+    lemma_code_len(a);
+    lemma_code_len(b);
+    lemma_sym_ok(a);
+    lemma_sym_ok(b);
+    lemma_bits_of_inj(spec_huff_code(a).0 as nat, spec_huff_code(b).0 as nat, spec_huff_code(a).1);
+    lemma_code_inv(a);
+    lemma_code_inv(b);
+}
+
+/// No byte's code is all ones within 7 bits (all codes up to 7 bits sit below `2^l - 1`).
+proof fn lemma_short_not_ones(a: nat)
+    requires
+        a < 256,
+        code_bits(a).len() <= 7,
+    ensures
+        code_bits(a) != ones(code_bits(a).len()),
+{
+    lemma_code_len(a);
+    lemma_sym_ok(a);
+    let (c, l) = spec_huff_code(a);
+    if code_bits(a) == ones(l) {
+        lemma_bits_of_ones(c as nat, l);
+        lemma2_to64();
+        assert(false);
+    }
+}
+
+/// A non-empty code string cannot fit in at most 7 bits of padding.
+proof fn lemma_ones_no_code(s: Seq<u8>, k: nat, k0: nat)
+    requires
+        s.len() > 0,
+        k0 <= 7,
+        encode_bits(s) + ones(k) == ones(k0),
+    ensures
+        false,
+{
+    let c = code_bits(s[0] as nat);
+    let w = ones(k0);
+    assert(encode_bits(s) + ones(k) =~= c + (encode_bits(s.drop_first()) + ones(k)));
+    lemma_code_len(s[0] as nat);
+    assert(c =~= w.subrange(0, c.len() as int));
+    assert(c =~= ones(c.len()));
+    lemma_short_not_ones(s[0] as nat);
+}
+
+proof fn lemma_unique_bits(s1: Seq<u8>, k1: nat, s2: Seq<u8>, k2: nat)
+    requires
+        k1 <= 7,
+        k2 <= 7,
+        encode_bits(s1) + ones(k1) == encode_bits(s2) + ones(k2),
+    ensures
+        s1 == s2,
+    decreases s1.len() + s2.len(),
+{
+    if s1.len() == 0 && s2.len() == 0 {
+        assert(s1 =~= s2);
+    } else if s1.len() == 0 {
+        assert(encode_bits(s1) + ones(k1) =~= ones(k1));
+        lemma_ones_no_code(s2, k2, k1);
+    } else if s2.len() == 0 {
+        assert(encode_bits(s2) + ones(k2) =~= ones(k2));
+        lemma_ones_no_code(s1, k1, k2);
+    } else {
+        let a1 = s1[0] as nat;
+        let a2 = s2[0] as nat;
+        let c1 = code_bits(a1);
+        let c2 = code_bits(a2);
+        let t1 = encode_bits(s1.drop_first()) + ones(k1);
+        let t2 = encode_bits(s2.drop_first()) + ones(k2);
+        let w = encode_bits(s1) + ones(k1);
+        assert(w =~= c1 + t1);
+        assert(w =~= c2 + t2);
+        lemma_code_len(a1);
+        lemma_code_len(a2);
+        if c1.len() < c2.len() {
+            assert(c2.subrange(0, c1.len() as int) =~= w.subrange(0, c1.len() as int));
+            assert(w.subrange(0, c1.len() as int) =~= c1);
+            lemma_prefix_free(a1, a2);
+        } else if c2.len() < c1.len() {
+            assert(c1.subrange(0, c2.len() as int) =~= w.subrange(0, c2.len() as int));
+            assert(w.subrange(0, c2.len() as int) =~= c2);
+            lemma_prefix_free(a2, a1);
+        }
+        assert(c1 =~= w.subrange(0, c1.len() as int));
+        assert(c2 =~= w.subrange(0, c2.len() as int));
+        lemma_code_inj(a1, a2);
+        assert(t1 =~= w.subrange(c1.len() as int, w.len() as int));
+        assert(t2 =~= w.subrange(c2.len() as int, w.len() as int));
+        lemma_unique_bits(s1.drop_first(), k1, s2.drop_first(), k2);
+        assert(s1 =~= seq![s1[0]] + s1.drop_first());
+        assert(s2 =~= seq![s2[0]] + s2.drop_first());
+    }
+}
+
+/// Huffman decoding is a function: at most one string decodes from a given input.
+pub proof fn lemma_huffman_unique(input: Seq<u8>, s1: Seq<u8>, s2: Seq<u8>)
+    requires
+        rfc_huffman_decodes(input, s1),
+        rfc_huffman_decodes(input, s2),
+    ensures
+        s1 == s2,
+{
+    let k1 = choose|k: nat| k <= 7 && bytes_to_bits(input) == encode_bits(s1) + #[trigger] ones(k);
+    let k2 = choose|k: nat| k <= 7 && bytes_to_bits(input) == encode_bits(s2) + #[trigger] ones(k);
+    lemma_unique_bits(s1, k1, s2, k2);
+}
+
 spec fn state_ok(
     bits: Seq<bool>,
     t: int,

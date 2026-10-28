@@ -312,6 +312,47 @@ pub proof fn theorem_prefix_int_roundtrip(n: u8, flags: u8, v: u64)
     }
 }
 
+proof fn lemma_cont_facts(b: Seq<u8>, k: nat, acc: nat, t: Seq<u8>)
+    ensures
+        rfc_prefix_cont(b, k, acc) matches PrefixIntSpec::Value { consumed, .. } ==> k + 2
+            <= consumed <= k + 1 + b.len(),
+        rfc_prefix_cont(b, k, acc) is Value ==> rfc_prefix_cont(b + t, k, acc) == rfc_prefix_cont(
+            b,
+            k,
+            acc,
+        ),
+    decreases b.len(),
+{
+    if b.len() > 0 {
+        assert((b + t)[0] == b[0]);
+        assert((b + t).skip(1) =~= b.skip(1) + t);
+        lemma_cont_facts(b.skip(1), k + 1, acc + (b[0] & 127u8) as nat * pow2(7 * k), t);
+    }
+}
+
+/// A decoded integer occupies between 1 and `b.len()` bytes.
+pub proof fn lemma_prefix_int_consumed(n: u8, b: Seq<u8>)
+    ensures
+        rfc_prefix_int(n, b) matches PrefixIntSpec::Value { consumed, .. } ==> 1 <= consumed
+            <= b.len(),
+{
+    if b.len() > 0 {
+        lemma_cont_facts(b.skip(1), 0, b[0] as nat % pow2(n as nat), Seq::empty());
+    }
+}
+
+/// Prefix stability: bytes after a complete integer don't change how it decodes.
+pub proof fn lemma_prefix_int_append(n: u8, b: Seq<u8>, t: Seq<u8>)
+    requires
+        rfc_prefix_int(n, b) is Value,
+    ensures
+        rfc_prefix_int(n, b + t) == rfc_prefix_int(n, b),
+{
+    assert((b + t)[0] == b[0]);
+    assert((b + t).skip(1) =~= b.skip(1) + t);
+    lemma_cont_facts(b.skip(1), 0, b[0] as nat % pow2(n as nat), t);
+}
+
 // =============================================================================
 // Executable codec
 // =============================================================================
