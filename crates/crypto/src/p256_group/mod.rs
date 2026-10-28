@@ -1,0 +1,6 @@
+#![allow(dead_code)]
+//! P-256 group law (Phase 5d): proofs of `lemma_scalar_mult_double` and
+//! `lemma_scalar_mult_g_nonzero` over the frozen `crate::p256` spec, with no new trusted base.
+//! Exported lemmas are `mod.rs` wrappers: proof fns are erased, so `use` re-exports fail to build.
+
+mod nt;
