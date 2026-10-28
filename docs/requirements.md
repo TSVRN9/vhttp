@@ -373,7 +373,7 @@ Total keyword count: 307 across 115 sections.
 |---|---|---|---|---|---|
 | 4 | Carrying TLS Messages | 1 | yes | 4 | Retransmitted CRYPTO data MUST use the same keys as the original, even after TLS moves to newer keys. |
 | 4.1.2 | Handshake Confirmed | 1 | yes | 4 | Server MUST send HANDSHAKE_DONE as soon as the handshake completes. 4b: crates/tls/src/server.rs: `TlsEvent::Complete` / `is_complete()` (closed in 4c) |
-| 4.1.3 | Sending and Receiving Handshake Messages | 3 | yes | 4 | CRYPTO data from an earlier level MUST NOT extend past previously received data (PROTOCOL_VIOLATION); unconsumed lower-level data when higher-level keys arrive is PROTOCOL_VIOLATION. 4b: crates/tls/src/server.rs: `pending(level)` for the data TLS has not consumed (closed in 4c) |
+| 4.1.3 | Sending and Receiving Handshake Messages | 3 | yes | 4 | CRYPTO data from an earlier level MUST NOT extend past previously received data (PROTOCOL_VIOLATION); unconsumed lower-level data when higher-level keys arrive is PROTOCOL_VIOLATION. 4b: crates/tls/src/server.rs: `pending(level)` for the data TLS has not consumed; 4c checks CRYPTO offsets per level before `on_crypto`, which returns 0x10a for new data at a finished level (closed in 4c) |
 | 4.2 | TLS Version | 2 | partial | 4 | Server only negotiates 1.3, so the "terminate if older than 1.3 is negotiated" rule holds by construction; ✅ 4a: crates/tls/src/client_hello.rs + server_msgs.rs |
 | 4.2 (req) | Clients MUST NOT offer TLS older than 1.3 | 1 | no | N/A (client-only) | "Clients MUST NOT offer TLS versions older than 1.3." |
 | 4.4 | Peer Authentication | 4 | partial | 4 | Server MUST NOT use post-handshake client auth and MUST NOT send post-handshake CertificateRequest. We never request client certificates at all; ✅ 4a: crates/tls/src/server_msgs.rs |
@@ -527,7 +527,7 @@ Total keyword count: 38 across 19 sections.
 | 5.2 | Record Payload Protection | 5 | no | 4 | replaced by QUIC (RFC 9001 §4); packet protection in RFC 9001 §5 |
 | 5.3 | Per-Record Nonce | 3 | no | 4 | replaced by QUIC (RFC 9001 §4); nonce from packet number per RFC 9001 §5.3 |
 | 5.4 | Record Padding | 6 | no | 4 | replaced by QUIC (RFC 9001 §4) |
-| 6 | Alert Protocol | 7 | partial | 4 | Alerts become CRYPTO_ERROR (0x0100 + alert) and are always fatal (RFC 9001 §4.8); decode_error/illegal_parameter mapping; forget secrets of failed connections; 4a codec: crates/tls/src/client_hello.rs (closed in 4c); 4b: crates/tls/src/server.rs: `0x100 + alert` codes; secrets and transcript zeroed on `Failed` (closed in 4c) |
+| 6 | Alert Protocol | 7 | partial | 4 | Alerts become CRYPTO_ERROR (0x0100 + alert) and are always fatal (RFC 9001 §4.8); decode_error/illegal_parameter mapping; forget secrets of failed connections; 4a codec: crates/tls/src/client_hello.rs (closed in 4c); 4b: crates/tls/src/server.rs: `0x100 + alert` codes; `client_vd` overwritten on `Failed`; transcript and CH1 dropped; handshake and master secrets never retained in `ServerHandshake` (no zeroization) (closed in 4c) |
 | 6.1 | Closure Alerts | 4 | no | 4 | replaced by QUIC (RFC 9001 §4): connection close via CONNECTION_CLOSE, no close_notify |
 | 6.2 | Error Alerts | 3 | yes | 4 | Fatal error closes connection; alert maps to QUIC error code |
 | 7.4.2 | Elliptic Curve Diffie-Hellman | 2 | partial | 4 | Do not truncate leading zeros of shared secret (P-256 X coordinate, 32 bytes) ✅ 4b: crates/tls/src/flight.rs (shared secret is a [u8; 32]; all-zero secret aborts with illegal_parameter) |
