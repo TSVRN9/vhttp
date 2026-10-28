@@ -35,7 +35,7 @@ It consumes 3b `Frame` values and emits exactly the events `h3::conn` takes: `on
    - a peer exceeding our limit is STREAM_LIMIT_ERROR;
    - a MAX_STREAMS that doesn't increase the limit is ignored;
    - local stream IDs are never reused;
-   - we advertise at least `h3::uni::MIN_PEER_UNI_STREAMS` (3).
+   - we advertise at least `h3::limits::MIN_PEER_UNI_STREAMS` (3).
 2. **`quic::recv_stream`** (§3.2, §2.2, §4.5):
    - the states Recv, Size Known, Data Recvd, Data Read, Reset Recvd and Reset Read;
    - a reassembly buffer bounded by the advertised stream window;
