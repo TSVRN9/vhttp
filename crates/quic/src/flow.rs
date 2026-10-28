@@ -60,7 +60,9 @@ impl RecvCredit {
     pub closed spec fn wf(&self) -> bool {
         &&& self.consumed <= self.limit <= self.cap <= VARINT_MAX
         &&& self.window <= self.cap
-        &&& self.next matches Some(v) ==> self.limit <= v <= self.cap
+        &&& self.limit <= self.consumed + self.window
+        &&& self.next matches Some(v) ==> self.limit <= v <= self.cap && v <= self.consumed
+            + self.window
     }
 
     pub closed spec fn limit_spec(&self) -> u64 {
@@ -90,7 +92,9 @@ impl RecvCredit {
         ensures
             self.consumed_spec() <= self.limit_spec() <= self.cap_spec() <= VARINT_MAX,
             self.window_spec() <= self.cap_spec(),
-            self.pending_spec() matches Some(v) ==> self.limit_spec() <= v <= self.cap_spec(),
+            self.limit_spec() <= self.consumed_spec() + self.window_spec(),
+            self.pending_spec() matches Some(v) ==> self.limit_spec() <= v <= self.cap_spec() && v
+                <= self.consumed_spec() + self.window_spec(),
     {
     }
 

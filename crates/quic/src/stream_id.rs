@@ -80,6 +80,21 @@ impl StreamIds {
         &&& self.peer_uni.cap_spec() == MAX_STREAMS_LIMIT
         &&& self.peer_bidi.consumed_spec() <= self.peer_bidi_next <= self.peer_bidi.limit_spec()
         &&& self.peer_uni.consumed_spec() <= self.peer_uni_next <= self.peer_uni.limit_spec()
+        &&& self.local_uni.max_spec() <= MAX_STREAMS_LIMIT
+    }
+
+    /// The per-direction part of the invariant that `lemma_wf` exports.
+    pub open spec fn peer_side_ok(&self, b: bool) -> bool {
+        let c = self.peer_credit_spec(b);
+        &&& c.wf()
+        &&& c.cap_spec() == MAX_STREAMS_LIMIT
+        &&& c.consumed_spec() <= self.peer_opened_spec(b) <= self.peer_limit_spec(b)
+        &&& self.peer_limit_spec(b) == c.limit_spec()
+        &&& self.peer_limit_spec(b) <= c.consumed_spec() + c.window_spec()
+        &&& self.pending_max_streams_spec(b) == c.pending_spec()
+        &&& self.peer_limit_spec(b) <= MAX_STREAMS_LIMIT
+        &&& self.pending_max_streams_spec(b) matches Some(v) ==> self.peer_limit_spec(b) <= v
+            <= MAX_STREAMS_LIMIT && v <= c.consumed_spec() + c.window_spec()
     }
 
     /// How many peer streams of this direction are open or were.
@@ -136,20 +151,12 @@ impl StreamIds {
         requires
             self.wf(),
         ensures
-            forall|b: bool|
-                {
-                    &&& #[trigger] self.peer_credit_spec(b).wf()
-                    &&& self.peer_credit_spec(b).cap_spec() == MAX_STREAMS_LIMIT
-                    &&& self.peer_credit_spec(b).consumed_spec() <= self.peer_opened_spec(b)
-                        <= self.peer_limit_spec(b)
-                    &&& self.peer_limit_spec(b) == self.peer_credit_spec(b).limit_spec()
-                    &&& self.pending_max_streams_spec(b) == self.peer_credit_spec(b).pending_spec()
-                    &&& self.peer_limit_spec(b) <= MAX_STREAMS_LIMIT
-                    &&& self.pending_max_streams_spec(b) matches Some(v) ==> self.peer_limit_spec(b)
-                        <= v <= MAX_STREAMS_LIMIT
-                },
+            self.peer_side_ok(true),
+            self.peer_side_ok(false),
             self.local_uni_spec().wf(),
             self.local_uni_limit_spec() == self.local_uni_spec().max_spec(),
+            self.local_uni_limit_spec() <= MAX_STREAMS_LIMIT,
+            self.local_uni_spec().used_spec() <= self.local_uni_limit_spec(),
             forall|id: u64| #[trigger]
                 self.peer_created_spec(id) == (if id % 4 == 0 {
                     id / 4 < self.peer_opened_spec(true)
@@ -164,6 +171,7 @@ impl StreamIds {
     {
         self.peer_bidi.lemma_wf();
         self.peer_uni.lemma_wf();
+        self.local_uni.lemma_wf();
     }
 
     /// `local_max_*`: the stream limits we advertise in our transport parameters.
@@ -461,6 +469,7 @@ impl StreamIds {
     pub fn on_max_streams(&mut self, bidi: bool, max: u64)
         requires
             old(self).wf(),
+            !bidi ==> max <= MAX_STREAMS_LIMIT,
         ensures
             final(self).wf(),
             bidi ==> *final(self) == *old(self),
