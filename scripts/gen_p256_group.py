@@ -5,6 +5,7 @@ Run: python3 -I scripts/gen_p256_group.py [--check]
 Not trusted: every emitted datum is re-checked by Verus (certificates by compute_only)."""
 import filecmp
 import json
+import math
 import sys
 import tempfile
 from pathlib import Path
@@ -17,6 +18,11 @@ P = 2**256 - 2**224 + 2**192 + 2**96 - 1
 N = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
 B = 0x5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604B
 SMALL = 1 << 16
+# Compute chunk sizes: the interpreter's recursion-depth and step budgets scale with --rlimit, and
+# every chunk must pass at --rlimit 0.6 (6x under 4). Exponents are split every W bits, trial
+# division every SEG candidates.
+W = 48
+SEG = 32
 
 
 # ---------------------------------------------------------------------------------------------
@@ -43,6 +49,95 @@ def load_pratt():
     return cert
 
 
+def chunks(e):
+    """Exponent prefixes e >> (W * i), shortest first, ending at e itself."""
+    c = -(-e.bit_length() // W)
+    return [e >> (W * (c - 1 - j)) for j in range(c)]
+
+
+def gen_powmod_chain(name, A, Q, a, q, ex, e, pre, fact, lit):
+    """Lemma `name` ensuring `fact`, i.e. `pre` and a fact about powmod(A, ex, Q), with ex == e.
+    One compute assert when e has at most W bits, else a chain of W-bit prefix chunks joined by
+    `lemma_powmod_ext`; `pre` is checked in the last chunk."""
+    if e.bit_length() <= W:
+        return f"""proof fn {name}()
+    ensures
+        {fact},
+{{
+    assert({fact}) by (compute_only);
+}}
+
+"""
+    es = chunks(e)
+    ms = [pow(a, x, q) for x in es]
+    o, calls = [], []
+    for j, (x, m) in enumerate(zip(es, ms)):
+        last = j == len(es) - 1
+        xs = ex if last else f"{x}nat"
+        ms_ = lit(m) or f"{m}int"
+        if j == 0:
+            st = f"powmod({A}, {xs}, {Q} as int) == {ms_}"
+        else:
+            st = (f"{pre if last else ''}shr({xs}, {W}) == {es[j - 1]}nat && "
+                  f"powmod_ext({ms[j - 1]}int, {A}, {xs}, {W}, {Q} as int) == {ms_}")
+            calls.append(f"    lemma_powmod_ext({A}, {xs}, {W}, {Q} as int);\n")
+        o.append(f"""proof fn {name}_c{j}()
+    ensures
+        {st},
+{{
+    assert({st}) by (compute_only);
+}}
+
+""")
+        calls.insert(len(calls) - (1 if j else 0), f"    {name}_c{j}();\n")
+    o.append(f"""proof fn {name}()
+    ensures
+        {fact},
+{{
+{"".join(calls)}}}
+
+""")
+    return "".join(o)
+
+
+def gen_trial(r):
+    """Primality of r < 2^16 by trial division, in SEG-candidate chunks joined by `lemma_trial_seg`."""
+    d = math.isqrt(r) + 1
+    if d - 2 <= SEG:
+        return f"""proof fn lemma_trial_{r}()
+    ensures
+        crate::rsa::is_prime({r}),
+{{
+    assert(trial_ok({r})) by (compute_only);
+    lemma_trial_prime({r});
+}}
+
+"""
+    bounds = list(range(2, d, SEG)) + [d]
+    o, calls = [], []
+    for i in reversed(range(len(bounds) - 1)):
+        lo, hi = bounds[i], bounds[i + 1]
+        st = f"trial_seg({r}, {lo}, {hi})" + (f" && trial_from({r}, {d})" if hi == d else "")
+        o.insert(0, f"""proof fn lemma_trial_{r}_c{i}()
+    ensures
+        {st},
+{{
+    assert({st}) by (compute_only);
+}}
+
+""")
+        calls.append(f"    lemma_trial_{r}_c{i}();\n    lemma_trial_seg({r}, {lo}, {hi});\n")
+    o.append(f"""proof fn lemma_trial_{r}()
+    ensures
+        crate::rsa::is_prime({r}),
+{{
+{"".join(calls)}    lemma_trial_prime({r});
+}}
+
+""")
+    return "".join(o)
+
+
 def gen_pratt():
     cert = load_pratt()
     order = sorted(cert)  # children are smaller than parents, so ascending is leaves-first
@@ -66,15 +161,7 @@ verus! {
 
 """)
     for r in small:
-        o.append(f"""proof fn lemma_trial_{r}()
-    ensures
-        crate::rsa::is_prime({r}),
-{{
-    assert(trial_ok({r})) by (compute_only);
-    lemma_trial_prime({r});
-}}
-
-""")
+        o.append(gen_trial(r))
     for q in order:
         a, fs = cert[q]
         x = label[q]
@@ -106,26 +193,15 @@ proof fn lemma_cert_{x}_shape()
     assert({shape}) by (compute_only);
 }}
 
-proof fn lemma_cert_{x}_full()
-    ensures
-        {full},
-{{
-    assert({full}) by (compute_only);
-}}
-
 """)
-        for k in range(len(fs)):
+        o.append(gen_powmod_chain(f"lemma_cert_{x}_full", A, Q, a, q, f"({Q} - 1) as nat", q - 1, "",
+                                  full, lambda m: "1" if m == 1 else None))
+        for k, (r, _) in enumerate(fs):
             rk = f"({FS}[{k}].0 as int)"
-            fact = (f"{FS}[{k}].0 > 1 && ({Q} - 1) % {rk} == 0 && "
-                    f"powmod({A}, (({Q} - 1) / {rk}) as nat, {Q} as int) != 1")
-            o.append(f"""proof fn lemma_cert_{x}_{k}()
-    ensures
-        {fact},
-{{
-    assert({fact}) by (compute_only);
-}}
-
-""")
+            pre = f"{FS}[{k}].0 > 1 && ({Q} - 1) % {rk} == 0"
+            fact = f"{pre} && powmod({A}, (({Q} - 1) / {rk}) as nat, {Q} as int) != 1"
+            o.append(gen_powmod_chain(f"lemma_cert_{x}_{k}", A, Q, a, q, f"(({Q} - 1) / {rk}) as nat",
+                                      (q - 1) // r, pre + " && ", fact, lambda m: None))
         calls = "".join(f"    lemma_cert_{x}_{k}();\n" for k in range(len(fs)))
         o.append(f"""proof fn lemma_cert_{x}()
     ensures
@@ -229,6 +305,36 @@ def pdivmod(a, b):
     return ptrim(q), a
 
 
+def xp_chain(q2):
+    """lemma_xp_mod_f: qpow(X, p) == XP_POLY in W-bit prefix chunks joined by `lemma_qpow_ext`."""
+    q2p = lambda a: f"({q2(a)})"  # struct literals need parentheses in expressions
+    es = chunks(P)
+    ms = [qpow((0, 1, 0), x) for x in es]
+    o, calls = [], []
+    for j, (x, m) in enumerate(zip(es, ms)):
+        last = j == len(es) - 1
+        xs, mv = ("P_LIT() as nat", "XP_POLY()") if last else (f"{x}nat", q2p(m))
+        if j == 0:
+            st = f"qpow(X(), {xs}) == {mv}"
+        else:
+            st = f"shr({xs}, {W}) == {es[j - 1]}nat && qpow_ext({q2p(ms[j - 1])}, X(), {xs}, {W}) == {mv}"
+        o.append(f"""proof fn lemma_xp_c{j}()
+    ensures
+        {st},
+{{
+    assert({st}) by (compute_only);
+}}
+
+""")
+        calls.append(f"    lemma_xp_c{j}();\n" + (f"    lemma_qpow_ext(X(), {xs}, {W});\n" if j else ""))
+    return "".join(o) + f"""pub(crate) proof fn lemma_xp_mod_f()
+    ensures
+        qpow(X(), P_LIT() as nat) == XP_POLY(),
+{{
+{"".join(calls)}}}
+"""
+
+
 def gen_torsion():
     g = qpow((0, 1, 0), P)
     f = ptrim([B, -3, 0, 1])
@@ -252,6 +358,8 @@ def gen_torsion():
 #[allow(unused_imports)]
 use super::field::*;
 #[allow(unused_imports)]
+use super::nt::*;
+#[allow(unused_imports)]
 use super::torsion::*;
 use vstd::prelude::*;
 
@@ -270,13 +378,7 @@ pub(crate) open spec fn V() -> Q2 {{
     {q2(v)}
 }}
 
-pub(crate) proof fn lemma_xp_mod_f()
-    ensures
-        qpow(X(), P_LIT() as nat) == XP_POLY(),
-{{
-    assert(qpow(X(), P_LIT() as nat) == XP_POLY()) by (compute_only);
-}}
-
+{xp_chain(q2)}
 pub(crate) proof fn lemma_bezout_cert()
     ensures
         bez_ok(U(), V(), XP_POLY()),
