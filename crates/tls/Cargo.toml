@@ -12,3 +12,6 @@ verify = true
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)'] }
+
+[dev-dependencies]
+ring = "=0.17.14"
