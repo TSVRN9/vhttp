@@ -102,6 +102,45 @@ pub(crate) open spec fn trial_ok(r: nat) -> bool {
     trial_from(r, 2)
 }
 
+/// No k in [lo, hi) divides r (one chunk of `trial_from`).
+pub(crate) open spec fn trial_seg(r: nat, lo: nat, hi: nat) -> bool
+    decreases hi - lo,
+{
+    if lo >= hi {
+        true
+    } else {
+        r % lo != 0 && trial_seg(r, lo + 1, hi)
+    }
+}
+
+/// e >> k.
+pub(crate) open spec fn shr(e: nat, k: nat) -> nat
+    decreases k,
+{
+    if k == 0 {
+        e
+    } else {
+        shr(e / 2, (k - 1) as nat)
+    }
+}
+
+/// `powmod` resumed from s == a^(e >> k) mod q through the low k bits of e (one chunk).
+pub(crate) open spec fn powmod_ext(s: int, a: int, e: nat, k: nat, q: int) -> int
+    decreases k,
+{
+    if k == 0 {
+        s
+    } else {
+        let h = powmod_ext(s, a, e / 2, (k - 1) as nat, q);
+        let s2 = (h * h) % q;
+        if e % 2 == 0 {
+            s2
+        } else {
+            (s2 * (a % q)) % q
+        }
+    }
+}
+
 /// Euclid's gcd.
 pub(crate) open spec fn gcd(a: nat, b: nat) -> nat
     decreases b,
@@ -142,6 +181,32 @@ pub(crate) proof fn lemma_powmod(a: int, e: nat, q: int)
             lemma_pow1(a);
             lemma_mul_mod_noop_general(pow(a, k + k), a, q);
         }
+    }
+}
+
+pub(crate) proof fn lemma_shr_pos(e: nat, k: nat)
+    requires
+        shr(e, k) > 0,
+    ensures
+        e > 0,
+    decreases k,
+{
+    if k > 0 {
+        lemma_shr_pos(e / 2, (k - 1) as nat);
+    }
+}
+
+/// Exponent-prefix split of `powmod`.
+pub(crate) proof fn lemma_powmod_ext(a: int, e: nat, k: nat, q: int)
+    requires
+        shr(e, k) > 0,
+    ensures
+        powmod(a, e, q) == powmod_ext(powmod(a, shr(e, k), q), a, e, k, q),
+    decreases k,
+{
+    if k > 0 {
+        lemma_shr_pos(e, k);
+        lemma_powmod_ext(a, e / 2, (k - 1) as nat, q);
     }
 }
 
@@ -506,6 +571,21 @@ proof fn lemma_trial_from(r: nat, d: nat, m: nat)
     ;
     if d < m {
         lemma_trial_from(r, d + 1, m);
+    }
+}
+
+/// Chunked trial division: [lo, hi) clear and trial_from(r, hi) give trial_from(r, lo).
+pub(crate) proof fn lemma_trial_seg(r: nat, lo: nat, hi: nat)
+    requires
+        lo <= hi,
+        trial_seg(r, lo, hi),
+        trial_from(r, hi),
+    ensures
+        trial_from(r, lo),
+    decreases hi - lo,
+{
+    if lo < hi {
+        lemma_trial_seg(r, lo + 1, hi);
     }
 }
 

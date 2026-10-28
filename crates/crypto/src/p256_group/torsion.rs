@@ -5,6 +5,8 @@
 #[allow(unused_imports)]
 use super::field::*;
 #[allow(unused_imports)]
+use super::nt::*;
+#[allow(unused_imports)]
 use super::torsion_cert::*;
 #[allow(unused_imports)]
 use crate::p256::*;
@@ -69,6 +71,23 @@ pub(crate) open spec fn qpow(a: Q2, e: nat) -> Q2
     }
 }
 
+/// `qpow` resumed from s == a^(e >> k) through the low k bits of e (one chunk).
+pub(crate) open spec fn qpow_ext(s: Q2, a: Q2, e: nat, k: nat) -> Q2
+    decreases k,
+{
+    if k == 0 {
+        s
+    } else {
+        let h = qpow_ext(s, a, e / 2, (k - 1) as nat);
+        let s2 = qmul(h, h);
+        if e % 2 == 0 {
+            s2
+        } else {
+            qmul(s2, a)
+        }
+    }
+}
+
 /// a(r) (over the integers).
 pub(crate) open spec fn qev(a: Q2, r: int) -> int {
     a.c0 + a.c1 * r + a.c2 * (r * r)
@@ -82,6 +101,21 @@ pub(crate) open spec fn bez_ok(u: (int, int), v: Q2, g: Q2) -> bool {
     (u.0 * B_LIT() + v.c0 * h0) % P_LIT() == 1 && (u.1 * B_LIT() - 3 * u.0 + v.c0 * h1 + v.c1
         * h0) % P_LIT() == 0 && (-3 * u.1 + v.c0 * h2 + v.c1 * h1 + v.c2 * h0) % P_LIT() == 0 && (
     u.0 + v.c1 * h2 + v.c2 * h1) % P_LIT() == 0 && (u.1 + v.c2 * h2) % P_LIT() == 0
+}
+
+/// Exponent-prefix split of `qpow`.
+pub(crate) proof fn lemma_qpow_ext(a: Q2, e: nat, k: nat)
+    requires
+        shr(e, k) > 0,
+    ensures
+        qpow(a, e) == qpow_ext(qpow(a, shr(e, k)), a, e, k),
+    decreases k,
+{
+    hide(qmul);
+    if k > 0 {
+        lemma_shr_pos(e, k);
+        lemma_qpow_ext(a, e / 2, (k - 1) as nat);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -180,7 +214,6 @@ proof fn lemma_qq_expand(a0: int, a1: int, a2: int, b0: int, b1: int, b2: int, r
 {
     let s = r * r;
     let t = r * r * r;
-    let w = r * r * r * r;
     let bp = b0 + b1 * r + b2 * s;
     lemma_monos(r);
     lemma_dist3(a0, a1 * r, a2 * s, bp);
@@ -214,7 +247,6 @@ proof fn lemma_lf_expand(y0: int, y1: int, r: int)
         (y0 + y1 * r) * (r * r * r - 3 * r + B_LIT()) == y0 * B_LIT() + (y1 * B_LIT() - 3 * y0) * r
             + (-3 * y1) * (r * r) + y0 * (r * r * r) + y1 * (r * r * r * r),
 {
-    let s = r * r;
     let t = r * r * r;
     let b = B_LIT();
     lemma_monos(r);
