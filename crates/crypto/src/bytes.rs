@@ -30,6 +30,17 @@ pub open spec fn i2osp(x: nat, len: nat) -> Seq<u8>
     }
 }
 
+/// `i2osp` yields exactly `len` octets.
+pub proof fn lemma_i2osp_len(x: nat, len: nat)
+    ensures
+        i2osp(x, len).len() == len,
+    decreases len,
+{
+    if len > 0 {
+        lemma_i2osp_len(x / 256, (len - 1) as nat);
+    }
+}
+
 /// Bytewise XOR; the result has the length of `a`.
 pub open spec fn xor_bytes(a: Seq<u8>, b: Seq<u8>) -> Seq<u8> {
     Seq::new(a.len(), |i: int| a[i] ^ b[i])

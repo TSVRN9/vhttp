@@ -60,6 +60,7 @@ pub(crate) fn p256_public_key(d: &[u8]) -> Option<[u8; 65]> {
     // unreachable: requires d@.len() == 32
     let d: [u8; 32] = d.try_into().unwrap();
     let sk = p256::SecretKey::from_bytes((&d).into()).ok()?;
+    // unreachable: a valid scalar never gives the identity, and the uncompressed encoding is 65 bytes
     sk.public_key().to_sec1_point(false).as_bytes().try_into().ok()
 }
 
