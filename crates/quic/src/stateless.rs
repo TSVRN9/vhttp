@@ -35,9 +35,9 @@ pub const RESET_MAX_LEN: usize = 43;
 //# versions that the server supports.
 /// A Version Negotiation packet: first byte 0xc0, Version 0, the client's SCID as our DCID,
 /// the client's DCID as our SCID, then the one version we support. Both CIDs come from
-/// `rfc_long_header`, which reads each length from one byte, so each is at most 255 bytes,
-/// the `as u8` casts are lossless, and the packet is at most 1 + 4 + 2 * (1 + 255) + 4 = 521
-/// bytes.
+/// `rfc_long_header`, which reads each length from one byte, so each is at most 255 bytes
+/// and the `as u8` casts are lossless; `version_negotiation` proves the resulting bound of
+/// 1 + 4 + 2 * (1 + 255) + 4 = 521 bytes.
 pub open spec fn spec_vn_bytes(dcid: Seq<u8>, scid: Seq<u8>) -> Seq<u8>
     recommends
         dcid.len() <= 255,
@@ -137,6 +137,7 @@ fn put_slice(s: &[u8], out: &mut Vec<u8>)
 pub fn version_negotiation(datagram: &[u8]) -> (r: Option<Vec<u8>>)
     ensures
         r.deep_view() == rfc_version_negotiation(datagram@),
+        r matches Some(v) ==> v@.len() <= 521,
 {
     if datagram.len() < MIN_INITIAL_DATAGRAM {
         return None;
@@ -161,6 +162,7 @@ pub fn version_negotiation(datagram: &[u8]) -> (r: Option<Vec<u8>>)
                 assert(QUIC_V1 >> 24u32 == 0 && QUIC_V1 >> 16u32 == 0 && QUIC_V1 >> 8u32 == 0)
                     by (compute_only);
                 assert(out@ =~= spec_vn_bytes(dcid@, scid@));
+                assert(dcid@.len() == datagram@[5] as int);
             }
             Some(out)
         },

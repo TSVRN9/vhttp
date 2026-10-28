@@ -115,8 +115,12 @@ pub open spec fn ack_range(a: SpecAck, i: int) -> (int, int) {
     }
 }
 
-/// `a` acknowledges `pn`.
-pub open spec fn ack_contains(a: SpecAck, pn: u64) -> bool {
+/// `a` acknowledges `pn`. Meaningful only for a frame with valid ranges, which every
+/// `rfc_ack` result has; otherwise a computed bound can be negative.
+pub open spec fn ack_contains(a: SpecAck, pn: u64) -> bool
+    recommends
+        rfc_ack_ranges_valid(a.largest, a.first_range, a.ranges),
+{
     exists|i: int|
         -1 <= i < a.ranges.len() && (#[trigger] ack_range(a, i)).0 <= pn <= ack_range(a, i).1
 }
