@@ -297,7 +297,7 @@ Total keyword count: 44 across 22 sections.
 | 14.1 (req) | Server limits bytes sent before address validation | 1 | yes | 3 | See 8.1 3x row. |
 | 14.2 | Path maximum transmission unit | 1 | yes | 3 | Cease sending if PMTU < 1200 (except probes/CONNECTION_CLOSE). |
 | 14.2.1 | Handling of ICMP messages by PMTUD | 3 | yes | 3 | Only if shell processes ICMP; vacuous otherwise. |
-| 17.1 | Packet number encoding and decoding | 2 | yes | 3 | Full PN before first ACK; size covers > 2x range. |
+| 17.1 | Packet number encoding and decoding | 2 | yes | 3 | Full PN before first ACK; size covers > 2x range. ✅ 3b: crates/quic/src/pn.rs; A.2 pseudocode under-sizes at exact powers of two; §17.1 prose used |
 | 17.2 | Long header packets | 7 | yes | 3 | Fixed bit; CID length <= 20 (drop); reserved bits PROTOCOL_VIOLATION. |
 | 17.2.1 | Version Negotiation packet | 6 | partial | 3 | Server rows are phase 3; one client-only. |
 | 17.2.1 (req) | Client ignores Unused field | 1 | no | N/A (client-only) |  |
