@@ -6,6 +6,8 @@ edition = "2021"
 [dependencies]
 vstd = "=0.0.0-2026-10-04-0306"
 sha2 = { version = "=0.11.1", default-features = false }                                         # Task 1
+hmac = { version = "=0.13.0", default-features = false }                                         # Task 2
+hkdf = { version = "=0.13.0", default-features = false }                                         # Task 2
 
 [package.metadata.verus]
 verify = true
