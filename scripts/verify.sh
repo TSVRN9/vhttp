@@ -15,6 +15,8 @@ fail() { echo "verify.sh: escape gate: $*" >&2; exit 1; }
 rc=0
 hits=$(grep -rnE 'admit[[:space:]]*\(|assume[[:space:]]*\(|external_body|assume_specification|verifier[[:space:]]*(::|\()[[:space:]]*external|\baxiom\b' "$root/crates" --include='*.rs') || rc=$?
 [ "$rc" -le 1 ] || fail "grep failed (rc=$rc)"
+# Escapes split across lines (e.g. `assume` newline `(`), which the line-based grep misses.
+ml=$(grep -rlPz '\b(admit|assume)\s*\(' "$root/crates" --include='*.rs') && fail "escape across lines in: $ml"
 bad=$(printf '%s\n' "$hits" | awk -v pre="$root/crates/crypto/src/" 'NF { f=$0; sub(/:[0-9]+:.*/, "", f); t=$0; sub(/^[^:]*:[0-9]+:[ \t]*/, "", t); if (index(f, pre) != 1 || t != "#[verifier::external_body]") print }')
 [ -z "$bad" ] || fail "unaccounted escape:
 $bad"
