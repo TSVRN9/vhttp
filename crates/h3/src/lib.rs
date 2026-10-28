@@ -3,5 +3,6 @@
 pub mod codes;
 pub mod frame;
 pub mod limits;
+pub mod message;
 pub mod qpack;
 pub mod uni;
