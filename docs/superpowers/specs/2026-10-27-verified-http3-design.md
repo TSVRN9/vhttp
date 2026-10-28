@@ -19,6 +19,7 @@ Calls I made (the user can override them):
   - The server can be configured with an RSA certificate and key. It then signs CertificateVerify with rsa_pss_rsae_sha256: RSASSA-PSS, MGF1-SHA256, salt length 32 (RFC 8446 §4.2.3).
   - rsa_pkcs1_sha256 and rsa_pss_rsae_sha256 are recognized in the client's `signature_algorithms` / `signature_algorithms_cert` when choosing which configured chain to send.
   - **Ruling:** no RSA *verification* code is written. The server verifies no peer signatures, because client certificates are declined. "Support for certificates" is met by sending chains signed with those schemes and by negotiating the codepoints. Revisit this if client authentication is ever added.
+  - RSA certificates must not be deployed before Phase 5 replaces the shim (RUSTSEC-2023-0071, Marvin timing side channel).
 - **"No migration" has a narrow meaning:** we send `disable_active_migration` and never initiate migration. Path validation (PATH_CHALLENGE → PATH_RESPONSE) is still implemented, because it's a MUST.
 - **ECDSA nonces are deterministic (RFC 6979, HMAC-DRBG).** Signing then doesn't depend on the RNG, and proofs reuse the HMAC proofs.
 - **Sans-IO core.** The verified code is pure state machines that take bytes, time and random values as inputs. A thin, unverified shell owns the UDP socket, clock, getrandom and timers. It starts as a blocking `std::net::UdpSocket` loop; an async (tokio) shell can come later for production. Verified code avoids async, trait objects and closures.
