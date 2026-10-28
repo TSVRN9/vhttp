@@ -322,8 +322,8 @@ Total keyword count: 44 across 22 sections.
 | 18.2 (req) | Receiving active_connection_id_limit < 2 is TRANSPORT_PARAMETER_ERROR | 1 | yes | 3 |  |
 | 18.2 (req) | Client MUST NOT include server-only parameters | 1 | no | N/A (client-only) | Client obligation. |
 | 18.2 (req) | Server treats receipt of server-only parameter as TRANSPORT_PARAMETER_ERROR | 1 | yes | 3 | original_destination_connection_id, preferred_address, retry_source_connection_id, stateless_reset_token. |
-| 19.3 | ACK frames | 1 | yes | 3 | Handle both ACK types (with/without ECN). |
-| 19.3.1 | ACK ranges | 1 | yes | 3 | Negative computed PN is FRAME_ENCODING_ERROR. |
+| 19.3 | ACK frames | 1 | yes | 3 | Handle both ACK types (with/without ECN). ✅ 3b: crates/quic/src/ack.rs |
+| 19.3.1 | ACK ranges | 1 | yes | 3 | Negative computed PN is FRAME_ENCODING_ERROR. ✅ 3b: crates/quic/src/ack.rs |
 | 19.4 | RESET_STREAM frames | 1 | yes | 3 | STREAM_STATE_ERROR for send-only stream. |
 | 19.5 | STOP_SENDING frames | 2 | yes | 3 | STREAM_STATE_ERROR cases. |
 | 19.6 | CRYPTO frames | 1 | yes | 3 | Offset limit error. |
