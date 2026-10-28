@@ -197,6 +197,7 @@ pub open spec fn quic_varint_fmt<const MINIMAL: bool>() -> QuicVarIntFmt {
 
 /// A QUIC variable-length integer. `QuicVarInt<false>` accepts any encoding length
 /// (RFC 9000 §16); `QuicVarInt<true>` accepts only the minimal one (frame types, §12.4).
+
 pub struct QuicVarInt<const MINIMAL: bool>;
 
 mod derived_specs {
@@ -865,6 +866,31 @@ proof fn lemma_serialize_bytes<const MINIMAL: bool>(v: u64)
     }
 }
 
+/// Every successful parse (either `MINIMAL`) consumes 1, 2, 4 or 8 bytes and yields a value
+/// within `VARINT_MAX`.
+pub proof fn lemma_parse_bound<const MINIMAL: bool>(b: Seq<u8>)
+    ensures
+        QuicVarInt::<MINIMAL>.spec_parse(b) matches Some((n, v)) ==> v <= VARINT_MAX && (n == 1
+            || n == 2 || n == 4 || n == 8),
+{
+    lemma_parse_matches_rfc::<MINIMAL>(b);
+    if let Some((n, v)) = QuicVarInt::<MINIMAL>.spec_parse(b) {
+        if b.len() > 0 {
+            let b0 = b[0];
+            assert(b0 >> 6 <= 3) by (bit_vector);
+            if b0 >> 6 == 0 {
+                lemma_len1(b0);
+            } else if b0 >> 6 == 1 {
+                lemma_len2(b0, b.subrange(1, 2));
+            } else if b0 >> 6 == 2 {
+                lemma_len4(b0, b.subrange(1, 4));
+            } else {
+                lemma_len8(b0, b.subrange(1, 8));
+            }
+        }
+    }
+}
+
 /// One more `repeat` step: folding `s.push(x)` is folding `s`, then one step with `x`.
 proof fn lemma_read_push(a: u64, s: Seq<u8>, x: u8)
     ensures
@@ -992,6 +1018,8 @@ impl<'i, const MINIMAL: bool> Parser<&'i [u8]> for QuicVarInt<MINIMAL> {
     }
 }
 
+/// Callers outside verified code must call `Prepare::prepare` first: a value above
+/// `VARINT_MAX` is otherwise silently mis-encoded.
 impl<Output: OutputBuf, const MINIMAL: bool> Serializer<Output, u64> for QuicVarInt<MINIMAL> {
     fn serialize_into(&self, v: &u64, obuf: &mut Output) {
         broadcast use vest_lib::core::exec::output::outbuf_lemmas;
@@ -1025,6 +1053,24 @@ impl<Output: OutputBuf, const MINIMAL: bool> Serializer<Output, u64> for QuicVar
     }
 }
 
+impl<const MINIMAL: bool> ByteLen<u64> for QuicVarInt<MINIMAL> {
+    fn length(&self, v: &u64) -> (len: usize) {
+        proof {
+            if *v <= VARINT_MAX {
+                lemma_serialize_bytes::<MINIMAL>(*v);
+            } else {
+                // The mapper sends inconsistent values to `(0, R(R(R(seq![]))))`: 1 byte.
+                assert(QuicVarInt::<MINIMAL>.byte_len(*v) == 1);
+            }
+        }
+        if *v > VARINT_MAX {
+            1
+        } else {
+            exec_min_len(*v)
+        }
+    }
+}
+
 impl<const MINIMAL: bool> Prepare<u64> for QuicVarInt<MINIMAL> {
     fn prepare(&self, v: &u64) -> (checked: Result<usize, PreSerializeError>) {
         if *v > VARINT_MAX {
@@ -1038,3 +1084,13 @@ impl<const MINIMAL: bool> Prepare<u64> for QuicVarInt<MINIMAL> {
 }
 
 } // verus!
+
+// Manual rather than `#[derive]`: the derive's generated items destabilise
+// `lemma_serialize_bytes` (observed). Vest's `Repeat` execs require `Copy`.
+impl<const MINIMAL: bool> Clone for QuicVarInt<MINIMAL> {
+    fn clone(&self) -> Self {
+        QuicVarInt
+    }
+}
+
+impl<const MINIMAL: bool> Copy for QuicVarInt<MINIMAL> {}
