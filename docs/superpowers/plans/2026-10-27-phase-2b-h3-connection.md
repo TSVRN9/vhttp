@@ -28,9 +28,9 @@
 - **Dispatch on `FrameHeader.ty` before calling `parse_frame_payload`.** A frame type that is forbidden on the current stream gets its error code from the type alone, with no buffering and no payload parse. For example, PUSH_PROMISE from a client is H3_FRAME_UNEXPECTED even if its payload is malformed (RFC 9114 §7.2.5). This also applies to HEADERS, DATA and HTTP/2-reserved types on the control stream, and to control-only frames on request streams.
 - **Ruling (Phase 2a final review): every `Err(code)` from the 2a QPACK codecs is a connection error.** RFC 9204 §7.4's request-stream TooLarge, a stream error by the letter, is escalated as RFC 9114 §8 permits.
 - **Never add a MAX_PUSH_ID, CANCEL_PUSH or PUSH_PROMISE serializer.** The server "never sends" rules (RFC 9114 §7.2.5, §7.2.7) hold because those serializers don't exist.
-- **Limits we choose.** These are constants in `h3::conn`, each with a `ponytail:` comment.
+- **Limits we choose.** These are constants in `h3::limits` (`conn.rs` re-exports them), each with a `ponytail:` comment.
   - `MAX_FIELD_SECTION_SIZE: u64 = 65536` is advertised in our SETTINGS. A HEADERS frame payload longer than this is a stream error `H3_EXCESSIVE_LOAD`. `// ponytail: caps the encoded size; RFC 9114 §4.2.2 measures the decoded size; refine if needed.`
-  - `MAX_CONTROL_FRAME: u64 = 16384`. A larger non-DATA frame on the control stream is a connection error `H3_EXCESSIVE_LOAD`.
+  - `MAX_CONTROL_FRAME: u64 = 16384`. A larger **known** non-DATA frame on the control stream is a connection error `H3_EXCESSIVE_LOAD`. Unknown and grease frames are **skipped without buffering at any length** (RFC 9114 §9, §7.2.8), on every stream type. Single-varint frames (GOAWAY, MAX_PUSH_ID, CANCEL_PUSH) with `len > 8` are `H3_FRAME_ERROR`, decided from the header alone (§7.1).
   - `MAX_SETTINGS_FRAME: u64 = 1024`. A larger SETTINGS frame is a connection error `H3_EXCESSIVE_LOAD`. This bounds the O(n²) duplicate scan in `parse_frame_payload` to at most 512 pairs.
   - `MAX_FIELD_SECTION_SIZE` is also the **decoded** budget: Σ(name.len + value.len + 32) over the field lines (RFC 9114 §4.2.2's definition). It is enforced by the bounded decoder in Task 3, which checks before every allocation.
 - **Our SETTINGS frame is exactly `[(0x06, 65536), (0x21, 0)]`:** MAX_FIELD_SECTION_SIZE plus one grease setting (RFC 9114 §7.2.4.1 SHOULD). QPACK settings are left at their defaults of 0, which is what we want, so they aren't sent.
@@ -141,7 +141,7 @@ All Phase-2 rows that are not marked `✅ 2a` or that carry an "open for 2b" tai
       - a GOAWAY ID larger than an earlier peer GOAWAY ID is `H3_ID_ERROR` (§5.2);
       - unknown types are ignored;
       - any payload error from `rfc_frame_payload` is passed through;
-      - a non-DATA frame with `len > MAX_CONTROL_FRAME` is `H3_EXCESSIVE_LOAD`;
+      - a **known** non-DATA frame with `len > MAX_CONTROL_FRAME` is `H3_EXCESSIVE_LOAD`; unknown and grease frames are skipped without buffering at any length;
       - a FIN, at any point, is `H3_CLOSED_CRITICAL_STREAM` (§6.2.1).
     - **QPACK streams:** bytes go through `rfc_encoder_stream` / `rfc_decoder_stream`, and a FIN is `H3_CLOSED_CRITICAL_STREAM` (RFC 9204 §4.2).
     - **Ignored:** everything after the type is dropped, and no error is ever raised.
@@ -192,7 +192,7 @@ All Phase-2 rows that are not marked `✅ 2a` or that carry an "open for 2b" tai
     - `pub fn on_data(&mut self, data: &[u8], fin: bool, events: &mut Vec<ReqEvent>) -> Result<(), ReqError>`.
   - **Spec:** `pub open spec fn rfc_request_stream(bytes: Seq<u8>, fin: bool) -> (Seq<SpecReqEvent>, Option<SpecReqError>)`, where `Body` events are specified by **concatenation**. The spec's event sequence has `Head`, one `BodyBytes(all body bytes so far)`, `Trailers?` and `End?`. The exec emits `Body` chunks whose concatenation must equal that. RFC 9114 §4.1:
     - **Frame order:** HEADERS, then DATA*, then an optional HEADERS (trailers), then FIN.
-    - **Wrong frames:** DATA before the first HEADERS, any frame after the trailers, and SETTINGS, CANCEL_PUSH, GOAWAY, MAX_PUSH_ID, PUSH_PROMISE or HTTP/2-reserved types are all `Connection(H3_FRAME_UNEXPECTED)`. Unknown and grease frames are ignored anywhere (§9).
+    - **Wrong frames:** DATA before the first HEADERS, any frame after the trailers, and SETTINGS, CANCEL_PUSH, GOAWAY, MAX_PUSH_ID, PUSH_PROMISE or HTTP/2-reserved types are all `Connection(H3_FRAME_UNEXPECTED)`. Unknown and grease frames are ignored anywhere (§9): **skipped without buffering at any length**, like DATA payloads. The exec's buffer bound is a proven clause of its invariant, using the same pattern as `h3::uni`.
     - **HEADERS processing:** a HEADERS payload longer than MAX_FIELD_SECTION_SIZE is `Stream(H3_EXCESSIVE_LOAD)`, rejected before buffering it. Otherwise the payload goes through a **new bounded decoder**, `decode_field_section_bounded(b, budget) -> Result<Vec<FieldLine>, BoundedError>` with `pub enum BoundedError { Qpack(u64), OverBudget }`, added to field_section.rs.
       - Its spec `rfc_decode_field_section_bounded(b, budget)` is `rfc_decode_field_section` plus a running Σ(name+value+32) check. It reports OverBudget at the first field line whose size pushes the total over budget.
       - The exec checks the budget before allocating each literal. Static entries and literal lengths are known before allocation; a Huffman output is bounded by the input slice and is checked right after decoding.
