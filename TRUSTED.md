@@ -14,7 +14,10 @@
 
 The shipped artifact is built by plain `cargo build` on the user's default stable rustc (unpinned; currently 1.92.0), with `verus!` erasure done by `verus_builtin_macros` (version from `Cargo.lock`, currently 0.0.0-2026-09-20-0158). Verification used Verus's own rustc 1.98.1 frontend, so the compiler that checks the proofs is not the compiler that builds the binary. No `rust-toolchain.toml` is needed.
 
-- Test-only (crates/tls dev-dependencies, not in the trusted base): ring =0.17.14 (build/platform lock entries: cc 1.6.0, shlex 2.0.1, find-msvc-tools 0.1.14, wasi 0.11.1, windows-sys 0.52.0, windows-targets 0.52.6, windows_* 0.52.6); rustls =0.23.45 (Task 7)
+- Test-only (crates/tls dev-dependencies, not in the trusted base; `cargo tree -e normal` contains none of them). These are the Cargo.lock entries this phase adds:
+  - ring =0.17.14, with untrusted 0.9.0 and the getrandom 0.2.17 *crate*, which is test-only and distinct from the trusted OS getrandom above;
+  - ring's build/platform entries: cc 1.6.0, shlex 2.0.1, find-msvc-tools 0.1.14, wasi 0.11.1+wasi-snapshot-preview1, windows-sys 0.52.0, windows-targets 0.52.6 and windows_* 0.52.6;
+  - rustls =0.23.45 (Task 7), with rustls-webpki 0.103.15, rustls-pki-types 1.15.1 and once_cell 1.21.4. Its subtle 2.6.1 and zeroize 1.9.1 were already locked by the RustCrypto shim.
 - RustCrypto shim (crates/crypto), removed in phase 5: sha2 =0.11.1, aes =0.9.3, aes-gcm =0.11.1, p256 =0.14.0, rsa =0.10.0-rc.19 (dev: primeorder =0.14.0, rsa with hazmat, hmac =0.13.0, hkdf =0.13.0); transitively pinned by Cargo.lock: hmac 0.13.0, hkdf 0.13.0, rfc6979 0.6.0, ecdsa 0.17.0, crypto-bigint 0.7.10, primeorder 0.14.0 (a normal dependency), elliptic-curve 0.14.3, ghash 0.6.0, polyval 0.7.3, ctr 0.10.1, cipher 0.5.2, digest 0.11.3
 
 ## Trusted items
