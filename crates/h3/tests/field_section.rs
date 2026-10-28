@@ -106,3 +106,21 @@ fn encode_name_reference() {
     encode_field_section(&[f], &mut out);
     assert_eq!(out, hex("0000 5f1d 06 746578742f78"));
 }
+
+#[test]
+fn negative_vectors() {
+    let e = Err(QPACK_DECOMPRESSION_FAILED);
+    assert_eq!(dec("0000 80"), e); // indexed, T=0 (dynamic)
+    assert_eq!(dec("0000 10"), e); // indexed post-Base
+    assert_eq!(dec("0000 00 00"), e); // literal, post-Base name reference
+    assert_eq!(dec("0000 40 00"), e); // literal, dynamic name reference (T=0)
+    assert_eq!(dec("00 80"), e); // Sign=1: negative Base
+    assert_eq!(dec("0000 51 05 2f 61"), e); // value length 5, 2 bytes present
+    assert_eq!(dec("0000 d9 ff"), e); // 0xff: indexed static whose 6-bit index needs a missing continuation byte
+}
+
+#[test]
+fn n_bit_ignored() {
+    // 0x71: literal with name reference, N=1, T=1, index 1 (:path); value "/".
+    assert_eq!(dec("0000 71 01 2f"), Ok(vec![pair(":path", "/")]));
+}
