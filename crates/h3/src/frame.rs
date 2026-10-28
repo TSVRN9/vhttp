@@ -1,12 +1,11 @@
 //! HTTP/3 frame layout and the SETTINGS / GOAWAY payloads (RFC 9114 §7): RFC-transcribed
 //! specs, executable codec, and proofs that the two agree.
-use vest_lib::core::exec::{Parser, SerializerExt};
 // Used only in ghost code, which a plain `cargo build` erases.
 #[allow(unused_imports)]
 use vest_lib::core::spec::*;
 use vstd::prelude::*;
 use vstd::slice::{slice_subrange, slice_to_vec};
-use wire::varint::*;
+pub use wire::varint::*;
 
 use crate::codes::*;
 
@@ -192,10 +191,6 @@ pub open spec fn rfc_frame_payload(ty: u64, p: Seq<u8>) -> Result<SpecFrame, u64
 // Serialization specs
 // =============================================================================
 
-pub open spec fn spec_varint(v: u64) -> Seq<u8> {
-    QuicVarInt::<true>.spec_serialize(v)
-}
-
 pub open spec fn spec_frame_header_bytes(ty: u64, len: u64) -> Seq<u8> {
     spec_varint(ty).add(spec_varint(len))
 }
@@ -222,14 +217,6 @@ pub open spec fn spec_settings_payload(s: Seq<(u64, u64)>) -> Seq<u8>
 // Varint lemmas
 // =============================================================================
 
-proof fn lemma_decode_len_bounds(b: Seq<u8>)
-    ensures
-        rfc_varint_decode(b) matches Some((n, _)) ==> 1 <= n <= b.len() && n <= 8,
-{
-    theorem_matches_rfc(b);
-    lemma_parse_bound::<false>(b);
-}
-
 /// A buffer that does not yet hold a whole varint is shorter than 8 bytes.
 pub proof fn lemma_decode_none_short(b: Seq<u8>)
     ensures
@@ -249,74 +236,9 @@ proof fn settings_pairs_decreases(p: Seq<u8>) {
     }
 }
 
-/// Decoding looks only at the bytes the varint occupies.
-pub proof fn lemma_decode_prefix(a: Seq<u8>, r: Seq<u8>)
-    requires
-        rfc_varint_decode(a) is Some,
-    ensures
-        rfc_varint_decode(a.add(r)) == rfc_varint_decode(a),
-{
-    lemma_decode_len_bounds(a);
-    let n = rfc_varint_decode(a).unwrap().0;
-    assert(a.add(r)[0] == a[0]);
-    assert(a.add(r).subrange(1, n as int) =~= a.subrange(1, n as int));
-}
-
-pub proof fn lemma_decode_zero()
-    ensures
-        rfc_varint_decode(seq![0u8]) == Some((1nat, 0u64)),
-{
-    lemma_serialize_bytes::<true>(0);
-    theorem_serialize_matches_rfc(0);
-}
-
-pub open spec fn completes(b: Seq<u8>, ext: Seq<u8>) -> bool {
-    &&& rfc_varint_decode(b.add(ext)) is Some
-    &&& rfc_varint_decode(b.add(ext)).unwrap().0 == b.add(ext).len()
-}
-
-/// A buffer too short for its varint can be padded to exactly the varint's length.
-pub proof fn lemma_decode_extend(b: Seq<u8>)
-    requires
-        rfc_varint_decode(b) is None,
-    ensures
-        exists|ext: Seq<u8>| #[trigger] completes(b, ext),
-{
-    if b.len() == 0 {
-        let ext = seq![0u8];
-        assert(b.add(ext) =~= ext);
-        lemma_decode_zero();
-        assert(completes(b, ext));
-    } else {
-        let l = (1u8 << (b[0] >> 6)) as nat;
-        assert(b.len() < l);
-        let ext = Seq::new((l - b.len()) as nat, |i: int| 0u8);
-        assert(b.add(ext).len() == l);
-        assert(b.add(ext)[0] == b[0]);
-        assert(completes(b, ext));
-    }
-}
-
 // =============================================================================
 // Executable helpers
 // =============================================================================
-
-pub fn parse_varint(b: &[u8]) -> (r: Option<(usize, u64)>)
-    ensures
-        match r {
-            Some((n, v)) => rfc_varint_decode(b@) == Some((n as nat, v)) && 1 <= n <= b@.len(),
-            None => rfc_varint_decode(b@) is None,
-        },
-{
-    proof {
-        theorem_matches_rfc(b@);
-        lemma_decode_len_bounds(b@);
-    }
-    match QuicVarInt::<false>.parse(&b) {
-        Ok((n, v)) => Some((n, v)),
-        Err(_) => None,
-    }
-}
 
 fn parse_exact_varint(p: &[u8]) -> (r: Option<u64>)
     ensures
@@ -330,15 +252,6 @@ fn parse_exact_varint(p: &[u8]) -> (r: Option<u64>)
         },
         None => None,
     }
-}
-
-fn put_varint(v: u64, out: &mut Vec<u8>)
-    requires
-        v <= VARINT_MAX,
-    ensures
-        final(out)@ == old(out)@.add(spec_varint(v)),
-{
-    QuicVarInt::<true>.serialize_with_vec(&v, out);
 }
 
 // ponytail: O(n^2) duplicate scan; SETTINGS frames are small

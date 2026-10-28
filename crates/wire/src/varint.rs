@@ -1100,4 +1100,106 @@ impl<const MINIMAL: bool> Clone for QuicVarInt<MINIMAL> {
 
 impl<const MINIMAL: bool> Copy for QuicVarInt<MINIMAL> {}
 
+// =============================================================================
+// Helpers shared by the h3 and quic codecs
+// =============================================================================
+
+/// The minimal encoding of `v`.
+pub open spec fn spec_varint(v: u64) -> Seq<u8> {
+    QuicVarInt::<true>.spec_serialize(v)
+}
+
+/// Every RFC decoding consumes 1 to 8 bytes, all present in `b`.
+pub proof fn lemma_decode_len_bounds(b: Seq<u8>)
+    ensures
+        rfc_varint_decode(b) matches Some((n, _)) ==> 1 <= n <= b.len() && n <= 8,
+{
+    theorem_matches_rfc(b);
+    lemma_parse_bound::<false>(b);
+}
+
+/// Decoding looks only at the bytes the varint occupies.
+pub proof fn lemma_decode_prefix(a: Seq<u8>, r: Seq<u8>)
+    requires
+        rfc_varint_decode(a) is Some,
+    ensures
+        rfc_varint_decode(a.add(r)) == rfc_varint_decode(a),
+{
+    lemma_decode_len_bounds(a);
+    let n = rfc_varint_decode(a).unwrap().0;
+    assert(a.add(r)[0] == a[0]);
+    assert(a.add(r).subrange(1, n as int) =~= a.subrange(1, n as int));
+}
+
+pub proof fn lemma_decode_zero()
+    ensures
+        rfc_varint_decode(seq![0u8]) == Some((1nat, 0u64)),
+{
+    lemma_serialize_bytes::<true>(0);
+    theorem_serialize_matches_rfc(0);
+}
+
+pub open spec fn completes(b: Seq<u8>, ext: Seq<u8>) -> bool {
+    &&& rfc_varint_decode(b.add(ext)) is Some
+    &&& rfc_varint_decode(b.add(ext)).unwrap().0 == b.add(ext).len()
+}
+
+/// A buffer too short for its varint can be padded to exactly the varint's length.
+pub proof fn lemma_decode_extend(b: Seq<u8>)
+    requires
+        rfc_varint_decode(b) is None,
+    ensures
+        exists|ext: Seq<u8>| #[trigger] completes(b, ext),
+{
+    if b.len() == 0 {
+        let ext = seq![0u8];
+        assert(b.add(ext) =~= ext);
+        lemma_decode_zero();
+        assert(completes(b, ext));
+    } else {
+        let l = (1u8 << (b[0] >> 6)) as nat;
+        assert(b.len() < l);
+        let ext = Seq::new((l - b.len()) as nat, |i: int| 0u8);
+        assert(b.add(ext).len() == l);
+        assert(b.add(ext)[0] == b[0]);
+        assert(completes(b, ext));
+    }
+}
+
+pub fn parse_varint(b: &[u8]) -> (r: Option<(usize, u64)>)
+    ensures
+        match r {
+            Some((n, v)) => rfc_varint_decode(b@) == Some((n as nat, v)) && 1 <= n <= b@.len(),
+            None => rfc_varint_decode(b@) is None,
+        },
+{
+    proof {
+        theorem_matches_rfc(b@);
+        lemma_decode_len_bounds(b@);
+    }
+    match QuicVarInt::<false>.parse(&b) {
+        Ok((n, v)) => Some((n, v)),
+        Err(_) => None,
+    }
+}
+
+pub fn put_varint(v: u64, out: &mut Vec<u8>)
+    requires
+        v <= VARINT_MAX,
+    ensures
+        final(out)@ == old(out)@.add(spec_varint(v)),
+{
+    QuicVarInt::<true>.serialize_with_vec(&v, out);
+}
+
+/// The minimal encoded length of `v`.
+pub fn varint_len(v: u64) -> (n: usize)
+    requires
+        v <= VARINT_MAX,
+    ensures
+        n == rfc_varint_min_len(v),
+{
+    exec_min_len(v)
+}
+
 } // verus!
