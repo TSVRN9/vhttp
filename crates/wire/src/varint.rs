@@ -2,7 +2,7 @@
 //! proofs that the two agree.
 use vest_lib::combinators::mapped::spec::FnSpecMapper;
 use vest_lib::combinators::{Bind, Empty, Fixed, Mapped, Refined, Sum, U8};
-use vest_lib::core::{proof::*, spec::*};
+use vest_lib::core::{exec::*, proof::*, spec::*};
 use vstd::prelude::*;
 // Used only in ghost code, which a plain `cargo build` erases.
 #[allow(unused_imports)]
@@ -75,10 +75,15 @@ pub open spec fn rfc_varint_read_remaining(v: u64, data: Seq<u8>) -> u64
 }
 
 //= https://www.rfc-editor.org/rfc/rfc9000#section-16
-//# | 2MSB | Length | Usable Bits | Range                 |
 //# | 00   | 1      | 6           | 0-63                  |
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-16
 //# | 01   | 2      | 14          | 0-16383               |
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-16
 //# | 10   | 4      | 30          | 0-1073741823          |
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-16
 //# | 11   | 8      | 62          | 0-4611686018427387903 |
 //
 //= https://www.rfc-editor.org/rfc/rfc9000#section-16
@@ -725,19 +730,18 @@ proof fn lemma_fmt_sound_inv()
 // Equivalence with the RFC
 // =============================================================================
 
-/// Vest's lenient parser is exactly RFC 9000 `ReadVarint`; the minimal parser accepts exactly
-/// the RFC decodings that use the shortest length.
-pub proof fn theorem_matches_rfc(b: Seq<u8>)
+/// Generic over `MINIMAL`: the format parses exactly the RFC decodings, restricted to the
+/// shortest length when `MINIMAL`.
+proof fn lemma_parse_matches_rfc<const MINIMAL: bool>(b: Seq<u8>)
     ensures
-        QuicVarInt::<false>.spec_parse(b) == (match rfc_varint_decode(b) {
-            Some((n, v)) => Some((n as int, v)),
+        QuicVarInt::<MINIMAL>.spec_parse(b) == (match rfc_varint_decode(b) {
+            Some((n, v)) => if !MINIMAL || n == rfc_varint_min_len(v) {
+                Some((n as int, v))
+            } else {
+                None
+            },
             None => None,
         }),
-        QuicVarInt::<true>.spec_parse(b) is Some <==> (rfc_varint_decode(b) matches Some((n, v))
-            && n == rfc_varint_min_len(v)),
-        QuicVarInt::<true>.spec_parse(b) matches Some((n, v)) ==> rfc_varint_decode(b) == Some(
-            (n as nat, v),
-        ),
 {
     if b.len() > 0 {
         let b0 = b[0];
@@ -781,6 +785,24 @@ pub proof fn theorem_matches_rfc(b: Seq<u8>)
     }
 }
 
+/// Vest's lenient parser is exactly RFC 9000 `ReadVarint`; the minimal parser accepts exactly
+/// the RFC decodings that use the shortest length.
+pub proof fn theorem_matches_rfc(b: Seq<u8>)
+    ensures
+        QuicVarInt::<false>.spec_parse(b) == (match rfc_varint_decode(b) {
+            Some((n, v)) => Some((n as int, v)),
+            None => None,
+        }),
+        QuicVarInt::<true>.spec_parse(b) is Some <==> (rfc_varint_decode(b) matches Some((n, v))
+            && n == rfc_varint_min_len(v)),
+        QuicVarInt::<true>.spec_parse(b) matches Some((n, v)) ==> rfc_varint_decode(b) == Some(
+            (n as nat, v),
+        ),
+{
+    lemma_parse_matches_rfc::<false>(b);
+    lemma_parse_matches_rfc::<true>(b);
+}
+
 /// The serializer emits the minimal RFC encoding of `v`.
 pub proof fn theorem_serialize_matches_rfc(v: u64)
     requires
@@ -792,6 +814,227 @@ pub proof fn theorem_serialize_matches_rfc(v: u64)
     let s = QuicVarInt::<true>.spec_serialize(v);
     QuicVarInt::<true>.theorem_serialize_parse_roundtrip(v);
     theorem_matches_rfc(s);
+}
+
+/// The serializer emits the shift/OR encoding at the shortest length, so `byte_len` is the
+/// RFC's `rfc_varint_min_len` for either `MINIMAL`.
+proof fn lemma_serialize_bytes<const MINIMAL: bool>(v: u64)
+    requires
+        v <= VARINT_MAX,
+    ensures
+        QuicVarInt::<MINIMAL>.byte_len(v) == rfc_varint_min_len(v),
+        QuicVarInt::<MINIMAL>.spec_serialize(v) == (if v <= 63 {
+            seq![v as u8]
+        } else if v <= 16383 {
+            seq![(0x40 | (v >> 8)) as u8, v as u8]
+        } else if v <= 0x3FFF_FFFF {
+            seq![(0x80 | (v >> 24)) as u8, (v >> 16) as u8, (v >> 8) as u8, v as u8]
+        } else {
+            seq![
+                (0xC0 | (v >> 56)) as u8,
+                (v >> 48) as u8,
+                (v >> 40) as u8,
+                (v >> 32) as u8,
+                (v >> 24) as u8,
+                (v >> 16) as u8,
+                (v >> 8) as u8,
+                v as u8,
+            ]
+        }),
+{
+    let s = QuicVarInt::<MINIMAL>.spec_serialize(v);
+    quic_varint_fmt::<MINIMAL>().lemma_serialize_len(v);
+    assert(s.len() == QuicVarInt::<MINIMAL>.byte_len(v));
+    if v <= 63 {
+        assert(s =~= seq![v as u8]);
+    } else if v <= 16383 {
+        assert(s =~= seq![(0x40 | (v >> 8)) as u8, v as u8]);
+    } else if v <= 0x3FFF_FFFF {
+        assert(s =~= seq![(0x80 | (v >> 24)) as u8, (v >> 16) as u8, (v >> 8) as u8, v as u8]);
+    } else {
+        assert(s =~= seq![
+            (0xC0 | (v >> 56)) as u8,
+            (v >> 48) as u8,
+            (v >> 40) as u8,
+            (v >> 32) as u8,
+            (v >> 24) as u8,
+            (v >> 16) as u8,
+            (v >> 8) as u8,
+            v as u8,
+        ]);
+    }
+}
+
+/// One more `repeat` step: folding `s.push(x)` is folding `s`, then one step with `x`.
+proof fn lemma_read_push(a: u64, s: Seq<u8>, x: u8)
+    ensures
+        rfc_varint_read_remaining(a, s.push(x)) == ((rfc_varint_read_remaining(a, s) << 8)
+            + x as u64) as u64,
+    decreases s.len(),
+{
+    reveal_with_fuel(rfc_varint_read_remaining, 2);
+    if s.len() == 0 {
+        assert(s.push(x).drop_first() =~= s);
+        assert(s.push(x)[0] == x);
+    } else {
+        assert(s.push(x).drop_first() =~= s.drop_first().push(x));
+        assert(s.push(x)[0] == s[0]);
+        lemma_read_push(((a << 8) + s[0] as u64) as u64, s.drop_first(), x);
+    }
+}
+
+proof fn bv_shl_or(a: u64, x: u8) by (bit_vector)
+    ensures
+        ((a << 8) + x as u64) as u64 == (a << 8) | (x as u64),
+{
+}
+
+// =============================================================================
+// Executable parser, serializer, prepare
+// =============================================================================
+
+/// Encoded length announced by the first byte's 2-bit prefix.
+fn exec_len(b0: u8) -> (n: usize)
+    ensures
+        n == (1u8 << (b0 >> 6)) as nat,
+        n == 1 || n == 2 || n == 4 || n == 8,
+{
+    proof {
+        assert(b0 >> 6 <= 3) by (bit_vector);
+    }
+    if b0 >> 6 == 0 {
+        assert(1u8 << (b0 >> 6) == 1) by (bit_vector)
+            requires
+                b0 >> 6 == 0,
+        ;
+        1
+    } else if b0 >> 6 == 1 {
+        assert(1u8 << (b0 >> 6) == 2) by (bit_vector)
+            requires
+                b0 >> 6 == 1,
+        ;
+        2
+    } else if b0 >> 6 == 2 {
+        assert(1u8 << (b0 >> 6) == 4) by (bit_vector)
+            requires
+                b0 >> 6 == 2,
+        ;
+        4
+    } else {
+        assert(1u8 << (b0 >> 6) == 8) by (bit_vector)
+            requires
+                b0 >> 6 == 3,
+        ;
+        8
+    }
+}
+
+fn exec_min_len(v: u64) -> (n: usize)
+    ensures
+        n == rfc_varint_min_len(v),
+{
+    if v <= 63 {
+        1
+    } else if v <= 16383 {
+        2
+    } else if v <= 0x3FFF_FFFF {
+        4
+    } else {
+        8
+    }
+}
+
+impl<'i, const MINIMAL: bool> Parser<&'i [u8]> for QuicVarInt<MINIMAL> {
+    type PT = u64;
+
+    fn min_byte_len(&self) -> usize {
+        1
+    }
+
+    fn parse(&self, ibuf: &&'i [u8]) -> PResult<Self::PT> {
+        let b = *ibuf;
+        proof {
+            lemma_parse_matches_rfc::<MINIMAL>(b@);
+        }
+        if b.len() == 0 {
+            return Err(ParseError::unexpected_eof());
+        }
+        let b0 = b[0];
+        let n = exec_len(b0);
+        if b.len() < n {
+            return Err(ParseError::unexpected_eof());
+        }
+        let mut v: u64 = (b0 & 0x3f) as u64;
+        let mut i: usize = 1;
+        while i < n
+            invariant
+                1 <= i <= n <= b@.len(),
+                v == rfc_varint_read_remaining((b0 & 0x3f) as u64, b@.subrange(1, i as int)),
+            decreases n - i,
+        {
+            proof {
+                lemma_read_push((b0 & 0x3f) as u64, b@.subrange(1, i as int), b@[i as int]);
+                bv_shl_or(v, b@[i as int]);
+                assert(b@.subrange(1, i as int).push(b@[i as int]) =~= b@.subrange(
+                    1,
+                    i as int + 1,
+                ));
+            }
+            v = (v << 8) | (b[i] as u64);
+            i += 1;
+        }
+        assert(b@.subrange(1, n as int) == b@.subrange(1, i as int));
+        if MINIMAL && n != exec_min_len(v) {
+            Err(ParseError::non_canonical())
+        } else {
+            Ok((n, v))
+        }
+    }
+}
+
+impl<Output: OutputBuf, const MINIMAL: bool> Serializer<Output, u64> for QuicVarInt<MINIMAL> {
+    fn serialize_into(&self, v: &u64, obuf: &mut Output) {
+        broadcast use vest_lib::core::exec::output::outbuf_lemmas;
+
+        let v = *v;
+        let ghost old_obuf = obuf@;
+        proof {
+            lemma_serialize_bytes::<MINIMAL>(v);
+        }
+        if v <= 63 {
+            obuf.write_byte(v as u8);
+        } else if v <= 16383 {
+            obuf.write_byte((0x40 | (v >> 8)) as u8);
+            obuf.write_byte(v as u8);
+        } else if v <= 0x3FFF_FFFF {
+            obuf.write_byte((0x80 | (v >> 24)) as u8);
+            obuf.write_byte((v >> 16) as u8);
+            obuf.write_byte((v >> 8) as u8);
+            obuf.write_byte(v as u8);
+        } else {
+            obuf.write_byte((0xC0 | (v >> 56)) as u8);
+            obuf.write_byte((v >> 48) as u8);
+            obuf.write_byte((v >> 40) as u8);
+            obuf.write_byte((v >> 32) as u8);
+            obuf.write_byte((v >> 24) as u8);
+            obuf.write_byte((v >> 16) as u8);
+            obuf.write_byte((v >> 8) as u8);
+            obuf.write_byte(v as u8);
+        }
+        assert(obuf@ =~= old_obuf + self.spec_serialize(v));
+    }
+}
+
+impl<const MINIMAL: bool> Prepare<u64> for QuicVarInt<MINIMAL> {
+    fn prepare(&self, v: &u64) -> (checked: Result<usize, PreSerializeError>) {
+        if *v > VARINT_MAX {
+            return Err(PreSerializeError::custom("QUIC varint exceeds 2^62 - 1"));
+        }
+        proof {
+            lemma_serialize_bytes::<MINIMAL>(*v);
+        }
+        Ok(exec_min_len(*v))
+    }
 }
 
 } // verus!
