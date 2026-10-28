@@ -70,6 +70,7 @@ fn wrong_type_first_byte() {
     r.push(&[0x02]);
     assert_eq!(r.next_message(1), Err(0x10a));
     assert!(!r.is_empty());
+    assert_eq!(r.next_message(1), Err(0x10a), "reader unchanged after Err");
     let mut r = HsReader::new();
     r.push(&[0x18]);
     assert_eq!(r.next_message(20), Err(0x10a));
@@ -86,6 +87,14 @@ fn length_cap() {
         r.push(&hdr);
         assert_eq!(r.next_message(1), want, "{:02x?}", hdr);
     }
+    let mut r = HsReader::new();
+    r.push(&[1, 0x01, 0x00, 0x00]);
+    r.push(&vec![0x5a; 1 << 16]);
+    match r.next_message(1) {
+        Ok(Some(m)) => assert_eq!(m.len(), 65540),
+        got => panic!("max body: {:?}", got.map(|o| o.map(|m| m.len()))),
+    }
+    assert!(r.is_empty());
 }
 
 #[test]
