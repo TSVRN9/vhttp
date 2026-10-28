@@ -437,6 +437,13 @@ pub open spec fn ctrl_open(o: SpecOutput) -> bool {
     }
 }
 
+pub open spec fn body_ok(o: SpecOutput) -> bool {
+    match o {
+        SpecOutput::RequestBody { data, .. } => data.len() > 0,
+        _ => true,
+    }
+}
+
 pub open spec fn no_close(o: Seq<SpecOutput>) -> bool {
     forall|i: int| 0 <= i < o.len() ==> !((#[trigger] o[i]) is CloseConnection)
 }
@@ -449,19 +456,19 @@ pub open spec fn no_close(o: Seq<SpecOutput>) -> bool {
 //# The sender MUST NOT close either of these streams, and the receiver
 //# MUST NOT request that the sender close either of these streams.
 /// The shape of one call's outputs: STOP_SENDING only on request streams (never on the peer's
-/// control or QPACK streams), our control stream never FIN-ed, and a CloseConnection, if any, is
-/// the last output and only when `closing`.
+/// control or QPACK streams), our control stream never FIN-ed, no empty RequestBody, and a
+/// CloseConnection, if any, is the last output and only when `closing`.
 pub open spec fn outs_ok(o: Seq<SpecOutput>, closing: bool) -> bool {
-    &&& forall|i: int| 0 <= i < o.len() ==> stop_ok(#[trigger] o[i]) && ctrl_open(o[i])
+    &&& forall|i: int| 0 <= i < o.len() ==> stop_ok(#[trigger] o[i]) && ctrl_open(o[i]) && body_ok(o[i])
     &&& forall|i: int|
         0 <= i < o.len() && (#[trigger] o[i]) is CloseConnection ==> closing && i == o.len() - 1
     &&& closing ==> o.len() > 0 && o.last() is CloseConnection
 }
 
 /// Outputs on request streams only: no control-stream write, STOP_SENDING only on request
-/// streams.
+/// streams, no empty RequestBody.
 pub open spec fn req_only(o: Seq<SpecOutput>) -> bool {
-    forall|i: int| 0 <= i < o.len() ==> ctrl_free(#[trigger] o[i]) && stop_ok(o[i])
+    forall|i: int| 0 <= i < o.len() ==> ctrl_free(#[trigger] o[i]) && stop_ok(o[i]) && body_ok(o[i])
 }
 
 // =============================================================================
@@ -1076,7 +1083,7 @@ proof fn lemma_req_concat(a: Seq<SpecOutput>, b: Seq<SpecOutput>, closing: bool)
 {
     let c = a + b;
     assert forall|i: int| 0 <= i < c.len() implies ctrl_free(#[trigger] c[i]) && stop_ok(c[i])
-        && ctrl_open(c[i]) by {
+        && ctrl_open(c[i]) && body_ok(c[i]) by {
         if i < a.len() {
             assert(c[i] == a[i]);
         } else {
@@ -1233,6 +1240,7 @@ fn deliver(
 ) -> (answered: bool)
     requires
         ev == request::views(evs@),
+        request::bodies_from(evs@, 0),
         old(e).id % 4 == 0,
         old(e).stream.wf(),
         old(e).rx_open,
@@ -1268,9 +1276,13 @@ fn deliver(
     let ghost o0 = out@;
     let ghost tr0 = fields_view(e.trailers@);
     let n = evs.len();
+    let ghost evs0 = evs@;
     let mut rv = rev(evs);
     let mut k: usize = 0;
     proof {
+        assert forall|i: int| 0 <= i < rv@.len() implies request::body_nonempty(#[trigger] rv@[i]) by {
+            assert(rv@[i] == evs0[n - 1 - i]);
+        }
         lemma_added_refl(o0);
         assert(ev.skip(0) =~= ev);
         assert forall|x: Seq<SpecOutput>| #[trigger]
@@ -1291,6 +1303,7 @@ fn deliver(
             n == ev.len(),
             rv@.len() + k == n,
             forall|i: int| 0 <= i < rv@.len() ==> (#[trigger] rv@[i])@ == ev[n - 1 - i],
+            forall|i: int| 0 <= i < rv@.len() ==> request::body_nonempty(#[trigger] rv@[i]),
             extends(o0, out@),
             forall|x: Seq<SpecOutput>| #[trigger]
                 req_outs(id, ev.skip(k as int), fields_view(e.trailers@), err, fin, x) ==> req_outs(
@@ -1328,6 +1341,7 @@ fn deliver(
         };
         proof {
             assert(x@ == ev[k as int]);
+            assert(request::body_nonempty(x));
         }
         match x {
             ReqEvent::Head(RequestHead::Connect { .. }) => {
@@ -1399,7 +1413,7 @@ fn deliver(
                 assert(a == added(o0, o1).push(a.last()));
                 assert forall|i: int| 0 <= i < a.len() implies ctrl_free(#[trigger] a[i]) && stop_ok(
                     a[i],
-                ) && !(a[i] is CloseConnection) by {
+                ) && body_ok(a[i]) && !(a[i] is CloseConnection) by {
                     if i < a.len() - 1 {
                         assert(a[i] == added(o0, o1)[i]);
                     }
@@ -2086,7 +2100,7 @@ impl H3Conn {
         lemma_writes_append(a, b, 3);
         assert(c0.ctrl_bytes() + writes_on(a, 3) + writes_on(b, 3) =~= c0.ctrl_bytes() + (writes_on(a, 3) + writes_on(b, 3)));
         let c = a + b;
-        assert forall|i: int| 0 <= i < c.len() implies stop_ok(#[trigger] c[i]) && ctrl_open(c[i]) && !(c[i] is CloseConnection) by {
+        assert forall|i: int| 0 <= i < c.len() implies stop_ok(#[trigger] c[i]) && ctrl_open(c[i]) && body_ok(c[i]) && !(c[i] is CloseConnection) by {
             if i < a.len() {
                 assert(c[i] == a[i]);
             } else {
