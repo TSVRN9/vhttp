@@ -293,3 +293,60 @@ fn reader_bound() {
     assert_eq!(feed(&mut hs, Level::Initial, &[0x01]), (Err(0x10a), vec![]));
     assert!(!hs.pending(Level::Initial));
 }
+
+#[test]
+fn finished_split() {
+    let cfg = ecdsa_cfg();
+    for k in [1, 2, 3, 4, 20, 35] {
+        let (mut hs, _, fin) = waiting(&cfg);
+        assert_eq!(feed(&mut hs, Level::Handshake, &fin[..k]), (Ok(()), vec![]), "split {k}");
+        assert!(hs.pending(Level::Handshake));
+        assert_eq!(feed(&mut hs, Level::Handshake, &fin[k..]), (Ok(()), vec![TlsEvent::Complete]), "split {k}");
+        assert!(hs.is_complete() && !hs.pending(Level::Handshake));
+    }
+    let (mut hs, _, fin) = waiting(&cfg);
+    for (i, b) in fin.iter().enumerate() {
+        let want = if i + 1 == fin.len() { vec![TlsEvent::Complete] } else { vec![] };
+        assert_eq!(feed(&mut hs, Level::Handshake, &[*b]), (Ok(()), want), "byte {i}");
+    }
+    assert!(hs.is_complete());
+}
+
+#[test]
+fn ch_header_split() {
+    let cfg = ecdsa_cfg();
+    let ch = direct_ch();
+    for k in [1, 2, 3] {
+        let mut hs = ServerHandshake::new(&cfg, TP.to_vec());
+        assert_eq!(feed(&mut hs, Level::Initial, &ch[..k]), (Ok(()), vec![]), "split {k}");
+        let (r, ev) = feed(&mut hs, Level::Initial, &ch[k..]);
+        assert_eq!(r, Ok(()));
+        check_flight(&ev);
+    }
+}
+
+/// CH2s that differ from CH1 in one of the remaining compared fields. `legacy_session_id`
+/// cannot differ: 4a rejects any non-empty one (0x0a), so both are always empty.
+fn ch2_field_changes() -> Vec<Vec<u8>> {
+    let sni = [&[0, 14, 0, 0, 11][..], b"example.org"].concat();
+    vec![
+        h3_ch(&[p256()], |e| set(e, 0x2b, vec![4, 3, 4, 3, 3])),
+        h3_ch(&[p256()], |e| set(e, 0x0a, u16_list(&[0x17, 0x18]))),
+        h3_ch(&[p256()], |e| set(e, 0x0d, u16_list(&[0x0403, 0x0804]))),
+        h3_ch(&[p256()], |e| e.push((50, u16_list(&[0x0403])))),
+        h3_ch(&[p256()], |e| set(e, 0x00, sni)),
+    ]
+}
+
+#[test]
+fn ch2_rules_more_fields() {
+    let cfg = ecdsa_cfg();
+    for (i, ch2) in ch2_field_changes().iter().enumerate() {
+        let mut hs = ServerHandshake::new(&cfg, TP.to_vec());
+        let (r, ev) = feed(&mut hs, Level::Initial, ch2);
+        assert_eq!(r, Ok(()), "case {i} as CH1");
+        check_flight(&ev);
+        let mut hs = after_hrr(&cfg);
+        assert_eq!(feed(&mut hs, Level::Initial, ch2), (Err(0x12f), vec![]), "case {i}");
+    }
+}

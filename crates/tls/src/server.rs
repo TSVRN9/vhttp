@@ -5,7 +5,8 @@
 //!
 //! `on_crypto` takes CRYPTO data at one level, frames handshake messages from it and runs
 //! each through `spec_step`; the events of a call are returned only when the call succeeds.
-//! There is no 0-RTT level and no early secret is expanded: 0-RTT is never accepted.
+//! There is no 0-RTT level and no client_early_traffic_secret (or binder key) is derived:
+//! 0-RTT is never accepted.
 use crate::client_hello::*;
 use crate::codes::*;
 use crate::config::*;
@@ -45,7 +46,8 @@ verus! {
 //# If the
 //# server cannot determine that the settings remembered by a client are
 //# compatible with its current settings, it MUST NOT accept 0-RTT data.
-// No 0-RTT level exists (`Level`), early_data is ignored (4a) and no early secret is expanded.
+// No 0-RTT level exists (`Level`), early_data is ignored (4a) and no client_early_traffic_secret
+// (or binder key) is derived.
 pub enum SpecPhase {
     Start,
     HrrSent,
@@ -149,6 +151,12 @@ pub open spec fn spec_step(
             Ok(ch) => match rfc_negotiate(ch, cfg, false) {
                 Err(e) => Err(e),
                 Ok(Choice::Retry) => {
+                    //= https://www.rfc-editor.org/rfc/rfc8446#section-4.1.4
+                    //# The value of selected_version in the HelloRetryRequest
+                    //# "supported_versions" extension MUST be retained in the ServerHello,
+                    //# and a client MUST abort the handshake with an "illegal_parameter"
+                    //# alert if the value changes.
+                    // by construction: the HelloRetryRequest and ServerHello both carry spec_sh_versions_bytes() (0x0304)
                     let hrr = spec_hello_retry_request_bytes(ch.legacy_session_id, SECP256R1);
                     Ok(
                         (
@@ -228,6 +236,10 @@ pub open spec fn spec_step(
         //# At any time after the server has received the client Finished
         //# message, it MAY send a NewSessionTicket message.
         // not taken: no NewSessionTicket is sent (PSK/resumption declined)
+        //= https://www.rfc-editor.org/rfc/rfc8446#section-4.4.4
+        //# Any records following a Finished message MUST be encrypted under the
+        //# appropriate application traffic key as described in Section 7.2.
+        // by construction: Secrets{OneRtt} is the flight's last event, after the server Finished (theorem_flight_order); nothing is sent after it, and QUIC applies the keys
         SpecPhase::WaitFinished => match rfc_finished(m.skip(4)) {
             Err(e) => Err(e),
             Ok(vd) => if vd != s.client_vd {
@@ -638,7 +650,8 @@ pub proof fn theorem_complete_iff_finished(
 
 /// A step from `HrrSent` never reaches `HrrSent` again, and (unless the RNG drew the
 /// HelloRetryRequest random itself, p = 2^-256) never sends a message carrying that random.
-pub proof fn theorem_no_second_hrr(
+// ponytail: probability 2^-256; add an exec guard (internal_error) if a deterministic RNG is ever used
+pub proof fn theorem_server_no_second_hrr(
     cfg: Seq<SpecCertChain>,
     tp: Seq<u8>,
     s: SpecServerHs,
@@ -1130,7 +1143,6 @@ impl<'a> ServerHandshake<'a> {
         &&& forall|i: int| 0 <= i < self.cfg_view().len() ==> chain_wf(#[trigger] self.cfg_view()[i])
         &&& self.tp_view().len() <= 1024
         &&& self@.transcript.len() <= 0x2_0000
-        &&& (self@.phase is HrrSent <==> self@.ch1 is Some)
         &&& spec_hs_inv(self@)
     }
 
@@ -1280,7 +1292,7 @@ impl<'a> ServerHandshake<'a> {
                         //# HelloRetryRequest in the same connection (i.e., where the ClientHello
                         //# was itself in response to a HelloRetryRequest), it MUST abort the
                         //# handshake with an "unexpected_message" alert.
-                        // server side: never sends a second HRR (`theorem_no_second_hrr`); a CH2
+                        // server side: never sends a second HRR (`theorem_server_no_second_hrr`); a CH2
                         // that would need one is illegal_parameter
                         if after_hrr {
                             return Err(ALERT_ILLEGAL_PARAMETER);
@@ -1400,7 +1412,7 @@ impl<'a> ServerHandshake<'a> {
                     == old(ev)@
                 &&& res matches Ok(evs) ==> (r is Ok && final(self)@ == s2 && final(ev).deep_view()
                     == old(ev).deep_view() + evs) || (r == Err::<(), u64>(ALERT_INTERNAL_ERROR)
-                    && final(self)@.phase is Failed && final(ev)@ == old(ev)@)
+                    && final(self)@ == spec_failed(s2, ALERT_INTERNAL_ERROR) && final(ev)@ == old(ev)@)
             }),
     {
         hide(spec_step);
@@ -1495,7 +1507,14 @@ impl<'a> ServerHandshake<'a> {
                             assert(spec_drain(cfg, tp, s2, level, rand@, a0 + evs) == (s2, Ok::<Seq<SpecTlsEvent>, u64>(a0 + evs)));
                         }
                     }
+                    let ghost s_err = self@;
                     self.fail(e);
+                    proof {
+                        if let Ok((s2, evs)) = spec_step(cfg, tp, s1, m@, rand@) {
+                            assert(s_err.initial == s2.initial && s_err.handshake == s2.handshake);
+                            assert(self@ == spec_failed(s2, ALERT_INTERNAL_ERROR));
+                        }
+                    }
                     return Err(e);
                 },
             }
