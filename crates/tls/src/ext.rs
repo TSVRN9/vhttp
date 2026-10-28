@@ -87,6 +87,18 @@ pub open spec fn spec_ext_list_bytes(s: Seq<SpecExt>) -> Seq<u8>
 //= https://www.rfc-editor.org/rfc/rfc8446#section-4.2.11
 //# Servers MUST check that it is the last extension and otherwise fail
 //# the handshake with an "illegal_parameter" alert.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-4.2
+//# When multiple extensions of different types are present, the
+//# extensions MAY appear in any order, with the exception of
+//# "pre_shared_key" (Section 4.2.11) which MUST be the last extension in
+//# the ClientHello (but can appear anywhere in the ServerHello
+//# extensions block).
+// enforced by the §4.2.11 last-extension check
+//= https://www.rfc-editor.org/rfc/rfc8446#section-4.2
+//# Upon
+//# receiving such an extension, an endpoint MUST abort the handshake
+//# with an "unsupported_extension" alert.
+// vacuous: binds a receiver of extension responses; the server receives only ClientHello (requests) and Finished (no extensions)
 /// The ClientHello extension-block rules. Duplicates cover every type, unknown and GREASE
 /// included; the RFC names no alert for them (Decision 7). oid_filters is recognized and
 /// specified only for CertificateRequest (Decision 8).

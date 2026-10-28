@@ -156,7 +156,7 @@ pub open spec fn spec_step(
                     //# "supported_versions" extension MUST be retained in the ServerHello,
                     //# and a client MUST abort the handshake with an "illegal_parameter"
                     //# alert if the value changes.
-                    // by construction: the HelloRetryRequest and ServerHello both carry spec_sh_versions_bytes() (0x0304)
+                    // by construction: the HelloRetryRequest and ServerHello both carry spec_sh_versions_bytes() (0x0304); the client-side abort is N/A (client-only)
                     let hrr = spec_hello_retry_request_bytes(ch.legacy_session_id, SECP256R1);
                     Ok(
                         (
