@@ -278,7 +278,7 @@ Total keyword count: 44 across 22 sections.
 | 12.2 | Coalescing packets | 4 | yes | 3 | Process coalesced packets; same CID within datagram; ack separately. |
 | 12.3 | Packet numbers | 5 | yes | 3 | Monotonic, never reused, 2^62-1 limit closes silently, duplicate suppression after decryption. |
 | 12.4 | Frames and frame types | 5 | yes | 3 | Rows for frame-type encoding below; no-frame packet and disallowed frame are PROTOCOL_VIOLATION; unknown frame FRAME_ENCODING_ERROR. |
-| 12.4 (req) | Frame type MUST use shortest possible encoding | 1 | yes | 3 | "a frame type MUST use the shortest possible encoding"; sender must emit minimal type varint; receiver should reject non-minimal (relies on phase 1 minimal-encoding decision for varint). |
+| 12.4 (req) | Frame type MUST use shortest possible encoding | 1 | yes | 3 | "a frame type MUST use the shortest possible encoding"; sender must emit minimal type varint; receiver should reject non-minimal (relies on phase 1 minimal-encoding decision for varint). ✅ 3b: crates/quic/src/frame.rs |
 | 12.5 | Frames and number spaces | 2 | yes | 3 | Frame/space restrictions (0x1d only in application space). |
 | 13.1 | Packet processing | 1 | yes | 3 | ACK only after decryption and full frame processing. |
 | 13.2.1 | Sending ACK frames | 5 | yes | 3 | Immediate ACK for Initial/Handshake; max_ack_delay; one ACK-only packet per ack-eliciting; no feedback loops. |
@@ -326,24 +326,24 @@ Total keyword count: 44 across 22 sections.
 | 19.3.1 | ACK ranges | 1 | yes | 3 | Negative computed PN is FRAME_ENCODING_ERROR. ✅ 3b: crates/quic/src/ack.rs |
 | 19.4 | RESET_STREAM frames | 1 | yes | 3 | STREAM_STATE_ERROR for send-only stream. |
 | 19.5 | STOP_SENDING frames | 2 | yes | 3 | STREAM_STATE_ERROR cases. |
-| 19.6 | CRYPTO frames | 1 | yes | 3 | Offset limit error. |
-| 19.7 | NEW_TOKEN frames | 4 | partial | 3 | Server row below; others client-only/declined. |
+| 19.6 | CRYPTO frames | 1 | yes | 3 | Offset limit error. ✅ 3b: crates/quic/src/frame.rs |
+| 19.7 | NEW_TOKEN frames | 4 | partial | 3 | Server row below; others client-only/declined. ✅ 3b: crates/quic/src/frame.rs |
 | 19.7 (req) | Token MUST NOT be empty | 1 | no | Declined (optional: NEW_TOKEN issuance) | Sender rule; we never send NEW_TOKEN. |
 | 19.7 (req) | Client empty-token error; clients MUST NOT send NEW_TOKEN | 2 | no | N/A (client-only) |  |
-| 19.7 (req) | Server treats receipt of NEW_TOKEN as PROTOCOL_VIOLATION | 1 | yes | 3 |  |
-| 19.8 | STREAM frames | 2 | yes | 3 | STREAM_STATE_ERROR; offset/length limit. |
+| 19.7 (req) | Server treats receipt of NEW_TOKEN as PROTOCOL_VIOLATION | 1 | yes | 3 | ✅ 3b: crates/quic/src/frame.rs |
+| 19.8 | STREAM frames | 2 | yes | 3 | STREAM_STATE_ERROR; offset/length limit. 3b codec: crates/quic/src/frame.rs (closed in 3c) |
 | 19.9 | MAX_DATA frames | 2 | yes | 3 | FLOW_CONTROL_ERROR on excess. |
 | 19.10 | MAX_STREAM_DATA frames | 4 | yes | 3 |  |
-| 19.11 | MAX_STREAMS frames | 4 | yes | 3 |  |
+| 19.11 | MAX_STREAMS frames | 4 | yes | 3 | 3b codec: crates/quic/src/frame.rs (closed in 3c) |
 | 19.13 | STREAM_DATA_BLOCKED frames | 1 | yes | 3 |  |
-| 19.14 | STREAMS_BLOCKED frames | 1 | yes | 3 |  |
+| 19.14 | STREAMS_BLOCKED frames | 1 | yes | 3 | ✅ 3b: crates/quic/src/frame.rs |
 | 19.15 | NEW_CONNECTION_ID frames | 8 | yes | 3 | Each requirement has its own row. |
-| 19.15 (req) | Length < 1 or > 20 is FRAME_ENCODING_ERROR | 1 | yes | 3 |  |
+| 19.15 (req) | Length < 1 or > 20 is FRAME_ENCODING_ERROR | 1 | yes | 3 | ✅ 3b: crates/quic/src/frame.rs |
 | 19.15 (req) | MUST NOT send if peer requires zero-length DCID | 1 | yes | 3 |  |
 | 19.15 (req) | Zero-length-DCID sender receiving NEW_CONNECTION_ID is PROTOCOL_VIOLATION | 1 | yes | 3 |  |
 | 19.15 (req) | Duplicate frame not a connection error | 1 | yes | 3 |  |
-| 19.15 (req) | Retire Prior To <= Sequence Number (sending) | 1 | yes | 3 |  |
-| 19.15 (req) | Retire Prior To > Sequence Number received is FRAME_ENCODING_ERROR | 1 | yes | 3 |  |
+| 19.15 (req) | Retire Prior To <= Sequence Number (sending) | 1 | yes | 3 | ✅ 3b: crates/quic/src/frame.rs |
+| 19.15 (req) | Retire Prior To > Sequence Number received is FRAME_ENCODING_ERROR | 1 | yes | 3 | ✅ 3b: crates/quic/src/frame.rs |
 | 19.15 (req) | Ignore non-increasing Retire Prior To | 1 | yes | 3 |  |
 | 19.15 (req) | Send RETIRE_CONNECTION_ID for sequence below earlier Retire Prior To | 1 | yes | 3 |  |
 | 19.16 | RETIRE_CONNECTION_ID frames | 3 | yes | 3 | Each requirement has its own row. |
@@ -351,7 +351,7 @@ Total keyword count: 44 across 22 sections.
 | 19.16 (req) | Sequence MUST NOT refer to the packet's own DCID | 1 | yes | 3 |  |
 | 19.16 (req) | Zero-length-CID provider receiving RETIRE_CONNECTION_ID is PROTOCOL_VIOLATION | 1 | yes | 3 |  |
 | 19.17 | PATH_CHALLENGE frames | 1 | yes | 3 | Recipient MUST generate PATH_RESPONSE with same data (see 8.2.2 rows). |
-| 19.20 | HANDSHAKE_DONE frames | 2 | yes | 3 | Server sends only after handshake complete; receipt is PROTOCOL_VIOLATION. |
+| 19.20 | HANDSHAKE_DONE frames | 2 | yes | 3 | Server sends only after handshake complete; receipt is PROTOCOL_VIOLATION. 3b codec: crates/quic/src/frame.rs (closed in 3d) |
 | 19.21 | Extension frames | 3 | no | Declined (optional: HTTP/3 extensions) | Applies only to endpoints using extension frames; unknown frame handling is in 12.4. |
 | 21.5 | Request forgery attacks | 1 | no | N/A (binds spec authors) | Requirement on future extensions, not an endpoint. |
 | 21.5.3 | Request forgery with preferred addresses | 1 | no | N/A (client-only) | Client must not send non-probing frames to unvalidated preferred address. |
