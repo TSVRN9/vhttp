@@ -573,7 +573,8 @@ pub open spec fn pseudo_first(f: Fields) -> bool {
 //# :scheme, and :path pseudo-header fields, unless the request is a
 //# CONNECT request; see Section 4.4.
 /// No request pseudo-header repeats. (Presence is checked in `rfc_validate_request`.) A repeated
-/// `host` is rejected too (RFC 9110 §7.2).
+/// `host` is rejected too: hardening, since RFC 9110 §5.3 says Host is not a list field, so a sender
+/// MUST NOT repeat it.
 pub open spec fn pseudo_once(f: Fields) -> bool {
     count_name(f, lit_method()) <= 1 && count_name(f, lit_scheme()) <= 1 && count_name(
         f,
@@ -636,6 +637,16 @@ pub open spec fn rfc_content_length(f: Fields) -> Option<u64> {
     }
 }
 
+/// RFC 3986 section 3.1: schemes are case-insensitive. `lit` is lowercase.
+pub open spec fn eq_ci(s: Seq<u8>, lit: Seq<u8>) -> bool {
+    s.len() == lit.len() && forall|i: int|
+        0 <= i < s.len() ==> (if 65 <= #[trigger] s[i] && s[i] <= 90 {
+            (s[i] + 32) as u8
+        } else {
+            s[i]
+        }) == lit[i]
+}
+
 pub open spec fn no_at(s: Seq<u8>) -> bool {
     forall|i: int| 0 <= i < s.len() ==> (#[trigger] s[i]) != 64u8
 }
@@ -651,10 +662,10 @@ pub open spec fn no_at(s: Seq<u8>) -> bool {
 //# deprecated userinfo subcomponent for URIs of scheme "http" or
 //# "https".
 pub open spec fn authority_ok(scheme: Seq<u8>, a: Option<Seq<u8>>, h: Option<Seq<u8>>) -> bool {
-    !(scheme == lit_http() || scheme == lit_https()) || match (a, h) {
+    !(eq_ci(scheme, lit_http()) || eq_ci(scheme, lit_https())) || match (a, h) {
         (None, None) => false,
         (Some(x), None) => x.len() > 0 && no_at(x),
-        (None, Some(y)) => y.len() > 0,
+        (None, Some(y)) => y.len() > 0 && no_at(y),
         (Some(x), Some(y)) => x.len() > 0 && x == y && no_at(x),
     }
 }
@@ -772,7 +783,7 @@ pub open spec fn rfc_validate_request(f: Fields) -> Result<SpecRequestHead, u64>
 pub open spec fn rfc_validate_trailers(f: Fields) -> bool {
     forall|i: int|
         0 <= i < f.len() ==> !is_pseudo((#[trigger] f[i]).0) && valid_field_name(f[i].0)
-            && valid_field_value(f[i].1)
+            && valid_field_value(f[i].1) && !conn_specific(f[i].0)
 }
 
 //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3
@@ -1142,6 +1153,39 @@ fn value_at(fields: &[FieldLine], i: Option<usize>) -> (r: Option<&[u8]>)
     }
 }
 
+fn eq_ci_x(s: &[u8], lit: &[u8]) -> (r: bool)
+    ensures
+        r == eq_ci(s@, lit@),
+{
+    if s.len() != lit.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < s.len()
+        invariant
+            i <= s.len(),
+            s@.len() == lit@.len(),
+            forall|k: int|
+                0 <= k < i ==> (if 65 <= #[trigger] s@[k] && s@[k] <= 90 {
+                    (s@[k] + 32) as u8
+                } else {
+                    s@[k]
+                }) == lit@[k],
+        decreases s.len() - i,
+    {
+        let c = if 65 <= s[i] && s[i] <= 90 {
+            s[i] + 32
+        } else {
+            s[i]
+        };
+        if c != lit[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
 fn no_at_x(s: &[u8]) -> (r: bool)
     ensures
         r == no_at(s@),
@@ -1165,13 +1209,13 @@ fn authority_ok_x(scheme: &[u8], a: Option<&[u8]>, h: Option<&[u8]>) -> (r: bool
     ensures
         r == authority_ok(scheme@, opt_view(a), opt_view(h)),
 {
-    if !(eq_bytes(scheme, &x_http()) || eq_bytes(scheme, &x_https())) {
+    if !(eq_ci_x(scheme, &x_http()) || eq_ci_x(scheme, &x_https())) {
         return true;
     }
     match (a, h) {
         (None, None) => false,
         (Some(x), None) => x.len() > 0 && no_at_x(x),
-        (None, Some(y)) => y.len() > 0,
+        (None, Some(y)) => y.len() > 0 && no_at_x(y),
         (Some(x), Some(y)) => x.len() > 0 && eq_bytes(x, y) && no_at_x(x),
     }
 }
@@ -1360,14 +1404,15 @@ pub fn validate_trailers(fields: &[FieldLine]) -> (r: bool)
             fv == fields_view(fields@),
             forall|k: int|
                 0 <= k < i ==> !is_pseudo((#[trigger] fv[k]).0) && valid_field_name(fv[k].0)
-                    && valid_field_value(fv[k].1),
+                    && valid_field_value(fv[k].1) && !conn_specific(fv[k].0),
         decreases fields.len() - i,
     {
         let f = &fields[i];
         proof {
             assert(fv[i as int] == fields@[i as int]@);
         }
-        if is_pseudo_x(&f.name) || !field_name_ok(&f.name) || !field_value_ok(&f.value) {
+        if is_pseudo_x(&f.name) || !field_name_ok(&f.name) || !field_value_ok(&f.value)
+            || is_conn_specific_x(&f.name) {
             return false;
         }
         i += 1;

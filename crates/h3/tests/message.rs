@@ -109,3 +109,13 @@ fn response_check() {
     assert!(!check_response(&r(200, "connection", "x")));
     assert!(!check_response(&r(200, ":status", "200")));
 }
+
+#[test]
+fn hardening() {
+    err(vec![fl(":method", "GET"), fl(":scheme", "https"), fl(":path", "/"), fl("host", "user@h")]);
+    err(vec![fl(":method", "GET"), fl(":scheme", "HTTPS"), fl(":path", "/")]);
+    err(vec![fl(":method", "GET"), fl(":scheme", "HtTp"), fl(":path", "/")]);
+    assert!(!validate_trailers(&[fl("connection", "x")]));
+    err(vec![fl(":method", ""), fl(":scheme", "https"), fl(":authority", "a"), fl(":path", "/")]);
+    err(vec![fl(":method", "CONNECT"), fl(":scheme", "https"), fl(":authority", "a:1")]);
+}
