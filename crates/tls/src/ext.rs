@@ -245,7 +245,7 @@ pub fn check_ch_exts(s: &Vec<Ext>) -> (r: Result<(), u64>)
     Ok(())
 }
 
-/// The index of the first extension of type `ty`.
+/// The index of the first extension of type `ty`, tied to `spec_find`.
 pub fn find_ext(s: &Vec<Ext>, ty: u16) -> (r: Option<usize>)
     ensures
         match r {
@@ -253,19 +253,29 @@ pub fn find_ext(s: &Vec<Ext>, ty: u16) -> (r: Option<usize>)
                 0 <= k < i ==> #[trigger] s@[k].ty != ty,
             None => forall|k: int| 0 <= k < s@.len() ==> #[trigger] s@[k].ty != ty,
         },
+        r matches Some(i) ==> spec_find(s.deep_view(), ty) == Some(s@[i as int].data@),
+        r is None ==> spec_find(s.deep_view(), ty) is None,
 {
+    let ghost d = s.deep_view();
     let mut i: usize = 0;
+    assert(d.skip(0) =~= d);
     while i < s.len()
         invariant
             i <= s@.len(),
+            d == s.deep_view(),
+            d.len() == s@.len(),
             forall|k: int| 0 <= k < i ==> #[trigger] s@[k].ty != ty,
+            spec_find(d, ty) == spec_find(d.skip(i as int), ty),
         decreases s@.len() - i,
     {
+        assert(d.skip(i as int)[0] == s@[i as int]@);
         if s[i].ty == ty {
             return Some(i);
         }
+        assert(d.skip(i as int).skip(1) =~= d.skip(i + 1));
         i += 1;
     }
+    assert(d.skip(i as int).len() == 0);
     None
 }
 
