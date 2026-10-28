@@ -239,7 +239,7 @@ proof fn settings_pairs_decreases(p: Seq<u8>) {
 }
 
 /// Decoding looks only at the bytes the varint occupies.
-proof fn lemma_decode_prefix(a: Seq<u8>, r: Seq<u8>)
+pub proof fn lemma_decode_prefix(a: Seq<u8>, r: Seq<u8>)
     requires
         rfc_varint_decode(a) is Some,
     ensures
@@ -259,13 +259,13 @@ proof fn lemma_decode_zero()
     theorem_serialize_matches_rfc(0);
 }
 
-spec fn completes(b: Seq<u8>, ext: Seq<u8>) -> bool {
+pub open spec fn completes(b: Seq<u8>, ext: Seq<u8>) -> bool {
     &&& rfc_varint_decode(b.add(ext)) is Some
     &&& rfc_varint_decode(b.add(ext)).unwrap().0 == b.add(ext).len()
 }
 
 /// A buffer too short for its varint can be padded to exactly the varint's length.
-proof fn lemma_decode_extend(b: Seq<u8>)
+pub proof fn lemma_decode_extend(b: Seq<u8>)
     requires
         rfc_varint_decode(b) is None,
     ensures
@@ -290,7 +290,7 @@ proof fn lemma_decode_extend(b: Seq<u8>)
 // Executable helpers
 // =============================================================================
 
-fn parse_varint(b: &[u8]) -> (r: Option<(usize, u64)>)
+pub fn parse_varint(b: &[u8]) -> (r: Option<(usize, u64)>)
     ensures
         match r {
             Some((n, v)) => rfc_varint_decode(b@) == Some((n as nat, v)) && 1 <= n <= b@.len(),
@@ -462,7 +462,7 @@ pub proof fn theorem_header_roundtrip(ty: u64, len: u64)
 }
 
 /// Complete frame: header for `body.len()` followed by `body`.
-fn put_frame(ty: u64, body: &Vec<u8>, out: &mut Vec<u8>)
+pub fn put_frame(ty: u64, body: &Vec<u8>, out: &mut Vec<u8>)
     requires
         ty <= VARINT_MAX,
         !is_h2_reserved_frame_spec(ty),

@@ -64,3 +64,15 @@ fn huffman_padding() {
     let all: Vec<u8> = (0..=255).collect();
     assert_eq!(huffman_decode(&encode(&all)), Some(all));
 }
+
+#[test]
+fn huffman_eos_after_symbol() {
+    // 'a' then EOS (30 ones), padded with ones: an embedded EOS is an error.
+    let (code, len) = huff_code(b'a' as u16);
+    let bits = ((code as u64) << 30) | ((1u64 << 30) - 1);
+    let n = len as u32 + 30;
+    let pad = (8 - n % 8) % 8;
+    let bits = (bits << pad) | ((1u64 << pad) - 1);
+    let bytes: Vec<u8> = (0..(n + pad) / 8).rev().map(|i| (bits >> (8 * i)) as u8).collect();
+    assert_eq!(huffman_decode(&bytes), None);
+}
