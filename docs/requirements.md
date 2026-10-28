@@ -10,7 +10,7 @@ Columns: `§` section, `Topic`, `#MUST/MUST NOT` (MUST, MUST NOT, REQUIRED, SHAL
 
 | Phase | Crate / scope |
 |---|---|
-| 1 | `wire`: QUIC variable-length integers (RFC 9000 §16 only) |
+| 1 | `wire`: QUIC variable-length integers (RFC 9000 §16 only) — proven: `theorem_matches_rfc`, `theorem_serialize_matches_rfc` in crates/wire/src/varint.rs |
 | 2 | `h3`: HTTP/3 framing, streams, settings, errors (RFC 9114), QPACK (RFC 9204), HTTP message validation |
 | 3 | `quic`: QUIC transport (RFC 9000 except §16), incl. anti-amplification, connection IDs, path validation, stateless reset, version negotiation |
 | 4 | `tls`: TLS 1.3 server handshake, key schedule, record/AEAD use (RFC 8446) and QUIC-TLS (RFC 9001) |
@@ -21,10 +21,11 @@ Columns: `§` section, `Topic`, `#MUST/MUST NOT` (MUST, MUST NOT, REQUIRED, SHAL
 ### Non-phase values
 
 - `N/A (client-only)`: the rule binds a client.
+- `N/A (IANA procedure)`: registry or codepoint-allocation rules for IANA/IESG or specification authors, not endpoint behavior.
 - `N/A (intermediary-only)`: translation/forwarding rules for proxies and gateways (RFC 9204 §4.5.4 forwarding rule and §7.1.3; RFC 9114 §4.1.2, §4.2, both §4.3.1 rows). We are an origin server.
 - `N/A (binds spec authors)`: the rule binds authors of future specifications, extensions or applications, not an implementation (RFC 9001 §5.1, §6.6, §9.2, §9.4; RFC 8446 Appendix E exporters).
 - `N/A (boilerplate)`: the BCP 14 keyword-definition paragraph; the keywords there are not requirements.
-- `Declined (optional: X)`: the rule only matters for an optional feature we decline. Declined features: 0-RTT, resumption/PSK, connection migration (initiating it), Retry, server push, QPACK dynamic table (capacity advertised as 0), ChaCha20-Poly1305, AES-256-GCM, X25519, client certificates, HTTP/3 extensions (datagrams, WebTransport, extended CONNECT), TLS 1.2-and-older compatibility, and CONNECT/proxying. A MUST about how to refuse or ignore a declined feature (discard 0-RTT packets, no `early_data` in EncryptedExtensions, reject PUSH_PROMISE, still answer PATH_CHALLENGE) is not declined; it carries its phase.
+- `Declined (optional: X)`: the rule only matters for an optional feature we decline. Declined features: 0-RTT, resumption/PSK, connection migration (initiating it), Retry, NEW_TOKEN issuance (sending NEW_TOKEN is a MAY, RFC 9000 §8.1.3; receiving-side rules stay Phase 3), server push, QPACK dynamic table (capacity advertised as 0), ChaCha20-Poly1305, AES-256-GCM, X25519, client certificates, HTTP/3 extensions (datagrams, WebTransport, extended CONNECT), TLS 1.2-and-older compatibility, and CONNECT/proxying. A MUST about how to refuse or ignore a declined feature (discard 0-RTT packets, no `early_data` in EncryptedExtensions, reject PUSH_PROMISE, still answer PATH_CHALLENGE) is not declined; it carries its phase.
 - `REINTERPRET`: a literal MUST we satisfy by reading it as not applying. Each needs an entry in the design spec's "Calls I made". Only the RSA rows (RFC 8446 §4.2.3, §4.4.3, §9.1) remain; they fall under the single RSA bullet in "Calls I made" ("RSA under RFC 8446 §9.1"), which awaits user review.
 
 ### Notes that bind later phases
@@ -50,7 +51,7 @@ Matrix total = sum of the section rows' counts (`(req)` rows excluded). It equal
 
 | § | Topic | #MUST/MUST NOT | Server applies? | Phase | Notes |
 |---|---|---|---|---|---|
-| 2.2 | Conventions and Terminology | 5 | no | N/A (boilerplate) | BCP 14 boilerplate listing the keywords; not a requirement (no other phase value fits) |
+| 2.2 | Conventions and Terminology | 5 | no | N/A (boilerplate) | BCP 14 boilerplate listing the keywords; not a requirement |
 | 3.1 | Discovering an HTTP/3 Endpoint | 2 | no | N/A (client-only) | Client verifies server certificate / authority |
 | 3.1.2 | Other Schemes | 1 | no | N/A (client-only) | Client ensures server willing to serve non-https scheme |
 | 3.2 | Connection Establishment | 3 | partial | 2 | Server must send SETTINGS as initial control-stream frame |
@@ -124,10 +125,10 @@ Matrix total = sum of the section rows' counts (`(req)` rows excluded). It equal
 | 10.6 | Use of Compression | 2 | yes | 2 | Satisfied structurally: static-table-only QPACK (no dynamic table) and no content compression |
 | 10.8 | Frame Parsing | 1 | yes | 2 | Frame length must exactly match its fields (see 7.1) |
 | 10.9 | Early Data | 1 | no | Declined (optional: 0-RTT) | Anti-replay mitigations apply only when HTTP/3 accepts 0-RTT; we never do |
-| 11.2.1 | Frame Types | 4 | no | N/A (client-only) | IANA registry rules; not endpoint behavior (no other phase value fits) |
-| 11.2.2 | Settings Parameters | 3 | no | N/A (client-only) | IANA registry rules; not endpoint behavior (no other phase value fits) |
-| 11.2.3 | Error Codes | 3 | no | N/A (client-only) | IANA registry rules; not endpoint behavior (no other phase value fits) |
-| 11.2.4 | Stream Types | 4 | no | N/A (client-only) | IANA registry rules; not endpoint behavior (no other phase value fits) |
+| 11.2.1 | Frame Types | 4 | no | N/A (IANA procedure) | IANA registry rules; not endpoint behavior |
+| 11.2.2 | Settings Parameters | 3 | no | N/A (IANA procedure) | IANA registry rules; not endpoint behavior |
+| 11.2.3 | Error Codes | 3 | no | N/A (IANA procedure) | IANA registry rules; not endpoint behavior |
+| 11.2.4 | Stream Types | 4 | no | N/A (IANA procedure) | IANA registry rules; not endpoint behavior |
 
 Total keyword count: 157 across 44 sections.
 
@@ -223,11 +224,11 @@ Total keyword count: 44 across 22 sections.
 | 8.1 (req) | Client pads Initial datagrams to 1200 | 1 | no | N/A (client-only) | Client behavior. |
 | 8.1 (req) | Client sends packet on PTO to avoid deadlock | 1 | no | N/A (client-only) | Client behavior. |
 | 8.1 (req) | Client Initial >= 1200 bytes if no Handshake keys, else Handshake packet | 1 | no | N/A (client-only) | Client behavior. |
-| 8.1.1 | Token construction | 1 | no | Declined (optional: Retry) | Tokens come only via Retry/NEW_TOKEN; we send neither (NEW_TOKEN not in declined list; confirm). |
+| 8.1.1 | Token construction | 1 | no | Declined (optional: NEW_TOKEN issuance) | Tokens come only via Retry/NEW_TOKEN; we send neither. |
 | 8.1.2 | Address validation using Retry packets | 1 | no | N/A (client-only) | Client repeats Retry token. |
 | 8.1.3 | Address validation for future connections | 7 | partial | 3 | Rows below. |
 | 8.1.3 (req) | Client token inclusion/reuse rules | 4 | no | N/A (client-only) | Client include token, no Retry token reuse, no inapplicable token, Retry token used immediately. |
-| 8.1.3 (req) | NEW_TOKEN unlinkability and uniqueness | 2 | no | Declined (optional: Retry) | We do not send NEW_TOKEN (address-validation-token feature; not in declined list, confirm). |
+| 8.1.3 (req) | NEW_TOKEN unlinkability and uniqueness | 2 | no | Declined (optional: NEW_TOKEN issuance) | We do not send NEW_TOKEN. |
 | 8.1.3 (req) | Server MUST attempt to validate a token in Initial | 1 | yes | 3 | We issue no tokens, so any token fails validation; must still handle without erroring (invalid NEW_TOKEN token: proceed as unvalidated; Retry-style invalid: INVALID_TOKEN). |
 | 8.1.4 | Address validation token integrity | 5 | no | Declined (optional: Retry) | Applies to tokens we issue; none issued. Anti-amplification still applies via 8.1. |
 | 8.2.1 | Initiating path validation | 4 | yes | 3 | Server initiates validation of a peer's new address (not migration). |
@@ -325,7 +326,7 @@ Total keyword count: 44 across 22 sections.
 | 19.5 | STOP_SENDING frames | 2 | yes | 3 | STREAM_STATE_ERROR cases. |
 | 19.6 | CRYPTO frames | 1 | yes | 3 | Offset limit error. |
 | 19.7 | NEW_TOKEN frames | 4 | partial | 3 | Server row below; others client-only/declined. |
-| 19.7 (req) | Token MUST NOT be empty | 1 | no | Declined (optional: Retry) | Sender rule; we never send NEW_TOKEN (confirm). |
+| 19.7 (req) | Token MUST NOT be empty | 1 | no | Declined (optional: NEW_TOKEN issuance) | Sender rule; we never send NEW_TOKEN. |
 | 19.7 (req) | Client empty-token error; clients MUST NOT send NEW_TOKEN | 2 | no | N/A (client-only) |  |
 | 19.7 (req) | Server treats receipt of NEW_TOKEN as PROTOCOL_VIOLATION | 1 | yes | 3 |  |
 | 19.8 | STREAM frames | 2 | yes | 3 | STREAM_STATE_ERROR; offset/length limit. |
@@ -354,13 +355,13 @@ Total keyword count: 44 across 22 sections.
 | 21.5.3 | Request forgery with preferred addresses | 1 | no | N/A (client-only) | Client must not send non-probing frames to unvalidated preferred address. |
 | 21.11 | Stateless reset oracle | 2 | yes | 3 | No reset for CIDs possibly active elsewhere with same static key. |
 | 21.12 | Version downgrade | 1 | no | N/A (client-only) | Requirement on future versions, not an endpoint. |
-| 22.1.2 | Selecting codepoints | 1 | no | N/A (client-only) | IANA procedure, not an endpoint requirement. |
-| 22.1.3 | Reclaiming provisional codepoints | 3 | no | N/A (client-only) | IANA procedure. |
-| 22.1.4 | Permanent registrations | 1 | no | N/A (client-only) | IANA procedure. |
-| 22.2 | QUIC versions registry | 2 | no | N/A (client-only) | IANA procedure. |
-| 22.3 | QUIC transport parameters registry | 3 | no | N/A (client-only) | IANA procedure. |
-| 22.4 | QUIC frame types registry | 1 | no | N/A (client-only) | IANA procedure. |
-| 22.5 | QUIC transport error codes registry | 1 | no | N/A (client-only) | IANA procedure. |
+| 22.1.2 | Selecting codepoints | 1 | no | N/A (IANA procedure) | IANA procedure, not an endpoint requirement. |
+| 22.1.3 | Reclaiming provisional codepoints | 3 | no | N/A (IANA procedure) | IANA procedure. |
+| 22.1.4 | Permanent registrations | 1 | no | N/A (IANA procedure) | IANA procedure. |
+| 22.2 | QUIC versions registry | 2 | no | N/A (IANA procedure) | IANA procedure. |
+| 22.3 | QUIC transport parameters registry | 3 | no | N/A (IANA procedure) | IANA procedure. |
+| 22.4 | QUIC frame types registry | 1 | no | N/A (IANA procedure) | IANA procedure. |
+| 22.5 | QUIC transport error codes registry | 1 | no | N/A (IANA procedure) | IANA procedure. |
 
 Total keyword count: 307 across 115 sections.
 
@@ -477,7 +478,7 @@ Total keyword count: 38 across 19 sections.
 | 4.2.2 | Cookie | 3 | no | 4 | Client copies cookie; clients MUST NOT reuse cookies; "Servers operating statelessly MUST ignore these records" refers to CCS records, which QUIC lacks (RFC 9001 §8.4). We emit no cookies |
 | 4.2.3 | Signature Algorithms | 16 | partial | 4 | Server: missing signature_algorithms when authenticating with certificate -> missing_extension; key type must match signature algorithm; no SHA-1-signed certificate unless unavoidable |
 | 4.2.3 (req) | RSA signature scheme requirements (rsaEncryption OID, RSASSA-PSS OID, salt length, DER params, identical params) | 6 | no | REINTERPRET | We use an ECDSA P-256 certificate only (ecdsa_secp256r1_sha256) and never request client certs, so no RSA key/signature is produced or verified; MUSTs conditioned on RSA keys/signatures do not arise See "Calls I made" in the design spec (RSA under RFC 8446 §9.1). |
-| 4.2.3 (req) | Deprecated algorithms MUST NOT be offered or negotiated (MD5, SHA-224, DSA) | 2 | yes | 5 | We implement only ecdsa_secp256r1_sha256 |
+| 4.2.3 (req) | Deprecated algorithms MUST NOT be offered or negotiated (MD5, SHA-224, DSA) | 2 | yes | 4 | We implement only ecdsa_secp256r1_sha256 |
 | 4.2.3 (req) | TLS 1.2 negotiation rules for signature schemes / curves / PSS | 3 | no | Declined (optional: TLS 1.2-and-older compatibility) | "implementations MUST be prepared to accept a signature that uses any curve ..." when TLS 1.2 negotiated |
 | 4.2.3 (req) | Client lists legacy algorithms lowest priority | 1 | no | N/A (client-only) | "Clients offering these values MUST list them as the lowest priority" |
 | 4.2.5 | OID Filters | 6 | no | Declined (optional: client certificates) | Only in CertificateRequest, which we never send |
@@ -534,11 +535,11 @@ Total keyword count: 38 across 19 sections.
 | 8.2 | Client Hello Recording | 3 | no | Declined (optional: 0-RTT) | Anti-replay storage for 0-RTT |
 | 9.1 | Mandatory-to-Implement Cipher Suites | 3 | partial | 4 | MUST implement TLS_AES_128_GCM_SHA256 (our only suite; primitives in Phase 5); MUST support secp256r1 key exchange and ecdsa_secp256r1_sha256 |
 | 9.1 (req) | "MUST support digital signatures with rsa_pkcs1_sha256 (for certificates), rsa_pss_rsae_sha256 (for CertificateVerify and certificates)" | 1 | no | REINTERPRET | We serve an ECDSA P-256 certificate and never request client certificates, so we neither sign nor validate RSA; the RSA schemes are only needed for RSA certificate chains / client certs See "Calls I made" in the design spec (RSA under RFC 8446 §9.1). |
-| 9.2 | Mandatory-to-Implement Extensions | 13 | partial | 4 | Implement supported_versions, signature_algorithms, supported_groups, key_share, server_name; missing_extension abort for CH lacking required extensions; send supported_versions/key_share when applicable |
-| 9.2 (req) | "MUST implement ... cookie" | 1 | no | 4 | "MUST implement ... cookie". Phase 4 parses the cookie extension and rejects a cookie we never issued (we send no HelloRetryRequest cookie). Not a reinterpretation. |
-| 9.2 (req) | pre_shared_key / psk_key_exchange_modes REQUIRED for PSK | 2 | no | Declined (optional: resumption/PSK) | "MUST implement ... cookie". Phase 4 parses the cookie extension and rejects a cookie we never issued (we send no HelloRetryRequest cookie). Not a reinterpretation. |
+| 9.2 | Mandatory-to-Implement Extensions | 13 | partial | 4 | Implement supported_versions, signature_algorithms, signature_algorithms_cert, supported_groups, key_share, server_name; missing_extension abort for CH lacking required extensions; send supported_versions/key_share when applicable |
+| 9.2 (req) | "MUST implement ... cookie" | 1 | yes | 4 | "MUST implement ... cookie". Basis is RFC 8446 §4.2.2 (server cookie emission is a MAY), so "implement" means handle the extension; rejecting a cookie we never issued is our policy choice, not a MUST. Not a reinterpretation. |
+| 9.2 (req) | pre_shared_key / psk_key_exchange_modes REQUIRED for PSK | 2 | no | Declined (optional: resumption/PSK) | "\"pre_shared_key\" is REQUIRED for PSK key agreement"; "\"psk_key_exchange_modes\" is REQUIRED for PSK key agreement". PSK declined. |
 | 9.3 | Protocol Invariants | 10 | partial | 4 | Server MUST correctly ignore unrecognized cipher suites, extensions, and other parameters; client/middlebox invariants do not apply |
-| 11 | IANA Considerations | 2 | no | N/A (client-only) | Registry policy for IANA/IESG; no implementation requirement |
+| 11 | IANA Considerations | 2 | no | N/A (IANA procedure) | Registry policy for IANA/IESG; no implementation requirement |
 | Appendix B | Protocol Data Structures and Constant Values | 2 | yes | 4 | Never send the deprecated/obsolete_RESERVED values; we offer and accept one suite, so this holds by construction. |
 | Appendix C | Implementation Notes | 1 | partial | 4 | "applications MUST NOT use TLS in such a way absent explicit configuration" (no authentication mechanism): the server always authenticates with its certificate. |
 | Appendix D | Backward Compatibility | 18 | partial | 4 | Server rows: legacy_version / legacy_record_version ignored; negotiate via supported_versions; abort protocol_version when no TLS 1.3 offer (never fall back); never send or negotiate RC4, <112-bit ciphers, SSL 2.0/3.0, SSL 2.0-format ClientHello, legacy_version <= 0x0300 (abort protocol_version), truncated HMAC. All hold by construction (TLS 1.3 only, one suite) but each needs its Phase 4 check. Rows below carve out the exceptions. |
