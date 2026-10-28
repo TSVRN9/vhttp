@@ -16,4 +16,5 @@ pub mod hmac;
 pub mod p256;
 pub mod rsa;
 pub mod sha256;
+mod p256_group;
 mod shim;
