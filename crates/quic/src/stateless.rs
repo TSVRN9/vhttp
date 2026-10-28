@@ -34,10 +34,22 @@ pub const RESET_MAX_LEN: usize = 43;
 //# The remainder of the Version Negotiation packet is a list of 32-bit
 //# versions that the server supports.
 /// A Version Negotiation packet: first byte 0xc0, Version 0, the client's SCID as our DCID,
-/// the client's DCID as our SCID, then the one version we support.
-pub open spec fn spec_vn_bytes(dcid: Seq<u8>, scid: Seq<u8>) -> Seq<u8> {
+/// the client's DCID as our SCID, then the one version we support. Both CIDs come from
+/// `rfc_long_header`, which reads each length from one byte, so each is at most 255 bytes,
+/// the `as u8` casts are lossless, and the packet is at most 1 + 4 + 2 * (1 + 255) + 4 = 521
+/// bytes.
+pub open spec fn spec_vn_bytes(dcid: Seq<u8>, scid: Seq<u8>) -> Seq<u8>
+    recommends
+        dcid.len() <= 255,
+        scid.len() <= 255,
+{
     seq![0xc0u8, 0u8, 0u8, 0u8, 0u8, scid.len() as u8] + scid + seq![dcid.len() as u8] + dcid
-        + seq![0u8, 0u8, 0u8, 1u8]
+        + seq![
+        (QUIC_V1 >> 24u32) as u8,
+        (QUIC_V1 >> 16u32) as u8,
+        (QUIC_V1 >> 8u32) as u8,
+        QUIC_V1 as u8,
+    ]
 }
 
 //= https://www.rfc-editor.org/rfc/rfc9000#section-6.1
@@ -146,6 +158,8 @@ pub fn version_negotiation(datagram: &[u8]) -> (r: Option<Vec<u8>>)
             out.push(0);
             out.push(1);
             proof {
+                assert(QUIC_V1 >> 24u32 == 0 && QUIC_V1 >> 16u32 == 0 && QUIC_V1 >> 8u32 == 0)
+                    by (compute_only);
                 assert(out@ =~= spec_vn_bytes(dcid@, scid@));
             }
             Some(out)

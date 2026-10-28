@@ -46,20 +46,21 @@ fn vn_not_sent() {
     assert_eq!(version_negotiation(&dgram(0xc0, v, &dcid, &scid, 1199)), None);
     assert_eq!(version_negotiation(&dgram(0xc0, [0, 0, 0, 1], &dcid, &scid, 1200)), None);
     assert_eq!(version_negotiation(&dgram(0xc0, [0; 4], &dcid, &scid, 1200)), None);
-    let mut short = vec![0x40; 1200];
-    short[0] = 0x40;
-    assert_eq!(version_negotiation(&short), None);
+    assert_eq!(version_negotiation(&vec![0x40; 1200]), None);
 }
 
 #[test]
 fn stateless_reset_sizes() {
-    let u: Vec<u8> = (0..27).collect();
+    // u[0] = 0xff: the top two bits must be masked off; the rest are distinct and non-zero.
+    let mut u: Vec<u8> = (1..=27).collect();
+    u[0] = 0xff;
     let token = [0xaa; 16];
     assert_eq!(stateless_reset(21, &u, &token), None);
     for (trigger, len) in [(22, 21), (43, 42), (44, 43), (1200, 43)] {
         let r = stateless_reset(trigger, &u, &token).unwrap();
         assert_eq!(r.len(), len);
-        assert_eq!(r[0] & 0xc0, 0x40);
+        assert_eq!(r[0], 0x7f);
+        assert_eq!(r[1..len - 16], u[1..len - 16]);
         assert_eq!(r[len - 16..], token);
     }
 }

@@ -82,12 +82,12 @@ fn header_drops() {
     assert_eq!(parse_long_header(&long(0xc0, &[0, 0, 0, 2, 0])), None);
     // Token length 5 with 2 bytes left.
     assert_eq!(parse_long_header(&long(0xc0, &[0, 0, 5, 0xaa, 0xbb])), None);
-    // Short header: 20 bytes is too small, 21 is enough.
     // SCID length 21.
     let mut b = long(0xc0, &[0, 21]);
     b.extend([0u8; 21]);
     b.extend([0, 1, 0]);
     assert_eq!(parse_long_header(&b), None);
+    // Short header: 20 bytes is too small, 21 is enough.
     assert_eq!(parse_header(&[0x40; 20], 8), None);
     assert!(parse_header(&[0x40; 21], 8).is_some());
     // Short header with fixed bit 0.
