@@ -84,6 +84,8 @@ proof fn send_stream_exports(s: SendStream)
     assert(!is_reset(s.state()) ==> s.buffered_spec() == s.all_written().len()
         - s.acked_base_spec());
     assert(s.next_off() matches Some(o) ==> o <= s.all_written().len());
+    // Memory (length, not capacity): at most twice the bytes past the acknowledged prefix.
+    assert(s.buffered_spec() <= 2 * (s.all_written().len() - s.acked_point_spec()));
     assert(s.pending_reset() matches Some(r) ==> r.1 == s.sent_end() && r.0 <= VARINT_MAX);
 }
 

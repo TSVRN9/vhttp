@@ -64,6 +64,21 @@ pub struct Chunk {
     pub new_bytes: u64,
 }
 
+pub struct SpecChunk {
+    pub off: u64,
+    pub data: Seq<u8>,
+    pub fin: bool,
+    pub new_bytes: u64,
+}
+
+impl View for Chunk {
+    type V = SpecChunk;
+
+    open spec fn view(&self) -> SpecChunk {
+        SpecChunk { off: self.off, data: self.data@, fin: self.fin, new_bytes: self.new_bytes }
+    }
+}
+
 /// Every range is non-empty and inside `[lo, hi)`.
 pub open spec fn in_bounds(v: Seq<(u64, u64)>, lo: u64, hi: u64) -> bool {
     forall|i: int| #![trigger v[i]] 0 <= i < v.len() ==> lo <= v[i].0 < v[i].1 <= hi
@@ -212,16 +227,16 @@ pub open spec fn no_data(a: SendState) -> bool {
 pub open spec fn chunk_ok(
     s1: SendStream,
     s2: SendStream,
-    c: Chunk,
+    c: SpecChunk,
     max_len: u64,
     conn_avail: u64,
 ) -> bool {
-    let end = c.off + c.data@.len();
+    let end = c.off + c.data.len();
     &&& end <= s1.all_written().len()
-    &&& c.data@ == s1.all_written().subrange(c.off as int, end)
+    &&& c.data == s1.all_written().subrange(c.off as int, end)
     &&& c.fin ==> end == s1.all_written().len() && s1.fin_written_spec()
-    &&& c.data@.len() > 0 || c.fin
-    &&& c.data@.len() <= max_len
+    &&& c.data.len() > 0 || c.fin
+    &&& c.data.len() <= max_len
     &&& c.new_bytes <= conn_avail
     &&& s2.sent_end() == s1.sent_end() + c.new_bytes
     &&& s1.next_off() == Some(c.off)
@@ -253,6 +268,16 @@ impl SendStream {
     /// The RESET_STREAM's `(code, final size)`, once reset.
     pub closed spec fn reset_spec(&self) -> Option<(u64, u64)> {
         self.reset
+    }
+
+    /// The end of the contiguously acknowledged prefix. The buffer is trimmed to it lazily, so
+    /// `acked_base` (the buffer's start) may lag behind.
+    pub closed spec fn acked_point_spec(&self) -> u64 {
+        if self.acked@.len() > 0 && self.acked@[0].0 == self.acked_base {
+            self.acked@[0].1
+        } else {
+            self.acked_base
+        }
     }
 
     pub closed spec fn buffered_spec(&self) -> nat {
@@ -292,7 +317,8 @@ impl SendStream {
         }
     }
 
-    pub closed spec fn wf(&self) -> bool {
+    /// `wf` except the clauses `on_data_acked` restores only at its end.
+    closed spec fn core(&self) -> bool {
         &&& self.credit.wf()
         &&& self.credit.used_spec() == self.sent_end
         &&& self.sent_end <= self.credit.max_spec()
@@ -313,11 +339,18 @@ impl SendStream {
             && self.sent_end == self.written
         &&& self.fin_lost ==> self.state is DataSent && !self.fin_acked
         &&& self.fin_acked ==> self.state is DataSent || self.state is DataRecvd
-        &&& self.state is DataSent ==> !(self.acked_base == self.written && self.fin_acked)
         &&& self.state is DataRecvd ==> self.acked_base == self.written && self.fin_acked
         &&& (self.reset is Some <==> is_reset(self.state))
         &&& self.reset matches Some(r) ==> r.0 <= VARINT_MAX && r.1 == self.sent_end
         &&& self.reset_pending ==> self.state is ResetSent
+    }
+
+    pub closed spec fn wf(&self) -> bool {
+        &&& self.core()
+        &&& self.state is DataSent ==> !(self.acked_base == self.written && self.fin_acked)
+        // Memory: the buffer is at most twice the bytes past the acknowledged prefix.
+        &&& self.buf@.len() <= 2 * (self.written - self.acked_point_spec())
+        &&& self.acked_point_spec() == self.written ==> self.acked_base == self.written
     }
 
     /// The invariant, in terms of the accessors.
@@ -345,6 +378,10 @@ impl SendStream {
             self.pending_reset() is Some ==> self.state() is ResetSent && self.pending_reset()
                 == self.reset_spec(),
             self.next_off() matches Some(o) ==> o <= self.all_written().len(),
+            self.acked_base_spec() <= self.acked_point_spec() <= self.all_written().len(),
+            self.buffered_spec() <= 2 * (self.all_written().len() - self.acked_point_spec()),
+            self.acked_point_spec() == self.all_written().len() <==> self.acked_base_spec()
+                == self.all_written().len(),
     {
         self.credit.lemma_wf();
     }
@@ -471,7 +508,7 @@ impl SendStream {
             final(self).pending_reset() == old(self).pending_reset(),
             no_data(old(self).state()) ==> r is None,
             r is None ==> *final(self) == *old(self),
-            r matches Some(c) ==> chunk_ok(*old(self), *final(self), c, max_len, conn_avail),
+            r matches Some(c) ==> chunk_ok(*old(self), *final(self), c@, max_len, conn_avail),
     {
         match self.state {
             //= https://www.rfc-editor.org/rfc/rfc9000#section-3.3
@@ -509,7 +546,7 @@ impl SendStream {
             final(self).reset_spec() == old(self).reset_spec(),
             final(self).pending_reset() == old(self).pending_reset(),
             r is None ==> *final(self) == *old(self),
-            r matches Some(c) ==> chunk_ok(*old(self), *final(self), c, max_len, 0),
+            r matches Some(c) ==> chunk_ok(*old(self), *final(self), c@, max_len, 0),
     {
         let (s, e) = self.lost[0];
         if max_len == 0 {
@@ -562,7 +599,7 @@ impl SendStream {
             final(self).reset_spec() == old(self).reset_spec(),
             final(self).pending_reset() == old(self).pending_reset(),
             r is None ==> *final(self) == *old(self),
-            r matches Some(c) ==> chunk_ok(*old(self), *final(self), c, max_len, conn_avail),
+            r matches Some(c) ==> chunk_ok(*old(self), *final(self), c@, max_len, conn_avail),
     {
         proof {
             self.credit.lemma_wf();
@@ -859,15 +896,45 @@ impl SendStream {
                 self.fin_lost = false;
             }
         }
-        if self.acked.len() > 0 && self.acked[0].0 == ab {
+        // ponytail: the buffer is trimmed only once the acknowledged prefix is at least the
+        // tail that `split_off` copies, so each copied byte is paid for by a freed one (O(written)
+        // copying in total) at the cost of up to 2x the unacked bytes held; a head index as in
+        // Reassembly if that slack matters.
+        let ghost pre = *self;
+        loop
+            invariant
+                self.core(),
+                self.state == pre.state,
+                self.state is Send || self.state is DataSent,
+                self.all_written == pre.all_written,
+                self.written == pre.written,
+                self.sent_end == pre.sent_end,
+                se == self.sent_end,
+                aw == self.all_written@,
+                self.credit == pre.credit,
+                self.fin_written == pre.fin_written,
+                self.fin_acked == pre.fin_acked,
+                self.reset == pre.reset,
+                self.reset_pending == pre.reset_pending,
+                self.acked_base >= pre.acked_base,
+            ensures
+                self.acked@.len() == 0 || self.acked@[0].0 != self.acked_base || self.acked@[0].1
+                    - self.acked_base < self.written - self.acked@[0].1,
+            decreases self.written - self.acked_base,
+        {
+            if self.acked.len() == 0 || self.acked[0].0 != self.acked_base {
+                break;
+            }
+            let ab = self.acked_base;
             let nb = self.acked[0].1;
+            if nb - ab < self.written - nb {
+                break;
+            }
             if nb == self.written {
                 // A fresh vec, not `clear()`: acknowledged space keeps no allocation
                 // (TRUSTED.md: proven bounds are lengths, not capacities).
                 self.buf = Vec::new();
             } else {
-                // ponytail: split_off copies the unacked tail on each advancing ack; a head
-                // index as in Reassembly if send buffers grow large.
                 let t = self.buf.split_off((nb - ab) as usize);
                 self.buf = t;
             }
