@@ -532,7 +532,7 @@ Total keyword count: 38 across 19 sections.
 | 6.2 | Error Alerts | 3 | yes | 4 | Fatal error closes connection; alert maps to QUIC error code |
 | 7.4.2 | Elliptic Curve Diffie-Hellman | 2 | partial | 4 | Do not truncate leading zeros of shared secret (P-256 X coordinate, 32 bytes) |
 | 7.4.2 (req) | All-zero shared secret check (RFC 7748 §6) | 1 | no | Declined (optional: X25519) | Applies to X25519/X448; P-256 point validation (§4.2.8.2) precludes it |
-| 7.5 | Exporters | 2 | no | 4 | QUIC does not use TLS exporters |
+| 7.5 | Exporters | 2 | no | 4 | QUIC does not use TLS exporters; ✅ 4b: crates/tls/src/schedule.rs (no exporter derived; QUIC uses none) |
 | 8 | 0-RTT and Anti-Replay | 3 | no | Declined (optional: 0-RTT) | We never accept 0-RTT |
 | 8.2 | Client Hello Recording | 3 | no | Declined (optional: 0-RTT) | Anti-replay storage for 0-RTT |
 | 9.1 | Mandatory-to-Implement Cipher Suites | 3 | partial | 4 | MUST implement TLS_AES_128_GCM_SHA256 (our only suite; primitives in Phase 5); MUST support secp256r1 key exchange and ecdsa_secp256r1_sha256 |
