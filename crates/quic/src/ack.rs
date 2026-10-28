@@ -443,7 +443,7 @@ proof fn lemma_ack_layout(a: SpecAck, rest: Seq<u8>)
     }
 }
 
-proof fn lemma_skip0(b: Seq<u8>)
+pub(crate) proof fn lemma_skip0(b: Seq<u8>)
     ensures
         b.skip(0) == b,
 {

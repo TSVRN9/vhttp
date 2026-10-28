@@ -10,6 +10,7 @@ use wire::varint::*;
 
 use crate::ack::*;
 use crate::codes::*;
+use crate::stateless::*;
 
 verus! {
 
@@ -681,13 +682,6 @@ proof fn lemma_bytes_at(b: Seq<u8>, p: int, d: Seq<u8>, tail: Seq<u8>)
     assert(b.skip(p + d.len()) =~= tail);
 }
 
-proof fn lemma_skip0(b: Seq<u8>)
-    ensures
-        b.skip(0) == b,
-{
-    assert(b.skip(0) =~= b);
-}
-
 proof fn lemma_reset_stream_rt(x: u64, y: u64, z: u64, rest: Seq<u8>)
     requires
         x <= VARINT_MAX,
@@ -711,7 +705,7 @@ proof fn lemma_reset_stream_rt(x: u64, y: u64, z: u64, rest: Seq<u8>)
     lemma_vint_at(b, (vx.len() + vy.len()) as int, z, rest);
 }
 
-proof fn lemma_two_varints_rt(ty: u64, x: u64, y: u64, rest: Seq<u8>)
+proof fn lemma_two_varints_rt(x: u64, y: u64, rest: Seq<u8>)
     requires
         x <= VARINT_MAX,
         y <= VARINT_MAX,
@@ -836,7 +830,7 @@ proof fn lemma_ncid_rt(seq: u64, rpt: u64, cid: Seq<u8>, token: Seq<u8>, rest: S
     lemma_bytes_at(b, p2 + 1 + cid.len(), token, rest);
 }
 
-proof fn lemma_path_rt(ty: u64, d: Seq<u8>, rest: Seq<u8>)
+proof fn lemma_path_rt(d: Seq<u8>, rest: Seq<u8>)
     requires
         d.len() == 8,
     ensures
@@ -910,7 +904,7 @@ proof fn lemma_body_roundtrip_a(f: SpecFrame, rest: Seq<u8>)
             lemma_reset_stream_rt(stream_id, error_code, final_size, rest);
         },
         SpecFrame::StopSending { stream_id, error_code } => {
-            lemma_two_varints_rt(FRAME_STOP_SENDING, stream_id, error_code, rest);
+            lemma_two_varints_rt(stream_id, error_code, rest);
         },
         SpecFrame::Crypto { offset, data } => {
             lemma_crypto_rt(offset, data, rest);
@@ -938,7 +932,7 @@ proof fn lemma_body_roundtrip_b(f: SpecFrame, rest: Seq<u8>)
             lemma_one_varint_rt(v, rest);
         },
         SpecFrame::MaxStreamData { stream_id, max } => {
-            lemma_two_varints_rt(FRAME_MAX_STREAM_DATA, stream_id, max, rest);
+            lemma_two_varints_rt(stream_id, max, rest);
         },
         SpecFrame::MaxStreams { bidi, max } => {
             lemma_streams_limit();
@@ -948,7 +942,7 @@ proof fn lemma_body_roundtrip_b(f: SpecFrame, rest: Seq<u8>)
             lemma_one_varint_rt(v, rest);
         },
         SpecFrame::StreamDataBlocked { stream_id, max } => {
-            lemma_two_varints_rt(FRAME_STREAM_DATA_BLOCKED, stream_id, max, rest);
+            lemma_two_varints_rt(stream_id, max, rest);
         },
         SpecFrame::StreamsBlocked { bidi, max } => {
             lemma_streams_limit();
@@ -961,10 +955,10 @@ proof fn lemma_body_roundtrip_b(f: SpecFrame, rest: Seq<u8>)
             lemma_one_varint_rt(v, rest);
         },
         SpecFrame::PathChallenge(d) => {
-            lemma_path_rt(FRAME_PATH_CHALLENGE, d, rest);
+            lemma_path_rt(d, rest);
         },
         SpecFrame::PathResponse(d) => {
-            lemma_path_rt(FRAME_PATH_RESPONSE, d, rest);
+            lemma_path_rt(d, rest);
         },
         SpecFrame::ConnectionClose { app, error_code, frame_type, reason } => {
             lemma_close_rt(app, error_code, frame_type, reason, rest);
@@ -1450,14 +1444,6 @@ pub fn frame_type_of(f: &Frame) -> (r: u64)
     }
 }
 
-fn put_bytes(s: &[u8], out: &mut Vec<u8>)
-    ensures
-        final(out)@ == old(out)@ + s@,
-{
-    out.extend_from_slice(s);
-    assert(out@ =~= old(out)@ + s@);
-}
-
 fn put_varints2(x: u64, y: u64, out: &mut Vec<u8>)
     requires
         x <= VARINT_MAX,
@@ -1501,7 +1487,7 @@ fn put_opt_len_bytes(present: bool, v: u64, data: &[u8], out: &mut Vec<u8>)
         put_varint(v, out);
     }
     put_varint(data.len() as u64, out);
-    put_bytes(data, out);
+    put_slice(data, out);
     assert(out@ =~= start + ((if present {
         spec_varint(v)
     } else {
@@ -1564,8 +1550,8 @@ fn put_ncid_body(seq: u64, retire_prior_to: u64, cid: &[u8], token: &[u8], out: 
     let ghost start = old(out)@;
     put_varints2(seq, retire_prior_to, out);
     out.push(cid.len() as u8);
-    put_bytes(cid, out);
-    put_bytes(token, out);
+    put_slice(cid, out);
+    put_slice(token, out);
     assert(out@ =~= start + (spec_varint(seq) + (spec_varint(retire_prior_to) + (seq![
         cid.len() as u8,
     ] + (cid@ + token@)))));
@@ -1611,8 +1597,8 @@ fn serialize_body(f: &Frame, out: &mut Vec<u8>)
             out,
         ),
         Frame::RetireConnectionId(v) => put_varint(*v, out),
-        Frame::PathChallenge(d) => put_bytes(d.as_slice(), out),
-        Frame::PathResponse(d) => put_bytes(d.as_slice(), out),
+        Frame::PathChallenge(d) => put_slice(d.as_slice(), out),
+        Frame::PathResponse(d) => put_slice(d.as_slice(), out),
         Frame::ConnectionClose { app, error_code, frame_type, reason } => put_close_body(
             *app,
             *error_code,
