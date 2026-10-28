@@ -224,6 +224,12 @@ impl Reassembly {
         (self.buf@.len() - self.head) as usize
     }
 
+    /// The physical length of each of the two buffers, delivered space awaiting compaction
+    /// included.
+    pub closed spec fn phys_len(&self) -> nat {
+        self.buf@.len()
+    }
+
     pub closed spec fn wf(&self) -> bool {
         let m = rfc_received(self.ins@);
         &&& self.buf@.len() == self.have@.len()
@@ -252,6 +258,7 @@ impl Reassembly {
             forall|k: nat| #[trigger]
                 rfc_received(self.inserted()).contains_key(k) ==> k < self.base()
                     + self.buf_len(),
+            self.buf_len() <= self.phys_len() <= 2 * self.buf_len(),
     {
     }
 
