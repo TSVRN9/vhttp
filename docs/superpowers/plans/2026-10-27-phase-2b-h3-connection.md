@@ -249,6 +249,10 @@ All Phase-2 rows that are not marked `✅ 2a` or that carry an "open for 2b" tai
     - a well-formed CONNECT is answered with a `501` response and FIN (§4.4, via RFC 9110 §9.1);
     - requests on IDs ≥ our sent GOAWAY ID get `ResetStream(H3_REQUEST_REJECTED)` and are never processed (§5.2, §4.1.1).
   - `pub fn on_stream_reset(&mut self, stream_id: u64, code: u64, out)`. A reset of a critical peer uni stream is `CloseConnection(H3_CLOSED_CRITICAL_STREAM)`; a reset of a request stream drops it silently.
+  - `pub fn on_stop_sending(&mut self, stream_id: u64, code: u64, out)` (peer STOP_SENDING on one of *our* sending streams).
+    - On our control stream 3, it is `CloseConnection(H3_CLOSED_CRITICAL_STREAM)` (RFC 9114 §6.2.1: "MUST NOT … close"; the closure the peer would force is a critical-stream error).
+    - On a request stream, the pending response is dropped and nothing more is written. The QUIC layer (Phase 3c) sends the RESET_STREAM that RFC 9000 §3.5 requires.
+    - Test `stop_sending_control` pins this.
   - `pub fn send_response(&mut self, stream_id: u64, resp: &Response, out) -> Result<(), ()>`.
     - It returns `Err` with no output if `!check_response(resp)`, if the stream isn't an open request stream whose `Head` was delivered, or if the connection is closed.
     - Otherwise it writes HEADERS (`:status` first via `encode_field_section`), then DATA (if the body is non-empty), then FIN.
