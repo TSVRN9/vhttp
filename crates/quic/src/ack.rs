@@ -464,6 +464,69 @@ proof fn lemma_assoc(x: Seq<u8>, y: Seq<u8>, z: Seq<u8>)
     assert((x + y) + z =~= x + (y + z));
 }
 
+/// Every decoded varint fits in 62 bits.
+pub(crate) proof fn lemma_decoded_bounded()
+    ensures
+        forall|s: Seq<u8>| (#[trigger] rfc_varint_decode(s)) is Some ==> rfc_varint_decode(s).unwrap().1
+            <= VARINT_MAX,
+{
+    assert forall|s: Seq<u8>| (#[trigger] rfc_varint_decode(s)) is Some implies rfc_varint_decode(
+        s,
+    ).unwrap().1 <= VARINT_MAX by {
+        theorem_matches_rfc(s);
+        lemma_parse_bound::<false>(s);
+    }
+}
+
+/// `count` pairs read back are `count` pairs of 62-bit values.
+proof fn lemma_ack_pairs_bounded(b: Seq<u8>, p: int, count: nat)
+    ensures
+        rfc_ack_pairs(b, p, count) matches Some((r, _)) ==> r.len() == count && forall|i: int|
+            0 <= i < r.len() ==> (#[trigger] r[i]).0 <= VARINT_MAX && r[i].1 <= VARINT_MAX,
+    decreases count,
+{
+    if count > 0 {
+        lemma_decoded_bounded();
+        if let Some((n1, gap)) = rfc_varint_decode(b.skip(p)) {
+            if let Some((n2, len)) = rfc_varint_decode(b.skip(p + n1)) {
+                lemma_ack_pairs_bounded(b, p + n1 + n2, (count - 1) as nat);
+                if let Some((rest, q)) = rfc_ack_pairs(b, p + n1 + n2, (count - 1) as nat) {
+                    let r = seq![(gap, len)] + rest;
+                    assert forall|i: int| 0 <= i < r.len() implies (#[trigger] r[i]).0
+                        <= VARINT_MAX && r[i].1 <= VARINT_MAX by {
+                        if i > 0 {
+                            assert(r[i] == rest[i - 1]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Every ACK frame `rfc_ack` accepts is one `serialize_ack` can write back, with ECN counts
+/// exactly when the type is 0x03; every failure is FRAME_ENCODING_ERROR.
+pub proof fn lemma_ack_received(ty: u64, b: Seq<u8>)
+    ensures
+        rfc_ack(ty, b) matches Ok((a, _)) ==> ack_encodable(a) && rfc_ack_ranges_valid(
+            a.largest,
+            a.first_range,
+            a.ranges,
+        ) && (a.ecn is Some <==> ty == FRAME_ACK_ECN),
+        rfc_ack(ty, b) matches Err(e) ==> e == FRAME_ENCODING_ERROR,
+{
+    lemma_decoded_bounded();
+    if let Some((n1, _)) = rfc_varint_decode(b) {
+        if let Some((n2, _)) = rfc_varint_decode(b.skip(n1 as int)) {
+            if let Some((n3, count)) = rfc_varint_decode(b.skip((n1 + n2) as int)) {
+                if let Some((n4, _)) = rfc_varint_decode(b.skip((n1 + n2 + n3) as int)) {
+                    lemma_ack_pairs_bounded(b, (n1 + n2 + n3 + n4) as int, count as nat);
+                }
+            }
+        }
+    }
+}
+
 /// Parsing what `serialize_ack` wrote, minus the type byte and followed by anything,
 /// recovers the frame and consumes exactly its body.
 pub proof fn theorem_ack_roundtrip(a: SpecAck, rest: Seq<u8>)
@@ -648,6 +711,7 @@ pub fn parse_ack(ty: u64, b: &[u8]) -> (r: Result<(AckFrame, usize), u64>)
 }
 
 /// Writes the whole ACK frame, type included: 0x03 iff it carries ECN counts.
+#[verifier::spinoff_prover]
 pub fn serialize_ack(a: &AckFrame, out: &mut Vec<u8>)
     requires
         ack_encodable(a@),

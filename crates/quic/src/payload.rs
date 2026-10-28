@@ -174,6 +174,19 @@ pub open spec fn frames_sendable(fs: Seq<SpecFrame>, k: PacketKind) -> bool {
         )
 }
 
+/// What every frame `rfc_payload` accepts satisfies: sendable in a packet of kind `k`, and
+/// neither HANDSHAKE_DONE (rejected on receipt) nor PADDING (dropped).
+pub open spec fn frames_received(fs: Seq<SpecFrame>, k: PacketKind) -> bool {
+    &&& frames_sendable(fs, k)
+    &&& forall|i: int|
+        0 <= i < fs.len() ==> !(#[trigger] fs[i] is HandshakeDone) && !(fs[i] is Padding)
+}
+
+/// `n` PADDING frames.
+pub open spec fn paddings(n: nat) -> Seq<SpecFrame> {
+    Seq::new(n, |i: int| SpecFrame::Padding)
+}
+
 /// The exec frames as spec values.
 pub open spec fn frames_view(fs: Seq<Frame>) -> Seq<SpecFrame> {
     fs.map_values(|f: Frame| f@)
@@ -292,6 +305,132 @@ pub proof fn theorem_payload_roundtrip(fs: Seq<SpecFrame>, k: PacketKind)
     assert(Seq::<u8>::empty() + b =~= b);
 }
 
+/// The frames from offset `p` on are `frames_received`; every failure is
+/// FRAME_ENCODING_ERROR or PROTOCOL_VIOLATION.
+proof fn lemma_frames_received(b: Seq<u8>, p: int, k: PacketKind)
+    requires
+        0 <= p,
+    ensures
+        rfc_frames(b, p, k) matches Ok(fs) ==> frames_received(fs, k),
+        rfc_frames(b, p, k) matches Err(e) ==> e == FRAME_ENCODING_ERROR || e == PROTOCOL_VIOLATION,
+    decreases (if p < b.len() {
+        b.len() - p
+    } else {
+        0
+    }),
+{
+    hide(rfc_frame_body);
+    hide(frame_wf);
+    hide(spec_frame_type);
+    if p < b.len() {
+        let c = b.skip(p);
+        lemma_decode_len_bounds(c);
+        if let Ok((ty, n)) = rfc_frame_type(c) {
+            if ty <= FRAME_HANDSHAKE_DONE && frame_permitted(ty, k) {
+                lemma_frame_body_received(ty, c.skip(n as int));
+                if let Ok((f, m)) = rfc_frame_body(ty, c.skip(n as int)) {
+                    lemma_frames_received(b, p + n + m, k);
+                    if let Ok(fs) = rfc_frames(b, p + n + m, k) {
+                        if !(f is Padding) {
+                            assert(frame_permitted(spec_frame_type(f), k));
+                            let r = seq![f] + fs;
+                            assert forall|i: int| 0 <= i < r.len() implies frame_wf(#[trigger] r[i])
+                                && frame_permitted(spec_frame_type(r[i]), k) && !(r[i] is HandshakeDone)
+                                && !(r[i] is Padding) by {
+                                if i > 0 {
+                                    assert(r[i] == fs[i - 1]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Every frame a server accepts in a packet of kind `k` is well-formed, permitted in `k`,
+/// and neither HANDSHAKE_DONE nor PADDING: the facts 3c and 3d need from a parse, and the
+/// precondition `serialize_payload` and `theorem_payload_roundtrip` ask of their frames.
+pub proof fn theorem_payload_received_wf(b: Seq<u8>, k: PacketKind)
+    ensures
+        rfc_payload(b, k) matches Ok(fs) ==> frames_received(fs, k),
+{
+    lemma_frames_received(b, 0, k);
+}
+
+/// Every payload a server rejects is FRAME_ENCODING_ERROR or PROTOCOL_VIOLATION.
+pub proof fn theorem_payload_error_codes(b: Seq<u8>, k: PacketKind)
+    ensures
+        rfc_payload(b, k) matches Err(e) ==> e == FRAME_ENCODING_ERROR || e == PROTOCOL_VIOLATION,
+{
+    lemma_frames_received(b, 0, k);
+}
+
+/// PADDING frames are zero bytes and drop out of `non_padding`.
+proof fn lemma_paddings(fs: Seq<SpecFrame>, n: nat)
+    ensures
+        spec_frames_bytes(fs + paddings(n)) == spec_frames_bytes(fs) + Seq::new(n, |i: int| 0u8),
+        non_padding(fs + paddings(n)) == non_padding(fs),
+    decreases fs.len() + n,
+{
+    let z = Seq::new(n, |i: int| 0u8);
+    if fs.len() > 0 {
+        lemma_paddings(fs.skip(1), n);
+        assert((fs + paddings(n)).skip(1) =~= fs.skip(1) + paddings(n));
+        assert((fs + paddings(n))[0] == fs[0]);
+        assert(spec_frame_bytes(fs[0]) + (spec_frames_bytes(fs.skip(1)) + z) =~= (spec_frame_bytes(
+            fs[0],
+        ) + spec_frames_bytes(fs.skip(1))) + z);
+    } else if n > 0 {
+        lemma_paddings(fs, (n - 1) as nat);
+        let z1 = Seq::new((n - 1) as nat, |i: int| 0u8);
+        assert(fs + paddings(n) =~= paddings(n));
+        assert(fs + paddings((n - 1) as nat) =~= paddings((n - 1) as nat));
+        assert(paddings(n).skip(1) =~= paddings((n - 1) as nat));
+        assert(paddings(n)[0] is Padding);
+        lemma_serialize_bytes::<true>(0);
+        assert(spec_frame_bytes(SpecFrame::Padding) =~= seq![0u8]);
+        assert(seq![0u8] + z1 =~= z);
+        assert(spec_frames_bytes(fs) =~= Seq::<u8>::empty());
+        assert(Seq::<u8>::empty() + z =~= z);
+        assert(Seq::<u8>::empty() + z1 =~= z1);
+    } else {
+        assert(fs + paddings(n) =~= fs);
+        assert(spec_frames_bytes(fs) + z =~= spec_frames_bytes(fs));
+    }
+}
+
+/// `theorem_payload_roundtrip` with `n` PADDING frames appended: the payload is the frames'
+/// bytes followed by `n` zero bytes, and it parses back to the same frames.
+pub proof fn theorem_payload_padded(fs: Seq<SpecFrame>, n: nat, k: PacketKind)
+    requires
+        fs.len() + n >= 1,
+        frames_sendable(fs, k),
+        forall|i: int| 0 <= i < fs.len() ==> !(#[trigger] fs[i] is HandshakeDone),
+    ensures
+        spec_frames_bytes(fs + paddings(n)) == spec_frames_bytes(fs) + Seq::new(n, |i: int| 0u8),
+        non_padding(fs + paddings(n)) == non_padding(fs),
+        rfc_payload(spec_frames_bytes(fs) + Seq::new(n, |i: int| 0u8), k) == Ok::<
+            Seq<SpecFrame>,
+            u64,
+        >(non_padding(fs)),
+{
+    let g = fs + paddings(n);
+    lemma_paddings(fs, n);
+    assert forall|i: int| 0 <= i < g.len() implies frame_wf(#[trigger] g[i]) && frame_permitted(
+        spec_frame_type(g[i]),
+        k,
+    ) && !(g[i] is HandshakeDone) by {
+        if i < fs.len() {
+            assert(g[i] == fs[i]);
+        } else {
+            assert(g[i] == paddings(n)[i - fs.len()]);
+        }
+    }
+    theorem_payload_roundtrip(g, k);
+}
+
 // =============================================================================
 // Executable code
 // =============================================================================
@@ -341,13 +480,18 @@ pub fn parse_payload(b: &[u8], k: PacketKind) -> (r: Result<Vec<Frame>, u64>)
     ensures
         match r {
             Ok(v) => rfc_payload(b@, k) == Ok::<Seq<SpecFrame>, u64>(frames_view(v@))
-                && v@.len() <= b@.len(),
-            Err(e) => rfc_payload(b@, k) == Err::<Seq<SpecFrame>, u64>(e),
+                && v@.len() <= b@.len() && frames_received(frames_view(v@), k),
+            Err(e) => rfc_payload(b@, k) == Err::<Seq<SpecFrame>, u64>(e) && (e
+                == FRAME_ENCODING_ERROR || e == PROTOCOL_VIOLATION),
         },
 {
     hide(rfc_varint_decode);
     hide(rfc_frame_body);
     hide(frame_permitted);
+    proof {
+        theorem_payload_received_wf(b@, k);
+        theorem_payload_error_codes(b@, k);
+    }
     if b.len() == 0 {
         return Err(PROTOCOL_VIOLATION);
     }
@@ -363,6 +507,9 @@ pub fn parse_payload(b: &[u8], k: PacketKind) -> (r: Result<Vec<Frame>, u64>)
             p <= b.len(),
             out@.len() <= p,
             rfc_frames(b@, 0, k) == prepend(frames_view(out@), rfc_frames(b@, p as int, k)),
+            rfc_payload(b@, k) matches Ok(fs) ==> frames_received(fs, k),
+            rfc_payload(b@, k) matches Err(e) ==> e == FRAME_ENCODING_ERROR || e
+                == PROTOCOL_VIOLATION,
         decreases b.len() - p,
     {
         let c = slice_subrange(b, p, b.len());

@@ -31,6 +31,8 @@ fn pn_len_boundary() {
 fn decode_pn_edges() {
     assert_eq!(decode_pn(None, 0, 1), 0);
     assert_eq!(decode_pn(Some(0xff), 0x00, 1), 0x100);
+    // candidate 0x100 <= expected 0x1ff - 0x80: the +win branch.
+    assert_eq!(decode_pn(Some(0x1fe), 0x00, 1), 0x200);
     assert_eq!(decode_pn(Some(0x100), 0xff, 1), 0xff);
     assert_eq!(decode_pn(Some(PN_MAX - 1), 0xff, 1), PN_MAX);
     assert_eq!(decode_pn(Some(0x3fff_ffff_ffff_ff7f), 0x00, 1), 0x3fff_ffff_ffff_ff00);
