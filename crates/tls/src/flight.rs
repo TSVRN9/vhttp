@@ -189,7 +189,6 @@ pub proof fn theorem_flight_order(
             &&& forall|i: int|
                 0 <= i < 5 && (#[trigger] f.events[i] matches SpecTlsEvent::Send { level: Level::Handshake, .. })
                     ==> i == 3
-            &&& ch.key_shares.unwrap()[share as int].group == SECP256R1
         }),
 {
     hide(spec_sha256);

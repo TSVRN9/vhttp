@@ -11,7 +11,6 @@ use tls::config::*;
 use tls::flight::*;
 use tls::schedule::*;
 use tls::server_msgs::*;
-use tls::sign::cv_content;
 
 type Flight = Result<(Vec<TlsEvent>, [u8; 32]), u64>;
 
@@ -104,7 +103,9 @@ fn check_flight(evs: &[TlsEvent], vd: &[u8; 32], cert: &[u8]) -> (Vec<u8>, Vec<u
     assert_eq!(evs[4], TlsEvent::Secrets { level: Level::OneRtt, client: c_ap, server: s_ap });
     assert_eq!(vd, &verify_data(&c_hs, &th4));
     let th_cert = h(&[&t0, R5_SH, &ee, &ct]);
-    (cv, cv_content(&th_cert))
+    // RFC 8446 §4.4.3: 64 spaces, the context string, a 0 byte, then the transcript hash.
+    let content = [&[0x20u8; 64][..], b"TLS 1.3, server CertificateVerify", &[0], &th_cert].concat();
+    (cv, content)
 }
 
 #[test]
