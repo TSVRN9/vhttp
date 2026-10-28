@@ -185,7 +185,7 @@ Total keyword count: 44 across 22 sections.
 | 4.2 | Increasing flow control limits | 1 | yes | 3 | Do not wait for *_BLOCKED before raising credit. |
 | 4.4 | Handling stream cancellation | 1 | yes | 3 | Keep flow control state until terminal. |
 | 4.5 | Stream final size | 2 | yes | 3 | Account final size in connection flow control; no data at/after final size. |
-| 4.6 | Controlling concurrency | 5 | yes | 3 | Stream limit > 2^60 is an error; STREAM_LIMIT_ERROR; ignore non-increasing MAX_STREAMS. |
+| 4.6 | Controlling concurrency | 5 | yes | 3 | Stream limit > 2^60 is an error; STREAM_LIMIT_ERROR; ignore non-increasing MAX_STREAMS. 3b codec: crates/quic/src/tp.rs (closed in 3c) |
 | 5.1 | Connection ID | 3 | yes | 3 | CIDs must not be correlatable by observers; no zero-length-CID port sharing (we issue non-zero CIDs). |
 | 5.1 (req) | Same CID not issued twice on a connection | 1 | yes | 3 | "the same connection ID MUST NOT be issued more than once on the same connection". |
 | 5.1.1 | Issuing connection IDs | 4 | yes | 3 | See req rows below. |
@@ -208,13 +208,13 @@ Total keyword count: 44 across 22 sections.
 | 7.3 | Authenticating connection IDs | 4 | partial | 3 | Server rows below; client-side checks are client-only. |
 | 7.3 (req) | Validate/send initial_source_connection_id; original_destination_connection_id sent by server | 3 | yes | 3 | Server sends correct values; validates client's initial_source_connection_id; absence is TRANSPORT_PARAMETER_ERROR. |
 | 7.3 (req) | retry_source_connection_id presence/absence/mismatch checks | 1 | no | N/A (client-only) | Client check; server never sends Retry (declined) so never sends retry_source_connection_id. Client sending it is an error per 18.2. |
-| 7.4 | Transport parameters | 2 | yes | 3 | Invalid value is TRANSPORT_PARAMETER_ERROR; each parameter at most once. |
+| 7.4 | Transport parameters | 2 | yes | 3 | Invalid value is TRANSPORT_PARAMETER_ERROR; each parameter at most once. ✅ 3b: crates/quic/src/tp.rs |
 | 7.4.1 | Values of transport parameters for 0-RTT | 9 | partial | 3 | Mostly 0-RTT / client rows below. |
 | 7.4.1 (req) | New-parameter 0-RTT storage rule | 1 | no | N/A (client-only) | Requirement on parameter definers, not an endpoint. |
 | 7.4.1 (req) | Client remembered-parameter rules (do not use some remembered values, use server's new values, remember others, only remembered values in 0-RTT) | 5 | no | N/A (client-only) | Lines on client 0-RTT use (incl. the two MUSTs in the last sentence). |
 | 7.4.1 (req) | Server accepting 0-RTT must not reduce limits or alter values | 2 | no | Declined (optional: 0-RTT) | We never accept 0-RTT. |
 | 7.4.1 (req) | Server MUST reject 0-RTT if restored values unsupported | 1 | yes | 3 | Refusal path: we always reject 0-RTT. |
-| 7.4.2 | New transport parameters | 1 | yes | 3 | Ignore unknown transport parameters. |
+| 7.4.2 | New transport parameters | 1 | yes | 3 | Ignore unknown transport parameters. ✅ 3b: crates/quic/src/tp.rs |
 | 7.5 | Cryptographic message buffering | 3 | yes | 3 | Buffer >= 4096 bytes out-of-order CRYPTO; CRYPTO_BUFFER_EXCEEDED; ACK packets whose CRYPTO was discarded. |
 | 8 | Address validation | 1 | yes | 3 | 3x limit before validation; see 8.1 row. |
 | 8.1 | Address validation during connection establishment | 5 | partial | 3 | Server rows below; 3 client-only MUSTs. |
@@ -313,15 +313,15 @@ Total keyword count: 44 across 22 sections.
 | 17.2.5.3 | Continuing a handshake after Retry | 2 | no | N/A (client-only) |  |
 | 17.3.1 | 1-RTT packet | 3 | yes | 3 | Fixed bit; reserved bits PROTOCOL_VIOLATION. 3b codec: crates/quic/src/header.rs (closed in 3e) |
 | 17.4 | Latency spin bit | 4 | yes | 3 | Simplest compliance: not support it and keep it disabled (set arbitrary, ignore incoming); keep admin-disable switch. ✅ 3b: crates/quic/src/header.rs; spin bit unsupported, so always disabled: serializer takes a caller-chosen `spin` (RECOMMENDED random per packet or per CID, supplied by 3e), never read on parse; no admin switch is needed for a feature that cannot be enabled |
-| 18.2 | Transport parameter definitions | 9 | partial | 3 | Rows below. |
-| 18.2 (req) | stateless_reset_token not sent by clients | 1 | yes | 3 | Server sends it; receipt from a client is an error (see server-only row). |
+| 18.2 | Transport parameter definitions | 9 | partial | 3 | Rows below. ✅ 3b: crates/quic/src/tp.rs |
+| 18.2 (req) | stateless_reset_token not sent by clients | 1 | yes | 3 | Server sends it; receipt from a client is an error (see server-only row). ✅ 3b: crates/quic/src/tp.rs |
 | 18.2 (req) | preferred_address receiver rules (no new local address toward handshake address) | 1 | no | N/A (client-only) | Sent only by servers; receiver is a client. |
 | 18.2 (req) | Server with zero-length CID MUST NOT give preferred_address, nor zero-length CID in it | 2 | no | Declined (optional: connection migration) | We never send preferred_address. |
 | 18.2 (req) | Client treats preferred_address violations as TRANSPORT_PARAMETER_ERROR | 1 | no | N/A (client-only) |  |
-| 18.2 (req) | active_connection_id_limit MUST be at least 2 (our advertised value) | 1 | yes | 3 | We advertise >= 2. |
-| 18.2 (req) | Receiving active_connection_id_limit < 2 is TRANSPORT_PARAMETER_ERROR | 1 | yes | 3 |  |
+| 18.2 (req) | active_connection_id_limit MUST be at least 2 (our advertised value) | 1 | yes | 3 | We advertise >= 2. ✅ 3b: crates/quic/src/tp.rs |
+| 18.2 (req) | Receiving active_connection_id_limit < 2 is TRANSPORT_PARAMETER_ERROR | 1 | yes | 3 | ✅ 3b: crates/quic/src/tp.rs |
 | 18.2 (req) | Client MUST NOT include server-only parameters | 1 | no | N/A (client-only) | Client obligation. |
-| 18.2 (req) | Server treats receipt of server-only parameter as TRANSPORT_PARAMETER_ERROR | 1 | yes | 3 | original_destination_connection_id, preferred_address, retry_source_connection_id, stateless_reset_token. |
+| 18.2 (req) | Server treats receipt of server-only parameter as TRANSPORT_PARAMETER_ERROR | 1 | yes | 3 | original_destination_connection_id, preferred_address, retry_source_connection_id, stateless_reset_token. ✅ 3b: crates/quic/src/tp.rs |
 | 19.3 | ACK frames | 1 | yes | 3 | Handle both ACK types (with/without ECN). ✅ 3b: crates/quic/src/ack.rs |
 | 19.3.1 | ACK ranges | 1 | yes | 3 | Negative computed PN is FRAME_ENCODING_ERROR. ✅ 3b: crates/quic/src/ack.rs |
 | 19.4 | RESET_STREAM frames | 1 | yes | 3 | STREAM_STATE_ERROR for send-only stream. |
