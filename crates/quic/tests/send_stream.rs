@@ -157,3 +157,26 @@ fn ack_releases_capacity() {
     assert_eq!(s.state_exec(), SendState::DataRecvd);
     assert_eq!(s.buf_capacity(), 0);
 }
+
+#[test]
+fn ack_copies_linear() {
+    // In-order 1-byte acks of a large write: the buffer trims stay O(written) bytes in total.
+    // A trim (`split_off`) leaves a tail-sized allocation, so each capacity change is a copy of
+    // that many bytes.
+    const W: usize = 1 << 16;
+    let mut s = SendStream::new(W as u64);
+    assert_eq!(s.write(&vec![7u8; W], true), Ok(()));
+    while s.poll_data(1200, u64::MAX).is_some() {}
+    let (mut cap, mut copied) = (s.buf_capacity(), 0usize);
+    for i in 0..W {
+        s.on_data_acked(i as u64, 1, i == W - 1);
+        let c = s.buf_capacity();
+        if c != cap {
+            copied += c;
+            cap = c;
+        }
+    }
+    assert!(copied <= W, "copied {copied} bytes for {W} written");
+    assert_eq!(s.state_exec(), SendState::DataRecvd);
+    assert_eq!(s.buf_capacity(), 0);
+}
