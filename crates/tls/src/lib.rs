@@ -2,9 +2,11 @@
 pub mod ch_ext;
 pub mod client_hello;
 pub mod codes;
+pub mod config;
 pub mod ext;
 pub mod handshake;
 pub mod hkdf_label;
+pub mod negotiate;
 pub mod pl;
 pub mod schedule;
 pub mod server_msgs;
