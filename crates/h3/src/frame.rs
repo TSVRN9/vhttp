@@ -262,7 +262,7 @@ pub proof fn lemma_decode_prefix(a: Seq<u8>, r: Seq<u8>)
     assert(a.add(r).subrange(1, n as int) =~= a.subrange(1, n as int));
 }
 
-proof fn lemma_decode_zero()
+pub proof fn lemma_decode_zero()
     ensures
         rfc_varint_decode(seq![0u8]) == Some((1nat, 0u64)),
 {
