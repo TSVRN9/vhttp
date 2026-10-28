@@ -232,7 +232,7 @@ proof fn lemma_sh_random(random: Seq<u8>, sid: Seq<u8>, pk: Seq<u8>)
 // Lengths (the MAX_INPUT_LEN bound on every transcript hash)
 // =============================================================================
 
-proof fn lemma_vlen(ceiling: nat, c: Seq<u8>)
+pub(crate) proof fn lemma_vlen(ceiling: nat, c: Seq<u8>)
     ensures
         spec_vec_bytes(ceiling, c).len() == len_width(ceiling) + c.len(),
         len_width(ceiling) <= 3,
@@ -240,14 +240,14 @@ proof fn lemma_vlen(ceiling: nat, c: Seq<u8>)
     assert(spec_be_bytes(c.len(), len_width(ceiling)).len() == len_width(ceiling));
 }
 
-proof fn lemma_hs_len(ty: u8, body: Seq<u8>)
+pub(crate) proof fn lemma_hs_len(ty: u8, body: Seq<u8>)
     ensures
         spec_hs_bytes(ty, body).len() == 4 + body.len(),
 {
     lemma_vlen(0xff_ffff, body);
 }
 
-proof fn lemma_ext_len(ty: u16, data: Seq<u8>)
+pub(crate) proof fn lemma_ext_len(ty: u16, data: Seq<u8>)
     ensures
         spec_ext_bytes(ty, data).len() == 4 + data.len(),
 {

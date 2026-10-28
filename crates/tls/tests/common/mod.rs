@@ -482,6 +482,27 @@ pub fn rsa_key() -> crypto::rsa::RsaPrivateKey {
     }
 }
 
+/// The real fixtures as one-chain configs.
+pub fn rsa_cfg() -> tls::config::ServerConfig {
+    tls::config::ServerConfig {
+        chains: vec![tls::config::CertChain {
+            der: vec![RSA_CERT.to_vec()],
+            chain_schemes: vec![],
+            key: tls::config::SigningKey::Rsa(rsa_key()),
+        }],
+    }
+}
+
+pub fn ecdsa_cfg() -> tls::config::ServerConfig {
+    tls::config::ServerConfig {
+        chains: vec![tls::config::CertChain {
+            der: vec![ECDSA_CERT.to_vec()],
+            chain_schemes: vec![],
+            key: tls::config::SigningKey::EcdsaP256(ECDSA_D),
+        }],
+    }
+}
+
 /// One length assert per vector (sha256 prefixes were checked when the vectors were copied).
 #[test]
 fn vectors_intact() {
