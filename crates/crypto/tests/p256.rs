@@ -49,6 +49,11 @@ fn ecdh_rejects_invalid() {
     assert!(p256_ecdh(&i, &xp).is_none());
     let x0 = h(&format!("04 {} {y0}", "00".repeat(32)));
     assert!(p256_ecdh(&i, &x0).is_some());
+    let x1 = "09e78d4ef60d05f750f6636209092bc43cbdd6b47e11a9de20a9feb2a50bb96c";
+    let yp1 = h(&format!("04 {x1} ffffffff00000001000000000000000000000001000000000000000000000000"));
+    assert!(p256_ecdh(&i, &yp1).is_none());
+    let y1 = h(&format!("04 {x1} {}01", "00".repeat(31)));
+    assert!(p256_ecdh(&i, &y1).is_some());
     assert!(p256_ecdh(&[0u8; 32], &gr).is_none());
     assert!(p256_ecdh(&P256_N, &gr).is_none());
     assert!(p256_ecdh(&[0xff; 32], &gr).is_none());
