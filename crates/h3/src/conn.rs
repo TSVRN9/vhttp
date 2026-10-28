@@ -309,19 +309,41 @@ pub open spec fn empty_response(status: u16) -> SpecResponse {
 // Specs: request-stream delegation
 // =============================================================================
 
+/// What a request-stream call's outputs depend on besides the events: the FIN flag, the peer's
+/// SETTINGS_MAX_FIELD_SECTION_SIZE, and whether our sending part is still open.
+pub struct Ctx {
+    pub fin: bool,
+    pub peer: Option<u64>,
+    pub send_open: bool,
+}
+
+/// STOP_SENDING with `code`, unless the peer's sending part has ended.
+pub open spec fn stop_outs(id: u64, code: u64, fin: bool) -> Seq<SpecOutput> {
+    if fin {
+        Seq::empty()
+    } else {
+        seq![SpecOutput::StopSending { stream_id: id, code }]
+    }
+}
+
 //= https://www.rfc-editor.org/rfc/rfc9114#section-4.1.2
 //# Malformed requests or responses that are
 //# detected MUST be treated as a stream error of type H3_MESSAGE_ERROR.
+//= https://www.rfc-editor.org/rfc/rfc9114#section-4.1.1
+//# Implementations SHOULD cancel requests by abruptly terminating any
+//# directions of a stream that are still open.
 /// The outputs for the request machine's error: a connection error closes the connection; a
-/// stream error resets our sending part and aborts reading, with that code.
-pub open spec fn err_outs(id: u64, e: Option<ReqError>) -> Seq<SpecOutput> {
+/// stream error resets our sending part (if still open) and aborts reading (unless the peer's
+/// sending part has ended), with that code.
+pub open spec fn err_outs(id: u64, e: Option<ReqError>, cx: Ctx) -> Seq<SpecOutput> {
     match e {
         None => Seq::empty(),
         Some(ReqError::Connection(c)) => seq![SpecOutput::CloseConnection { code: c }],
-        Some(ReqError::Stream(c)) => seq![
-            SpecOutput::ResetStream { stream_id: id, code: c },
-            SpecOutput::StopSending { stream_id: id, code: c },
-        ],
+        Some(ReqError::Stream(c)) => (if cx.send_open {
+            seq![SpecOutput::ResetStream { stream_id: id, code: c }]
+        } else {
+            Seq::empty()
+        }) + stop_outs(id, c, cx.fin),
     }
 }
 
@@ -332,75 +354,98 @@ pub open spec fn err_outs(id: u64, e: Option<ReqError>) -> Seq<SpecOutput> {
 //# close the sending part of the stream.  The error code H3_NO_ERROR
 //# SHOULD be used when requesting that the client stop sending on the
 //# request stream.
+/// A request the connection answers itself with `status` (no headers, no body), never passed to
+/// the application: the response with FIN, then STOP_SENDING(H3_NO_ERROR) unless the request has
+/// ended. If the peer's field-section limit doesn't admit it, the request is rejected instead;
+/// if our sending part is already closed (peer STOP_SENDING), only reading is aborted.
+pub open spec fn answered_outs(id: u64, status: u16, cx: Ctx, o: Seq<SpecOutput>) -> bool {
+    let stop = stop_outs(id, H3_NO_ERROR, cx.fin);
+    if !cx.send_open {
+        o == stop
+    } else if fits_peer(cx.peer, fields_size(resp_fields(empty_response(status)))) {
+        o.len() == 1 + stop.len() && one_response(o.take(1), id, empty_response(status)) && o.skip(1)
+            == stop
+    } else {
+        o == rejected_outs(id, cx.fin)
+    }
+}
+
 //= https://www.rfc-editor.org/rfc/rfc9114#section-4.1.1
 //# When the server cancels a request without performing any application
 //# processing, the request is considered "rejected".  The server SHOULD
 //# abort its response stream with the error code H3_REQUEST_REJECTED.
-/// A request the connection answers itself with `status` (no headers, no body), never passed to
-/// the application: the response with FIN, then STOP_SENDING(H3_NO_ERROR) unless the request has
-/// ended. If the response can't be sent (the peer's field-section limit), the request is
-/// rejected instead.
-pub open spec fn answered_outs(id: u64, status: u16, fin: bool, o: Seq<SpecOutput>) -> bool {
-    let stop = if fin {
-        Seq::<SpecOutput>::empty()
-    } else {
-        seq![SpecOutput::StopSending { stream_id: id, code: H3_NO_ERROR }]
-    };
-    ||| (o.len() == 1 + stop.len() && one_response(o.take(1), id, empty_response(status)) && o.skip(1)
-        == stop)
-    ||| o == rejected_outs(id)
+//= https://www.rfc-editor.org/rfc/rfc9114#section-4.1.1
+//# Servers MUST NOT use the H3_REQUEST_REJECTED error code for requests
+//# that were partially or fully processed.
+/// A request rejected without any of it reaching the application (the only uses: a new stream
+/// at or above our GOAWAY ID, and a 501/421 the peer's limit doesn't admit).
+pub open spec fn rejected_outs(id: u64, fin: bool) -> Seq<SpecOutput> {
+    seq![SpecOutput::ResetStream { stream_id: id, code: H3_REQUEST_REJECTED }] + stop_outs(
+        id,
+        H3_REQUEST_REJECTED,
+        fin,
+    )
 }
 
-pub open spec fn rejected_outs(id: u64) -> Seq<SpecOutput> {
-    seq![
-        SpecOutput::ResetStream { stream_id: id, code: H3_REQUEST_REJECTED },
-        SpecOutput::StopSending { stream_id: id, code: H3_REQUEST_REJECTED },
-    ]
+/// The head of a request the connection answers itself.
+pub open spec fn internal_head(e: SpecReqEvent) -> bool {
+    match e {
+        SpecReqEvent::Head(SpecRequestHead::Connect { .. }) => true,
+        SpecReqEvent::Head(SpecRequestHead::Request(r)) => !http_scheme(r.scheme),
+        _ => false,
+    }
 }
 
-//= https://www.rfc-editor.org/rfc/rfc9114#section-4.4
-//# A CONNECT request MUST be constructed as follows:
+pub open spec fn no_internal(s: Seq<SpecReqEvent>) -> bool {
+    forall|i: int| 0 <= i < s.len() ==> !internal_head(#[trigger] s[i])
+}
+
+pub open spec fn has_request(o: Seq<SpecOutput>) -> bool {
+    exists|i: int| 0 <= i < o.len() && (#[trigger] o[i]) is Request
+}
+
 /// `o` is what the connection outputs for new request-machine events `evs` on stream `id`,
-/// given the trailer section `tr` held from earlier calls, the machine's error `err` and the FIN
-/// flag. A CONNECT is answered 501 (RFC 9110 §9.1: an unimplemented method) and a scheme other
-/// than http/https 421 (RFC 9110 §15.5.20: Misdirected Request); either ends the stream's
-/// processing, so later events and the error are not output. Trailers are held until the end.
+/// given the trailer section `tr` held from earlier calls, the machine's error `err` and the
+/// call's context `cx`. A CONNECT is answered 501 (RFC 9110 §9.1: an unimplemented method) and a
+/// scheme other than http/https 421 (RFC 9110 §15.5.20: Misdirected Request); either ends the
+/// stream's processing, so later events and the error are not output. Trailers are held until
+/// the end.
 pub open spec fn req_outs(
     id: u64,
     evs: Seq<SpecReqEvent>,
     tr: Fields,
     err: Option<ReqError>,
-    fin: bool,
+    cx: Ctx,
     o: Seq<SpecOutput>,
 ) -> bool
     decreases evs.len(),
 {
     if evs.len() == 0 {
-        o == err_outs(id, err)
+        o == err_outs(id, err, cx)
     } else {
         match evs[0] {
-            SpecReqEvent::Head(SpecRequestHead::Connect { .. }) => answered_outs(id, 501, fin, o),
+            SpecReqEvent::Head(SpecRequestHead::Connect { .. }) => answered_outs(id, 501, cx, o),
             SpecReqEvent::Head(SpecRequestHead::Request(r)) => if !http_scheme(r.scheme) {
-                answered_outs(id, 421, fin, o)
+                answered_outs(id, 421, cx, o)
             } else {
                 o.len() > 0 && o[0] == SpecOutput::Request { stream_id: id, head: r } && req_outs(
                     id,
                     evs.skip(1),
                     tr,
                     err,
-                    fin,
+                    cx,
                     o.skip(1),
                 )
             },
             SpecReqEvent::BodyBytes(d) => o.len() > 0 && o[0] == SpecOutput::RequestBody {
                 stream_id: id,
                 data: d,
-            } && req_outs(id, evs.skip(1), tr, err, fin, o.skip(1)),
-            SpecReqEvent::Trailers(t) => req_outs(id, evs.skip(1), t, err, fin, o),
+            } && req_outs(id, evs.skip(1), tr, err, cx, o.skip(1)),
+            SpecReqEvent::Trailers(t) => req_outs(id, evs.skip(1), t, err, cx, o),
             SpecReqEvent::End => o.len() > 0 && o[0] == SpecOutput::RequestEnd {
                 stream_id: id,
                 trailers: tr,
-            } && req_outs(id, evs.skip(1), Seq::empty(), err, fin, o.skip(1)),
+            } && req_outs(id, evs.skip(1), Seq::empty(), err, cx, o.skip(1)),
         }
     }
 }
@@ -733,6 +778,10 @@ fn write_response(id: u64, r: &Response, peer: Option<u64>, out: &mut Vec<Output
             r@,
         ),
         !ok ==> final(out)@ == old(out)@,
+        !ok && r@.headers.len() == 0 && r@.body.len() == 0 ==> !fits_peer(
+            peer,
+            fields_size(resp_fields(r@)),
+        ),
 {
     let mut fields: Vec<FieldLine> = Vec::new();
     fields.push(status_line(r.status));
@@ -764,6 +813,11 @@ fn write_response(id: u64, r: &Response, peer: Option<u64>, out: &mut Vec<Output
     if enc.len() as u64 > VARINT_MAX || r.body.len() as u64 > VARINT_MAX {
         proof {
             lemma_added_refl(out@);
+            if r@.headers.len() == 0 {
+                assert(fields_view(fields@).len() == 1);
+                assert(fields_view(fields@)[0] == fields@[0]@);
+                assert(enc@.len() <= 262);
+            }
         }
         return false;
     }
@@ -814,7 +868,7 @@ struct ReqEntry {
 spec fn req_entry_ok(e: ReqEntry) -> bool {
     &&& e.id % 4 == 0
     &&& e.stream.wf()
-    &&& e.rx_open ==> !e.stream.done()
+    &&& e.rx_open ==> !e.stream.done() && !e.fin_seen
 }
 
 spec fn req_hist_of(e: ReqEntry) -> (Seq<u8>, Seq<SpecReqEvent>, Fields) {
@@ -939,6 +993,199 @@ proof fn lemma_unis_hist(
     }
 }
 
+/// A request stream's state as `req_state` reports it.
+pub struct ReqState {
+    /// Request bytes are still processed: no FIN, error or internal answer yet.
+    pub receiving: bool,
+    /// The request head was delivered to the application.
+    pub head: bool,
+    /// Our sending part is open.
+    pub send_open: bool,
+    /// The peer's sending part has ended (FIN seen).
+    pub fin_seen: bool,
+}
+
+spec fn state_of(e: ReqEntry) -> ReqState {
+    ReqState { receiving: e.rx_open, head: e.head, send_open: e.send_open, fin_seen: e.fin_seen }
+}
+
+/// `st` mirrors the table: exactly its IDs, each with its entry's state.
+spec fn req_dom(s: Seq<ReqEntry>, st: Map<u64, ReqState>) -> bool {
+    &&& forall|k: int|
+        0 <= k < s.len() ==> st.contains_key((#[trigger] s[k]).id) && st[s[k].id] == state_of(s[k])
+    &&& forall|id: u64|
+        #[trigger] st.contains_key(id) ==> exists|k: int| 0 <= k < s.len() && (#[trigger] s[k]).id
+            == id
+}
+
+spec fn uni_dom(s: Seq<UniEntry>, us: Set<u64>) -> bool {
+    &&& forall|k: int| 0 <= k < s.len() ==> us.contains((#[trigger] s[k]).id)
+    &&& forall|id: u64|
+        #[trigger] us.contains(id) ==> exists|k: int| 0 <= k < s.len() && (#[trigger] s[k]).id == id
+}
+
+proof fn lemma_dom_update(
+    s: Seq<ReqEntry>,
+    h: Map<u64, (Seq<u8>, Seq<SpecReqEvent>, Fields)>,
+    st: Map<u64, ReqState>,
+    i: int,
+    e: ReqEntry,
+)
+    requires
+        reqs_ok(s, h),
+        req_dom(s, st),
+        0 <= i < s.len(),
+        e.id == s[i].id,
+    ensures
+        req_dom(s.update(i, e), st.insert(e.id, state_of(e))),
+{
+    let t = s.update(i, e);
+    let st2 = st.insert(e.id, state_of(e));
+    assert forall|k: int| 0 <= k < t.len() implies st2.contains_key((#[trigger] t[k]).id) && st2[t[k].id]
+        == state_of(t[k]) by {
+        if k != i {
+            assert(s[k].id != s[i].id);
+        }
+    }
+    assert forall|id: u64| #[trigger] st2.contains_key(id) implies exists|k: int|
+        0 <= k < t.len() && (#[trigger] t[k]).id == id by {
+        if id == e.id {
+            assert(t[i].id == id);
+        } else {
+            let k = choose|k: int| 0 <= k < s.len() && (#[trigger] s[k]).id == id;
+            assert(t[k].id == id);
+        }
+    }
+}
+
+proof fn lemma_dom_push(s: Seq<ReqEntry>, st: Map<u64, ReqState>, e: ReqEntry)
+    requires
+        req_dom(s, st),
+        forall|k: int| 0 <= k < s.len() ==> (#[trigger] s[k]).id != e.id,
+    ensures
+        req_dom(s.push(e), st.insert(e.id, state_of(e))),
+{
+    let t = s.push(e);
+    let st2 = st.insert(e.id, state_of(e));
+    assert forall|k: int| 0 <= k < t.len() implies st2.contains_key((#[trigger] t[k]).id) && st2[t[k].id]
+        == state_of(t[k]) by {
+        if k < s.len() {
+            assert(t[k] == s[k]);
+            assert(s[k].id != e.id);
+        }
+    }
+    assert forall|id: u64| #[trigger] st2.contains_key(id) implies exists|k: int|
+        0 <= k < t.len() && (#[trigger] t[k]).id == id by {
+        if id == e.id {
+            assert(t[s.len() as int].id == id);
+        } else {
+            let k = choose|k: int| 0 <= k < s.len() && (#[trigger] s[k]).id == id;
+            assert(t[k].id == id);
+        }
+    }
+}
+
+proof fn lemma_dom_remove(
+    s: Seq<ReqEntry>,
+    h: Map<u64, (Seq<u8>, Seq<SpecReqEvent>, Fields)>,
+    st: Map<u64, ReqState>,
+    i: int,
+)
+    requires
+        reqs_ok(s, h),
+        req_dom(s, st),
+        0 <= i < s.len(),
+    ensures
+        req_dom(s.remove(i), st.remove(s[i].id)),
+{
+    let t = s.remove(i);
+    let st2 = st.remove(s[i].id);
+    assert forall|k: int| 0 <= k < t.len() implies t[k] == s[if k < i { k } else { k + 1 }] by {}
+    assert forall|k: int| 0 <= k < t.len() implies st2.contains_key((#[trigger] t[k]).id) && st2[t[k].id]
+        == state_of(t[k]) by {
+        let kk = if k < i { k } else { k + 1 };
+        assert(t[k] == s[kk]);
+        assert(s[kk].id != s[i].id);
+    }
+    assert forall|id: u64| #[trigger] st2.contains_key(id) implies exists|k: int|
+        0 <= k < t.len() && (#[trigger] t[k]).id == id by {
+        let k = choose|k: int| 0 <= k < s.len() && (#[trigger] s[k]).id == id;
+        assert(k != i);
+        let kk = if k < i { k } else { k - 1 };
+        assert(t[kk] == s[k]);
+    }
+}
+
+proof fn lemma_udom_push(s: Seq<UniEntry>, us: Set<u64>, e: UniEntry)
+    requires
+        uni_dom(s, us),
+    ensures
+        uni_dom(s.push(e), us.insert(e.id)),
+{
+    let t = s.push(e);
+    let u2 = us.insert(e.id);
+    assert forall|k: int| 0 <= k < t.len() implies u2.contains((#[trigger] t[k]).id) by {
+        if k < s.len() {
+            assert(t[k] == s[k]);
+        }
+    }
+    assert forall|id: u64| #[trigger] u2.contains(id) implies exists|k: int|
+        0 <= k < t.len() && (#[trigger] t[k]).id == id by {
+        if id == e.id {
+            assert(t[s.len() as int].id == id);
+        } else {
+            let k = choose|k: int| 0 <= k < s.len() && (#[trigger] s[k]).id == id;
+            assert(t[k].id == id);
+        }
+    }
+}
+
+proof fn lemma_udom_update(s: Seq<UniEntry>, us: Set<u64>, i: int, e: UniEntry)
+    requires
+        uni_dom(s, us),
+        0 <= i < s.len(),
+        e.id == s[i].id,
+    ensures
+        uni_dom(s.update(i, e), us),
+{
+    let t = s.update(i, e);
+    assert forall|k: int| 0 <= k < t.len() implies us.contains((#[trigger] t[k]).id) by {
+        if k != i {
+            assert(t[k] == s[k]);
+        }
+    }
+    assert forall|id: u64| #[trigger] us.contains(id) implies exists|k: int|
+        0 <= k < t.len() && (#[trigger] t[k]).id == id by {
+        let k = choose|k: int| 0 <= k < s.len() && (#[trigger] s[k]).id == id;
+        assert(t[k].id == id);
+    }
+}
+
+proof fn lemma_udom_remove(s: Seq<UniEntry>, h: Map<u64, (Seq<u8>, SeenUni, Seq<SpecUniEvent>)>, us: Set<u64>, i: int)
+    requires
+        unis_ok(s, h),
+        uni_dom(s, us),
+        0 <= i < s.len(),
+    ensures
+        uni_dom(s.remove(i), us.remove(s[i].id)),
+{
+    let t = s.remove(i);
+    let u2 = us.remove(s[i].id);
+    assert forall|k: int| 0 <= k < t.len() implies t[k] == s[if k < i { k } else { k + 1 }] by {}
+    assert forall|k: int| 0 <= k < t.len() implies u2.contains((#[trigger] t[k]).id) by {
+        let kk = if k < i { k } else { k + 1 };
+        assert(t[k] == s[kk]);
+        assert(s[kk].id != s[i].id);
+    }
+    assert forall|id: u64| #[trigger] u2.contains(id) implies exists|k: int|
+        0 <= k < t.len() && (#[trigger] t[k]).id == id by {
+        let k = choose|k: int| 0 <= k < s.len() && (#[trigger] s[k]).id == id;
+        assert(k != i);
+        let kk = if k < i { k } else { k - 1 };
+        assert(t[kk] == s[k]);
+    }
+}
+
 fn find_req(s: &Vec<ReqEntry>, id: u64) -> (r: Option<usize>)
     ensures
         match r {
@@ -983,8 +1230,8 @@ fn find_uni(s: &Vec<UniEntry>, id: u64) -> (r: Option<usize>)
     None
 }
 
-/// Answers the request on `e` itself with an empty `status` response (rejecting it if that can't
-/// be sent) and stops processing it.
+/// Answers the request on `e` itself with an empty `status` response (rejecting it if the
+/// peer's limit doesn't admit that) and stops processing it.
 fn answer(e: &mut ReqEntry, status: u16, fin: bool, peer: Option<u64>, out: &mut Vec<Output>)
     requires
         old(e).id % 4 == 0,
@@ -992,49 +1239,73 @@ fn answer(e: &mut ReqEntry, status: u16, fin: bool, peer: Option<u64>, out: &mut
         status == 501 || status == 421,
     ensures
         extends(old(out)@, final(out)@),
-        answered_outs(old(e).id, status, fin, added(old(out)@, final(out)@)),
+        answered_outs(
+            old(e).id,
+            status,
+            Ctx { fin, peer, send_open: old(e).send_open },
+            added(old(out)@, final(out)@),
+        ),
         final(e).id == old(e).id,
         final(e).stream == old(e).stream,
         final(e).trailers == old(e).trailers,
-        req_entry_ok(*final(e)),
+        final(e).head == old(e).head,
         !final(e).rx_open && !final(e).send_open,
         final(e).fin_seen == (old(e).fin_seen || fin),
 {
     let ghost o0 = out@;
-    let r = Response { status, headers: Vec::new(), body: Vec::new() };
     proof {
-        assert(fields_view(r.headers@) =~= Seq::<(Seq<u8>, Seq<u8>)>::empty());
-        assert(r.body@ =~= Seq::<u8>::empty());
-        assert(r@ == empty_response(status));
+        lemma_added_refl(o0);
     }
-    if write_response(e.id, &r, peer, out) {
-        if !fin {
+    if e.send_open {
+        let r = Response { status, headers: Vec::new(), body: Vec::new() };
+        proof {
+            assert(fields_view(r.headers@) =~= Seq::<(Seq<u8>, Seq<u8>)>::empty());
+            assert(r.body@ =~= Seq::<u8>::empty());
+            assert(r@ == empty_response(status));
+        }
+        if write_response(e.id, &r, peer, out) {
             let ghost o1 = out@;
-            let s = Output::StopSending { stream_id: e.id, code: H3_NO_ERROR };
-            out.push(s);
+            stop(e.id, H3_NO_ERROR, fin, out);
             proof {
-                lemma_added_push(o0, o1, s);
+                lemma_added_trans(o0, o1, out@);
                 assert(added(o0, out@).take(1) =~= added(o0, o1));
-                assert(added(o0, out@).skip(1) =~= seq![s@]);
+                assert(added(o0, out@).skip(1) =~= added(o1, out@));
             }
         } else {
-            proof {
-                assert(added(o0, out@).take(1) =~= added(o0, out@));
-                assert(added(o0, out@).skip(1) =~= Seq::<SpecOutput>::empty());
-            }
+            reject(e.id, fin, out);
         }
     } else {
-        reject(e.id, out);
+        stop(e.id, H3_NO_ERROR, fin, out);
     }
     e.rx_open = false;
     e.send_open = false;
     e.fin_seen = e.fin_seen || fin;
 }
 
-fn reject(id: u64, out: &mut Vec<Output>)
+/// STOP_SENDING with `code` unless `fin`.
+fn stop(id: u64, code: u64, fin: bool, out: &mut Vec<Output>)
     ensures
         extends(old(out)@, final(out)@),
-        added(old(out)@, final(out)@) == rejected_outs(id),
+        added(old(out)@, final(out)@) == stop_outs(id, code, fin),
+{
+    let ghost o0 = out@;
+    proof {
+        lemma_added_refl(o0);
+    }
+    if !fin {
+        let b = Output::StopSending { stream_id: id, code };
+        out.push(b);
+        proof {
+            lemma_added_push(o0, o0, b);
+            assert(added(o0, out@) =~= stop_outs(id, code, fin));
+        }
+    }
+}
+
+fn reject(id: u64, fin: bool, out: &mut Vec<Output>)
+    ensures
+        extends(old(out)@, final(out)@),
+        added(old(out)@, final(out)@) == rejected_outs(id, fin),
 {
     let ghost o0 = out@;
     proof {
@@ -1046,26 +1317,76 @@ fn reject(id: u64, out: &mut Vec<Output>)
         lemma_added_push(o0, o0, a);
     }
     let ghost o1 = out@;
-    let b = Output::StopSending { stream_id: id, code: H3_REQUEST_REJECTED };
-    out.push(b);
+    stop(id, H3_REQUEST_REJECTED, fin, out);
     proof {
-        lemma_added_push(o0, o1, b);
-        assert(added(o0, out@) =~= rejected_outs(id));
+        lemma_added_trans(o0, o1, out@);
+        assert(added(o0, o1) =~= seq![a@]);
     }
 }
 
-proof fn lemma_answered_shape(id: u64, status: u16, fin: bool, o: Seq<SpecOutput>)
+proof fn lemma_answered_shape(id: u64, status: u16, cx: Ctx, o: Seq<SpecOutput>)
     requires
-        answered_outs(id, status, fin, o),
+        answered_outs(id, status, cx, o),
         id % 4 == 0,
     ensures
         req_only(o),
         no_close(o),
+        !has_request(o),
 {
-    if o != rejected_outs(id) {
+    if cx.send_open && fits_peer(cx.peer, fields_size(resp_fields(empty_response(status)))) {
         assert(o.take(1)[0] == o[0]);
-        if !fin {
+        if !cx.fin {
             assert(o.skip(1)[0] == o[1]);
+        }
+    } else if cx.send_open && !cx.fin {
+        assert(o[1] == o.skip(1)[0]);
+    }
+    assert(!has_request(o)) by {
+        if has_request(o) {
+            let i = choose|i: int| 0 <= i < o.len() && (#[trigger] o[i]) is Request;
+            if i > 0 {
+                assert(o[i] == o.skip(1)[i - 1]);
+            }
+        }
+    }
+}
+
+proof fn lemma_has_request_push(a: Seq<SpecOutput>, x: SpecOutput)
+    ensures
+        has_request(a.push(x)) == (has_request(a) || x is Request),
+{
+    if has_request(a) {
+        let i = choose|i: int| 0 <= i < a.len() && (#[trigger] a[i]) is Request;
+        assert(a.push(x)[i] == a[i]);
+    }
+    if x is Request {
+        assert(a.push(x)[a.len() as int] == x);
+    }
+    if has_request(a.push(x)) {
+        let i = choose|i: int| 0 <= i < a.push(x).len() && (#[trigger] a.push(x)[i]) is Request;
+        if i < a.len() {
+            assert(a.push(x)[i] == a[i]);
+        }
+    }
+}
+
+/// `b` adds no Request output.
+proof fn lemma_has_request_concat(a: Seq<SpecOutput>, b: Seq<SpecOutput>)
+    requires
+        !has_request(b),
+    ensures
+        has_request(a + b) == has_request(a),
+{
+    if has_request(a) {
+        let i = choose|i: int| 0 <= i < a.len() && (#[trigger] a[i]) is Request;
+        assert((a + b)[i] == a[i]);
+    }
+    if has_request(a + b) {
+        let i = choose|i: int| 0 <= i < (a + b).len() && (#[trigger] (a + b)[i]) is Request;
+        if i < a.len() {
+            assert((a + b)[i] == a[i]);
+        } else {
+            assert((a + b)[i] == b[i - a.len()]);
         }
     }
 }
@@ -1103,13 +1424,28 @@ proof fn lemma_req_concat(a: Seq<SpecOutput>, b: Seq<SpecOutput>, closing: bool)
     }
 }
 
-proof fn lemma_err_outs_shape(id: u64, e: Option<ReqError>)
+proof fn lemma_err_outs_shape(id: u64, e: Option<ReqError>, cx: Ctx)
     requires
         id % 4 == 0,
     ensures
-        req_only(err_outs(id, e)),
-        outs_ok(err_outs(id, e), e matches Some(ReqError::Connection(_))),
+        req_only(err_outs(id, e, cx)),
+        outs_ok(err_outs(id, e, cx), e matches Some(ReqError::Connection(_))),
 {
+    if let Some(ReqError::Stream(c)) = e {
+        let a = if cx.send_open {
+            seq![SpecOutput::ResetStream { stream_id: id, code: c }]
+        } else {
+            Seq::<SpecOutput>::empty()
+        };
+        let b = stop_outs(id, c, cx.fin);
+        assert forall|i: int| 0 <= i < (a + b).len() implies !((#[trigger] (a + b)[i]) is CloseConnection) && ctrl_free((a + b)[i]) && stop_ok((a + b)[i]) && ctrl_open((a + b)[i]) && body_ok((a + b)[i]) by {
+            if i < a.len() {
+                assert((a + b)[i] == a[i]);
+            } else {
+                assert((a + b)[i] == b[i - a.len()]);
+            }
+        }
+    }
 }
 
 /// The `k`-th new event, delivered as `w`, moves the loop invariant past it.
@@ -1121,7 +1457,7 @@ proof fn lemma_deliver(
     tr2: Fields,
     tr0: Fields,
     err: Option<ReqError>,
-    fin: bool,
+    cx: Ctx,
     o0: Seq<Output>,
     o1: Seq<Output>,
     w: Output,
@@ -1130,12 +1466,12 @@ proof fn lemma_deliver(
         0 <= k < ev.len(),
         extends(o0, o1),
         forall|x: Seq<SpecOutput>| #[trigger]
-            req_outs(id, ev.skip(k), tr, err, fin, x) ==> req_outs(
+            req_outs(id, ev.skip(k), tr, err, cx, x) ==> req_outs(
                 id,
                 ev,
                 tr0,
                 err,
-                fin,
+                cx,
                 added(o0, o1) + x,
             ),
         match ev[k] {
@@ -1151,12 +1487,12 @@ proof fn lemma_deliver(
         extends(o0, o1.push(w)),
         added(o0, o1.push(w)) == added(o0, o1).push(w@),
         forall|x: Seq<SpecOutput>| #[trigger]
-            req_outs(id, ev.skip(k + 1), tr2, err, fin, x) ==> req_outs(
+            req_outs(id, ev.skip(k + 1), tr2, err, cx, x) ==> req_outs(
                 id,
                 ev,
                 tr0,
                 err,
-                fin,
+                cx,
                 added(o0, o1.push(w)) + x,
             ),
 {
@@ -1165,18 +1501,18 @@ proof fn lemma_deliver(
     assert(s.skip(1) =~= ev.skip(k + 1));
     assert(s[0] == ev[k]);
     assert forall|x: Seq<SpecOutput>| #[trigger]
-        req_outs(id, ev.skip(k + 1), tr2, err, fin, x) implies req_outs(
+        req_outs(id, ev.skip(k + 1), tr2, err, cx, x) implies req_outs(
         id,
         ev,
         tr0,
         err,
-        fin,
+        cx,
         added(o0, o1.push(w)) + x,
     ) by {
         let y = seq![w@] + x;
         assert(y[0] == w@);
         assert(y.skip(1) =~= x);
-        assert(req_outs(id, s, tr, err, fin, y));
+        assert(req_outs(id, s, tr, err, cx, y));
         assert(added(o0, o1) + y =~= added(o0, o1.push(w)) + x);
     }
 }
@@ -1189,7 +1525,7 @@ proof fn lemma_answer_done(
     tr: Fields,
     tr0: Fields,
     err: Option<ReqError>,
-    fin: bool,
+    cx: Ctx,
     status: u16,
     o0: Seq<Output>,
     o1: Seq<Output>,
@@ -1200,15 +1536,15 @@ proof fn lemma_answer_done(
         extends(o0, o1),
         extends(o1, o2),
         forall|x: Seq<SpecOutput>| #[trigger]
-            req_outs(id, ev.skip(k), tr, err, fin, x) ==> req_outs(
+            req_outs(id, ev.skip(k), tr, err, cx, x) ==> req_outs(
                 id,
                 ev,
                 tr0,
                 err,
-                fin,
+                cx,
                 added(o0, o1) + x,
             ),
-        answered_outs(id, status, fin, added(o1, o2)),
+        answered_outs(id, status, cx, added(o1, o2)),
         match ev[k] {
             SpecReqEvent::Head(SpecRequestHead::Connect { .. }) => status == 501,
             SpecReqEvent::Head(SpecRequestHead::Request(r)) => !http_scheme(r.scheme) && status
@@ -1218,12 +1554,12 @@ proof fn lemma_answer_done(
     ensures
         extends(o0, o2),
         added(o0, o2) == added(o0, o1) + added(o1, o2),
-        req_outs(id, ev, tr0, err, fin, added(o0, o2)),
+        req_outs(id, ev, tr0, err, cx, added(o0, o2)),
 {
     lemma_added_trans(o0, o1, o2);
     let s = ev.skip(k);
     assert(s[0] == ev[k]);
-    assert(req_outs(id, s, tr, err, fin, added(o1, o2)));
+    assert(req_outs(id, s, tr, err, cx, added(o1, o2)));
 }
 
 /// Outputs what the request machine's new events `evs` mean, in order; stops at a request the
@@ -1236,10 +1572,12 @@ fn deliver(
     peer: Option<u64>,
     Ghost(ev): Ghost<Seq<SpecReqEvent>>,
     Ghost(err): Ghost<Option<ReqError>>,
+    Ghost(cx): Ghost<Ctx>,
     out: &mut Vec<Output>,
 ) -> (answered: bool)
     requires
         ev == request::views(evs@),
+        cx == (Ctx { fin, peer, send_open: old(e).send_open }),
         request::bodies_from(evs@, 0),
         old(e).id % 4 == 0,
         old(e).stream.wf(),
@@ -1255,7 +1593,7 @@ fn deliver(
             ev,
             fields_view(old(e).trailers@),
             err,
-            fin,
+            cx,
             added(old(out)@, final(out)@),
         ),
         !answered ==> req_outs(
@@ -1263,9 +1601,11 @@ fn deliver(
             ev,
             fields_view(old(e).trailers@),
             err,
-            fin,
-            added(old(out)@, final(out)@) + err_outs(old(e).id, err),
+            cx,
+            added(old(out)@, final(out)@) + err_outs(old(e).id, err, cx),
         ),
+        answered == !no_internal(ev),
+        final(e).head == (old(e).head || has_request(added(old(out)@, final(out)@))),
         answered ==> !final(e).rx_open && !final(e).send_open && final(e).fin_seen == (old(
             e,
         ).fin_seen || fin),
@@ -1286,12 +1626,12 @@ fn deliver(
         lemma_added_refl(o0);
         assert(ev.skip(0) =~= ev);
         assert forall|x: Seq<SpecOutput>| #[trigger]
-            req_outs(id, ev.skip(0), tr0, err, fin, x) implies req_outs(
+            req_outs(id, ev.skip(0), tr0, err, cx, x) implies req_outs(
             id,
             ev,
             tr0,
             err,
-            fin,
+            cx,
             added(o0, out@) + x,
         ) by {
             assert(added(o0, out@) + x =~= x);
@@ -1306,12 +1646,12 @@ fn deliver(
             forall|i: int| 0 <= i < rv@.len() ==> request::body_nonempty(#[trigger] rv@[i]),
             extends(o0, out@),
             forall|x: Seq<SpecOutput>| #[trigger]
-                req_outs(id, ev.skip(k as int), fields_view(e.trailers@), err, fin, x) ==> req_outs(
+                req_outs(id, ev.skip(k as int), fields_view(e.trailers@), err, cx, x) ==> req_outs(
                     id,
                     ev,
                     tr0,
                     err,
-                    fin,
+                    cx,
                     added(o0, out@) + x,
                 ),
             req_only(added(o0, out@)),
@@ -1326,6 +1666,9 @@ fn deliver(
             e.rx_open,
             e.fin_seen == old(e).fin_seen,
             e.send_open == old(e).send_open,
+            cx == (Ctx { fin, peer, send_open: old(e).send_open }),
+            forall|i: int| 0 <= i < k ==> !internal_head(#[trigger] ev[i]),
+            e.head == (old(e).head || has_request(added(o0, out@))),
         decreases n - k,
     {
         let ghost tr = fields_view(e.trailers@);
@@ -1347,9 +1690,11 @@ fn deliver(
             ReqEvent::Head(RequestHead::Connect { .. }) => {
                 answer(e, 501, fin, peer, out);
                 proof {
-                    lemma_answer_done(id, ev, k as int, tr, tr0, err, fin, 501, o0, o1, out@);
-                    lemma_answered_shape(id, 501, fin, added(o1, out@));
+                    lemma_answer_done(id, ev, k as int, tr, tr0, err, cx, 501, o0, o1, out@);
+                    lemma_answered_shape(id, 501, cx, added(o1, out@));
                     lemma_req_concat(added(o0, o1), added(o1, out@), false);
+                    lemma_has_request_concat(added(o0, o1), added(o1, out@));
+                    assert(internal_head(ev[k as int]));
                 }
                 return true;
             },
@@ -1357,23 +1702,27 @@ fn deliver(
                 if !is_http_scheme(req.scheme.as_slice()) {
                     answer(e, 421, fin, peer, out);
                     proof {
-                        lemma_answer_done(id, ev, k as int, tr, tr0, err, fin, 421, o0, o1, out@);
-                        lemma_answered_shape(id, 421, fin, added(o1, out@));
+                        lemma_answer_done(id, ev, k as int, tr, tr0, err, cx, 421, o0, o1, out@);
+                        lemma_answered_shape(id, 421, cx, added(o1, out@));
                         lemma_req_concat(added(o0, o1), added(o1, out@), false);
+                        lemma_has_request_concat(added(o0, o1), added(o1, out@));
+                        assert(internal_head(ev[k as int]));
                     }
                     return true;
                 }
                 e.head = true;
                 let w = Output::Request { stream_id: e.id, head: req };
                 proof {
-                    lemma_deliver(id, ev, k as int, tr, tr, tr0, err, fin, o0, o1, w);
+                    lemma_deliver(id, ev, k as int, tr, tr, tr0, err, cx, o0, o1, w);
+                    lemma_has_request_push(added(o0, o1), w@);
                 }
                 out.push(w);
             },
             ReqEvent::Body(d) => {
                 let w = Output::RequestBody { stream_id: e.id, data: d };
                 proof {
-                    lemma_deliver(id, ev, k as int, tr, tr, tr0, err, fin, o0, o1, w);
+                    lemma_deliver(id, ev, k as int, tr, tr, tr0, err, cx, o0, o1, w);
+                    lemma_has_request_push(added(o0, o1), w@);
                 }
                 out.push(w);
             },
@@ -1384,15 +1733,15 @@ fn deliver(
                     assert(s[0] == ev[k as int]);
                     assert(s.skip(1) =~= ev.skip(k + 1));
                     assert forall|x: Seq<SpecOutput>| #[trigger]
-                        req_outs(id, ev.skip(k + 1), fields_view(e.trailers@), err, fin, x) implies req_outs(
+                        req_outs(id, ev.skip(k + 1), fields_view(e.trailers@), err, cx, x) implies req_outs(
                         id,
                         ev,
                         tr0,
                         err,
-                        fin,
+                        cx,
                         added(o0, out@) + x,
                     ) by {
-                        assert(req_outs(id, s, tr, err, fin, x));
+                        assert(req_outs(id, s, tr, err, cx, x));
                     }
                 }
             },
@@ -1402,7 +1751,8 @@ fn deliver(
                 let w = Output::RequestEnd { stream_id: e.id, trailers: t };
                 proof {
                     assert(fields_view(e.trailers@) =~= Seq::<(Seq<u8>, Seq<u8>)>::empty());
-                    lemma_deliver(id, ev, k as int, tr, Seq::empty(), tr0, err, fin, o0, o1, w);
+                    lemma_deliver(id, ev, k as int, tr, Seq::empty(), tr0, err, cx, o0, o1, w);
+                    lemma_has_request_push(added(o0, o1), w@);
                 }
                 out.push(w);
             },
@@ -1424,16 +1774,26 @@ fn deliver(
     }
     proof {
         assert(ev.skip(n as int) =~= Seq::<SpecReqEvent>::empty());
-        assert(req_outs(id, ev.skip(n as int), fields_view(e.trailers@), err, fin, err_outs(id, err)));
+        assert(req_outs(id, ev.skip(n as int), fields_view(e.trailers@), err, cx, err_outs(id, err, cx)));
     }
     false
 }
 
 /// Outputs what the request machine's error means (`err_outs`); `true` for a connection error.
-fn push_err(id: u64, res: &Result<(), ReqError>, out: &mut Vec<Output>) -> (closing: bool)
+fn push_err(
+    id: u64,
+    res: &Result<(), ReqError>,
+    send_open: bool,
+    fin: bool,
+    Ghost(cx): Ghost<Ctx>,
+    out: &mut Vec<Output>,
+) -> (closing: bool)
+    requires
+        cx.send_open == send_open,
+        cx.fin == fin,
     ensures
         extends(old(out)@, final(out)@),
-        added(old(out)@, final(out)@) == err_outs(id, request::err_of(*res)),
+        added(old(out)@, final(out)@) == err_outs(id, request::err_of(*res), cx),
         closing == (*res matches Err(ReqError::Connection(_))),
 {
     let ghost o0 = out@;
@@ -1446,27 +1806,34 @@ fn push_err(id: u64, res: &Result<(), ReqError>, out: &mut Vec<Output>) -> (clos
             out.push(w);
             proof {
                 lemma_added_push(o0, o0, w);
-                assert(added(o0, out@) =~= err_outs(id, request::err_of(*res)));
+                assert(added(o0, out@) =~= err_outs(id, request::err_of(*res), cx));
             }
             true
         },
         Err(ReqError::Stream(c)) => {
-            let a = Output::ResetStream { stream_id: id, code: *c };
-            out.push(a);
-            proof {
-                lemma_added_push(o0, o0, a);
+            if send_open {
+                let a = Output::ResetStream { stream_id: id, code: *c };
+                out.push(a);
+                proof {
+                    lemma_added_push(o0, o0, a);
+                    assert(added(o0, out@) =~= seq![a@]);
+                }
             }
             let ghost o1 = out@;
-            let b = Output::StopSending { stream_id: id, code: *c };
-            out.push(b);
+            stop(id, *c, fin, out);
             proof {
-                lemma_added_push(o0, o1, b);
-                assert(added(o0, out@) =~= err_outs(id, request::err_of(*res)));
+                lemma_added_trans(o0, o1, out@);
+                assert(added(o0, out@) =~= err_outs(id, request::err_of(*res), cx));
             }
             false
         },
         Ok(()) => false,
     }
+}
+
+/// The request-machine error of a call, from the stream's bytes.
+pub open spec fn req_err(all: Seq<u8>, fin: bool) -> Option<ReqError> {
+    request::rfc_request_stream(all, fin).1
 }
 
 /// Feeds `data` to the request machine of `e` and outputs what its events and error mean.
@@ -1490,19 +1857,25 @@ fn feed_req(e: &mut ReqEntry, data: &[u8], fin: bool, peer: Option<u64>, out: &m
             old(e).id,
             final(e).stream.emitted().skip(old(e).stream.emitted().len() as int),
             fields_view(old(e).trailers@),
-            request::rfc_request_stream(final(e).stream.all(), fin).1,
-            fin,
+            req_err(final(e).stream.all(), fin),
+            Ctx { fin, peer, send_open: old(e).send_open },
             added(old(out)@, final(out)@),
         ),
         outs_ok(added(old(out)@, final(out)@), closing),
         req_only(added(old(out)@, final(out)@)),
-        final(e).fin_seen == (old(e).fin_seen || fin),
-        !old(e).send_open ==> !final(e).send_open,
+        final(e).fin_seen == fin,
+        final(e).rx_open == (req_err(final(e).stream.all(), fin) is None && !fin && no_internal(
+            final(e).stream.emitted().skip(old(e).stream.emitted().len() as int),
+        )),
+        !closing ==> final(e).send_open == (old(e).send_open && req_err(final(e).stream.all(), fin)
+            is None && no_internal(final(e).stream.emitted().skip(old(e).stream.emitted().len() as int))),
+        final(e).head == (old(e).head || has_request(added(old(out)@, final(out)@))),
 {
     hide(request::rfc_req);
     let ghost id = e.id;
     let ghost o0 = out@;
     let ghost em0 = e.stream.emitted();
+    let ghost so = e.send_open;
     let mut evs: Vec<ReqEvent> = Vec::new();
     let res = e.stream.on_data(data, fin, &mut evs);
     proof {
@@ -1510,7 +1883,8 @@ fn feed_req(e: &mut ReqEntry, data: &[u8], fin: bool, peer: Option<u64>, out: &m
         assert(e.stream.emitted().skip(em0.len() as int) =~= request::views(evs@));
     }
     let ghost err = request::err_of(res);
-    if deliver(e, evs, fin, peer, Ghost(request::views(evs@)), Ghost(err), out) {
+    let ghost cx = Ctx { fin, peer, send_open: e.send_open };
+    if deliver(e, evs, fin, peer, Ghost(request::views(evs@)), Ghost(err), Ghost(cx), out) {
         proof {
             lemma_added_refl(out@);
             lemma_req_concat(added(o0, out@), Seq::empty(), false);
@@ -1519,14 +1893,11 @@ fn feed_req(e: &mut ReqEntry, data: &[u8], fin: bool, peer: Option<u64>, out: &m
         return false;
     }
     let ghost o2 = out@;
-    let closing = push_err(e.id, &res, out);
+    let closing = push_err(e.id, &res, e.send_open, fin, Ghost(cx), out);
     match res {
-        Err(ReqError::Stream(_)) => {
+        Err(_) => {
             e.rx_open = false;
             e.send_open = false;
-        },
-        Err(ReqError::Connection(_)) => {
-            e.rx_open = false;
         },
         Ok(()) => {
             if fin {
@@ -1534,11 +1905,22 @@ fn feed_req(e: &mut ReqEntry, data: &[u8], fin: bool, peer: Option<u64>, out: &m
             }
         },
     }
-    e.fin_seen = e.fin_seen || fin;
+    e.fin_seen = fin;
     proof {
         lemma_added_trans(o0, o2, out@);
-        lemma_err_outs_shape(id, err);
+        lemma_err_outs_shape(id, err, cx);
         lemma_req_concat(added(o0, o2), added(o2, out@), closing);
+        assert(!has_request(added(o2, out@))) by {
+            if has_request(added(o2, out@)) {
+                let i = choose|i: int| 0 <= i < added(o2, out@).len() && (#[trigger] added(o2, out@)[i]) is Request;
+                if let Some(ReqError::Stream(c)) = err {
+                    let a = if cx.send_open { seq![SpecOutput::ResetStream { stream_id: id, code: c }] } else { Seq::<SpecOutput>::empty() };
+                    let b = stop_outs(id, c, fin);
+                    if i < a.len() { assert((a + b)[i] == a[i]); } else { assert((a + b)[i] == b[i - a.len()]); }
+                }
+            }
+        }
+        lemma_has_request_concat(added(o0, o2), added(o2, out@));
     }
     closing
 }
@@ -1689,6 +2071,10 @@ pub struct H3Conn {
     rhist: Ghost<Map<u64, (Seq<u8>, Seq<SpecReqEvent>, Fields)>>,
     /// Per peer uni stream: bytes fed to its machine, its `seen_before`, its events.
     uhist: Ghost<Map<u64, (Seq<u8>, SeenUni, Seq<SpecUniEvent>)>>,
+    /// The tracked request streams and their states (mirrors `reqs`).
+    rstate: Ghost<Map<u64, ReqState>>,
+    /// The tracked peer uni streams (mirrors `unis`).
+    uset: Ghost<Set<u64>>,
 }
 
 /// What every call guarantees: the invariant, outputs only appended, nothing at all once
@@ -1708,24 +2094,96 @@ pub open spec fn rejected_id(c: H3Conn, id: u64) -> bool {
     c.goaways().len() > 0 && id >= c.goaways().last()
 }
 
-/// A request-stream call that fed the machine: the stream's bytes (continued if it was being
-/// received, else from empty) grew by `data`; its cumulative events (body chunks concatenated)
-/// are `rfc_request_stream` of those bytes; and the call's outputs `o` are exactly what the new
-/// events and the machine's error mean (`req_outs`).
+/// Every tracked stream other than `x` is unchanged: its state, and the history its machine was
+/// fed. (With `x == None`, every stream.)
+pub open spec fn frame(c0: H3Conn, c1: H3Conn, x: Option<u64>) -> bool {
+    forall|y: u64|
+        #![trigger c1.req_state(y)]
+        #![trigger c1.uni_known(y)]
+        #![trigger c1.req_hist(y)]
+        #![trigger c1.uni_hist(y)]
+        x != Some(y) ==> c1.req_state(y) == c0.req_state(y) && c1.uni_known(y) == c0.uni_known(y)
+            && c1.req_hist(y) == c0.req_hist(y) && c1.uni_hist(y) == c0.uni_hist(y)
+}
+
+/// The state a request stream starts in.
+pub open spec fn fresh_state() -> ReqState {
+    ReqState { receiving: true, head: false, send_open: true, fin_seen: false }
+}
+
+/// The state request stream `id` was fed from: its own if it was being received, else fresh.
+pub open spec fn state_before(c0: H3Conn, id: u64) -> ReqState {
+    if c0.req_receiving(id) {
+        c0.req_state(id)->0
+    } else {
+        fresh_state()
+    }
+}
+
+/// A request-stream call that fed the machine.
+/// - The stream's bytes (continued if it was being received, else from empty) grew by `data`.
+/// - Its cumulative events (body chunks concatenated) are `rfc_request_stream` of those bytes.
+/// - The call's outputs `o` are exactly what the new events and the machine's error mean
+///   (`req_outs`), with our sending part and the peer's limit as they were.
+/// - Unless the connection closed: the stream is still received exactly when there was no
+///   FIN, no error and no internal answer, and it is respondable exactly when, besides no error
+///   and no internal answer, our sending part was open and a head was delivered (now or before).
 pub open spec fn req_fed(c0: H3Conn, c1: H3Conn, id: u64, data: Seq<u8>, fin: bool, o: Seq<SpecOutput>) -> bool {
     let b0 = if c0.req_receiving(id) { c0.req_hist(id).0 } else { Seq::<u8>::empty() };
     let e0 = if c0.req_receiving(id) { c0.req_hist(id).1 } else { Seq::<SpecReqEvent>::empty() };
     let t0 = if c0.req_receiving(id) { c0.req_hist(id).2 } else { Seq::<(Seq<u8>, Seq<u8>)>::empty() };
+    let s0 = state_before(c0, id);
     let h = c1.req_hist(id);
+    let err = req_err(h.0, fin);
+    let ne = h.1.skip(e0.len() as int);
     &&& h.0 == b0 + data
     &&& h.1.len() >= e0.len()
     &&& h.1.take(e0.len() as int) == e0
     &&& request::concat_bodies(h.1) == request::rfc_request_stream(h.0, fin).0
-    &&& req_outs(id, h.1.skip(e0.len() as int), t0, request::rfc_request_stream(h.0, fin).1, fin, o)
+    &&& req_outs(
+        id,
+        ne,
+        t0,
+        err,
+        Ctx { fin, peer: c0.peer_max_field_section(), send_open: s0.send_open },
+        o,
+    )
+    &&& !c1.closed() ==> c1.req_receiving(id) == (err is None && !fin && no_internal(ne))
+    &&& !c1.closed() ==> c1.req_respondable(id) == (err is None && no_internal(ne) && s0.send_open
+        && (s0.head || has_request(o)))
+}
+
+/// The last SETTINGS_MAX_FIELD_SECTION_SIZE in `p`, else `cur`.
+pub open spec fn pairs_fs(p: Seq<(u64, u64)>, cur: Option<u64>) -> Option<u64>
+    decreases p.len(),
+{
+    if p.len() == 0 {
+        cur
+    } else if p.last().0 == SETTINGS_MAX_FIELD_SECTION_SIZE {
+        Some(p.last().1)
+    } else {
+        pairs_fs(p.drop_last(), cur)
+    }
+}
+
+/// The peer's MAX_FIELD_SECTION_SIZE after its uni-stream events `e`, starting from `cur`.
+pub open spec fn events_fs(e: Seq<SpecUniEvent>, cur: Option<u64>) -> Option<u64>
+    decreases e.len(),
+{
+    if e.len() == 0 {
+        cur
+    } else {
+        match e.last() {
+            SpecUniEvent::PeerSettings(p) => pairs_fs(p, events_fs(e.drop_last(), cur)),
+            _ => events_fs(e.drop_last(), cur),
+        }
+    }
 }
 
 /// A peer uni stream call: the stream's bytes grew by `data`; its events and error are
-/// `rfc_uni_stream` of them; the only output is CloseConnection on that error.
+/// `rfc_uni_stream` of them; the only output is CloseConnection on that error. Otherwise the
+/// stream stays tracked until its FIN, and the peer's MAX_FIELD_SECTION_SIZE is the last one its
+/// new events carry.
 pub open spec fn uni_fed(c0: H3Conn, c1: H3Conn, id: u64, data: Seq<u8>, fin: bool, o: Seq<SpecOutput>) -> bool {
     let b0 = if c0.uni_known(id) { c0.uni_hist(id).0 } else { Seq::<u8>::empty() };
     let e0 = if c0.uni_known(id) { c0.uni_hist(id).2 } else { Seq::<SpecUniEvent>::empty() };
@@ -1735,6 +2193,52 @@ pub open spec fn uni_fed(c0: H3Conn, c1: H3Conn, id: u64, data: Seq<u8>, fin: bo
     &&& h.2.take(e0.len() as int) == e0
     &&& uni::rfc_uni_stream(h.0, fin, h.1).0 == h.2
     &&& o == uni_err_outs(uni::rfc_uni_stream(h.0, fin, h.1).1)
+    &&& !c1.closed() ==> c1.uni_known(id) == !fin && c1.peer_max_field_section() == events_fs(
+        h.2.skip(e0.len() as int),
+        c0.peer_max_field_section(),
+    )
+}
+
+/// What a peer reset of request stream `id` outputs: our sending part, if still open, is reset
+/// (H3_REQUEST_INCOMPLETE if the request never ended, else H3_REQUEST_CANCELLED).
+pub open spec fn reset_outs(id: u64, st: Option<ReqState>) -> Seq<SpecOutput> {
+    match st {
+        Some(s) => if s.send_open {
+            seq![
+                SpecOutput::ResetStream {
+                    stream_id: id,
+                    code: if s.fin_seen {
+                        H3_REQUEST_CANCELLED
+                    } else {
+                        H3_REQUEST_INCOMPLETE
+                    },
+                },
+            ]
+        } else {
+            Seq::empty()
+        },
+        None => Seq::empty(),
+    }
+}
+
+/// What a request-stream call does (connection open, `id % 4 == 0`).
+/// - A new stream at or above our GOAWAY ID is rejected (`rejected_outs`), never fed.
+/// - A tracked stream no longer received (finished, or abandoned awaiting the peer's FIN or
+///   reset) outputs nothing and is unchanged, except that a FIN may forget it.
+/// - Otherwise its machine is fed (`req_fed`).
+pub open spec fn req_call(c0: H3Conn, c1: H3Conn, id: u64, data: Seq<u8>, fin: bool, o: Seq<SpecOutput>) -> bool {
+    &&& !c0.req_known(id) && rejected_id(c0, id) ==> o == rejected_outs(id, fin) && !c1.closed()
+        && !c1.req_receiving(id) && !c1.req_respondable(id)
+    &&& c0.req_known(id) && !c0.req_receiving(id) ==> o == Seq::<SpecOutput>::empty() && !c1.closed()
+        && !c1.req_receiving(id) && c1.req_respondable(id) == c0.req_respondable(id)
+    &&& (c0.req_receiving(id) || (!c0.req_known(id) && !rejected_id(c0, id))) ==> req_fed(
+        c0,
+        c1,
+        id,
+        data,
+        fin,
+        o,
+    )
 }
 
 pub open spec fn critical(k: UniKind) -> bool {
@@ -1778,30 +2282,43 @@ impl H3Conn {
         self.peer_max
     }
 
+    /// The state of request stream `id`, while the connection tracks it.
+    pub closed spec fn req_state(&self, id: u64) -> Option<ReqState> {
+        if self.rstate@.contains_key(id) {
+            Some(self.rstate@[id])
+        } else {
+            None
+        }
+    }
+
     /// The connection tracks request stream `id` (it may be finished or abandoned).
-    pub closed spec fn req_known(&self, id: u64) -> bool {
-        exists|k: int| 0 <= k < self.reqs@.len() && (#[trigger] self.reqs@[k]).id == id
+    pub open spec fn req_known(&self, id: u64) -> bool {
+        self.req_state(id) is Some
     }
 
     /// Request stream `id` is still being received and processed.
-    pub closed spec fn req_receiving(&self, id: u64) -> bool {
-        exists|k: int|
-            0 <= k < self.reqs@.len() && (#[trigger] self.reqs@[k]).id == id && self.reqs@[k].rx_open
+    pub open spec fn req_receiving(&self, id: u64) -> bool {
+        match self.req_state(id) {
+            Some(s) => s.receiving,
+            None => false,
+        }
     }
 
     /// Request stream `id` had its head delivered and has no response yet.
-    pub closed spec fn req_respondable(&self, id: u64) -> bool {
-        exists|k: int|
-            0 <= k < self.reqs@.len() && (#[trigger] self.reqs@[k]).id == id && self.reqs@[k].head
-                && self.reqs@[k].send_open
+    pub open spec fn req_respondable(&self, id: u64) -> bool {
+        match self.req_state(id) {
+            Some(s) => s.head && s.send_open,
+            None => false,
+        }
     }
 
     pub closed spec fn req_hist(&self, id: u64) -> (Seq<u8>, Seq<SpecReqEvent>, Fields) {
         self.rhist@[id]
     }
 
+    /// The connection tracks peer uni stream `id`.
     pub closed spec fn uni_known(&self, id: u64) -> bool {
-        exists|k: int| 0 <= k < self.unis@.len() && (#[trigger] self.unis@[k]).id == id
+        self.uset@.contains(id)
     }
 
     pub closed spec fn uni_hist(&self, id: u64) -> (Seq<u8>, SeenUni, Seq<SpecUniEvent>) {
@@ -1809,6 +2326,13 @@ impl H3Conn {
     }
 
     pub closed spec fn wf(&self) -> bool {
+        &&& self.ctrl_inv()
+        &&& !self.closed ==> reqs_ok(self.reqs@, self.rhist@) && unis_ok(self.unis@, self.uhist@)
+            && req_dom(self.reqs@, self.rstate@) && uni_dom(self.unis@, self.uset@)
+    }
+
+    /// The control-stream and GOAWAY part of the invariant (kept even once closed).
+    spec fn ctrl_inv(&self) -> bool {
         &&& nonincreasing(self.goaways@)
         &&& forall|i: int| 0 <= i < self.goaways@.len() ==> #[trigger] self.goaways@[i] <= VARINT_MAX
         &&& self.ctrl@ == if self.started {
@@ -1823,7 +2347,6 @@ impl H3Conn {
             Some(self.goaways@.last())
         }
         &&& (self.highest is Some && self.goaway is Some) ==> self.highest->0 < self.goaway->0
-        &&& !self.closed ==> reqs_ok(self.reqs@, self.rhist@) && unis_ok(self.unis@, self.uhist@)
     }
 
     /// What the invariant means for our control stream and GOAWAYs: nothing written yet, or the
@@ -1869,13 +2392,15 @@ impl H3Conn {
             goaways: Ghost(Seq::empty()),
             rhist: Ghost(Map::empty()),
             uhist: Ghost(Map::empty()),
+            rstate: Ghost(Map::empty()),
+            uset: Ghost(Set::empty()),
         }
     }
 
     /// Outputs CloseConnection and latches the connection closed.
     fn close(&mut self, code: u64, out: &mut Vec<Output>)
         requires
-            old(self).wf(),
+            old(self).ctrl_inv(),
             !old(self).closed,
         ensures
             final(self).wf(),
@@ -1887,6 +2412,8 @@ impl H3Conn {
             final(self).reqs == old(self).reqs,
             final(self).rhist == old(self).rhist,
             final(self).uhist == old(self).uhist,
+            final(self).rstate == old(self).rstate,
+            final(self).uset == old(self).uset,
             extends(old(out)@, final(out)@),
             added(old(out)@, final(out)@) == seq![SpecOutput::CloseConnection { code }],
             step(*old(self), *final(self), old(out)@, final(out)@),
@@ -1932,6 +2459,8 @@ impl H3Conn {
             final(self).closed() == old(self).closed(),
             final(self).goaways() == old(self).goaways(),
             final(self).highest_accepted() == old(self).highest_accepted(),
+            frame(*old(self), *final(self), None::<u64>),
+            final(self).peer_max_field_section() == old(self).peer_max_field_section(),
             !old(self).closed() ==> final(self).ctrl_bytes().len() > 0,
             !old(self).closed() && old(self).ctrl_bytes().len() == 0 ==> final(self).ctrl_bytes()
                 == ctrl_preamble(),
@@ -1992,6 +2521,8 @@ impl H3Conn {
         ensures
             step(*old(self), *final(self), old(out)@, final(out)@),
             final(self).closed() == old(self).closed(),
+            frame(*old(self), *final(self), None::<u64>),
+            final(self).peer_max_field_section() == old(self).peer_max_field_section(),
             !old(self).closed() && goaway_id(old(self).highest_accepted(), old(self).goaways())
                 <= VARINT_MAX ==> final(self).goaways() == old(self).goaways().push(
                 goaway_id(old(self).highest_accepted(), old(self).goaways()) as u64,
@@ -2055,6 +2586,8 @@ impl H3Conn {
             step(*old(self), *final(self), old(out)@, final(out)@),
             !final(self).closed,
             final(self).goaways@ == old(self).goaways@.push(id),
+            frame(*old(self), *final(self), None::<u64>),
+            final(self).peer_max == old(self).peer_max,
     {
         let ghost o0 = out@;
         let mut data: Vec<u8> = Vec::new();
@@ -2117,18 +2650,15 @@ impl H3Conn {
         ensures
             step(*old(self), *final(self), old(out)@, final(out)@),
             final(self).goaways() == old(self).goaways(),
+            frame(*old(self), *final(self), Some(stream_id)),
+            stream_id % 4 != 2 ==> final(self).peer_max_field_section() == old(
+                self,
+            ).peer_max_field_section(),
             !old(self).closed() && stream_id % 4 != 0 && stream_id % 4 != 2 ==> added(
                 old(out)@,
                 final(out)@,
             ) == seq![SpecOutput::CloseConnection { code: H3_STREAM_CREATION_ERROR }],
-            !old(self).closed() && stream_id % 4 == 0 && !old(self).req_known(stream_id)
-                && rejected_id(*old(self), stream_id) ==> added(old(out)@, final(out)@)
-                == rejected_outs(stream_id),
-            !old(self).closed() && stream_id % 4 == 0 && old(self).req_known(stream_id) && !old(self).req_receiving(stream_id) ==> added(old(out)@, final(out)@) == Seq::<
-                SpecOutput,
-            >::empty(),
-            !old(self).closed() && stream_id % 4 == 0 && (old(self).req_receiving(stream_id) || (
-            !old(self).req_known(stream_id) && !rejected_id(*old(self), stream_id))) ==> req_fed(
+            !old(self).closed() && stream_id % 4 == 0 ==> req_call(
                 *old(self),
                 *final(self),
                 stream_id,
@@ -2156,10 +2686,8 @@ impl H3Conn {
         } else if stream_id % 4 == 2 {
             self.uni_data(stream_id, data, fin, out);
         } else {
-            //= https://www.rfc-editor.org/rfc/rfc9114#section-6.2
-            //# The purpose is indicated by a stream type, which is sent
-            //# as a variable-length integer at the start of the stream.
-            // Server-initiated IDs: the peer cannot send on them (RFC 9000 §2.1).
+            // Server-initiated IDs: the peer cannot send on them (RFC 9000 §2.1); the QUIC layer
+            // normally refuses such data first.
             self.close(H3_STREAM_CREATION_ERROR, out);
         }
     }
@@ -2172,12 +2700,9 @@ impl H3Conn {
         ensures
             step(*old(self), *final(self), old(out)@, final(out)@),
             final(self).goaways() == old(self).goaways(),
-            !old(self).req_known(id) && rejected_id(*old(self), id) ==> added(old(out)@, final(out)@)
-                == rejected_outs(id),
-            old(self).req_known(id) && !old(self).req_receiving(id) ==> added(old(out)@, final(out)@)
-                == Seq::<SpecOutput>::empty(),
-            (old(self).req_receiving(id) || (!old(self).req_known(id) && !rejected_id(*old(self), id)))
-                ==> req_fed(*old(self), *final(self), id, data@, fin, added(old(out)@, final(out)@)),
+            final(self).peer_max == old(self).peer_max,
+            frame(*old(self), *final(self), Some(id)),
+            req_call(*old(self), *final(self), id, data@, fin, added(old(out)@, final(out)@)),
     {
         hide(request::rfc_req);
         hide(req_outs);
@@ -2190,25 +2715,32 @@ impl H3Conn {
         match find_req(&self.reqs, id) {
             Some(i) => {
                 proof {
-                    assert(c0.req_known(id));
+                    assert(c0.rstate@[id] == state_of(c0.reqs@[i as int]));
+                    assert(c0.rhist@[id] == req_hist_of(c0.reqs@[i as int]));
                 }
                 if !self.reqs[i].rx_open {
                     // Finished, or abandoned and awaiting the peer's FIN or reset.
-                    proof {
-                        assert(!c0.req_receiving(id)) by {
-                            if c0.req_receiving(id) {
-                                let k = choose|k: int|
-                                    0 <= k < c0.reqs@.len() && (#[trigger] c0.reqs@[k]).id == id
-                                        && c0.reqs@[k].rx_open;
-                                assert(k == i);
+                    if fin {
+                        let mut e = self.reqs.remove(i);
+                        if e.send_open {
+                            e.fin_seen = true;
+                            proof {
+                                lemma_reqs_update(c0.reqs@, c0.rhist@, i as int, e);
+                                lemma_dom_update(c0.reqs@, c0.rhist@, c0.rstate@, i as int, e);
+                                assert(c0.rhist@.insert(e.id, req_hist_of(e)) =~= c0.rhist@);
                             }
+                            self.reqs.insert(i, e);
+                            self.rstate = Ghost(self.rstate@.insert(id, state_of(e)));
+                            proof {
+                                assert(self.reqs@ =~= c0.reqs@.update(i as int, e));
+                            }
+                        } else {
+                            proof {
+                                lemma_reqs_remove(c0.reqs@, c0.rhist@, c0.rhist@, i as int);
+                                lemma_dom_remove(c0.reqs@, c0.rhist@, c0.rstate@, i as int);
+                            }
+                            self.rstate = Ghost(self.rstate@.remove(id));
                         }
-                    }
-                    if fin && !self.reqs[i].send_open {
-                        proof {
-                            lemma_reqs_remove(self.reqs@, self.rhist@, self.rhist@, i as int);
-                        }
-                        self.reqs.remove(i);
                     }
                     proof {
                         Self::lemma_idle(*self, out@);
@@ -2216,10 +2748,6 @@ impl H3Conn {
                         assert(c0.ctrl@ + Seq::<u8>::empty() =~= c0.ctrl@);
                     }
                     return;
-                }
-                proof {
-                    assert(c0.req_receiving(id));
-                    assert(c0.rhist@[id] == req_hist_of(c0.reqs@[i as int]));
                 }
                 let mut e = self.reqs.remove(i);
                 let pm = self.peer_max;
@@ -2237,13 +2765,16 @@ impl H3Conn {
                 if e.fin_seen && !e.send_open {
                     proof {
                         lemma_reqs_remove(c0.reqs@, c0.rhist@, self.rhist@, i as int);
-                        assert(self.reqs@ == c0.reqs@.remove(i as int));
+                        lemma_dom_remove(c0.reqs@, c0.rhist@, c0.rstate@, i as int);
                     }
+                    self.rstate = Ghost(self.rstate@.remove(id));
                 } else {
                     proof {
                         lemma_reqs_update(c0.reqs@, c0.rhist@, i as int, e);
+                        lemma_dom_update(c0.reqs@, c0.rhist@, c0.rstate@, i as int, e);
                     }
                     self.reqs.insert(i, e);
+                    self.rstate = Ghost(self.rstate@.insert(id, state_of(e)));
                     proof {
                         assert(self.reqs@ =~= c0.reqs@.update(i as int, e));
                     }
@@ -2251,8 +2782,11 @@ impl H3Conn {
             },
             None => {
                 proof {
-                    assert(!c0.req_known(id));
-                    assert(!c0.req_receiving(id));
+                    assert(!c0.rstate@.contains_key(id)) by {
+                        if c0.rstate@.contains_key(id) {
+                            let k = choose|k: int| 0 <= k < c0.reqs@.len() && (#[trigger] c0.reqs@[k]).id == id;
+                        }
+                    }
                 }
                 if let Some(g) = self.goaway {
                     if id >= g {
@@ -2262,7 +2796,7 @@ impl H3Conn {
                         //# or pushes that have identifiers greater than or equal to the one
                         //# indicated, in order to clean up transport state for the affected
                         //# streams.
-                        reject(id, out);
+                        reject(id, fin, out);
                         if !fin {
                             // Kept until the peer's FIN or reset, so data in flight is ignored.
                             let e = ReqEntry {
@@ -2276,13 +2810,14 @@ impl H3Conn {
                             };
                             proof {
                                 lemma_reqs_push(self.reqs@, self.rhist@, e);
+                                lemma_dom_push(self.reqs@, self.rstate@, e);
                             }
                             self.reqs.push(e);
                             self.rhist = Ghost(self.rhist@.insert(id, req_hist_of(e)));
+                            self.rstate = Ghost(self.rstate@.insert(id, state_of(e)));
                         }
                         proof {
                             assert(rejected_id(c0, id));
-                            assert forall|i: int| 0 <= i < added(o0, out@).len() implies ctrl_free(#[trigger] added(o0, out@)[i]) by {}
                             lemma_writes_none(added(o0, out@), 3);
                             assert(self.ctrl@ + Seq::<u8>::empty() =~= self.ctrl@);
                             assert(self.goaways@.take(self.goaways@.len() as int) =~= self.goaways@);
@@ -2329,11 +2864,16 @@ impl H3Conn {
                 if !(e.fin_seen && !e.send_open) {
                     proof {
                         lemma_reqs_push(c0.reqs@, c0.rhist@, e);
+                        lemma_dom_push(c0.reqs@, c0.rstate@, e);
                     }
                     self.reqs.push(e);
+                    self.rstate = Ghost(self.rstate@.insert(id, state_of(e)));
                 } else {
                     proof {
-                        assert forall|k: int| 0 <= k < self.reqs@.len() implies req_entry_ok(#[trigger] self.reqs@[k]) && self.rhist@.contains_key(self.reqs@[k].id) && self.rhist@[self.reqs@[k].id] == req_hist_of(self.reqs@[k]) by {
+                        assert forall|k: int| 0 <= k < self.reqs@.len() implies req_entry_ok(
+                            #[trigger] self.reqs@[k],
+                        ) && self.rhist@.contains_key(self.reqs@[k].id) && self.rhist@[self.reqs@[k].id]
+                            == req_hist_of(self.reqs@[k]) by {
                             assert(self.reqs@[k].id != id);
                         }
                     }
@@ -2350,6 +2890,7 @@ impl H3Conn {
         ensures
             step(*old(self), *final(self), old(out)@, final(out)@),
             final(self).goaways() == old(self).goaways(),
+            frame(*old(self), *final(self), Some(id)),
             uni_fed(*old(self), *final(self), id, data@, fin, added(old(out)@, final(out)@)),
     {
         let ghost c0 = *self;
@@ -2358,29 +2899,32 @@ impl H3Conn {
         let mut e = match found {
             Some(i) => {
                 proof {
-                    assert(c0.uni_known(id));
+                    assert(c0.uset@.contains(id));
                     assert(c0.uhist@[id] == uni_hist_of(c0.unis@[i as int]));
                 }
                 self.unis.remove(i)
             },
             None => {
                 proof {
-                    assert(!c0.uni_known(id));
+                    assert(!c0.uset@.contains(id)) by {
+                        if c0.uset@.contains(id) {
+                            let k = choose|k: int| 0 <= k < c0.unis@.len() && (#[trigger] c0.unis@[k]).id == id;
+                        }
+                    }
                 }
                 UniEntry { id, stream: UniStream::new() }
             },
         };
+        let ghost e_old = e;
         let mut evs: Vec<UniEvent> = Vec::new();
         let r = e.stream.on_data(data, fin, &mut self.seen, &mut evs);
         self.uhist = Ghost(self.uhist@.insert(id, uni_hist_of(e)));
         proof {
             assert(evs@.skip(0) =~= evs@);
             assert(Seq::<u8>::empty() + data@ =~= data@);
-            assert(e.stream.emitted().take(0) =~= Seq::<SpecUniEvent>::empty());
-            if let Some(i) = found {
-                let e0 = c0.unis@[i as int].stream.emitted();
-                assert(e.stream.emitted().take(e0.len() as int) =~= e0);
-            }
+            let e0 = e_old.stream.emitted();
+            assert(e.stream.emitted().take(e0.len() as int) =~= e0);
+            assert(e.stream.emitted().skip(e0.len() as int) =~= uni::views(evs@));
         }
         match r {
             Err(c) => {
@@ -2393,6 +2937,7 @@ impl H3Conn {
                         Some(i) => {
                             proof {
                                 lemma_unis_update(c0.unis@, c0.uhist@, i as int, e);
+                                lemma_udom_update(c0.unis@, c0.uset@, i as int, e);
                             }
                             self.unis.insert(i, e);
                             proof {
@@ -2402,8 +2947,10 @@ impl H3Conn {
                         None => {
                             proof {
                                 lemma_unis_push(c0.unis@, c0.uhist@, e);
+                                lemma_udom_push(c0.unis@, c0.uset@, e);
                             }
                             self.unis.push(e);
+                            self.uset = Ghost(self.uset@.insert(id));
                         },
                     }
                 } else {
@@ -2411,8 +2958,12 @@ impl H3Conn {
                     proof {
                         if let Some(i) = found {
                             lemma_unis_remove(c0.unis@, c0.uhist@, i as int);
+                            lemma_udom_remove(c0.unis@, c0.uhist@, c0.uset@, i as int);
                         }
                         lemma_unis_hist(self.unis@, c0.uhist@, self.uhist@, id);
+                    }
+                    if found.is_some() {
+                        self.uset = Ghost(self.uset@.remove(id));
                     }
                 }
                 proof {
@@ -2428,38 +2979,61 @@ impl H3Conn {
     //= https://www.rfc-editor.org/rfc/rfc9114#section-9
     //# Implementations MUST ignore unknown or unsupported values in all
     //# extensible protocol elements.
-    /// Records the peer's SETTINGS_MAX_FIELD_SECTION_SIZE; every other identifier is ignored
-    /// (the QPACK settings don't matter with a dynamic table of capacity 0).
+    /// Records the peer's SETTINGS_MAX_FIELD_SECTION_SIZE (the last one); every other identifier
+    /// is ignored (the QPACK settings don't matter with a dynamic table of capacity 0).
     fn apply_settings(&mut self, evs: &Vec<UniEvent>)
         ensures
-            final(self).peer_max is Some || final(self).peer_max == old(self).peer_max,
+            final(self).peer_max == events_fs(uni::views(evs@), old(self).peer_max),
             *final(self) == (H3Conn { peer_max: final(self).peer_max, ..*old(self) }),
     {
+        let ghost ev = uni::views(evs@);
         let mut k: usize = 0;
+        proof {
+            assert(ev.take(0) =~= Seq::<SpecUniEvent>::empty());
+        }
         while k < evs.len()
             invariant
                 k <= evs@.len(),
+                ev == uni::views(evs@),
                 *self == (H3Conn { peer_max: self.peer_max, ..*old(self) }),
-                self.peer_max is Some || self.peer_max == old(self).peer_max,
+                self.peer_max == events_fs(ev.take(k as int), old(self).peer_max),
             decreases evs@.len() - k,
         {
+            let ghost before = self.peer_max;
+            proof {
+                assert(ev.take(k + 1).drop_last() =~= ev.take(k as int));
+                assert(ev.take(k + 1).last() == evs@[k as int]@);
+            }
             if let UniEvent::PeerSettings(v) = &evs[k] {
                 let mut j: usize = 0;
+                proof {
+                    assert(v@.take(0) =~= Seq::<(u64, u64)>::empty());
+                }
                 while j < v.len()
                     invariant
                         j <= v@.len(),
                         *self == (H3Conn { peer_max: self.peer_max, ..*old(self) }),
-                        self.peer_max is Some || self.peer_max == old(self).peer_max,
+                        self.peer_max == pairs_fs(v@.take(j as int), before),
                     decreases v@.len() - j,
                 {
                     let (s, x) = v[j];
+                    proof {
+                        assert(v@.take(j + 1).drop_last() =~= v@.take(j as int));
+                        assert(v@.take(j + 1).last() == v@[j as int]);
+                    }
                     if s == SETTINGS_MAX_FIELD_SECTION_SIZE {
                         self.peer_max = Some(x);
                     }
                     j += 1;
                 }
+                proof {
+                    assert(v@.take(v@.len() as int) =~= v@);
+                }
             }
             k += 1;
+        }
+        proof {
+            assert(ev.take(evs@.len() as int) =~= ev);
         }
     }
 
@@ -2472,44 +3046,38 @@ impl H3Conn {
             i < old(self).reqs@.len(),
         ensures
             final(self).wf(),
-            *final(self) == (H3Conn { reqs: final(self).reqs, ..*old(self) }),
+            *final(self) == (H3Conn { reqs: final(self).reqs, rstate: final(self).rstate, ..*old(self) }),
+            frame(*old(self), *final(self), Some(old(self).reqs@[i as int].id)),
             !final(self).req_respondable(old(self).reqs@[i as int].id),
+            final(self).req_receiving(old(self).reqs@[i as int].id) == old(self).req_receiving(
+                old(self).reqs@[i as int].id,
+            ),
     {
         let ghost c0 = *self;
         let ghost id = self.reqs@[i as int].id;
+        proof {
+            assert(c0.rstate@[id] == state_of(c0.reqs@[i as int]));
+        }
         let mut e = self.reqs.remove(i);
         e.send_open = false;
         if !e.fin_seen {
             proof {
                 lemma_reqs_update(c0.reqs@, c0.rhist@, i as int, e);
+                lemma_dom_update(c0.reqs@, c0.rhist@, c0.rstate@, i as int, e);
                 assert(c0.rhist@.insert(e.id, req_hist_of(e)) =~= c0.rhist@);
             }
             self.reqs.insert(i, e);
+            self.rstate = Ghost(self.rstate@.insert(id, state_of(e)));
             proof {
                 assert(self.reqs@ =~= c0.reqs@.update(i as int, e));
-                assert(!self.req_respondable(id)) by {
-                    if self.req_respondable(id) {
-                        let k = choose|k: int|
-                            0 <= k < self.reqs@.len() && (#[trigger] self.reqs@[k]).id == id
-                                && self.reqs@[k].head && self.reqs@[k].send_open;
-                        if k != i {
-                            assert(c0.reqs@[k].id != c0.reqs@[i as int].id);
-                        }
-                    }
-                }
             }
         } else {
             proof {
                 lemma_reqs_remove(c0.reqs@, c0.rhist@, c0.rhist@, i as int);
-                assert(!self.req_respondable(id)) by {
-                    if self.req_respondable(id) {
-                        let k = choose|k: int|
-                            0 <= k < self.reqs@.len() && (#[trigger] self.reqs@[k]).id == id
-                                && self.reqs@[k].head && self.reqs@[k].send_open;
-                        assert(c0.reqs@.remove(i as int)[k].id != c0.reqs@[i as int].id);
-                    }
-                }
+                lemma_dom_remove(c0.reqs@, c0.rhist@, c0.rstate@, i as int);
+                assert(!c0.reqs@[i as int].rx_open);
             }
+            self.rstate = Ghost(self.rstate@.remove(id));
         }
     }
 
@@ -2529,26 +3097,46 @@ impl H3Conn {
     //# Section 9), use of an error code in an unexpected context or receipt
     //# of an unknown error code MUST be treated as equivalent to
     //# H3_NO_ERROR.
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-4.1
+    //# If a client-initiated
+    //# stream terminates without enough of the HTTP message to provide a
+    //# complete response, the server SHOULD abort its response stream with
+    //# the error code H3_REQUEST_INCOMPLETE.
     /// The peer reset its sending part of `stream_id`. The error code changes nothing: every code
     /// is handled as H3_NO_ERROR would be. A reset peer control or QPACK stream closes the
-    /// connection; any other stream is forgotten silently.
+    /// connection; any other uni stream is forgotten silently. A request stream is forgotten,
+    /// and our sending part, if still open, is reset (`reset_outs`).
     pub fn on_stream_reset(&mut self, stream_id: u64, _code: u64, out: &mut Vec<Output>)
         requires
             old(self).wf(),
         ensures
             step(*old(self), *final(self), old(out)@, final(out)@),
             final(self).goaways() == old(self).goaways(),
+            frame(*old(self), *final(self), Some(stream_id)),
+            final(self).peer_max_field_section() == old(self).peer_max_field_section(),
             !old(self).closed() && stream_id % 4 == 2 && old(self).uni_known(stream_id) && critical(
                 uni::kind_of_bytes(old(self).uni_hist(stream_id).0),
             ) ==> added(old(out)@, final(out)@) == seq![
                 SpecOutput::CloseConnection { code: H3_CLOSED_CRITICAL_STREAM },
             ],
-            !old(self).closed() && !(stream_id % 4 == 2 && old(self).uni_known(stream_id) && critical(
+            !old(self).closed() && stream_id % 4 == 2 && !(old(self).uni_known(stream_id) && critical(
                 uni::kind_of_bytes(old(self).uni_hist(stream_id).0),
-            )) ==> added(old(out)@, final(out)@) == Seq::<SpecOutput>::empty() && !final(self).closed(),
-            !old(self).closed() && stream_id % 4 == 0 ==> !final(self).req_known(stream_id),
+            )) ==> added(old(out)@, final(out)@) == Seq::<SpecOutput>::empty() && !final(self).closed()
+                && !final(self).uni_known(stream_id),
+            !old(self).closed() && stream_id % 4 == 0 ==> added(old(out)@, final(out)@) == reset_outs(
+                stream_id,
+                old(self).req_state(stream_id),
+            ) && !final(self).closed() && !final(self).req_known(stream_id),
+            !old(self).closed() && stream_id % 4 != 0 && stream_id % 4 != 2 ==> added(
+                old(out)@,
+                final(out)@,
+            ) == Seq::<SpecOutput>::empty() && !final(self).closed(),
     {
         let ghost c0 = *self;
+        let ghost o0 = out@;
+        proof {
+            lemma_added_refl(o0);
+        }
         if self.closed {
             proof {
                 Self::lemma_idle(*self, out@);
@@ -2558,7 +3146,7 @@ impl H3Conn {
         if stream_id % 4 == 2 {
             if let Some(i) = find_uni(&self.unis, stream_id) {
                 proof {
-                    assert(c0.uni_known(stream_id));
+                    assert(c0.uset@.contains(stream_id));
                     assert(c0.uhist@[stream_id] == uni_hist_of(c0.unis@[i as int]));
                 }
                 let k = self.unis[i].stream.kind();
@@ -2570,28 +3158,61 @@ impl H3Conn {
                     _ => {
                         proof {
                             lemma_unis_remove(self.unis@, self.uhist@, i as int);
+                            lemma_udom_remove(self.unis@, self.uhist@, self.uset@, i as int);
                         }
                         self.unis.remove(i);
+                        self.uset = Ghost(self.uset@.remove(stream_id));
                     },
                 }
             } else {
                 proof {
-                    assert(!c0.uni_known(stream_id));
+                    assert(!c0.uset@.contains(stream_id)) by {
+                        if c0.uset@.contains(stream_id) {
+                            let k = choose|k: int| 0 <= k < c0.unis@.len() && (#[trigger] c0.unis@[k]).id == stream_id;
+                        }
+                    }
                 }
             }
         } else if stream_id % 4 == 0 {
-            if let Some(i) = find_req(&self.reqs, stream_id) {
-                proof {
-                    lemma_reqs_remove(self.reqs@, self.rhist@, self.rhist@, i as int);
-                }
-                self.reqs.remove(i);
-            }
-            proof {
-                assert(!self.req_known(stream_id));
+            match find_req(&self.reqs, stream_id) {
+                Some(i) => {
+                    proof {
+                        assert(c0.rstate@[stream_id] == state_of(c0.reqs@[i as int]));
+                        lemma_reqs_remove(self.reqs@, self.rhist@, self.rhist@, i as int);
+                        lemma_dom_remove(self.reqs@, self.rhist@, self.rstate@, i as int);
+                    }
+                    let e = self.reqs.remove(i);
+                    self.rstate = Ghost(self.rstate@.remove(stream_id));
+                    if e.send_open {
+                        let code = if e.fin_seen {
+                            H3_REQUEST_CANCELLED
+                        } else {
+                            H3_REQUEST_INCOMPLETE
+                        };
+                        let w = Output::ResetStream { stream_id, code };
+                        out.push(w);
+                        proof {
+                            lemma_added_push(o0, o0, w);
+                            assert(added(o0, out@) =~= seq![w@]);
+                            lemma_writes_one(w@, 3);
+                        }
+                    }
+                },
+                None => {
+                    proof {
+                        assert(!c0.rstate@.contains_key(stream_id)) by {
+                            if c0.rstate@.contains_key(stream_id) {
+                                let k = choose|k: int| 0 <= k < c0.reqs@.len() && (#[trigger] c0.reqs@[k]).id == stream_id;
+                            }
+                        }
+                    }
+                },
             }
         }
         proof {
-            Self::lemma_idle(*self, out@);
+            if added(o0, out@).len() == 0 {
+                Self::lemma_idle(c0, o0);
+            }
             assert(c0.ctrl@ + Seq::<u8>::empty() =~= c0.ctrl@);
             assert(c0.goaways@.take(c0.goaways@.len() as int) =~= c0.goaways@);
         }
@@ -2611,13 +3232,15 @@ impl H3Conn {
         ensures
             step(*old(self), *final(self), old(out)@, final(out)@),
             final(self).goaways() == old(self).goaways(),
+            frame(*old(self), *final(self), Some(stream_id)),
+            final(self).peer_max_field_section() == old(self).peer_max_field_section(),
             !old(self).closed() && stream_id == 3 ==> added(old(out)@, final(out)@) == seq![
                 SpecOutput::CloseConnection { code: H3_CLOSED_CRITICAL_STREAM },
             ],
             !old(self).closed() && stream_id != 3 ==> added(old(out)@, final(out)@) == Seq::<
                 SpecOutput,
-            >::empty() && !final(self).closed(),
-            !old(self).closed() ==> !final(self).req_respondable(stream_id),
+            >::empty() && !final(self).closed() && !final(self).req_respondable(stream_id)
+                && final(self).req_receiving(stream_id) == old(self).req_receiving(stream_id),
     {
         let ghost c0 = *self;
         if self.closed {
@@ -2628,15 +3251,6 @@ impl H3Conn {
         }
         if stream_id == 3 {
             self.close(H3_CLOSED_CRITICAL_STREAM, out);
-            proof {
-                assert(!self.req_respondable(stream_id)) by {
-                    if self.req_respondable(stream_id) {
-                        let k = choose|k: int| 0 <= k < self.reqs@.len() && (#[trigger] self.reqs@[k]).id == stream_id && self.reqs@[k].head && self.reqs@[k].send_open;
-                        assert(reqs_ok(c0.reqs@, c0.rhist@));
-                        assert(req_entry_ok(c0.reqs@[k]));
-                    }
-                }
-            }
             return;
         }
         match find_req(&self.reqs, stream_id) {
@@ -2645,7 +3259,11 @@ impl H3Conn {
             },
             None => {
                 proof {
-                    assert(!self.req_respondable(stream_id));
+                    assert(!c0.rstate@.contains_key(stream_id)) by {
+                        if c0.rstate@.contains_key(stream_id) {
+                            let k = choose|k: int| 0 <= k < c0.reqs@.len() && (#[trigger] c0.reqs@[k]).id == stream_id;
+                        }
+                    }
                 }
             },
         }
@@ -2670,11 +3288,15 @@ impl H3Conn {
             step(*old(self), *final(self), old(out)@, final(out)@),
             final(self).goaways() == old(self).goaways(),
             final(self).closed() == old(self).closed(),
+            final(self).peer_max_field_section() == old(self).peer_max_field_section(),
+            frame(*old(self), *final(self), Some(stream_id)),
+            final(self).req_hist(stream_id) == old(self).req_hist(stream_id),
+            final(self).req_receiving(stream_id) == old(self).req_receiving(stream_id),
             r is Ok ==> !old(self).closed() && old(self).req_respondable(stream_id) && valid_response(
                 resp@,
             ) && fits_peer(old(self).peer_max_field_section(), fields_size(resp_fields(resp@)))
                 && one_response(added(old(out)@, final(out)@), stream_id, resp@) && !final(self).req_respondable(stream_id),
-            r is Err ==> final(out)@ == old(out)@,
+            r is Err ==> final(out)@ == old(out)@ && final(self).req_state(stream_id) == old(self).req_state(stream_id),
             old(self).closed() || !valid_response(resp@) || !old(self).req_respondable(stream_id)
                 ==> r is Err,
     {
@@ -2690,24 +3312,20 @@ impl H3Conn {
             Some(i) => i,
             None => {
                 proof {
-                    assert(!c0.req_respondable(stream_id));
+                    assert(!c0.rstate@.contains_key(stream_id)) by {
+                        if c0.rstate@.contains_key(stream_id) {
+                            let k = choose|k: int| 0 <= k < c0.reqs@.len() && (#[trigger] c0.reqs@[k]).id == stream_id;
+                        }
+                    }
                 }
                 return Err(());
             },
         };
-        if !(self.reqs[i].head && self.reqs[i].send_open) {
-            proof {
-                assert(!c0.req_respondable(stream_id)) by {
-                    if c0.req_respondable(stream_id) {
-                        let k = choose|k: int| 0 <= k < c0.reqs@.len() && (#[trigger] c0.reqs@[k]).id == stream_id && c0.reqs@[k].head && c0.reqs@[k].send_open;
-                        assert(k == i);
-                    }
-                }
-            }
-            return Err(());
-        }
         proof {
-            assert(c0.req_respondable(stream_id));
+            assert(c0.rstate@[stream_id] == state_of(c0.reqs@[i as int]));
+        }
+        if !(self.reqs[i].head && self.reqs[i].send_open) {
+            return Err(());
         }
         //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4.2
         //# An HTTP implementation MUST NOT send frames or requests that would be

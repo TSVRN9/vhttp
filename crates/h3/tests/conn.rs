@@ -217,6 +217,15 @@ fn bad_response_rejected() {
         resp(200, &[("connection", "close")], ""),
         resp(200, &[(":path", "/")], ""),
         resp(600, &[], ""),
+        // Interim statuses are never a whole response; HTTP/3 has no 101.
+        resp(100, &[], ""),
+        resp(101, &[], ""),
+        resp(199, &[], ""),
+        // content-length must equal the body length; 204 and 304 carry no content.
+        resp(200, &[("content-length", "3")], "hi"),
+        resp(200, &[("content-length", "x")], "hi"),
+        resp(204, &[], "hi"),
+        resp(304, &[], "hi"),
     ] {
         let mut c = ready(&[]);
         let mut out = Vec::new();
@@ -227,6 +236,13 @@ fn bad_response_rejected() {
         // The stream is still answerable.
         assert_eq!(c.send_response(0, &resp(204, &[], ""), &mut out), Ok(()));
     }
+    // An accepted 200 with a matching content-length.
+    let mut c = ready(&[]);
+    let mut out = Vec::new();
+    c.on_stream_data(0, &get("/"), true, &mut out);
+    let mut out = Vec::new();
+    assert_eq!(c.send_response(0, &resp(200, &[("content-length", "2")], "hi"), &mut out), Ok(()));
+    assert_eq!(out.len(), 1);
     // No Head delivered on that stream: Err.
     let mut c = ready(&[]);
     let mut out = Vec::new();
@@ -409,14 +425,77 @@ fn stream_resets() {
     c.on_stream_reset(2, 0x1234, &mut out);
     assert_eq!(out.len(), 1);
     assert!(is_close(&out[0], H3_CLOSED_CRITICAL_STREAM));
-    // A request stream or an unknown-type uni stream reset is silent.
+    // The encoder and decoder streams are critical too.
+    for ty in [0x02u8, 0x03] {
+        let mut c = ready(&[]);
+        let mut out = Vec::new();
+        c.on_stream_data(6, &[ty], false, &mut out);
+        assert!(out.is_empty());
+        c.on_stream_reset(6, 0, &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(is_close(&out[0], H3_CLOSED_CRITICAL_STREAM));
+    }
+    // An unknown-type uni stream reset is silent.
+    let mut c = ready(&[]);
+    let mut out = Vec::new();
+    c.on_stream_data(6, &[0x21], false, &mut out);
+    c.on_stream_reset(6, 0, &mut out);
+    assert!(out.is_empty());
+    // A request stream reset mid-request: our sending part is reset with H3_REQUEST_INCOMPLETE.
     let mut c = ready(&[]);
     let mut out = Vec::new();
     c.on_stream_data(0, &get("/"), false, &mut out);
-    c.on_stream_data(6, &[0x21], false, &mut out);
     let mut out = Vec::new();
     c.on_stream_reset(0, H3_REQUEST_CANCELLED, &mut out);
-    c.on_stream_reset(6, 0, &mut out);
-    assert!(out.is_empty());
+    assert_eq!(out.len(), 1);
+    assert!(is_reset(&out[0], 0, H3_REQUEST_INCOMPLETE));
+    let mut out = Vec::new();
     assert_eq!(c.send_response(0, &resp(200, &[], ""), &mut out), Err(()));
+    // After the request ended, unanswered: H3_REQUEST_CANCELLED.
+    c.on_stream_data(4, &get("/"), true, &mut out);
+    let mut out = Vec::new();
+    c.on_stream_reset(4, 0, &mut out);
+    assert_eq!(out.len(), 1);
+    assert!(is_reset(&out[0], 4, H3_REQUEST_CANCELLED));
+    // Already answered: nothing to reset.
+    let mut out = Vec::new();
+    c.on_stream_data(8, &get("/"), false, &mut out);
+    assert_eq!(c.send_response(8, &resp(200, &[], ""), &mut out), Ok(()));
+    let mut out = Vec::new();
+    c.on_stream_reset(8, 0, &mut out);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn critical_stream_fin() {
+    // The control stream (2, already open), then a new encoder or decoder stream (6).
+    for (id, b) in [(2u64, vec![]), (6, vec![0x02u8]), (6, vec![0x03])] {
+        let mut c = ready(&[]);
+        let mut out = Vec::new();
+        c.on_stream_data(id, &b, true, &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(is_close(&out[0], H3_CLOSED_CRITICAL_STREAM));
+    }
+}
+
+#[test]
+fn only_open_directions_aborted() {
+    // Rejected with the request complete: no STOP_SENDING.
+    let mut c = ready(&[]);
+    let mut out = Vec::new();
+    c.on_stream_data(0, &get("/"), true, &mut out);
+    c.shutdown(&mut out);
+    let mut out = Vec::new();
+    c.on_stream_data(4, &get("/"), true, &mut out);
+    assert_eq!(out.len(), 1);
+    assert!(is_reset(&out[0], 4, H3_REQUEST_REJECTED));
+    // Answered early, then the rest of the request is malformed: the sent response is not reset.
+    let mut c = ready(&[]);
+    let mut out = Vec::new();
+    c.on_stream_data(0, &get("/"), false, &mut out);
+    assert_eq!(c.send_response(0, &resp(200, &[], ""), &mut out), Ok(()));
+    let mut out = Vec::new();
+    c.on_stream_data(0, &headers(&[fl(":path", "/")]), false, &mut out);
+    assert_eq!(out.len(), 1);
+    assert!(is_stop(&out[0], 0, H3_MESSAGE_ERROR));
 }
