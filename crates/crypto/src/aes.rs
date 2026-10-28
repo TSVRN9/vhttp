@@ -609,11 +609,12 @@ pub(crate) fn expand_key(key: &[u8]) -> (rk: [u8; 176])
         rk[i] = key[i];
         i += 1;
     }
-    assert forall|j: nat| j < 4 implies rk@.subrange(4 * j as int, 4 * j + 4 as int) == #[trigger] key_word(
-        key@,
-        j,
-    ) by {
-        assert(rk@.subrange(4 * j as int, 4 * j + 4 as int) =~= key@.subrange(4 * j as int, 4 * j + 4 as int));
+    assert forall|j: nat| j < 4 implies rk@.subrange(4 * j as int, 4 * j + 4 as int)
+        == #[trigger] key_word(key@, j) by {
+        assert(rk@.subrange(4 * j as int, 4 * j + 4 as int) =~= key@.subrange(
+            4 * j as int,
+            4 * j + 4 as int,
+        ));
     }
     let mut i: usize = 4;
     let mut rc: u8 = 1;
@@ -621,7 +622,10 @@ pub(crate) fn expand_key(key: &[u8]) -> (rk: [u8; 176])
         invariant
             4 <= i <= 44,
             forall|j: nat|
-                j < i ==> rk@.subrange(4 * j as int, 4 * j + 4 as int) == #[trigger] key_word(key@, j),
+                j < i ==> rk@.subrange(4 * j as int, 4 * j + 4 as int) == #[trigger] key_word(
+                    key@,
+                    j,
+                ),
             rc == rcon((i / 4) as nat),
         decreases 44 - i,
     {
@@ -741,7 +745,8 @@ pub(crate) fn encrypt_rk(rk: &[u8; 176], Ghost(key): Ghost<Seq<u8>>, block: &[u8
 }
 
 /// FIPS 197 §5.1 (Nr = 10), §5.2 (Nk = 4); verified against spec_aes128_encrypt.
-// ponytail: key schedule recomputed per call (40 S-boxes, ≈<measured>% of one block); add a pub expanded-key type if packet-rate profiling shows it
+// ponytail: key schedule recomputed per call (40 S-boxes, ≈<measured>% of one block); add a pub
+// expanded-key type if packet-rate profiling shows it
 pub fn aes128_encrypt_block(key: &[u8], block: &[u8]) -> (r: [u8; 16])
     requires
         key@.len() == 16,
