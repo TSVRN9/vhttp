@@ -287,4 +287,8 @@ All Phase-2 rows that are not marked `✅ 2a` or that carry an "open for 2b" tai
 ## Exit criteria (Phase 2b)
 
 - All four checks pass. Every row under "Matrix rows this plan closes" carries `✅ 2b` or an explicit `N/A`/`Declined` reason. A grep of `docs/requirements.md` for Phase-2 rows without a ✅ returns nothing.
+  The exact command, run from the repo root, must print nothing. Summary rows marked "(summary; sub-rows carry status)" are excluded, because their sub-rows carry the ✅:
+  ```sh
+  awk -F'|' '$6 ~ /^ *2 *$/ && !/✅/ && index($0, "(summary; sub-rows carry status)") == 0' docs/requirements.md
+  ```
 - `phase-2b` is merged into `main`.

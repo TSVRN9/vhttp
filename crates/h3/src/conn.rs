@@ -5,6 +5,21 @@
 //! Contract with the QUIC layer: stream IDs follow RFC 9000 §2.1, and no data is delivered on a
 //! stream after its FIN or the peer's reset. Data that was in flight when we sent STOP_SENDING
 //! may still arrive; it is ignored until the stream's FIN or reset.
+//!
+//! Caller obligations (Phase 3c; stated here, not proven by this module):
+//! - **Bounded streams.** The tracked streams grow with every peer stream, and nothing here caps
+//!   them. The QUIC layer advertises bounded `initial_max_streams_bidi`/`_uni` and re-credits a
+//!   stream (MAX_STREAMS) only once `H3Conn` has forgotten it (`!req_known` / `!uni_known`).
+//! - **`start()` first.** Call `start` as soon as the transport can send, before delivering any
+//!   stream event or calling `send_response`, so SETTINGS opens our control stream before any
+//!   response is written (RFC 9114 §6.2.1, §7.2.4.2). Nothing else here calls it, except
+//!   `shutdown`.
+//! - **At least 3 peer uni streams.** Encode `initial_max_streams_uni >= MIN_PEER_UNI_STREAMS`
+//!   (3) in our transport parameters (RFC 9114 §6.2); the constant alone enforces nothing.
+//! - **Aborted requests.** A peer reset of a request whose response was already sent (or whose
+//!   sending part the peer stopped), i.e. `send_open` is false, outputs nothing. The caller
+//!   knows it delivered `on_stream_reset`, and tells the application that any `RequestBody`
+//!   stream for that request has been aborted.
 use vstd::prelude::*;
 use vstd::slice::slice_to_vec;
 use wire::varint::VARINT_MAX;
@@ -478,9 +493,11 @@ pub open spec fn uni_err_outs(e: Option<u64>) -> Seq<SpecOutput> {
 // Specs: what every call guarantees
 // =============================================================================
 
+/// STOP_SENDING and RESET_STREAM only on request streams.
 pub open spec fn stop_ok(o: SpecOutput) -> bool {
     match o {
         SpecOutput::StopSending { stream_id, .. } => stream_id % 4 == 0,
+        SpecOutput::ResetStream { stream_id, .. } => stream_id % 4 == 0,
         _ => true,
     }
 }
@@ -518,8 +535,9 @@ pub open spec fn no_close(o: Seq<SpecOutput>) -> bool {
 //# The sender MUST NOT close either of these streams, and the receiver
 //# MUST NOT request that the sender close either of these streams.
 /// The shape of one call's outputs: STOP_SENDING only on request streams (never on the peer's
-/// control or QPACK streams), our control stream never FIN-ed, no empty RequestBody, and a
-/// CloseConnection, if any, is the last output and only when `closing`.
+/// control or QPACK streams), our control stream never FIN-ed nor reset (RESET_STREAM only on
+/// request streams), no empty RequestBody, and a CloseConnection, if any, is the last output
+/// and only when `closing`.
 pub open spec fn outs_ok(o: Seq<SpecOutput>, closing: bool) -> bool {
     &&& forall|i: int| 0 <= i < o.len() ==> stop_ok(#[trigger] o[i]) && ctrl_open(o[i]) && body_ok(o[i])
     &&& forall|i: int|
@@ -527,8 +545,8 @@ pub open spec fn outs_ok(o: Seq<SpecOutput>, closing: bool) -> bool {
     &&& closing ==> o.len() > 0 && o.last() is CloseConnection
 }
 
-/// Outputs on request streams only: no control-stream write, STOP_SENDING only on request
-/// streams, no empty RequestBody.
+/// Outputs on request streams only: no control-stream write, STOP_SENDING and RESET_STREAM only
+/// on request streams, no empty RequestBody.
 pub open spec fn req_only(o: Seq<SpecOutput>) -> bool {
     forall|i: int| 0 <= i < o.len() ==> ctrl_free(#[trigger] o[i]) && stop_ok(o[i]) && body_ok(o[i])
 }
@@ -2277,7 +2295,10 @@ pub open spec fn events_fs(e: Seq<SpecUniEvent>, cur: Option<u64>) -> Option<u64
 /// A peer uni stream call: the stream's bytes grew by `data`; its events and error are
 /// `rfc_uni_stream` of them; the only output is CloseConnection on that error. Otherwise the
 /// stream stays tracked until its FIN, and the peer's MAX_FIELD_SECTION_SIZE is the last one its
-/// new events carry.
+/// new events carry. The stream's type is checked against the connection's `uni_seen()` at the
+/// call that determined it, and that call records the type there (`seen_after`); so a second
+/// control, encoder or decoder stream is H3_STREAM_CREATION_ERROR (RFC 9114 §6.2.1, RFC 9204
+/// §4.2).
 pub open spec fn uni_fed(c0: H3Conn, c1: H3Conn, id: u64, data: Seq<u8>, fin: bool, o: Seq<SpecOutput>) -> bool {
     let b0 = if c0.uni_known(id) { c0.uni_hist(id).0 } else { Seq::<u8>::empty() };
     let e0 = if c0.uni_known(id) { c0.uni_hist(id).2 } else { Seq::<SpecUniEvent>::empty() };
@@ -2287,6 +2308,11 @@ pub open spec fn uni_fed(c0: H3Conn, c1: H3Conn, id: u64, data: Seq<u8>, fin: bo
     &&& h.2.take(e0.len() as int) == e0
     &&& uni::rfc_uni_stream(h.0, fin, h.1).0 == h.2
     &&& o == uni_err_outs(uni::rfc_uni_stream(h.0, fin, h.1).1)
+    &&& if uni::kind_of_bytes(b0) is Undetermined {
+        h.1 == c0.uni_seen() && c1.uni_seen() == uni::seen_after(c0.uni_seen(), h.0)
+    } else {
+        h.1 == c0.uni_hist(id).1 && c1.uni_seen() == c0.uni_seen()
+    }
     &&& !c1.closed() ==> c1.uni_known(id) == !fin && c1.peer_max_field_section() == events_fs(
         h.2.skip(e0.len() as int),
         c0.peer_max_field_section(),
@@ -2316,13 +2342,22 @@ pub open spec fn reset_outs(id: u64, st: Option<ReqState>) -> Seq<SpecOutput> {
 }
 
 /// What a request-stream call does (connection open, `id % 4 == 0`).
-/// - A new stream at or above our GOAWAY ID is rejected (`rejected_outs`), never fed.
+/// - A new stream at or above our GOAWAY ID is rejected (`rejected_outs`), never fed; it is
+///   kept, neither received nor answerable, until the peer's FIN or reset.
 /// - A tracked stream no longer received (finished, or abandoned awaiting the peer's FIN or
 ///   reset) outputs nothing and is unchanged, except that a FIN may forget it.
 /// - Otherwise its machine is fed (`req_fed`).
+/// - A new stream that is fed is accepted: `highest_accepted` rises to its ID (`bump`); every
+///   other call leaves it unchanged.
 pub open spec fn req_call(c0: H3Conn, c1: H3Conn, id: u64, data: Seq<u8>, fin: bool, o: Seq<SpecOutput>) -> bool {
     &&& !c0.req_known(id) && rejected_id(c0, id) ==> o == rejected_outs(id, fin) && !c1.closed()
-        && !c1.req_receiving(id) && !c1.req_respondable(id)
+        && !c1.req_receiving(id) && !c1.req_respondable(id) && (if fin {
+        !c1.req_known(id)
+    } else {
+        c1.req_state(id) == Some(
+            ReqState { receiving: false, head: false, send_open: false, fin_seen: false, is_head: false },
+        )
+    })
     &&& c0.req_known(id) && !c0.req_receiving(id) ==> o == Seq::<SpecOutput>::empty() && !c1.closed()
         && !c1.req_receiving(id) && c1.req_respondable(id) == c0.req_respondable(id) && (
     c1.req_known(id) ==> c1.req_state(id) == Some(
@@ -2336,6 +2371,11 @@ pub open spec fn req_call(c0: H3Conn, c1: H3Conn, id: u64, data: Seq<u8>, fin: b
         fin,
         o,
     )
+    &&& c1.highest_accepted() == if !c0.req_known(id) && !rejected_id(c0, id) {
+        bump(c0.highest_accepted(), id)
+    } else {
+        c0.highest_accepted()
+    }
 }
 
 pub open spec fn critical(k: UniKind) -> bool {
@@ -2353,6 +2393,46 @@ pub open spec fn goaway_id(highest: Option<u64>, sent: Seq<u64>) -> int {
         sent.last() as int
     } else {
         t
+    }
+}
+
+/// The highest accepted request ID once `id` is accepted.
+pub open spec fn bump(h: Option<u64>, id: u64) -> Option<u64> {
+    match h {
+        Some(x) => if x < id {
+            Some(id)
+        } else {
+            Some(x)
+        },
+        None => Some(id),
+    }
+}
+
+/// `start`'s outputs: our control-stream preamble, if the stream isn't open yet.
+pub open spec fn start_outs(c: H3Conn) -> Seq<SpecOutput> {
+    if !c.closed() && c.ctrl_bytes().len() == 0 {
+        seq![SpecOutput::StreamWrite { stream_id: 3, data: ctrl_preamble(), fin: false }]
+    } else {
+        Seq::empty()
+    }
+}
+
+/// `shutdown`'s outputs: `start_outs`, then one GOAWAY(`goaway_id`) frame on stream 3 if that ID
+/// is encodable (it isn't only when stream 2^62 - 4 was accepted and no GOAWAY was sent yet).
+pub open spec fn shutdown_outs(c: H3Conn) -> Seq<SpecOutput> {
+    let g = goaway_id(c.highest_accepted(), c.goaways());
+    if c.closed() {
+        Seq::empty()
+    } else if g <= VARINT_MAX {
+        start_outs(c).push(
+            SpecOutput::StreamWrite {
+                stream_id: 3,
+                data: spec_frame_bytes(FRAME_GOAWAY, spec_varint(g as u64)),
+                fin: false,
+            },
+        )
+    } else {
+        start_outs(c)
     }
 }
 
@@ -2422,6 +2502,12 @@ impl H3Conn {
         self.uhist@[id]
     }
 
+    /// The critical stream types (control, QPACK encoder, QPACK decoder) the peer has opened:
+    /// the `SeenUni` every new uni stream's type is checked against (`uni_fed`).
+    pub closed spec fn uni_seen(&self) -> SeenUni {
+        self.seen
+    }
+
     pub closed spec fn wf(&self) -> bool {
         &&& self.ctrl_inv()
         &&& !self.closed ==> reqs_ok(self.reqs@, self.rhist@) && unis_ok(self.unis@, self.uhist@)
@@ -2444,11 +2530,15 @@ impl H3Conn {
             Some(self.goaways@.last())
         }
         &&& (self.highest is Some && self.goaway is Some) ==> self.highest->0 < self.goaway->0
+        &&& self.highest is Some ==> self.highest->0 % 4 == 0
+        &&& forall|i: int| 0 <= i < self.goaways@.len() ==> #[trigger] self.goaways@[i] % 4 == 0
     }
 
     /// What the invariant means for our control stream and GOAWAYs: nothing written yet, or the
     /// stream type and one SETTINGS frame (`theorem_ctrl_preamble`) followed only by GOAWAY
-    /// frames with non-increasing IDs, all above every request we accepted.
+    /// frames with non-increasing client-bidi IDs (RFC 9114 §5.2, §7.2.6), all above the highest
+    /// request we accepted (`highest_accepted`, which `on_stream_data` raises to every accepted
+    /// stream's ID and nothing else changes).
     pub proof fn theorem_wf(c: H3Conn)
         requires
             c.wf(),
@@ -2459,10 +2549,21 @@ impl H3Conn {
             nonincreasing(c.goaways()),
             c.highest_accepted() is Some && c.goaways().len() > 0 ==> c.highest_accepted()->0
                 < c.goaways().last(),
+            c.highest_accepted() is Some ==> c.highest_accepted()->0 % 4 == 0,
+            forall|i: int| 0 <= i < c.goaways().len() ==> #[trigger] c.goaways()[i] % 4 == 0,
+            forall|i: int|
+                0 <= i < c.goaways().len() && c.highest_accepted() is Some ==> c.highest_accepted()->0
+                    < #[trigger] c.goaways()[i],
     {
         if !c.started {
         } else {
             assert(ctrl_preamble().len() > 0);
+        }
+        if c.goaways@.len() > 0 {
+            assert forall|i: int| 0 <= i < c.goaways().len() && c.highest_accepted() is Some implies c.highest_accepted()->0
+                < #[trigger] c.goaways()[i] by {
+                assert(c.goaways@[c.goaways@.len() - 1] <= c.goaways@[i]);
+            }
         }
     }
 
@@ -2474,6 +2575,7 @@ impl H3Conn {
             c.goaways() == Seq::<u64>::empty(),
             c.highest_accepted() is None,
             c.peer_max_field_section() is None,
+            c.uni_seen() == (SeenUni { control: false, encoder: false, decoder: false }),
             forall|id: u64| !c.req_known(id) && !c.uni_known(id),
     {
         H3Conn {
@@ -2505,6 +2607,7 @@ impl H3Conn {
             final(self).ctrl == old(self).ctrl,
             final(self).goaways == old(self).goaways,
             final(self).highest == old(self).highest,
+            final(self).seen == old(self).seen,
             final(self).peer_max == old(self).peer_max,
             final(self).reqs == old(self).reqs,
             final(self).rhist == old(self).rhist,
@@ -2561,6 +2664,8 @@ impl H3Conn {
             !old(self).closed() ==> final(self).ctrl_bytes().len() > 0,
             !old(self).closed() && old(self).ctrl_bytes().len() == 0 ==> final(self).ctrl_bytes()
                 == ctrl_preamble(),
+            added(old(out)@, final(out)@) == start_outs(*old(self)),
+            final(self).uni_seen() == old(self).uni_seen(),
     {
         if self.closed || self.started {
             proof {
@@ -2625,6 +2730,9 @@ impl H3Conn {
                 goaway_id(old(self).highest_accepted(), old(self).goaways()) as u64,
             ),
             !old(self).closed() ==> final(self).ctrl_bytes().len() > 0,
+            added(old(out)@, final(out)@) == shutdown_outs(*old(self)),
+            final(self).highest_accepted() == old(self).highest_accepted(),
+            final(self).uni_seen() == old(self).uni_seen(),
     {
         if self.closed {
             proof {
@@ -2679,16 +2787,29 @@ impl H3Conn {
             id <= VARINT_MAX,
             old(self).goaways@.len() > 0 ==> id <= old(self).goaways@.last(),
             old(self).highest is Some ==> old(self).highest->0 < id,
+            id % 4 == 0,
         ensures
             step(*old(self), *final(self), old(out)@, final(out)@),
             !final(self).closed,
             final(self).goaways@ == old(self).goaways@.push(id),
             frame(*old(self), *final(self), None::<u64>),
             final(self).peer_max == old(self).peer_max,
+            final(self).highest == old(self).highest,
+            final(self).seen == old(self).seen,
+            added(old(out)@, final(out)@) == seq![
+                SpecOutput::StreamWrite {
+                    stream_id: 3,
+                    data: spec_frame_bytes(FRAME_GOAWAY, spec_varint(id)),
+                    fin: false,
+                },
+            ],
     {
         let ghost o0 = out@;
         let mut data: Vec<u8> = Vec::new();
         serialize_goaway(id, &mut data);
+        proof {
+            assert(data@ =~= spec_frame_bytes(FRAME_GOAWAY, spec_varint(id)));
+        }
         let w = Output::StreamWrite { stream_id: 3, data, fin: false };
         out.push(w);
         proof {
@@ -2771,6 +2892,12 @@ impl H3Conn {
                 fin,
                 added(old(out)@, final(out)@),
             ),
+            old(self).closed() || stream_id % 4 != 0 ==> final(self).highest_accepted() == old(
+                self,
+            ).highest_accepted(),
+            old(self).closed() || stream_id % 4 != 2 ==> final(self).uni_seen() == old(
+                self,
+            ).uni_seen(),
     {
         if self.closed {
             proof {
@@ -2800,6 +2927,7 @@ impl H3Conn {
             final(self).peer_max == old(self).peer_max,
             frame(*old(self), *final(self), Some(id)),
             req_call(*old(self), *final(self), id, data@, fin, added(old(out)@, final(out)@)),
+            final(self).seen == old(self).seen,
     {
         hide(request::rfc_req);
         hide(req_outs);
@@ -2991,6 +3119,7 @@ impl H3Conn {
             final(self).goaways() == old(self).goaways(),
             frame(*old(self), *final(self), Some(id)),
             uni_fed(*old(self), *final(self), id, data@, fin, added(old(out)@, final(out)@)),
+            final(self).highest == old(self).highest,
     {
         let ghost c0 = *self;
         let ghost o0 = out@;
@@ -3238,6 +3367,8 @@ impl H3Conn {
                 old(out)@,
                 final(out)@,
             ) == Seq::<SpecOutput>::empty() && !final(self).closed(),
+            final(self).highest_accepted() == old(self).highest_accepted(),
+            final(self).uni_seen() == old(self).uni_seen(),
     {
         let ghost c0 = *self;
         let ghost o0 = out@;
@@ -3354,6 +3485,9 @@ impl H3Conn {
             ) && final(self).req_state(stream_id) == Some(
                 ReqState { send_open: false, ..old(self).req_state(stream_id)->0 },
             )),
+            final(self).req_hist(stream_id) == old(self).req_hist(stream_id),
+            final(self).highest_accepted() == old(self).highest_accepted(),
+            final(self).uni_seen() == old(self).uni_seen(),
     {
         let ghost c0 = *self;
         if self.closed {
@@ -3417,6 +3551,8 @@ impl H3Conn {
             frame(*old(self), *final(self), Some(stream_id)),
             final(self).req_hist(stream_id) == old(self).req_hist(stream_id),
             final(self).req_receiving(stream_id) == old(self).req_receiving(stream_id),
+            final(self).highest_accepted() == old(self).highest_accepted(),
+            final(self).uni_seen() == old(self).uni_seen(),
             r is Ok ==> !old(self).closed() && old(self).req_respondable(stream_id) && valid_response(
                 resp@,
                 old(self).req_state(stream_id)->0.is_head,
