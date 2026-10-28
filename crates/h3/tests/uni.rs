@@ -52,12 +52,9 @@ fn control_rejects_from_header_alone() {
         run(&[0x00, 0x04, 0x00, 0x07, 0x01, 0x08, 0x07, 0x01, 0x09], false),
         (Err(H3_ID_ERROR), vec![UniEvent::PeerSettings(vec![]), UniEvent::PeerGoaway(8)])
     );
-    // Unknown frame announcing 16385 bytes; SETTINGS announcing 1025 bytes.
-    assert_eq!(
-        run(&[0x00, 0x04, 0x00, 0x21, 0x80, 0x00, 0x40, 0x01], false).0,
-        Err(H3_EXCESSIVE_LOAD)
-    );
+    // SETTINGS announcing 1025 bytes; GOAWAY announcing 9 (a varint is at most 8).
     assert_eq!(run(&[0x00, 0x04, 0x44, 0x01], false).0, Err(H3_EXCESSIVE_LOAD));
+    assert_eq!(run(&[0x00, 0x04, 0x00, 0x07, 0x09], false).0, Err(H3_FRAME_ERROR));
     // Malformed SETTINGS payload passes the frame codec's error through.
     assert_eq!(run(&[0x00, 0x04, 0x01, 0x06], false).0, Err(H3_FRAME_ERROR));
 }
@@ -109,4 +106,25 @@ fn chunking() {
     assert_eq!(s.on_data(&[0x02, 0x20, 0x3f], false, &mut seen, &mut ev), Ok(()));
     assert_eq!(s.on_data(&[0xe1], false, &mut seen, &mut ev), Ok(()));
     assert_eq!(s.on_data(&[0x1f], false, &mut seen, &mut ev), Err(QPACK_ENCODER_STREAM_ERROR));
+}
+
+#[test]
+fn large_unknown_frame_skipped() {
+    // SETTINGS, unknown frame 0x21 of 16385 bytes, GOAWAY 8.
+    let mut stream = vec![0x00, 0x04, 0x00, 0x21, 0x80, 0x00, 0x40, 0x01];
+    stream.extend(std::iter::repeat(0xab).take(16385));
+    stream.extend([0x07, 0x01, 0x08]);
+    let want = || vec![UniEvent::PeerSettings(vec![]), UniEvent::PeerGoaway(8)];
+    assert_eq!(run(&stream, false), (Ok(()), want()));
+    for size in [1000, 1, 7] {
+        let mut s = UniStream::new();
+        let mut ev = Vec::new();
+        let mut seen = fresh();
+        for c in stream.chunks(size) {
+            assert_eq!(s.on_data(c, false, &mut seen, &mut ev), Ok(()));
+        }
+        assert_eq!(ev, want());
+    }
+    // A FIN while skipping is still a closed critical stream.
+    assert_eq!(run(&stream[..100], true).0, Err(H3_CLOSED_CRITICAL_STREAM));
 }

@@ -159,6 +159,7 @@ pub proof fn lemma_encoder_stream_split(b: Seq<u8>, t: Seq<u8>)
         ({
             let n = rfc_encoder_stream(b)->Ok_0;
             &&& n <= b.len()
+            &&& b.len() - n <= 1 + PREFIX_INT_MAX_CONT
             &&& rfc_encoder_stream(b + t) == add_ok(rfc_encoder_stream(b.skip(n as int) + t), n)
         }),
     decreases b.len(),
@@ -167,6 +168,9 @@ pub proof fn lemma_encoder_stream_split(b: Seq<u8>, t: Seq<u8>)
     if b.len() > 0 && b[0] & 0xE0u8 == 0x20u8 {
         assert((b + t)[0] == b[0]);
         lemma_prefix_int_consumed(5, b);
+        if rfc_prefix_int(5, b) is Incomplete {
+            lemma_prefix_int_incomplete_len(5, b);
+        }
         if let PrefixIntSpec::Value { value: _, consumed: c } = rfc_prefix_int(5, b) {
             lemma_prefix_int_append(5, b, t);
             let s = b.skip(c as int);
@@ -275,6 +279,7 @@ pub proof fn lemma_decoder_stream_split(b: Seq<u8>, t: Seq<u8>)
         ({
             let n = rfc_decoder_stream(b)->Ok_0;
             &&& n <= b.len()
+            &&& b.len() - n <= 1 + PREFIX_INT_MAX_CONT
             &&& rfc_decoder_stream(b + t) == add_ok(rfc_decoder_stream(b.skip(n as int) + t), n)
         }),
     decreases b.len(),
@@ -283,6 +288,9 @@ pub proof fn lemma_decoder_stream_split(b: Seq<u8>, t: Seq<u8>)
     if b.len() > 0 && b[0] & 0xC0u8 == 0x40u8 {
         assert((b + t)[0] == b[0]);
         lemma_prefix_int_consumed(6, b);
+        if rfc_prefix_int(6, b) is Incomplete {
+            lemma_prefix_int_incomplete_len(6, b);
+        }
         if let PrefixIntSpec::Value { value: _, consumed: c } = rfc_prefix_int(6, b) {
             lemma_prefix_int_append(6, b, t);
             let s = b.skip(c as int);
