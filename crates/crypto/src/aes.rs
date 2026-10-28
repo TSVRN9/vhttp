@@ -5,7 +5,7 @@ use vstd::prelude::*;
 
 verus! {
 
-/// FIPS 197 §4.2.1 xtime: multiplication by x in GF(2^8) modulo x^8 + x^4 + x^3 + x + 1.
+/// FIPS 197-upd1 §4.2 eq. (4.5) xtime: multiplication by x in GF(2^8) modulo x^8 + x^4 + x^3 + x + 1.
 pub open spec fn xtime(b: u8) -> u8 {
     if b & 0x80 != 0 {
         ((b & 0x7f) << 1) ^ 0x1b
@@ -34,7 +34,7 @@ pub open spec fn gmul(a: u8, b: u8) -> u8 {
     gmul_n(a, b, 8)
 }
 
-/// b^n in GF(2^8).
+/// FIPS 197-upd1 §4.4 eq. (4.11): b^n in GF(2^8).
 pub open spec fn gpow(b: u8, n: nat) -> u8
     decreases n,
 {
@@ -50,13 +50,13 @@ pub open spec fn ginv(b: u8) -> u8 {
     gpow(b, 254)
 }
 
-/// FIPS 197 §5.1.1 eq. (5.2): bit i of the affine transformation of x, with c = 0x63.
+/// FIPS 197-upd1 §5.1.1 eq. (5.3): bit i of the affine transformation of x, with c = 0x63.
 pub open spec fn sbox_bit(x: u8, i: nat) -> u8 {
     ((x >> (i as u8)) ^ (x >> (((i + 4) % 8) as u8)) ^ (x >> (((i + 5) % 8) as u8)) ^ (x >> (
     ((i + 6) % 8) as u8)) ^ (x >> (((i + 7) % 8) as u8)) ^ (0x63u8 >> (i as u8))) & 1
 }
 
-/// Bits 0..n of the affine transformation of x, assembled into a byte.
+/// FIPS 197-upd1 §5.1.1 eq. (5.3): bits 0..n of the affine transformation of x, assembled into a byte.
 pub open spec fn sbox_bits(x: u8, n: nat) -> u8
     decreases n,
 {

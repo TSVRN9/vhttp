@@ -42,7 +42,7 @@ pub(crate) fn aes128_gcm_seal(key: &[u8], nonce: &[u8], aad: &[u8], pt: &[u8]) -
     let k: [u8; 16] = key.try_into().unwrap();
     // unreachable: requires nonce@.len() == 12
     let n: [u8; 12] = nonce.try_into().unwrap();
-    // unreachable: requires pt@.len() <= GCM_MAX_PT_LEN
+    // unreachable: requires pt@.len() <= GCM_MAX_PT_LEN (= P_MAX) and aad@.len() <= MAX_INPUT_LEN (< A_MAX)
     aes_gcm::Aes128Gcm::new(&k.into()).encrypt(&n.into(), Payload { msg: pt, aad }).unwrap()
 }
 
