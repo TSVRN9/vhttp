@@ -31,14 +31,30 @@ fn a2_client_initial_header() {
 fn a3_server_initial_header() {
     let scid = hex("f067a5502a4262b5");
     let mut out = Vec::new();
-    serialize_long_header(LongType::Initial, &[], &scid, 1, 2, 115, &mut out);
+    let off = serialize_long_header(LongType::Initial, &[], &scid, 1, 2, 115, &mut out);
     assert_eq!(out, hex("c1000000010008f067a5502a4262b50040750001"));
+    assert_eq!(off, 18);
+
+    // The real protected header: reserved and pn-length bits are not interpreted.
+    let mut pkt = hex("cf000000010008f067a5502a4262b5004075");
+    pkt.resize(135, 0);
+    assert_eq!(
+        parse_header(&pkt, 8),
+        Some(Header::Long {
+            ty: LongType::Initial,
+            dcid: vec![],
+            scid,
+            token: vec![],
+            pn_offset: 18,
+            packet_end: 135,
+        })
+    );
 }
 
 #[test]
 fn a5_short_header() {
     let mut out = Vec::new();
-    let off = serialize_short_header(&[], false, 654360564, 3, &mut out);
+    let off = serialize_short_header(&[], false, false, 654360564, 3, &mut out);
     assert_eq!(out, hex("4200bff4"));
     assert_eq!(off, 1);
     assert_eq!(first_byte_pn_len(0x42), 3);
@@ -67,6 +83,11 @@ fn header_drops() {
     // Token length 5 with 2 bytes left.
     assert_eq!(parse_long_header(&long(0xc0, &[0, 0, 5, 0xaa, 0xbb])), None);
     // Short header: 20 bytes is too small, 21 is enough.
+    // SCID length 21.
+    let mut b = long(0xc0, &[0, 21]);
+    b.extend([0u8; 21]);
+    b.extend([0, 1, 0]);
+    assert_eq!(parse_long_header(&b), None);
     assert_eq!(parse_header(&[0x40; 20], 8), None);
     assert!(parse_header(&[0x40; 21], 8).is_some());
     // Short header with fixed bit 0.
@@ -107,6 +128,7 @@ fn header_roundtrip() {
     let off = serialize_long_header(LongType::Handshake, &dcid, &scid, 7, 1, 30, &mut b);
     b.extend([0xee; 30]);
     assert_eq!(first_byte_pn_len(b[0]), 1);
+    assert_eq!(off, 48);
     assert_eq!(
         parse_header(&b, 8),
         Some(Header::Long {
@@ -114,16 +136,17 @@ fn header_roundtrip() {
             dcid,
             scid,
             token: vec![],
-            pn_offset: off,
+            pn_offset: 48,
             packet_end: b.len(),
         })
     );
 
     let dcid: Vec<u8> = (1..=8).collect();
     let mut b = Vec::new();
-    let off = serialize_short_header(&dcid, true, 0x1234, 2, &mut b);
+    let off = serialize_short_header(&dcid, true, true, 0x1234, 2, &mut b);
     b.resize(40, 0);
     assert_eq!(off, 9);
+    assert_eq!(b[0], 0x65);
     assert!(first_byte_key_phase(b[0]));
     assert_eq!(first_byte_pn_len(b[0]), 2);
     assert!(reserved_bits_zero(b[0], false));

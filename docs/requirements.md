@@ -312,7 +312,7 @@ Total keyword count: 44 across 22 sections.
 | 17.2.5.2 | Handling a Retry packet | 5 | no | N/A (client-only) |  |
 | 17.2.5.3 | Continuing a handshake after Retry | 2 | no | N/A (client-only) |  |
 | 17.3.1 | 1-RTT packet | 3 | yes | 3 | Fixed bit; reserved bits PROTOCOL_VIOLATION. 3b codec: crates/quic/src/header.rs (closed in 3e) |
-| 17.4 | Latency spin bit | 4 | yes | 3 | Simplest compliance: not support it and keep it disabled (set arbitrary, ignore incoming); keep admin-disable switch. ✅ 3b: crates/quic/src/header.rs; spin bit unsupported, so always disabled: written 0, never read; no admin switch is needed for a feature that cannot be enabled |
+| 17.4 | Latency spin bit | 4 | yes | 3 | Simplest compliance: not support it and keep it disabled (set arbitrary, ignore incoming); keep admin-disable switch. ✅ 3b: crates/quic/src/header.rs; spin bit unsupported, so always disabled: serializer takes a caller-chosen `spin` (RECOMMENDED random per packet or per CID, supplied by 3e), never read on parse; no admin switch is needed for a feature that cannot be enabled |
 | 18.2 | Transport parameter definitions | 9 | partial | 3 | Rows below. |
 | 18.2 (req) | stateless_reset_token not sent by clients | 1 | yes | 3 | Server sends it; receipt from a client is an error (see server-only row). |
 | 18.2 (req) | preferred_address receiver rules (no new local address toward handshake address) | 1 | no | N/A (client-only) | Sent only by servers; receiver is a client. |

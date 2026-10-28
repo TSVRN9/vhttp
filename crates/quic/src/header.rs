@@ -320,9 +320,14 @@ pub open spec fn spec_long_first_byte(ty: LongType, pn_len: u8) -> u8 {
 //# An
 //# endpoint that does not support this feature MUST disable it, as
 //# defined below.
-/// Spin bit 0: the feature is unsupported, so always disabled.
-pub open spec fn spec_short_first_byte(key_phase: bool, pn_len: u8) -> u8 {
-    0x40u8 | (if key_phase {
+/// The spin bit (0x20) is whatever the caller supplies: the feature is disabled, so the value
+/// is arbitrary (RECOMMENDED random) and never read back.
+pub open spec fn spec_short_first_byte(key_phase: bool, spin: bool, pn_len: u8) -> u8 {
+    0x40u8 | (if spin {
+        0x20u8
+    } else {
+        0u8
+    }) | (if key_phase {
         4u8
     } else {
         0u8
@@ -368,10 +373,14 @@ pub open spec fn spec_token_field(ty: LongType) -> Seq<u8> {
     }
 }
 
-pub open spec fn spec_short_header_bytes(dcid: Seq<u8>, key_phase: bool, pn: u64, pn_len: u8) -> Seq<
-    u8,
-> {
-    seq![spec_short_first_byte(key_phase, pn_len)] + dcid + pn_be(pn, pn_len as nat)
+pub open spec fn spec_short_header_bytes(
+    dcid: Seq<u8>,
+    key_phase: bool,
+    spin: bool,
+    pn: u64,
+    pn_len: u8,
+) -> Seq<u8> {
+    seq![spec_short_first_byte(key_phase, spin, pn_len)] + dcid + pn_be(pn, pn_len as nat)
 }
 
 // =============================================================================
@@ -392,17 +401,18 @@ proof fn bv_long_first_byte(t: u8, n: u8)
 {
 }
 
-proof fn bv_short_first_byte(k: u8, n: u8)
+proof fn bv_short_first_byte(s: u8, k: u8, n: u8)
     by (bit_vector)
     requires
+        s == 0 || s == 0x20,
         k == 0 || k == 4,
         n <= 3,
     ensures
-        (0x40u8 | k | n) & 0x80u8 == 0,
-        (0x40u8 | k | n) & 0x40u8 != 0,
-        (0x40u8 | k | n) & 3u8 == n,
-        ((0x40u8 | k | n) & 0x04u8 != 0) == (k == 4),
-        (0x40u8 | k | n) & 0x18u8 == 0,
+        (0x40u8 | s | k | n) & 0x80u8 == 0,
+        (0x40u8 | s | k | n) & 0x40u8 != 0,
+        (0x40u8 | s | k | n) & 3u8 == n,
+        ((0x40u8 | s | k | n) & 0x04u8 != 0) == (k == 4),
+        (0x40u8 | s | k | n) & 0x18u8 == 0,
 {
 }
 
@@ -542,6 +552,7 @@ pub proof fn theorem_long_header_roundtrip(
 pub proof fn theorem_short_header_roundtrip(
     dcid: Seq<u8>,
     key_phase: bool,
+    spin: bool,
     pn: u64,
     pn_len: u8,
     tail: Seq<u8>,
@@ -549,15 +560,20 @@ pub proof fn theorem_short_header_roundtrip(
     requires
         1 <= dcid.len() <= MAX_CID_LEN,
         1 <= pn_len <= 4,
-        spec_short_header_bytes(dcid, key_phase, pn, pn_len).len() + tail.len()
+        spec_short_header_bytes(dcid, key_phase, spin, pn, pn_len).len() + tail.len()
             >= MIN_SHORT_PACKET,
     ensures
-        rfc_header(spec_short_header_bytes(dcid, key_phase, pn, pn_len) + tail, dcid.len())
+        rfc_header(spec_short_header_bytes(dcid, key_phase, spin, pn, pn_len) + tail, dcid.len())
             == Some(SpecHeader::Short { dcid, pn_offset: 1 + dcid.len() }),
 {
-    let b = spec_short_header_bytes(dcid, key_phase, pn, pn_len) + tail;
+    let b = spec_short_header_bytes(dcid, key_phase, spin, pn, pn_len) + tail;
     lemma_pn_roundtrip(pn, pn_len as nat);
     bv_short_first_byte(
+        if spin {
+            0x20u8
+        } else {
+            0u8
+        },
         if key_phase {
             4u8
         } else {
@@ -565,7 +581,7 @@ pub proof fn theorem_short_header_roundtrip(
         },
         (pn_len - 1) as u8,
     );
-    assert(b[0] == spec_short_first_byte(key_phase, pn_len));
+    assert(b[0] == spec_short_first_byte(key_phase, spin, pn_len));
     assert(b.subrange(1, 1 + dcid.len() as int) =~= dcid);
 }
 
@@ -805,10 +821,12 @@ pub fn serialize_long_header(
 }
 
 /// Writes a short (1-RTT) header through the packet number; the DCID may be empty, since a
-/// client may choose an empty CID. Returns the packet-number offset.
+/// client may choose an empty CID. `spin` is written to the spin bit. Returns the
+/// packet-number offset.
 pub fn serialize_short_header(
     dcid: &[u8],
     key_phase: bool,
+    spin: bool,
     pn: u64,
     pn_len: u8,
     out: &mut Vec<u8>,
@@ -817,7 +835,7 @@ pub fn serialize_short_header(
         dcid.len() <= MAX_CID_LEN,
         1 <= pn_len <= 4,
     ensures
-        final(out)@ == old(out)@ + spec_short_header_bytes(dcid@, key_phase, pn, pn_len),
+        final(out)@ == old(out)@ + spec_short_header_bytes(dcid@, key_phase, spin, pn, pn_len),
         pn_offset == 1 + dcid.len(),
         spec_pn_len(final(out)@[old(out)@.len() as int]) == pn_len,
         spec_key_phase(final(out)@[old(out)@.len() as int]) == key_phase,
@@ -833,14 +851,19 @@ pub fn serialize_short_header(
     } else {
         0
     };
+    let sb: u8 = if spin {
+        0x20
+    } else {
+        0
+    };
     proof {
-        bv_short_first_byte(k, (pn_len - 1) as u8);
+        bv_short_first_byte(sb, k, (pn_len - 1) as u8);
     }
-    out.push(0x40u8 | k | (pn_len - 1));
+    out.push(0x40u8 | sb | k | (pn_len - 1));
     put_slice(dcid, out);
     put_pn(pn, pn_len, out);
     proof {
-        let w = spec_short_header_bytes(dcid@, key_phase, pn, pn_len);
+        let w = spec_short_header_bytes(dcid@, key_phase, spin, pn, pn_len);
         assert(out@ =~= start + w);
         assert(out@.skip(start.len() as int) =~= w);
         lemma_pn_roundtrip(pn, pn_len as nat);
@@ -849,7 +872,7 @@ pub fn serialize_short_header(
                 out@.len() - start.len() + tail.len() >= MIN_SHORT_PACKET implies #[trigger]
                 rfc_header(out@.skip(start.len() as int).add(tail), dcid.len() as nat)
                     == Some(SpecHeader::Short { dcid: dcid@, pn_offset: (1 + dcid.len()) as nat }) by {
-                theorem_short_header_roundtrip(dcid@, key_phase, pn, pn_len, tail);
+                theorem_short_header_roundtrip(dcid@, key_phase, spin, pn, pn_len, tail);
             }
         }
     }
