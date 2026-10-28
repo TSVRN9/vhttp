@@ -1186,6 +1186,18 @@ fn eq_ci_x(s: &[u8], lit: &[u8]) -> (r: bool)
     true
 }
 
+/// A scheme we serve: "http" or "https", case-insensitively (RFC 3986 §3.1).
+pub open spec fn http_scheme(s: Seq<u8>) -> bool {
+    eq_ci(s, lit_http()) || eq_ci(s, lit_https())
+}
+
+pub fn is_http_scheme(s: &[u8]) -> (r: bool)
+    ensures
+        r == http_scheme(s@),
+{
+    eq_ci_x(s, &x_http()) || eq_ci_x(s, &x_https())
+}
+
 fn no_at_x(s: &[u8]) -> (r: bool)
     ensures
         r == no_at(s@),
