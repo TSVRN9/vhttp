@@ -220,7 +220,7 @@ pub open spec fn rfc_early_data_ok(d: Seq<u8>) -> bool {
 // =============================================================================
 
 /// The `(start, end)` of the `<floor..ceiling>` vector that is all of `d`.
-fn read_exact(d: &[u8], floor: usize, ceiling: usize) -> (r: Option<(usize, usize)>)
+pub fn read_exact(d: &[u8], floor: usize, ceiling: usize) -> (r: Option<(usize, usize)>)
     requires
         ceiling < 0x100_0000,
     ensures
