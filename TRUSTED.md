@@ -14,7 +14,7 @@
 
 The shipped artifact is built by plain `cargo build` on the user's default stable rustc (unpinned; currently 1.92.0), with `verus!` erasure done by `verus_builtin_macros` (version from `Cargo.lock`, currently 0.0.0-2026-09-20-0158). Verification used Verus's own rustc 1.98.1 frontend, so the compiler that checks the proofs is not the compiler that builds the binary. No `rust-toolchain.toml` is needed.
 
-- RustCrypto shim (crates/crypto), removed in phase 5: sha2 =0.11.1, hmac =0.13.0, hkdf =0.13.0, aes =0.9.3, aes-gcm =0.11.1
+- RustCrypto shim (crates/crypto), removed in phase 5: sha2 =0.11.1, hmac =0.13.0, hkdf =0.13.0, aes =0.9.3, aes-gcm =0.11.1, p256 =0.14.0 (dev: primeorder =0.14.0)
 
 ## Trusted items
 
@@ -31,7 +31,10 @@ The shipped artifact is built by plain `cargo build` on the user's default stabl
 | crypto::aes::aes128_encrypt_block: 1 external_body (RustCrypto aes via shim::aes128_encrypt_block) | crates/crypto/src/aes.rs | exec body is unverified RustCrypto; ensures trusted | 5 |
 | crypto::gcm::aes128_gcm_seal: 1 external_body (RustCrypto aes-gcm via shim::aes128_gcm_seal) | crates/crypto/src/gcm.rs | exec body is unverified RustCrypto; ensures trusted | 5 |
 | crypto::gcm::aes128_gcm_open: 1 external_body (RustCrypto aes-gcm via shim::aes128_gcm_open) | crates/crypto/src/gcm.rs | exec body is unverified RustCrypto; ensures trusted | 5 |
+| crypto::p256::p256_public_key: 1 external_body (RustCrypto p256 via shim::p256_public_key) | crates/crypto/src/p256.rs | exec body is unverified RustCrypto; ensures trusted | 5 |
+| crypto::p256::p256_ecdh: 1 external_body (RustCrypto p256 via shim::p256_ecdh) | crates/crypto/src/p256.rs | exec body is unverified RustCrypto; ensures trusted | 5 |
 | `crates/crypto/src/shim.rs`: every RustCrypto call (no escape token, but trusted code) | crates/crypto/src/shim.rs | Unverified plain Rust behind the external_body fns | 5 |
 | Constants `SHA256_K`, `SHA256_H0` and the SHA-256 specs (FIPS 180-4 transcription; constants re-derived from prime roots by `tests/sha256.rs`, spec fns not machine-checked until phase 5) | crates/crypto/src/sha256.rs, crates/crypto/src/bytes.rs | Specs are transcribed by hand, not derived by proof | never (standard transcription) |
 | HMAC/HKDF specs (RFC 2104 §2, RFC 5869 §2.2-2.3 transcription; not machine-checked until phase 5) | crates/crypto/src/hmac.rs, crates/crypto/src/hkdf.rs | Specs are transcribed by hand, not derived by proof | never (standard transcription) |
 | AES-128 and AES-128-GCM specs (FIPS 197, SP 800-38D transcription; S-box defined algebraically via GF(2^8) inverse + affine map; not machine-checked until phase 5) | crates/crypto/src/aes.rs, crates/crypto/src/gcm.rs | Specs are transcribed by hand, not derived by proof | never (standard transcription) |
+| Constants `P256_P`, `P256_N`, `P256_B`, `P256_GX`, `P256_GY` and the P-256 specs (SP 800-186 §3.2.1.3, SEC 1 v2 §2.2.1/§2.3.3-2.3.6/§3.2.1/§3.3.1 transcription; constants checked against RustCrypto and the p formula by `tests/p256.rs`, spec fns not machine-checked until phase 5) | crates/crypto/src/p256.rs | Specs are transcribed by hand, not derived by proof | never (standard transcription) |

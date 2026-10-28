@@ -54,3 +54,23 @@ pub(crate) fn aes128_gcm_open(key: &[u8], nonce: &[u8], aad: &[u8], ct: &[u8]) -
     let n: [u8; 12] = nonce.try_into().unwrap();
     aes_gcm::Aes128Gcm::new(&k.into()).decrypt(&n.into(), Payload { msg: ct, aad }).ok()
 }
+
+pub(crate) fn p256_public_key(d: &[u8]) -> Option<[u8; 65]> {
+    use p256::elliptic_curve::sec1::ToSec1Point;
+    // unreachable: requires d@.len() == 32
+    let d: [u8; 32] = d.try_into().unwrap();
+    let sk = p256::SecretKey::from_bytes((&d).into()).ok()?;
+    sk.public_key().to_sec1_point(false).as_bytes().try_into().ok()
+}
+
+pub(crate) fn p256_ecdh(d: &[u8], peer: &[u8]) -> Option<[u8; 32]> {
+    // from_sec1_bytes also accepts the compressed form, which the spec rejects.
+    if peer.len() != 65 || peer.first() != Some(&4) {
+        return None;
+    }
+    // unreachable: requires d@.len() == 32
+    let d: [u8; 32] = d.try_into().unwrap();
+    let sk = p256::SecretKey::from_bytes((&d).into()).ok()?;
+    let pk = p256::PublicKey::from_sec1_bytes(peer).ok()?;
+    Some((*p256::ecdh::diffie_hellman(sk.to_nonzero_scalar(), pk.as_affine()).raw_secret_bytes()).into())
+}

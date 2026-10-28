@@ -490,7 +490,7 @@ Total keyword count: 38 across 19 sections.
 | 4.2.8 | Key Share | 13 | partial | 4 | Server: key_share in same group as selected client share, MUST NOT send entry for group not in supported_groups; only secp256r1 supported; ignore other groups' shares |
 | 4.2.8 (req) | Client key_share construction and HRR/ServerHello checks | 9 | no | N/A (client-only) | Entries match supported_groups order, no duplicates, replace key_share after HRR, illegal_parameter checks |
 | 4.2.8.1 | Diffie-Hellman Parameters | 1 | no | Declined (optional: X25519) | Finite-field DH; only secp256r1 supported (groups beyond secp256r1 declined) |
-| 4.2.8.2 | ECDHE Parameters | 1 | partial | 5 | Validate peer public value Q is on curve for secp256r1; secp384r1/secp521r1 not supported |
+| 4.2.8.2 | ECDHE Parameters | 1 | partial | 5 | Validate peer public value Q is on curve for secp256r1; secp384r1/secp521r1 not supported; 3a spec: crates/crypto/src/p256.rs (exec external_body until 5) |
 | 4.2.9 | Pre-Shared Key Exchange Modes | 7 | partial | 4 | Server: abort if pre_shared_key offered without psk_key_exchange_modes; MUST NOT send psk_key_exchange_modes; never select an unlisted mode |
 | 4.2.9 (req) | psk_ke / psk_dhe_ke modes (client must send, key_share rules per mode) | 4 | no | Declined (optional: resumption/PSK) | "In order to use PSKs, clients MUST also send ..."; psk_ke "MUST NOT supply a key_share" |
 | 4.2.10 | Early Data Indication | 12 | partial | 4 | Server receiving early_data must not accept it: ignore/reject path (do not echo extension; skip/discard 0-RTT) |
