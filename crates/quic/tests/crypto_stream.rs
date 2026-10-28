@@ -40,3 +40,19 @@ fn crypto_duplicate() {
     assert_eq!(c.on_crypto(5, &[6, 7, 8, 9, 10, 11]), Ok(()));
     assert_eq!(read(&mut c), [11]);
 }
+
+#[test]
+fn crypto_tail_then_in_order() {
+    // Reviewer's pattern: a far byte pins a 16 KiB buffer, then 1-byte frames arrive in
+    // order, each followed by a read. Each read must not copy the buffered tail.
+    let t = std::time::Instant::now();
+    let mut c = CryptoStream::new();
+    assert_eq!(c.on_crypto(16383, &[0xff]), Ok(()));
+    for off in 0..16382u64 {
+        assert_eq!(c.on_crypto(off, &[off as u8]), Ok(()));
+        assert_eq!(read(&mut c), [off as u8]);
+    }
+    assert_eq!(c.on_crypto(16382, &[0xfe]), Ok(()));
+    assert_eq!(read(&mut c), [0xfe, 0xff]);
+    assert!(t.elapsed().as_secs() < 5, "took {:?}", t.elapsed());
+}
