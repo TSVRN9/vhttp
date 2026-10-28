@@ -199,10 +199,11 @@ proof fn lemma_prefix_of(m: Map<nat, u8>, s: Seq<u8>)
     assert(rfc_prefix(m, c) =~= s.take(c as int));
 }
 
-/// Out-of-order buffer: `buf[i]`/`have[i]` describe offset `base + i`; everything below
-/// `base` was delivered.
+/// Out-of-order buffer: `buf[head + i]`/`have[head + i]` describe offset `base + i`;
+/// everything below `base` was delivered. `buf[..head]` is delivered space awaiting compaction.
 pub struct Reassembly {
     base: u64,
+    head: usize,
     buf: Vec<u8>,
     have: Vec<bool>,
     ins: Ghost<Seq<(nat, Seq<u8>)>>,
@@ -220,22 +221,25 @@ impl Reassembly {
     }
 
     pub closed spec fn buf_len_spec(&self) -> usize {
-        self.buf@.len() as usize
+        (self.buf@.len() - self.head) as usize
     }
 
     pub closed spec fn wf(&self) -> bool {
         let m = rfc_received(self.ins@);
         &&& self.buf@.len() == self.have@.len()
-        &&& self.base + self.buf@.len() <= VARINT_MAX
+        &&& self.head <= self.buf@.len()
+        &&& self.head == 0 || 2 * self.head < self.buf@.len()
+        &&& self.base + self.buf@.len() - self.head <= VARINT_MAX
         &&& forall|i: int|
-            0 <= i < self.have@.len() ==> (#[trigger] self.have@[i] <==> m.contains_key(
-                (self.base + i) as nat,
+            self.head <= i < self.have@.len() ==> (#[trigger] self.have@[i] <==> m.contains_key(
+                (self.base + i - self.head) as nat,
             ))
         &&& forall|i: int|
-            0 <= i < self.buf@.len() && self.have@[i] ==> #[trigger] self.buf@[i] == m[(self.base
-                + i) as nat]
+            self.head <= i < self.buf@.len() && self.have@[i] ==> #[trigger] self.buf@[i] == m[(
+            self.base + i - self.head) as nat]
         &&& self.base <= rfc_contiguous(m)
-        &&& forall|k: nat| #[trigger] m.contains_key(k) ==> k < self.base + self.buf@.len()
+        &&& forall|k: nat| #[trigger]
+            m.contains_key(k) ==> k < self.base + self.buf@.len() - self.head
     }
 
     /// The invariant, in terms of the accessors.
@@ -258,7 +262,13 @@ impl Reassembly {
             r.base() == 0,
             r.buf_len() == 0,
     {
-        let r = Reassembly { base: 0, buf: Vec::new(), have: Vec::new(), ins: Ghost(Seq::empty()) };
+        let r = Reassembly {
+            base: 0,
+            head: 0,
+            buf: Vec::new(),
+            have: Vec::new(),
+            ins: Ghost(Seq::empty()),
+        };
         proof {
             lemma_contiguous_exists(rfc_received(r.ins@));
         }
@@ -274,10 +284,12 @@ impl Reassembly {
 
     #[verifier::when_used_as_spec(buf_len_spec)]
     pub fn buf_len(&self) -> (r: usize)
+        requires
+            self.wf(),
         ensures
             r == self.buf_len_spec(),
     {
-        self.buf.len()
+        self.buf.len() - self.head
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
@@ -303,26 +315,28 @@ impl Reassembly {
             },
     {
         let ghost m = rfc_received(self.ins@);
-        let ghost hw = (old(self).base + old(self).buf@.len()) as int;
+        let ghost hw = (old(self).base + old(self).buf@.len() - old(self).head) as int;
         let end = off + data.len() as u64;
-        while self.base + (self.buf.len() as u64) < end
+        while self.base + ((self.buf.len() - self.head) as u64) < end
             invariant
                 self.wf(),
                 self.ins@ == old(self).ins@,
                 self.base == old(self).base,
+                self.head == old(self).head,
                 end == off + data@.len(),
                 end <= VARINT_MAX,
-                self.base + self.buf@.len() <= if hw >= end {
+                self.base + self.buf@.len() - self.head <= if hw >= end {
                     hw
                 } else {
                     end as int
                 },
-            decreases end - (self.base + self.buf@.len()),
+            decreases end - (self.base + self.buf@.len() - self.head),
         {
             self.buf.push(0);
             self.have.push(false);
         }
         let ghost len = self.buf@.len();
+        let ghost h = self.head as int;
         let mut j: usize = if off >= self.base {
             0
         } else if self.base - off < data.len() as u64 {
@@ -334,31 +348,34 @@ impl Reassembly {
             invariant
                 self.ins@ == old(self).ins@,
                 self.base == old(self).base,
+                self.head == h,
                 m == rfc_received(self.ins@),
                 self.buf@.len() == len,
                 self.have@.len() == len,
-                self.base + len <= VARINT_MAX,
+                h <= len,
+                h == 0 || 2 * h < len,
+                self.base + len - h <= VARINT_MAX,
                 end == off + data@.len(),
-                end <= self.base + len,
+                end <= self.base + len - h,
                 j <= data@.len(),
                 j < data@.len() ==> self.base <= off + j,
                 self.base <= rfc_contiguous(m),
-                forall|k: nat| #[trigger] m.contains_key(k) ==> k < self.base + len,
+                forall|k: nat| #[trigger] m.contains_key(k) ==> k < self.base + len - h,
                 forall|i: int|
-                    0 <= i < len ==> (#[trigger] self.have@[i] <==> (m.contains_key(
-                        (self.base + i) as nat,
-                    ) || (off <= self.base + i < off + j))),
+                    h <= i < len ==> (#[trigger] self.have@[i] <==> (m.contains_key(
+                        (self.base + i - h) as nat,
+                    ) || (off <= self.base + i - h < off + j))),
                 forall|i: int|
-                    0 <= i < len && self.have@[i] ==> #[trigger] self.buf@[i] == if m.contains_key(
-                        (self.base + i) as nat,
+                    h <= i < len && self.have@[i] ==> #[trigger] self.buf@[i] == if m.contains_key(
+                        (self.base + i - h) as nat,
                     ) {
-                        m[(self.base + i) as nat]
+                        m[(self.base + i - h) as nat]
                     } else {
-                        data@[self.base + i - off]
+                        data@[self.base + i - h - off]
                     },
             decreases data@.len() - j,
         {
-            let idx = (off + j as u64 - self.base) as usize;
+            let idx = (off + j as u64 - self.base) as usize + self.head;
             if !self.have[idx] {
                 self.buf[idx] = data[j];
                 self.have[idx] = true;
@@ -374,17 +391,15 @@ impl Reassembly {
             if rfc_contiguous(m2) < self.base {
                 assert(m.contains_key(rfc_contiguous(m2)));
             }
-            assert(self.buf@.len() == self.have@.len());
-            assert(self.base + self.buf@.len() <= VARINT_MAX);
             assert(forall|i: int|
-                0 <= i < self.have@.len() ==> (#[trigger] self.have@[i] <==> m2.contains_key(
-                    (self.base + i) as nat,
+                h <= i < self.have@.len() ==> (#[trigger] self.have@[i] <==> m2.contains_key(
+                    (self.base + i - h) as nat,
                 )));
             assert(forall|i: int|
-                0 <= i < self.buf@.len() && self.have@[i] ==> #[trigger] self.buf@[i] == m2[(self.base
-                    + i) as nat]);
+                h <= i < self.buf@.len() && self.have@[i] ==> #[trigger] self.buf@[i] == m2[(
+                self.base + i - h) as nat]);
             assert(self.base <= rfc_contiguous(m2));
-            assert(forall|k: nat| #[trigger] m2.contains_key(k) ==> k < self.base + self.buf@.len());
+            assert(forall|k: nat| #[trigger] m2.contains_key(k) ==> k < self.base + len - h);
         }
     }
 
@@ -392,6 +407,8 @@ impl Reassembly {
     //# Endpoints MUST be able to deliver stream data to an application as an
     //# ordered byte stream.
     /// Appends the contiguous bytes past `base` to `out` and advances `base` past them.
+    /// Delivered space is reclaimed only once it is at least half the buffer, so each byte is
+    /// copied O(1) times amortized.
     pub fn pop(&mut self, out: &mut Vec<u8>)
         requires
             old(self).wf(),
@@ -406,43 +423,68 @@ impl Reassembly {
             ).subrange(old(self).base() as int, final(self).base() as int),
     {
         let ghost m = rfc_received(self.ins@);
-        let mut n: usize = 0;
+        let ghost b = self.base as nat;
+        let ghost h = self.head as int;
+        proof {
+            lemma_contiguous_exists(m);
+        }
+        let mut n: usize = self.head;
         while n < self.have.len() && self.have[n]
             invariant
                 *self == *old(self),
-                n <= self.have@.len(),
-                forall|k: int| 0 <= k < n ==> #[trigger] self.have@[k],
+                self.wf(),
+                h == self.head,
+                h <= n <= self.have@.len(),
+                forall|k: int| h <= k < n ==> #[trigger] self.have@[k],
+                out@ == old(out)@ + self.buf@.subrange(h, n as int),
             decreases self.have@.len() - n,
         {
+            out.push(self.buf[n]);
+            proof {
+                assert(self.buf@.subrange(h, n + 1) =~= self.buf@.subrange(h, n as int).push(
+                    self.buf@[n as int],
+                ));
+            }
             n = n + 1;
         }
-        // ponytail: O(buffered) copy per delivery; keep a start index with lazy compaction if profiling shows it.
-        let ghost head = self.buf@.subrange(0, n as int);
-        let tail = self.buf.split_off(n);
-        out.append(&mut self.buf);
-        self.buf = tail;
-        let htail = self.have.split_off(n);
-        self.have = htail;
-        self.base = self.base + n as u64;
+        let ghost run = self.buf@.subrange(h, n as int);
         proof {
-            let b = old(self).base as nat;
-            lemma_contiguous_exists(m);
-            assert forall|j: nat| j < b + n implies m.contains_key(j) by {
+            let c = b + (n - h) as nat;
+            assert forall|j: nat| j < c implies m.contains_key(j) by {
                 if j >= b {
-                    assert(old(self).have@[j - b]);
+                    assert(self.have@[h + j - b]);
                 }
             }
-            if n < old(self).have@.len() {
-                assert(!old(self).have@[n as int]);
+            if n < self.have@.len() {
+                assert(!self.have@[n as int]);
             }
-            lemma_contiguous_is(m, b + n as nat);
-            assert(head =~= rfc_prefix(m, b + n as nat).subrange(b as int, b + n)) by {
-                assert forall|k: int| 0 <= k < n implies head[k] == m[(b + k) as nat] by {
-                    assert(old(self).have@[k]);
+            lemma_contiguous_is(m, c);
+            assert(run =~= rfc_prefix(m, c).subrange(b as int, c as int)) by {
+                assert forall|k: int| 0 <= k < n - h implies run[k] == m[(b + k) as nat] by {
+                    assert(self.have@[h + k]);
                 }
             }
-            assert forall|i: int| 0 <= i < self.have@.len() implies #[trigger] self.have@[i]
-                == old(self).have@[i + n] by {}
+        }
+        if n == self.head {
+            return;
+        }
+        self.base = self.base + (n - self.head) as u64;
+        self.head = n;
+        if self.head >= self.buf.len() - self.head {
+            if self.head == self.buf.len() {
+                self.buf.clear();
+                self.have.clear();
+            } else {
+                let t = self.buf.split_off(self.head);
+                self.buf = t;
+                let t = self.have.split_off(self.head);
+                self.have = t;
+            }
+            self.head = 0;
+            proof {
+                assert forall|i: int| 0 <= i < self.have@.len() implies #[trigger] self.have@[i]
+                    == old(self).have@[i + n] && self.buf@[i] == old(self).buf@[i + n] by {}
+            }
         }
     }
 }

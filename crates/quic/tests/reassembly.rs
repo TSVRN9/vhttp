@@ -60,3 +60,26 @@ fn duplicate_below_base() {
     r.insert(2, b"cdefg");
     assert_eq!(pop(&mut r), b"fg");
 }
+
+#[test]
+fn pop_cost_independent_of_tail() {
+    // The CRYPTO pattern at 1 MiB. Copying the tail on every pop moves ~512 GiB here (about
+    // 20 s in a debug build); amortized compaction moves under 2 MiB.
+    const N: u64 = 1 << 20;
+    let t = std::time::Instant::now();
+    let mut r = Reassembly::new();
+    r.insert(N - 1, b"z");
+    let mut out = Vec::new();
+    for off in 0..N - 2 {
+        r.insert(off, &[off as u8]);
+        r.pop(&mut out);
+        assert_eq!(r.base_exec(), off + 1);
+        assert_eq!(r.buf_len() as u64, N - 1 - off);
+    }
+    r.insert(N - 2, b"y");
+    r.pop(&mut out);
+    assert_eq!(r.base_exec(), N);
+    assert_eq!(r.buf_len(), 0);
+    assert_eq!(out.len() as u64, N);
+    assert!(t.elapsed().as_secs() < 5, "took {:?}", t.elapsed());
+}

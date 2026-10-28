@@ -69,7 +69,9 @@ impl CryptoStream {
             //# discarded CRYPTO frames MUST be acknowledged because the packet has
             //# been received and processed by the transport even though the CRYPTO
             //# frame was discarded.
-            // Already read: not an error, so the packet is processed and acknowledged.
+            // Already read: not an error, so the packet is processed and acknowledged. The
+            // post-handshake option to discard frames that don't fit (a MAY) is declined: a
+            // frame past the window always closes the connection, below.
             return Ok(());
         }
         if end > base + MAX_CRYPTO_BUFFER {
@@ -92,6 +94,9 @@ impl CryptoStream {
             final(self).reassembly().base() == rfc_contiguous(
                 rfc_received(old(self).reassembly().inserted()),
             ),
+            final(self).reassembly().base() + final(self).reassembly().buf_len() == old(
+                self,
+            ).reassembly().base() + old(self).reassembly().buf_len(),
             final(out)@ == old(out)@ + rfc_prefix(
                 rfc_received(old(self).reassembly().inserted()),
                 final(self).reassembly().base(),
