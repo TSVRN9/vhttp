@@ -292,7 +292,9 @@ pub open spec fn recv_event_ok(e: SpecStreamEvent, id: u64, last: bool) -> bool 
 /// E1–E3 for stream `id`: `Data* (Data{fin: true} | Reset)?`, no `Data{[], false}`. With
 /// `data_of == rfc_prefix(..)` (in `recv_inv`) the payloads have no gaps and no repeats.
 pub open spec fn recv_events_ok(evs: Seq<SpecStreamEvent>, id: u64) -> bool {
-    forall|i: int| #![trigger evs[i]] 0 <= i < evs.len() ==> recv_event_ok(evs[i], id, i == evs.len() - 1)
+    forall|i: int|
+        #![trigger evs[i]]
+        0 <= i < evs.len() ==> recv_event_ok(evs[i], id, i == evs.len() - 1)
 }
 
 /// The invariant of every reachable `SpecRecv`.
@@ -381,7 +383,9 @@ proof fn lemma_data_step(id: u64, s: SpecRecv, off: nat, data: Seq<u8>, fin: boo
         };
         lemma_data_of_push(s.events, e);
         assert(s2.events == s.events.push(e));
-        assert forall|i: int| #![trigger s2.events[i]] 0 <= i < s2.events.len() implies recv_event_ok(
+        assert forall|i: int|
+            #![trigger s2.events[i]]
+            0 <= i < s2.events.len() implies recv_event_ok(
             s2.events[i],
             id,
             i == s2.events.len() - 1,
@@ -419,7 +423,9 @@ proof fn lemma_reset_step(id: u64, s: SpecRecv, code: u64, fs: nat)
         let e = SpecStreamEvent::Reset { id, code };
         lemma_data_of_push(s.events, e);
         assert(data_of(s2.events) =~= data_of(s.events));
-        assert forall|i: int| #![trigger s2.events[i]] 0 <= i < s2.events.len() implies recv_event_ok(
+        assert forall|i: int|
+            #![trigger s2.events[i]]
+            0 <= i < s2.events.len() implies recv_event_ok(
             s2.events[i],
             id,
             i == s2.events.len() - 1,
@@ -883,8 +889,17 @@ impl RecvStream {
         }
     }
 
+    /// The physical length of each of the reassembly's two buffers (a length bound: Verus
+    /// does not model capacity).
+    pub closed spec fn buffered_phys(&self) -> nat {
+        match self.re {
+            Some(r) => r.phys_len(),
+            None => 0,
+        }
+    }
+
     pub closed spec fn pending_stop_spec(&self) -> Option<u64> {
-        if self.stop_pending {
+        if self.stop_pending && (self.state is Recv || self.state is SizeKnown) {
             self.stopped
         } else {
             None
@@ -930,8 +945,14 @@ impl RecvStream {
             self.stop_code() is Some <==> self.rfc().stopped,
             self.stop_code() matches Some(c) ==> c <= VARINT_MAX,
             self.pending_stop() is Some ==> self.pending_stop() == self.stop_code(),
+            self.pending_stop() is Some ==> self.rfc().state is Recv
+                || self.rfc().state is SizeKnown,
+            self.buffered_len() <= self.buffered_phys() <= 2 * self.buffered_len(),
     {
         self.credit.lemma_wf();
+        if let Some(r) = self.re {
+            r.lemma_wf();
+        }
     }
 
     pub fn new(id: u64, window: u64) -> (r: RecvStream)
@@ -1080,7 +1101,8 @@ impl RecvStream {
             final(self).emitted() == old(self).emitted(),
             final(self).stop_code() == old(self).stop_code(),
             final(self).pending_stop() == old(self).pending_stop(),
-            (old(self).rfc().state is Recv && !old(self).rfc().stopped) ==> final(self).pending_credit() is Some,
+            (old(self).rfc().state is Recv && !old(self).rfc().stopped)
+                ==> final(self).pending_credit() is Some,
     {
         self.credit.on_lost();
     }
@@ -1120,15 +1142,23 @@ impl RecvStream {
         true
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-3.5
+    //# STOP_SENDING SHOULD only be sent for a stream that has not been reset
+    //# by the peer.
+    /// Our STOP_SENDING code to send, if any: only while data may still arrive (Recv or Size
+    /// Known), so never after the peer's RESET_STREAM.
     #[verifier::when_used_as_spec(pending_stop_spec)]
     pub fn pending_stop(&self) -> (r: Option<u64>)
         ensures
             r == self.pending_stop_spec(),
     {
-        if self.stop_pending {
-            self.stopped
-        } else {
-            None
+        match self.state {
+            RecvState::Recv | RecvState::SizeKnown => if self.stop_pending {
+                self.stopped
+            } else {
+                None
+            },
+            _ => None,
         }
     }
 
@@ -1162,7 +1192,8 @@ impl RecvStream {
             final(self).emitted() == old(self).emitted(),
             final(self).stop_code() == old(self).stop_code(),
             final(self).pending_credit() == old(self).pending_credit(),
-            final(self).pending_stop() == if old(self).rfc().state is Recv || old(self).rfc().state is SizeKnown {
+            final(self).pending_stop() == if old(self).rfc().state is Recv
+                || old(self).rfc().state is SizeKnown {
                 old(self).stop_code()
             } else {
                 old(self).pending_stop()
@@ -1201,7 +1232,8 @@ impl RecvStream {
                 );
                 let s1 = old(self).rfc();
                 let s2 = rfc_recv(old(self).id_spec(), old(self).window_spec(), t2);
-                &&& s2.err matches Some(c) ==> r == Err::<u64, u64>(c) && *final(self) == *old(self) && final(ev)@ == old(ev)@
+                &&& s2.err matches Some(c) ==> r == Err::<u64, u64>(c) && *final(self) == *old(self)
+                    && final(ev)@ == old(ev)@
                 &&& (s2.err is None && counted(s2) - counted(s1) > conn_room) ==> r == Err::<
                     u64,
                     u64,
@@ -1215,7 +1247,11 @@ impl RecvStream {
                 }
             }),
             final(self).stop_code() == old(self).stop_code(),
-            final(self).pending_stop() == old(self).pending_stop(),
+            final(self).pending_stop() == if terminal(final(self).rfc().state) {
+                None
+            } else {
+                old(self).pending_stop()
+            },
     {
         let ghost t2 = self.trace@.push(SpecRecvIn::Data { off: off as nat, data: data@, fin });
         let ghost s1 = self.rfc();
@@ -1367,7 +1403,8 @@ impl RecvStream {
                 );
                 let s1 = old(self).rfc();
                 let s2 = rfc_recv(old(self).id_spec(), old(self).window_spec(), t2);
-                &&& s2.err matches Some(c) ==> r == Err::<u64, u64>(c) && *final(self) == *old(self) && final(ev)@ == old(ev)@
+                &&& s2.err matches Some(c) ==> r == Err::<u64, u64>(c) && *final(self) == *old(self)
+                    && final(ev)@ == old(ev)@
                 &&& (s2.err is None && counted(s2) - counted(s1) > conn_room) ==> r == Err::<
                     u64,
                     u64,
@@ -1381,7 +1418,11 @@ impl RecvStream {
                 }
             }),
             final(self).stop_code() == old(self).stop_code(),
-            final(self).pending_stop() == old(self).pending_stop(),
+            final(self).pending_stop() == if terminal(final(self).rfc().state) {
+                None
+            } else {
+                old(self).pending_stop()
+            },
             // Reset or suppressed after all data was delivered: nothing stays buffered.
             r is Ok ==> final(self).buffered_len() == 0,
     {
