@@ -229,7 +229,67 @@ pub fn huff_code(sym: u16) -> (r: (u32, u8))
     for i in range(257):
         h, l = rows[i]
         s += f"        {i} => (0x{h:x}u32, {l}u8),\n"
-    s += "        _ => (0u32, 0u8),\n    }\n}\n\n} // verus!\n"
+    s += "        _ => (0u32, 0u8),\n    }\n}\n"
+    return s + gen_huff_canonical(rows) + "\n} // verus!\n"
+
+
+def gen_huff_canonical(rows):
+    """Per-length canonical layout of syms 0..=255 (EOS excluded): the length-l codes are
+    first(l), first(l)+1, ... in sym order; sorted() lists syms by (len, sym); offset(l) is the
+    index in sorted() of the first length-l sym. huffman.rs re-checks all of it against
+    spec_huff_code in Verus; these asserts only stop the script emitting a layout that can't verify."""
+    order = sorted(range(256), key=lambda a: (rows[a][1], a))
+    info, first, off = {}, 0, 0
+    for l in range(1, 31):
+        syms = [a for a in order if rows[a][1] == l]
+        assert [rows[a][0] for a in syms] == list(range(first, first + len(syms))), l
+        info[l] = (first, len(syms), off)
+        first, off = (first + len(syms)) * 2, off + len(syms)
+    assert off == 256 and info[30][1] == 3 and rows[256] == (info[30][0] + 3, 30)
+    s = '''
+/// `(first, count, offset)` of the length-`l` codes among syms 0..=255 for l in 1..=30, else zeros.
+pub open spec fn spec_huff_len_info(l: nat) -> (nat, nat, nat) {
+'''
+    for l in range(1, 31):
+        f, c, o = info[l]
+        s += f"    {'if' if l == 1 else '} else if'} l == {l} {{\n        ({f}nat, {c}nat, {o}nat)\n"
+    s += '''    } else {
+        (0nat, 0nat, 0nat)
+    }
+}
+
+/// Syms 0..=255 sorted by (code length, sym); 0 out of range.
+pub open spec fn spec_huff_sorted(i: nat) -> nat {
+'''
+    for i, a in enumerate(order):
+        s += f"    {'if' if i == 0 else '} else if'} i == {i} {{\n        {a}nat\n"
+    s += '''    } else {
+        0nat
+    }
+}
+
+pub fn huff_len_info(l: u32) -> (r: (u32, u32, u32))
+    ensures
+        (r.0 as nat, r.1 as nat, r.2 as nat) == spec_huff_len_info(l as nat),
+{
+    match l {
+'''
+    for l in range(1, 31):
+        f, c, o = info[l]
+        s += f"        {l} => ({f}u32, {c}u32, {o}u32),\n"
+    s += '''        _ => (0u32, 0u32, 0u32),
+    }
+}
+
+pub fn huff_sorted(i: u32) -> (r: u8)
+    ensures
+        r as nat == spec_huff_sorted(i as nat),
+{
+    match i {
+'''
+    for i, a in enumerate(order):
+        s += f"        {i} => {a}u8,\n"
+    s += "        _ => 0u8,\n    }\n}\n"
     return s
 
 
