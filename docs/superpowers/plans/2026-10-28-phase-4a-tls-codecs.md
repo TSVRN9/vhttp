@@ -432,7 +432,7 @@ RFC 9001 §8.4 is an N/A (client-only) row. Task 5 adds to its Notes: `server SH
     - `legacy_session_id<0..32>`;
     - `CipherSuite cipher_suites<2..2^16-2>`, through `rfc_u16_list`;
     - `legacy_compression_methods<1..2^8-1>`;
-    - then the end of `body` gives `exts: None` (no extensions block, §4.1.2). Otherwise it is `rfc_vec_exact(rest, 8, 0xffff)` (`extensions<8..2^16-1>`), then `rfc_ext_list`, giving `Some(list)`.
+    - then the end of `body` gives `exts: None` (no extensions block, §4.1.2). Otherwise it is `rfc_vec_exact(rest, 0, 0xffff)`, then `rfc_ext_list`, giving `Some(list)`. Floor 0, not the TLS 1.3 `<8..>`: a ClientHello without supported_versions is a TLS 1.2 ClientHello (§4.1.2), whose block is `<0..2^16-1>`, so D.2's protocol_version MUST applies to it (controller ruling after Task 5 review). Every accepted ClientHello still has at least 8 bytes.
   - **`pub open spec fn spec_ch_fields_bytes(f: SpecChFields) -> Seq<u8>`** and **`theorem_ch_fields_canonical(body)`:** `rfc_ch_fields(body) == Some(f) ⇒ spec_ch_fields_bytes(f) == body`.
   - **`pub struct ClientHello`**, with its twin `SpecClientHello`:
     ```
