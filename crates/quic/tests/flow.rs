@@ -46,3 +46,13 @@ fn send_credit() {
     c.on_max(12);
     assert_eq!(c.max(), 12);
 }
+
+#[test]
+fn recv_credit_lost_keeps_larger_pending() {
+    let mut c = RecvCredit::new(100, VARINT_MAX);
+    c.on_consumed(51);
+    assert_eq!(c.pending(), Some(151));
+    c.on_lost();
+    assert_eq!(c.pending(), Some(151));
+    assert_eq!(c.limit(), 100);
+}
