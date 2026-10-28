@@ -125,7 +125,7 @@ pub open spec fn rfc_stateless_reset(trigger_len: nat, u: Seq<u8>, token: Seq<u8
     }
 }
 
-fn put_slice(s: &[u8], out: &mut Vec<u8>)
+pub(crate) fn put_slice(s: &[u8], out: &mut Vec<u8>)
     ensures
         final(out)@ == old(out)@ + s@,
 {
