@@ -415,7 +415,7 @@ impl Reassembly {
     //# ordered byte stream.
     /// Appends the contiguous bytes past `base` to `out` and advances `base` past them.
     /// Delivered space is reclaimed only once it is at least half the buffer, so each byte is
-    /// copied O(1) times amortized.
+    /// copied O(1) times amortized. A full drain releases the allocation.
     pub fn pop(&mut self, out: &mut Vec<u8>)
         requires
             old(self).wf(),
@@ -479,9 +479,12 @@ impl Reassembly {
         self.head = n;
         if self.head >= self.buf.len() - self.head {
             if self.head == self.buf.len() {
-                self.buf.clear();
-                self.have.clear();
+                // Fresh vecs, not `clear()`: drained space must not keep its allocation.
+                self.buf = Vec::new();
+                self.have = Vec::new();
             } else {
+                // `head >= 1`, so `split_off` returns a new tail-sized allocation and the old
+                // one is dropped.
                 let t = self.buf.split_off(self.head);
                 self.buf = t;
                 let t = self.have.split_off(self.head);
@@ -497,3 +500,12 @@ impl Reassembly {
 }
 
 } // verus!
+
+impl Reassembly {
+    /// Test support: the allocated capacities of `buf` and `have`. Verus models `Vec` length,
+    /// not capacity, so capacity release is checked by test only (TRUSTED.md).
+    #[doc(hidden)]
+    pub fn capacities(&self) -> (usize, usize) {
+        (self.buf.capacity(), self.have.capacity())
+    }
+}
