@@ -83,13 +83,13 @@ pub open spec fn spec_encrypted_extensions_bytes(tp: Seq<u8>) -> Seq<u8> {
 
 /// The `CertificateEntry` list: each is `cert_data<1..2^24-1>` and an empty
 /// `extensions<0..2^16-1>`.
-pub open spec fn spec_cert_entries(chain: Seq<Seq<u8>>) -> Seq<u8>
+pub open spec fn spec_cert_entries_bytes(chain: Seq<Seq<u8>>) -> Seq<u8>
     decreases chain.len(),
 {
     if chain.len() == 0 {
         seq![]
     } else {
-        spec_cert_entries(chain.drop_last()) + spec_vec_bytes(0xff_ffff, chain.last())
+        spec_cert_entries_bytes(chain.drop_last()) + spec_vec_bytes(0xff_ffff, chain.last())
             + spec_vec_bytes(0xffff, seq![])
     }
 }
@@ -97,13 +97,13 @@ pub open spec fn spec_cert_entries(chain: Seq<Seq<u8>>) -> Seq<u8>
 pub open spec fn spec_certificate_bytes(chain: Seq<Seq<u8>>) -> Seq<u8> {
     spec_hs_bytes(
         HT_CERTIFICATE,
-        spec_vec_bytes(255, seq![]) + spec_vec_bytes(0xff_ffff, spec_cert_entries(chain)),
+        spec_vec_bytes(255, seq![]) + spec_vec_bytes(0xff_ffff, spec_cert_entries_bytes(chain)),
     )
 }
 
 pub open spec fn cert_chain_ok(chain: Seq<Seq<u8>>) -> bool {
     chain.len() >= 1 && (forall|i: int| 0 <= i < chain.len() ==> 1 <= #[trigger] chain[i].len()
-        <= 0xff_ffff) && spec_cert_entries(chain).len() + 4 <= 0xff_ffff
+        <= 0xff_ffff) && spec_cert_entries_bytes(chain).len() + 4 <= 0xff_ffff
 }
 
 pub open spec fn spec_certificate_verify_bytes(scheme: u16, sig: Seq<u8>) -> Seq<u8> {
@@ -135,7 +135,7 @@ proof fn lemma_entries_mono(chain: Seq<Seq<u8>>, i: int)
     requires
         0 <= i <= chain.len(),
     ensures
-        spec_cert_entries(chain.take(i)).len() <= spec_cert_entries(chain).len(),
+        spec_cert_entries_bytes(chain.take(i)).len() <= spec_cert_entries_bytes(chain).len(),
     decreases chain.len() - i,
 {
     if i < chain.len() {
@@ -148,6 +148,35 @@ proof fn lemma_entries_mono(chain: Seq<Seq<u8>>, i: int)
     } else {
         assert(chain.take(i) =~= chain);
     }
+}
+
+// RFC 8446 Appendix B.3.1.3, SignatureScheme "Reserved Code Points" (the `_RESERVED` entries).
+pub open spec fn spec_reserved_scheme(s: u16) -> bool {
+    s <= 0x0200 || s == 0x0202 || (0x0204 <= s <= 0x0400) || s == 0x0402 || (0x0404 <= s
+        <= 0x0500) || s == 0x0502 || (0x0504 <= s <= 0x0600) || s == 0x0602 || (0x0604 <= s
+        <= 0x06FF)
+}
+
+// RFC 8446 Appendix B.3.1.4, NamedGroup: unallocated_RESERVED(0x0000) and the
+// `obsolete_RESERVED` ranges.
+pub open spec fn spec_reserved_group(g: u16) -> bool {
+    g <= 0x0016 || (0x001A <= g <= 0x001C) || (0xFF01 <= g <= 0xFF02)
+}
+
+pub fn is_reserved_scheme(s: u16) -> (r: bool)
+    ensures
+        r == spec_reserved_scheme(s),
+{
+    s <= 0x0200 || s == 0x0202 || (0x0204 <= s && s <= 0x0400) || s == 0x0402 || (0x0404 <= s
+        && s <= 0x0500) || s == 0x0502 || (0x0504 <= s && s <= 0x0600) || s == 0x0602 || (0x0604
+        <= s && s <= 0x06FF)
+}
+
+pub fn is_reserved_group(g: u16) -> (r: bool)
+    ensures
+        r == spec_reserved_group(g),
+{
+    g <= 0x0016 || (0x001A <= g && g <= 0x001C) || (0xFF01 <= g && g <= 0xFF02)
 }
 
 // =============================================================================
@@ -266,6 +295,7 @@ pub fn serialize_server_hello(
     requires
         session_id_echo@.len() <= 32,
         1 <= key_exchange@.len() <= 256,
+        !spec_reserved_group(group),
     ensures
         final(out)@ == old(out)@ + spec_server_hello_bytes(
             random@,
@@ -299,6 +329,7 @@ pub fn serialize_hello_retry_request(
 )
     requires
         session_id_echo@.len() <= 32,
+        !spec_reserved_group(selected_group),
     ensures
         final(out)@ == old(out)@ + spec_hello_retry_request_bytes(session_id_echo@, selected_group),
 {
@@ -383,7 +414,7 @@ pub fn serialize_certificate(chain: &Vec<Vec<u8>>, out: &mut Vec<u8>)
             i <= chain.len(),
             cs == chain.deep_view(),
             cert_chain_ok(cs),
-            entries@ == spec_cert_entries(cs.take(i as int)),
+            entries@ == spec_cert_entries_bytes(cs.take(i as int)),
         decreases chain.len() - i,
     {
         proof {
@@ -418,17 +449,17 @@ pub fn serialize_certificate(chain: &Vec<Vec<u8>>, out: &mut Vec<u8>)
         assert(empty@ =~= Seq::<u8>::empty());
         assert(body@ =~= spec_vec_bytes(255, seq![]) + spec_vec_bytes(
             0xff_ffff,
-            spec_cert_entries(cs),
+            spec_cert_entries_bytes(cs),
         ));
         lemma_vec_len(255, seq![]);
-        lemma_vec_len(0xff_ffff, spec_cert_entries(cs));
+        lemma_vec_len(0xff_ffff, spec_cert_entries_bytes(cs));
     }
     put_hs(out, HT_CERTIFICATE, &body);
 }
 
-// `scheme` is a `tls::codes`-grade SignatureScheme chosen by 4b, never a reserved value.
 pub fn serialize_certificate_verify(scheme: u16, signature: &[u8], out: &mut Vec<u8>)
     requires
+        !spec_reserved_scheme(scheme),
         signature@.len() <= 0xffff,
     ensures
         final(out)@ == old(out)@ + spec_certificate_verify_bytes(scheme, signature@),
