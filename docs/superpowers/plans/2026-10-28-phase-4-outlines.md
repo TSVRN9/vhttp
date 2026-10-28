@@ -371,3 +371,4 @@ Negotiation is not done here.
 ## Controller rulings (2026-10-28)
 
 All 9 outline decisions are accepted as recommended. 4b starts after 3a merges; 4c starts after 3e merges.
+- 4c obligation (from 4a Task 2): bound total bytes pushed into HsReader per space; 3c's MAX_CRYPTO_BUFFER caps it if push is fed only from in-order CRYPTO data.
