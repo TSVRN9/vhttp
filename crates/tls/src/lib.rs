@@ -4,5 +4,6 @@ pub mod client_hello;
 pub mod codes;
 pub mod ext;
 pub mod handshake;
+pub mod hkdf_label;
 pub mod pl;
 pub mod server_msgs;
