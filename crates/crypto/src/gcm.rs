@@ -145,7 +145,7 @@ proof fn bv_gf128_step(x: u128, z: u128, v: u128, s: u128) by (bit_vector)
 {
 }
 
-// SP 800-38D §6.3 Algorithm 1: constant-time x . y in GF(2^128).
+// SP 800-38D §6.3 Algorithm 1: constant-time-style x . y in GF(2^128).
 // ponytail: 128 masked shift/xor steps per 16-byte block, ≈0.16 µs/block (release); upgrade:
 // carry-less multiply (PCLMULQDQ) behind an equivalence lemma. 4-bit Shoup tables are faster
 // but index by H, so not constant-time style
