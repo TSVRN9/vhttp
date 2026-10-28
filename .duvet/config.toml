@@ -1,0 +1,20 @@
+'$schema' = "https://awslabs.github.io/duvet/config/v0.4.0.json"
+
+[[source]]
+pattern = "crates/**/*.rs"
+
+[[specification]]
+source = "https://www.rfc-editor.org/rfc/rfc9114"
+[[specification]]
+source = "https://www.rfc-editor.org/rfc/rfc9204"
+[[specification]]
+source = "https://www.rfc-editor.org/rfc/rfc9000"
+[[specification]]
+source = "https://www.rfc-editor.org/rfc/rfc9001"
+[[specification]]
+source = "https://www.rfc-editor.org/rfc/rfc9002"
+[[specification]]
+source = "https://www.rfc-editor.org/rfc/rfc8446"
+
+[report.html]
+enabled = true
