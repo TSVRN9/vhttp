@@ -132,6 +132,12 @@ fn frame_order() {
     let after_trailers =
         cat(&[&req("GET", &[]), &headers(&[fl("x-t", "1")]), &frame(0x00, b"x")]);
     assert_eq!(run(&after_trailers, false).0, Err(ReqError::Connection(H3_FRAME_UNEXPECTED)));
+    let headers_after_trailers =
+        cat(&[&req("GET", &[]), &headers(&[fl("x-t", "1")]), &headers(&[fl("x-u", "2")])]);
+    assert_eq!(
+        run(&headers_after_trailers, false).0,
+        Err(ReqError::Connection(H3_FRAME_UNEXPECTED))
+    );
     let settings = cat(&[&req("GET", &[]), &frame(0x04, &[])]);
     assert_eq!(run(&settings, false).0, Err(ReqError::Connection(H3_FRAME_UNEXPECTED)));
     // CANCEL_PUSH, GOAWAY, MAX_PUSH_ID and HTTP/2-reserved 0x02, from the header alone.
@@ -191,6 +197,21 @@ fn decoded_budget() {
     let mut h = Vec::new();
     serialize_frame_header(0x01, 65537, &mut h);
     assert_eq!(run(&h, false).0, Err(ReqError::Stream(H3_EXCESSIVE_LOAD)));
+    // Exact boundary: a valid request whose Σ(name + value + 32) is exactly 65536 is accepted;
+    // one more line is over the budget.
+    let mut f = vec![
+        fl(":method", "GET"),
+        fl(":scheme", "https"),
+        fl(":authority", "example.com"),
+        fl(":path", "/"),
+    ];
+    let size = |f: &[FieldLine]| f.iter().map(|l| l.name.len() + l.value.len() + 32).sum::<usize>();
+    let pad = 65536 - size(&f) - ("x-pad".len() + 32);
+    f.push(fl("x-pad", &"a".repeat(pad)));
+    assert_eq!(size(&f), 65536);
+    assert_eq!(run(&headers(&f), true), (Ok(()), get_events()));
+    f.push(fl("x", ""));
+    assert_eq!(run(&headers(&f), true).0, Err(ReqError::Stream(H3_EXCESSIVE_LOAD)));
 }
 
 #[test]
@@ -217,6 +238,17 @@ fn unknown_frames_ignored() {
     ]);
     assert_eq!(run(&b, true), (Ok(()), post_events()));
     assert_eq!(run_bytewise(&b, true), (Ok(()), post_events()));
+    // An unknown frame announcing 2^62 - 1 bytes, fed partially: skipped, nothing buffered.
+    let mut huge = Vec::new();
+    serialize_frame_header(0x21, (1u64 << 62) - 1, &mut huge);
+    huge.extend_from_slice(&[0u8; 100]);
+    let mut s = RequestStream::new();
+    let mut ev = Vec::new();
+    assert_eq!(s.on_data(&huge, false, &mut ev), Ok(()));
+    assert_eq!(s.buffered_len(), 0);
+    assert_eq!(s.on_data(&[0u8; 1000], false, &mut ev), Ok(()));
+    assert_eq!(s.buffered_len(), 0);
+    assert!(ev.is_empty());
 }
 
 #[test]

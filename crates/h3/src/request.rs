@@ -102,6 +102,19 @@ pub open spec fn concat_bodies(s: Seq<SpecReqEvent>) -> Seq<SpecReqEvent> {
     push_all(Seq::empty(), s)
 }
 
+/// A `Body` event carries at least one byte.
+pub open spec fn body_nonempty(e: ReqEvent) -> bool {
+    match e {
+        ReqEvent::Body(b) => b@.len() > 0,
+        _ => true,
+    }
+}
+
+/// Every event of `s` from index `a` on satisfies `body_nonempty`.
+pub open spec fn bodies_from(s: Seq<ReqEvent>, a: int) -> bool {
+    forall|i: int| a <= i < s.len() ==> body_nonempty(#[trigger] s[i])
+}
+
 pub open spec fn err_of(r: Result<(), ReqError>) -> Option<ReqError> {
     match r {
         Ok(_) => None,
@@ -470,6 +483,22 @@ proof fn lemma_views_push(s: Seq<ReqEvent>, k: int, x: ReqEvent)
 {
     assert(views(s.push(x).skip(k)) =~= views(s.skip(k)).push(x@));
     assert(s.push(x).take(k) =~= s.take(k));
+}
+
+proof fn lemma_bodies_trans(a: int, e1: Seq<ReqEvent>, e2: Seq<ReqEvent>)
+    requires
+        0 <= a <= e1.len() <= e2.len(),
+        e2.take(e1.len() as int) == e1,
+        bodies_from(e1, a),
+        bodies_from(e2, e1.len() as int),
+    ensures
+        bodies_from(e2, a),
+{
+    assert forall|i: int| a <= i < e2.len() implies body_nonempty(#[trigger] e2[i]) by {
+        if i < e1.len() {
+            assert(e2.take(e1.len() as int)[i] == e2[i]);
+        }
+    }
 }
 
 proof fn lemma_push_all_push(acc: Seq<SpecReqEvent>, s: Seq<SpecReqEvent>, x: SpecReqEvent)
@@ -973,6 +1002,7 @@ fn step_data(
             res,
         ),
         !(res matches Ok(None)),
+        bodies_from(final(events)@, old(events)@.len() as int),
 {
     let ghost ph0 = *ph;
     let ghost m0 = *mode;
@@ -1077,6 +1107,7 @@ fn step_frame(
             push_all(acc, views(final(events)@.skip(old(events)@.len() as int))),
             res,
         ),
+        bodies_from(final(events)@, old(events)@.len() as int),
 {
     let ghost ph0 = *ph;
     let ghost ev0 = events@;
@@ -1198,6 +1229,7 @@ fn run(
             push_all(acc0, views(final(events)@.skip(old(events)@.len() as int))),
             r,
         ),
+        bodies_from(final(events)@, old(events)@.len() as int),
 {
     let ghost m0 = *mode;
     let ghost ph0 = *ph;
@@ -1218,6 +1250,7 @@ fn run(
             events@.len() >= ev0.len(),
             events@.take(ev0.len() as int) == ev0,
             acc == push_all(acc0, views(events@.skip(ev0.len() as int))),
+            bodies_from(events@, ev0.len() as int),
             forall|t: Seq<u8>, f: bool| #[trigger]
                 rest(m0, ph0, acc0, s@ + t, f) == rest(*mode, *ph, acc, s@.skip(pos as int) + t, f),
         decreases s@.len() - pos,
@@ -1241,6 +1274,7 @@ fn run(
                 assert(events@ == ev1);
             }
             lemma_views_split(ev1, events@, ev0.len() as int);
+            lemma_bodies_trans(ev0.len() as int, ev1, events@);
             lemma_push_all_append(
                 acc0,
                 views(ev1.skip(ev0.len() as int)),
@@ -1415,6 +1449,13 @@ impl RequestStream {
         self.done
     }
 
+    pub fn buffered_len(&self) -> (r: usize)
+        ensures
+            r == self.buffered(),
+    {
+        self.buf.len()
+    }
+
     /// Feeds the next `data` (`fin`: the stream ends after it). Afterwards the cumulative events,
     /// with body chunks concatenated, and the error are exactly `rfc_request_stream` of every
     /// byte received, so they don't depend on how the bytes were chunked.
@@ -1435,6 +1476,7 @@ impl RequestStream {
             final(self).emitted() == old(self).emitted() + views(
                 final(events)@.skip(old(events)@.len() as int),
             ),
+            bodies_from(final(events)@, old(events)@.len() as int),
             rfc_request_stream(final(self).all(), fin) == (
                 concat_bodies(final(self).emitted()),
                 err_of(r),
@@ -1459,11 +1501,16 @@ impl RequestStream {
                 ev0 == old(events)@,
                 self.all@ == all0 + data@.take(j as int),
                 grew(*old(self), *self, ev0, events@),
+                bodies_from(events@, ev0.len() as int),
             decreases data@.len() - j,
         {
             let ghost s1 = *self;
             let ghost e1 = events@;
-            match self.advance(data, j, events) {
+            let res = self.advance(data, j, events);
+            proof {
+                lemma_bodies_trans(ev0.len() as int, e1, events@);
+            }
+            match res {
                 Err(e) => {
                     proof {
                         lemma_grew_trans(*old(self), s1, *self, ev0, e1, events@);
@@ -1548,6 +1595,7 @@ impl RequestStream {
             j < data@.len(),
         ensures
             grew(*old(self), *final(self), old(events)@, final(events)@),
+            bodies_from(final(events)@, old(events)@.len() as int),
             !final(self).done,
             match r {
                 Ok(j2) => {
