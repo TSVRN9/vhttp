@@ -32,7 +32,8 @@ pub enum Level {
     OneRtt,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+/// `Debug` is hand-written below (outside `verus!`): it never prints the traffic secrets.
+#[derive(PartialEq, Eq)]
 pub enum TlsEvent {
     Send { level: Level, data: Vec<u8> },
     Secrets { level: Level, client: [u8; 32], server: [u8; 32] },
@@ -642,3 +643,21 @@ pub fn build_flight(
 }
 
 } // verus!
+
+impl core::fmt::Debug for TlsEvent {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            TlsEvent::Send { level, data } => {
+                f.debug_struct("Send").field("level", level).field("data", data).finish()
+            },
+            TlsEvent::Secrets { level, client, server } => f
+                .debug_struct("Secrets")
+                .field("level", level)
+                .field("client", &format_args!("<{} bytes redacted>", client.len()))
+                .field("server", &format_args!("<{} bytes redacted>", server.len()))
+                .finish(),
+            TlsEvent::PeerParams(p) => f.debug_tuple("PeerParams").field(p).finish(),
+            TlsEvent::Complete => f.write_str("Complete"),
+        }
+    }
+}
