@@ -470,7 +470,7 @@ Total keyword count: 38 across 19 sections.
 | 4.1.2 (req) | renegotiation of pre-1.3 sessions / pre-1.3 extension-block rules | 5 | no | Declined (optional: TLS 1.2-and-older compatibility) | "MUST retain the previous protocol version"; "MUST NOT negotiate TLS 1.3"; prior-version procedures |
 | 4.1.3 | Server Hello | 16 | partial | 4 | Server-side: legacy_version 0x0303, random independent of ClientHello.random, compression 0, supported_versions present, only required extensions ✅ 4b: crates/tls/src/flight.rs (random = rand[0..32]; downgrade sentinel vacuous, TLS 1.3 only; layout in server_msgs.rs, 4a) |
 | 4.1.3 (req) | Client-side ServerHello checks | 4 | no | N/A (client-only) | "A client which receives a legacy_session_id_echo ... / cipher suite not offered MUST abort"; downgrade-sentinel checks |
-| 4.1.3 (req) | Downgrade sentinel in ServerHello.Random | 4 | no | Declined (optional: TLS 1.2-and-older compatibility) | "TLS 1.3 servers which negotiate TLS 1.2 or below ... MUST set the last 8 bytes"; we never negotiate older versions |
+| 4.1.3 (req) | Downgrade sentinel in ServerHello.Random | 4 | no | Declined (optional: TLS 1.2-and-older compatibility) | "TLS 1.3 servers which negotiate TLS 1.2 or below ... MUST set the last 8 bytes"; we never negotiate older versions; crates/tls/src/flight.rs cites the three server MUSTs as vacuous (4a rejects every ClientHello without 0x0304) |
 | 4.1.4 | Hello Retry Request | 11 | partial | 4 | Server: supported_versions in HRR, no unoffered extensions except cookie, same cipher suite on updated ClientHello; 4a codec: server_msgs.rs layout (closed in 4b) |
 | 4.1.4 (req) | Client-side HRR processing | 6 | no | N/A (client-only) | "Clients MUST abort ... if the HelloRetryRequest would not result in any change"; second HRR; cipher suite/version checks |
 | 4.2 | Extensions | 5 | yes | 4 | No unsolicited extension responses (cookie excepted), unsupported_extension / illegal_parameter aborts, no duplicate extension types; 4a codec: crates/tls/src/ext.rs: duplicates, psk-last, oid_filters (closed in 4b: no unsolicited responses) |
@@ -531,7 +531,7 @@ Total keyword count: 38 across 19 sections.
 | 6.1 | Closure Alerts | 4 | no | 4 | replaced by QUIC (RFC 9001 §4): connection close via CONNECTION_CLOSE, no close_notify |
 | 6.2 | Error Alerts | 3 | yes | 4 | Fatal error closes connection; alert maps to QUIC error code |
 | 7.4.2 | Elliptic Curve Diffie-Hellman | 2 | partial | 4 | Do not truncate leading zeros of shared secret (P-256 X coordinate, 32 bytes) ✅ 4b: crates/tls/src/flight.rs (shared secret is a [u8; 32]; all-zero secret aborts with illegal_parameter) |
-| 7.4.2 (req) | All-zero shared secret check (RFC 7748 §6) | 1 | no | Declined (optional: X25519) | Applies to X25519/X448; P-256 point validation (§4.2.8.2) precludes it |
+| 7.4.2 (req) | All-zero shared secret check (RFC 7748 §6) | 1 | no | Declined (optional: X25519) | Applies to X25519/X448 ("For these curves"), not negotiated; crates/tls/src/flight.rs also rejects an all-zero P-256 secret with illegal_parameter (4b, brief Step 3) |
 | 7.5 | Exporters | 2 | no | 4 | QUIC does not use TLS exporters; "Future specifications MUST NOT define a use of exporters ..." is N/A (binds spec authors), a Duvet exception in crates/tls/src/schedule.rs; ✅ 4b: crates/tls/src/schedule.rs (no exporter derived; QUIC uses none) |
 | 8 | 0-RTT and Anti-Replay | 3 | no | Declined (optional: 0-RTT) | We never accept 0-RTT |
 | 8.2 | Client Hello Recording | 3 | no | Declined (optional: 0-RTT) | Anti-replay storage for 0-RTT |
