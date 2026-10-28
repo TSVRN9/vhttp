@@ -793,4 +793,894 @@ pub fn huff_code(sym: u16) -> (r: (u32, u8))
     }
 }
 
+/// `(first, count, offset)` of the length-`l` codes among syms 0..=255 for l in 1..=30, else zeros.
+pub open spec fn spec_huff_len_info(l: nat) -> (nat, nat, nat) {
+    if l == 1 {
+        (0nat, 0nat, 0nat)
+    } else if l == 2 {
+        (0nat, 0nat, 0nat)
+    } else if l == 3 {
+        (0nat, 0nat, 0nat)
+    } else if l == 4 {
+        (0nat, 0nat, 0nat)
+    } else if l == 5 {
+        (0nat, 10nat, 0nat)
+    } else if l == 6 {
+        (20nat, 26nat, 10nat)
+    } else if l == 7 {
+        (92nat, 32nat, 36nat)
+    } else if l == 8 {
+        (248nat, 6nat, 68nat)
+    } else if l == 9 {
+        (508nat, 0nat, 74nat)
+    } else if l == 10 {
+        (1016nat, 5nat, 74nat)
+    } else if l == 11 {
+        (2042nat, 3nat, 79nat)
+    } else if l == 12 {
+        (4090nat, 2nat, 82nat)
+    } else if l == 13 {
+        (8184nat, 6nat, 84nat)
+    } else if l == 14 {
+        (16380nat, 2nat, 90nat)
+    } else if l == 15 {
+        (32764nat, 3nat, 92nat)
+    } else if l == 16 {
+        (65534nat, 0nat, 95nat)
+    } else if l == 17 {
+        (131068nat, 0nat, 95nat)
+    } else if l == 18 {
+        (262136nat, 0nat, 95nat)
+    } else if l == 19 {
+        (524272nat, 3nat, 95nat)
+    } else if l == 20 {
+        (1048550nat, 8nat, 98nat)
+    } else if l == 21 {
+        (2097116nat, 13nat, 106nat)
+    } else if l == 22 {
+        (4194258nat, 26nat, 119nat)
+    } else if l == 23 {
+        (8388568nat, 29nat, 145nat)
+    } else if l == 24 {
+        (16777194nat, 12nat, 174nat)
+    } else if l == 25 {
+        (33554412nat, 4nat, 186nat)
+    } else if l == 26 {
+        (67108832nat, 15nat, 190nat)
+    } else if l == 27 {
+        (134217694nat, 19nat, 205nat)
+    } else if l == 28 {
+        (268435426nat, 29nat, 224nat)
+    } else if l == 29 {
+        (536870910nat, 0nat, 253nat)
+    } else if l == 30 {
+        (1073741820nat, 3nat, 253nat)
+    } else {
+        (0nat, 0nat, 0nat)
+    }
+}
+
+/// Syms 0..=255 sorted by (code length, sym); 0 out of range.
+pub open spec fn spec_huff_sorted(i: nat) -> nat {
+    if i == 0 {
+        48nat
+    } else if i == 1 {
+        49nat
+    } else if i == 2 {
+        50nat
+    } else if i == 3 {
+        97nat
+    } else if i == 4 {
+        99nat
+    } else if i == 5 {
+        101nat
+    } else if i == 6 {
+        105nat
+    } else if i == 7 {
+        111nat
+    } else if i == 8 {
+        115nat
+    } else if i == 9 {
+        116nat
+    } else if i == 10 {
+        32nat
+    } else if i == 11 {
+        37nat
+    } else if i == 12 {
+        45nat
+    } else if i == 13 {
+        46nat
+    } else if i == 14 {
+        47nat
+    } else if i == 15 {
+        51nat
+    } else if i == 16 {
+        52nat
+    } else if i == 17 {
+        53nat
+    } else if i == 18 {
+        54nat
+    } else if i == 19 {
+        55nat
+    } else if i == 20 {
+        56nat
+    } else if i == 21 {
+        57nat
+    } else if i == 22 {
+        61nat
+    } else if i == 23 {
+        65nat
+    } else if i == 24 {
+        95nat
+    } else if i == 25 {
+        98nat
+    } else if i == 26 {
+        100nat
+    } else if i == 27 {
+        102nat
+    } else if i == 28 {
+        103nat
+    } else if i == 29 {
+        104nat
+    } else if i == 30 {
+        108nat
+    } else if i == 31 {
+        109nat
+    } else if i == 32 {
+        110nat
+    } else if i == 33 {
+        112nat
+    } else if i == 34 {
+        114nat
+    } else if i == 35 {
+        117nat
+    } else if i == 36 {
+        58nat
+    } else if i == 37 {
+        66nat
+    } else if i == 38 {
+        67nat
+    } else if i == 39 {
+        68nat
+    } else if i == 40 {
+        69nat
+    } else if i == 41 {
+        70nat
+    } else if i == 42 {
+        71nat
+    } else if i == 43 {
+        72nat
+    } else if i == 44 {
+        73nat
+    } else if i == 45 {
+        74nat
+    } else if i == 46 {
+        75nat
+    } else if i == 47 {
+        76nat
+    } else if i == 48 {
+        77nat
+    } else if i == 49 {
+        78nat
+    } else if i == 50 {
+        79nat
+    } else if i == 51 {
+        80nat
+    } else if i == 52 {
+        81nat
+    } else if i == 53 {
+        82nat
+    } else if i == 54 {
+        83nat
+    } else if i == 55 {
+        84nat
+    } else if i == 56 {
+        85nat
+    } else if i == 57 {
+        86nat
+    } else if i == 58 {
+        87nat
+    } else if i == 59 {
+        89nat
+    } else if i == 60 {
+        106nat
+    } else if i == 61 {
+        107nat
+    } else if i == 62 {
+        113nat
+    } else if i == 63 {
+        118nat
+    } else if i == 64 {
+        119nat
+    } else if i == 65 {
+        120nat
+    } else if i == 66 {
+        121nat
+    } else if i == 67 {
+        122nat
+    } else if i == 68 {
+        38nat
+    } else if i == 69 {
+        42nat
+    } else if i == 70 {
+        44nat
+    } else if i == 71 {
+        59nat
+    } else if i == 72 {
+        88nat
+    } else if i == 73 {
+        90nat
+    } else if i == 74 {
+        33nat
+    } else if i == 75 {
+        34nat
+    } else if i == 76 {
+        40nat
+    } else if i == 77 {
+        41nat
+    } else if i == 78 {
+        63nat
+    } else if i == 79 {
+        39nat
+    } else if i == 80 {
+        43nat
+    } else if i == 81 {
+        124nat
+    } else if i == 82 {
+        35nat
+    } else if i == 83 {
+        62nat
+    } else if i == 84 {
+        0nat
+    } else if i == 85 {
+        36nat
+    } else if i == 86 {
+        64nat
+    } else if i == 87 {
+        91nat
+    } else if i == 88 {
+        93nat
+    } else if i == 89 {
+        126nat
+    } else if i == 90 {
+        94nat
+    } else if i == 91 {
+        125nat
+    } else if i == 92 {
+        60nat
+    } else if i == 93 {
+        96nat
+    } else if i == 94 {
+        123nat
+    } else if i == 95 {
+        92nat
+    } else if i == 96 {
+        195nat
+    } else if i == 97 {
+        208nat
+    } else if i == 98 {
+        128nat
+    } else if i == 99 {
+        130nat
+    } else if i == 100 {
+        131nat
+    } else if i == 101 {
+        162nat
+    } else if i == 102 {
+        184nat
+    } else if i == 103 {
+        194nat
+    } else if i == 104 {
+        224nat
+    } else if i == 105 {
+        226nat
+    } else if i == 106 {
+        153nat
+    } else if i == 107 {
+        161nat
+    } else if i == 108 {
+        167nat
+    } else if i == 109 {
+        172nat
+    } else if i == 110 {
+        176nat
+    } else if i == 111 {
+        177nat
+    } else if i == 112 {
+        179nat
+    } else if i == 113 {
+        209nat
+    } else if i == 114 {
+        216nat
+    } else if i == 115 {
+        217nat
+    } else if i == 116 {
+        227nat
+    } else if i == 117 {
+        229nat
+    } else if i == 118 {
+        230nat
+    } else if i == 119 {
+        129nat
+    } else if i == 120 {
+        132nat
+    } else if i == 121 {
+        133nat
+    } else if i == 122 {
+        134nat
+    } else if i == 123 {
+        136nat
+    } else if i == 124 {
+        146nat
+    } else if i == 125 {
+        154nat
+    } else if i == 126 {
+        156nat
+    } else if i == 127 {
+        160nat
+    } else if i == 128 {
+        163nat
+    } else if i == 129 {
+        164nat
+    } else if i == 130 {
+        169nat
+    } else if i == 131 {
+        170nat
+    } else if i == 132 {
+        173nat
+    } else if i == 133 {
+        178nat
+    } else if i == 134 {
+        181nat
+    } else if i == 135 {
+        185nat
+    } else if i == 136 {
+        186nat
+    } else if i == 137 {
+        187nat
+    } else if i == 138 {
+        189nat
+    } else if i == 139 {
+        190nat
+    } else if i == 140 {
+        196nat
+    } else if i == 141 {
+        198nat
+    } else if i == 142 {
+        228nat
+    } else if i == 143 {
+        232nat
+    } else if i == 144 {
+        233nat
+    } else if i == 145 {
+        1nat
+    } else if i == 146 {
+        135nat
+    } else if i == 147 {
+        137nat
+    } else if i == 148 {
+        138nat
+    } else if i == 149 {
+        139nat
+    } else if i == 150 {
+        140nat
+    } else if i == 151 {
+        141nat
+    } else if i == 152 {
+        143nat
+    } else if i == 153 {
+        147nat
+    } else if i == 154 {
+        149nat
+    } else if i == 155 {
+        150nat
+    } else if i == 156 {
+        151nat
+    } else if i == 157 {
+        152nat
+    } else if i == 158 {
+        155nat
+    } else if i == 159 {
+        157nat
+    } else if i == 160 {
+        158nat
+    } else if i == 161 {
+        165nat
+    } else if i == 162 {
+        166nat
+    } else if i == 163 {
+        168nat
+    } else if i == 164 {
+        174nat
+    } else if i == 165 {
+        175nat
+    } else if i == 166 {
+        180nat
+    } else if i == 167 {
+        182nat
+    } else if i == 168 {
+        183nat
+    } else if i == 169 {
+        188nat
+    } else if i == 170 {
+        191nat
+    } else if i == 171 {
+        197nat
+    } else if i == 172 {
+        231nat
+    } else if i == 173 {
+        239nat
+    } else if i == 174 {
+        9nat
+    } else if i == 175 {
+        142nat
+    } else if i == 176 {
+        144nat
+    } else if i == 177 {
+        145nat
+    } else if i == 178 {
+        148nat
+    } else if i == 179 {
+        159nat
+    } else if i == 180 {
+        171nat
+    } else if i == 181 {
+        206nat
+    } else if i == 182 {
+        215nat
+    } else if i == 183 {
+        225nat
+    } else if i == 184 {
+        236nat
+    } else if i == 185 {
+        237nat
+    } else if i == 186 {
+        199nat
+    } else if i == 187 {
+        207nat
+    } else if i == 188 {
+        234nat
+    } else if i == 189 {
+        235nat
+    } else if i == 190 {
+        192nat
+    } else if i == 191 {
+        193nat
+    } else if i == 192 {
+        200nat
+    } else if i == 193 {
+        201nat
+    } else if i == 194 {
+        202nat
+    } else if i == 195 {
+        205nat
+    } else if i == 196 {
+        210nat
+    } else if i == 197 {
+        213nat
+    } else if i == 198 {
+        218nat
+    } else if i == 199 {
+        219nat
+    } else if i == 200 {
+        238nat
+    } else if i == 201 {
+        240nat
+    } else if i == 202 {
+        242nat
+    } else if i == 203 {
+        243nat
+    } else if i == 204 {
+        255nat
+    } else if i == 205 {
+        203nat
+    } else if i == 206 {
+        204nat
+    } else if i == 207 {
+        211nat
+    } else if i == 208 {
+        212nat
+    } else if i == 209 {
+        214nat
+    } else if i == 210 {
+        221nat
+    } else if i == 211 {
+        222nat
+    } else if i == 212 {
+        223nat
+    } else if i == 213 {
+        241nat
+    } else if i == 214 {
+        244nat
+    } else if i == 215 {
+        245nat
+    } else if i == 216 {
+        246nat
+    } else if i == 217 {
+        247nat
+    } else if i == 218 {
+        248nat
+    } else if i == 219 {
+        250nat
+    } else if i == 220 {
+        251nat
+    } else if i == 221 {
+        252nat
+    } else if i == 222 {
+        253nat
+    } else if i == 223 {
+        254nat
+    } else if i == 224 {
+        2nat
+    } else if i == 225 {
+        3nat
+    } else if i == 226 {
+        4nat
+    } else if i == 227 {
+        5nat
+    } else if i == 228 {
+        6nat
+    } else if i == 229 {
+        7nat
+    } else if i == 230 {
+        8nat
+    } else if i == 231 {
+        11nat
+    } else if i == 232 {
+        12nat
+    } else if i == 233 {
+        14nat
+    } else if i == 234 {
+        15nat
+    } else if i == 235 {
+        16nat
+    } else if i == 236 {
+        17nat
+    } else if i == 237 {
+        18nat
+    } else if i == 238 {
+        19nat
+    } else if i == 239 {
+        20nat
+    } else if i == 240 {
+        21nat
+    } else if i == 241 {
+        23nat
+    } else if i == 242 {
+        24nat
+    } else if i == 243 {
+        25nat
+    } else if i == 244 {
+        26nat
+    } else if i == 245 {
+        27nat
+    } else if i == 246 {
+        28nat
+    } else if i == 247 {
+        29nat
+    } else if i == 248 {
+        30nat
+    } else if i == 249 {
+        31nat
+    } else if i == 250 {
+        127nat
+    } else if i == 251 {
+        220nat
+    } else if i == 252 {
+        249nat
+    } else if i == 253 {
+        10nat
+    } else if i == 254 {
+        13nat
+    } else if i == 255 {
+        22nat
+    } else {
+        0nat
+    }
+}
+
+pub fn huff_len_info(l: u32) -> (r: (u32, u32, u32))
+    ensures
+        (r.0 as nat, r.1 as nat, r.2 as nat) == spec_huff_len_info(l as nat),
+{
+    match l {
+        1 => (0u32, 0u32, 0u32),
+        2 => (0u32, 0u32, 0u32),
+        3 => (0u32, 0u32, 0u32),
+        4 => (0u32, 0u32, 0u32),
+        5 => (0u32, 10u32, 0u32),
+        6 => (20u32, 26u32, 10u32),
+        7 => (92u32, 32u32, 36u32),
+        8 => (248u32, 6u32, 68u32),
+        9 => (508u32, 0u32, 74u32),
+        10 => (1016u32, 5u32, 74u32),
+        11 => (2042u32, 3u32, 79u32),
+        12 => (4090u32, 2u32, 82u32),
+        13 => (8184u32, 6u32, 84u32),
+        14 => (16380u32, 2u32, 90u32),
+        15 => (32764u32, 3u32, 92u32),
+        16 => (65534u32, 0u32, 95u32),
+        17 => (131068u32, 0u32, 95u32),
+        18 => (262136u32, 0u32, 95u32),
+        19 => (524272u32, 3u32, 95u32),
+        20 => (1048550u32, 8u32, 98u32),
+        21 => (2097116u32, 13u32, 106u32),
+        22 => (4194258u32, 26u32, 119u32),
+        23 => (8388568u32, 29u32, 145u32),
+        24 => (16777194u32, 12u32, 174u32),
+        25 => (33554412u32, 4u32, 186u32),
+        26 => (67108832u32, 15u32, 190u32),
+        27 => (134217694u32, 19u32, 205u32),
+        28 => (268435426u32, 29u32, 224u32),
+        29 => (536870910u32, 0u32, 253u32),
+        30 => (1073741820u32, 3u32, 253u32),
+        _ => (0u32, 0u32, 0u32),
+    }
+}
+
+pub fn huff_sorted(i: u32) -> (r: u8)
+    ensures
+        r as nat == spec_huff_sorted(i as nat),
+{
+    match i {
+        0 => 48u8,
+        1 => 49u8,
+        2 => 50u8,
+        3 => 97u8,
+        4 => 99u8,
+        5 => 101u8,
+        6 => 105u8,
+        7 => 111u8,
+        8 => 115u8,
+        9 => 116u8,
+        10 => 32u8,
+        11 => 37u8,
+        12 => 45u8,
+        13 => 46u8,
+        14 => 47u8,
+        15 => 51u8,
+        16 => 52u8,
+        17 => 53u8,
+        18 => 54u8,
+        19 => 55u8,
+        20 => 56u8,
+        21 => 57u8,
+        22 => 61u8,
+        23 => 65u8,
+        24 => 95u8,
+        25 => 98u8,
+        26 => 100u8,
+        27 => 102u8,
+        28 => 103u8,
+        29 => 104u8,
+        30 => 108u8,
+        31 => 109u8,
+        32 => 110u8,
+        33 => 112u8,
+        34 => 114u8,
+        35 => 117u8,
+        36 => 58u8,
+        37 => 66u8,
+        38 => 67u8,
+        39 => 68u8,
+        40 => 69u8,
+        41 => 70u8,
+        42 => 71u8,
+        43 => 72u8,
+        44 => 73u8,
+        45 => 74u8,
+        46 => 75u8,
+        47 => 76u8,
+        48 => 77u8,
+        49 => 78u8,
+        50 => 79u8,
+        51 => 80u8,
+        52 => 81u8,
+        53 => 82u8,
+        54 => 83u8,
+        55 => 84u8,
+        56 => 85u8,
+        57 => 86u8,
+        58 => 87u8,
+        59 => 89u8,
+        60 => 106u8,
+        61 => 107u8,
+        62 => 113u8,
+        63 => 118u8,
+        64 => 119u8,
+        65 => 120u8,
+        66 => 121u8,
+        67 => 122u8,
+        68 => 38u8,
+        69 => 42u8,
+        70 => 44u8,
+        71 => 59u8,
+        72 => 88u8,
+        73 => 90u8,
+        74 => 33u8,
+        75 => 34u8,
+        76 => 40u8,
+        77 => 41u8,
+        78 => 63u8,
+        79 => 39u8,
+        80 => 43u8,
+        81 => 124u8,
+        82 => 35u8,
+        83 => 62u8,
+        84 => 0u8,
+        85 => 36u8,
+        86 => 64u8,
+        87 => 91u8,
+        88 => 93u8,
+        89 => 126u8,
+        90 => 94u8,
+        91 => 125u8,
+        92 => 60u8,
+        93 => 96u8,
+        94 => 123u8,
+        95 => 92u8,
+        96 => 195u8,
+        97 => 208u8,
+        98 => 128u8,
+        99 => 130u8,
+        100 => 131u8,
+        101 => 162u8,
+        102 => 184u8,
+        103 => 194u8,
+        104 => 224u8,
+        105 => 226u8,
+        106 => 153u8,
+        107 => 161u8,
+        108 => 167u8,
+        109 => 172u8,
+        110 => 176u8,
+        111 => 177u8,
+        112 => 179u8,
+        113 => 209u8,
+        114 => 216u8,
+        115 => 217u8,
+        116 => 227u8,
+        117 => 229u8,
+        118 => 230u8,
+        119 => 129u8,
+        120 => 132u8,
+        121 => 133u8,
+        122 => 134u8,
+        123 => 136u8,
+        124 => 146u8,
+        125 => 154u8,
+        126 => 156u8,
+        127 => 160u8,
+        128 => 163u8,
+        129 => 164u8,
+        130 => 169u8,
+        131 => 170u8,
+        132 => 173u8,
+        133 => 178u8,
+        134 => 181u8,
+        135 => 185u8,
+        136 => 186u8,
+        137 => 187u8,
+        138 => 189u8,
+        139 => 190u8,
+        140 => 196u8,
+        141 => 198u8,
+        142 => 228u8,
+        143 => 232u8,
+        144 => 233u8,
+        145 => 1u8,
+        146 => 135u8,
+        147 => 137u8,
+        148 => 138u8,
+        149 => 139u8,
+        150 => 140u8,
+        151 => 141u8,
+        152 => 143u8,
+        153 => 147u8,
+        154 => 149u8,
+        155 => 150u8,
+        156 => 151u8,
+        157 => 152u8,
+        158 => 155u8,
+        159 => 157u8,
+        160 => 158u8,
+        161 => 165u8,
+        162 => 166u8,
+        163 => 168u8,
+        164 => 174u8,
+        165 => 175u8,
+        166 => 180u8,
+        167 => 182u8,
+        168 => 183u8,
+        169 => 188u8,
+        170 => 191u8,
+        171 => 197u8,
+        172 => 231u8,
+        173 => 239u8,
+        174 => 9u8,
+        175 => 142u8,
+        176 => 144u8,
+        177 => 145u8,
+        178 => 148u8,
+        179 => 159u8,
+        180 => 171u8,
+        181 => 206u8,
+        182 => 215u8,
+        183 => 225u8,
+        184 => 236u8,
+        185 => 237u8,
+        186 => 199u8,
+        187 => 207u8,
+        188 => 234u8,
+        189 => 235u8,
+        190 => 192u8,
+        191 => 193u8,
+        192 => 200u8,
+        193 => 201u8,
+        194 => 202u8,
+        195 => 205u8,
+        196 => 210u8,
+        197 => 213u8,
+        198 => 218u8,
+        199 => 219u8,
+        200 => 238u8,
+        201 => 240u8,
+        202 => 242u8,
+        203 => 243u8,
+        204 => 255u8,
+        205 => 203u8,
+        206 => 204u8,
+        207 => 211u8,
+        208 => 212u8,
+        209 => 214u8,
+        210 => 221u8,
+        211 => 222u8,
+        212 => 223u8,
+        213 => 241u8,
+        214 => 244u8,
+        215 => 245u8,
+        216 => 246u8,
+        217 => 247u8,
+        218 => 248u8,
+        219 => 250u8,
+        220 => 251u8,
+        221 => 252u8,
+        222 => 253u8,
+        223 => 254u8,
+        224 => 2u8,
+        225 => 3u8,
+        226 => 4u8,
+        227 => 5u8,
+        228 => 6u8,
+        229 => 7u8,
+        230 => 8u8,
+        231 => 11u8,
+        232 => 12u8,
+        233 => 14u8,
+        234 => 15u8,
+        235 => 16u8,
+        236 => 17u8,
+        237 => 18u8,
+        238 => 19u8,
+        239 => 20u8,
+        240 => 21u8,
+        241 => 23u8,
+        242 => 24u8,
+        243 => 25u8,
+        244 => 26u8,
+        245 => 27u8,
+        246 => 28u8,
+        247 => 29u8,
+        248 => 30u8,
+        249 => 31u8,
+        250 => 127u8,
+        251 => 220u8,
+        252 => 249u8,
+        253 => 10u8,
+        254 => 13u8,
+        255 => 22u8,
+        _ => 0u8,
+    }
+}
+
 } // verus!
