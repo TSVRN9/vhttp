@@ -133,7 +133,7 @@ pub open spec fn our_settings() -> Seq<(u64, u64)> {
 /// The start of our control stream (server uni stream 3): its type, then our SETTINGS frame:
 /// MAX_FIELD_SECTION_SIZE and one grease setting.
 pub open spec fn ctrl_preamble() -> Seq<u8> {
-    seq![0u8] + spec_frame_bytes(FRAME_SETTINGS, spec_settings_payload(our_settings()))
+    seq![0u8] + spec_frame_bytes(FRAME_SETTINGS, spec_pairs_bytes(our_settings()))
 }
 
 pub open spec fn goaway_frames(g: Seq<u64>) -> Seq<u8>
@@ -182,18 +182,18 @@ pub proof fn theorem_ctrl_preamble()
             let p = ctrl_preamble().skip(1);
             let h = spec_frame_header_bytes(
                 FRAME_SETTINGS,
-                spec_settings_payload(our_settings()).len() as u64,
+                spec_pairs_bytes(our_settings()).len() as u64,
             ).len();
             &&& rfc_frame_header(p) == Some(
-                (h, FRAME_SETTINGS, spec_settings_payload(our_settings()).len() as u64),
+                (h, FRAME_SETTINGS, spec_pairs_bytes(our_settings()).len() as u64),
             )
-            &&& h + spec_settings_payload(our_settings()).len() == p.len()
+            &&& h + spec_pairs_bytes(our_settings()).len() == p.len()
             &&& rfc_frame_payload(FRAME_SETTINGS, p.skip(h as int)) == Ok::<SpecFrame, u64>(
                 SpecFrame::Settings(our_settings()),
             )
         }),
 {
-    let pl = spec_settings_payload(our_settings());
+    let pl = spec_pairs_bytes(our_settings());
     let body = spec_frame_bytes(FRAME_SETTINGS, pl);
     lemma_settings_bounds();
     lemma_decode_zero();
@@ -213,11 +213,11 @@ proof fn lemma_settings_bounds()
         forall|i: int|
             0 <= i < our_settings().len() ==> (#[trigger] our_settings()[i]).0 <= VARINT_MAX
                 && our_settings()[i].1 <= VARINT_MAX,
-        spec_settings_payload(our_settings()).len() <= VARINT_MAX,
+        spec_pairs_bytes(our_settings()).len() <= VARINT_MAX,
 {
     let s = our_settings();
     assert(s.skip(1).skip(1) =~= Seq::<(u64, u64)>::empty());
-    reveal_with_fuel(spec_settings_payload, 3);
+    reveal_with_fuel(spec_pairs_bytes, 3);
     lemma_varint_len(s[0].0);
     lemma_varint_len(s[0].1);
     lemma_varint_len(s[1].0);

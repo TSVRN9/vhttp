@@ -1131,6 +1131,43 @@ pub proof fn lemma_decode_prefix(a: Seq<u8>, r: Seq<u8>)
     assert(a.add(r).subrange(1, n as int) =~= a.subrange(1, n as int));
 }
 
+/// Two varints, the way h3 SETTINGS (identifier, value) and QUIC ACK (Gap, ACK Range Length)
+/// pairs are written.
+pub open spec fn spec_pair_bytes(x: (u64, u64)) -> Seq<u8> {
+    spec_varint(x.0) + spec_varint(x.1)
+}
+
+/// The pairs written one after another.
+pub open spec fn spec_pairs_bytes(s: Seq<(u64, u64)>) -> Seq<u8>
+    decreases s.len(),
+{
+    if s.len() == 0 {
+        Seq::empty()
+    } else {
+        spec_pair_bytes(s[0]) + spec_pairs_bytes(s.skip(1))
+    }
+}
+
+pub proof fn lemma_pairs_bytes_snoc(s: Seq<(u64, u64)>, x: (u64, u64))
+    ensures
+        spec_pairs_bytes(s.push(x)) == spec_pairs_bytes(s) + spec_pair_bytes(x),
+    decreases s.len(),
+{
+    if s.len() == 0 {
+        assert(s.push(x)[0] == x);
+        assert(s.push(x).skip(1) =~= Seq::<(u64, u64)>::empty());
+        assert(spec_pairs_bytes(s) == Seq::<u8>::empty());
+        assert(spec_pairs_bytes(Seq::<(u64, u64)>::empty()) == Seq::<u8>::empty());
+        assert(spec_pair_bytes(x) + Seq::empty() =~= Seq::<u8>::empty() + spec_pair_bytes(x));
+    } else {
+        assert(s.push(x)[0] == s[0]);
+        assert(s.push(x).skip(1) =~= s.skip(1).push(x));
+        lemma_pairs_bytes_snoc(s.skip(1), x);
+        assert(spec_pair_bytes(s[0]) + (spec_pairs_bytes(s.skip(1)) + spec_pair_bytes(x))
+            =~= spec_pair_bytes(s[0]) + spec_pairs_bytes(s.skip(1)) + spec_pair_bytes(x));
+    }
+}
+
 pub proof fn lemma_decode_zero()
     ensures
         rfc_varint_decode(seq![0u8]) == Some((1nat, 0u64)),

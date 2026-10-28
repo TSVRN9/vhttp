@@ -10,7 +10,7 @@ use wire::varint::*;
 
 use crate::ack::*;
 use crate::codes::*;
-use crate::stateless::*;
+use crate::header::*;
 
 verus! {
 

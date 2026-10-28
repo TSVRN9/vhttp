@@ -9,7 +9,7 @@ use crate::codes::*;
 // Used only in ghost code, which a plain `cargo build` erases.
 #[allow(unused_imports)]
 use crate::frame::*;
-use crate::stateless::*;
+use crate::header::*;
 
 verus! {
 
