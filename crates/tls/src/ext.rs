@@ -230,9 +230,10 @@ pub fn check_ch_exts(s: &Vec<Ext>) -> (r: Result<(), u64>)
 {
     let ghost d = s.deep_view();
     let n = s.len();
-    // ponytail: an 8 KiB bitmap zeroed per ClientHello (twice with HRR) is the main CPU cost
-    // of the unauthenticated HRR path, where no asymmetric crypto runs; sort the types and
-    // scan for neighbours (O(n log n) in the extension count) if that fill shows in profiles.
+    // ponytail: an 8 KiB bitmap zeroed per ClientHello (twice with HRR) is CPU an
+    // unauthenticated peer can force on the HRR path, where no asymmetric crypto runs; sort
+    // the types and scan for neighbours (O(n log n) in the extension count) if it shows in
+    // profiles.
     let mut seen: Vec<u64> = Vec::new();
     let mut w: usize = 0;
     while w < 1024
