@@ -83,3 +83,17 @@ fn pop_cost_independent_of_tail() {
     assert_eq!(out.len() as u64, N);
     assert!(t.elapsed().as_secs() < 5, "took {:?}", t.elapsed());
 }
+
+#[test]
+fn drain_releases_capacity() {
+    // A peer fills [1, W), then sends byte 0: everything drains, and nothing stays allocated.
+    const W: usize = 1 << 16;
+    let mut r = Reassembly::new();
+    r.insert(1, &vec![7u8; W - 1]);
+    assert!(r.capacities().0 >= W && r.capacities().1 >= W);
+    r.insert(0, b"x");
+    let out = pop(&mut r);
+    assert_eq!(out.len(), W);
+    assert_eq!(r.buf_len(), 0);
+    assert_eq!(r.capacities(), (0, 0));
+}
