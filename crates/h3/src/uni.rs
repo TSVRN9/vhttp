@@ -238,6 +238,12 @@ pub open spec fn rfc_control(b: Seq<u8>, st: CtrlState, fin: bool) -> (
     }
 }
 
+//= https://www.rfc-editor.org/rfc/rfc9114#section-6.2.1
+//# A control stream is indicated by a stream type of 0x00.
+//= https://www.rfc-editor.org/rfc/rfc9204#section-4.2
+//# An encoder stream is a unidirectional stream of type 0x02.
+//= https://www.rfc-editor.org/rfc/rfc9204#section-4.2
+//# A decoder stream is a unidirectional stream of type 0x03.
 pub open spec fn rfc_kind_of(ty: u64) -> UniKind {
     if ty == STREAM_CONTROL {
         UniKind::Control
@@ -252,14 +258,14 @@ pub open spec fn rfc_kind_of(ty: u64) -> UniKind {
 
 /// The kind the received bytes give a stream. A push stream (0x01) maps to `Ignored`; it is
 /// rejected on arrival, so its kind never matters.
-pub open spec fn rfc_uni_kind(b: Seq<u8>) -> UniKind {
+pub open spec fn kind_of_bytes(b: Seq<u8>) -> UniKind {
     match rfc_varint_decode(b) {
         None => UniKind::Undetermined,
         Some((_, ty)) => rfc_kind_of(ty),
     }
 }
 
-pub open spec fn rfc_qpack_end(r: Result<nat, u64>, fin: bool) -> (Seq<SpecUniEvent>, Option<u64>) {
+pub open spec fn qpack_end(r: Result<nat, u64>, fin: bool) -> (Seq<SpecUniEvent>, Option<u64>) {
     match r {
         Ok(_) => (Seq::empty(), fin_err(fin)),
         Err(c) => (Seq::empty(), Some(c)),
@@ -276,8 +282,8 @@ pub open spec fn rfc_tail(k: UniKind, st: CtrlState, b: Seq<u8>, fin: bool) -> (
 ) {
     match k {
         UniKind::Control => rfc_control(b, st, fin),
-        UniKind::QpackEncoder => rfc_qpack_end(rfc_encoder_stream(b), fin),
-        UniKind::QpackDecoder => rfc_qpack_end(rfc_decoder_stream(b), fin),
+        UniKind::QpackEncoder => qpack_end(rfc_encoder_stream(b), fin),
+        UniKind::QpackDecoder => qpack_end(rfc_decoder_stream(b), fin),
         _ => (Seq::empty(), None),
     }
 }
@@ -294,7 +300,7 @@ pub open spec fn rfc_duplicate(s: SeenUni, ty: u64) -> bool {
         == STREAM_QPACK_DECODER && s.decoder)
 }
 
-pub open spec fn rfc_mark(s: SeenUni, ty: u64) -> SeenUni {
+pub open spec fn seen_mark(s: SeenUni, ty: u64) -> SeenUni {
     SeenUni {
         control: s.control || ty == STREAM_CONTROL,
         encoder: s.encoder || ty == STREAM_QPACK_ENCODER,
@@ -303,10 +309,10 @@ pub open spec fn rfc_mark(s: SeenUni, ty: u64) -> SeenUni {
 }
 
 /// `seen` once `b` has been received on a stream whose type was unknown before.
-pub open spec fn rfc_seen_after(s: SeenUni, b: Seq<u8>) -> SeenUni {
+pub open spec fn seen_after(s: SeenUni, b: Seq<u8>) -> SeenUni {
     match rfc_varint_decode(b) {
         None => s,
-        Some((_, ty)) => rfc_mark(s, ty),
+        Some((_, ty)) => seen_mark(s, ty),
     }
 }
 
@@ -760,7 +766,7 @@ impl UniStream {
     }
 
     pub closed spec fn wf(&self) -> bool {
-        &&& self.kind == rfc_uni_kind(self.all@)
+        &&& self.kind == kind_of_bytes(self.all@)
         &&& !self.done ==> match self.kind {
             UniKind::Undetermined => {
                 &&& self.all@ == self.buf@
@@ -804,7 +810,7 @@ impl UniStream {
         requires
             self.wf(),
         ensures
-            k == rfc_uni_kind(self.all()),
+            k == kind_of_bytes(self.all()),
     {
         match self.kind {
             UniKind::Undetermined => UniKind::Undetermined,
@@ -841,10 +847,10 @@ impl UniStream {
                 final(self).emitted(),
                 err_of(r),
             ),
-            rfc_uni_kind(old(self).all()) is Undetermined ==> final(self).seen_before() == *old(
+            kind_of_bytes(old(self).all()) is Undetermined ==> final(self).seen_before() == *old(
                 seen,
-            ) && *final(seen) == rfc_seen_after(*old(seen), final(self).all()),
-            !(rfc_uni_kind(old(self).all()) is Undetermined) ==> final(self).seen_before()
+            ) && *final(seen) == seen_after(*old(seen), final(self).all()),
+            !(kind_of_bytes(old(self).all()) is Undetermined) ==> final(self).seen_before()
                 == old(self).seen_before() && *final(seen) == *old(seen),
     {
         let ghost all0 = self.all@;
@@ -910,7 +916,7 @@ impl UniStream {
                     == STREAM_QPACK_ENCODER && seen.encoder) || (ty == STREAM_QPACK_DECODER
                     && seen.decoder) {
                     proof {
-                        assert(rfc_mark(self.seen0@, ty) == self.seen0@);
+                        assert(seen_mark(self.seen0@, ty) == self.seen0@);
                     }
                     return Err(H3_STREAM_CREATION_ERROR);
                 }
