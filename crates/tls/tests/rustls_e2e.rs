@@ -197,6 +197,17 @@ fn initial_sends(calls: &[Vec<TlsEvent>]) -> usize {
     all(calls).iter().filter(|e| matches!(e, TlsEvent::Send { level: Level::Initial, .. })).count()
 }
 
+/// The level of every server `Send`, in order (rustls's `read_hs` takes no level).
+fn send_levels(calls: &[Vec<TlsEvent>]) -> Vec<Level> {
+    all(calls)
+        .into_iter()
+        .filter_map(|e| match e {
+            TlsEvent::Send { level, .. } => Some(*level),
+            _ => None,
+        })
+        .collect()
+}
+
 fn complete(c: &ClientConnection, hs: &ServerHandshake) {
     assert!(!c.is_handshaking());
     assert!(hs.is_complete());
@@ -251,6 +262,7 @@ fn rustls_hrr_ecdsa() {
     let calls = run(&mut c, &mut hs, None).unwrap();
     assert_eq!(calls[0], vec![TlsEvent::Send { level: Level::Initial, data: hex(HRR) }]);
     assert_eq!(initial_sends(&calls), 2);
+    assert_eq!(send_levels(&calls), [Level::Initial, Level::Initial, Level::Handshake]);
     complete(&c, &hs);
     let peer: Vec<_> = all(&calls).into_iter().filter(|e| matches!(e, TlsEvent::PeerParams(_))).collect();
     assert_eq!(peer, vec![&TlsEvent::PeerParams(client_tp())]);
@@ -265,6 +277,7 @@ fn rustls_direct_rsa() {
         client(vec![kx_group::SECP256R1], default_suites(), h3(), vec![SignatureScheme::RSA_PSS_SHA256]);
     let calls = run(&mut c, &mut hs, None).unwrap();
     assert_eq!(initial_sends(&calls), 1);
+    assert_eq!(send_levels(&calls), [Level::Initial, Level::Handshake]);
     complete(&c, &hs);
     secrets_match(&calls, &log);
 }
@@ -279,6 +292,7 @@ fn rustls_two_chains() {
         let (mut c, log) = client(vec![kx_group::SECP256R1], default_suites(), h3(), vec![scheme]);
         let calls = run(&mut c, &mut hs, None).unwrap();
         assert_eq!(cv_scheme(&calls), want, "{scheme:?}");
+        assert_eq!(send_levels(&calls), [Level::Initial, Level::Handshake]);
         complete(&c, &hs);
         secrets_match(&calls, &log);
     }
