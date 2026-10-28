@@ -484,8 +484,9 @@ pub open spec fn rfc_frame(b: Seq<u8>) -> Result<(SpecFrame, nat), u64> {
 //# The value in the Retire Prior To field
 //# MUST be less than or equal to the value in the Sequence Number field.
 /// A frame we may send: every field fits its encoding, and each frame obeys its sender-side
-/// limits. The token, path data and reason lengths are implied by the exec types; spec
-/// values have to state them.
+/// limits. The token and path-data lengths are implied by the exec array types; spec values
+/// have to state them. The reason bound is the caller's obligation, because Reason Phrase
+/// Length is a varint.
 pub open spec fn frame_wf(f: SpecFrame) -> bool {
     match f {
         SpecFrame::Ack(a) => ack_encodable(a) && rfc_ack_ranges_valid(

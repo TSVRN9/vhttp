@@ -126,6 +126,20 @@ fn small_frames() {
 }
 
 #[test]
+fn non_minimal_body_varints() {
+    // §16: body fields may use a longer varint than needed; only the type must be minimal.
+    assert_eq!(parse_frame(&[0x10, 0x40, 0x05]), Ok((Frame::MaxData(5), 3)));
+    let b = [&[0x18, 0x41, 0x00, 0x40, 0x00, 0x01, 0xaa][..], &[0; 16]].concat();
+    let want = Frame::NewConnectionId {
+        seq: 256,
+        retire_prior_to: 0,
+        cid: vec![0xaa],
+        reset_token: [0; 16],
+    };
+    assert_eq!(parse_frame(&b), Ok((want, b.len())));
+}
+
+#[test]
 fn frame_roundtrip() {
     let all = vec![
         Frame::Padding,
