@@ -1382,6 +1382,8 @@ impl RecvStream {
             }),
             final(self).stop_code() == old(self).stop_code(),
             final(self).pending_stop() == old(self).pending_stop(),
+            // Reset or suppressed after all data was delivered: nothing stays buffered.
+            r is Ok ==> final(self).buffered_len() == 0,
     {
         let ghost t2 = self.trace@.push(
             SpecRecvIn::Reset { code, final_size: final_size as nat },
