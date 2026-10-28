@@ -461,6 +461,52 @@ pub proof fn theorem_header_roundtrip(ty: u64, len: u64)
     assert(a.add(b).skip(a.len() as int) =~= b);
 }
 
+/// A complete header occupies at least two bytes and no more than `b`.
+pub proof fn lemma_frame_header_bounds(b: Seq<u8>)
+    ensures
+        rfc_frame_header(b) matches Some((h, _, _)) ==> 2 <= h <= b.len(),
+{
+    lemma_decode_len_bounds(b);
+    if let Some((n1, _)) = rfc_varint_decode(b) {
+        lemma_decode_len_bounds(b.skip(n1 as int));
+    }
+}
+
+/// Prefix stability: bytes after a complete header don't change how it parses.
+pub proof fn lemma_frame_header_prefix(b: Seq<u8>, t: Seq<u8>)
+    requires
+        rfc_frame_header(b) is Some,
+    ensures
+        rfc_frame_header(b.add(t)) == rfc_frame_header(b),
+{
+    lemma_decode_prefix(b, t);
+    let n1 = rfc_varint_decode(b).unwrap().0;
+    lemma_decode_len_bounds(b);
+    assert(b.add(t).skip(n1 as int) =~= b.skip(n1 as int).add(t));
+    lemma_decode_prefix(b.skip(n1 as int), t);
+}
+
+/// A serialized frame, followed by anything, parses back to its header and exactly its payload.
+pub proof fn lemma_frame_bytes_roundtrip(ty: u64, p: Seq<u8>, rest: Seq<u8>)
+    requires
+        ty <= VARINT_MAX,
+        p.len() <= VARINT_MAX,
+    ensures
+        ({
+            let h = spec_frame_header_bytes(ty, p.len() as u64).len();
+            let b = spec_frame_bytes(ty, p).add(rest);
+            &&& rfc_frame_header(b) == Some((h, ty, p.len() as u64))
+            &&& b.subrange(h as int, (h + p.len()) as int) == p
+        }),
+{
+    let hb = spec_frame_header_bytes(ty, p.len() as u64);
+    theorem_header_roundtrip(ty, p.len() as u64);
+    lemma_frame_header_prefix(hb, p.add(rest));
+    let b = spec_frame_bytes(ty, p).add(rest);
+    assert(b =~= hb.add(p.add(rest)));
+    assert(b.subrange(hb.len() as int, (hb.len() + p.len()) as int) =~= p);
+}
+
 /// Complete frame: header for `body.len()` followed by `body`.
 pub fn put_frame(ty: u64, body: &Vec<u8>, out: &mut Vec<u8>)
     requires
