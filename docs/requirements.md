@@ -136,16 +136,16 @@ Total keyword count: 157 across 44 sections.
 | § | Topic | #MUST/MUST NOT | Server applies? | Phase | Notes |
 |---|---|---|---|---|---|
 | 1.1 | Conventions and Definitions | 5 | no | N/A (boilerplate) | BCP 14 boilerplate listing the keywords; not a requirement. |
-| 2.1 | Encoder: field order | 1 | yes | 2 | Response encoder MUST emit representations in input order. |
+| 2.1 | Encoder: field order | 1 | yes | 2 | Response encoder MUST emit representations in input order. ✅ 2a: crates/h3/src/qpack/field_section.rs |
 | 2.1.1 | Limits on dynamic table insertions | 1 | no | Declined (optional: QPACK dynamic table) | Encoder must not insert when nothing evictable; we never insert. |
 | 2.1.2 | Blocked streams | 2 | partial | 2 | Encoder limit on blocked streams is moot (no dynamic refs); decoder rule row below binds. |
 | 2.1.2 (req) | Encoder limits blocked streams | 1 | no | Declined (optional: QPACK dynamic table) | "An encoder MUST limit the number of streams that could become blocked to the value of SETTINGS_QPACK_BLOCKED_STREAMS at all times." |
-| 2.1.2 (req) | Decoder: too many blocked streams | 1 | yes | 2 | "If a decoder encounters more blocked streams than it promised to support, it MUST treat this as a connection error of type QPACK_DECOMPRESSION_FAILED." With capacity 0 and blocked-streams limit 0, any Required Insert Count > 0 is this error. |
-| 2.2 | Decoder: field order | 1 | yes | 2 | Request decoder MUST emit field lines in encoded order. |
-| 2.2.1 | Blocked decoding | 1 | yes | 2 | RIC smaller than expected is QPACK_DECOMPRESSION_FAILED. |
+| 2.1.2 (req) | Decoder: too many blocked streams | 1 | yes | 2 | "If a decoder encounters more blocked streams than it promised to support, it MUST treat this as a connection error of type QPACK_DECOMPRESSION_FAILED." With capacity 0 and blocked-streams limit 0, any Required Insert Count > 0 is this error. ✅ 2a: crates/h3/src/qpack/field_section.rs |
+| 2.2 | Decoder: field order | 1 | yes | 2 | Request decoder MUST emit field lines in encoded order. ✅ 2a: crates/h3/src/qpack/field_section.rs |
+| 2.2.1 | Blocked decoding | 1 | yes | 2 | RIC smaller than expected is QPACK_DECOMPRESSION_FAILED. ✅ 2a: crates/h3/src/qpack/field_section.rs |
 | 2.2.2.1 | Section Acknowledgment emission | 1 | no | Declined (optional: QPACK dynamic table) | Only after decoding dynamic-table references, which we reject (see 2.2.3); never emitted. |
-| 2.2.3 | Invalid references | 2 | yes | 2 | Dynamic ref in field line -> QPACK_DECOMPRESSION_FAILED; encoder-instruction ref to evicted entry -> QPACK_ENCODER_STREAM_ERROR (at capacity 0 any such instruction is an error). |
-| 3.1 | Static table | 2 | yes | 2 | Invalid static index: QPACK_DECOMPRESSION_FAILED on request stream, QPACK_ENCODER_STREAM_ERROR on encoder stream. | ✅ 2a (table + lookup): crates/h3/src/qpack/static_table.rs; open: invalid-index error mapping in Tasks 6/7
+| 2.2.3 | Invalid references | 2 | yes | 2 | Dynamic ref in field line -> QPACK_DECOMPRESSION_FAILED; encoder-instruction ref to evicted entry -> QPACK_ENCODER_STREAM_ERROR (at capacity 0 any such instruction is an error). ✅ 2a (field-line half): crates/h3/src/qpack/field_section.rs; open: encoder-instruction half in Task 7 |
+| 3.1 | Static table | 2 | yes | 2 | Invalid static index: QPACK_DECOMPRESSION_FAILED on request stream, QPACK_ENCODER_STREAM_ERROR on encoder stream. ✅ 2a (table + lookup): crates/h3/src/qpack/static_table.rs; ✅ 2a (request-stream index error): crates/h3/src/qpack/field_section.rs; open: encoder-stream index error in Task 7 |
 | 3.2 | Dynamic table: duplicates | 1 | no | Declined (optional: QPACK dynamic table) | Duplicates not an error; no inserts are possible at capacity 0. |
 | 3.2.2 | Capacity and eviction | 2 | partial | 2 | Encoder eviction rule is declined; decoder error rule binds. |
 | 3.2.2 (req) | Encoder must not evict non-evictable | 1 | no | Declined (optional: QPACK dynamic table) | "The encoder MUST NOT cause a dynamic table entry to be evicted unless that entry is evictable." |
@@ -162,12 +162,12 @@ Total keyword count: 157 across 44 sections.
 | 4.3.1 (req) | No eviction of non-evictable entries | 1 | no | Declined (optional: QPACK dynamic table) | "This MUST NOT cause the eviction of entries that are not evictable." |
 | 4.4.1 | Section Acknowledgment received | 1 | yes | 2 | We send no dynamic refs, so any Section Acknowledgment is QPACK_DECODER_STREAM_ERROR. |
 | 4.4.3 | Insert Count Increment received | 1 | yes | 2 | Increment of zero, or beyond what we sent (always 0 sent), is QPACK_DECODER_STREAM_ERROR. |
-| 4.5.1.1 | Required Insert Count | 1 | yes | 2 | Unproducible EncodedInsertCount -> QPACK_DECOMPRESSION_FAILED. |
-| 4.5.1.2 | Base | 2 | yes | 2 | Base MUST NOT be negative; Sign=1 invalid when RIC <= Delta Base (decoder check on request field sections). |
-| 4.5.4 | Literal with name reference | 2 | partial | 2 | Decoder must accept N bit; forwarding rule below is intermediary-only. |
+| 4.5.1.1 | Required Insert Count | 1 | yes | 2 | Unproducible EncodedInsertCount -> QPACK_DECOMPRESSION_FAILED. ✅ 2a: crates/h3/src/qpack/field_section.rs |
+| 4.5.1.2 | Base | 2 | yes | 2 | Base MUST NOT be negative; Sign=1 invalid when RIC <= Delta Base (decoder check on request field sections). ✅ 2a: crates/h3/src/qpack/field_section.rs |
+| 4.5.4 | Literal with name reference | 2 | partial | 2 | Decoder must accept N bit; forwarding rule below is intermediary-only. ✅ 2a: crates/h3/src/qpack/field_section.rs |
 | 4.5.4 (req) | N-bit literal must be forwarded as literal | 1 | no | N/A (intermediary-only) | "when a peer sends a field line that it received represented as a literal field line with the 'N' bit set, it MUST use a literal representation to forward this field line." We are an origin server and never forward request fields, so the rule is read as not applying. Cheap to honor if a proxy mode is ever added. |
 | 7.1.3 | Never-indexed literals | 3 | no | N/A (intermediary-only) | All three MUSTs govern intermediaries re-encoding fields ("An intermediary MUST NOT re-encode a value that uses a literal representation with the 'N' bit set..."). Origin server, never re-encodes received fields; read as not applying. |
-| 7.4 | Implementation limits | 1 | yes | 2 | Value too large to decode: QPACK_DECOMPRESSION_FAILED (request stream) or appropriate connection error (encoder/decoder stream). ✅ 2a (prefix ints): crates/h3/src/qpack/int.rs; open: string lengths in Task 6 |
+| 7.4 | Implementation limits | 1 | yes | 2 | Value too large to decode: QPACK_DECOMPRESSION_FAILED (request stream) or appropriate connection error (encoder/decoder stream). ✅ 2a (prefix ints): crates/h3/src/qpack/int.rs; ✅ 2a (string lengths): crates/h3/src/qpack/field_section.rs |
 
 Total keyword count: 44 across 22 sections.
 
