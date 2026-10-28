@@ -768,9 +768,11 @@ fn fits(a: usize, c: usize, left: u64) -> (r: bool)
     x <= left && y <= left - x && 32 <= left - x - y
 }
 
-/// `decode_field_line` that charges the line against `left` before copying anything: the whole
-/// line is located first (only Huffman strings are decoded), then its size is checked, and only
-/// then are the static and raw bytes copied.
+/// `decode_field_line` under a budget, in the spec's order: decode, then charge. The whole line
+/// is located and its Huffman strings are decoded first: both strings of a literal-name line, and
+/// the value of a name-reference line even when the static name alone exceeds `left`. Each such
+/// allocation is bounded by the input bytes present. Then the line's size is checked against
+/// `left`, and only then are the static and raw bytes copied.
 fn decode_field_line_bounded(b: &[u8], left: u64) -> (r: Result<(FieldLine, usize), BoundedError>)
     requires
         b@.len() > 0,
@@ -956,7 +958,8 @@ fn section_start(b: &[u8]) -> (r: Option<usize>)
 }
 
 /// `decode_field_section` under a decoded-size budget: Σ(name + value + 32) over the lines may
-/// not exceed `budget`. Decoding stops at the first line that would, before copying it.
+/// not exceed `budget`. Decoding stops at the first line that would, after decoding its Huffman
+/// strings (bounded by the input size) but before copying its static or raw bytes.
 pub fn decode_field_section_bounded(b: &[u8], budget: u64) -> (r: Result<
     Vec<FieldLine>,
     BoundedError,
