@@ -112,7 +112,7 @@ Also read:
     | `A3_SH` | 90 | `27fcb1c6f0a24ed7` | the RFC 9001 A.3 payload after `02000000000600405a` |
     | `R3_CH` | 196 | `4db255f30da09a40` | RFC 8448 §3 ClientHello |
     | `R3_SH` | 90 | `ed88d69f6adbcad6` | RFC 8448 §3 ServerHello |
-    | `R4_CH` | 477 | `63224b2e4573f2d3` | RFC 8448 §4 ClientHello: pre_shared_key last, early_data |
+    | `R4_CH` | 512 | `08ad0fa05d7c7233` | RFC 8448 §4 ClientHello, the full 512-byte "payload" (rfc8448.txt:972), not the 477-byte binder-hash prefix: pre_shared_key last, early_data |
     | `R5_CH1` | 180 | `de7420cc7426d2f6` | RFC 8448 §5 first ClientHello: X25519-only share |
     | `R5_CH2` | 512 | `5c2fe8a843fd18e4` | RFC 8448 §5 second ClientHello: P-256 share, **cookie** |
     | `R5_SH` | 123 | `11b2f096784fb1de` | RFC 8448 §5 ServerHello (P-256) |
