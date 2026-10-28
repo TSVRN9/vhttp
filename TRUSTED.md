@@ -1,0 +1,23 @@
+# Trusted base
+
+## Trusted base (from the design spec)
+
+- rustc, Verus, Z3, and vstd's specs of std.
+- The OS UDP stack, the clock, and getrandom (used for connection IDs, the ECDHE private key and stateless-reset tokens).
+- The unverified IO shell and the `main` binary, including loading the certificate chain and parsing the PEM/PKCS#8 P-256 private key.
+- **The hand-written Verus formalization of each RFC** (`spec` modules). Proofs show the code matches these specs; they can't show the specs match the RFC text. Keeping the specs small and readable, with each one citing its RFC section, is how the risk stays manageable.
+- **Temporary:** each crypto `external_body` backed by the RustCrypto shim (phases 3-4). Phase 5 removes every one of these entries.
+
+## Pinned versions
+
+- Verus 0.2026.10.04.426d8b0 (toolchain 1.98.1)
+- Z3 4.16.0 (bundled with Verus)
+- vstd 0.0.0-2026-10-04-0306 (must equal the pin in vest_lib 0.2.2)
+
+`cargo build` and `cargo test` work on the default stable toolchain with vest_lib 0.2.2, so no `rust-toolchain.toml` is needed.
+
+## Trusted items
+
+| Item | File | Why trusted | Removed in phase |
+|------|------|-------------|------------------|
+| vest_lib 0.2.2: 31 `external_body` + 3 `assume_specification` (its proofs are re-checked by `cargo verus verify`; these are not) | `asn1/bmpstring.rs` (1 eb), `asn1/universalstring.rs` (1 eb), `asn1/utf8string.rs` (1 eb, 1 as), `combinators/bytes/exec.rs` (1 eb, 1 as), `combinators/marker/exec.rs` (1 eb), `combinators/sints/exec.rs` (12 eb), `combinators/star/exec.rs` (2 eb), `combinators/uints/exec.rs` (12 eb), `core/exec/output.rs` (1 as) | Exec int conversions, std API specs and similar bodies Verus cannot check | never (third-party dependency) |
