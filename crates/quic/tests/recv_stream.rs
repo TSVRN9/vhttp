@@ -6,13 +6,15 @@ fn D(d: &[u8], fin: bool) -> StreamEvent {
     StreamEvent::Data { id: 0, data: d.to_vec(), fin }
 }
 
-fn data(s: &mut RecvStream, off: u64, d: &[u8], fin: bool, room: u64) -> (Result<u64, u64>, Vec<StreamEvent>) {
+type Out = (Result<u64, u64>, Vec<StreamEvent>);
+
+fn data(s: &mut RecvStream, off: u64, d: &[u8], fin: bool, room: u64) -> Out {
     let mut ev = Vec::new();
     let r = s.on_data(off, d, fin, room, &mut ev);
     (r, ev)
 }
 
-fn reset(s: &mut RecvStream, code: u64, fs: u64, room: u64) -> (Result<u64, u64>, Vec<StreamEvent>) {
+fn reset(s: &mut RecvStream, code: u64, fs: u64, room: u64) -> Out {
     let mut ev = Vec::new();
     let r = s.on_reset(code, fs, room, &mut ev);
     (r, ev)
@@ -166,5 +168,26 @@ fn reset_counts() {
 fn buffer_bound() {
     let mut s = RecvStream::new(0, 10);
     assert!(data(&mut s, 9, b"z", false, 1000).0.is_ok());
-    assert!(s.buffered_len() <= 10);
+    // Exactly limit - delivered, and one byte past it is refused with nothing buffered.
+    assert_eq!(s.buffered_len(), 10);
+    assert_eq!(data(&mut s, 10, b"y", false, 1000).0, Err(FLOW_CONTROL_ERROR));
+    assert_eq!(s.buffered_len(), 10);
+    assert_eq!(data(&mut s, 0, b"a", false, 1000), (Ok(0), vec![D(b"a", false)]));
+    assert_eq!(s.buffered_len(), 9);
+}
+
+#[test]
+fn no_stop_sending_after_reset() {
+    // Peer reset first: stop() queues nothing.
+    let mut s = RecvStream::new(0, 100);
+    assert!(reset(&mut s, 3, 0, 1000).0.is_ok());
+    assert!(!s.stop(0));
+    assert_eq!(s.pending_stop(), None);
+    // Stopped, then the peer's reset arrives before the STOP_SENDING is sent.
+    let mut s = RecvStream::new(0, 100);
+    assert!(s.stop(5));
+    assert!(reset(&mut s, 3, 0, 1000).0.is_ok());
+    assert_eq!(s.pending_stop(), None);
+    s.stop_lost();
+    assert_eq!(s.pending_stop(), None);
 }

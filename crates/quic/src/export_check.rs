@@ -64,6 +64,8 @@ proof fn recv_stream_exports(r: RecvStream)
     // The per-stream buffer bounds, against the stream limit and against connection credit.
     assert(r.buffered_len() <= s.limit - s.delivered);
     assert(r.buffered_len() <= counted(s) - retired(s));
+    // Memory (length, not capacity): each reassembly vec holds at most twice that.
+    assert(r.buffered_phys() <= 2 * r.buffered_len());
     assert(s.delivered <= s.high <= counted(s) <= s.limit <= VARINT_MAX);
     assert(recv_events_ok(s.events, r.id_spec()));
     lemma_retired_le_counted(r.id_spec(), r.window_spec(), r.trace());
