@@ -1,4 +1,4 @@
-//! AES-128 block cipher (FIPS 197): spec and verified constant-time-style exec code.
+//! AES-128 block cipher (FIPS 197): spec and verified exec code written in constant-time style (timing unverified; see TRUSTED.md).
 #[allow(unused_imports)]
 use crate::bytes::*;
 use vstd::prelude::*;
@@ -177,7 +177,7 @@ proof fn bv_xtime(b: u8) by (bit_vector)
 {
 }
 
-// FIPS 197 §4.2 eq. (4.5): constant-time xtime.
+// FIPS 197 §4.2 eq. (4.5): constant-time-style xtime.
 fn xtime_ct(b: u8) -> (r: u8)
     ensures
         r == xtime(b),
@@ -210,7 +210,7 @@ proof fn bv_xor8(p: u8, q: u8, s: u8) by (bit_vector)
 {
 }
 
-// FIPS 197 §4.2: constant-time GF(2^8) multiplication, 8 masked shift-and-xtime steps.
+// FIPS 197 §4.2: constant-time-style GF(2^8) multiplication, 8 masked shift-and-xtime steps.
 fn gmul_ct(a: u8, b: u8) -> (r: u8)
     ensures
         r == gmul(a, b),
@@ -442,8 +442,8 @@ proof fn lemma_sbox_chain(x: u8)
     lemma_sbox_chunk_elem(16 * (x / 16) as nat, 16 * (x / 16) as nat + 16, x as nat);
 }
 
-// FIPS 197 §5.1.1: constant-time S-box, no table and no branch on x.
-// ponytail: S-box = 13 constant-time GF(2^8) multiplies (8 masked steps each) + affine,
+// FIPS 197 §5.1.1: constant-time-style S-box, no table and no branch on x.
+// ponytail: S-box = 13 constant-time-style GF(2^8) multiplies (8 masked steps each) + affine,
 // ≈9.2 µs per AES block (release, Task 5 gcm_64kib); upgrade: Boyar–Peralta bitsliced circuit,
 // proved by the same chunk lemmas, or AES-NI behind an equivalence proof
 pub(crate) fn sbox_ct(x: u8) -> (r: u8)
