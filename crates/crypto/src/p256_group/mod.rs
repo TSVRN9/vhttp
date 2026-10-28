@@ -4,3 +4,5 @@
 //! Exported lemmas are `mod.rs` wrappers: proof fns are erased, so `use` re-exports fail to build.
 
 mod nt;
+mod field;
+mod pratt;
