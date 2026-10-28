@@ -216,6 +216,9 @@ fn bad_response_rejected() {
         resp(200, &[("X-Up", "1")], ""),
         resp(200, &[("connection", "close")], ""),
         resp(200, &[(":path", "/")], ""),
+        // TE is connection-specific outside a request header (RFC 9114 §4.2).
+        resp(200, &[("te", "trailers")], ""),
+        resp(200, &[("te", "gzip")], ""),
         resp(600, &[], ""),
         // Interim statuses are never a whole response; HTTP/3 has no 101.
         resp(100, &[], ""),
@@ -280,6 +283,66 @@ fn connect_gets_501() {
     let mut out = Vec::new();
     c.on_stream_data(0, &frame(0x00, b"tunnel"), false, &mut out);
     assert!(out.is_empty());
+}
+
+#[test]
+fn malformed_connect_is_message_error() {
+    for a in ["u@example.com:443", "example.com", "example.com:", ":443"] {
+        let mut c = ready(&[]);
+        let mut out = Vec::new();
+        let b = headers(&[fl(":method", "CONNECT"), fl(":authority", a)]);
+        c.on_stream_data(0, &b, false, &mut out);
+        assert_eq!(out.len(), 2, "{a}");
+        assert!(is_reset(&out[0], 0, H3_MESSAGE_ERROR), "{a}");
+        assert!(is_stop(&out[1], 0, H3_MESSAGE_ERROR), "{a}");
+    }
+}
+
+#[test]
+fn te_in_trailers_is_message_error() {
+    let mut b = headers(&[
+        fl(":method", "POST"),
+        fl(":scheme", "https"),
+        fl(":authority", "example.com"),
+        fl(":path", "/"),
+        fl("te", "trailers"),
+    ]);
+    b.extend(frame(0x00, b"x"));
+    b.extend(headers(&[fl("te", "trailers")]));
+    let mut c = ready(&[]);
+    let mut out = Vec::new();
+    c.on_stream_data(0, &b, true, &mut out);
+    assert!(matches!(out[0], Output::Request { stream_id: 0, .. }));
+    assert!(!out.iter().any(|o| matches!(o, Output::RequestEnd { .. })));
+    assert!(out.iter().any(|o| is_reset(o, 0, H3_MESSAGE_ERROR)));
+}
+
+#[test]
+fn second_critical_stream() {
+    // RFC 9114 §6.2.1, RFC 9204 §4.2: a second control, encoder or decoder stream.
+    for (first, ty) in [(2u64, 0x00u8), (6, 0x02), (6, 0x03)] {
+        let mut c = ready(&[]);
+        let mut out = Vec::new();
+        if first != 2 {
+            c.on_stream_data(first, &[ty], false, &mut out);
+            assert!(out.is_empty());
+        }
+        c.on_stream_data(10, &[ty], false, &mut out);
+        assert_eq!(out.len(), 1, "type {ty}");
+        assert!(is_close(&out[0], H3_STREAM_CREATION_ERROR), "type {ty}");
+    }
+}
+
+#[test]
+fn goaway_above_highest_request() {
+    let mut c = ready(&[]);
+    let mut out = Vec::new();
+    c.on_stream_data(8, &get("/"), true, &mut out);
+    c.on_stream_data(0, &get("/"), true, &mut out);
+    let mut out = Vec::new();
+    c.shutdown(&mut out);
+    let (fr, _) = write_on(&out, 3);
+    assert_eq!(parse_frame_payload(fr[0].0, &fr[0].1), Ok(Frame::Goaway(12)));
 }
 
 #[test]

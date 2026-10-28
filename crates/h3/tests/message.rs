@@ -86,6 +86,14 @@ fn connect() {
     let mut g = f;
     g.push(fl(":path", "/"));
     err(g);
+    // RFC 9114 §4.4, RFC 9110 §9.3.6: authority-form, host ":" port, no userinfo.
+    for a in ["[::1]:443", "h:1", "example.com:443"] {
+        let f = vec![fl(":method", "CONNECT"), fl(":authority", a)];
+        assert!(matches!(validate_request(&f), Ok(RequestHead::Connect { .. })), "{a}");
+    }
+    for a in ["u@h:443", "h", "h:", ":443", "h:4a", "h:44 ", ""] {
+        err(vec![fl(":method", "CONNECT"), fl(":authority", a)]);
+    }
 }
 
 #[test]
@@ -108,6 +116,9 @@ fn response_check() {
     assert!(!check_response(&r(200, "Content-Type", "text/plain"), false));
     assert!(!check_response(&r(200, "connection", "x"), false));
     assert!(!check_response(&r(200, ":status", "200"), false));
+    // RFC 9114 §4.2: TE is allowed only in a request header.
+    assert!(!check_response(&r(200, "te", "trailers"), false));
+    assert!(!check_response(&r(200, "te", "gzip"), false));
 }
 
 #[test]
@@ -116,6 +127,8 @@ fn hardening() {
     err(vec![fl(":method", "GET"), fl(":scheme", "HTTPS"), fl(":path", "/")]);
     err(vec![fl(":method", "GET"), fl(":scheme", "HtTp"), fl(":path", "/")]);
     assert!(!validate_trailers(&[fl("connection", "x")]));
+    assert!(!validate_trailers(&[fl("te", "trailers")]));
+    assert!(validate_trailers(&[fl("x-t", "1")]));
     err(vec![fl(":method", ""), fl(":scheme", "https"), fl(":authority", "a"), fl(":path", "/")]);
     err(vec![fl(":method", "CONNECT"), fl(":scheme", "https"), fl(":authority", "a:1")]);
 }

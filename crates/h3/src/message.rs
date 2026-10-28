@@ -651,6 +651,30 @@ pub open spec fn no_at(s: Seq<u8>) -> bool {
     forall|i: int| 0 <= i < s.len() ==> (#[trigger] s[i]) != 64u8
 }
 
+pub open spec fn is_digit(c: u8) -> bool {
+    48 <= c && c <= 57
+}
+
+/// How many bytes at the end of `s` are digits.
+pub open spec fn trailing_digits(s: Seq<u8>) -> nat
+    decreases s.len(),
+{
+    if s.len() > 0 && is_digit(s.last()) {
+        trailing_digits(s.drop_last()) + 1
+    } else {
+        0
+    }
+}
+
+// RFC 9110 §9.3.6 / §7.1: a CONNECT request-target is authority-form, `uri-host ":" port`, and
+// the deprecated userinfo is excluded. `port` is `1*DIGIT` here: a tunnel needs a port.
+/// `uri-host ":" port` with a non-empty host, a non-empty all-digit port and no `@`. The port is
+/// the maximal run of trailing digits, so the byte before it must be the `:`.
+pub open spec fn authority_form(a: Seq<u8>) -> bool {
+    let d = trailing_digits(a);
+    no_at(a) && d > 0 && d + 2 <= a.len() && a[a.len() - d - 1] == 58u8
+}
+
 //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3.1
 //# If the :scheme pseudo-header field identifies a scheme that has a
 //# mandatory authority component (including "http" and "https"), the
@@ -747,7 +771,7 @@ pub open spec fn rfc_validate_request(f: Fields) -> Result<SpecRequestHead, u64>
             None => Err(H3_MESSAGE_ERROR),
             Some(meth) => if meth == lit_connect() {
                 match (lookup(f, lit_scheme()), lookup(f, lit_path()), a) {
-                    (None, None, Some(auth)) if auth.len() > 0 => Ok(
+                    (None, None, Some(auth)) if authority_form(auth) => Ok(
                         SpecRequestHead::Connect { authority: auth },
                     ),
                     _ => Err(H3_MESSAGE_ERROR),
@@ -780,10 +804,11 @@ pub open spec fn rfc_validate_request(f: Fields) -> Result<SpecRequestHead, u64>
 
 //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3
 //# Pseudo-header fields MUST NOT appear in trailer sections.
+/// TE is connection-specific here: RFC 9114 §4.2 allows it only in a request header.
 pub open spec fn rfc_validate_trailers(f: Fields) -> bool {
     forall|i: int|
         0 <= i < f.len() ==> !is_pseudo((#[trigger] f[i]).0) && valid_field_name(f[i].0)
-            && valid_field_value(f[i].1) && !conn_specific(f[i].0)
+            && valid_field_value(f[i].1) && !conn_specific(f[i].0) && f[i].0 != lit_te()
 }
 
 //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3
@@ -796,10 +821,11 @@ pub open spec fn rfc_validate_trailers(f: Fields) -> bool {
 //# message containing connection-specific fields MUST be treated as
 //# malformed.
 /// A response we may encode. `:status` is added by the encoder, so no header may be a
-/// pseudo-header. Name and value lengths are `encode_field_section`'s precondition.
+/// pseudo-header, and TE is connection-specific outside a request header (RFC 9114 §4.2).
+/// Name and value lengths are `encode_field_section`'s precondition.
 pub open spec fn resp_header_ok(h: (Seq<u8>, Seq<u8>)) -> bool {
     valid_field_name(h.0) && !is_pseudo(h.0) && valid_field_value(h.1) && !conn_specific(h.0)
-        && h.0.len() <= PREFIX_INT_MAX && h.1.len() <= PREFIX_INT_MAX
+        && h.0 != lit_te() && h.0.len() <= PREFIX_INT_MAX && h.1.len() <= PREFIX_INT_MAX
 }
 
 //= https://www.rfc-editor.org/rfc/rfc9114#section-4.1.2
@@ -1248,6 +1274,47 @@ fn no_at_x(s: &[u8]) -> (r: bool)
     true
 }
 
+proof fn lemma_trailing_digits(s: Seq<u8>, i: int)
+    requires
+        0 <= i <= s.len(),
+        forall|k: int| i <= k < s.len() ==> is_digit(#[trigger] s[k]),
+        i == 0 || !is_digit(s[i - 1]),
+    ensures
+        trailing_digits(s) == s.len() - i,
+    decreases s.len(),
+{
+    if s.len() > i {
+        assert forall|k: int| i <= k < s.drop_last().len() implies is_digit(
+            #[trigger] s.drop_last()[k],
+        ) by {
+            assert(s.drop_last()[k] == s[k]);
+        }
+        if i > 0 {
+            assert(s.drop_last()[i - 1] == s[i - 1]);
+        }
+        lemma_trailing_digits(s.drop_last(), i);
+    }
+}
+
+fn authority_form_x(a: &[u8]) -> (r: bool)
+    ensures
+        r == authority_form(a@),
+{
+    let mut i = a.len();
+    while i > 0 && 48 <= a[i - 1] && a[i - 1] <= 57
+        invariant
+            i <= a.len(),
+            forall|k: int| i <= k < a.len() ==> is_digit(#[trigger] a@[k]),
+        decreases i,
+    {
+        i -= 1;
+    }
+    proof {
+        lemma_trailing_digits(a@, i as int);
+    }
+    i < a.len() && i >= 2 && a[i - 1] == 58 && no_at_x(a)
+}
+
 fn authority_ok_x(scheme: &[u8], a: Option<&[u8]>, h: Option<&[u8]>) -> (r: bool)
     ensures
         r == authority_ok(scheme@, opt_view(a), opt_view(h)),
@@ -1402,7 +1469,7 @@ pub fn validate_request(fields: &[FieldLine]) -> (r: Result<RequestHead, u64>)
     if eq_bytes(&fields[m].value, &x_connect()) {
         if si.is_none() && pi.is_none() {
             match av {
-                Some(auth) if auth.len() > 0 => {
+                Some(auth) if authority_form_x(auth) => {
                     return Ok(RequestHead::Connect { authority: slice_to_vec(auth) });
                 },
                 _ => return Err(H3_MESSAGE_ERROR),
@@ -1447,7 +1514,7 @@ pub fn validate_trailers(fields: &[FieldLine]) -> (r: bool)
             fv == fields_view(fields@),
             forall|k: int|
                 0 <= k < i ==> !is_pseudo((#[trigger] fv[k]).0) && valid_field_name(fv[k].0)
-                    && valid_field_value(fv[k].1) && !conn_specific(fv[k].0),
+                    && valid_field_value(fv[k].1) && !conn_specific(fv[k].0) && fv[k].0 != lit_te(),
         decreases fields.len() - i,
     {
         let f = &fields[i];
@@ -1455,7 +1522,7 @@ pub fn validate_trailers(fields: &[FieldLine]) -> (r: bool)
             assert(fv[i as int] == fields@[i as int]@);
         }
         if is_pseudo_x(&f.name) || !field_name_ok(&f.name) || !field_value_ok(&f.value)
-            || is_conn_specific_x(&f.name) {
+            || is_conn_specific_x(&f.name) || eq_bytes(&f.name, &x_te()) {
             return false;
         }
         i += 1;
@@ -1488,7 +1555,8 @@ fn resp_header_ok_x(f: &FieldLine) -> (r: bool)
         r == resp_header_ok(f@),
 {
     field_name_ok(&f.name) && !is_pseudo_x(&f.name) && field_value_ok(&f.value)
-        && !is_conn_specific_x(&f.name) && f.name.len() as u64 <= PREFIX_INT_MAX
+        && !is_conn_specific_x(&f.name) && !eq_bytes(&f.name, &x_te())
+        && f.name.len() as u64 <= PREFIX_INT_MAX
         && f.value.len() as u64 <= PREFIX_INT_MAX
 }
 
