@@ -42,3 +42,29 @@ fn sha256_constants_from_roots() {
     }
     assert_eq!((SHA256_K[0], SHA256_K[63], SHA256_H0[0], SHA256_H0[7]), (0x428a2f98, 0xc67178f2, 0x6a09e667, 0x5be0cd19));
 }
+
+fn pattern(len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i * 31 + 7) as u8).collect()
+}
+
+fn rustcrypto(m: &[u8]) -> [u8; 32] {
+    <sha2::Sha256 as sha2::Digest>::digest(m).into()
+}
+
+#[test]
+fn sha256_matches_rustcrypto() {
+    for len in 0..=300 {
+        let m = pattern(len);
+        assert_eq!(sha256(&m), rustcrypto(&m), "len {len}");
+    }
+}
+
+#[test]
+fn sha256_1mib() {
+    let m = pattern(1 << 20);
+    let t = std::time::Instant::now();
+    let d = sha256(&m);
+    let dt = t.elapsed();
+    assert_eq!(d, rustcrypto(&m));
+    assert!(dt < std::time::Duration::from_secs(2), "{dt:?}");
+}
