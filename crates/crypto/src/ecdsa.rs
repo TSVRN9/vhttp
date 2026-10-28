@@ -92,8 +92,8 @@ pub open spec fn ecdsa_h(h1: Seq<u8>) -> nat {
 }
 
 /// Attempt i yields a signature: k in [1, n - 1] (RFC 6979 §3.2 step h.3), r != 0 (§3.4) and
-/// s != 0 (FIPS 186-5 §6.4.1 step 11). FIPS 186-5 step 11 outputs failure for a deterministic
-/// k with r = 0 or s = 0; RFC 6979 §3.4 and RustCrypto keep looping instead, as here.
+/// s != 0 (SEC 1 v2 §4.1.3 steps 3 and 6: return to step 1). FIPS 186-5 §6.4.1 step 11 outputs
+/// failure for a deterministic k with r = 0 or s = 0; RFC 6979 §3.4, SEC 1 and RustCrypto retry, as here.
 pub open spec fn suitable(x: Seq<u8>, h1: Seq<u8>, i: nat) -> bool {
     let k = rfc6979_k(x, h1, i);
     1 <= k < p256_n() && ecdsa_r(k) != 0 && ecdsa_s(os2ip(x), ecdsa_h(h1), k) != 0
@@ -123,6 +123,8 @@ pub open spec fn spec_ecdsa_p256_sha256_sign(d: Seq<u8>, msg: Seq<u8>) -> Option
 }
 
 /// Trusted shim: the body is RustCrypto p256; the ensures is the trusted statement.
+/// Partial correctness: where the spec is None (no suitable attempt, probability ~2^-256) the
+/// shim loops forever instead of returning.
 #[verifier::external_body]
 pub fn p256_ecdsa_sign(d: &[u8], msg: &[u8]) -> (r: Option<[u8; 64]>)
     requires
