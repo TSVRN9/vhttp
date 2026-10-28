@@ -4,6 +4,7 @@
 //! Credit counters (flow control) and stream-ID accounting (3c).
 pub mod ack;
 pub mod codes;
+mod export_check;
 pub mod flow;
 pub mod frame;
 pub mod header;
