@@ -461,7 +461,7 @@ Total keyword count: 38 across 19 sections.
 | 2 | Protocol Overview | 2 | yes | 4 | Server key share in same group as a client share; no application data before server Finished |
 | 2.1 | Incorrect DHE Share | 1 | yes | 4 | Abort with alert if no common parameters |
 | 2.2 | Resumption and Pre-Shared Key (PSK) | 1 | no | Declined (optional: resumption/PSK) | Out-of-band PSK provisioning |
-| 4 | Handshake Protocol | 2 | yes | 4 | Message ordering; unexpected_message on out-of-order handshake message |
+| 4 | Handshake Protocol | 2 | yes | 4 | Message ordering; unexpected_message on out-of-order handshake message; 4a codec: crates/tls/src/handshake.rs (closed in 4b) |
 | 4.1.1 | Cryptographic Negotiation | 4 | partial | 4 | Abort (handshake_failure/insufficient_security) when no group/parameter overlap; HelloRetryRequest when no compatible key_share |
 | 4.1.1 (req) | PSK key establishment mode selection | 1 | no | Declined (optional: resumption/PSK) | "If the server selects a PSK, then it MUST also select a key establishment mode from the set indicated by the client" |
 | 4.1.2 | Client Hello | 16 | partial | 4 | Server-side rules: reject non-null compression (illegal_parameter), ignore unknown cipher suites/extensions, unexpected_message on ClientHello after handshake |
@@ -523,7 +523,7 @@ Total keyword count: 38 across 19 sections.
 | 4.6.3 (req) | "Implementations that receive a KeyUpdate message ... MUST terminate the connection with unexpected_message" | 1 | yes | 4 | RFC 9001 §6: endpoints MUST NOT send TLS KeyUpdate and treat receipt as connection error 0x010a |
 | 5 | Record Protocol | 5 | no | 4 | replaced by QUIC (RFC 9001 §4); CCS: QUIC carries no change_cipher_spec (RFC 9001 §8.4) |
 | 5.1 | Record Layer | 17 | no | 4 | replaced by QUIC (RFC 9001 §4) |
-| 5.1 (req) | Handshake messages MUST NOT span key changes; verify message alignment at key change | 3 | yes | 4 | QUIC analogue: leftover handshake data at a lower encryption level when keys advance is PROTOCOL_VIOLATION (RFC 9001 §4.1.3) |
+| 5.1 (req) | Handshake messages MUST NOT span key changes; verify message alignment at key change | 3 | yes | 4 | QUIC analogue: leftover handshake data at a lower encryption level when keys advance is PROTOCOL_VIOLATION (RFC 9001 §4.1.3); 4a codec: HsReader::is_empty (closed in 4c) |
 | 5.2 | Record Payload Protection | 5 | no | 4 | replaced by QUIC (RFC 9001 §4); packet protection in RFC 9001 §5 |
 | 5.3 | Per-Record Nonce | 3 | no | 4 | replaced by QUIC (RFC 9001 §4); nonce from packet number per RFC 9001 §5.3 |
 | 5.4 | Record Padding | 6 | no | 4 | replaced by QUIC (RFC 9001 §4) |
