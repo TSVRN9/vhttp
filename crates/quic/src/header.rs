@@ -487,6 +487,29 @@ proof fn lemma_rfc_long_v1(b: Seq<u8>, ty: LongType, d: int, s: int, q: int, m: 
 {
 }
 
+/// The token field `spec_token_field` wrote at `p` reads back empty, and `after` follows it.
+proof fn lemma_token_field(b: Seq<u8>, ty: LongType, p: int, after: Seq<u8>)
+    requires
+        0 <= p <= b.len(),
+        b.skip(p) == spec_token_field(ty) + after,
+    ensures
+        rfc_token(b, ty, p) == Some((Seq::<u8>::empty(), p + spec_token_field(ty).len())),
+        b.skip(p + spec_token_field(ty).len()) == after,
+{
+    let q = p + spec_token_field(ty).len();
+    if ty == LongType::Initial {
+        lemma_decode_zero();
+        lemma_decode_prefix(seq![0u8], after);
+        assert(b.skip(p) =~= seq![0u8] + after);
+        assert(b.subrange(p + 1, p + 1) =~= Seq::<u8>::empty());
+    }
+    let n = spec_token_field(ty).len() as int;
+    assert forall|i: int| 0 <= i < after.len() implies #[trigger] b.skip(q)[i] == after[i] by {
+        assert(b.skip(p)[n + i] == b[p + n + i]);
+    }
+    assert(b.skip(q) =~= after);
+}
+
 /// Parsing what `serialize_long_header` wrote, followed by the payload and anything after
 /// it, recovers every field; the packet ends exactly after the payload.
 pub proof fn theorem_long_header_roundtrip(
@@ -519,6 +542,9 @@ pub proof fn theorem_long_header_roundtrip(
             )
         }),
 {
+    hide(rfc_long_header);
+    hide(rfc_token);
+    hide(rfc_varint_decode);
     let w = spec_long_header_bytes(ty, dcid, scid, pn, pn_len, p.len());
     let d = dcid.len() as int;
     let s = scid.len() as int;
@@ -536,14 +562,7 @@ pub proof fn theorem_long_header_roundtrip(
     theorem_serialize_matches_rfc(l);
     bv_long_first_byte(long_type_code(ty), (pn_len - 1) as u8);
     let q = pfx + t.len();
-    if ty == LongType::Initial {
-        assert(tail =~= seq![0u8] + (lv + after));
-        lemma_decode_zero();
-        lemma_decode_prefix(seq![0u8], lv + after);
-        assert(b.subrange(pfx + 1, pfx + 1) =~= Seq::<u8>::empty());
-    }
-    assert(rfc_token(b, ty, pfx) == Some((Seq::<u8>::empty(), q)));
-    assert(b.skip(q) =~= lv + after);
+    lemma_token_field(b, ty, pfx, lv + after);
     lemma_decode_prefix(lv, after);
     lemma_rfc_long_v1(b, ty, d, s, q, lv.len(), l);
 }
@@ -789,21 +808,57 @@ pub fn serialize_long_header(
         assert(out@ =~= start + w);
         assert(out@.skip(start.len() as int) =~= w);
         lemma_pn_roundtrip(pn, pn_len as nat);
-        assert forall|p: Seq<u8>, rest: Seq<u8>| p.len() == payload_len implies #[trigger]
-            rfc_long_header(out@.skip(start.len() as int).add(p).add(rest)) == Some(
-                SpecHeader::Long {
-                    ty,
-                    dcid: dcid@,
-                    scid: scid@,
-                    token: Seq::empty(),
-                    pn_offset: pn_offset as nat,
-                    packet_end: (pn_offset + pn_len + payload_len) as nat,
-                },
-            ) by {
-            theorem_long_header_roundtrip(ty, dcid@, scid@, pn, pn_len, p, rest);
-        }
+        lemma_long_header_parses(ty, dcid@, scid@, pn, pn_len, payload_len as nat);
     }
     pn_offset
+}
+
+/// `theorem_long_header_roundtrip` for every payload of `payload_len` bytes (split out of
+/// `serialize_long_header` for the rlimit).
+proof fn lemma_long_header_parses(
+    ty: LongType,
+    dcid: Seq<u8>,
+    scid: Seq<u8>,
+    pn: u64,
+    pn_len: u8,
+    payload_len: nat,
+)
+    requires
+        ty != LongType::ZeroRtt,
+        dcid.len() <= MAX_CID_LEN,
+        scid.len() <= MAX_CID_LEN,
+        1 <= pn_len <= 4,
+        pn_len + payload_len <= VARINT_MAX,
+    ensures
+        ({
+            let w = spec_long_header_bytes(ty, dcid, scid, pn, pn_len, payload_len);
+            forall|p: Seq<u8>, rest: Seq<u8>|
+                p.len() == payload_len ==> #[trigger] rfc_long_header(w.add(p).add(rest)) == Some(
+                    SpecHeader::Long {
+                        ty,
+                        dcid,
+                        scid,
+                        token: Seq::empty(),
+                        pn_offset: (w.len() - pn_len) as nat,
+                        packet_end: w.len() + payload_len,
+                    },
+                )
+        }),
+{
+    let w = spec_long_header_bytes(ty, dcid, scid, pn, pn_len, payload_len);
+    assert forall|p: Seq<u8>, rest: Seq<u8>| p.len() == payload_len implies #[trigger]
+        rfc_long_header(w.add(p).add(rest)) == Some(
+            SpecHeader::Long {
+                ty,
+                dcid,
+                scid,
+                token: Seq::empty(),
+                pn_offset: (w.len() - pn_len) as nat,
+                packet_end: w.len() + payload_len,
+            },
+        ) by {
+        theorem_long_header_roundtrip(ty, dcid, scid, pn, pn_len, p, rest);
+    }
 }
 
 /// Writes a short (1-RTT) header through the packet number; the DCID may be empty, since a

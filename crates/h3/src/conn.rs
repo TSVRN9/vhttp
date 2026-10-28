@@ -802,6 +802,7 @@ fn fits_peer_x(fields: &[FieldLine], peer: Option<u64>) -> (r: bool)
 
 /// Writes `r` on `id` with FIN, `:status` first. `false` (nothing written): the field section
 /// exceeds the peer's limit, or a frame would be too long to encode.
+#[verifier::spinoff_prover]
 fn write_response(id: u64, r: &Response, peer: Option<u64>, out: &mut Vec<Output>) -> (ok: bool)
     requires
         valid_response(r@, false) || valid_response(r@, true),
@@ -2916,6 +2917,7 @@ impl H3Conn {
         }
     }
 
+    #[verifier::spinoff_prover]
     fn request_data(&mut self, id: u64, data: &[u8], fin: bool, out: &mut Vec<Output>)
         requires
             old(self).wf(),
@@ -3013,99 +3015,127 @@ impl H3Conn {
                         }
                     }
                 }
-                if let Some(g) = self.goaway {
-                    if id >= g {
-                        //= https://www.rfc-editor.org/rfc/rfc9114#section-5.2
-                        //# Upon sending a GOAWAY frame, the endpoint
-                        //# SHOULD explicitly cancel (see Sections 4.1.1 and 7.2.3) any requests
-                        //# or pushes that have identifiers greater than or equal to the one
-                        //# indicated, in order to clean up transport state for the affected
-                        //# streams.
-                        reject(id, fin, out);
-                        if !fin {
-                            // Kept until the peer's FIN or reset, so data in flight is ignored.
-                            let e = ReqEntry {
-                                id,
-                                stream: RequestStream::new(),
-                                rx_open: false,
-                                fin_seen: false,
-                                head: false,
-                                is_head: false,
-                                send_open: false,
-                                trailers: Vec::new(),
-                            };
-                            proof {
-                                lemma_reqs_push(self.reqs@, self.rhist@, e);
-                                lemma_dom_push(self.reqs@, self.rstate@, e);
-                            }
-                            self.reqs.push(e);
-                            self.rhist = Ghost(self.rhist@.insert(id, req_hist_of(e)));
-                            self.rstate = Ghost(self.rstate@.insert(id, state_of(e)));
-                        }
-                        proof {
-                            assert(rejected_id(c0, id));
-                            lemma_writes_none(added(o0, out@), 3);
-                            assert(self.ctrl@ + Seq::<u8>::empty() =~= self.ctrl@);
-                            assert(self.goaways@.take(self.goaways@.len() as int) =~= self.goaways@);
-                        }
-                        return;
+                self.request_data_new(id, data, fin, out);
+            },
+        }
+    }
+
+    /// `request_data` for a stream with no entry yet (split out for the rlimit).
+    #[verifier::spinoff_prover]
+    fn request_data_new(&mut self, id: u64, data: &[u8], fin: bool, out: &mut Vec<Output>)
+        requires
+            old(self).wf(),
+            !old(self).closed,
+            id % 4 == 0,
+            !old(self).rstate@.contains_key(id),
+            forall|k: int| 0 <= k < old(self).reqs@.len() ==> (#[trigger] old(self).reqs@[k]).id != id,
+        ensures
+            step(*old(self), *final(self), old(out)@, final(out)@),
+            final(self).goaways() == old(self).goaways(),
+            final(self).peer_max == old(self).peer_max,
+            frame(*old(self), *final(self), Some(id)),
+            req_call(*old(self), *final(self), id, data@, fin, added(old(out)@, final(out)@)),
+            final(self).seen == old(self).seen,
+    {
+        hide(request::rfc_req);
+        hide(req_outs);
+        hide(request::push_all);
+        let ghost c0 = *self;
+        let ghost o0 = out@;
+        proof {
+            lemma_added_refl(o0);
+        }
+        if let Some(g) = self.goaway {
+            if id >= g {
+                //= https://www.rfc-editor.org/rfc/rfc9114#section-5.2
+                //# Upon sending a GOAWAY frame, the endpoint
+                //# SHOULD explicitly cancel (see Sections 4.1.1 and 7.2.3) any requests
+                //# or pushes that have identifiers greater than or equal to the one
+                //# indicated, in order to clean up transport state for the affected
+                //# streams.
+                reject(id, fin, out);
+                if !fin {
+                    // Kept until the peer's FIN or reset, so data in flight is ignored.
+                    let e = ReqEntry {
+                        id,
+                        stream: RequestStream::new(),
+                        rx_open: false,
+                        fin_seen: false,
+                        head: false,
+                        is_head: false,
+                        send_open: false,
+                        trailers: Vec::new(),
+                    };
+                    proof {
+                        lemma_reqs_push(self.reqs@, self.rhist@, e);
+                        lemma_dom_push(self.reqs@, self.rstate@, e);
                     }
+                    self.reqs.push(e);
+                    self.rhist = Ghost(self.rhist@.insert(id, req_hist_of(e)));
+                    self.rstate = Ghost(self.rstate@.insert(id, state_of(e)));
                 }
                 proof {
-                    assert(!rejected_id(c0, id));
-                }
-                let mut e = ReqEntry {
-                    id,
-                    stream: RequestStream::new(),
-                    rx_open: true,
-                    fin_seen: false,
-                    head: false,
-                    is_head: false,
-                    send_open: true,
-                    trailers: Vec::new(),
-                };
-                proof {
-                    assert(fields_view(e.trailers@) =~= Seq::<(Seq<u8>, Seq<u8>)>::empty());
-                }
-                self.highest = match self.highest {
-                    Some(h) => if h < id {
-                        Some(id)
-                    } else {
-                        Some(h)
-                    },
-                    None => Some(id),
-                };
-                let pm = self.peer_max;
-                let closing = feed_req(&mut e, data, fin, pm, out);
-                self.rhist = Ghost(self.rhist@.insert(id, req_hist_of(e)));
-                proof {
+                    assert(rejected_id(c0, id));
                     lemma_writes_none(added(o0, out@), 3);
                     assert(self.ctrl@ + Seq::<u8>::empty() =~= self.ctrl@);
                     assert(self.goaways@.take(self.goaways@.len() as int) =~= self.goaways@);
-                    assert(Seq::<u8>::empty() + data@ =~= data@);
                 }
-                if closing {
-                    self.closed = true;
-                    return;
-                }
-                if !(e.fin_seen && !e.send_open) {
-                    proof {
-                        lemma_reqs_push(c0.reqs@, c0.rhist@, e);
-                        lemma_dom_push(c0.reqs@, c0.rstate@, e);
-                    }
-                    self.reqs.push(e);
-                    self.rstate = Ghost(self.rstate@.insert(id, state_of(e)));
-                } else {
-                    proof {
-                        assert forall|k: int| 0 <= k < self.reqs@.len() implies req_entry_ok(
-                            #[trigger] self.reqs@[k],
-                        ) && self.rhist@.contains_key(self.reqs@[k].id) && self.rhist@[self.reqs@[k].id]
-                            == req_hist_of(self.reqs@[k]) by {
-                            assert(self.reqs@[k].id != id);
-                        }
-                    }
-                }
+                return;
+            }
+        }
+        proof {
+            assert(!rejected_id(c0, id));
+        }
+        let mut e = ReqEntry {
+            id,
+            stream: RequestStream::new(),
+            rx_open: true,
+            fin_seen: false,
+            head: false,
+            is_head: false,
+            send_open: true,
+            trailers: Vec::new(),
+        };
+        proof {
+            assert(fields_view(e.trailers@) =~= Seq::<(Seq<u8>, Seq<u8>)>::empty());
+        }
+        self.highest = match self.highest {
+            Some(h) => if h < id {
+                Some(id)
+            } else {
+                Some(h)
             },
+            None => Some(id),
+        };
+        let pm = self.peer_max;
+        let closing = feed_req(&mut e, data, fin, pm, out);
+        self.rhist = Ghost(self.rhist@.insert(id, req_hist_of(e)));
+        proof {
+            lemma_writes_none(added(o0, out@), 3);
+            assert(self.ctrl@ + Seq::<u8>::empty() =~= self.ctrl@);
+            assert(self.goaways@.take(self.goaways@.len() as int) =~= self.goaways@);
+            assert(Seq::<u8>::empty() + data@ =~= data@);
+        }
+        if closing {
+            self.closed = true;
+            return;
+        }
+        if !(e.fin_seen && !e.send_open) {
+            proof {
+                lemma_reqs_push(c0.reqs@, c0.rhist@, e);
+                lemma_dom_push(c0.reqs@, c0.rstate@, e);
+            }
+            self.reqs.push(e);
+            self.rstate = Ghost(self.rstate@.insert(id, state_of(e)));
+        } else {
+            proof {
+                assert forall|k: int| 0 <= k < self.reqs@.len() implies req_entry_ok(
+                    #[trigger] self.reqs@[k],
+                ) && self.rhist@.contains_key(self.reqs@[k].id) && self.rhist@[self.reqs@[k].id]
+                    == req_hist_of(self.reqs@[k]) by {
+                    assert(self.reqs@[k].id != id);
+                }
+            }
         }
     }
 
@@ -3540,6 +3570,7 @@ impl H3Conn {
     ///
     /// Caller's obligation (RFC 9110 §8.6 MUST NOT; the transport can't check it): on a response
     /// to HEAD, or a 304, a `content-length` must be the length a GET would have had (a 200).
+    #[verifier::spinoff_prover]
     pub fn send_response(&mut self, stream_id: u64, resp: &Response, out: &mut Vec<Output>) -> (r: Result<(), ()>)
         requires
             old(self).wf(),
@@ -3567,6 +3598,10 @@ impl H3Conn {
                 old(self).req_state(stream_id)->0.is_head,
             ) ==> r is Err,
     {
+        hide(one_response);
+        hide(valid_response);
+        hide(fits_peer);
+        hide(resp_fields);
         let ghost c0 = *self;
         let ghost o0 = out@;
         proof {
@@ -3605,6 +3640,7 @@ impl H3Conn {
         }
         self.end_send(i);
         proof {
+            reveal(one_response);
             let a = added(o0, out@);
             assert(req_entry_ok(c0.reqs@[i as int]));
             assert(a[0] == a.take(1)[0]);
