@@ -262,7 +262,7 @@ proof fn bv_be32(b0: u32, b1: u32, b2: u32, b3: u32) by (bit_vector)
 {
 }
 
-proof fn lemma_os2ip4(s: Seq<u8>)
+pub(crate) proof fn lemma_os2ip4(s: Seq<u8>)
     requires
         s.len() == 4,
     ensures
@@ -415,7 +415,7 @@ proof fn bv_div256_u64(x: u64) by (bit_vector)
 }
 
 /// I2OSP(x, 4) of a 32-bit word is its big-endian bytes.
-proof fn lemma_i2osp_be4(x: u32)
+pub(crate) proof fn lemma_i2osp_be4(x: u32)
     ensures
         i2osp(x as nat, 4) =~= seq![(x >> 24) as u8, (x >> 16) as u8, (x >> 8) as u8, x as u8],
 {
@@ -424,7 +424,7 @@ proof fn lemma_i2osp_be4(x: u32)
 }
 
 /// I2OSP(x, 8) of a 64-bit word is its big-endian bytes.
-proof fn lemma_i2osp_be8(x: u64)
+pub(crate) proof fn lemma_i2osp_be8(x: u64)
     ensures
         i2osp(x as nat, 8) =~= seq![
             (x >> 56) as u8,
