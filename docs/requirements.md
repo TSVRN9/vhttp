@@ -473,7 +473,7 @@ Total keyword count: 38 across 19 sections.
 | 4.1.3 (req) | Downgrade sentinel in ServerHello.Random | 4 | no | Declined (optional: TLS 1.2-and-older compatibility) | "TLS 1.3 servers which negotiate TLS 1.2 or below ... MUST set the last 8 bytes"; we never negotiate older versions |
 | 4.1.4 | Hello Retry Request | 11 | partial | 4 | Server: supported_versions in HRR, no unoffered extensions except cookie, same cipher suite on updated ClientHello |
 | 4.1.4 (req) | Client-side HRR processing | 6 | no | N/A (client-only) | "Clients MUST abort ... if the HelloRetryRequest would not result in any change"; second HRR; cipher suite/version checks |
-| 4.2 | Extensions | 5 | yes | 4 | No unsolicited extension responses (cookie excepted), unsupported_extension / illegal_parameter aborts, no duplicate extension types |
+| 4.2 | Extensions | 5 | yes | 4 | No unsolicited extension responses (cookie excepted), unsupported_extension / illegal_parameter aborts, no duplicate extension types; 4a codec: crates/tls/src/ext.rs: duplicates, psk-last, oid_filters (closed in 4b: no unsolicited responses) |
 | 4.2.1 | Supported Versions | 16 | partial | 4 | Server: use only supported_versions (not legacy_version), ignore unknown versions, reply with 0x0304 and legacy_version 0x0303 |
 | 4.2.1 (req) | Server supporting TLS 1.2 / negotiating pre-1.3 | 3 | no | Declined (optional: TLS 1.2-and-older compatibility) | "servers ... which also support TLS 1.2 MUST negotiate TLS 1.2"; "MUST NOT send supported_versions" when negotiating pre-1.3 |
 | 4.2.1 (req) | Client-side supported_versions rules | 6 | no | N/A (client-only) | Client MUST send extension, check it first in ServerHello, abort on bad selected version |
