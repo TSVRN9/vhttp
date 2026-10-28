@@ -192,24 +192,61 @@ pub fn parse_ext_list(b: &[u8]) -> (r: Option<Vec<Ext>>)
     Some(v)
 }
 
+/// Bit `u % 64` of word `u / 64` of the seen table.
+spec fn seen_bit(seen: Seq<u64>, u: int) -> bool {
+    (seen[u / 64] >> ((u % 64) as u64)) & 1 == 1
+}
+
+proof fn lemma_bit_zero(c: u64)
+    by (bit_vector)
+    ensures
+        (0u64 >> c) & 1 == 0,
+{
+}
+
+proof fn lemma_bit_set_same(w: u64, b: u64)
+    by (bit_vector)
+    requires
+        b < 64,
+    ensures
+        ((w | (1u64 << b)) >> b) & 1 == 1,
+{
+}
+
+proof fn lemma_bit_set_other(w: u64, b: u64, c: u64)
+    by (bit_vector)
+    requires
+        b < 64,
+        c < 64,
+        b != c,
+    ensures
+        ((w | (1u64 << b)) >> c) & 1 == (w >> c) & 1,
+{
+}
+
 pub fn check_ch_exts(s: &Vec<Ext>) -> (r: Result<(), u64>)
     ensures
         r == rfc_ch_ext_check(s.deep_view()),
 {
     let ghost d = s.deep_view();
     let n = s.len();
-    // ponytail: 64 KiB scratch per ClientHello; an [u64; 1024] bitmap if memory matters.
-    let mut seen: Vec<bool> = Vec::new();
-    let mut t: usize = 0;
-    while t < 0x1_0000
+    // ponytail: an 8 KiB bitmap zeroed per ClientHello (twice with HRR) is the main CPU cost
+    // of the unauthenticated HRR path, where no asymmetric crypto runs; sort the types and
+    // scan for neighbours (O(n log n) in the extension count) if that fill shows in profiles.
+    let mut seen: Vec<u64> = Vec::new();
+    let mut w: usize = 0;
+    while w < 1024
         invariant
-            t <= 0x1_0000,
-            seen@.len() == t,
-            forall|k: int| 0 <= k < t ==> !seen@[k],
-        decreases 0x1_0000 - t,
+            w <= 1024,
+            seen@.len() == w,
+            forall|k: int| 0 <= k < w ==> seen@[k] == 0,
+        decreases 1024 - w,
     {
-        seen.push(false);
-        t += 1;
+        seen.push(0);
+        w += 1;
+    }
+    assert forall|u: int| 0 <= u < 0x1_0000 implies !#[trigger] seen_bit(seen@, u) by {
+        lemma_bit_zero((u % 64) as u64);
     }
     let mut i: usize = 0;
     while i < n
@@ -218,9 +255,9 @@ pub fn check_ch_exts(s: &Vec<Ext>) -> (r: Result<(), u64>)
             d == s.deep_view(),
             d.len() == n,
             i <= n,
-            seen@.len() == 0x1_0000,
+            seen@.len() == 1024,
             forall|u: int|
-                0 <= u < 0x1_0000 ==> (#[trigger] seen@[u] <==> exists|k: int|
+                0 <= u < 0x1_0000 ==> (#[trigger] seen_bit(seen@, u) <==> exists|k: int|
                     0 <= k < i && #[trigger] d[k].ty == u),
             forall|a: int, c: int| 0 <= a < c < i ==> #[trigger] d[a].ty != #[trigger] d[c].ty,
             forall|k: int| 0 <= k < i && #[trigger] d[k].ty == EXT_PRE_SHARED_KEY ==> k == n - 1,
@@ -229,17 +266,43 @@ pub fn check_ch_exts(s: &Vec<Ext>) -> (r: Result<(), u64>)
     {
         let ty = s[i].ty;
         assert(d[i as int].ty == ty);
-        if seen[ty as usize] {
+        let wi = (ty / 64) as usize;
+        let b = (ty % 64) as u64;
+        let word = seen[wi];
+        if (word >> b) & 1 == 1 {
             proof {
+                assert(seen_bit(seen@, ty as int));
                 let k = choose|k: int| 0 <= k < i && #[trigger] d[k].ty == ty;
                 assert(0 <= k < i && d[k].ty == d[i as int].ty);
             }
             return Err(ALERT_ILLEGAL_PARAMETER);
         }
+        assert(!seen_bit(seen@, ty as int));
         if (ty == EXT_PRE_SHARED_KEY && i != n - 1) || ty == EXT_OID_FILTERS {
             return Err(ALERT_ILLEGAL_PARAMETER);
         }
-        seen.set(ty as usize, true);
+        let ghost old_seen = seen@;
+        seen.set(wi, word | (1u64 << b));
+        proof {
+            assert forall|u: int| 0 <= u < 0x1_0000 implies (#[trigger] seen_bit(seen@, u)
+                <==> exists|k: int| 0 <= k < i + 1 && #[trigger] d[k].ty == u) by {
+                if u == ty as int {
+                    lemma_bit_set_same(word, b);
+                    assert(d[i as int].ty == u);
+                } else {
+                    if u / 64 == wi as int {
+                        lemma_bit_set_other(word, b, (u % 64) as u64);
+                    } else {
+                        assert(seen@[u / 64] == old_seen[u / 64]);
+                    }
+                    assert(seen_bit(seen@, u) == seen_bit(old_seen, u));
+                    if exists|k: int| 0 <= k < i + 1 && #[trigger] d[k].ty == u {
+                        let k = choose|k: int| 0 <= k < i + 1 && #[trigger] d[k].ty == u;
+                        assert(k != i);
+                    }
+                }
+            }
+        }
         i += 1;
     }
     Ok(())

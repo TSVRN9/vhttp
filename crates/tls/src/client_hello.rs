@@ -414,6 +414,30 @@ pub open spec fn rfc_client_hello(body: Seq<u8>) -> Result<SpecClientHello, u64>
     }
 }
 
+/// Facts about an accepted ClientHello that the serializers' preconditions and negotiation
+/// rely on.
+pub proof fn lemma_client_hello_ok(body: Seq<u8>)
+    requires
+        rfc_client_hello(body) is Ok,
+    ensures
+        ({
+            let s = rfc_client_hello(body)->Ok_0;
+            &&& s.legacy_session_id.len() == 0
+            &&& s.versions.contains(TLS13)
+            &&& s.random.len() == 32
+            &&& s.key_shares matches Some(ks) ==> forall|i: int|
+                0 <= i < ks.len() ==> 1 <= #[trigger] ks[i].key_exchange.len() <= 0xffff
+        }),
+{
+    let f = rfc_ch_fields(body).unwrap();
+    let ks = spec_find(rfc_ch_exts(f), EXT_KEY_SHARE);
+    if let Some(d) = ks {
+        if let Some(c) = rfc_vec_exact(d, 0, 0xffff) {
+            lemma_key_share_list_lens(c);
+        }
+    }
+}
+
 // =============================================================================
 // Exec
 // =============================================================================

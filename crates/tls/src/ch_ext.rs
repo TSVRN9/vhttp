@@ -215,6 +215,28 @@ pub open spec fn rfc_early_data_ok(d: Seq<u8>) -> bool {
     d.len() == 0
 }
 
+/// Every parsed `key_exchange` has a length in `1..=0xffff`.
+pub proof fn lemma_key_share_list_lens(b: Seq<u8>)
+    ensures
+        rfc_key_share_list(b) matches Some(ks) ==> forall|i: int|
+            0 <= i < ks.len() ==> 1 <= #[trigger] ks[i].key_exchange.len() <= 0xffff,
+    decreases b.len(),
+{
+    if let Some(ks) = rfc_key_share_list(b) {
+        if b.len() > 0 {
+            let (kx, rest) = rfc_vec(b.skip(2), 1, 0xffff).unwrap();
+            lemma_key_share_list_lens(rest);
+            let tail = rfc_key_share_list(rest).unwrap();
+            assert forall|i: int| 0 <= i < ks.len() implies 1 <= #[trigger] ks[i].key_exchange.len()
+                <= 0xffff by {
+                if i > 0 {
+                    assert(ks[i] == tail[i - 1]);
+                }
+            }
+        }
+    }
+}
+
 // =============================================================================
 // Exec
 // =============================================================================
