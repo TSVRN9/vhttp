@@ -263,6 +263,18 @@ impl StreamIds {
         Ok(Opened::New { first: 4 * next + id % 4, count: q + 1 - next })
     }
 
+    /// How many peer streams of this direction are open or were.
+    pub fn peer_opened(&self, bidi: bool) -> (r: u64)
+        ensures
+            r == self.peer_opened_spec(bidi),
+    {
+        if bidi {
+            self.peer_bidi_next
+        } else {
+            self.peer_uni_next
+        }
+    }
+
     #[verifier::when_used_as_spec(peer_created_spec)]
     pub fn peer_created(&self, id: u64) -> (r: bool)
         ensures
