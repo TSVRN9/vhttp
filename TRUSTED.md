@@ -12,7 +12,7 @@
 - Z3 4.16.0 (bundled with Verus)
 - vstd 0.0.0-2026-10-04-0306 (must equal the pin in vest_lib 0.2.2)
 
-The shipped artifact is built by plain `cargo build` on the user's default stable rustc (unpinned; currently 1.92.0), with `verus!` erasure done by `verus_builtin_macros` (version from `Cargo.lock`, currently 0.0.0-2026-09-20-0158). Verification used Verus's own rustc 1.98.1 frontend, so the compiler that checks the proofs is not the compiler that builds the binary. No `rust-toolchain.toml` is needed.
+The shipped artifact is built by `cargo build --release` with rustc 1.98.1, pinned by `rust-toolchain.toml`, which is Verus's own toolchain, so the compiler that checks the proofs is the compiler that builds the binary. The release profile keeps overflow checks on, except in the verified crates (per-package overrides in `Cargo.toml`), where Verus proves the absence of overflow. `verus!` erasure is done by `verus_builtin_macros` (version from `Cargo.lock`, currently 0.0.0-2026-09-20-0158).
 
 - Test-only (crates/tls dev-dependencies, not in the trusted base; `cargo tree -e normal` contains none of them). These are the Cargo.lock entries this phase adds:
   - ring =0.17.14, with untrusted 0.9.0 and the getrandom 0.2.17 *crate*, which is test-only and distinct from the trusted OS getrandom above;
