@@ -74,3 +74,58 @@ fn appends() {
     serialize_encrypted_extensions(&[], &mut out);
     assert_eq!(out[0], 0xee);
 }
+
+#[test]
+fn rfc8448_s5_certificate() {
+    let der = R5_CERT[11..443].to_vec();
+    assert_eq!(der.len(), 432);
+    assert_eq!(&der[..4], &hex("308201ac")[..]);
+    let mut out = Vec::new();
+    serialize_certificate(&vec![der], &mut out);
+    assert_eq!(out, R5_CERT);
+}
+
+#[test]
+fn two_cert_chain() {
+    let der = R5_CERT[11..443].to_vec();
+    let mut out = Vec::new();
+    serialize_certificate(&vec![der, vec![0x30, 0x00]], &mut out);
+    assert_eq!(&out[..15], &hex(&"0b0001c0 00 0001bc 0001b0 308201ac".replace(' ', ""))[..]);
+    assert_eq!(&out[out.len() - 10..], &hex(&"e1 0000 000002 3000 0000".replace(' ', ""))[..]);
+    assert_eq!(out.len(), 4 + 0x1c0);
+}
+
+#[test]
+fn rfc8448_s5_cv() {
+    let mut out = Vec::new();
+    serialize_certificate_verify(0x0804, &R5_CV[8..136], &mut out);
+    assert_eq!(out, R5_CV);
+}
+
+#[test]
+fn rfc8448_s5_finished() {
+    let vd: [u8; 32] = hex("8863e6bfb0420a927fa27f34336a70ae426e968e3eb884945b96856dba3976d1")
+        .try_into()
+        .unwrap();
+    let mut out = Vec::new();
+    serialize_finished(&vd, &mut out);
+    assert_eq!(out, R5_SFIN);
+}
+
+#[test]
+fn finished_parse() {
+    assert_eq!(parse_finished(&[0x11; 32]), Ok([0x11; 32]));
+    assert_eq!(parse_finished(&[0x11; 31]), Err(0x132));
+    assert_eq!(parse_finished(&[0x11; 33]), Err(0x132));
+    assert_eq!(parse_finished(&[]), Err(0x132));
+}
+
+#[test]
+fn appends_cert_cv_fin() {
+    let mut out = vec![0xee];
+    serialize_certificate(&vec![vec![1]], &mut out);
+    serialize_certificate_verify(0x0804, &[], &mut out);
+    serialize_finished(&[0; 32], &mut out);
+    assert_eq!(out[0], 0xee);
+    assert_eq!(out.len(), 1 + 14 + 8 + 36);
+}

@@ -81,6 +81,75 @@ pub open spec fn spec_encrypted_extensions_bytes(tp: Seq<u8>) -> Seq<u8> {
     )
 }
 
+/// The `CertificateEntry` list: each is `cert_data<1..2^24-1>` and an empty
+/// `extensions<0..2^16-1>`.
+pub open spec fn spec_cert_entries(chain: Seq<Seq<u8>>) -> Seq<u8>
+    decreases chain.len(),
+{
+    if chain.len() == 0 {
+        seq![]
+    } else {
+        spec_cert_entries(chain.drop_last()) + spec_vec_bytes(0xff_ffff, chain.last())
+            + spec_vec_bytes(0xffff, seq![])
+    }
+}
+
+pub open spec fn spec_certificate_bytes(chain: Seq<Seq<u8>>) -> Seq<u8> {
+    spec_hs_bytes(
+        HT_CERTIFICATE,
+        spec_vec_bytes(255, seq![]) + spec_vec_bytes(0xff_ffff, spec_cert_entries(chain)),
+    )
+}
+
+pub open spec fn cert_chain_ok(chain: Seq<Seq<u8>>) -> bool {
+    chain.len() >= 1 && (forall|i: int| 0 <= i < chain.len() ==> 1 <= #[trigger] chain[i].len()
+        <= 0xff_ffff) && spec_cert_entries(chain).len() + 4 <= 0xff_ffff
+}
+
+pub open spec fn spec_certificate_verify_bytes(scheme: u16, sig: Seq<u8>) -> Seq<u8> {
+    spec_hs_bytes(HT_CERTIFICATE_VERIFY, spec_be_bytes(scheme as nat, 2) + spec_vec_bytes(0xffff, sig))
+}
+
+pub open spec fn spec_finished_bytes(vd: Seq<u8>) -> Seq<u8> {
+    spec_hs_bytes(HT_FINISHED, vd)
+}
+
+/// `Finished.verify_data` is exactly `Hash.length` (32 for SHA-256) bytes.
+pub open spec fn rfc_finished(body: Seq<u8>) -> Result<Seq<u8>, u64> {
+    if body.len() == 32 {
+        Ok(body)
+    } else {
+        Err(ALERT_DECODE_ERROR)
+    }
+}
+
+proof fn lemma_vec_len(ceiling: nat, c: Seq<u8>)
+    ensures
+        spec_vec_bytes(ceiling, c).len() == len_width(ceiling) + c.len(),
+{
+    assert(spec_be_bytes(c.len(), len_width(ceiling)).len() == len_width(ceiling));
+}
+
+/// The entries list only grows as certificates are added.
+proof fn lemma_entries_mono(chain: Seq<Seq<u8>>, i: int)
+    requires
+        0 <= i <= chain.len(),
+    ensures
+        spec_cert_entries(chain.take(i)).len() <= spec_cert_entries(chain).len(),
+    decreases chain.len() - i,
+{
+    if i < chain.len() {
+        let t = chain.take(i + 1);
+        assert(t.drop_last() =~= chain.take(i));
+        assert(t.last() == chain[i]);
+        lemma_vec_len(0xff_ffff, chain[i]);
+        lemma_vec_len(0xffff, seq![]);
+        lemma_entries_mono(chain, i + 1);
+    } else {
+        assert(chain.take(i) =~= chain);
+    }
+}
+
 // =============================================================================
 // Exec
 // =============================================================================
@@ -267,6 +336,141 @@ pub fn serialize_encrypted_extensions(transport_params: &[u8], out: &mut Vec<u8>
             + spec_ext_bytes(EXT_QUIC_TRANSPORT_PARAMETERS, transport_params@),
     ));
     put_hs(out, HT_ENCRYPTED_EXTENSIONS, &body);
+}
+
+// RFC 8446 §4.4.2: X509 entries only (`server_certificate_type` is never negotiated), no
+// OpenPGP, no extensions in any entry, and a zero-length context.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-4.4.2
+//# Otherwise (in the case of server authentication),
+//# this field SHALL be zero length.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-4.4.2
+//# The server's certificate_list MUST always be non-empty.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-4.4.2
+//# The OpenPGP certificate type [RFC6091] MUST NOT be used with TLS 1.3.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-4.4.2
+//# Extensions in the Certificate message from the server MUST
+//# correspond to ones from the ClientHello message.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-4.4.2
+//# If the RawPublicKey certificate type was negotiated, then the
+//# certificate_list MUST contain no more than one CertificateEntry,
+//# which contains an ASN1_subjectPublicKeyInfo value as defined in
+//# [RFC7250], Section 3.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-4.4.2.1
+//# TLS 1.3 servers MUST NOT act upon its presence or information in it
+//# when processing ClientHello messages; in particular, they MUST NOT
+//# send the status_request_v2 extension in the EncryptedExtensions,
+//# CertificateRequest, or Certificate messages.
+//= https://www.rfc-editor.org/rfc/rfc8446#appendix-B
+//# TLS 1.3 implementations MUST NOT send them but might receive them
+//# from older TLS implementations.
+//= https://www.rfc-editor.org/rfc/rfc9001#section-4.4
+//# More specifically, servers MUST NOT send post-
+//# handshake TLS CertificateRequest messages, and clients MUST treat
+//# receipt of such messages as a connection error of type
+//# PROTOCOL_VIOLATION.
+// ponytail: chain is opaque DER; 4b passes the config's chain unchanged.
+pub fn serialize_certificate(chain: &Vec<Vec<u8>>, out: &mut Vec<u8>)
+    requires
+        cert_chain_ok(chain.deep_view()),
+    ensures
+        final(out)@ == old(out)@ + spec_certificate_bytes(chain.deep_view()),
+{
+    let ghost cs = chain.deep_view();
+    let mut entries: Vec<u8> = Vec::new();
+    let mut i: usize = 0;
+    while i < chain.len()
+        invariant
+            i <= chain.len(),
+            cs == chain.deep_view(),
+            cert_chain_ok(cs),
+            entries@ == spec_cert_entries(cs.take(i as int)),
+        decreases chain.len() - i,
+    {
+        proof {
+            assert(chain.deep_view()[i as int] == chain[i as int]@);
+            assert(cs[i as int].len() <= 0xff_ffff);
+            lemma_vec_len(0xff_ffff, cs[i as int]);
+            lemma_vec_len(0xffff, seq![]);
+            lemma_entries_mono(cs, i as int + 1);
+        }
+        let ghost before = entries@;
+        put_vec(&mut entries, 0xff_ffff, &chain[i]);
+        let empty: Vec<u8> = Vec::new();
+        put_vec(&mut entries, 0xffff, &empty);
+        proof {
+            let t = cs.take(i as int + 1);
+            assert(t.drop_last() =~= cs.take(i as int));
+            assert(t.last() == cs[i as int]);
+            assert(empty@ =~= Seq::<u8>::empty());
+            assert(entries@ =~= before + spec_vec_bytes(0xff_ffff, cs[i as int])
+                + spec_vec_bytes(0xffff, seq![]));
+        }
+        i += 1;
+    }
+    proof {
+        assert(cs.take(i as int) =~= cs);
+    }
+    let empty: Vec<u8> = Vec::new();
+    let mut body: Vec<u8> = Vec::new();
+    put_vec(&mut body, 255, &empty);
+    put_vec(&mut body, 0xff_ffff, &entries);
+    proof {
+        assert(empty@ =~= Seq::<u8>::empty());
+        assert(body@ =~= spec_vec_bytes(255, seq![]) + spec_vec_bytes(
+            0xff_ffff,
+            spec_cert_entries(cs),
+        ));
+        lemma_vec_len(255, seq![]);
+        lemma_vec_len(0xff_ffff, spec_cert_entries(cs));
+    }
+    put_hs(out, HT_CERTIFICATE, &body);
+}
+
+// `scheme` is a `tls::codes`-grade SignatureScheme chosen by 4b, never a reserved value.
+pub fn serialize_certificate_verify(scheme: u16, signature: &[u8], out: &mut Vec<u8>)
+    requires
+        signature@.len() <= 0xffff,
+    ensures
+        final(out)@ == old(out)@ + spec_certificate_verify_bytes(scheme, signature@),
+{
+    let mut body: Vec<u8> = Vec::new();
+    put_u16(&mut body, scheme);
+    put_vec(&mut body, 0xffff, signature);
+    assert(body@ =~= spec_be_bytes(scheme as nat, 2) + spec_vec_bytes(0xffff, signature@));
+    put_hs(out, HT_CERTIFICATE_VERIFY, &body);
+}
+
+pub fn serialize_finished(verify_data: &[u8; 32], out: &mut Vec<u8>)
+    ensures
+        final(out)@ == old(out)@ + spec_finished_bytes(verify_data@),
+{
+    put_hs(out, HT_FINISHED, verify_data.as_slice());
+}
+
+pub fn parse_finished(body: &[u8]) -> (r: Result<[u8; 32], u64>)
+    ensures
+        match r {
+            Ok(a) => rfc_finished(body@) == Ok::<Seq<u8>, u64>(a@),
+            Err(e) => rfc_finished(body@) == Err::<Seq<u8>, u64>(e),
+        },
+{
+    if body.len() != 32 {
+        return Err(ALERT_DECODE_ERROR);
+    }
+    let mut a = [0u8; 32];
+    let mut i: usize = 0;
+    while i < 32
+        invariant
+            i <= 32,
+            body@.len() == 32,
+            forall|k: int| 0 <= k < i ==> a[k] == body@[k],
+        decreases 32 - i,
+    {
+        a[i] = body[i];
+        i += 1;
+    }
+    assert(a@ =~= body@);
+    Ok(a)
 }
 
 } // verus!
