@@ -409,7 +409,7 @@ proof fn lemma_sub_chain(
 // Montgomery product: r < m and r * 2^256 == a * b (mod m).
 // ct: secret a, b; public m, mp
 // The row quotients and `d4` are read only by proof code, which a plain `cargo build` erases.
-#[allow(dead_code, unused_variables)]  // dead_code: used from Task 3
+#[allow(unused_variables)]
 #[verifier::spinoff_prover]
 pub(crate) fn mont_mul(a: &[u64; 4], b: &[u64; 4], m: &[u64; 4], mp: u64) -> (r: [u64; 4])
     requires
@@ -554,7 +554,6 @@ fn add4(a: &[u64; 4], b: &[u64; 4]) -> (r: ([u64; 4], u64))
 
 // 4-limb subtract with borrow out: the shared constant-time compare and subtract.
 // ct: secret a, b
-#[allow(dead_code)]  // used from Task 3
 pub(crate) fn sub4(a: &[u64; 4], b: &[u64; 4]) -> (r: ([u64; 4], u64))
     ensures
         r.1 <= 1,
@@ -592,7 +591,6 @@ pub(crate) fn sub4(a: &[u64; 4], b: &[u64; 4]) -> (r: ([u64; 4], u64))
 
 // Masked 4-limb select: b == 1 picks x, b == 0 picks y.
 // ct: secret b, x, y
-#[allow(dead_code)]  // used from Task 3
 pub(crate) fn select4(b: u64, x: &[u64; 4], y: &[u64; 4]) -> (r: [u64; 4])
     requires
         b <= 1,
@@ -642,7 +640,6 @@ proof fn bv_xor_eq(x: u64, y: u64) by (bit_vector)
 
 // 1 iff v4(a) == 0, without branching.
 // ct: secret a
-#[allow(dead_code)]  // used from Task 3
 pub(crate) fn is_zero4(a: &[u64; 4]) -> (r: u64)
     ensures
         r <= 1,
@@ -657,7 +654,6 @@ pub(crate) fn is_zero4(a: &[u64; 4]) -> (r: u64)
 
 // 1 iff a == b limb for limb, without branching.
 // ct: secret a, b
-#[allow(dead_code)]  // used from Task 3
 pub(crate) fn eq4(a: &[u64; 4], b: &[u64; 4]) -> (r: u64)
     ensures
         r <= 1,
@@ -680,7 +676,6 @@ pub(crate) fn eq4(a: &[u64; 4], b: &[u64; 4]) -> (r: u64)
 
 // (a + b) mod m for a, b < m: add, then a masked conditional subtract.
 // ct: secret a, b; public m
-#[allow(dead_code)]  // used from Task 3
 pub(crate) fn add_mod(a: &[u64; 4], b: &[u64; 4], m: &[u64; 4]) -> (r: [u64; 4])
     requires
         v4(*a) < v4(*m),
@@ -710,7 +705,6 @@ pub(crate) fn add_mod(a: &[u64; 4], b: &[u64; 4], m: &[u64; 4]) -> (r: [u64; 4])
 
 // (a - b) mod m (Euclidean) for a, b < m: subtract, then a masked conditional add of m.
 // ct: secret a, b; public m
-#[allow(dead_code)]  // used from Task 3
 pub(crate) fn sub_mod(a: &[u64; 4], b: &[u64; 4], m: &[u64; 4]) -> (r: [u64; 4])
     requires
         v4(*a) < v4(*m),
@@ -930,7 +924,6 @@ proof fn bv_bit_u8(b: u8, k: u8) by (bit_vector)
 // x^e in Montgomery form, by square-and-multiply over the public big-endian exponent e.
 // ct: secret x; public e, m, mp, one
 // ponytail: plain square-and-multiply over the public exponent, 256 squarings + popcount(e) multiplies (≈<measured> µs per fe_inv, release, Task 8 p256_speed); upgrade: a fixed addition chain (~115 fewer multiplies) with one exponent-arithmetic proof per step
-#[allow(dead_code)]  // used from Task 3
 pub(crate) fn mont_pow(
     x: &[u64; 4],
     e: &[u8; 32],
@@ -1097,7 +1090,6 @@ fn load_be64(b: &[u8], off: usize) -> (r: u64)
 
 // Limbs of the big-endian 32-octet integer b[off..off + 32].
 // ct: secret b; public off
-#[allow(dead_code)]  // used from Task 3
 pub(crate) fn limbs_from_be(b: &[u8], off: usize) -> (r: [u64; 4])
     requires
         off + 32 <= b@.len(),
@@ -1126,7 +1118,6 @@ pub(crate) fn limbs_from_be(b: &[u8], off: usize) -> (r: [u64; 4])
 
 // I2OSP(v4(l), 32): the limbs as 32 big-endian octets.
 // ct: secret l
-#[allow(dead_code)]  // used from Task 3
 pub(crate) fn limbs_to_be(l: &[u64; 4]) -> (r: [u8; 32])
     ensures
         r@ == i2osp(v4(*l) as nat, 32),
