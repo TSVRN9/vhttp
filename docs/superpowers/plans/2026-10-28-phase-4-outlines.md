@@ -372,3 +372,4 @@ Negotiation is not done here.
 
 All 9 outline decisions are accepted as recommended. 4b starts after 3a merges; 4c starts after 3e merges.
 - 4c obligation (from 4a Task 2): bound total bytes pushed into HsReader per space; 3c's MAX_CRYPTO_BUFFER caps it if push is fed only from in-order CRYPTO data.
+- **4b binding note (from 3a final review, I2):** `rsa_key_wf` includes primality of p and q, which no verified code can establish. 4b must define `ServerConfig::wf()` (including `rsa_key_wf` for RSA keys and the P-256 scalar range for ECDSA keys), require it on `ServerHandshake::new`, and add a TRUSTED.md row: "the trusted PKCS#8 loader in the shell establishes ServerConfig::wf()". Use 3a's exported length lemmas (`lemma_spec_sha256_len`, `lemma_i2osp_len`, `lemma_spec_hkdf_expand_len`) for key-schedule array sizes.
