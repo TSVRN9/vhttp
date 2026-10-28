@@ -154,7 +154,7 @@ Total keyword count: 157 across 44 sections.
 | 3.2.3 (req) | Encoder capacity <= maximum | 1 | no | Declined (optional: QPACK dynamic table) | "The encoder MUST NOT set a dynamic table capacity that exceeds this maximum" (we never send Set Capacity). |
 | 3.2.3 (req) | Remembered non-zero value (0-RTT) | 1 | no | Declined (optional: 0-RTT) | "If the remembered value is non-zero, the server MUST send the same non-zero value in its SETTINGS frame." We never accept 0-RTT; advertised value is always 0. |
 | 3.2.3 (req) | Capacity zero: no inserts, no encoder instructions | 2 | yes | 2 | "the encoder MUST NOT insert entries into the dynamic table and MUST NOT send any encoder instructions on the encoder stream." Binds our response encoder; we advertise 0. |
-| 4.1.1 | Prefixed integers | 1 | yes | 2 | Decode integers up to 62 bits (prefix-integer codec, distinct from QUIC varint). |
+| 4.1.1 | Prefixed integers | 1 | yes | 2 | Decode integers up to 62 bits (prefix-integer codec, distinct from QUIC varint). ✅ 2a: crates/h3/src/qpack/int.rs |
 | 4.2 | Encoder and decoder streams | 6 | yes | 2 | One of each at most (second -> H3_STREAM_CREATION_ERROR); never close; closure -> H3_CLOSED_CRITICAL_STREAM; MUST accept peer-created QPACK streams even though capacity is 0. |
 | 4.3.1 | Set Dynamic Table Capacity | 3 | partial | 2 | Mixed; see rows. |
 | 4.3.1 (req) | New capacity <= limit (sender) | 1 | no | Declined (optional: QPACK dynamic table) | "The new capacity MUST be lower than or equal to the limit described in Section 3.2.3." We never send it. |
@@ -167,7 +167,7 @@ Total keyword count: 157 across 44 sections.
 | 4.5.4 | Literal with name reference | 2 | partial | 2 | Decoder must accept N bit; forwarding rule below is intermediary-only. |
 | 4.5.4 (req) | N-bit literal must be forwarded as literal | 1 | no | N/A (intermediary-only) | "when a peer sends a field line that it received represented as a literal field line with the 'N' bit set, it MUST use a literal representation to forward this field line." We are an origin server and never forward request fields, so the rule is read as not applying. Cheap to honor if a proxy mode is ever added. |
 | 7.1.3 | Never-indexed literals | 3 | no | N/A (intermediary-only) | All three MUSTs govern intermediaries re-encoding fields ("An intermediary MUST NOT re-encode a value that uses a literal representation with the 'N' bit set..."). Origin server, never re-encodes received fields; read as not applying. |
-| 7.4 | Implementation limits | 1 | yes | 2 | Value too large to decode: QPACK_DECOMPRESSION_FAILED (request stream) or appropriate connection error (encoder/decoder stream). |
+| 7.4 | Implementation limits | 1 | yes | 2 | Value too large to decode: QPACK_DECOMPRESSION_FAILED (request stream) or appropriate connection error (encoder/decoder stream). ✅ 2a (prefix ints): crates/h3/src/qpack/int.rs; open: string lengths in Task 6 |
 
 Total keyword count: 44 across 22 sections.
 
