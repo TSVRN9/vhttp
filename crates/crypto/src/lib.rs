@@ -7,7 +7,9 @@ global size_of usize == 8;
 
 } // verus!
 
+pub mod aes;
 pub mod bytes;
+pub mod gcm;
 pub mod hkdf;
 pub mod hmac;
 pub mod sha256;
