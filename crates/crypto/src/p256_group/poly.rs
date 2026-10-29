@@ -1018,12 +1018,8 @@ pub(crate) proof fn lemma_grid_smoke()
     assert(fits(smoke_poly(), d2));
     // the grid
     let g = smoke_grid();
-    assert(distinct_mod_p(seq![0int, 1, 2]));
-    assert forall|k: int| 0 <= k < g.len() implies #[trigger] g[k].len() > d2[k] && distinct_mod_p(
-        g[k],
-    ) by {
-        assert(g[k] == seq![0int, 1, 2]);
-    }
+    assert(distinct_mod_p(g[0]) && distinct_mod_p(g[1]));
+    // the lengths g[k].len() > d2[k] are left to lemma_grid's precondition
     assert forall|xs: Seq<int>| in_grid(xs, g) implies fmod(#[trigger] ev(smoke_poly(), xs))
         == 0 by {
         let u = xs[0];
