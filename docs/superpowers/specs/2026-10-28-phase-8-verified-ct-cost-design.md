@@ -332,7 +332,7 @@ pub struct Program { pub fns: Vec<Body> }
 - **The compiler below MIR:** MIR passes after the analysed point (the shipped build's MIR inliner) and LLVM, which can turn masks or selects back into branches (watch the u128 mask multiply `x * u128::MAX`) or introduce table lookups.
 - **The CPU:** variable-latency instructions other than div and shift, caches beyond the addresses implied by indices, prefetchers, speculation (Spectre-class), power/EM, SMT port contention.
 - **Panics and unwinding:** a failed assert is `None`, and the theorem speaks of completed runs. Verus proves the asserts pass.
-- **Drop glue** (deallocation). **Interior mutability and `unsafe`**, which the translator rejects.
+- **Drop glue** (deallocation). **Interior mutability, and the constructs `unsafe` code needs** (raw pointers, unions, statics, compiler intrinsics), which the translator rejects.
 
 **Overflow:** core arithmetic wraps. The shipped verified crates have no overflow checks (D5), so there are no overflow branches. Verus proves the wrapping never happens in verified code.
 
@@ -482,7 +482,7 @@ translate-crate <crate>                # foreign crates whose bodies may be tran
   - Roots and internal callees are keyed by instance.
   - Ambiguity is an error: a key that matches more than one distinct fn instance fails closed, for roots, internal callees and manifest/`intr` lookups alike.
 - `intr` lines need not resolve in a given build (preflight).
-- An `intr` path inside the analysed crate is a loader error, except `<crate>::ct::declassify` mapped to `Declassify` and `<crate>::ct::ghost_fallback` mapped to `GhostUnit` (8a Task 7a ruling). `Declassify` is allowed nowhere else.
+- An `intr` path inside the analysed crate is a loader error, except `<crate>::ct::declassify` mapped to `Declassify` (8a Task 7a ruling) and `ct_fixtures::ct::ghost_fallback` mapped to `GhostUnit`, for the fixtures only (8a final review M7). `Declassify` is allowed nowhere else.
 - Expected keys include the `Vec::with_capacity`, `push`, `extend_from_slice` and `as_slice` def paths; vstd's `Vec` `set` and `slice_subrange`/`slice_to_vec`; `u32::wrapping_add`; `Ghost::assume_new_fallback`; and `crypto::ct::declassify`.
 
 **Report** (`$CT_OUT/report-<crate>.txt`), one line per item:
@@ -523,7 +523,7 @@ No root reaches the RSA path, so it needs no manifest line (preflight).
 
 | Site | What becomes public | Code |
 |---|---|---|
-| `crypto::gcm::aes128_gcm_open` | the tag-compare outcome (accept/reject) | 5b, **new** in 8a: `if declassify(diff) != 0` (the existing `ponytail:` comment already argues it) |
+| `crypto::gcm::aes128_gcm_open` | the tag-compare outcome (accept/reject) | 5b, **new** in 8a: `if declassify(diff != 0)`, the bit, not the byte (8a final review I1) (the existing `ponytail:` comment already argues it) |
 | P-256 (`crypto::p256`, `crypto::ecdsa`) | ct-discipline points 1–5 and the two peer-decode points (B1 below) | 5c Tasks 7/8, placement amended by the 8a Task 9 ruling |
 
 **Binding notes for Phase 5c**, which must reach 5c **before Task 7 starts**:

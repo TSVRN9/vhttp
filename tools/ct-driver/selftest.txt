@@ -29,3 +29,10 @@ crypto::p256::p256_ecdh 00000000000000000000000000000000000000000000000000000000
 crypto::p256::p256_public_key 0000000000000000000000000000000000000000000000000000000000000000 => None
 # P-256 ECDSA: RFC 6979 A.2.5 "sample" => Some(r || s) (crates/crypto/tests/ecdsa.rs)
 crypto::ecdsa::p256_ecdsa_sign c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721 73616d706c65 => Some(efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8)
+# RFC 5869 A.1: HKDF-Extract (crates/crypto/tests/hmac_hkdf.rs)
+crypto::hkdf::hkdf_extract 000102030405060708090a0b0c 0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b => 077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5
+# RFC 5869 A.1: HKDF-Expand, L = 42 (two blocks) (crates/crypto/tests/hmac_hkdf.rs)
+crypto::hkdf::hkdf_expand 077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5 f0f1f2f3f4f5f6f7f8f9 0x2ausize => 3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865
+# GCM spec test case 2 open: valid tag => Some(P), last tag byte flipped => None (crates/crypto/tests/aes_gcm.rs)
+crypto::gcm::aes128_gcm_open 00000000000000000000000000000000 000000000000000000000000 - 0388dace60b6a392f328c2b971b2fe78ab6e47d42cec13bdf53a67b21257bddf => Some(00000000000000000000000000000000)
+crypto::gcm::aes128_gcm_open 00000000000000000000000000000000 000000000000000000000000 - 0388dace60b6a392f328c2b971b2fe78ab6e47d42cec13bdf53a67b21257bdde => None
