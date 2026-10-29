@@ -196,8 +196,8 @@ Total keyword count: 44 across 22 sections.
 | 5.1.2 | Consuming and retiring connection IDs | 2 | yes | 3 | Retire CIDs below increased Retire Prior To before activating new one; never forget a CID without retiring it. ✅ 3d: crates/quic/src/cid.rs |
 | 5.2 | Matching packets to connections | 1 | yes | 3 | Error on bad packet content or fully revert changes. |
 | 5.2.1 | Client packet handling | 1 | no | N/A (client-only) | Client discards packets with a different version. |
-| 5.2.2 | Server packet handling | 2 | yes | 3 | Drop smaller-than-1200 packets with unsupported version (no VN); drop all other unmatched packets. 3b codec: crates/quic/src/stateless.rs (closed in 3d) |
-| 5.2.3 | Considerations for simple load balancers | 1 | yes | 3 | Conditional on simple LB deployment; avoid stateless reset oracle (see 21.11). |
+| 5.2.2 | Server packet handling | 2 | yes | 3 | Drop smaller-than-1200 packets with unsupported version (no VN); drop all other unmatched packets. ✅ 3d: crates/quic/src/route.rs |
+| 5.2.3 | Considerations for simple load balancers | 1 | yes | 3 | Conditional on simple LB deployment; avoid stateless reset oracle (see 21.11). ✅ 3d: route.rs (exception: never sends resets, no static key) |
 | 6.1 | Sending Version Negotiation packets | 1 | yes | 3 | Never send VN in response to VN. ✅ 3b: crates/quic/src/stateless.rs |
 | 6.2 | Handling Version Negotiation packets | 3 | no | N/A (client-only) | Client behavior. |
 | 7 | Cryptographic and transport handshake | 2 | yes | 3 | Handshake properties and explicit ALPN negotiation; TLS-side mechanics land in phase 4. ✅ 3d: crates/quic/src/handshake.rs (ALPN here; handshake properties Phase 4 TLS) |
@@ -271,7 +271,7 @@ Total keyword count: 44 across 22 sections.
 | 10.3 | Stateless reset | 5 | yes | 3 | CONNECTION_CLOSE if able; reset < 3x trigger; discard too-small packets; short header; any packet ending in valid token is a reset. Sending rows (short header, < 3x trigger) vacuous: we never send a Stateless Reset (sending is a MAY); Duvet exceptions in crates/quic/src/stateless.rs. Receive side (discard too small, token match) closed in 3d |
 | 10.3.1 | Detecting a stateless reset | 4 | yes | 3 | Constant-time token comparison; only for used, unretired CIDs; enter draining. |
 | 10.3.2 | Calculating a stateless reset token | 5 | yes | 3 | Hard to guess; unique per CID; CID length handling; no CID reuse across static-key nodes. static-key MUSTs: exception (no static key, tokens are fresh randomness). ✅ 3d: crates/quic/src/cid.rs |
-| 10.3.3 | Looping | 1 | yes | 3 | Reset must be smaller than trigger. Vacuous: we never send a Stateless Reset; Duvet exception in crates/quic/src/stateless.rs |
+| 10.3.3 | Looping | 1 | yes | 3 | Reset must be smaller than trigger. ✅ 3b: exception — we never send a Stateless Reset (stateless.rs) |
 | 11 | Error handling | 1 | yes | 3 | No stateless reset if connection state exists. |
 | 11.1 | Connection errors | 1 | yes | 3 | Fatal errors via CONNECTION_CLOSE. |
 | 11.2 | Stream errors | 1 | yes | 3 | RESET_STREAM only instigated by the application (HTTP/3 layer). ✅ 3c: crates/quic/src/streams.rs |
@@ -295,7 +295,7 @@ Total keyword count: 44 across 22 sections.
 | 14.1 (req) | Server expands ack-eliciting Initial datagrams to 1200 | 1 | yes | 3 |  |
 | 14.1 (req) | Server discards Initial in datagram < 1200 bytes | 1 | yes | 3 | "A server MUST discard an Initial packet that is carried in a UDP datagram with a payload that is smaller than ... 1200 bytes." Do not close the connection (see 14). |
 | 14.1 (req) | Server limits bytes sent before address validation | 1 | yes | 3 | See 8.1 3x row. |
-| 14.2 | Path maximum transmission unit | 1 | yes | 3 | Cease sending if PMTU < 1200 (except probes/CONNECTION_CLOSE). |
+| 14.2 | Path maximum transmission unit | 1 | yes | 3 | Cease sending if PMTU < 1200 (except probes/CONNECTION_CLOSE). ✅ 3d: datagram.rs MAX_DATAGRAM (exception: no PMTUD) |
 | 14.2.1 | Handling of ICMP messages by PMTUD | 3 | yes | 3 | Only if shell processes ICMP; vacuous otherwise. |
 | 17.1 | Packet number encoding and decoding | 2 | yes | 3 | Full PN before first ACK; size covers > 2x range. ✅ 3b: crates/quic/src/pn.rs; A.2 pseudocode under-sizes at exact powers of two; §17.1 prose used. Decoding is A.3 (`decode_pn`, result <= PN_MAX); `theorem_pn_len_decodes` proves a `pn_len_ok` length decodes back at a receiver that has seen the acknowledged packet; `pn_encode_len` None (more than 2^31 unacked) is a 3d internal limit |
 | 17.2 | Long header packets | 7 | yes | 3 | Fixed bit; CID length <= 20 (drop); reserved bits PROTOCOL_VIOLATION. 3b codec: crates/quic/src/header.rs (closed in 3e) |
@@ -355,7 +355,7 @@ Total keyword count: 44 across 22 sections.
 | 19.21 | Extension frames | 3 | no | Declined (optional: HTTP/3 extensions) | Applies only to endpoints using extension frames; unknown frame handling is in 12.4. |
 | 21.5 | Request forgery attacks | 1 | no | N/A (binds spec authors) | Requirement on future extensions, not an endpoint. |
 | 21.5.3 | Request forgery with preferred addresses | 1 | no | N/A (client-only) | Client must not send non-probing frames to unvalidated preferred address. |
-| 21.11 | Stateless reset oracle | 2 | yes | 3 | No reset for CIDs possibly active elsewhere with same static key. |
+| 21.11 | Stateless reset oracle | 2 | yes | 3 | No reset for CIDs possibly active elsewhere with same static key. ✅ 3d: route.rs (exception: never sends resets, no static key) |
 | 21.12 | Version downgrade | 1 | no | N/A (binds spec authors) | Requirement on future versions, not an endpoint. |
 | 22.1.2 | Selecting codepoints | 1 | no | N/A (IANA procedure) | IANA procedure, not an endpoint requirement. |
 | 22.1.3 | Reclaiming provisional codepoints | 3 | no | N/A (IANA procedure) | IANA procedure. |

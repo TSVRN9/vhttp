@@ -2627,7 +2627,7 @@ pub(crate) fn eq_bytes(a: &[u8], b: &[u8]) -> (r: bool)
     true
 }
 
-proof fn lemma_or_xor(acc: u8, x: u8, y: u8)
+pub(crate) proof fn lemma_or_xor(acc: u8, x: u8, y: u8)
     ensures
         ((acc | (x ^ y)) == 0) <==> (acc == 0 && x == y),
 {
