@@ -11,11 +11,17 @@ root crypto::sha256::sha256
 root crypto::hmac::hmac_sha256
 root crypto::hkdf::hkdf_extract
 root crypto::hkdf::hkdf_expand
+# P-256 (5c): every P-256 declassify site is reached from these three.
+root crypto::p256::p256_public_key
+root crypto::p256::p256_ecdh
+root crypto::ecdsa::p256_ecdsa_sign
 
 # Intrinsics: every non-crypto key of `CT_MODE=census` over the roots above (census-crypto.txt),
 # each asserting that the std/vstd fn behaves as its core intrinsic. Never guessed.
 intr <std::vec::Vec<u8> as vstd::pervasive::VecAdditionalExecFns<u8>>::set VecSet
 intr core::num::<impl u32>::wrapping_add Wrapping Add U32
+# P-256 (census over the P-256 roots, Task 8): from mont::{mont_mul, select4, is_zero4, eq4}, p256::sel_pt
+intr core::num::<impl u64>::wrapping_sub Wrapping Sub U64
 intr std::array::<impl [u8; 128]>::as_slice ArrayAsSlice
 intr std::array::<impl [u8; 16]>::as_slice ArrayAsSlice
 intr std::array::<impl [u8; 32]>::as_slice ArrayAsSlice

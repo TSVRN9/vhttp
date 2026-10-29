@@ -21,3 +21,11 @@ crypto::mont::limbs_from_be ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9
 # P-256 ECDSA: DER of the RFC 6979 A.2.5 "sample" signature, appended to out = [aa] (der_vectors
 # in crates/crypto/tests/ecdsa.rs)
 crypto::ecdsa::serialize_ecdsa_der efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8 mut:aa => () aa3046022100efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716022100f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8
+# P-256: d = 3 => Some(04 || 3G); x and y are ADD_TEST_VECTORS[2] (crates/crypto/src/p256.rs tests)
+crypto::p256::p256_public_key 0000000000000000000000000000000000000000000000000000000000000003 => Some(045ecbe4d1a6330a44c8f7ef951d4bf165e6c6b721efada985fb41661bc6e7fd6c8734640c4998ff7e374b06ce1a64a2ecd82ab036384fb83d9a79b127a27d5032)
+# P-256 ECDH: d = 3, peer = G => Some(x(3G)) (same vector)
+crypto::p256::p256_ecdh 0000000000000000000000000000000000000000000000000000000000000003 046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5 => Some(5ecbe4d1a6330a44c8f7ef951d4bf165e6c6b721efada985fb41661bc6e7fd6c)
+# P-256: d = 0 => None, the declassified range check (crates/crypto/tests/p256.rs)
+crypto::p256::p256_public_key 0000000000000000000000000000000000000000000000000000000000000000 => None
+# P-256 ECDSA: RFC 6979 A.2.5 "sample" => Some(r || s) (crates/crypto/tests/ecdsa.rs)
+crypto::ecdsa::p256_ecdsa_sign c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721 73616d706c65 => Some(efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8)

@@ -192,6 +192,7 @@ proof fn lemma_wrapping_add32(a: u32, b: u32)
 }
 
 // FIPS 180-4 §3.2: addition modulo 2^32.
+#[cfg_attr(ct_check, ct::secret(a, b))]
 fn add32_exec(a: u32, b: u32) -> (r: u32)
     ensures
         r == add32(a, b),
@@ -203,6 +204,7 @@ fn add32_exec(a: u32, b: u32) -> (r: u32)
 }
 
 // FIPS 180-4 §4.1.2 (4.2).
+#[cfg_attr(ct_check, ct::secret(x, y, z))]
 fn ch_exec(x: u32, y: u32, z: u32) -> (r: u32)
     ensures
         r == ch(x, y, z),
@@ -211,6 +213,7 @@ fn ch_exec(x: u32, y: u32, z: u32) -> (r: u32)
 }
 
 // FIPS 180-4 §4.1.2 (4.3).
+#[cfg_attr(ct_check, ct::secret(x, y, z))]
 fn maj_exec(x: u32, y: u32, z: u32) -> (r: u32)
     ensures
         r == maj(x, y, z),
@@ -219,6 +222,7 @@ fn maj_exec(x: u32, y: u32, z: u32) -> (r: u32)
 }
 
 // FIPS 180-4 §4.1.2 (4.4).
+#[cfg_attr(ct_check, ct::secret(x))]
 fn bsig0_exec(x: u32) -> (r: u32)
     ensures
         r == bsig0(x),
@@ -227,6 +231,7 @@ fn bsig0_exec(x: u32) -> (r: u32)
 }
 
 // FIPS 180-4 §4.1.2 (4.5).
+#[cfg_attr(ct_check, ct::secret(x))]
 fn bsig1_exec(x: u32) -> (r: u32)
     ensures
         r == bsig1(x),
@@ -235,6 +240,7 @@ fn bsig1_exec(x: u32) -> (r: u32)
 }
 
 // FIPS 180-4 §4.1.2 (4.6).
+#[cfg_attr(ct_check, ct::secret(x))]
 fn ssig0_exec(x: u32) -> (r: u32)
     ensures
         r == ssig0(x),
@@ -243,6 +249,7 @@ fn ssig0_exec(x: u32) -> (r: u32)
 }
 
 // FIPS 180-4 §4.1.2 (4.7).
+#[cfg_attr(ct_check, ct::secret(x))]
 fn ssig1_exec(x: u32) -> (r: u32)
     ensures
         r == ssig1(x),
@@ -279,6 +286,7 @@ pub(crate) proof fn lemma_os2ip4(s: Seq<u8>)
 }
 
 // FIPS 180-4 §6.2.2 step 1: the message schedule W_0..W_63 of the block src[off..off + 64].
+#[cfg_attr(ct_check, ct::secret(src), ct::public(off))]
 fn schedule(src: &[u8], off: usize) -> (w: [u32; 64])
     requires
         off + 64 <= src@.len(),
@@ -330,6 +338,7 @@ fn schedule(src: &[u8], off: usize) -> (w: [u32; 64])
 
 // FIPS 180-4 §6.2.2 steps 1-4: compress the block src[off..off + 64] into h.
 #[verifier::spinoff_prover]
+#[cfg_attr(ct_check, ct::secret(h, src), ct::public(off))]
 fn compress(h: &mut [u32; 8], src: &[u8], off: usize)
     requires
         off + 64 <= src@.len(),
@@ -442,6 +451,7 @@ pub(crate) proof fn lemma_i2osp_be8(x: u64)
 }
 
 // FIPS 180-4 §6.2.2 step 4: H_0..H_7 as 32 big-endian bytes.
+#[cfg_attr(ct_check, ct::secret(h))]
 fn words_be(h: &[u32; 8]) -> (r: [u8; 32])
     ensures
         r@ == sha256_words_be(h@),
@@ -540,6 +550,7 @@ proof fn lemma_pad_tail(m: Seq<u8>)
 // FIPS 180-4 §5.1.1, §6.2: SHA-256 of prefix || msg, where prefix is empty or one block
 // (HMAC's padded key).
 #[verifier::spinoff_prover]
+#[cfg_attr(ct_check, ct::secret(prefix, msg))]
 pub(crate) fn sha256_cat(prefix: &[u8], msg: &[u8]) -> (r: [u8; 32])
     requires
         prefix@.len() == 0 || prefix@.len() == 64,
@@ -672,6 +683,7 @@ pub(crate) fn sha256_cat(prefix: &[u8], msg: &[u8]) -> (r: [u8; 32])
 }
 
 /// FIPS 180-4 §6.2; verified against spec_sha256.
+#[cfg_attr(ct_check, ct::secret(msg))]
 pub fn sha256(msg: &[u8]) -> (r: [u8; 32])
     requires
         msg@.len() <= MAX_INPUT_LEN,

@@ -178,6 +178,7 @@ proof fn bv_xtime(b: u8) by (bit_vector)
 }
 
 // FIPS 197 §4.2 eq. (4.5): constant-time-style xtime.
+#[cfg_attr(ct_check, ct::secret(b))]
 fn xtime_ct(b: u8) -> (r: u8)
     ensures
         r == xtime(b),
@@ -211,6 +212,7 @@ proof fn bv_xor8(p: u8, q: u8, s: u8) by (bit_vector)
 }
 
 // FIPS 197 §4.2: constant-time-style GF(2^8) multiplication, 8 masked shift-and-xtime steps.
+#[cfg_attr(ct_check, ct::secret(a, b))]
 fn gmul_ct(a: u8, b: u8) -> (r: u8)
     ensures
         r == gmul(a, b),
@@ -446,6 +448,7 @@ proof fn lemma_sbox_chain(x: u8)
 // ponytail: S-box = 13 constant-time-style GF(2^8) multiplies (8 masked steps each) + affine,
 // ≈9.2 µs per AES block (release, Task 5 gcm_64kib); upgrade: Boyar–Peralta bitsliced circuit,
 // proved by the same chunk lemmas, or AES-NI behind an equivalence proof
+#[cfg_attr(ct_check, ct::secret(x))]
 pub(crate) fn sbox_ct(x: u8) -> (r: u8)
     ensures
         r == sbox(x),
@@ -471,6 +474,7 @@ pub(crate) fn sbox_ct(x: u8) -> (r: u8)
 }
 
 // FIPS 197 §5.1.1 SubBytes.
+#[cfg_attr(ct_check, ct::secret(s))]
 fn sub_bytes_exec(s: &[u8; 16]) -> (r: [u8; 16])
     ensures
         r@ == sub_bytes(s@),
@@ -492,6 +496,7 @@ fn sub_bytes_exec(s: &[u8; 16]) -> (r: [u8; 16])
 }
 
 // FIPS 197 §5.1.2 ShiftRows; the index depends only on the public position i.
+#[cfg_attr(ct_check, ct::secret(s))]
 fn shift_rows_exec(s: &[u8; 16]) -> (r: [u8; 16])
     ensures
         r@ == shift_rows(s@),
@@ -512,6 +517,7 @@ fn shift_rows_exec(s: &[u8; 16]) -> (r: [u8; 16])
 }
 
 // FIPS 197 §5.1.3 MixColumns.
+#[cfg_attr(ct_check, ct::secret(s))]
 fn mix_columns_exec(s: &[u8; 16]) -> (r: [u8; 16])
     ensures
         r@ == mix_columns(s@),
@@ -562,6 +568,7 @@ proof fn lemma_round_key(rk: Seq<u8>, key: Seq<u8>, r: nat)
 }
 
 // FIPS 197 §5.1.4 AddRoundKey with round key `round` read from the expanded key.
+#[cfg_attr(ct_check, ct::secret(s, rk), ct::public(round))]
 fn add_round_key_exec(s: &[u8; 16], rk: &[u8; 176], round: usize, Ghost(key): Ghost<Seq<u8>>) -> (r:
     [u8; 16])
     requires
@@ -592,6 +599,7 @@ fn add_round_key_exec(s: &[u8; 16], rk: &[u8; 176], round: usize, Ghost(key): Gh
 
 // FIPS 197 §5.2, Algorithm 2 (Nk = 4): the 44-word key schedule, one word per step.
 #[verifier::spinoff_prover]
+#[cfg_attr(ct_check, ct::secret(key))]
 pub(crate) fn expand_key(key: &[u8]) -> (rk: [u8; 176])
     requires
         key@.len() == 16,
@@ -696,6 +704,7 @@ pub(crate) fn expand_key(key: &[u8]) -> (rk: [u8; 176])
 
 // FIPS 197 §5.1, Algorithm 1 (Nr = 10) on an expanded key.
 #[verifier::spinoff_prover]
+#[cfg_attr(ct_check, ct::secret(rk, block))]
 pub(crate) fn encrypt_rk(rk: &[u8; 176], Ghost(key): Ghost<Seq<u8>>, block: &[u8]) -> (r: [u8; 16])
     requires
         rk_ok(rk@, key),
@@ -749,6 +758,7 @@ pub(crate) fn encrypt_rk(rk: &[u8; 176], Ghost(key): Ghost<Seq<u8>>, block: &[u8
 /// FIPS 197 §5.1 (Nr = 10), §5.2 (Nk = 4); verified against spec_aes128_encrypt.
 // ponytail: key schedule recomputed per call (40 S-boxes, ≈22% of one block); add a pub
 // expanded-key type if packet-rate profiling shows it
+#[cfg_attr(ct_check, ct::secret(key, block))]
 pub fn aes128_encrypt_block(key: &[u8], block: &[u8]) -> (r: [u8; 16])
     requires
         key@.len() == 16,

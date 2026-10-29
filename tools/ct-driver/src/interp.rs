@@ -691,6 +691,8 @@ pub struct Vector {
     pub args: Vec<(bool, IVal)>,
     /// The return value, then the final pointee of each `mut:` param, in param order.
     pub want: Vec<IVal>,
+    /// Per param: the suffix width of an int arg (`0x2au8` is 8), checked against the param.
+    pub int_bits: Vec<Option<u32>>,
 }
 
 /// Parses the tokens after the path. Values: hex bytes (an `Arr` of byte `Int`s; `-` is the
@@ -707,7 +709,23 @@ pub fn parse_vector(toks: &[&str]) -> Result<Vector, String> {
         })
         .collect::<Result<_, String>>()?;
     let want = toks[at + 1..].iter().map(|t| value(t)).collect::<Result<_, _>>()?;
-    Ok(Vector { args, want })
+    let int_bits = toks[..at].iter().map(|t| int_lit(t.strip_prefix("mut:").unwrap_or(t)).map(|(_, w)| w)).collect();
+    Ok(Vector { args, want, int_bits })
+}
+
+/// An int literal `0x<hex><suffix>`: its digits and the suffix's width.
+fn int_lit(t: &str) -> Option<(&str, u32)> {
+    let r = t.strip_prefix("0x")?;
+    let (digits, suf) = r.split_at(r.find(|ch: char| !ch.is_ascii_hexdigit()).unwrap_or(r.len()));
+    let w = match suf {
+        "u8" | "i8" => 8,
+        "u16" | "i16" => 16,
+        "u32" | "i32" => 32,
+        "u64" | "i64" | "usize" | "isize" => 64,
+        "u128" | "i128" => 128,
+        _ => return None,
+    };
+    Some((digits, w))
 }
 
 fn value(t: &str) -> Result<IVal, String> {
@@ -724,17 +742,9 @@ fn value(t: &str) -> Result<IVal, String> {
     if let Some(inner) = t.strip_prefix("Some(").and_then(|r| r.strip_suffix(')')) {
         return Ok(IVal::Adt(1, vec![value(inner)?]));
     }
-    if let Some(r) = t.strip_prefix("0x") {
-        let k = r.find(|ch: char| !ch.is_ascii_hexdigit()).unwrap_or(r.len());
-        let (digits, suf) = r.split_at(k);
-        let w = match suf {
-            "u8" | "i8" => 8,
-            "u16" | "i16" => 16,
-            "u32" | "i32" => 32,
-            "u64" | "i64" | "usize" | "isize" => 64,
-            "u128" | "i128" => 128,
-            _ => return Err(format!("{t}: an int needs a type suffix (u8 .. u128, usize, i8 .. i128, isize)")),
-        };
+    if t.starts_with("0x") {
+        let (digits, w) =
+            int_lit(t).ok_or_else(|| format!("{t}: an int needs a type suffix (u8 .. u128, usize, i8 .. i128, isize)"))?;
         let n = u128::from_str_radix(digits, 16).map_err(|e| format!("{t}: {e}"))?;
         if w < 128 && n >> w != 0 {
             return Err(format!("{t}: does not fit in {w} bits"));
@@ -760,6 +770,18 @@ pub fn check_vector(p: &c::Program, v: &Vector) -> Result<u64, String> {
     for (j, (m, _)) in v.args.iter().enumerate() {
         if *m != is_mut_param(b, j) {
             return Err(format!("param #{}: `mut:` must mark exactly the &mut params", j + 1));
+        }
+    }
+    for (j, w) in v.int_bits.iter().enumerate() {
+        let ty = match b.locals.get(1 + j) {
+            Some(c::Ty::Mut(t)) => Some(&**t),
+            t => t,
+        };
+        match (w, ty) {
+            (None, _) => {}
+            (Some(w), Some(c::Ty::Int(t))) if bits(t) == *w => {}
+            (Some(w), Some(c::Ty::Int(t))) => return Err(format!("param #{}: a {w}-bit int arg for a {}-bit param", j + 1, bits(t))),
+            (Some(w), _) => return Err(format!("param #{}: a {w}-bit int arg for a non-int param", j + 1)),
         }
     }
     let muts: Vec<usize> = (0..b.nargs).filter(|&j| v.args[j].0).collect();
@@ -1064,6 +1086,48 @@ mod tests {
         assert_eq!(v.want, vec![IVal::Adt(0, vec![]), IVal::Adt(1, vec![arr(&[10])])]);
         for bad in [&["0x1", "=>", "()"][..], &["0x100u8", "=>", "()"], &["abc", "=>", "()"], &["00"]] {
             assert!(parse_vector(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    /// A suffixed int arg must have its param's width (through `&mut` too), and goes only to an
+    /// int param.
+    #[test]
+    fn vector_int_width_matches_param() {
+        let ret = || vec![blk(vec![], c::Term::Return)];
+        let p = c::Program { fns: vec![body(1, vec![c::Ty::Int(T::U8), c::Ty::Int(T::U8)], ret())] };
+        let run = |p: &c::Program, args: &[&str]| check_vector(p, &parse_vector(args).unwrap());
+        assert_eq!(run(&p, &["0x1u8", "=>", "0x0u8"]), Err("got () want 0x0".into()));
+        assert!(run(&p, &["0x1u128", "=>", "()"]).unwrap_err().contains("param #1"));
+        assert!(run(&p, &["0x1u16", "=>", "()"]).unwrap_err().contains("param #1"));
+        assert!(run(&p, &["0x1usize", "=>", "()"]).unwrap_err().contains("param #1"));
+        let mt = c::Ty::Mut(Box::new(c::Ty::Int(T::U8)));
+        let p = c::Program { fns: vec![body(1, vec![c::Ty::Unit, mt], ret())] };
+        assert_eq!(run(&p, &["mut:0x7u8", "=>", "()", "0x7u8"]), Ok(1));
+        assert!(run(&p, &["mut:0x7u32", "=>", "()", "0x7u8"]).unwrap_err().contains("param #1"));
+        let p = c::Program { fns: vec![body(1, vec![c::Ty::Unit, c::Ty::Shr(Box::new(c::Ty::Int(T::U8)))], ret())] };
+        assert!(run(&p, &["0x7u8", "=>", "()"]).unwrap_err().contains("param #1"));
+    }
+
+    /// The in-place `Variant` write equals sem's `put(v, Variant(k), write_at(get(v, Variant(k)),
+    /// rest, w))`: the fields change and v's own tag stays. `get`'s owned arm reads the same.
+    #[test]
+    fn variant_write_keeps_tag() {
+        use IPe::{Field, Index, Variant};
+        let mut v = IVal::Adt(0, vec![Int(1)]);
+        write_at(&mut v, &[Variant(1), Field(0)], Int(9));
+        assert_eq!(v, IVal::Adt(0, vec![Int(9)]));
+        write_at(&mut v, &[Variant(1)], IVal::Adt(1, vec![Int(4), Int(5)]));
+        assert_eq!(v, IVal::Adt(0, vec![Int(4), Int(5)]));
+        let rd = |v: &IVal, path: &[IPe]| read_at(Cow::Owned(v.clone()), path).into_owned();
+        assert_eq!(rd(&v, &[Variant(1), Field(1)]), Int(5));
+        assert_eq!(rd(&v, &[Variant(1), Field(0)]), Int(4));
+        assert_eq!(rd(&v, &[Variant(1)]), IVal::Adt(1, vec![Int(4), Int(5)]));
+        assert_eq!(rd(&v, &[Field(2)]), Unit);
+        assert_eq!(rd(&arr(&[3, 4]), &[Index(1)]), Int(4));
+        assert_eq!(rd(&arr(&[3, 4]), &[Index(2)]), Unit);
+        assert_eq!(rd(&Int(3), &[Field(0)]), Unit);
+        for path in [&[Variant(1), Field(1)][..], &[Field(0)], &[Index(0)]] {
+            assert_eq!(rd(&v, path), read_at(Cow::Borrowed(&v), path).into_owned(), "{path:?}");
         }
     }
 

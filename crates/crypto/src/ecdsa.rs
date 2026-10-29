@@ -125,7 +125,7 @@ pub open spec fn spec_ecdsa_p256_sha256_sign(d: Seq<u8>, msg: Seq<u8>) -> Option
 }
 
 /// FIPS 186-5 §6.4.1 with RFC 6979 §3.2 nonces; verified against spec_ecdsa_p256_sha256_sign. Partially correct: loops while no attempt is suitable (probability ~2^-256), as RFC 6979 §3.2 step h does.
-// ct: secret d; public msg
+#[cfg_attr(ct_check, ct::secret(d), ct::public(msg))]
 #[verifier::exec_allows_no_decreases_clause]
 pub fn p256_ecdsa_sign(d: &[u8], msg: &[u8]) -> (r: Option<[u8; 64]>)
     requires
@@ -173,10 +173,8 @@ pub fn p256_ecdsa_sign(d: &[u8], msg: &[u8]) -> (r: Option<[u8; 64]>)
         if crate::ct::declassify(scalar_in_range(&t)) {
             let r = ecdsa_r_exec(&t);
             let s = ecdsa_s_exec(&limbs_from_be(d, 0), &reduce_n(&h1, 0), &limbs_from_be(&t, 0), &r);
-            // ct: declassify r and s (public signature outputs)
-            let r = crate::ct::declassify(r);
-            let s = crate::ct::declassify(s);
-            if is_zero4(&r) == 0 && is_zero4(&s) == 0 {
+            // ct: declassify the r = 0 / s = 0 outcomes (the RFC 6979 retry; r and s are public outputs)
+            if crate::ct::declassify(is_zero4(&r)) == 0 && crate::ct::declassify(is_zero4(&s)) == 0 {
                 proof {
                     lemma_least_suitable_choose(d@, h1@, i);
                 }
@@ -446,7 +444,7 @@ proof fn lemma_unmont_n(v: int, u: int)
 }
 
 // sc(r) == sc(a) * sc(b) mod n.
-// ct: secret a, b
+#[cfg_attr(ct_check, ct::secret(a, b))]
 fn sc_mul(a: [u64; 4], b: [u64; 4]) -> (r: [u64; 4])
     requires
         v4(a) < p256_n(),
@@ -466,7 +464,7 @@ fn sc_mul(a: [u64; 4], b: [u64; 4]) -> (r: [u64; 4])
 }
 
 // sc(r) == sc(a) + sc(b) mod n.
-// ct: secret a, b
+#[cfg_attr(ct_check, ct::secret(a, b))]
 fn sc_add(a: [u64; 4], b: [u64; 4]) -> (r: [u64; 4])
     requires
         v4(a) < p256_n(),
@@ -507,7 +505,7 @@ proof fn lemma_to_mont(r: int, x: int, r2: int, m: int, rr: int, ri: int)
 }
 
 // The Montgomery form of the plain value v4(a) < n: a * R^2 * R^-1.
-// ct: secret a
+#[cfg_attr(ct_check, ct::secret(a))]
 fn sc_in(a: &[u64; 4]) -> (r: [u64; 4])
     requires
         v4(*a) < p256_n(),
@@ -529,7 +527,7 @@ fn sc_in(a: &[u64; 4]) -> (r: [u64; 4])
 }
 
 // The plain value of a Montgomery-form scalar: multiply by 1.
-// ct: secret a
+#[cfg_attr(ct_check, ct::secret(a))]
 fn sc_out(a: &[u64; 4]) -> (r: [u64; 4])
     ensures
         v4(r) == sc(*a),
@@ -549,7 +547,7 @@ fn sc_out(a: &[u64; 4]) -> (r: [u64; 4])
 
 // os2ip(b[off..off + 32]) mod n. That integer is below 2^256 < 2n, so one masked conditional
 // subtract of n reduces it.
-// ct: secret b; public off
+#[cfg_attr(ct_check, ct::secret(b), ct::public(off))]
 fn reduce_n(b: &[u8], off: usize) -> (r: [u64; 4])
     requires
         off + 32 <= b@.len(),
@@ -577,7 +575,7 @@ fn reduce_n(b: &[u8], off: usize) -> (r: [u64; 4])
 }
 
 // RFC 6979 §2.3.4 bits2octets(h1) = int2octets(bits2int(h1) mod n).
-// ct: secret h1
+#[cfg_attr(ct_check, ct::secret(h1))]
 fn bits2octets_exec(h1: &[u8; 32]) -> (r: [u8; 32])
     ensures
         r@ == bits2octets(h1@),
@@ -600,7 +598,7 @@ proof fn lemma_ecdsa_r_lt_n(k: nat)
 
 // RFC 6979 §2.4 step 4: s = k^-1 (h + r d) mod n on plain values, with k^-1 = k^(n - 2) (D4).
 // The four inputs go into Montgomery form, and s comes back out.
-// ct: secret d, h, k, r
+#[cfg_attr(ct_check, ct::secret(d, h, k, r))]
 fn ecdsa_s_exec(d: &[u64; 4], h: &[u64; 4], k: &[u64; 4], r: &[u64; 4]) -> (s: [u64; 4])
     requires
         v4(*d) < p256_n(),
@@ -637,7 +635,7 @@ fn ecdsa_s_exec(d: &[u64; 4], h: &[u64; 4], k: &[u64; 4], r: &[u64; 4]) -> (s: [
 }
 
 // v || sep || x || b: the HMAC input of RFC 6979 §3.2 steps d and f.
-// ct: secret v, x, b; public sep
+#[cfg_attr(ct_check, ct::secret(v, x, b), ct::public(sep))]
 fn cat97(v: &[u8; 32], sep: u8, x: &[u8], b: &[u8; 32]) -> (r: [u8; 97])
     requires
         x@.len() == 32,
@@ -665,7 +663,7 @@ fn cat97(v: &[u8; 32], sep: u8, x: &[u8], b: &[u8; 32]) -> (r: [u8; 97])
 }
 
 // t || 0x00: the HMAC input of RFC 6979 §3.2 step h.3.
-// ct: secret t
+#[cfg_attr(ct_check, ct::secret(t))]
 fn cat33(t: &[u8; 32]) -> (r: [u8; 33])
     ensures
         r@ == t@ + seq![0x00u8],
@@ -687,7 +685,7 @@ fn cat33(t: &[u8; 32]) -> (r: [u8; 33])
 }
 
 // RFC 6979 §3.2 steps b-g: (K, V) after step g.
-// ct: secret x, h1
+#[cfg_attr(ct_check, ct::secret(x, h1))]
 fn rfc6979_init_exec(x: &[u8], h1: &[u8; 32]) -> (r: ([u8; 32], [u8; 32]))
     requires
         x@.len() == 32,
@@ -713,7 +711,7 @@ fn rfc6979_init_exec(x: &[u8], h1: &[u8; 32]) -> (r: ([u8; 32], [u8; 32]))
 
 // RFC 6979 §3.2 step h from (K, V): h.2 T = V' = HMAC_K(V), then h.3 K' = HMAC_K(T || 0x00) and
 // V'' = HMAC_K'(T). Returns (T, K', V''), rfc6979_state's one transition.
-// ct: secret k, v
+#[cfg_attr(ct_check, ct::secret(k, v))]
 fn rfc6979_next(k: &[u8; 32], v: &[u8; 32]) -> (r: ([u8; 32], [u8; 32], [u8; 32]))
     ensures
         r.0@ == spec_hmac_sha256(k@, v@),
@@ -757,7 +755,7 @@ proof fn lemma_os2ip_i2osp_p(x: nat)
 }
 
 // RFC 6979 §2.4 step 3: r = x(kG) mod n. kG != O for k in [1, n - 1] (Phase 5d), so there is no O case.
-// ct: secret k
+#[cfg_attr(ct_check, ct::secret(k))]
 fn ecdsa_r_exec(k: &[u8; 32]) -> (r: [u64; 4])
     requires
         1 <= os2ip(k@) < p256_n(),
@@ -784,6 +782,7 @@ fn ecdsa_r_exec(k: &[u8; 32]) -> (r: [u64; 4])
 }
 
 // r || s, the output of p256_ecdsa_sign.
+#[cfg_attr(ct_check, ct::secret(r, s))]
 fn cat64(r: &[u8; 32], s: &[u8; 32]) -> (o: [u8; 64])
     ensures
         o@ == r@ + s@,
