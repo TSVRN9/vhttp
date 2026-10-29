@@ -190,7 +190,7 @@ Total keyword count: 44 across 22 sections.
 | 5.1 (req) | Same CID not issued twice on a connection | 1 | yes | 3 | "the same connection ID MUST NOT be issued more than once on the same connection". ✅ 3d: crates/quic/src/cid.rs |
 | 5.1.1 | Issuing connection IDs | 4 | yes | 3 | See req rows below. ✅ 3d: crates/quic/src/cid.rs |
 | 5.1.1 (req) | Sequence number increases by 1 | 1 | yes | 3 | "The sequence number on each newly issued connection ID MUST increase by 1." ✅ 3d: crates/quic/src/cid.rs |
-| 5.1.1 (req) | Accept issued CID until retired | 1 | yes | 3 | Must accept packets with an issued CID for the connection lifetime or until RETIRE_CONNECTION_ID. gate wired in conn.rs (3d2). ✅ 3d: crates/quic/src/cid.rs |
+| 5.1.1 (req) | Accept issued CID until retired | 1 | yes | 3 | Must accept packets with an issued CID for the connection lifetime or until RETIRE_CONNECTION_ID. 3d: cid.rs (`is_active` until retired), route.rs (per-connection table cap, so every issued CID can be registered) (closed in 3d2 Task 1a) |
 | 5.1.1 (req) | Do not exceed peer's active_connection_id_limit | 1 | yes | 3 | "MUST NOT provide more connection IDs than the peer's limit." ✅ 3d: crates/quic/src/cid.rs |
 | 5.1.1 (req) | CONNECTION_ID_LIMIT_ERROR on excess active CIDs | 1 | yes | 3 | If active CIDs exceed our advertised active_connection_id_limit after processing NEW_CONNECTION_ID, close with CONNECTION_ID_LIMIT_ERROR. ✅ 3d: crates/quic/src/cid.rs |
 | 5.1.2 | Consuming and retiring connection IDs | 2 | yes | 3 | Retire CIDs below increased Retire Prior To before activating new one; never forget a CID without retiring it. ✅ 3d: crates/quic/src/cid.rs |
@@ -213,7 +213,7 @@ Total keyword count: 44 across 22 sections.
 | 7.4.1 (req) | New-parameter 0-RTT storage rule | 1 | no | N/A (client-only) | Requirement on parameter definers, not an endpoint. |
 | 7.4.1 (req) | Client remembered-parameter rules (do not use some remembered values, use server's new values, remember others, only remembered values in 0-RTT) | 5 | no | N/A (client-only) | Lines on client 0-RTT use (incl. the two MUSTs in the last sentence). |
 | 7.4.1 (req) | Server accepting 0-RTT must not reduce limits or alter values | 2 | no | Declined (optional: 0-RTT) | We never accept 0-RTT. |
-| 7.4.1 (req) | Server MUST reject 0-RTT if restored values unsupported | 1 | yes | 3 | Refusal path: we always reject 0-RTT. ✅ 3d: crates/quic/src/handshake.rs (0-RTT never accepted: no PacketKind, 3e drops, no early_data) |
+| 7.4.1 (req) | Server MUST reject 0-RTT if restored values unsupported | 1 | yes | 3 | Refusal path: we always reject 0-RTT. ✅ 3d: crates/quic/src/handshake.rs (exception: we never accept 0-RTT; no PacketKind, 3e drops, no early_data) |
 | 7.4.2 | New transport parameters | 1 | yes | 3 | Ignore unknown transport parameters. ✅ 3b: crates/quic/src/tp.rs |
 | 7.5 | Cryptographic message buffering | 3 | yes | 3 | Buffer >= 4096 bytes out-of-order CRYPTO; CRYPTO_BUFFER_EXCEEDED; ACK packets whose CRYPTO was discarded. ✅ 3c: crates/quic/src/crypto_stream.rs |
 | 8 | Address validation | 1 | yes | 3 | 3x limit before validation; see 8.1 row. |
@@ -243,7 +243,7 @@ Total keyword count: 44 across 22 sections.
 | 8.2.2 (req) | Expand PATH_RESPONSE datagram to 1200 | 1 | yes | 3 |  |
 | 8.2.2 (req) | Do not expand PATH_RESPONSE past anti-amplification limit | 1 | yes | 3 |  |
 | 8.2.2 (req) | At most one PATH_RESPONSE per PATH_CHALLENGE | 1 | yes | 3 | See 13.3. |
-| 8.2.3 | Successful path validation | 1 | yes | 3 | Re-validate with expanded datagram if MTU not yet confirmed. ✅ 3d: crates/quic/src/path.rs |
+| 8.2.3 | Successful path validation | 1 | yes | 3 | Re-validate with expanded datagram if MTU not yet confirmed. 3d: path.rs (`needs_mtu_probe`) (closed in 3d2 Task 2b) |
 | 9 | Connection migration | 5 | partial | 3 | Rows below. |
 | 9 (req) | MUST NOT initiate migration before handshake confirmed | 1 | no | Declined (optional: connection migration) | We never initiate migration. |
 | 9 (req) | disable_active_migration: no sends from different local address | 1 | no | Declined (optional: connection migration) | Parameter is server-sent; we never change local address. |
@@ -295,7 +295,7 @@ Total keyword count: 44 across 22 sections.
 | 14.1 (req) | Server expands ack-eliciting Initial datagrams to 1200 | 1 | yes | 3 |  |
 | 14.1 (req) | Server discards Initial in datagram < 1200 bytes | 1 | yes | 3 | "A server MUST discard an Initial packet that is carried in a UDP datagram with a payload that is smaller than ... 1200 bytes." Do not close the connection (see 14). |
 | 14.1 (req) | Server limits bytes sent before address validation | 1 | yes | 3 | See 8.1 3x row. |
-| 14.2 | Path maximum transmission unit | 1 | yes | 3 | Cease sending if PMTU < 1200 (except probes/CONNECTION_CLOSE). ✅ 3d: datagram.rs MAX_DATAGRAM (exception: no PMTUD) |
+| 14.2 | Path maximum transmission unit | 1 | yes | 3 | Cease sending if PMTU < 1200 (except probes/CONNECTION_CLOSE). 3d: path.rs (`mtu_failed`), datagram.rs MAX_DATAGRAM (closed in 3d2 Task 3) |
 | 14.2.1 | Handling of ICMP messages by PMTUD | 3 | yes | 3 | Only if shell processes ICMP; vacuous otherwise. |
 | 17.1 | Packet number encoding and decoding | 2 | yes | 3 | Full PN before first ACK; size covers > 2x range. ✅ 3b: crates/quic/src/pn.rs; A.2 pseudocode under-sizes at exact powers of two; §17.1 prose used. Decoding is A.3 (`decode_pn`, result <= PN_MAX); `theorem_pn_len_decodes` proves a `pn_len_ok` length decodes back at a receiver that has seen the acknowledged packet; `pn_encode_len` None (more than 2^31 unacked) is a 3d internal limit |
 | 17.2 | Long header packets | 7 | yes | 3 | Fixed bit; CID length <= 20 (drop); reserved bits PROTOCOL_VIOLATION. 3b codec: crates/quic/src/header.rs (closed in 3e) |
