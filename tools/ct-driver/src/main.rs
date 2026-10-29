@@ -288,8 +288,9 @@ fn census(krate: &str, m: &Manifest, roots: &[Instance], out: &std::path::Path) 
 /// its own verdict; then the report, sorted.
 fn check(krate: &str, m: &Manifest, out: &std::path::Path) -> Result<(), String> {
     let (mut lines, mut declass) = (BTreeSet::new(), BTreeMap::<String, BTreeSet<String>>::new());
+    let mut by_key = HashMap::new();
     for r in crate_roots(krate, m)? {
-        match verdict(m, r) {
+        match verdict(m, r, &mut by_key) {
             Ok((infos, ls)) => {
                 lines.insert(format!("root {r} ok\n"));
                 for (i, l) in infos.iter().zip(&ls) {
@@ -331,6 +332,7 @@ fn selftest(krate: &str, m: &Manifest, out: &std::path::Path) -> Result<(), Stri
     let text = std::fs::read_to_string(&file).map_err(|e| format!("{file}: {e}"))?;
     let prefix = format!("{krate}::");
     let mut lines = String::new();
+    let mut by_key = HashMap::new();
     for (n, line) in text.lines().enumerate() {
         let toks: Vec<&str> = line.split_whitespace().take_while(|t| !t.starts_with('#')).collect();
         let Some((&path, rest)) = toks.split_first() else { continue };
@@ -338,7 +340,7 @@ fn selftest(krate: &str, m: &Manifest, out: &std::path::Path) -> Result<(), Stri
             continue;
         }
         let v = interp::parse_vector(rest).map_err(|e| format!("{file}:{}: {e}", n + 1))?;
-        let r = match translate::translate_closure(m, path) {
+        let r = match translate::translate_closure(m, path, &mut by_key) {
             Ok((p, _)) => interp::check_vector(&p, &v),
             Err(es) => Err(format!("translation failed: {} error(s), first: {}", es.len(), tr_text(&es[0]))),
         };
@@ -366,9 +368,13 @@ fn tr_text(e: &translate::TrErr) -> String {
 
 /// One root's verdict: its fns and checked labels, or its reject texts (`<Kind> <rest>`): the
 /// translation errors, then the attribute rules, then `check_program`'s rejection sites.
-fn verdict(m: &Manifest, root: &str) -> Result<(Vec<translate::FnInfo>, Vec<ctcore::ct::FnLab>), Vec<String>> {
+fn verdict(
+    m: &Manifest,
+    root: &str,
+    by_key: &mut HashMap<String, KeyId>,
+) -> Result<(Vec<translate::FnInfo>, Vec<ctcore::ct::FnLab>), Vec<String>> {
     use translate::TrErr;
-    let (p, infos) = translate::translate_closure(m, root).map_err(|es| es.iter().map(tr_text).collect::<Vec<_>>())?;
+    let (p, infos) = translate::translate_closure(m, root, by_key).map_err(|es| es.iter().map(tr_text).collect::<Vec<_>>())?;
     let mut errs = Vec::new();
     for i in &infos {
         if let Some(msg) = &i.attr_err {

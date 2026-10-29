@@ -61,18 +61,25 @@ pub enum TrErr {
 }
 
 /// Translates the closure of manifest root `root` (a `ct_key` in the crate being compiled).
-pub fn translate_closure(m: &Manifest, root: &str) -> Result<(c::Program, Vec<FnInfo>), Vec<TrErr>> {
+/// `by_key`: the keys seen while compiling this crate, across all roots (one crate compile is one
+/// `run!`, as in census; the caller makes one map per compile): `bind_key` binds roots and internal
+/// fns by instance, leaves and `intr` callees by def, and a key naming two is an error. Report
+/// lines (`checked`, `declassify <fn>#k`) are keyed by `ct_key` across roots, so each key names
+/// one thing.
+pub fn translate_closure(
+    m: &Manifest,
+    root: &str,
+    by_key: &mut HashMap<String, KeyId>,
+) -> Result<(c::Program, Vec<FnInfo>), Vec<TrErr>> {
     let krate = rustc_public::local_crate().name;
     let r = root.to_string();
     let inst = match pick_roots(&krate, &[&r], &local_fns()) {
         Ok(v) => v[0],
         Err(msg) => return Err(vec![TrErr::Root { path: r, msg }]),
     };
-    let by_key = BY_KEY.with(|k| k.take());
     let mut tr = Tr { m, krate, index: HashMap::new(), order: vec![inst], by_key, errs: Vec::new() };
     tr.index.insert(inst, 0);
-    if bind_key(&mut tr.by_key, root, key_id(&tr.krate, m, &inst)).is_err() {
-        BY_KEY.with(|k| *k.borrow_mut() = tr.by_key);
+    if bind_key(tr.by_key, root, key_id(&tr.krate, m, &inst)).is_err() {
         return Err(vec![TrErr::Root { path: r, msg: "ambiguous key: another root's closure reached a different fn under it".into() }]);
     }
     let (mut fns, mut infos) = (Vec::new(), Vec::new());
@@ -85,7 +92,6 @@ pub fn translate_closure(m: &Manifest, root: &str) -> Result<(c::Program, Vec<Fn
         }
         i += 1;
     }
-    BY_KEY.with(|k| *k.borrow_mut() = tr.by_key);
     if tr.errs.is_empty() {
         Ok((c::Program { fns }, infos))
     } else {
@@ -93,21 +99,13 @@ pub fn translate_closure(m: &Manifest, root: &str) -> Result<(c::Program, Vec<Fn
     }
 }
 
-thread_local! {
-    /// The keys seen while compiling this crate, across all roots (one crate compile is one
-    /// `run!`, as in census): `bind_key` binds roots and internal fns by instance, leaves and
-    /// `intr` callees by def, and a key naming two is an error. Report lines (`checked`,
-    /// `declassify <fn>#k`) are keyed by `ct_key` across roots, so each key names one thing.
-    static BY_KEY: std::cell::RefCell<HashMap<String, KeyId>> = std::cell::RefCell::new(HashMap::new());
-}
-
-/// The closure being translated: fn indices by instance, and the crate's keys (`BY_KEY`).
+/// The closure being translated: fn indices by instance, and the crate's keys (`by_key`).
 struct Tr<'m> {
     m: &'m Manifest,
     krate: String,
     index: HashMap<Instance, usize>,
     order: Vec<Instance>,
-    by_key: HashMap<String, KeyId>,
+    by_key: &'m mut HashMap<String, KeyId>,
     errs: Vec<TrErr>,
 }
 
@@ -244,7 +242,7 @@ impl Tr<'_> {
         let unresolved = |callee: String| TrErr::Unresolved { path: cx.path.clone(), callee, span: cx.span.clone() };
         let callee = Instance::resolve(def, &gargs).map_err(|_| unresolved(strip_generic_args(&def.name())))?;
         let key = ct_key(&callee);
-        if let Err((d, prev)) = bind_key(&mut self.by_key, &key, key_id(&self.krate, self.m, &callee)) {
+        if let Err((d, prev)) = bind_key(self.by_key, &key, key_id(&self.krate, self.m, &callee)) {
             let prev = prev.map_or_else(|| d.name(), |p| p.name());
             return Err(cx.uns(format!("ambiguous key {key}: reached as {prev} and {}", callee.name())));
         }
@@ -679,6 +677,8 @@ fn same_int(a: &c::IntTy, b: &c::IntTy) -> bool {
 }
 
 /// `ctcore`'s types derive nothing (they are `verus!` exec types), so intrinsics are copied by hand.
+// ponytail: ~90 lines of hand copies (`intr_copy`, `binop_copy`, `intty_copy`, `intr_name`) while
+// the frozen ctcore types derive nothing; replace with derived `Clone`/`Debug` once ctcore may change.
 fn intr_copy(k: &c::Intrinsic) -> c::Intrinsic {
     use c::Intrinsic as I;
     match k {
