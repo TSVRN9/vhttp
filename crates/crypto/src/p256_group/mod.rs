@@ -12,3 +12,8 @@ mod poly;
 mod red;
 mod rcb;
 mod grid_small;
+mod assoc_id;
+mod grid_assoc_a;
+mod grid_assoc_b;
+mod grid_assoc_c;
+mod grid_assoc_d;
