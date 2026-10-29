@@ -921,7 +921,9 @@ pub struct PeerCids {
     /// RETIRE_CONNECTION_ID frames owed, and sent but not yet acknowledged.
     retire_pending: Vec<u64>,
     retire_unacked: Vec<u64>,
-    /// Every NEW_CONNECTION_ID the peer sent (and seq 0), by sequence number.
+    /// The peer's CIDs we have recorded (seq 0, and every NEW_CONNECTION_ID at or above the
+    /// largest Retire Prior To), by sequence number. Not a complete receive log: a late seq
+    /// below the largest Retire Prior To is already retired and is not recorded.
     received: Ghost<Map<u64, (Seq<u8>, Option<[u8; 16]>)>>,
     /// Sequence numbers whose RETIRE_CONNECTION_ID was acknowledged.
     acked: Ghost<Set<u64>>,
@@ -1022,21 +1024,23 @@ impl PeerCids {
     }
 
     /// NEW_CONNECTION_ID{seq, rpt} would exceed `local_limit` active CIDs after retiring
-    /// (§5.1.1), or `2 * local_limit` retirements in need of sending or acknowledgment (§5.1.2).
+    /// (§5.1.1), or `2 * PEER_CID_CAP` retirements in need of sending or acknowledgment
+    /// (§5.1.2 MAY; a fixed budget, so a peer bursting Retire Prior To updates under loss fits
+    /// even when `local_limit` is 2).
     pub open spec fn cid_limit_hit(&self, seq: u64, rpt: u64, local_limit: u64) -> bool {
         if seq < self.largest_rpt_spec() {
             false
         } else {
             let k = count_below(self.entries(), rpt);
             self.entries().len() + 1 - k > local_limit || self.backlog() + self.retire_count(rpt)
-                > 2 * local_limit
+                > 2 * PEER_CID_CAP
         }
     }
 
-    /// An exact repeat whose increased Retire Prior To would exceed `2 * local_limit`
+    /// An exact repeat whose increased Retire Prior To would exceed `2 * PEER_CID_CAP`
     /// retirements outstanding (§5.1.2 MAY).
     pub open spec fn repeat_limit_hit(&self, rpt: u64, local_limit: u64) -> bool {
-        rpt > self.largest_rpt_spec() && self.backlog() + self.retire_count(rpt) > 2 * local_limit
+        rpt > self.largest_rpt_spec() && self.backlog() + self.retire_count(rpt) > 2 * PEER_CID_CAP
     }
 
     /// The invariant, in terms of the accessors.
@@ -1419,7 +1423,7 @@ impl PeerCids {
     ///    received or not, add the CID, and if `current` was retired switch to the lowest
     ///    active one.
     /// Both limits (§5.1.1 active count after retiring; §5.1.2 MAY, at most
-    /// `2 * local_limit` retirements outstanding, counting every seq the increase retires)
+    /// `2 * PEER_CID_CAP` retirements outstanding, counting every seq the increase retires)
     /// are judged before anything changes, and an
     /// Err leaves the state unchanged (preflight I4), so `wf` holds on every path. Callers
     /// re-check every stored peer CID whenever `largest_rpt` increased; `current` can stay
@@ -1468,7 +1472,7 @@ impl PeerCids {
                 &&& forall|c: Seq<u8>| #[trigger]
                     peer_has_cid(final(self).entries(), c) ==> peer_has_cid(old(self).entries(), c)
                 &&& final(self).entries().len() <= old(self).entries().len()
-                &&& final(self).backlog() <= 2 * local_limit
+                &&& final(self).backlog() <= 2 * PEER_CID_CAP
                 &&& final(self).retire_pending_spec() == old(self).retire_pending_spec() + seq_range(
                     old(self).largest_rpt_spec(),
                     rpt,
@@ -1490,7 +1494,7 @@ impl PeerCids {
             },
             r is Ok && !peer_same(old(self).entries(), seq, cid@, token@) && seq >= old(
                 self).largest_rpt_spec() ==> final(self).entries().len() <= local_limit && final(
-                self).backlog() <= 2 * local_limit,
+                self).backlog() <= 2 * PEER_CID_CAP,
             r is Ok && !peer_same(old(self).entries(), seq, cid@, token@) && seq < old(
                 self).largest_rpt_spec() ==> *final(self) == *old(self) && old(self).retired(seq),
             r is Ok && !peer_same(old(self).entries(), seq, cid@, token@) && seq >= old(self).largest_rpt_spec() ==> {
@@ -1547,7 +1551,7 @@ impl PeerCids {
             if rpt <= self.largest_rpt {
                 return Ok(());
             }
-            if backlog + (rpt - self.largest_rpt) > 2 * local_limit {
+            if backlog + (rpt - self.largest_rpt) > 2 * PEER_CID_CAP {
                 return Err(CONNECTION_ID_LIMIT_ERROR);
             }
             self.repeat_raise(k, rpt, Ghost(seq), Ghost(cid@), Ghost(token@));
@@ -1577,7 +1581,7 @@ impl PeerCids {
             0
         };
         if self.active.len() as u64 + 1 - k as u64 > local_limit || backlog + n > 2
-            * local_limit {
+            * PEER_CID_CAP {
             return Err(CONNECTION_ID_LIMIT_ERROR);
         }
         let ghost e0 = self.active@;
