@@ -910,7 +910,7 @@ proof fn lemma_pow_step(x: int, e: nat, m: int)
 }
 
 // Bit k (MSB first) of byte b extends the k-bit prefix b >> (8 - k): prefix' == 2 * prefix + bit.
-proof fn bv_bit_u8(b: u8, k: u8) by (bit_vector)
+pub(crate) proof fn bv_bit_u8(b: u8, k: u8) by (bit_vector)
     requires
         k < 8,
     ensures
