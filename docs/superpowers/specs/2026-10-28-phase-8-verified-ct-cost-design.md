@@ -241,14 +241,14 @@ pub struct Program { pub fns: Vec<Body> }
 - An out-of-bounds index reads `Unit`, and an out-of-bounds write is a no-op. Verus proves in-bounds for the real code.
 - `Downcast(k)` re-tags the variant.
 - Field writes into a short `Tup`/`Adt` pad with `Unit`.
-- Only `Abort`, a failed `Assert`, fuel exhaustion and Vec length overflow give `None`.
+- Only `Abort`, a failed `Assert`, fuel exhaustion, Vec length overflow and an out-of-range fn or block index (which `wf` excludes) give `None`.
 
 **Places.**
 - `read_place(fr, pl) -> (Val, Seq<Event>)` starts at `Local(pl.local)` and applies each projection:
   - `Deref` follows a `Mut(loc)` (switching root and path) or enters a `Shr` snapshot;
   - `Index(x)` reads local `x` as an Int `i`, emits `Idx(i)` and descends;
   - `ConstIndex(k)` descends with no event.
-- `place_loc(fr, pl) -> Option<(Loc, Seq<Event>)>` does the same for writes, and gives `None` through a `Shr`. A write to `None` is a no-op; `wf` rules this out.
+- `place_loc(fr, pl) -> Option<(Loc, Seq<Event>)>` does the same for writes, and gives `None` through a `Shr`. A write to `None` is a no-op that still emits the place's events (as do `RefMut` and `SetDiscr` of a `None` place).
 
 **Statements.**
 - `Assign(pl, rv)`: the events are those of `rv`, then those of `pl`; then the value is written. Steps: 1.
@@ -275,7 +275,7 @@ pub struct Program { pub fns: Vec<Body> }
   - run the callee with fuel − 1;
   - write back each such slot to its `loc` in caller order;
   - assign the callee's `locals[0]` to `dst`.
-  - Trace is `args events + callee trace`. Steps are `1 + callee steps`.
+  - Trace is `args events + callee trace + dst events`. Steps are `1 + callee steps`.
 
 **Intrinsics** (`Call(Intr(k), …)`), with their events and costs:
 
