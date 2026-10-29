@@ -3,25 +3,38 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** For each target parser function, either prove `steps <= eval(b, inputs)` for a polynomial `b` in its input lengths, or report `None` with a reason.
-- **The deliverable is the coverage number**: bounded targets out of all targets, compared with the spec's pre-registered predictions (27 of 38).
+- **The deliverable is the coverage number**: bounded targets out of all targets. It is reported against three predictions:
+  - the spec's original pre-registration, 27 of 38;
+  - the same after the preflight's I3 ruling (two QuicVarInt rows are not cost roots), 25 of 36;
+  - the Task 1b re-baseline X′ of 36, recorded in the spec before Task 2 starts.
 - A step bound is **not** wall-clock time and **not** memory (spec §Cost analyser).
 
-**Spec:** `docs/superpowers/specs/2026-10-28-phase-8-verified-ct-cost-design.md`, §Cost analyser and D8/D9. 8a's plan, `docs/superpowers/plans/2026-10-28-phase-8a-ct-checker.md`, fixed the shared interfaces this plan consumes:
+**Spec:** `docs/superpowers/specs/2026-10-28-phase-8-verified-ct-cost-design.md`, §Cost analyser and D8/D9, as amended by the preflight rulings. 8a's plan, `docs/superpowers/plans/2026-10-28-phase-8a-ct-checker.md`, fixed the shared interfaces this plan consumes:
 - `ctcore::syntax::*`;
-- `sem.rs`'s `run_fn`/`run_from`/`exec_stmts`/`exec_intr`/`call_enter`/`call_leave`/`init_entry`/`len_ok`, with steps in `Res`;
-- `ct.rs`'s `wf`;
+- `sem.rs`'s `run_fn`/`run_from`/`exec_stmts`/`exec_intr`/`call_enter`/`call_leave`/`init_entry`/`len_ok`/`uval`, with steps in `Res`;
+- `ct.rs`'s `wf`, `check::check_wf` and `infer::callee_order`;
 - the driver's `translate_closure()` and its manifest (preflight). `translate_closure` is label-free; 8a's check mode applies the root-label rule separately.
 
-**Branch:** `phase-8b`, cut from `main` **after `phase-8a` merges**. The escape count stays at main's value (4, or 3/2 if 5c landed).
+**Branch:** `phase-8b`, cut from `main` at 6641fa2 (8a merged). The escape count stays at main's value, **1**.
 
-**Architecture.** All new code is additive. **No 8a file changes**, except `crates/ctcore/src/lib.rs` (new `mod` lines and re-exports), `tools/ct-driver/src/main.rs` (the `cost` mode), `tools/ct-driver/src/manifest.rs` (the `cost-root` kind; 8a's loader rejects unknown kinds), `tools/ct-fixtures/src/lib.rs` (cost fixtures) and `scripts/ct-check.sh` (preflight).
+**Architecture.** All new code is additive. **No 8a file changes**, except:
+- `crates/ctcore/src/lib.rs`: new `mod` lines, explicit re-exports and `analyze`;
+- `tools/ct-driver/src/main.rs`: the `cost` mode (Task 6), and `-Zalways-encode-mir` for `translate-crate` crates (Task 1b);
+- `tools/ct-driver/src/manifest.rs`: the `cost-root` kind (Task 6; 8a's loader rejects unknown kinds);
+- `tools/ct-driver/src/translate.rs`: Task 1b's coverage mappings only;
+- `tools/ct-driver/src/interp.rs`: tuple, bool and enum-variant values in the selftest vector grammar (Task 1b; not in the TCB);
+- `tools/ct-driver/manifest.txt` and `selftest.txt`: Task 1b's `intr`/`translate-crate` lines and parser vectors;
+- `tools/ct-fixtures/{src/lib.rs, manifest.txt, expected.txt}`: Task 1b's coverage fixtures (appended) and Task 6's cost fixtures;
+- `scripts/ct-check.sh` (preflight).
+
+The 8b modules:
 - `crates/ctcore/src/cost.rs` holds the trusted cost spec:
   - atoms, polynomials, facts and certificates;
   - `cert_sem_ok`/`cert_for`;
   - `theorem_cost`.
 - `crates/ctcore/src/cost_sym.rs` holds the abstract block effect, as spec plus lemmas.
 - `crates/ctcore/src/cost_check.rs` holds the verified validator, `check_cert(..) ==> cert_for(..)`.
-- `crates/ctcore/src/loops.rs` holds the untrusted inference: dominators, natural loops, counted loops and potentials. Its only route to a `Some` is through `check_cert`.
+- `crates/ctcore/src/loops.rs` holds the untrusted inference: dominators, natural loops, counted loops and potentials. Its only route to a `Some` is through `check_cert`, which `analyze` (in `lib.rs`) applies.
 
 **Tech Stack:** as 8a. No new dependencies.
 
@@ -30,7 +43,7 @@
 *8a's Global Constraints, repeated verbatim with the 8b deltas marked **[8b]**:*
 
 - **Escapes.**
-  - `crates/ctcore` adds **zero** escapes, and the `verify.sh` count stays at main's value **[8b: read it from main's verify.sh line at branch time and write it in every report]**.
+  - `crates/ctcore` adds **zero** escapes, and the `verify.sh` count stays at main's value **[8b: 1, from main's verify.sh line `escapes accounted (1)`; write it in every report]**.
   - The gate greps every `*.rs` under `crates/`, code *and* comments, for `assume(`, `admit(`, `external_body`, `assume_specification`, `verifier::external`/`verifier(external` and the bare word `axiom`.
   - Never write those strings in `crates/` (write "premise", "hypothesis").
   - Never name a lemma `*assume*` or `*axiom*`.
@@ -38,7 +51,7 @@
 - **Toolchain.**
   - The pinned 1.98.1 from `rust-toolchain.toml`.
   - `export PATH=$HOME/.local/opt/verus/0.2026.10.04.426d8b0/verus-x86-linux:$PATH`.
-  - `RUSTC_BOOTSTRAP=1` only inside `scripts/ct-check.sh`.
+  - `RUSTC_BOOTSTRAP=1` only inside `scripts/ct-check.sh`. **[8b] Exemption:** scratch census, dry-run and MIR-dump runs under the scratchpad (Task 1, Task 1b Step 6, the Task 7 Step 0 rerun) may set it by hand. So may the driver builds for them, which also need `RUSTFLAGS="-L $(rustc --print sysroot)/lib"`. Nothing they produce is committed except as recorded text.
 - **Verus usage.**
   - `cd crates/ctcore && cargo verus verify -- --rlimit 4`, narrowing with `--verify-only-module`/`--verify-function`.
   - **On a fresh target dir, first run without `--rlimit`** (vstd fails at 4).
@@ -56,7 +69,8 @@
   - Trace algebra in helpers.
   - **[8b]** Polynomial facts in small standalone lemmas (`lemma_mono_*`, `lemma_poly_*`). `by (nonlinear_arith)` only with at most one product per side.
 - **Trusted-spec freeze.**
-  - **[8b]** 8a's `syntax.rs`, `sem.rs`, `ct.rs`, `ct_lemmas.rs`, `ni.rs`, `check.rs` and `infer.rs` are frozen for the whole phase. `git diff main -- <those files>` must be empty in every commit.
+  - **[8b]** 8a's `syntax.rs`, `sem.rs`, `ct.rs`, `ct_lemmas.rs`, `ni.rs`, `check.rs`, `infer.rs` and `sem_sanity.rs` are frozen for the whole phase. `git diff main -- <those files>` must be empty in every commit.
+  - **[8b]** `tools/ct-driver/src/translate.rs` and `interp.rs` change only in Task 1b. From Task 1b on, crypto's ct-check output is byte-identical to main's in every task: `report-crypto.txt`, `selftest-crypto.txt` and the negative run's `report-crypto.txt`, and the lines `crypto ok (84 fns, 10 roots, 10 declassify)`, `selftest 15/15` and `negative control rejected`.
   - From the end of Task 2, `cost.rs`'s spec fns and the `theorem_cost` statement are frozen too.
   - A change to either needs a `SPEC-CHANGE:` paragraph and a controller ruling.
   - **A target that needs a new intrinsic or a semantics change is a `None` (`Unresolved`), never a reason to edit 8a's semantics.**
@@ -66,9 +80,9 @@
   3. `scripts/verify.sh` prints its success line with main's escape count (**[8b]** from Task 7, with `cost X/Y`).
   4. `scripts/ct-check.sh` exits 0 with the summary the task names.
 - **Evidence run.** `CARGO_TARGET_DIR` and `CT_TARGET_DIR` under `/tmp/claude-1000/-home-tavern-Projects-rust-web-server/19d690a3-7cab-4802-bc1f-9aa0173a905e/scratchpad/` (`vt-8b-tN`, `ct-8b-tN`), absolute. `rm -rf` both after. The tmpfs is 16 GB shared.
-- **Proof-time budget.** Report the five slowest functions. No function may exceed 10 s. ctcore's total must stay under 90 s **[8b: was 60 s]**.
+- **Proof-time budget.** Report the five slowest functions. No function may exceed 10 s. ctcore's total must stay under 90 s **[8b: was 60 s; Task 1 records the baseline]**.
 - **Mutations** fail on a named postcondition or expected line, never on rlimit. Revert immediately.
-- **Never weaken a test**, and never flip an expected verdict to pass a run. A bounded target turning `None` is a regression; stop and report it.
+- **Never weaken a test**, and never flip an expected verdict to pass a run. A bounded target turning `None` is a regression; stop and report it. **[8b]** `tools/ct-fixtures/expected.txt`'s 44 lines are append-only.
 - **[8b] The inference is untrusted.**
   - Give `loops.rs` no proof obligations beyond termination and memory safety.
   - Every `Some` an API returns must pass through `check_cert` on the final summary vector.
@@ -80,43 +94,162 @@
 
 ## Review Focus
 
-1. **The statement is the spec's.** `theorem_cost` matches the spec text. `cert_for` requires entry facts to be empty and `sums[f] == Some(pot[0])`. `cert_sem_ok` quantifies over **all** callee outcomes within the summary (dst and `&mut` targets havocked).
+1. **The statement is the amended spec's.** `theorem_cost` matches the spec text as amended by the preflight rulings (I1, C2): the `cert_for` premise, the `certs`/`sums` length premises, `vals_len_ok`, `poly_val`, the typed `Val(local, IntTy)` atom. `cert_for` requires entry facts to be empty and `sums[f] == Some(pot[0])`. `cert_sem_ok` quantifies over **all** frames satisfying the facts and `frame_len_ok`, and over **all** callee outcomes within the summary (dst and `&mut` targets havocked). Under C1 option A it has no extra frame invariant.
 2. **There is no unchecked route to `Some`.** `analyze`'s ensures comes from `check_cert` on the final vector. `loops.rs` output never reaches the report without it.
 3. **Honesty of the number.**
-   - The coverage line equals `cost-expected.txt`.
-   - Every divergence from the spec's pre-registered table is explained in the Task 7 report.
+   - The coverage line equals `expected-cost.txt`.
+   - The Task 7 report shows the result against 27/38, 25/36 and the Task 1b re-baseline X′/36, which was committed before Task 2.
+   - Every divergence from the pre-registered table is explained.
    - Every `None` has a reason.
 4. **Non-vacuity.**
    - Task 2's proof mutations fail.
+   - Task 3's unknown-provenance mutation fails.
    - Tampered certificates are rejected (Task 4).
    - Negative cost fixtures stay `None`.
    - A seeded unbounded loop in a real target is `None` (Task 7).
 5. **Wording.** TRUSTED.md, the spec and the report say "steps", never "time"; and "not memory; Vec growth hidden".
-6. **8a freeze held.** The `git diff` of 8a's files is empty.
+6. **8a freeze held.** The `git diff` of 8a's frozen files, `sem_sanity.rs` included, is empty.
+7. **Translator coverage (Task 1b) is CT-TCB surface.**
+   - Each new mapping has a fixture or vector, a mutation that fails it, and a TRUSTED note.
+   - Crypto's ct-check output is byte-identical.
+   - The 44 existing fixture lines are unchanged.
 
 ---
 
-### Task 1: Baseline, target census and pre-registration check (no commit)
+### Task 1: Baseline, target census, dry run and pre-registration check (no commit)
 
-**Files:** none in the repo. Scratch output goes under the scratchpad.
+**Files:** none in the repo. Scratch output goes under the scratchpad. The census, dry-run and MIR runs use the GC's `RUSTC_BOOTSTRAP` exemption (M6).
 
 **Consumes:** merged 8a.
 
-- [ ] **Step 1: 8a interfaces present.**
+- [ ] **Step 1: 8a interfaces present, and baselines.**
   - `grep -n 'pub open spec fn \(run_fn\|run_from\|exec_stmts\|exec_intr\|call_enter\|call_leave\|init_entry\|len_ok\|wf\)(' crates/ctcore/src/*.rs` finds each exactly once. The `(` keeps `wf` from also matching `wf_body` (preflight).
   - `Res` is `Option<(Frame, Seq<Event>, nat)>`.
-  - Record the escape count from `scripts/verify.sh`.
+  - Record the escape count from `scripts/verify.sh` (expected 1).
+  - **ctcore proof-time baseline** (M10): on a fresh target dir, run once without `--rlimit`, then `cargo verus verify -- --rlimit 4 --time-expanded`. Record the total and the five slowest functions. Task 8's `< 60 s` gate and the GC's 90 s budget compare against it.
+  - **Crypto ct-check baseline:** run `scripts/ct-check.sh` on main. Keep `report-crypto.txt`, `selftest-crypto.txt` and the negative run's `report-crypto.txt` under the scratchpad (`ct-baseline/`). Task 1b's invariant compares against them.
 - [ ] **Step 2: Census.**
-  - Write a scratch manifest with `root` lines for the spec's 38 target def paths. Get exact paths by `grep`, and for `<QuicVarInt<_> as Parser>::parse` from census output.
+  - Write a scratch manifest with `root` lines for the spec's target def paths, **36 of them** (I3): drop both `<QuicVarInt<_> as Parser>::parse` rows.
+    - The impl is generic, so `pick_roots` can't take it as a root.
+    - `QuicVarInt<true>` has no exec instance.
+    - `<QuicVarInt<false>>::parse` is counted inside `wire::varint::parse_varint`'s closure.
+  - Get exact paths by `grep`.
   - Add `translate-crate wire` (and `vest_lib` if the census shows trait plumbing through it).
   - Run the driver in `CT_MODE=census` over `wire`, `h3` and `quic` (`CT_CRATES=wire,h3,quic cargo build --release -p wire -p h3 -p quic`).
-  - Record every reached callee with no 8a intrinsic mapping. Each one makes its callers `Unresolved`, so list those targets as `None (unresolved: <callee>)`.
+  - Record every reached callee with no 8a intrinsic mapping. Record the `body=` column for `wire::varint::parse_varint` in the h3 and quic builds (I4e: `body=no` means Task 1b needs (ii)).
   - **vest_lib bodies.** If the census needs vest_lib bodies, check their release MIR for `*WithOverflow` (it is there under the base profile's `overflow-checks = true`). Escalate for a ruling: a `[profile.release.package.vest_lib] overflow-checks = false` override plus a TRUSTED note, or accept the `None`s.
-- [ ] **Step 3: Loop classification.**
+- [ ] **Step 3: Dry run (I4).**
+  - Use `CT_MODE=check` with the Step 2 manifest (scratch `root` lines plus `translate-crate wire`) over `CT_CRATES=wire,h3,quic`. It needs no driver change.
+  - `verdict()` runs `translate_closure` first. Then:
+    - `reject <root> Unsupported|Unresolved ..` is a translation failure;
+    - `reject <root> Root .. needs a ct:: attribute` is a clean translation.
+  - Per target, record clean or failed. For a failure, record its first error, classified as I4 (a) `str`, (b) intrinsic element-type guard, (c) `copy_from_slice`, (d) Drop, (e) no MIR body, or **other**.
+- [ ] **Step 4: Loop classification.**
   - Dump the MIR with `RUSTC_BOOTSTRAP=1 cargo rustc --release -p <crate> -- -Zinline-mir=no -Zunpretty=mir > <scratch>/<crate>.mir` (in a scratch target dir).
   - For each target, list its back edges and the guard/increment pattern.
   - Compare with the spec's table. Every row that changes gets a one-line reason.
-- [ ] **Step 4: Report** the final target list (the denominator Y), the revised predictions, and the Unresolved list. Stop for a ruling only if Y < 25 or more than 5 targets are Unresolved.
+- [ ] **Step 5: Report.** Include:
+  - the final target list, Y = 36;
+  - the original 27/38 and the I3 base 25/36;
+  - the dry-run table by category;
+  - the census's unmapped callees;
+  - the loop classification.
+
+  Translation failures in classes (a)–(e) are Task 1b's input, not a stop. List any failure classed **other** for the controller: it is outside Task 1b's scope.
+
+---
+
+### Task 1b: Translator coverage for the cost targets
+
+**Files:**
+- Modify:
+  - `tools/ct-driver/src/translate.rs`: (i), (iii), (iv);
+  - `tools/ct-driver/src/main.rs`: (ii);
+  - `tools/ct-driver/src/manifest.rs`: only if (ii) needs it. None is expected, since `translate_crates` already exists;
+  - `tools/ct-driver/src/interp.rs`: new values in `parse_vector`'s grammar. The interpreter is not in the TCB. Today it has no tuple, bool or non-`Option` enum form, which `settings_ok` (`-> bool`, `&Vec<(u64, u64)>`), `parse_prefix_int` (`-> PrefixInt`) and the `Option<(..)>` returns need. The new forms:
+    - `(v,v,..)`, a tuple;
+    - `true`/`false`, a `Bool` int;
+    - `#k(v,..)`, variant k of an enum with those fields;
+  - `tools/ct-driver/manifest.txt`: `translate-crate wire`, plus the census-derived `intr` lines the parser closures need, mapping only to 8a's existing intrinsics (e.g. `VecNew`, `VecIndex`, `SliceToVec`);
+  - `tools/ct-driver/selftest.txt`: parser vectors;
+  - `tools/ct-fixtures/src/lib.rs`, `tools/ct-fixtures/manifest.txt`, `tools/ct-fixtures/expected.txt`: new lines only;
+  - `scripts/ct-check.sh`;
+  - `TRUSTED.md`: the CT front-end row;
+  - `docs/superpowers/specs/2026-10-28-phase-8-verified-ct-cost-design.md`: the re-baseline line in §Cost analyser only.
+
+**Consumes:** the Task 1 dry-run table and census, and the Step 1 crypto baseline.
+
+**Invariant:** crypto's ct-check output stays byte-identical (GC). `cmp` against Task 1's `ct-baseline/` files, and check that the three crypto summary lines are unchanged.
+
+**Interfaces (produces)**, one per I4 ruling:
+- **(i) `str` and `&'static str` become `Unit`.**
+  - `Cx::ty`: `RigidTy::Str` gives `c::Ty::Unit`, and `Ref(_, str, Not)` gives `c::Ty::Unit`. `&mut str` stays Unsupported.
+  - `Cx::constant`: an `Allocated` constant of type `&str` gives `Lit(ConstVal::Unit)`. Today it falls into `const_val` and errors.
+  - Every read of a `str` stays rejected: `PtrMetadata` accepts slice refs only, and `str` methods have no `intr` line (Unresolved).
+- **(ii) Encoded upstream MIR.**
+  - `main.rs` pushes `-Zalways-encode-mir` with its other flags when the crate being compiled under the driver (in `CT_CRATES`) is named by a `translate-crate` line.
+  - The gate is the `translate-crate` line, not cost mode. Cost mode doesn't exist until Task 6, and the Step 6 re-baseline runs in check mode. Crypto's manifest has no `translate-crate` line, so crypto's builds are unchanged.
+  - It lands only if Task 1 recorded `body=no` for `wire::varint::parse_varint`. Otherwise only the `translate-crate wire` line lands, and (ii)'s flag is recorded as not needed.
+  - The flag only changes which MIR is available, never what it is.
+- **(iii) The intrinsic element-type guard, widened per intrinsic.** `sem.rs`'s `intr_eff` and `intr_cost` never inspect an element's type, so every Vec/slice intrinsic is element-type-generic there.
+  - `Cx::intr_types` gains an element check, `elem_ok(k, E)`. It accepts `u8` for every Vec/slice row, as today. It also accepts exactly the (intrinsic, element) pairs the Task 1 dry run reports, never wider. Expected:
+    - `(u64, u64)` for `VecLen`/`VecIndex`/`VecPush`/`VecNew`;
+    - `h3::qpack::field_section::FieldLine` for `VecNew`/`VecPush`.
+  - `VecPush`'s `x` must be `E`, and `VecIndex`'s dst must be `&E`.
+  - `SliceToVec`, `VecExtendFromSlice` and `ArrayAsSlice` stay `u8`-only. Their per-element cost of 1 is honest only for a bitwise copy, not a deep `Clone`.
+  - Fix the existing `ponytail:` comment to name the pair list.
+- **(iv) Drop glue as a no-op.** `sem.rs` has no Drop construct: the translator lowers `Drop` to `Goto(target)`. So this needs no frozen-file change.
+  - Admit a `Drop` whose type's glue frees a bounded number of `Vec<int>` buffers and runs no user code. Such a type is `Vec<int>`, `Option<T>`, a tuple, or a struct/enum whose fields are ints, `Unit`-mapped types, `Vec<int>`, or such types recursively, and with no `impl Drop` of its own. Examples: `Option<Vec<u8>>`, `FieldLine`.
+  - `Vec<E>` for a non-int `E` stays Unsupported: its glue is O(len) work, which the step model would hide. Examples: `Vec<Vec<u8>>`, `Vec<FieldLine>`.
+  - Step 1 confirms how rustc_public exposes an ADT's own `Drop` impl. If it exposes none, (iv) admits only `Vec<int>`, `Option` and tuples, and struct-of-Vec drops stay `None`. Record which.
+- **(v) `copy_from_slice`: None.** It has no intrinsic in the closed set, and adding one is a SPEC-CHANGE to frozen `syntax.rs`/`sem.rs`. `parse_path` and everything that reaches it stay `None (Unresolved)`.
+
+**Tests** (one fixture plus one selftest vector per new mapping):
+- **Fixtures**, appended to `tools/ct-fixtures` as `root` lines and `expected.txt` lines in sorted position. The 44 existing lines stay unchanged:
+  - `pos_str_unit` (i): `fn(x: u8) -> Option<&'static str>` returning `Some("e")` or `None`. Expected `ok`.
+  - `neg_str_len` (i): `s.len()` on `s: &str`. Expected `reject .. Unresolved` (`core::str::<impl str>::len`, no `intr` line).
+  - `pos_vec_elem_pair` (iii): `v.len()` and `v[i].0` on `&Vec<(u64, u64)>`, through the same keys as the h3 `intr` lines. Expected `ok`. The existing `neg_intr_type_args` (`Vec<u64>::push`) stays `Unsupported`, which is (iii)'s boundary.
+  - `pos_drop_bounded` (iv): drops an `Option<Vec<u8>>` and a `struct TwoVecs { a: Vec<u8>, b: Vec<u8> }`. Expected `ok`. The existing `neg_drop_non_vec` (`Vec<Vec<u8>>`) stays `Unsupported`, which is (iv)'s boundary.
+  - `neg_drop_user_impl` (iv): a struct with `impl Drop`. Expected `reject .. Unsupported`.
+  - (ii) has no fixture: `ct-fixtures` is a single-crate workspace. Its check is the cross-crate vectors below.
+  - New total: `ct-check: fixtures 49/49`.
+- **Selftest vectors** in `tools/ct-driver/selftest.txt`. Each expected value is cited to an existing test in its crate, as 8a requires. One vector may serve two mappings if each mapping's mutation fails it.
+  - `h3::frame::parse_exact_varint` covers (i) and (ii): it reaches `wire::varint::parse_varint` and its `PResult`/`&'static str` locals.
+  - `quic::frame::vint_at` covers (ii).
+  - `h3::frame::settings_ok` covers (iii) (a `[(..),(..)]` argument).
+  - `h3::qpack::field_section::decode_string` (or `scan_string`, whichever the dry run shows dropping `Option<Vec<u8>>`) covers (iv).
+  - For M12, also add `wire::varint::exec_len`, `h3::qpack::int::parse_prefix_int`, `h3::qpack::huffman::huffman_decode` and `quic::frame::bytes_at`. These cover the new `intr` lines and give every parser crate a vector.
+- **`ct-check.sh`:**
+  - `analyse()` takes a comma-separated crate list (the M14 part needed here). `CT_CRATES` is the list, `cargo clean -p` runs per crate, and it writes one report per crate.
+  - It adds a selftest run over `wire,h3,quic` (own target dir `$CT_TARGET_DIR/parsers`).
+  - Selftest counts are per crate prefix. The crypto line stays `ct-check: selftest 15/15`, and a new line prints `ct-check: selftest parsers K/K`, with K = 8.
+
+- [ ] **Step 1:** Confirm the rustc_public API for (iv)'s user-`Drop` check, and record it. Implement (i)–(iv) as above. Gate (ii) on Task 1's `body=` record.
+- [ ] **Step 2:** Add the three value forms to `interp.rs`, plus a unit test for each. Add the fixtures, the vectors, the manifest lines and the `ct-check.sh` changes.
+- [ ] **Step 3: Invariant.** Run `scripts/ct-check.sh`, then `cmp` the three crypto files against `ct-baseline/`. Expected output:
+  - `fixtures 49/49`;
+  - `selftest 15/15`;
+  - `selftest parsers 8/8`;
+  - `crypto ok (84 fns, 10 roots, 10 declassify)`;
+  - `negative control rejected`.
+- [ ] **Step 4: Mutations**, one per new mapping, each failing a named expected line or vector. Revert each.
+  - (i): remove the `Str` arm. `pos_str_unit` becomes `reject .. Unsupported` (diff), and the `parse_exact_varint` vector fails translation.
+  - (ii) (if landed): drop the flag. The `parse_exact_varint` and `vint_at` vectors fail with `no MIR body`.
+  - (iii): widen `elem_ok` to any int element, and `neg_intr_type_args` flips to `ok` (diff). Restore `u8`-only, and the `settings_ok` vector fails translation.
+  - (iv): admit `Vec<E>` for any `E`, and `neg_drop_non_vec` flips to `ok` (diff). Skip the user-`Drop` check, and `neg_drop_user_impl` flips. Restore `Vec<int>`-only, and `pos_drop_bounded` flips and the (iv) vector fails.
+- [ ] **Step 5: TRUSTED.md.** Add one sentence per mapping to the "CT front end" row:
+  - (i): `str` is opaque `Unit`, and every read of it stays rejected;
+  - (ii): `-Zalways-encode-mir` for `translate-crate` crates changes only which MIR is available;
+  - (iii): the admitted (intrinsic, element) pairs, with the len-cost rows `u8`-only;
+  - (iv): drop glue counts as one step. For the admitted types it frees a bounded number of buffers and runs no user code. Memory is not modelled.
+  - (v): `copy_from_slice` is unmapped.
+- [ ] **Step 6: Re-baseline before Task 2.**
+  - Rerun Task 1's dry run with the 1b driver.
+  - X′ = the targets the spec predicts `Some`, minus the two I3 rows, minus every target that still fails translation (parse_path included, by (v)), minus every target whose loop or call blocks the C1-A domain can't keep. The domain is as ruled at Task 2 Step 0: for example, a call that passes a parameter directly makes every local Unknown. So that ruling must be recorded in `progress.md` before this step.
+  - Append one dated line under the spec's pre-registered table, `Re-baseline (8b Task 1b, before Task 2): X′/36 predicted bounded`, with the targets that changed and why. **Never edit the table rows or the 27/38 line.**
+  - **Stop rule:** stop for a ruling if more than 5 targets the spec predicts `Some` (excluding `parse_path`) still fail translation, or if any failure is outside I4's classes.
+- [ ] **Step 7: Run the four checks and the evidence run.**
+- [ ] **Step 8: Commit:** `feat(ct-driver): translator coverage for cost targets (str as Unit, encoded upstream MIR, per-intrinsic element types, bounded drop glue); re-baseline X'/36`
 
 ---
 
@@ -126,23 +259,25 @@
 - Create: `crates/ctcore/src/cost.rs`
 - Modify: `crates/ctcore/src/lib.rs` (`pub mod cost;`)
 
-**Consumes:** `sem.rs` (`run_from`, `exec_stmts`, `exec_intr`, `call_enter`, `call_leave`, `init_entry`, `len_ok`) and `ct.rs` (`wf`).
+**Consumes:** `sem.rs` (`run_from`, `exec_stmts`, `exec_intr`, `call_enter`, `call_leave`, `init_entry`, `len_ok`, `uval`) and `ct.rs` (`wf`).
 
 **Interfaces (produces):**
 - **Exec types**, used by the spec through `@`:
-  - `pub enum Atom { Const(u64), Val(usize), Len(usize), Gap(Box<Atom>, Box<Atom>) }`;
+  - `pub enum Atom { Const(u64), Val(usize, IntTy), Len(usize), Gap(Box<Atom>, Box<Atom>) }`. `Val` is typed (C2): it reads the local at a width, as MIR's comparisons do;
   - `pub struct Mono { pub coef: u64, pub atoms: Vec<Atom> }` (≤ 2 atoms);
   - `pub struct Poly { pub monos: Vec<Mono> }`;
   - `pub enum Fact { Le(Atom, Atom), Lt(Atom, Atom) }`;
   - `pub struct BlockCert { pub facts: Vec<Fact>, pub pot: Poly }`;
   - `pub struct Cert { pub blocks: Vec<BlockCert> }`.
 - **Spec values** (`pub open spec fn`):
-  - `val_nat(v: Val) -> nat`: `Int(x)` gives x; anything else gives 0.
-  - `len_nat(fr: Frame, v: Val) -> nat`: the length of the `Arr` reached through `Shr`/`Mut`; 0 otherwise.
-  - `atom_val(fr: Frame, a: Atom) -> nat` (`decreases a`). `Gap(a, b)` is `if a >= b { a - b } else { 0 }`.
-  - `mono_val(fr, m) -> nat`, `poly_val(fr: Frame, p: Poly) -> nat`.
-  - `fact_holds(fr, f) -> bool`, `facts_hold(fr, fs: Seq<Fact>) -> bool`.
-  - `frame_len_ok(fr: Frame) -> bool`: `len_ok` of every local and slot.
+  - `val_nat(ty: IntTy, v: Val) -> nat`: `Int(x)` gives `uval(ty, x)`; anything else gives 0 (C2);
+  - `len_nat(fr: Frame, v: Val) -> nat`: the length of the `Arr` reached through `Shr`/`Mut`; 0 otherwise;
+  - `gap(a: nat, b: nat) -> nat`: `if a >= b { a - b } else { 0 }`;
+  - `atom_val(fr: Frame, a: Atom) -> nat` (`decreases a`). `Val(x, ty)` is `val_nat(ty, fr.locals[x])`, and `Gap(a, b)` is `gap(atom_val(a), atom_val(b))`;
+  - `mono_val(fr, m) -> nat`, `poly_val(fr: Frame, p: Poly) -> nat`;
+  - `fact_holds(fr, f) -> bool`, `facts_hold(fr, fs: Seq<Fact>) -> bool`;
+  - `frame_len_ok(fr: Frame) -> bool`: `len_ok` of every local and slot;
+  - `vals_len_ok(vs: Seq<Val>) -> bool`: `forall|i| 0 <= i < vs.len() ==> len_ok(vs[i])` (I1).
 - **Block and certificate conditions:**
   - `block_step_ok(p: Program, f: nat, b: nat, c: Cert, sums: Seq<Option<Poly>>, fr: Frame) -> bool`, per the spec §Cost analyser. Its parts:
     - `k = stmts.len()`, `fr1 = exec_stmts(..).0`;
@@ -151,23 +286,44 @@
     - `Abort`: true;
     - `Call(Intr)`: on `Some((fr2, _, extra))`, the next block's facts at `fr2` and `>= k + 1 + extra + pot_next(fr2)`;
     - `Call(Fn(g))`: `sums[g] is Some`, and `forall|out: Frame, n: nat| frame_len_ok(out) && n <= poly_val(call_enter(..).0, sums[g].unwrap())` ⇒ next facts at `fr2 = call_leave(fr1, out, wb, dst).0` and `>= k + 1 + n + pot_next(fr2)`.
-  - `cert_sem_ok(p, f, c, sums) -> bool`: `c.blocks@.len() == nblocks(f)`, and for all b and fr, `facts_hold(fr, c.blocks@[b].facts@) && frame_len_ok(fr) ==> block_step_ok(p, f, b, c, sums, fr)`.
+  - `cert_sem_ok(p, f, c, sums) -> bool`: `c.blocks@.len() == nblocks(f)`, and for all b and fr, `facts_hold(fr, c.blocks@[b].facts@) && frame_len_ok(fr) ==> block_step_ok(p, f, b, c, sums, fr)`. There is no other frame hypothesis (C1 option A).
   - `cert_for(p, f, c, sums) -> bool`: `cert_sem_ok` ∧ `c.blocks@[0].facts@.len() == 0` ∧ `sums[f] == Some(c.blocks@[0].pot)`.
 - **Lemmas:**
   - `proof fn lemma_run_len_ok(p, f, b, fr, fuel)`: `frame_len_ok(fr)` and `run_from(..) is Some` imply `frame_len_ok(final)`.
   - `proof fn lemma_exec_stmts_len_ok(..)`, `proof fn lemma_intr_len_ok(..)`.
+  - `proof fn lemma_init_entry_len_ok(p, f, args, slots)`: `vals_len_ok(args) && vals_len_ok(slots) ==> frame_len_ok(init_entry(p, f, args, slots))`.
+  - `proof fn lemma_gap_dec(a: nat, x: nat)`: `x < a ==> gap(a, x) == gap(a, x + 1) + 1`. Tasks 3 and 4 consume it.
   - `proof fn cost_from(p, certs, sums, f, b, fr, fuel)`, `decreases fuel`:
     - requires `wf(p)`, all-`cert_for` (as in the theorem), `sums[f] is Some`, `facts_hold(fr, certs[f].blocks@[b].facts@)`, `frame_len_ok(fr)` and `run_from(p, f, b, fr, fuel) is Some`;
     - ensures `steps <= poly_val(fr, certs[f].blocks@[b].pot)`.
-- **The theorem:** `pub proof fn theorem_cost(..)`, exactly the spec's statement, with the premise `forall|g: int| 0 <= g < p.fns@.len() && sums[g] is Some ==> cert_for(p, g as nat, certs[g], sums)` and `certs.len() == sums.len() == p.fns@.len()`.
+- **The theorem**, the amended spec's statement (I1):
 
-- [ ] **Step 1:** Write the spec fns. `lemma_run_len_ok` comes first, since it relies on 8a's overflow-gives-`None` rule for push/extend/to_vec. If that rule is missing from 8a's `sem.rs`, stop: that's a SPEC-CHANGE to 8a.
-- [ ] **Step 2:** Prove `cost_from` (one case lemma per terminator kind, plus the dispatcher) and `theorem_cost`.
+```rust
+pub proof fn theorem_cost(p: Program, certs: Seq<Cert>, sums: Seq<Option<Poly>>, f: nat,
+                          args: Seq<Val>, slots: Seq<Val>, fuel: nat, b: Poly)
+    requires
+        wf(p), f < p.fns@.len(), certs.len() == p.fns@.len(), sums.len() == p.fns@.len(),
+        sums[f as int] == Some(b),
+        forall|g: int| 0 <= g < p.fns@.len() && sums[g] is Some ==> cert_for(p, g as nat, certs[g], sums),
+        vals_len_ok(args), vals_len_ok(slots),
+        run_fn(p, f, init_entry(p, f, args, slots), fuel) is Some,
+    ensures
+        run_fn(p, f, init_entry(p, f, args, slots), fuel).unwrap().2
+            <= poly_val(init_entry(p, f, args, slots), b),
+```
+
+- [ ] **Step 0: C1-A ruling check, before any spec fn is written.** C1 option A keeps `cert_sem_ok`'s frames untyped. In such a frame any local, a parameter included, may hold a top-level `Mut(Local(i))`, whatever its declared type. This has two consequences:
+  - `len_nat` follows `Mut`, so `Len(x)` changes whenever x's target is written, a plain `z = ..` assignment included, while x's own value is unchanged;
+  - `write_back` follows every `Mut`-valued call argument, not just `&mut`-typed ones.
+
+  If `progress.md` has no ruling on these two points (keep `len_nat` through `Mut`, or read through `Shr` only), stop and ask before writing `len_nat`. The choice is frozen with `cost.rs`.
+- [ ] **Step 1:** Write the spec fns. `lemma_run_len_ok` comes first, since it relies on 8a's overflow-gives-`None` rule for push/extend/to_vec (`grow`, `SliceToVec`; sem.rs:405-411, 455-458). If that rule is missing from 8a's `sem.rs`, stop: that's a SPEC-CHANGE to 8a.
+- [ ] **Step 2:** Prove `lemma_gap_dec`, `lemma_init_entry_len_ok`, `cost_from` (one case lemma per terminator kind, plus the dispatcher) and `theorem_cost`.
 - [ ] **Step 3: Proof mutations**, each failing a named lemma:
   - `block_step_ok`'s `Return` requires `>= k` instead of `>= k + 1`;
   - the `Call(Fn)` case drops `n`;
   - `cert_for` drops `facts@.len() == 0`, so `theorem_cost` can't discharge the entry facts;
-  - `Gap` defined as `a - b` in int (no saturation), which fails the nat typing.
+  - `gap(a, b)` defined as `a`, which fails `lemma_gap_dec` (M4).
 - [ ] **Step 4: Run the four checks and the evidence run.** The cost spec freeze starts after this commit.
 - [ ] **Step 5: Commit:** `feat(ctcore): step-bound certificates and theorem_cost (steps <= summary(inputs))`
 
@@ -177,43 +333,68 @@
 
 **Files:**
 - Create: `crates/ctcore/src/cost_sym.rs`
+- Modify: `crates/ctcore/src/lib.rs` (`pub mod cost_sym;` only) (I5)
 
 **Consumes:** `cost.rs` (Task 2), `sem.rs`.
 
 **Interfaces (produces):**
 - **Types** (exec, used by the spec):
   - `pub enum Rel { Same, ValEq(Atom, u64 /* + k */), ValLe(Atom), LenEq(Atom), LenLe(Atom), Unknown }`: each local's post-state value in terms of pre-state atoms;
+  - `pub enum Prov { Local(usize), NoMut, Unknown }`: what a local's value may point to, from its in-block definition (C1 option A);
   - `pub struct Eff { pub rel: Vec<Rel>, pub edge: Vec<(usize /* succ block */, Vec<Fact> /* post-state facts on that edge */)> }`.
 - **Spec:**
-  - `pub open spec fn mut_taken(b: Body, x: nat) -> bool`: some `RefMut` place in the body is rooted at x.
+  - `pub open spec fn prov(blk: Block, k: nat, x: nat) -> Prov` gives the provenance of local x's value before statement k of blk:
+    - `Local(z)` if x's last in-block assignment is `RefMut(Place { local: z, proj: [] })`, or a `Use(Copy)` of such a local. `place_walk` with an empty projection targets exactly `Local(z)`, whatever the frame;
+    - `NoMut` if it is an rvalue whose top-level value is never `Mut`: `Bin`, `Un`, `Cast`, `Len`, `Discr`, `RefShr`, `Aggregate`, `Repeat`, or `Use(Const | Lit)`;
+    - `Unknown` otherwise. That includes every parameter and every local not assigned in the block, because frames are untyped and a declared type proves nothing.
+  - **Writer operands**:
+    - the base local of an assigned place whose projection contains `Deref`;
+    - arg 0 of `VecPush`/`VecSet`/`VecExtendFromSlice`;
+    - every arg of `Call(Fn)`;
+    - a `Call` dst that is not a bare local.
   - `pub open spec fn rel_sound(rel: Rel, x: nat, pre: Frame, post: Frame) -> bool`.
   - `pub open spec fn eff_sound(e: Eff, pre: Frame, post: Frame, succ: nat) -> bool`: every `rel` is sound, and the edge facts for `succ` hold at `post`.
 - **Transfer:** `pub open spec fn sym_block(b: Body, blk: Block, facts: Seq<Fact>) -> Eff`, recognizing exactly:
-  - `x = Copy(y)` (int), giving `ValEq(Val(y), 0)`;
-  - `x = Const(c)`, giving `ValEq(Const(c), 0)`;
-  - `x = Bin(Add, ty, Copy(x), Const(1))` and `Wrapping(Add, ty)(x, 1)`, giving `ValEq(Val(x), 1)`, **only if** a pre-fact `Lt(Val(x), A)` exists with `A` a `Const` ≤ `max(ty)`, a `Val` of a local of the same `IntTy`, or a `Len` with `ty == Usize`;
-  - `x = Len(pl)`/`VecLen`, giving `ValEq(Len(root), 0)`;
+  - `x = Copy(y)` (int, same `IntTy`), giving `ValEq(Val(y, ty), 0)`;
+  - `x = Const(ty, n)`, giving `ValEq(Const(uval(ty, n)), 0)`. If `uval(ty, n) > u64::MAX`, it gives `Unknown` (M8);
+  - `x = Bin(Add, ty, Copy(x), Const(1))` and `Wrapping(Add, ty)(x, 1)`, unsigned `ty` only (C2), giving `ValEq(Val(x, ty), 1)`, **only if** a pre-fact `Lt(Val(x, ty), A)` exists, where `A` is one of:
+    - a `Const` ≤ `max(ty)`;
+    - a `Val(_, ty)` of the same `IntTy`;
+    - a `Len` with `ty == Usize`;
+  - `x = Len(pl)`/`VecLen`, giving `ValEq(Len(root), 0)`, **only for** `pl.proj` ∈ {`[]`, `[Deref]`} (M8: `eval_rv`'s `Len` is `elems(read_place)`, which differs under field projections);
   - `x = RefShr(y)`/`VecAsSlice(y)`, giving `LenEq(Len(y))`;
   - `SliceSubrange(r, ..)`, giving `LenLe(Len(r))`;
   - `SliceToVec(r)`, giving `LenEq(Len(r))`;
-  - every other assignment to x, and every local in `mut_taken` after any write-through or call, gives `Unknown`;
+  - **Writes through `Mut`** (C1 option A, replacing `mut_taken`):
+    - a writer operand with provenance `Local(z)` writes only z, which becomes `Unknown`;
+    - a call argument with provenance `NoMut` writes nothing (no write-back);
+    - a writer operand with provenance `Unknown` makes **every** local `Unknown`.
+  - **Len after writes:** after any write-through, push or call, the `Len` of every `Mut`-typed local becomes `Unknown`, even when its `Rel` is `Same`. Task 2 Step 0 records the ruling on locals that hold a `Mut` without being `Mut`-typed;
+  - every other assignment to x gives `Unknown`;
   - untouched locals give `Same`.
-  - **Edge facts:**
-    - `Switch(Copy(c))` where c was set in this block by `Bin(Lt, _, a, b)` and is unchanged afterwards: `Lt(a', b')` on the non-zero target and `Le(b', a')` on the zero target, with a′, b′ the atoms of the operands' post values;
+  - **Edge facts** (unsigned compares only, C2):
+    - `Switch(Copy(c))` where c was set in this block by `Bin(Lt, ty, a, b)` and is unchanged afterwards: `Lt(a', b')` on the non-zero target and `Le(b', a')` on the zero target, with a′, b′ the atoms of the operands' post values at `ty`;
     - `Gt`/`Ge`/`Le` likewise;
     - the `Assert(Lt(..), true, b)` success edge gives `Lt`.
 - **Lemmas:**
-  - `proof fn lemma_sym_block_sound(p, f, b, blk, facts, fr)`: requires `facts_hold(fr, facts)` and `frame_len_ok(fr)`; ensures `eff_sound(sym_block(..), fr, exec_stmts(..).0, succ)` for the successor the terminator actually takes.
-  - **Per-pattern lemmas:** `lemma_rel_copy`, `lemma_rel_const`, `lemma_rel_inc` (the no-wrap argument, from the `Lt` fact and the width bound), `lemma_rel_len`, `lemma_rel_shr`, `lemma_rel_subrange`, `lemma_edge_lt`.
+  - `proof fn lemma_sym_block_sound(p, f, b, blk, facts, fr)`: requires `facts_hold(fr, facts)` and `frame_len_ok(fr)`. It ensures `eff_sound(sym_block(..), fr, post, succ)` for the successor the terminator actually takes, with `post` the **successor frame** (I2):
+    - `fr1 = exec_stmts(..).0` for `Goto`/`Switch`/`Assert`;
+    - `exec_intr(k, fr1, ..).0` for `Call(Intr)`;
+    - for every `out` with `frame_len_ok(out)`, `call_leave(fr1, out, wb, dst).0` for `Call(Fn)`.
+  - **Per-pattern lemmas:**
+    - `lemma_rel_copy`, `lemma_rel_const`, `lemma_rel_len`, `lemma_rel_shr`, `lemma_rel_subrange`, `lemma_edge_lt`;
+    - `lemma_rel_inc`: the no-wrap argument, from the `Lt` fact, the width bound and `lemma_gap_dec`;
+    - `lemma_prov_local`: a `Local(z)` writer changes only z.
 
 - [ ] **Step 1:** Write `lemma_rel_inc` first, as the bounded probe. If it needs `nonlinear_arith` with more than one product, or rlimit > 4 after one split, stop and report.
-- [ ] **Step 2:** Write the remaining lemmas and `lemma_sym_block_sound`.
+- [ ] **Step 2:** Write `lemma_prov_local`, the remaining lemmas and `lemma_sym_block_sound`. Use per-statement and per-intrinsic helper lemmas from the start, not one big match (8a lesson).
 - [ ] **Step 3: Mutations**, each failing a named lemma:
   - the increment rule without the `Lt` pre-fact (`lemma_rel_inc`);
   - `SliceSubrange` as `LenEq` (`lemma_rel_subrange`);
-  - `mut_taken` ignored, so a write through `Mut` keeps `Same`.
+  - an `Unknown`-provenance writer that keeps other locals `Same` (`lemma_sym_block_sound`) (C1);
+  - `lemma_sym_block_sound` stated at `exec_stmts(..).0` for `Call(Intr)`, which fails on the `VecLen` dst (I2).
 - [ ] **Step 4: Run the four checks and the evidence run.**
-- [ ] **Step 5: Commit:** `feat(ctcore): sound abstract block effect for cost certificates (counter increment, lengths, edge facts)`
+- [ ] **Step 5: Commit:** `feat(ctcore): sound abstract block effect for cost certificates (counter increment, lengths, Mut provenance, edge facts)`
 
 ---
 
@@ -221,24 +402,30 @@
 
 **Files:**
 - Create: `crates/ctcore/src/cost_check.rs`, `crates/ctcore/tests/cost_check.rs`
+- Modify: `crates/ctcore/src/lib.rs`: `pub mod cost_check;` and the explicit `pub use cost_check::check_cert;`, with no glob (I5, M2)
 
 **Consumes:** Tasks 2 and 3.
 
 **Interfaces (produces):** all `pub fn`, each with the stated `ensures`.
+- **Hand copies** (M18; ctcore's types derive nothing): `atom_copy(a: &Atom) -> (r: Atom) ensures r == *a`, plus the same for `IntTy`, `Mono`, `Poly` and `Fact`. Budget for them, and for the overflow and bounds obligations of every exec fn here.
 - **Atom order:** `atom_lt(a: &Atom, b: &Atom) -> (r: bool)`, a total strict order with its spec twin `spec_atom_lt`.
 - **Polynomial operations:**
   - `poly_add(a: &Poly, b: &Poly) -> (r: Option<Poly>)` ensures `r matches Some(q) ==> forall fr. poly_val(fr, q@) == poly_val(fr, a@) + poly_val(fr, b@)`;
   - `poly_dominates(lhs: &Poly, rhs: &Poly, extra: u64) -> (r: bool)` ensures `r ==> forall|fr| poly_val(fr, lhs) >= poly_val(fr, rhs) + extra`. It works by syntactic monomial matching on canonical atom lists with coefficient ≥, with `extra` taken from the constant monomial.
 - **Rewrites:**
-  - `rewrite_pre(p: &Poly, e: &Eff, facts: &Vec<Fact>) -> (r: Option<Poly>)` ensures `r matches Some(q) ==> forall|pre, post, s| facts_hold(pre, facts@) && eff_sound(*e, pre, post, s) ==> poly_val(pre, p) >= poly_val(post, q)`. It rewrites pre-atoms into post-atoms:
-    - a `Gap(A, Val(i))` with `ValEq(Val(i), 1)` and a pre-fact `Lt(Val(i), A)` becomes `Gap(A, Val(i))′ + 1`, expanded;
-    - `Same` atoms are kept;
+  - `rewrite_pre(p: &Poly, e: &Eff, facts: &Vec<Fact>) -> (r: Option<Poly>)` ensures `r matches Some(q) ==> forall|pre, post, s| facts_hold(pre, facts@) && eff_sound(*e, pre, post, s) ==> poly_val(pre, p) >= poly_val(post, q)`. Here `post` is the successor frame (I2). It rewrites pre-atoms into post-atoms:
+    - a `Gap(A, Val(i, ty))` with `ValEq(Val(i, ty), 1)` and a pre-fact `Lt(Val(i, ty), A)` becomes `Gap(A, Val(i, ty))′ + 1`, expanded (`lemma_gap_dec`);
+    - `Same` atoms are kept, except `Len` atoms Task 3 marks `Unknown`;
     - monomials over `Unknown` atoms are dropped (sound for the LHS).
   - `bound_post(p: &Poly, e: &Eff, post_facts: &Vec<Fact>) -> (r: Option<Poly>)` ensures `r matches Some(q) ==> forall|fr| facts_hold(fr, post_facts@) ==> poly_val(fr, q) >= poly_val(fr, p)`. It applies the upper-bound rewrites: `Le`/`Lt` facts, `Gap(a, x) <= a`, and `LenLe`. It returns `None` if an `Unknown` atom remains.
-  - `instantiate(sum: &Poly, b: &Body, args: &Vec<Operand>) -> (r: Option<Poly>)` ensures `r matches Some(q) ==> forall|fr| poly_val(fr, q) >= poly_val(call_enter(..).0, sum@)`. It substitutes callee param atoms with arg atoms (`Copy(local)` or `Const`); anything else gives `None`.
+  - `instantiate(sum: &Poly, p: &Program, g: usize, args: &Vec<Operand>) -> (r: Option<Poly>)` ensures `r matches Some(q) ==> forall|fr| poly_val(fr, q) >= poly_val(call_enter(*p, g as nat, fr, args@).0, sum@)` (M3). It substitutes callee param atoms with arg atoms:
+    - `Copy(Place { local, proj: [] })` maps `Val(j, ty)` to `Val(local, ty)`, with matching `IntTy` (C2);
+    - `Const(ty, n)` maps to `Const(uval(ty, n))` when it fits u64;
+    - callee non-param atoms map to `Const(0)`, since those locals are `Unit` at entry;
+    - anything else gives `None`.
 - **Facts:** `facts_imply(have: &Vec<Fact>, need: &Vec<Fact>) -> (r: bool)` ensures `r ==> forall|fr| facts_hold(fr, have@) ==> facts_hold(fr, need@)`. Syntactic: each needed fact appears, or follows by `Lt ⇒ Le`.
 - **Blocks and certificates:**
-  - `check_block(p: &Program, f: usize, b: usize, c: &Cert, sums: &Vec<Option<Poly>>) -> (r: bool)` ensures `r ==> forall|fr| facts_hold(fr, c.blocks@[b].facts@) && frame_len_ok(fr) ==> block_step_ok(*p, f as nat, b as nat, *c, sums@, fr)`;
+  - `check_cost_block(p: &Program, f: usize, b: usize, c: &Cert, sums: &Vec<Option<Poly>>) -> (r: bool)` ensures `r ==> forall|fr| facts_hold(fr, c.blocks@[b].facts@) && frame_len_ok(fr) ==> block_step_ok(*p, f as nat, b as nat, *c, sums@, fr)`. It is named `check_cost_block`, not `check_block`, because `lib.rs` glob-imports `check::*` (M2);
   - `check_cert(p: &Program, f: usize, c: &Cert, sums: &Vec<Option<Poly>>) -> (r: bool)` ensures `r ==> cert_for(*p, f as nat, *c, sums@)`.
 - **`tests/cost_check.rs`**, hand-built core programs with hand-written certificates:
   - `accepts_straight_line_const`
@@ -253,14 +440,15 @@
   - `rejects_unknown_atom_in_rhs`
   - `rejects_entry_facts_nonempty`
   - `rejects_summary_mismatch`
+  - `rejects_signed_counter`: an `I64` counter with an `Lt` fact gets no increment rule (C2)
 
-- [ ] **Step 1:** Write the polynomial and fact helpers, verifying each.
-- [ ] **Step 2:** Write `check_block` per terminator kind (`loop_isolation(false)` where needed) and `check_cert`.
+- [ ] **Step 1:** Write the hand copies, then the polynomial and fact helpers, verifying each.
+- [ ] **Step 2:** Write `check_cost_block` per terminator kind (`loop_isolation(false)` where needed) and `check_cert`.
 - [ ] **Step 3:** All tests pass.
 - [ ] **Step 4: Exec mutations**, each failing a named `ensures`:
   - `poly_dominates` ignores `extra`;
   - `rewrite_pre` keeps `Unknown` monomials as `Same`;
-  - `check_block` skips the successor-facts check.
+  - `check_cost_block` skips the successor-facts check.
 - [ ] **Step 5: Run the four checks and the evidence run.**
 - [ ] **Step 6: Commit:** `feat(ctcore): verified cost-certificate validator (check_cert ==> cert_for)`
 
@@ -270,27 +458,30 @@
 
 **Files:**
 - Create: `crates/ctcore/src/loops.rs`, `crates/ctcore/tests/cost_infer.rs`
-- Modify: `crates/ctcore/src/lib.rs`
+- Modify: `crates/ctcore/src/lib.rs` (`pub mod loops;` and `analyze`)
 
-**Consumes:** Task 4.
+**Consumes:** Task 4, `check::check_wf`, `infer::callee_order`.
 
 **Interfaces (produces):**
-- **Graph structure:**
+- **Graph structure** (`loops.rs`):
   - `pub fn dominators(b: &Body) -> Vec<Vec<bool>>`: iterative dataflow with a pass bound;
   - `pub fn back_edges(b: &Body, dom: &Vec<Vec<bool>>) -> Vec<(usize, usize)>`;
   - `pub fn natural_loop(b: &Body, latch: usize, header: usize) -> Vec<bool>`.
-- **Loops:**
-  - `pub struct Counted { pub header: usize, pub body: Vec<bool>, pub counter: usize, pub bound: Atom, pub test_block: usize, pub inc_block: usize }`;
-  - `pub fn recognize(b: &Body, lp: &Vec<bool>, header: usize) -> Option<Counted>`, by the spec's counted-loop definition;
-  - `pub enum CostWhy { Bounded, NotCounted(usize /* header */), Unresolved, Recursion, CalleeNone(usize), DegreeCap, Overflow, Validator(usize /* block */) }`.
-- **Certificates:** `pub fn build_cert(p: &Program, f: usize, sums: &Vec<Option<Poly>>) -> Result<Cert, CostWhy>`.
+- **Loops** (`loops.rs`):
+  - `pub struct Counted { pub header: usize, pub body: Vec<bool>, pub counter: usize, pub ty: IntTy, pub bound: Atom, pub test_block: usize, pub inc_block: usize }`;
+  - `pub fn recognize(b: &Body, lp: &Vec<bool>, header: usize) -> Option<Counted>`, by the spec's counted-loop definition, unsigned counters only (C2);
+  - `pub enum CostWhy { Bounded, NotCounted(usize /* header */), Unresolved, Recursion, CalleeNone(usize), DegreeCap, Overflow, Validator(usize /* block */), NotWf }` (M15).
+- **Certificates** (`loops.rs`): `pub fn build_cert(p: &Program, f: usize, sums: &Vec<Option<Poly>>) -> Result<Cert, CostWhy>`.
   - Block costs are local.
-  - Loop potentials: `Gap(bound, Val(counter)) × (per-iteration cost)` plus the exit continuation. Nested loops multiply, up to degree 2.
-  - Facts: `Lt(Val(counter), bound)` on the loop's body blocks and `Le(Val(counter), bound)` at the header. Carry `Le` facts from dominating length checks (`if len > b.len() - off { return }`).
-- **The API:** `pub fn analyze(p: &Program) -> (r: (Vec<Option<Poly>>, Vec<Cert>, Vec<CostWhy>))`.
-  - `ensures wf(*p) ==> (r.0@.len() == p.fns@.len() && r.1@.len() == p.fns@.len() && forall|g: int| 0 <= g < r.0@.len() && r.0@[g] is Some ==> cert_for(*p, g as nat, r.1@[g], r.0@))`.
-  - It works bottom-up over the call graph; recursive SCCs give `None`.
+  - Loop potentials: `Gap(bound, Val(counter, ty)) × (per-iteration cost)` plus the exit continuation. Nested loops multiply, up to degree 2.
+  - Facts: `Lt(Val(counter, ty), bound)` on the loop's body blocks and `Le(Val(counter, ty), bound)` at the header. Carry `Le` facts from dominating length checks (`if len > b.len() - off { return }`).
+  - Its exec code under `verus!` still carries Verus's overflow and bounds obligations, which is the GC's "memory safety" (M9). Budget for them and for the hand copies (M18).
+- **The API** (`lib.rs`, verified, like `check_program`; M9): `pub fn analyze(p: &Program) -> (r: (Vec<Option<Poly>>, Vec<Cert>, Vec<CostWhy>))`.
+  - `ensures r.0@.len() == p.fns@.len() && r.1@.len() == p.fns@.len() && forall|g: int| 0 <= g < r.0@.len() && r.0@[g] is Some ==> cert_for(*p, g as nat, r.1@[g], r.0@)`.
+  - It runs `check::check_wf` first: a non-wf program gives all-`None` with `NotWf`.
+  - It works bottom-up in `infer::callee_order`. Recursion (`Err`) gives `None` with `Recursion`.
   - Then it re-validates every `Some` with `check_cert` against the current vector, sets failures to `None`, and repeats until a pass changes nothing. That loop is `decreases` the number of `Some`s.
+  - `theorem_cost` is never re-exported (E0432). It stays at `ctcore::cost::theorem_cost`.
 - **`tests/cost_infer.rs`:**
   - `infers_counted_const`
   - `infers_counted_len`
@@ -300,6 +491,7 @@
   - `none_for_off_progress_loop`
   - `none_for_recursion`
   - `none_for_unknown_bound`
+  - `none_for_not_wf`
   - `revalidation_drops_dependent_caller`: a callee forced to `None` makes its caller `None`.
 
 - [ ] **Step 1:** Write the dominators, loops and recognizer (with plain unit tests), then `build_cert` and `analyze`.
@@ -313,19 +505,24 @@
 ### Task 6: Driver `cost` mode and cost fixtures
 
 **Files:**
-- Modify: `tools/ct-driver/src/main.rs` (`CT_MODE=cost`), `tools/ct-driver/src/manifest.rs` (the `cost-root <def-path>` line kind), `tools/ct-fixtures/src/lib.rs` (cost fixtures), `scripts/ct-check.sh`
-- Create: `tools/ct-fixtures/expected-cost.txt`
+- Modify:
+  - `tools/ct-driver/src/main.rs` (`CT_MODE=cost`);
+  - `tools/ct-driver/src/manifest.rs` (the `cost-root <def-path>` line kind);
+  - `tools/ct-fixtures/src/lib.rs` (cost fixtures);
+  - `scripts/ct-check.sh`.
+- Create: `tools/ct-fixtures/cost-manifest.txt` (the fixtures' `cost-root` lines; I6), `tools/ct-fixtures/expected-cost.txt`
 
-**Consumes:** `ctcore::analyze`, 8a's `translate_closure()` (preflight).
+**Consumes:** `ctcore::analyze`, 8a's `translate_closure()` (preflight), Task 1b's `analyse()` crate list.
 
 **Interfaces (produces):**
 - **Cost mode** translates from the `cost-root` lines. It reads no labels. `translate_closure` applies no label rule, so 8a's root-label rule, which runs in check mode only, doesn't apply here (preflight).
-  - It keeps only cost roots whose crate prefix is the crate being compiled, and analyses each root's closure as its own `Program`, as in 8a.
+  - It keeps only cost roots whose crate prefix is the crate being compiled, through a `crate_cost_roots` twin of `crate_roots`. It analyses each root's closure as its own `Program`, as in 8a. A crate with no cost root writes an empty file. A cost root matching no monomorphic fn stays a hard error.
   - ct-check.sh fails if any `cost-root` got no verdict line in any crate.
 - **It calls `analyze` and writes `cost-<crate>.txt`**, one line per cost root:
-  - `bounded <def-path> deg=<0|1|2> steps <= <poly in source param names>`; or
-  - `none <def-path> <CostWhy>`.
-- **Cost fixtures** (`cost_pos_*` must be `bounded`; `cost_neg_*` must be `none`):
+  - `bounded <def-path> deg=<0|1|2> steps <= <poly in source param names>`;
+  - `none <def-path> <CostWhy>`, from `analyze`;
+  - or `none <def-path> Unsupported|Unresolved <first error>`, when `translate_closure` fails (M15).
+- **Cost fixtures**, in `lib.rs` as plain Rust (`cost_pos_*` must be `bounded`; `cost_neg_*` must be `none`). Loops are `while` loops, because `for`/Range calls `Iterator::next`, which is Unresolved. Vecs and slices are of `u8` only, or a Task 1b pair (M16).
   - `cost_pos_straight` (deg 0)
   - `cost_pos_loop_const` (deg 0)
   - `cost_pos_loop_len` (deg 1)
@@ -336,11 +533,19 @@
   - `cost_neg_parsed_count`: a loop bound read from input bytes
   - `cost_neg_recursion`
   - `cost_neg_while_true_break_on_data`
+  - These are not `root`s, so the 49 check verdicts don't change.
 - **`expected-cost.txt`** lines are `bounded <path> deg=<d>` or `none <path> <Why>`. Coefficients are not pinned.
-- **`ct-check.sh`** prints `ct-check: cost fixtures 10/10`.
+- **`ct-check.sh`** (M14):
+  - `analyse()` gains a mode-to-filename map (`check` gives `report-`, `selftest` gives `selftest-`, `cost` gives `cost-`).
+  - The fixtures' cost run passes `tools/ct-fixtures/manifest.txt:tools/ct-fixtures/cost-manifest.txt` as `CT_MANIFEST`.
+  - It prints `ct-check: cost fixtures 10/10`.
+  - The Task 6 report gives the added cold and warm ct-check time.
 
 - [ ] **Step 1:** Implement the cost mode and fixtures. The diff is empty.
-- [ ] **Step 2: Translator-side mutation.** Translate `Goto` back edges as `Return`, which makes everything look straight-line. `cost_neg_*` must become `bounded`, so the diff catches it. Record which lines changed.
+- [ ] **Step 2: Translator-side mutation** (M5). The translator maps blocks 1:1 and has no notion of a back edge. So translate **every** `Goto` as `Return`.
+  - Expect `cost_neg_off_progress`, `cost_neg_parsed_count` and `cost_neg_while_true_break_on_data` to become `bounded`, which the diff catches.
+  - `cost_neg_recursion` stays `none Recursion`.
+  - Record which lines changed. Revert.
 - [ ] **Step 3: Run the four checks and the evidence run.**
 - [ ] **Step 4: Commit:** `feat(ct-driver): cost mode — step-bound report for cost roots; cost fixtures`
 
@@ -349,60 +554,83 @@
 ### Task 7: Run over the parser targets, record coverage, add the gate, update docs
 
 **Files:**
-- Create: `tools/ct-driver/cost-targets.txt` (the `cost-root` lines for the Task 1 target list, each followed by `# predicted: bounded|none (<why>)`), `tools/ct-driver/cost-expected.txt`
-- Modify: `tools/ct-driver/manifest.txt` (new `intr`/`translate-crate` lines from the Task 1 census; only mappings to 8a's existing intrinsics), `scripts/ct-check.sh`, `scripts/verify.sh`, `TRUSTED.md`, `docs/superpowers/specs/2026-10-27-verified-http3-design.md`
+- Create:
+  - `tools/ct-driver/cost-targets.txt`: the `cost-root` lines for the 36 targets, each followed by `# predicted: bounded|none (<why>)`. The prediction is the Task 1b re-baseline's, and it also names the original 27/38 row;
+  - `tools/ct-driver/expected-cost.txt` (M13).
+- Modify:
+  - `tools/ct-driver/manifest.txt`: only `intr` lines a Step 0 rerun finds beyond Task 1b's, and only mappings to 8a's existing intrinsics;
+  - `tools/ct-driver/selftest.txt`: one vector per such new `intr` line (M12);
+  - `scripts/ct-check.sh`, `scripts/verify.sh`, `TRUSTED.md`, `docs/superpowers/specs/2026-10-27-verified-http3-design.md`.
 
-**Consumes:** Task 6.
+**Consumes:** Task 6, the Task 1b re-baseline.
 
 **Interfaces (produces):**
-- **`ct-check.sh` cost run:** `CT_MODE=cost CT_CRATES=wire,h3,quic cargo build --release -p wire -p h3 -p quic`, then compare with `cost-expected.txt`:
+- **`ct-check.sh` cost run:** `CT_MODE=cost CT_CRATES=wire,h3,quic`, through `analyse()`'s crate list, with `CT_MANIFEST=tools/ct-driver/manifest.txt:tools/ct-driver/cost-targets.txt`. Then it compares with `expected-cost.txt`:
   - a `bounded` that becomes `none` is a failure;
-  - a new `bounded` is a failure until `cost-expected.txt` is updated in the same commit, with the bound in the report;
-  - it prints `ct-check: cost X/Y bounded`.
-- **`verify.sh`'s final line** gains `, cost X/Y`.
+  - a new `bounded` is a failure until `expected-cost.txt` is updated in the same commit, with the bound in the report;
+  - it prints `ct-check: cost X/36 bounded`.
+- **`verify.sh`'s final line** becomes `verify.sh: all crates verified, duvet ok, ct ok (10 declassify), cost X/Y, escapes accounted (1)`. X/Y is read from ct-check's `cost X/Y bounded` line (M11).
 - **TRUSTED.md** gains the spec's cost-model row, verbatim.
 - **The design spec's Phase 8 entry** gains the measured coverage `X/Y` and one line: "bounds are core steps, not time or memory".
 
-- [ ] **Step 1:** Run over the targets and write `cost-expected.txt` from the result.
+- [ ] **Step 0: 3d check** (M17). If `phase-3d` has merged to main, rerun Task 1's census and dry run on the rebased branch first. Record any change.
+- [ ] **Step 1:** Run over the targets and write `expected-cost.txt` from the result.
 - [ ] **Step 2: Coverage report.**
-  - A table of the targets with `predicted`, `actual`, the bound (for bounded) or the `CostWhy` (for none), and a one-line explanation for each prediction miss.
-  - The headline: **X of Y targets bounded**.
+  - A table of the 36 targets, plus the two dropped QuicVarInt rows marked `not a root (I3)`. Columns:
+    - `original` (27/38 table);
+    - `re-baseline` (Task 1b);
+    - `actual`;
+    - the bound (for bounded) or the `CostWhy`/translation error (for none);
+    - a one-line explanation for each miss against either prediction.
+  - The headline: **X of 36 targets bounded**, against 27/38, 25/36 and X′/36.
 - [ ] **Step 3: Real-code mutation** (in a scratch copy made by `git archive`, never the worktree). In `huffman_decode`, change `j += 1` to `j += 0`. `huffman_decode` must become `none`.
 - [ ] **Step 4:** Edit verify.sh, TRUSTED.md and the design spec. Run the four checks and the evidence run.
-- [ ] **Step 5: Commit:** `feat: verified step bounds for X/Y parser targets (wire, h3/QPACK, quic); cost gate in verify.sh`
+- [ ] **Step 5: Commit:** `feat: verified step bounds for X/36 parser targets (wire, h3/QPACK, quic); cost gate in verify.sh`
 
 ---
 
 ### Task 8 (stretch; controller go/no-go): off-progress loops via callee return facts
 
-**Go only if** all of these hold:
+**Go only if** all of these hold (M10):
 - Tasks 1–7 are reviewed and approved;
-- ctcore's total proof time is < 60 s;
-- at least 4 `none` targets have the reason "off-progress" (`off += consumed`).
+- ctcore's total proof time is < 60 s, measured as Task 1 Step 1 did, next to its recorded baseline;
+- at least 4 targets satisfy both of these:
+  - **off-progress:** the verdict is `none <path> NotCounted(<header>)`, where the header's loop advances by `off = off + consumed`, with `consumed` from a callee's return;
+  - **sole blocker:** the target translates, every callee in its closure is `bounded`, and that header is its only failure.
 
-Otherwise record `not attempted` with those numbers.
+Otherwise record `not attempted` with those numbers. Under the post-1b translator, the candidates are `parse_settings`, `decode_lines(_bounded)`, `parse_payload` and `parse_ack`. Any that still fails translation doesn't count.
 
 **Design:** this is a `SPEC-CHANGE` to 8b's own `cost.rs`, needing a ruling. 8a's files stay frozen.
 - Summaries gain return facts, `RetFact::ConsumedGe1(field path)`. They are certified by `facts_hold` at every `Return` block on the returned tuple's field.
 - A new atom, `Ret(local, field path)`, is valid until the next write to that local.
-- The recognizer gains "progress loops": `off < len` at the header, and `off = off + c` with `c >= 1` from a callee `RetFact`. The potential is `Gap(Len(b), Val(off))`.
+- The recognizer gains "progress loops": `off < len` at the header, and `off = off + c` with `c >= 1` from a callee `RetFact`. The potential is `Gap(Len(b), Val(off, Usize))`.
 - Targets this would flip: `parse_settings`, `decode_lines(_bounded)`, `parse_payload`, `parse_ack` (its loop also needs off-progress, not count).
 
-**Tasks if go:** the same cycle as Tasks 2–7 (spec+theorem → abstract effect → validator → inference → fixtures → rerun), each with its own mutations, as one task per layer. Exit: coverage re-reported.
+**Tasks if go:** the same cycle as Tasks 2–7 (spec+theorem → abstract effect → validator → inference → fixtures → rerun), each with its own mutations, as one task per layer. They need their own short plan, with Files and interfaces, before dispatch. Exit: coverage re-reported.
 
 ---
 
 ## Exit criteria (Phase 8b)
 
-- `theorem_cost` verifies at `--rlimit 4` with its statement equal to the spec's, and the Task 2 mutations each fail on a named lemma.
+- `theorem_cost` verifies at `--rlimit 4` with its statement equal to the amended spec's, and the Task 2 mutations each fail on a named lemma.
 - `check_cert ==> cert_for` and `analyze`'s ensures verify. The Task 4 tamper tests and the Task 5 dropped-caller test pass.
-- `ct-check.sh` prints `cost fixtures 10/10` and `cost X/Y bounded`, matching `cost-expected.txt`. `verify.sh` ends with `, cost X/Y`.
-- The Task 7 coverage table is in the phase summary, with predicted against actual and every `none` explained.
-- TRUSTED.md has the cost-model row, and the design spec carries `X/Y` and the steps-not-time-or-memory line.
-- `git diff main -- crates/ctcore/src/{syntax,sem,ct,ct_lemmas,ni,check,infer}.rs` is empty.
+- `ct-check.sh` prints:
+  - `fixtures 49/49`;
+  - `selftest 15/15`;
+  - `selftest parsers K/K`;
+  - `crypto ok (84 fns, 10 roots, 10 declassify)`;
+  - `negative control rejected`;
+  - `cost fixtures 10/10`;
+  - `cost X/36 bounded`, matching `expected-cost.txt`.
+
+  `verify.sh` ends with `cost X/36, escapes accounted (1)`.
+- Crypto's ct-check reports are byte-identical to main's.
+- The Task 7 coverage table is in the phase summary, with original, re-baseline and actual, and every `none` explained.
+- TRUSTED.md has the cost-model row and the Task 1b front-end notes. The design spec carries `X/Y` and the steps-not-time-or-memory line.
+- `git diff main -- crates/ctcore/src/{syntax,sem,ct,ct_lemmas,ni,check,infer,sem_sanity}.rs` is empty.
 - `phase-8b` is merged into `main`. Task 8 is recorded as done or `not attempted`, with the go/no-go numbers.
 
-## Self-review (done while writing)
+## Self-review (done while writing; amended for the preflight rulings)
 
 - **Shared interfaces come from 8a's plan:**
   - `Res` carries steps (8a D8);
@@ -415,5 +643,13 @@ Otherwise record `not attempted` with those numbers.
   - Task 2 is a semantic theorem;
   - Task 4 is a one-directional validator;
   - Task 5 re-validates the final vector.
-- **Honesty:** the predictions are pre-registered in the spec and re-checked in Task 1, the coverage regression gate is in verify.sh, and a seeded unbounded loop must come out `none`.
-- **Not probed by the planner:** the degree-2 dominance proofs and the counter-increment no-wrap lemma. Task 3 Step 1 is the bounded probe for the latter.
+- **Honesty:**
+  - The predictions are pre-registered in the spec, and the 27/38 rows are never edited.
+  - The I3 denominator (36) and the Task 1b re-baseline are recorded before any proof work, and the report compares against all three.
+  - The coverage regression gate is in verify.sh.
+  - A seeded unbounded loop must come out `none`.
+- **Translator changes are bounded:** Task 1b is the only task that touches `translate.rs`. Each mapping is justified by `sem.rs`'s element-agnostic intrinsics or by Drop being `Goto`. Each has a mutation, and crypto's output is byte-identical.
+- **Not probed by the planner:**
+  - the degree-2 dominance proofs;
+  - the counter-increment no-wrap lemma (Task 3 Step 1 is its bounded probe);
+  - the coverage cost of C1-A's untyped-frame provenance (Task 2 Step 0).

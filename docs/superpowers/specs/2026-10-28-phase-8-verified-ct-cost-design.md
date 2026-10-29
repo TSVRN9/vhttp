@@ -140,8 +140,8 @@ Its job is to make "constant-time style" a checked property of `crates/crypto`, 
 
 **D9. 8b certifies bounds instead of proving an analysis.**
 - An exec inference in `ctcore` produces, per function, a certificate: per-block facts plus a potential polynomial. It does this with dominators, natural loops, counted-loop recognition and callee summaries.
-- A verified validator checks the certificate. It is incomplete but sound: `check_cert(..) == true ==> cert_sem_ok(..)`.
-- A separate theorem turns `cert_sem_ok` into the step bound by fuel induction.
+- A verified validator checks the certificate. It is incomplete but sound: `check_cert(..) == true ==> cert_for(..)`, where `cert_for` is `cert_sem_ok` plus empty entry facts and `sums[f] == Some(pot[0])` (8b preflight I1).
+- A separate theorem turns `cert_for` for every summarised fn into the step bound by fuel induction.
 - The inference has no correctness proof and needs none.
 - Soundness doesn't need an acyclic call graph either. The inference simply returns `None` for recursive SCCs.
 
@@ -592,9 +592,9 @@ The final line becomes `verify.sh: all crates verified, duvet ok, ct ok (D decla
 - This is a model of work, not time. Memory is not bounded. In particular, Vec capacity growth and the Phase 3c-style "copy on every append" can only be bounded when the copying is an intrinsic with a len-cost (extend, to_vec). Repeated `push` reallocations are hidden.
 
 **Bounds.**
-- `Poly` = `Vec<(u64 coef, Vec<Atom>)>`, a sum of monomials over atoms.
-- `Atom = Const(u64) | Val(local) | Len(local) | Gap(Box<Atom>, Box<Atom>)`:
-  - `Val`: the int value as nat; 0 for non-ints;
+- `Poly { monos: Vec<Mono> }` with `Mono { coef: u64, atoms: Vec<Atom> }` (at most 2 atoms), a sum of monomials over atoms (8b preflight I1).
+- `Atom = Const(u64) | Val(local, IntTy) | Len(local) | Gap(Box<Atom>, Box<Atom>)`:
+  - `Val(x, ty)`: `uval(ty, raw)` for an `Int(raw)`, i.e. the value at the width MIR compares it at; 0 for non-ints (8b preflight C2: frame ints are raw bit patterns, and `binop(Lt, ty, ..)` compares at `ty`);
   - `Len`: the length of the `Arr` behind the local's value (through `Shr`/`Mut`); 0 otherwise;
   - `Gap(a, b)` = max(0, a − b).
 - A function's summary is a `Poly` over its parameter atoms. Example: `huffman_decode: steps <= c0 + c1·len(input)`.
@@ -602,24 +602,34 @@ The final line becomes `verify.sh: all crates verified, duvet ok, ct ok (D decla
 **Certificates** (D9).
 - `Cert` = per block `{ facts: Vec<Fact>, pot: Poly }`, with `Fact = Le(Atom, Atom) | Lt(Atom, Atom)`.
 - **`cert_sem_ok(p, f, cert, sums)` is semantic.** For every frame satisfying block b's facts, executing b leads to a successor b′ whose facts hold, with `pot_b(fr) >= cost(b, fr) + pot_b′(fr′)`. A return needs `pot_b(fr) >= cost(b)`. A call needs `cost` to include `1 + eval(sums[g], callee entry atoms)`, for *any* callee result within that bound (dst and `&mut` targets are havocked).
-- **Entry facts must be empty.** The summary is `pot[0]`.
+- `cert_sem_ok`'s frames are untyped: its only hypotheses are the block's facts and `frame_len_ok` (every local's and slot's `len_ok`). There is no frame or typing invariant (8b preflight C1, option A).
+- **Entry facts must be empty.** The summary is `pot[0]`. `cert_for(p, f, cert, sums)` = `cert_sem_ok` ∧ empty entry facts ∧ `sums[f] == Some(pot[0])`.
 
-**Theorem** (the controller's soundness statement):
+**Theorem** (the controller's soundness statement, as amended by the 8b preflight rulings I1 and C2):
 
 ```rust
 pub proof fn theorem_cost(p: Program, certs: Seq<Cert>, sums: Seq<Option<Poly>>, f: nat,
                           args: Seq<Val>, slots: Seq<Val>, fuel: nat, b: Poly)
     requires
-        wf(p), f < p.fns@.len(), sums[f as int] == Some(b),
-        forall|g| 0 <= g < p.fns@.len() && sums[g] is Some ==> cert_sem_ok(p, g, certs[g], sums),
+        wf(p), f < p.fns@.len(), certs.len() == p.fns@.len(), sums.len() == p.fns@.len(),
+        sums[f as int] == Some(b),
+        forall|g: int| 0 <= g < p.fns@.len() && sums[g] is Some ==> cert_for(p, g as nat, certs[g], sums),
         vals_len_ok(args), vals_len_ok(slots),                       // all lengths <= usize::MAX
         run_fn(p, f, init_entry(p, f, args, slots), fuel) is Some,
     ensures
         run_fn(p, f, init_entry(p, f, args, slots), fuel).unwrap().2
-            <= eval_poly(b, init_entry(p, f, args, slots)),
+            <= poly_val(init_entry(p, f, args, slots), b),
 ```
 
-- **The validator** is `pub fn check_cert(p: &Program, f: usize, c: &Cert, sums: &Vec<Option<Poly>>) -> (r: bool) ensures r ==> cert_sem_ok(*p, f as nat, *c, sums@)`. It is sound and incomplete. It works by symbolic execution of each block over a small abstract domain: unchanged, `+1`, constant, copy-of, `Len`-alias, unknown. A local whose address is taken by `RefMut` is unknown after any call or write-through. It then checks inequalities as monomial-wise coefficient dominance, after the pre→post atom rewrites (counter decrement under a `Lt` fact, upper bounds from `Le` facts, `Gap(a, x) <= a`).
+- `vals_len_ok(vs)` = `forall|i| 0 <= i < vs.len() ==> len_ok(vs[i])`. It gives `frame_len_ok(init_entry(..))`.
+- `poly_val(fr, p)` evaluates `p` with each atom read in `fr`.
+- The 8a-era statement had a `cert_sem_ok` premise, which never links `sums[f]` to `pot[0]`. It also had `eval_poly(b, fr)`. Both are superseded (I1).
+
+- **The validator** is `pub fn check_cert(p: &Program, f: usize, c: &Cert, sums: &Vec<Option<Poly>>) -> (r: bool) ensures r ==> cert_for(*p, f as nat, *c, sums@)`. It is sound and incomplete.
+  - It works by symbolic execution of each block over a small abstract domain: unchanged, `+1`, constant, copy-of, `Len`-alias, unknown. Each block's effect is stated against the successor frame, including the terminator's own writes: an intrinsic's dst, or a call's write-back and dst (I2).
+  - **`Mut` provenance (C1, option A).** A temp made in the block by `RefMut` of a bare local z targets exactly z, whatever the frame. A write-through, push/set/extend or call argument with that provenance writes only z. A writer of unknown provenance makes every local unknown. That includes a parameter, or a `Mut` from a havocked call dst. After any write-through, push or call, the `Len` of every `Mut`-typed local is unknown.
+  - The `+1` and edge-fact rules are unsigned-only (C2).
+  - It then checks inequalities as monomial-wise coefficient dominance, after the pre→post atom rewrites (counter decrement under a `Lt` fact, upper bounds from `Le` facts, `Gap(a, x) <= a`).
 - **The inference** (`loops.rs`, exec, no proof): dominator tree → back edges → natural loops → counted-loop recognition → potentials, with summaries bottom-up and `None` for recursive SCCs. A loop is *counted* when:
   - on every header→latch path, a test `i < N` (or `!(i >= N)`) dominates exactly one `i = i + 1` (or `wrapping_add(i, 1)`);
   - `N` is stable in the loop: a constant, a parameter's `Len`, or a local never assigned in the loop.
@@ -644,6 +654,20 @@ pub proof fn theorem_cost(p: Program, certs: Seq<Cert>, sums: Seq<Option<Poly>>,
 | `quic::payload::parse_payload` | `p += consumed` | **None** |
 
 - **Prediction: 27 of the 38 listed functions bounded, 11 `None`.** The real denominator comes from 8b Task 1's census.
+- **Denominator after the 8b preflight (I3), recorded before any run: 36, prediction 25 of 36.** The `<QuicVarInt<false>/<true> as Parser>::parse` rows can't be cost roots, for three reasons:
+  - the impl is generic, so the driver's root picker takes only monomorphic local fns;
+  - `QuicVarInt<true>` has no exec instance at all;
+  - `<QuicVarInt<false>>::parse` is counted inside `parse_varint`'s closure.
+
+  The 8b report shows its result against both 27/38 and 25/36, and against the Task 1b re-baseline below.
+- **Translator coverage (8b Task 1b).** These are deltas to §Front end, which stays as 8a shipped it. The preflight found that the 8a translator rejects most targets before any cost analysis (I4). Task 1b adds:
+  - (i) `str`/`&'static str` as opaque `Unit`;
+  - (ii) `-Zalways-encode-mir` for `translate-crate` crates, plus `translate-crate wire`;
+  - (iii) per-intrinsic element types where `sem.rs` is element-agnostic. The len-cost intrinsics stay `u8`;
+  - (iv) drop glue that frees a bounded number of `Vec<int>` buffers, as `Goto`.
+
+  (v) `copy_from_slice` stays unmapped (a new intrinsic would be a SPEC-CHANGE to 8a), so `parse_path` and its callers are `None`.
+- **Re-baseline (8b Task 1b, before Task 2):** *to be appended by Task 1b as one dated line, X′/36 predicted bounded, with the targets that changed and why. The table and the 27/38 line above are never edited.*
 - **The structural gap is off-progress loops** (`off += consumed` with `consumed >= 1` from a callee's postcondition). Closing it needs callee return facts. That is 8b's stretch task, behind an explicit go/no-go.
 
 ## Risks and fallbacks
