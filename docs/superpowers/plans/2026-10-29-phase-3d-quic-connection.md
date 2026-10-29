@@ -286,7 +286,7 @@ Touched notes replaced: 3b's on §5.2.2 (Task 6). 3b's on §10.3 and §19.20 and
   - **`pub fn on_new_cid(&mut self, seq: u64, rpt: u64, cid: &[u8], token: [u8; 16], local_limit: u64) -> (r: Result<(), u64>)`**: requires `rpt <= seq`, `1 <= cid.len() <= 20`, `2 <= local_limit <= PEER_CID_CAP`. Check order (the body; the signature doesn't fix it):
     ```
     1. zero_len                                                    -> Err(PROTOCOL_VIOLATION)   §19.15
-    2. seq known with same (cid, token)                            -> Ok, no change             §19.15 duplicate
+    2. seq known with same (cid, token)                            -> Ok, no change unless rpt > largest_rpt, then retire (§5.1.2; controller ruling, Task 4)   §19.15 duplicate
     3. seq known with different cid/token, or cid known under
        another seq, or token equal to another CID's token          -> Err(PROTOCOL_VIOLATION)   §19.15 MAY, §10.3.2 MAY
     4. seq < largest_rpt -> queue RETIRE(seq) unless already in retire_pending/retire_unacked; Ok   §19.15
