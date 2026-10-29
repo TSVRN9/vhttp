@@ -284,33 +284,41 @@ fn replay_of_retired_seq_with_full_backlog() {
     p.commit_retire();
     p.commit_retire();
     p.retire_acked(1);
-    for k in 3..=5u8 {
+    // Backlog: seq 0 unacked plus 3..=17 queued one by one = 16 = 2 * PEER_CID_CAP.
+    for k in 3..=17u8 {
         assert_eq!(N(&mut p, k as u64, k as u64, &[k; 8], T(k)), Ok(()), "k = {k}");
     }
+    assert_eq!(N(&mut p, 18, 18, &[18; 8], T(18)), Err(CONNECTION_ID_LIMIT_ERROR));
     assert_eq!(N(&mut p, 1, 0, &A, T(1)), Ok(()));
     assert_eq!(N(&mut p, 2, 2, &B, T(2)), Ok(()));
-    assert_eq!(retires(&mut p), vec![2, 3, 4]);
-    assert_eq!(p.current(), &[5; 8]);
+    assert_eq!(retires(&mut p), (2..=16).collect::<Vec<u64>>());
+    assert_eq!(p.current(), &[17; 8]);
 }
 
 #[test]
 fn rpt_jump_retires_unseen() {
     let mut p = peer();
+    // Retire Prior To 3 retires 0, 1 and 2 at once; 1 and 2 were never received.
     assert_eq!(N(&mut p, 3, 3, &[3; 8], T(3)), Ok(()));
+    assert_eq!(retires(&mut p), vec![0, 1, 2]);
+    // Their late NEW_CONNECTION_ID frames are already retired: nothing more is queued.
     assert_eq!(N(&mut p, 1, 0, &A, T(1)), Ok(()));
     assert_eq!(N(&mut p, 2, 1, &B, T(2)), Ok(()));
-    assert_eq!(retires(&mut p), vec![0, 1, 2]);
+    assert_eq!(p.pending_retire(), None);
     assert!(!p.is_active(&A) && !p.is_active(&B));
     for s in 0..3 {
         p.retire_acked(s);
     }
-    // A jump past `2 * local_limit` retirements is CONNECTION_ID_LIMIT_ERROR (§5.1.2 MAY),
-    // with nothing changed.
-    assert_eq!(N(&mut p, 8, 8, &[8; 8], T(8)), Err(CONNECTION_ID_LIMIT_ERROR));
+    // The budget is 2 * PEER_CID_CAP = 16 outstanding retirements, whatever local_limit
+    // (2 here): a jump retiring 17 is CONNECTION_ID_LIMIT_ERROR with nothing changed
+    // (§5.1.2 MAY), one retiring 16 fits.
+    assert_eq!(N(&mut p, 20, 20, &[20; 8], T(20)), Err(CONNECTION_ID_LIMIT_ERROR));
     assert_eq!(p.largest_rpt(), 3);
     assert_eq!(p.pending_retire(), None);
-    assert_eq!(N(&mut p, 7, 7, &[7; 8], T(7)), Ok(()));
-    assert_eq!(retires(&mut p), vec![3, 4, 5, 6]);
+    assert!(p.is_active(&[3; 8]));
+    assert_eq!(N(&mut p, 19, 19, &[19; 8], T(19)), Ok(()));
+    assert_eq!(retires(&mut p), (3..19).collect::<Vec<u64>>());
+    assert_eq!(p.current(), &[19; 8]);
 }
 
 #[test]
@@ -329,20 +337,23 @@ fn retire_lost_requeues() {
 #[test]
 fn retire_backlog() {
     let mut p = peer();
-    for k in 1..=4u8 {
+    // 2 * PEER_CID_CAP = 16 retirements may be outstanding, whatever local_limit (2 here).
+    for k in 1..=16u8 {
         assert_eq!(p.on_new_cid(k as u64, k as u64, &[k; 8], T(k), 2), Ok(()), "k = {k}");
     }
-    assert_eq!(p.on_new_cid(5, 5, &[5; 8], T(5), 2), Err(CONNECTION_ID_LIMIT_ERROR));
-    assert_eq!(p.current(), &[4; 8]);
+    assert_eq!(p.on_new_cid(17, 17, &[17; 8], T(17), 2), Err(CONNECTION_ID_LIMIT_ERROR));
+    assert_eq!(p.current(), &[16; 8]);
     // A late or replayed sequence number below Retire Prior To is already retired: Ok, and
     // it adds nothing to the backlog.
     assert_eq!(p.on_new_cid(0, 0, &[9; 8], T(9), 2), Ok(()));
     assert_eq!(p.on_new_cid(3, 0, &[3; 8], T(3), 2), Ok(()));
-    assert_eq!(retires(&mut p), vec![0, 1, 2, 3]);
+    assert_eq!(retires(&mut p), (0..16).collect::<Vec<u64>>());
     p.retire_acked(3);
     assert_eq!(p.on_new_cid(3, 0, &[3; 8], T(3), 2), Ok(()));
+    assert_eq!(p.pending_retire(), None);
     p.retire_acked(0);
-    assert!(p.retire_capacity() <= 16);
+    // Each list's length is at most 2 * PEER_CID_CAP, so each allocation is at most 16.
+    assert!(p.retire_capacity() <= 32);
 }
 
 #[test]
