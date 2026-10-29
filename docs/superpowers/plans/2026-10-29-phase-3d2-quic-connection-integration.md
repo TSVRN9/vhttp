@@ -305,6 +305,8 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7); the 45 rows t
 
 ### Task 2a: transmit core (`poll_transmit`, `build_space_packet`, `build_close`) (preflight: Task 2 split, I7)
 
+> **Binding carry-over from 3d Task 2 (controller, 2026-10-29):** the ACK frame passed to `RecvPns::on_ack_sent` must cover `unreported()`. Either give `build_ack` room `>= ack_track::FULL_ACK_LEN` (522), whose ensures then guarantees the full frame, or send no ACK in that packet. §13.2.1 is marked ✅ only with this discharged, as a proof obligation in `build_space_packet`.
+
 **Files:**
 - Modify: `crates/quic/src/conn.rs`
 - Test: `crates/quic/tests/conn_tx.rs`
