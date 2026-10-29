@@ -68,9 +68,13 @@ pub fn translate_closure(m: &Manifest, root: &str) -> Result<(c::Program, Vec<Fn
         Ok(v) => v[0],
         Err(msg) => return Err(vec![TrErr::Root { path: r, msg }]),
     };
-    let mut tr = Tr { m, krate, index: HashMap::new(), order: vec![inst], by_key: HashMap::new(), errs: Vec::new() };
+    let by_key = BY_KEY.with(|k| k.take());
+    let mut tr = Tr { m, krate, index: HashMap::new(), order: vec![inst], by_key, errs: Vec::new() };
     tr.index.insert(inst, 0);
-    let _ = bind_key(&mut tr.by_key, root, key_id(&tr.krate, m, &inst));
+    if bind_key(&mut tr.by_key, root, key_id(&tr.krate, m, &inst)).is_err() {
+        BY_KEY.with(|k| *k.borrow_mut() = tr.by_key);
+        return Err(vec![TrErr::Root { path: r, msg: "ambiguous key: another root's closure reached a different fn under it".into() }]);
+    }
     let (mut fns, mut infos) = (Vec::new(), Vec::new());
     let mut i = 0;
     while i < tr.order.len() {
@@ -81,6 +85,7 @@ pub fn translate_closure(m: &Manifest, root: &str) -> Result<(c::Program, Vec<Fn
         }
         i += 1;
     }
+    BY_KEY.with(|k| *k.borrow_mut() = tr.by_key);
     if tr.errs.is_empty() {
         Ok((c::Program { fns }, infos))
     } else {
@@ -88,8 +93,15 @@ pub fn translate_closure(m: &Manifest, root: &str) -> Result<(c::Program, Vec<Fn
     }
 }
 
-/// The closure being translated: fn indices by instance, and the keys seen (`bind_key`: roots and
-/// internal fns by instance, leaves and `intr` callees by def; a key naming two is an error).
+thread_local! {
+    /// The keys seen while compiling this crate, across all roots (one crate compile is one
+    /// `run!`, as in census): `bind_key` binds roots and internal fns by instance, leaves and
+    /// `intr` callees by def, and a key naming two is an error. Report lines (`checked`,
+    /// `declassify <fn>#k`) are keyed by `ct_key` across roots, so each key names one thing.
+    static BY_KEY: std::cell::RefCell<HashMap<String, KeyId>> = std::cell::RefCell::new(HashMap::new());
+}
+
+/// The closure being translated: fn indices by instance, and the crate's keys (`BY_KEY`).
 struct Tr<'m> {
     m: &'m Manifest,
     krate: String,

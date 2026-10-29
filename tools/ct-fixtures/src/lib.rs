@@ -312,6 +312,70 @@ pub mod fx {
         1
     }
 
+    // ------------------------------------------------------------------ ambiguous keys
+    // `ct_key` strips generic args, so `W::<u32>::f` and `W::<u64>::f` (two defs) and
+    // `id::<u32>`/`id::<u64>` (one def, two instances) each share one key.
+
+    pub struct W<T>(pub T);
+
+    impl W<u32> {
+        pub fn f(x: u32) -> u32 {
+            x ^ 1
+        }
+
+        #[cfg_attr(ct_check, ct::public(x))]
+        pub fn g(x: u32) -> u32 {
+            x
+        }
+
+        pub fn h(x: u32) -> u32 {
+            x ^ 3
+        }
+    }
+
+    impl W<u64> {
+        pub fn f(x: u64) -> u64 {
+            x ^ 2
+        }
+
+        #[cfg_attr(ct_check, ct::public(x))]
+        pub fn g(x: u64) -> u64 {
+            x
+        }
+
+        pub fn h(x: u64) -> u64 {
+            x ^ 4
+        }
+    }
+
+    pub fn id<T>(x: T) -> T {
+        x
+    }
+
+    #[cfg_attr(ct_check, ct::public(x))]
+    pub fn neg_ambiguous_callee(x: u32) -> u64 {
+        // Unsupported: two defs reached under the key ct_fixtures::fx::W::f
+        W::<u32>::f(x) as u64 ^ W::<u64>::f(x as u64)
+    }
+
+    #[cfg_attr(ct_check, ct::public(a, b))]
+    pub fn neg_ambiguous_generic(a: u32, b: u64) -> u64 {
+        // Unsupported: two instances of `id` reached under one key
+        id(a) as u64 ^ id(b)
+    }
+
+    #[cfg_attr(ct_check, ct::public(x))]
+    pub fn pos_key_first_root(x: u32) -> u32 {
+        // binds ct_fixtures::fx::W::h to W::<u32>::h for this crate
+        W::<u32>::h(x)
+    }
+
+    #[cfg_attr(ct_check, ct::public(x))]
+    pub fn neg_key_second_root(x: u64) -> u64 {
+        // Unsupported: a later root reaches W::<u64>::h under the key the first root bound
+        W::<u64>::h(x)
+    }
+
     #[derive(Clone, Copy)]
     pub enum Discr {
         A = 3,
