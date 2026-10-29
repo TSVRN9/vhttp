@@ -208,9 +208,9 @@ pub enum Rvalue {
     Aggregate(AggKind, Vec<Operand>), Repeat(Operand, u64), RefShr(Place), RefMut(Place),
 }
 pub enum Stmt { Assign(Place, Rvalue), SetDiscr(Place, usize) }
-pub enum Intrinsic {   // planner's estimate; 8a Task 2 Step 0 fixes the set from a real callee census
+pub enum Intrinsic {   // closed by 8a Task 2 Step 0 (callee census); adding one is a SPEC-CHANGE
     Declassify, GhostUnit, VecNew, VecWithCapacity, VecPush, VecExtendFromSlice, VecAsSlice,
-    VecLen, VecSet, VecIndex, SliceSubrange, SliceToVec, Wrapping(BinOp, IntTy),
+    ArrayAsSlice, VecLen, VecSet, VecIndex, SliceSubrange, SliceToVec, Wrapping(BinOp, IntTy),
 }
 pub enum Callee { Fn(usize), Intr(Intrinsic) }
 pub enum Term {
@@ -288,6 +288,7 @@ pub struct Program { pub fns: Vec<Body> }
 | `VecPush(m, x)` | appends `x` at `m`'s target | none | 1 |
 | `VecExtendFromSlice(m, s)` | appends the snapshot | none | 1 + len(s) |
 | `VecAsSlice(r)` | `dst := r` | none | 1 |
+| `ArrayAsSlice(r)` (`<[T; N]>::as_slice`; CT typing: result ⊒ source, as `VecAsSlice`) | `dst := r` | none | 1 |
 | `VecLen(r)` | `dst := len` | none | 1 |
 | `VecSet(m, i, x)` | `target[i] := x` | `Idx(i)` | 1 |
 | `VecIndex(r, i)` | `dst := Shr(elem i)` | `Idx(i)` | 1 |
@@ -354,7 +355,7 @@ pub struct Program { pub fns: Vec<Body> }
 | `Assign(pl, rv)` | `lab(rv) ⊑ wr(pl)`; if the value type contains `Mut`, `==` |
 | `Switch`, `Assert` | condition public |
 | `Call(Fn(g))` | each arg ⊑ g's param label (`==` for `Mut`-typed params); g's return label ⊑ `wr(dst)` |
-| `Call(Intr)` | per-intrinsic: `Declassify` result may be public; `VecWithCapacity` n public; `VecSet`/`VecIndex` i public; `SliceSubrange` lo, hi public; `VecPush`/`VecExtendFromSlice`/`VecSet` value ⊑ target; `VecAsSlice`/`VecIndex`/`SliceSubrange`/`SliceToVec` result ⊒ source; `VecLen` public |
+| `Call(Intr)` | per-intrinsic: `Declassify` result may be public; `VecWithCapacity` n public; `VecSet`/`VecIndex` i public; `SliceSubrange` lo, hi public; `VecPush`/`VecExtendFromSlice`/`VecSet` value ⊑ target; `VecAsSlice`/`ArrayAsSlice`/`VecIndex`/`SliceSubrange`/`SliceToVec` result ⊒ source; `VecLen` public |
 | `Call(Intr(Wrapping(op, ty)))` | as `Bin` (preflight): Div/Rem both operands public, Shl/Shr rhs public, otherwise the join |
 
 **`wf(p)`, the supported subset:**
