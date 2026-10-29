@@ -1,4 +1,6 @@
 use crypto::ecdsa::{p256_ecdsa_sign, serialize_ecdsa_der};
+use crypto::p256::p256_public_key;
+use p256::ecdsa::signature::{Signer, Verifier};
 
 fn h(s: &str) -> Vec<u8> {
     let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
@@ -51,4 +53,57 @@ fn der_vectors() {
     serialize_ecdsa_der(&h(SAMPLE), &mut out);
     assert_eq!(out[0], 0xAA);
     assert_eq!(out[1..].to_vec(), der(&h(SAMPLE)));
+}
+
+const N_MINUS_1: &str = "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632550";
+const MSG_LENS: [usize; 7] = [0, 1, 55, 56, 64, 65, 1000];
+
+fn pattern(i: usize) -> [u8; 32] {
+    core::array::from_fn(|j| (i * 37 + j * 11 + 1) as u8)
+}
+
+// 46 pattern keys plus d = 1 and d = n - 1.
+fn keys() -> Vec<Vec<u8>> {
+    let mut ds: Vec<Vec<u8>> = (0..46).map(|i| pattern(i).to_vec()).collect();
+    let mut one = vec![0u8; 32];
+    one[31] = 1;
+    ds.extend([one, h(N_MINUS_1)]);
+    ds
+}
+
+fn msg(i: usize, len: usize) -> Vec<u8> {
+    (0..len).map(|j| (j * 7 + i * 13 + 5) as u8).collect()
+}
+
+#[test]
+fn sign_matches_rustcrypto() {
+    for (i, d) in keys().iter().enumerate() {
+        let sk = p256::ecdsa::SigningKey::from_bytes(d[..].try_into().unwrap()).unwrap();
+        for len in MSG_LENS {
+            let m = msg(i, len);
+            let want: p256::ecdsa::Signature = sk.sign(&m);
+            assert_eq!(p256_ecdsa_sign(d, &m).unwrap().to_vec(), want.to_bytes().to_vec(), "{d:02x?} len {len}");
+        }
+    }
+}
+
+#[test]
+fn sign_verifies() {
+    for (i, d) in keys().iter().enumerate() {
+        let vk = p256::ecdsa::VerifyingKey::from_sec1_bytes(&p256_public_key(d).unwrap()).unwrap();
+        for len in MSG_LENS {
+            let m = msg(i, len);
+            let sig = p256::ecdsa::Signature::from_slice(&p256_ecdsa_sign(d, &m).unwrap()).unwrap();
+            assert!(vk.verify(&m, &sig).is_ok(), "{d:02x?} len {len}");
+        }
+    }
+}
+
+#[test]
+#[ignore] // timing only; run with --release -- --ignored --nocapture
+fn sign_speed() {
+    let d = h(D);
+    let t = std::time::Instant::now();
+    std::hint::black_box(p256_ecdsa_sign(std::hint::black_box(&d), b"sample"));
+    println!("p256_ecdsa_sign {:?}", t.elapsed());
 }

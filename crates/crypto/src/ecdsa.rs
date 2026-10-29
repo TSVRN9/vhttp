@@ -1,5 +1,5 @@
-//! ECDSA P-256/SHA-256 (FIPS 186-5 §6.4.1) with RFC 6979 deterministic nonces: spec and an exec
-//! signature backed by the trusted shim. Also the ECDSA-Sig-Value DER encoding (RFC 3279 §2.2.3,
+//! ECDSA P-256/SHA-256 (FIPS 186-5 §6.4.1) with RFC 6979 deterministic nonces: spec and the
+//! verified exec signature. Also the ECDSA-Sig-Value DER encoding (RFC 3279 §2.2.3,
 //! X.690 §8.3), as verified exec code.
 #[allow(unused_imports)]
 use crate::bytes::*;
@@ -124,10 +124,9 @@ pub open spec fn spec_ecdsa_p256_sha256_sign(d: Seq<u8>, msg: Seq<u8>) -> Option
     }
 }
 
-/// Trusted shim: the body is RustCrypto p256; the ensures is the trusted statement.
-/// Partial correctness: where the spec is None (no suitable attempt, probability ~2^-256) the
-/// shim loops forever instead of returning.
-#[verifier::external_body]
+/// FIPS 186-5 §6.4.1 with RFC 6979 §3.2 nonces; verified against spec_ecdsa_p256_sha256_sign. Partially correct: loops while no attempt is suitable (probability ~2^-256), as RFC 6979 §3.2 step h does.
+// ct: secret d; public msg
+#[verifier::exec_allows_no_decreases_clause]
 pub fn p256_ecdsa_sign(d: &[u8], msg: &[u8]) -> (r: Option<[u8; 64]>)
     requires
         d@.len() == 32,
@@ -135,7 +134,63 @@ pub fn p256_ecdsa_sign(d: &[u8], msg: &[u8]) -> (r: Option<[u8; 64]>)
     ensures
         r.deep_view() == spec_ecdsa_p256_sha256_sign(d@, msg@),
 {
-    crate::shim::p256_ecdsa_sign(d, msg)
+    hide(point_add);
+    hide(scalar_mult);
+    hide(finv);
+    hide(spec_hmac_sha256);
+    hide(spec_sha256);
+    hide(rfc6979_init);
+    hide(rfc6979_k);
+    hide(ecdsa_r);
+    hide(ecdsa_s);
+    // ct: declassify d in [1, n - 1] (key validity is a public error outcome)
+    if !crate::ct::declassify(scalar_in_range(d)) {
+        return None;
+    }
+    let h1 = sha256(msg);
+    let (mut kk, mut vv) = rfc6979_init_exec(d, &h1);
+    let ghost mut i: nat = 0;
+    proof {
+        assert(d@.subrange(0, 32) =~= d@);
+        assert(h1@.subrange(0, 32) =~= h1@);
+    }
+    loop
+        invariant
+            d@.len() == 32,
+            scalar_valid(d@),
+            d@.subrange(0, 32) == d@,
+            h1@.subrange(0, 32) == h1@,
+            h1@ == spec_sha256(msg@),
+            (kk@, vv@) == rfc6979_state(d@, h1@, i),
+            forall|j: nat| j < i ==> !#[trigger] suitable(d@, h1@, j),
+    {
+        let (t, k2, v2) = rfc6979_next(&kk, &vv);
+        proof {
+            lemma_rfc6979_step(d@, h1@, i);
+            assert(t@.subrange(0, 32) =~= t@);
+        }
+        // ct: declassify k in [1, n - 1] (the RFC 6979 §3.2 step h.3 retry, probability ~2^-32)
+        if crate::ct::declassify(scalar_in_range(&t)) {
+            let r = ecdsa_r_exec(&t);
+            let s = ecdsa_s_exec(&limbs_from_be(d, 0), &reduce_n(&h1, 0), &limbs_from_be(&t, 0), &r);
+            // ct: declassify r and s (public signature outputs)
+            let r = crate::ct::declassify(r);
+            let s = crate::ct::declassify(s);
+            if is_zero4(&r) == 0 && is_zero4(&s) == 0 {
+                proof {
+                    lemma_least_suitable_choose(d@, h1@, i);
+                }
+                let sig = cat64(&limbs_to_be(&r), &limbs_to_be(&s));
+                assert(sig.deep_view() =~= sig@);
+                return Some(sig);
+            }
+        }
+        proof {
+            i = i + 1;
+        }
+        kk = k2;
+        vv = v2;
+    }
 }
 
 /// X.690 §8.3.2: the minimal big-endian octets of x (one octet 0x00 for 0).
@@ -546,7 +601,6 @@ proof fn lemma_ecdsa_r_lt_n(k: nat)
 // RFC 6979 §2.4 step 4: s = k^-1 (h + r d) mod n on plain values, with k^-1 = k^(n - 2) (D4).
 // The four inputs go into Montgomery form, and s comes back out.
 // ct: secret d, h, k, r
-#[allow(dead_code)]  // used from Task 8
 fn ecdsa_s_exec(d: &[u64; 4], h: &[u64; 4], k: &[u64; 4], r: &[u64; 4]) -> (s: [u64; 4])
     requires
         v4(*d) < p256_n(),
@@ -634,7 +688,6 @@ fn cat33(t: &[u8; 32]) -> (r: [u8; 33])
 
 // RFC 6979 §3.2 steps b-g: (K, V) after step g.
 // ct: secret x, h1
-#[allow(dead_code)]  // used from Task 8
 fn rfc6979_init_exec(x: &[u8], h1: &[u8; 32]) -> (r: ([u8; 32], [u8; 32]))
     requires
         x@.len() == 32,
@@ -661,7 +714,6 @@ fn rfc6979_init_exec(x: &[u8], h1: &[u8; 32]) -> (r: ([u8; 32], [u8; 32]))
 // RFC 6979 §3.2 step h from (K, V): h.2 T = V' = HMAC_K(V), then h.3 K' = HMAC_K(T || 0x00) and
 // V'' = HMAC_K'(T). Returns (T, K', V''), rfc6979_state's one transition.
 // ct: secret k, v
-#[allow(dead_code)]  // used from Task 8
 fn rfc6979_next(k: &[u8; 32], v: &[u8; 32]) -> (r: ([u8; 32], [u8; 32], [u8; 32]))
     ensures
         r.0@ == spec_hmac_sha256(k@, v@),
@@ -691,6 +743,67 @@ proof fn lemma_rfc6979_step(x: Seq<u8>, h1: Seq<u8>, i: nat)
     hide(rfc6979_init);
 }
 
+// I2OSP(x, 32) round-trips through OS2IP for x < p < 2^256 = 256^32.
+proof fn lemma_os2ip_i2osp_p(x: nat)
+    requires
+        x < p256_p(),
+    ensures
+        os2ip(i2osp(x, 32)) == x,
+{
+    lemma_p256_consts();
+    reveal_with_fuel(pow, 33);
+    assert(pow(256, 32) == 0x1_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000int);
+    lemma_os2ip_i2osp(x, 32);
+}
+
+// RFC 6979 §2.4 step 3: r = x(kG) mod n. kG != O for k in [1, n - 1] (Phase 5d), so there is no O case.
+// ct: secret k
+fn ecdsa_r_exec(k: &[u8; 32]) -> (r: [u64; 4])
+    requires
+        1 <= os2ip(k@) < p256_n(),
+    ensures
+        v4(r) == ecdsa_r(os2ip(k@)),
+{
+    hide(point_add);
+    hide(scalar_mult);
+    hide(finv);
+    proof {
+        lemma_g_on_curve();
+    }
+    let q = scalar_mult_ct(k, &g_point());
+    proof {
+        crate::p256_group::lemma_scalar_mult_g_nonzero(os2ip(k@));
+        lemma_p256_consts();
+    }
+    let xb = fe_to_be(&q.x);
+    proof {
+        lemma_os2ip_i2osp_p(fe(q.x) as nat);
+        assert(xb@.subrange(0, 32) =~= xb@);
+    }
+    reduce_n(&xb, 0)
+}
+
+// r || s, the output of p256_ecdsa_sign.
+fn cat64(r: &[u8; 32], s: &[u8; 32]) -> (o: [u8; 64])
+    ensures
+        o@ == r@ + s@,
+{
+    let mut o = [0u8; 64];
+    let mut i: usize = 0;
+    while i < 32
+        invariant
+            i <= 32,
+            forall|j: int| 0 <= j < i ==> o@[j] == r@[j] && o@[32 + j] == s@[j],
+        decreases 32 - i,
+    {
+        o[i] = r[i];
+        o[32 + i] = s[i];
+        i += 1;
+    }
+    assert(o@ =~= r@ + s@);
+    o
+}
+
 // Attempt indices satisfying least_suitable coincide.
 proof fn lemma_least_suitable_unique(x: Seq<u8>, h1: Seq<u8>, i: nat, i2: nat)
     requires
@@ -705,6 +818,21 @@ proof fn lemma_least_suitable_unique(x: Seq<u8>, h1: Seq<u8>, i: nat, i2: nat)
     } else if i2 < i {
         assert(!suitable(x, h1, i2));
     }
+}
+
+// The first suitable attempt is the one the spec's choose picks.
+proof fn lemma_least_suitable_choose(x: Seq<u8>, h1: Seq<u8>, i: nat)
+    requires
+        suitable(x, h1, i),
+        forall|j: nat| j < i ==> !#[trigger] suitable(x, h1, j),
+    ensures
+        exists|c: nat| #[trigger] least_suitable(x, h1, c),
+        (choose|c: nat| #[trigger] least_suitable(x, h1, c)) == i,
+{
+    hide(suitable);
+    assert(least_suitable(x, h1, i));
+    let c = choose|c: nat| #[trigger] least_suitable(x, h1, c);
+    lemma_least_suitable_unique(x, h1, i, c);
 }
 
 } // verus!
@@ -869,7 +997,9 @@ mod tests {
     #[test]
     fn cavp_siggen_fixed_k() {
         for (i, [d, k, m, r, s]) in SIGGEN.iter().enumerate() {
-            let got = ecdsa_s_exec(&limbs_from_be(d, 0), &reduce_n(m, 0), &limbs_from_be(k, 0), &limbs_from_be(r, 0));
+            let rl = ecdsa_r_exec(k);
+            assert_eq!(limbs_to_be(&rl), *r, "vector {} r", i);
+            let got = ecdsa_s_exec(&limbs_from_be(d, 0), &reduce_n(m, 0), &limbs_from_be(k, 0), &rl);
             assert_eq!(limbs_to_be(&got), *s, "vector {}", i);
         }
     }

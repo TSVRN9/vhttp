@@ -1,18 +1,6 @@
 //! Trusted shim: every RustCrypto call lives here. Plain Rust outside `verus!`; removed in phase 5.
 use sha2::{Digest, Sha256};
 
-pub(crate) fn p256_ecdsa_sign(d: &[u8], msg: &[u8]) -> Option<[u8; 64]> {
-    use p256::ecdsa::signature::Signer;
-    // unreachable: requires d@.len() == 32
-    let d: [u8; 32] = d.try_into().unwrap();
-    let sk = p256::ecdsa::SigningKey::from_bytes((&d).into()).ok()?;
-    // unreachable: sign's internal expect needs try_sign to fail, and it cannot: from_bytes
-    // accepted d (1 <= d < n, requires d@.len() == 32), requires msg@.len() <= MAX_INPUT_LEN keeps
-    // the SHA-256 input under its length limit, and sign_prehash loops until a k is suitable.
-    let sig: p256::ecdsa::Signature = sk.sign(msg);
-    Some(sig.to_bytes().into())
-}
-
 struct SaltRng<'a>(&'a [u8], bool); // yields the caller's salt exactly once
 
 impl rsa::rand_core::TryRng for SaltRng<'_> {

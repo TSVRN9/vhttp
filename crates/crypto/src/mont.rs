@@ -924,7 +924,7 @@ pub(crate) proof fn bv_bit_u8(b: u8, k: u8) by (bit_vector)
 
 // x^e in Montgomery form, by square-and-multiply over the public big-endian exponent e.
 // ct: secret x; public e, m, mp, one
-// ponytail: plain square-and-multiply over the public exponent, 256 squarings + popcount(e) multiplies (≈<measured> µs per fe_inv, release, Task 8 p256_speed); upgrade: a fixed addition chain (~115 fewer multiplies) with one exponent-arithmetic proof per step
+// ponytail: plain square-and-multiply over the public exponent, 256 squarings + popcount(e) multiplies (≈12 µs per fe_inv, release, Task 8 p256_speed median: 6.1 ms per scalar mult / 512 point ops of one inversion each); upgrade: a fixed addition chain (~115 fewer multiplies) with one exponent-arithmetic proof per step
 pub(crate) fn mont_pow(
     x: &[u64; 4],
     e: &[u8; 32],
