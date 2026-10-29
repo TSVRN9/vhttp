@@ -48,18 +48,18 @@
     - `fn build_space_packet(..)` = `collect_frames(..)` (frame sources only) then `commit_space_packet(..)` (PN, ACK and record commits) (2a);
     - `fn commit_datagram(&mut self, q: PathId, d: &OutDatagram)`, the only place that calls `paths.on_sent` and pushes `out_log`.
 - **Per-space state** is three named fields per kind (`recv_i`, `recv_h`, `recv_1`, …) reached through `match k`, with spec accessors `recv(k)`, `sent(k)`, `live(k)`; no arrays of non-`Copy` structs.
-- **Consumed from 3d** (parent plan, exact names): `RecvPns`, `SentPacket`, `SentPackets`, `MAX_ACK_RANGES_IN`, `Recovery` (+ consts), `LocalCids`, `PeerCids`, `LOCAL_CID_LEN`, `ISSUE_CAP_ACTIVE`, `PEER_CID_CAP`, `HandshakeIds`, `local_tp_ok` (spec) / `is_local_tp_ok` (exec), `fill_local_tp` (requires `self.wf()`), `lemma_local_tp_streams`, `peer_tp_wf`, `lemma_peer_tp_stream_ok`, `check_alpn`, `token_validates`, `AmpBudget`, `amp_ok`, `PlainPacket`, `plain_wf`, `OutPacket`, `OutDatagram`, `PathId`, `packet_len`, `datagram_len`, `out_packet_len`, `out_datagram_len`, `out_packet_wf`, `add_sample_padding`, `pad_datagram`, `MAX_DATAGRAM`, `AEAD_TAG_LEN`, `CidUpdate`, `Lifecycle`, `Phase`, `IdleTimer`, `ms_to_us`, `effective_idle_us`, `close_frame`, `close_spaces`, `Paths`, `PathState`, `MAX_PATHS`; and 3d Task 1's `Streams::send_room`, `MAX_SEND_BUFFER`, `MAX_OWN_UNI`, `MAX_SEND_RANGES` and the doc-hidden `Streams::send_range_counts` (preflight C1). `Paths::set_dcid` takes an `Option` (preflight I1/I2).
+- **Consumed from 3d** (parent plan, exact names): `RecvPns`, `SentPacket`, `SentPackets`, `MAX_ACK_RANGES_IN`, `Recovery` (+ consts), `LocalCids`, `PeerCids`, `LOCAL_CID_LEN`, `ISSUE_CAP_ACTIVE`, `PEER_CID_CAP`, `HandshakeIds`, `local_tp_ok` (spec) / `is_local_tp_ok` (exec), `fill_local_tp` (requires `self.wf()`), `lemma_local_tp_streams`, `peer_tp_wf`, `lemma_peer_tp_stream_ok`, `check_alpn`, `token_validates`, `AmpBudget`, `amp_ok`, `PlainPacket`, `plain_wf`, `OutPacket`, `OutDatagram`, `PathId`, `packet_len`, `datagram_len`, `out_packet_len`, `out_datagram_len`, `out_packet_wf`, `add_sample_padding`, `pad_datagram`, `MAX_DATAGRAM`, `AEAD_TAG_LEN`, `CidUpdate`, `CidTable` (for 3e), `PER_CONN`, `MAX_CONNS`, `Lifecycle`, `Phase`, `IdleTimer`, `ms_to_us`, `effective_idle_us`, `close_frame`, `close_spaces`, `Paths` (with `mtu_failed`, `response_room`; 3d final review I2, M2), `PathState`, `MAX_PATHS`, `MAX_RESPONSES`; and 3d Task 1's `Streams::send_room`, `MAX_SEND_BUFFER`, `MAX_OWN_UNI`, `MAX_SEND_RANGES` and the doc-hidden `Streams::send_range_counts` (preflight C1). `Paths::set_dcid` takes an `Option` (preflight I1/I2).
 
-## Matrix rows this plan closes (45, RFC 9000)
+## Matrix rows this plan closes (48, RFC 9000)
 
-Rows were redistributed by the Task 1/Task 2 split (preflight I7); the 45 rows themselves are unchanged.
-- **Task 1a (5):** §5.2; §11.1; §13.1; §10.3; §8.2.1 (req) "Do NOT discard small datagrams carrying PATH_CHALLENGE/PATH_RESPONSE".
+Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final review moved three rows here from 3d (I1, M1, I2): §5.1.1 (req) "Accept issued CID until retired" (Task 1a), §8.2.3 (Task 2b) and §14.2 (Task 3).
+- **Task 1a (6):** §5.2; §11.1; §13.1; §10.3; §8.2.1 (req) "Do NOT discard small datagrams carrying PATH_CHALLENGE/PATH_RESPONSE"; §5.1.1 (req) "Accept issued CID until retired" (the I1 registration binding plus the `gate_packet` CID check).
 - **Task 1b (8):** §10.3.1; §9 and (req) "Peer violating disable_active_migration …", "Path validation on any peer address change …"; §9.3; §9.3.3; §9.5 and (req) "Do not reuse CID when sending to more than one destination address".
 - **Task 2a (17):** §12.3; §13.2.1; §8; §8.1 and its 2 server (req) rows; §10.2.1; §10.2.2; §12.2; §13.2.6; §14.1 and its 3 server (req) rows; §17.2.3 and (req) "ACK for a 1-RTT packet MUST be in a 1-RTT packet"; §19.20.
-- **Task 2b (12):** §8.2.1 and (req) "Unpredictable PATH_CHALLENGE data", "Expand PATH_CHALLENGE datagrams to 1200 unless anti-amplification forbids", "Second validation with 1200-byte datagram for MTU"; §8.2.2 and its 7 (req) rows.
-- **Task 3 (3):** §9.3.2; §9.4; §13.3.
-- Touched notes replaced: 3b's on §10.3 (Task 1a) and §19.20 (Task 2a); 3c's and 3d's on §13.3 (Task 3); 3d's on §12.3 and §13.2.1 (Task 2a) and §8.2.1 (Task 2b).
-- `python3 -I <scratch>/chk3d/rows1029.py <scratch>/chk3b/d3.txt` prints `3d2 T1a 5`, `3d2 T1b 8`, `3d2 T2a 17`, `3d2 T2b 12`, `3d2 T3 3` and `88 43 45`.
+- **Task 2b (13):** §8.2.1 and (req) "Unpredictable PATH_CHALLENGE data", "Expand PATH_CHALLENGE datagrams to 1200 unless anti-amplification forbids", "Second validation with 1200-byte datagram for MTU"; §8.2.2 and its 7 (req) rows; §8.2.3.
+- **Task 3 (4):** §9.3.2; §9.4; §13.3; §14.2.
+- Touched notes replaced: 3b's on §10.3 (Task 1a) and §19.20 (Task 2a); 3c's and 3d's on §13.3 (Task 3); 3d's on §12.3 and §13.2.1 (Task 2a), §8.2.1 and §8.2.3 (Task 2b), §5.1.1 (req) "Accept issued CID until retired" (Task 1a) and §14.2 (Task 3).
+- `python3 -I <scratch>/chk3d/rows1029.py <scratch>/chk3b/d3.txt` prints `3d2 T1a 6`, `3d2 T1b 8`, `3d2 T2a 17`, `3d2 T2b 13`, `3d2 T3 4` and `88 40 48`.
 
 ## Review Focus
 
@@ -110,6 +110,7 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7); the 45 rows t
     - Otherwise `L0 = rand[0..8]` is our seq-0 CID and `rand[8..24]` its token; `local_tp` is filled (`fill_local_tp`); `live_i = live_h = true`.
     - Paths: `paths = Paths::new(path)`, `hs_path = path`, `paths.set_dcid(path, Some(&first.scid))` (the client's SCID is peer seq 0; preflight I1).
     - `cid_updates = [Add(odcid), Add(L0)]`; `first.token` goes through `token_validates` (false, §8.1.3).
+    - **Binding (3d final review I1):** every active local CID, and `odcid` while `live_i`, is registered through `cid_updates`: each `issue` pushes its `Add`, each retirement its `Remove`, `discard(Initial)` the `Remove(odcid)`. A `Remove` is always queued before the replacement `Add`, so at every prefix of `poll_cid_updates` a connection owns at most `ISSUE_CAP_ACTIVE` active CIDs plus `odcid` = `PER_CONN` table entries (`LocalCids::wf`: active ≤ 4). `CidTable::apply(Add)` (`add_cid`) then never fails for a registered connection except on a key collision, which keeps §5.1.1 "accept until retired" dischargeable.
     - **Nothing is processed or counted**: the shell next calls `on_datagram` with the whole datagram. Ensures `r is Some(c) ==> c.wf() && c.out_log() == Seq::empty()`.
   - **`pub fn on_datagram(&mut self, path: PathId, datagram_len: usize, packets: Vec<PlainPacket>, now: u64, rand: &[u8; RAND_LEN])`**: requires `old.wf()` and `forall i: plain_wf(packets@[i]@)`. Body (order is the requirement for §8.1, §12.2, §13.1, §14.1):
     ```
@@ -128,7 +129,8 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7); the 45 rows t
     - Initial: `len < 1200` (§14.1), `!live_i`, `path != hs_path`, `!ids.initial_scid_ok(&p.scid)` (§7.2), or `!(p.dcid == ids.odcid() || local_cids.is_active(&p.dcid))`;
     - Handshake: `!live_h`, `path != hs_path`, or `!local_cids.is_active(&p.dcid)`;
     - OneRtt: `!complete` (RFC 9001 §5.7, the 4b note) or `!local_cids.is_active(&p.dcid)` (§5.1.1 accept until retired);
-    - any kind: `recv(k).is_duplicate(p.pn)` (§12.3).
+    - any kind: `recv(k).is_duplicate(p.pn)` (§12.3);
+    - any kind: more `PathChallenge` frames in `p.frames` than `paths.response_room(path)` (3d final review M2). The whole packet is dropped and never acknowledged, so the peer sees ordinary loss (§21.9 MAY "dropping packets", cited at `MAX_RESPONSES`) and no challenge is silently lost inside an acknowledged packet. Test `challenge_flood_dropped` (Task 1b): five `PathChallenge`s in one 1-RTT packet → `largest_pn(OneRtt)` unchanged, `response_owed(0) == false`.
     No size check applies to 1-RTT, so small PATH_* datagrams are never discarded (§8.2.1 req).
   - **`on_packet`**:
     - `for f in p.frames { on_frame(k, path, &p.dcid, f, now, rand)? }`.
@@ -139,7 +141,7 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7); the 45 rows t
     - **P10 stated (preflight M14):** ensures `r is Err ==> recv(k).seen() == old.recv(k).seen()`.
   - **`on_frame`** dispatches one arm per variant to a per-family helper (preflight I7). Task 1a writes these:
     - Padding/Ping → Ok.
-    - **`on_ack_frame(k, a)`**: `sent(k).on_ack(&a, &mut acked)?` (`frame_wf` gives `rfc_ack_ranges_valid`); `recovery.on_ack_received(k, acked.len(), a.delay, now)`; `on_acked_frame(k, f)` for every frame of every acked record.
+    - **`on_ack_frame(k, a)`**: `sent(k).on_ack(&a, &mut acked)?` (`frame_wf` gives `rfc_ack_ranges_valid`); `recovery.on_ack_received(k, acked.len(), a.delay, now)`; `on_acked_frame(k, f)` for every frame of every acked record, **except that adjacent STREAM frames of one stream in one record (`off + len` of one is the next's `off`) are coalesced into one `on_frame_acked` call** covering their union, FIN from the last (3d final review M3). `// ponytail: per incoming ACK at most 64 records × distinct stream runs per record × O(R) range work (R ≈ 2·64 + ~1000, 3d D4); coalescing turns a 200-frame single-stream record into one call. Cap STREAM frames per stream per packet if a split adversary still makes this hot.`
     - **`on_crypto_frame(k, off, data)`**: `crx(k).on_crypto(offset, &data)?` for Initial/Handshake. A 1-RTT CRYPTO goes to `crx_1` (`// ponytail: post-handshake CRYPTO (NewSessionTicket) is buffered and ignored; we send none.`).
     - `ConnectionClose{..}` → `lc.enter_draining(now, pto())`; `streams = None`; Ok.
     - `HandshakeDone` cannot occur (`frames_received` excludes it).
@@ -163,8 +165,8 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7); the 45 rows t
   - **`pub fn poll_stream_events(&mut self, out: &mut Vec<StreamEvent>)`** moves `events` into `out` (in order, no data copies) and leaves `events` empty.
     - **Caller obligation, stated in the module doc (preflight M24):** drain this after every `on_datagram`. `events` is bounded only by the caller draining it. `H3Server::pump` discharges this; 3e drives `Connection` before any stream exists.
   - `pub fn poll_cid_updates(&mut self, out: &mut Vec<CidUpdate>)` drains `cid_updates`, then diffs `peer_cids.used_tokens()` against `tokens_registered` into `AddToken`/`RemoveToken`.
-  - **Binding (3d Task 6 review):** `tokens_registered` ⊆ `peer_cids.used_tokens()` at all times, so the table holds only tokens of CIDs we have used and never those of retired CIDs (§10.3.1). Each connection therefore registers ≤ `PEER_CID_CAP` tokens; with `route::MAX_TOKENS = MAX_TABLE * PEER_CID_CAP`, `CidTable::apply(AddToken)` from 3e never fails at capacity. `route` checks reset tokens directly after the CID match, before NewInitial/VN (§10.3 "any packet").
-  - `fn issue_cids(&mut self, rand)`: only when `complete`. For i = 0..4, while it returns true: `local_cids.issue(&rand[24i .. 24i + 24], peer.active_connection_id_limit)`, pushing `Add(cid)` for each.
+  - **Binding (3d Task 6 review):** `tokens_registered` ⊆ `peer_cids.used_tokens()` at all times, so the table holds only tokens of CIDs we have used and never those of retired CIDs (§10.3.1). Each connection therefore registers ≤ `PEER_CID_CAP` tokens; with `route::MAX_TOKENS = MAX_CONNS * PEER_CID_CAP` and at most `MAX_CONNS` admitted connections, `CidTable::apply(AddToken)` from 3e never fails at capacity. `route` checks reset tokens directly after the CID match, before NewInitial/VN (§10.3 "any packet").
+  - `fn issue_cids(&mut self, rand)`: only when `complete`. For i = 0..4, while it returns true: `local_cids.issue(&rand[24i .. 24i + 24], peer.active_connection_id_limit)`, pushing `Add(cid)` for each. `// ponytail: a fresh 64-bit CID equal to another connection's makes CidTable::apply(Add) return false with no feedback (probability ~n²/2^64 at n ≤ MAX_CONNS·PER_CONN); a re-issue path if CIDs ever shrink.`
   - `fn pto(&self) -> u64` = `recovery.pto_us(OneRtt, peer_mad_us)`, with `peer_mad_us = ms_to_us(peer_tp.map_or(25, |t| t.max_ack_delay))`.
   - **Getters:** `largest_pn(k) -> Option<u64>` (3e's `decode_pn` input), `phase() -> Phase`, `is_closed()`, `handshake_complete()`, `local_params() -> &TransportParams`, `peer_uni_limit() -> Option<u64>`, `now()`, `active_path() -> PathId`, `path_state(q) -> PathState`, `path_dcid(q) -> Option<Vec<u8>>` (preflight I1), `response_owed(q) -> bool`, `challenge_owed(q) -> bool`, `streams_live() -> bool`, `sent_inflight_len(k) -> usize`, `close_info()`.
   - **Outside `verus!`:** `#[doc(hidden)] pub fn crypto_capacity(&self, k) -> usize`, the sum of the CRYPTO buffers' capacities via 3c's `buf_capacity`/`Reassembly::capacities`, summed with `saturating_add` (preflight M19b: Phase 8a turns overflow checks off in quic's release profile).
@@ -214,10 +216,10 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7); the 45 rows t
   - `gate_packet` accepts 1-RTT before `complete` (fails `on_stream_frame`'s `streams is Some` precondition);
   - `discard` assigns a fresh `SentPackets` (fails `wf_pn`).
   Test-only mutation (reported in Task 2a, whose `amp_limit` catches it): skip `paths.on_recv` when every packet is dropped.
-- [ ] **Step 5:** Four checks, evidence, quote check; MUST coverage for `5.2,11.1,13.1,10.3`.
+- [ ] **Step 5:** Four checks, evidence, quote check; MUST coverage for `5.2,11.1,13.1,10.3,5.1.1`.
 - [ ] **Step 6: Commits:**
   - `feat(quic): verified server Connection state and handshake receive path — per-path accounting, packet gating (RFC 9000 §5.2, §10.3, §13.1)`;
-  - matrix: `✅ 3d: crates/quic/src/conn.rs` on the 5 Task 1a rows (§10.3 replacing 3b's note);
+  - matrix: `✅ 3d: crates/quic/src/conn.rs` on the 6 Task 1a rows (§10.3 replacing 3b's note; §5.1.1 (req) "Accept issued CID until retired" replacing 3d's touched note, as `✅ 3d: crates/quic/src/conn.rs + cid.rs + route.rs`);
   - `docs: mark RFC 9000 §5.2, §10.3, §11.1, §13.1 closed in 3d`.
 
 ---
@@ -254,6 +256,7 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7); the 45 rows t
   - **`fn migrate(&mut self, path, now, rand)`** (body):
     ```
     if paths.dcid(path) is None { return }                            // §9.5: no fresh CID for a second destination
+    if paths.mtu_failed(path) { return }                              // §14.2: never make a failed-MTU path active (3d final review I2)
     old = paths.active(); paths.set_active(path)                      // §9.3: send subsequent packets to the new address
     if paths.state(path) == Unvalidated { if let Some(c) = next_challenge(rand) { paths.start_challenge(path, c, now) } }   // §9, §9.3: not if already underway (preflight M9)
     if paths.state(old) == Validated  { if let Some(c) = next_challenge(rand) { paths.start_challenge(old, c, now) } }      // §9.3.3
@@ -497,17 +500,18 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7); the 45 rows t
 - [ ] **Step 2:** the new tests fail.
 - [ ] **Step 3: Implement.** Duvet-cite:
   - §8.2.2: all seven MUSTs at `build_path_datagram`/P12/P13; "MUST NOT be enforced" at `Paths::on_response`'s call in Task 1b;
-  - §8.2.1: the expand MUST at `build_path_datagram`, plus "unpredictable data" at `next_challenge` and "second path validation" at Task 1b's MTU-probe start.
+  - §8.2.1: the expand MUST at `build_path_datagram`, plus "unpredictable data" at `next_challenge` and "second path validation" at Task 1b's MTU-probe start;
+  - §8.2.3: "MUST initiate another path validation with an expanded datagram" at Task 1b's MTU-probe start (E3) and at the padding of that challenge here (3d final review M1; 3d's `needs_mtu_probe` only reports the obligation).
 - [ ] **Step 4: Mutations:**
   - always pad path datagrams to 1200 (fails `commit_datagram`'s requires);
   - `build_path_datagram` stops at the first candidate path (fails `nat_rebinding` when path 0's frame is blocked; a test mutation);
   - take the response from path 0 for a datagram on path 1 (fails P12);
   - fall back to `peer_cids.current()` when `paths.dcid(q)` is None (fails P14).
-- [ ] **Step 5:** Four checks, evidence, quote check; MUST coverage for `8.2.1,8.2.2`.
+- [ ] **Step 5:** Four checks, evidence, quote check; MUST coverage for `8.2.1,8.2.2,8.2.3`.
 - [ ] **Step 6: Commits:**
   - `feat(quic): verified path datagrams — responses on the arrival path, challenge expansion within the amplification limit (RFC 9000 §8.2.1-8.2.2)`;
-  - matrix: `✅ 3d: crates/quic/src/conn.rs + path.rs` on the 12 Task 2b rows (§8.2.1 and its three non-small (req) rows replacing 3d's touched notes);
-  - `docs: mark RFC 9000 §8.2.1, §8.2.2 closed in 3d`.
+  - matrix: `✅ 3d: crates/quic/src/conn.rs + path.rs` on the 13 Task 2b rows (§8.2.1, its three non-small (req) rows and §8.2.3 replacing 3d's touched notes);
+  - `docs: mark RFC 9000 §8.2.1, §8.2.2, §8.2.3 closed in 3d`.
 
 ---
 
@@ -518,18 +522,19 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7); the 45 rows t
 - Test: `crates/quic/tests/conn_timers.rs`
 
 **Interfaces:**
-- Consumes: Tasks 1a–2b; `Lifecycle::{on_timeout, deadline, close_silently}`; `IdleTimer::deadline`; `effective_idle_us`; `RecvPns::ack_deadline`; `Recovery::{pto_deadline, on_packets_lost, on_pto_fired, on_path_validated}`; `SentPackets::{drain_inflight, last_sent_time}`; `Paths::{on_timeout, deadline, last_validated, set_active}`.
+- Consumes: Tasks 1a–2b; `Lifecycle::{on_timeout, deadline, close_silently}`; `IdleTimer::deadline`; `effective_idle_us`; `RecvPns::ack_deadline`; `Recovery::{pto_deadline, on_packets_lost, on_pto_fired, on_path_validated}`; `SentPackets::{drain_inflight, last_sent_time}`; `Paths::{on_timeout, deadline, last_validated, set_active, mtu_failed}`.
 - Produces:
   - **`pub fn next_timeout(&self) -> Option<u64>`**: the minimum of the Closing/Draining deadline; and, if Open: `idle.deadline(eff)` with `eff = effective_idle_us(local.max_idle_timeout, peer.max_idle_timeout, pto())` when Some; each live space's `ack_deadline(local_mad_us)`; each live space's `recovery.pto_deadline(k, sent(k).last_sent_time(), peer_mad_us, amp_blocked)` with `amp_blocked = paths.state(hs_path) != Validated && paths.budget(hs_path) == 0`; `paths.deadline(pto())`.
   - **`pub fn on_timeout(&mut self, now: u64, rand: &[u8; RAND_LEN])`**, in order:
     1. `lc.on_timeout(now)`;
     2. Open and the idle deadline passed → `lc.close_silently()`, `streams = None` (§10.1);
     3. Open: for the first live space whose PTO deadline passed: `sent(k).drain_inflight(&mut lost)`; `recovery.on_packets_lost(k, lost.len(), now)` (§13.3 congestion action, D6); `on_lost_frame(k, f)` for every frame; `recovery.on_pto_fired()`; `probe(k) = true` (E8);
-    4. Open: `while let Some(f) = paths.on_timeout(now, pto())` (preflight I5: every expired path, at most `MAX_PATHS` iterations; `decreases` is the number of outstanding challenges). When `f == paths.active()`:
-       - with `Some(v) = paths.last_validated()` → `paths.set_active(v)` (§9.3.2 revert);
+    4. Open: `while let Some(f) = paths.on_timeout(now, pto())` (preflight I5: every expired path, at most `MAX_PATHS` iterations; `decreases` is the number of outstanding challenges). When `f == paths.active()` and the active path is no longer usable (`state(f) != Validated`, or `mtu_failed(f)`: an expired MTU probe on the active path is treated like a validation failure, 3d final review I2):
+       - with `Some(v) = paths.last_validated()` → `paths.set_active(v)` (§9.3.2 revert). `Paths::wf` makes `v` usable (`Validated && !mtu_failed`) and never `f`: a failed MTU probe removes its path from `last_validated`/`prev_validated`, promoting the previous validated path;
        - with None → `lc.close_silently()`, `streams = None` (§9.3.2 silent close), and the loop ends.
     5. `issue_cids(rand)` (with `chal_used = 0` at entry, the clock rule).
-  - **P15 (§9.3.2):** after `on_timeout`, if the active path had a challenge that expired at `now`, then `paths.state(paths.active()) == Validated` or `lc.phase() is Closed` (stated after the loop; preflight I5).
+  - **P15 (§9.3.2, §14.2):** after `on_timeout`, if the active path had a challenge that expired at `now`, then `paths.state(paths.active()) == Validated && !paths.mtu_failed(paths.active())` or `lc.phase() is Closed` (stated after the loop; preflight I5; strengthened by the 3d final review I2).
+  - **P17 (§14.2 send gate; 3d final review I2), added to `poll_transmit`'s ensures:** a returned datagram on a path `q` with `paths.mtu_failed(q)` carries only `PathChallenge`, `PathResponse`, `Padding` (probes, from `build_path_datagram`) or `ConnectionClose` frames. It holds because `build_space_packet` sends only on `paths.active()`, which P15 and `migrate`'s `mtu_failed` guard (Task 1b) keep usable, and `mtu_failed` is set only inside `on_timeout`. Cite §14.2's cease-sending MUST here (it replaces 3d's former exception at `MAX_DATAGRAM`). Test `mtu_probe_failure_moves_off`: `nat_rebinding` up to the path-1 MTU probe, never answered; `on_timeout(40 + 3·1_024_000, ..)` → `active_path() == 0`, and later stream data goes to path 0, never path 1.
   - Outside `verus!`: `#[doc(hidden)] pub fn send_range_counts(&self, id: u64) -> Option<(usize, usize)>`, delegating to 3d Task 1's `Streams::send_range_counts` (preflight C1).
 
 - [ ] **Step 1: Failing tests** (`tests/conn_timers.rs`; helpers as before):
@@ -559,10 +564,10 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7); the 45 rows t
     - Assert at the end: no OneRtt packet after a stall carries new STREAM bytes until an ACK frees a slot or the range count drops below the gate.
     - This pins the 1-byte credit-drip adversary. Splitting large lost ranges on partial retransmission is not exercised; its bound is 3d D4's ~1000 term.
 - [ ] **Step 2:** the tests fail.
-- [ ] **Step 3: Implement.** Duvet-cite §9.3.2 (both MUSTs at step 4); §9.4 ("MUST NOT contribute to congestion control" at E2's not-recording in Task 2b's builder, cited there. The old-path clause is a placeholder with `// ponytail: one shared Recovery, so old-path records acked after on_path_validated still raise cwnd; Phase 6 keeps per-path state.`, preflight M8; "MUST immediately reset" at `on_path_validated`'s call; "MUST NOT be more aggressive" at `paths.deadline(pto())`, 3·PTO); §13.3's congestion MUST at step 3; §10.1's restart at step 2 (already cited in lifecycle.rs; a second citation is fine).
-- [ ] **Step 4: Mutations:** step 4 reverts to the failed path (fails P15); step 4 handles only the first expired path (fails `validation_failure_reverts`, a test mutation); 3d Task 1's `MAX_SEND_RANGES` gate removed (fails `alternate_ack_range_growth`, a test mutation); step 2 before step 1 with a `<` deadline compare (fails `idle_timeout`, a test mutation); `pto_deadline` ignores `amp_blocked` (fails the RFC 9002 §6.2.2.1 ensures if stated; otherwise a test mutation — say which); step 3 skips `on_packets_lost` (fails `pto_halves_cwnd`).
-- [ ] **Step 5:** Four checks, evidence, quote check; MUST coverage for `9.3.2,9.4,10.1,13.3`.
-- [ ] **Step 6: Commits:** `feat(quic): verified Connection timers — idle, close/drain, PTO placeholder with congestion action, path-validation fallback (RFC 9000 §9.3.2, §9.4, §10.1, §13.3)`; matrix: `✅ 3d: crates/quic/src/conn.rs + path.rs` on §9.3.2 and §9.4 (note "port-only MAY not used; RTT/CC reset is Recovery::on_path_validated (placeholder until Phase 6)"); on §13.3 replace the touched notes with `✅ 3d: crates/quic/src/conn.rs (retransmission routing) + recovery.rs (AIMD placeholder congestion action, Phase 6 replaces)`; `docs: mark RFC 9000 §9.3.2, §9.4, §13.3 closed in 3d`.
+- [ ] **Step 3: Implement.** Duvet-cite §9.3.2 (both MUSTs at step 4); §14.2's cease-sending MUST at P17 (3d final review I2); §9.4 ("MUST NOT contribute to congestion control" at E2's not-recording in Task 2b's builder, cited there. The old-path clause is a placeholder with `// ponytail: one shared Recovery, so old-path records acked after on_path_validated still raise cwnd; Phase 6 keeps per-path state.`, preflight M8; "MUST immediately reset" at `on_path_validated`'s call; "MUST NOT be more aggressive" at `paths.deadline(pto())`, 3·PTO); §13.3's congestion MUST at step 3; §10.1's restart at step 2 (already cited in lifecycle.rs; a second citation is fine).
+- [ ] **Step 4: Mutations:** step 4 reverts to the failed path (fails P15); step 4 ignores `mtu_failed` on the active path (fails P15); `migrate` drops its `mtu_failed` guard (fails P17); step 4 handles only the first expired path (fails `validation_failure_reverts`, a test mutation); 3d Task 1's `MAX_SEND_RANGES` gate removed (fails `alternate_ack_range_growth`, a test mutation); step 2 before step 1 with a `<` deadline compare (fails `idle_timeout`, a test mutation); `pto_deadline` ignores `amp_blocked` (fails the RFC 9002 §6.2.2.1 ensures if stated; otherwise a test mutation — say which); step 3 skips `on_packets_lost` (fails `pto_halves_cwnd`).
+- [ ] **Step 5:** Four checks, evidence, quote check; MUST coverage for `9.3.2,9.4,10.1,13.3,14.2`.
+- [ ] **Step 6: Commits:** `feat(quic): verified Connection timers — idle, close/drain, PTO placeholder with congestion action, path-validation fallback (RFC 9000 §9.3.2, §9.4, §10.1, §13.3)`; matrix: `✅ 3d: crates/quic/src/conn.rs + path.rs` on §9.3.2 and §9.4 (note "port-only MAY not used; RTT/CC reset is Recovery::on_path_validated (placeholder until Phase 6)"); on §13.3 replace the touched notes with `✅ 3d: crates/quic/src/conn.rs (retransmission routing) + recovery.rs (AIMD placeholder congestion action, Phase 6 replaces)`; on §14.2 replace 3d's touched note with `✅ 3d: crates/quic/src/conn.rs (P17 send gate) + path.rs (mtu_failed)`; `docs: mark RFC 9000 §9.3.2, §9.4, §13.3, §14.2 closed in 3d`.
 
 ---
 
@@ -627,14 +632,17 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7); the 45 rows t
 
 - **Paths (3d T8):**
   - Per-id `Paths` ops require `has(id)`. Connection getters return `Option` via `Paths::index`, or carry the same precondition.
-  - A path whose MTU probe failed stays Validated with `mtu_ok(id) == false`. Send only probes on it, never other data, and never make it `active` (§8.2.4 "unusable").
+  - A path whose MTU probe failed stays Validated with `mtu_ok(id) == false` and `mtu_failed(id) == true` (3d final review I2). Send only probes and CONNECTION_CLOSE on it (P17, §14.2), never make it `active` (`migrate`'s guard), and if it already is active, move off it (Task 3 step 4, P15; §8.2.4 "unusable").
   - `set_validated` is handshake-only (§8.1), and it marks the MTU confirmed (§14.1).
-  - A PATH_CHALLENGE retransmission with new data goes through `start_challenge`, which keeps the validation clock while the path is Validating.
+  - One PATH_CHALLENGE per validation attempt (E2), never retransmitted with new data (3d final review M4: `on_response` matches only the current challenge, so a retransmission would orphan a late response to the first). A lost challenge fails after 3·PTO and Task 3 step 4 falls back.
   - If the Task 3 failure loop calls a `Paths` mutator besides `on_timeout`/`set_active`, that mutator needs a `timed_count`-unchanged ensures.
 - **Lifecycle (3d T7):** `Lifecycle` exposes closed spec accessors, not a View. The frame conditions on `on_recv_closing`, `on_close_sent`, `on_timeout`, `enter_draining` and `enter_closing` (non-Open) are the ones 3d2 may rely on.
 
 ## Binding notes for later phases
 
+- **3e, from the 3d final review** (no 3e plan is under `docs/superpowers/plans` yet; carry these into its binding block):
+  - **Order (I1):** after `route` returns `Route::NewInitial`, call `Connection::accept`, then `CidTable::apply` every update from `poll_cid_updates`, before routing the next datagram. `has_room` counts admitted connections, and a connection is admitted by its first `Add`; another datagram routed in between could be admitted against the same slot. Apply `poll_cid_updates` after every `on_datagram`/`on_timeout` too, and `remove_conn` when a connection is dropped.
+  - **Per-datagram cost (I3):** `route` costs at most `MAX_TABLE` (512) CID comparisons plus, for a datagram of at least 21 bytes matching no CID, `MAX_TOKENS` (816) constant-time 16-byte token comparisons; about 100 connections (`MAX_CONNS` = 102) is the ceiling this linear scan is sized for. A random-keyed SipHash index for CIDs and tokens (a token lookup compares CT against one bucket only) replaces it before production; a sorted Vec is not acceptable (it leaks token order, §10.3.1).
 - **3e:** `protect(p: &OutPacket, keys, out)` writes exactly `out_packet_len(p@)` bytes, including `p.padding` zero bytes and `p.spin` for short headers; datagrams are the packets concatenated. On receive: `unprotect` uses `largest = conn.largest_pn(kind)` and `dcid_len = LOCAL_CID_LEN`; call `conn.on_reset_candidate(last16, now)` when the first packet fails to decrypt; always call `on_datagram` with the UDP payload length, even with no surviving packet; every `PlainPacket` passed must satisfy `plain_wf` (from `parse_payload`'s ensures). `RAND_LEN` is 129. The harness's "A.2 → one reply ≤ 3600" is `harness_mirror`'s 47-byte ACK-only Initial.
   - **What 3e Task 5 consumes from `poll_transmit`** (preflight I6): `Connection::out_log()` (closed spec fn); `poll_transmit` ensures that `out_log()` is pushed with exactly the returned datagram (unchanged on None); P7 on the result (`out_packet_wf` for every packet); P16 `out_datagram_len(d@) <= MAX_DATAGRAM`. 3e's Decision 14 fallback is therefore not needed.
   - The 3e draft's cross-references move: `Connection` is this plan's Tasks 1a–3; `PathId` is 3d Task 6 (`datagram.rs`); `MAX_PATHS` is 3d Task 8 (`path.rs`); the test helpers are in `tests/conn_rx.rs`. 3e Task 6 and Phase 8a Task 10 both edit verify.sh's success line, so the second to land merges the two (preflight M21).
@@ -644,7 +652,7 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7); the 45 rows t
 ## Exit criteria (Phase 3d2)
 
 - All four checks pass on the merged tree, with N = the escape count of `main` at merge (preflight M19d).
-- The 45 rows carry `✅ 3d: <file>`; 3b's notes on §10.3 and §19.20, 3c's on §13.3 and 3d's touched notes are replaced; `python3 -I <scratch>/chk3d/rows1029.py <scratch>/chk3b/d3.txt` prints `88 43 45` (preflight: per-task lines as in "Matrix rows").
+- The 48 rows carry `✅ 3d: <file>`; 3b's notes on §10.3 and §19.20, 3c's on §13.3 and 3d's touched notes are replaced; `python3 -I <scratch>/chk3d/rows1029.py <scratch>/chk3b/d3.txt` prints `88 40 48` (preflight: per-task lines as in "Matrix rows").
 - Every MUST in the 3d sections is cited or excepted: `python3 -I <scratch>/duvet_q.py <json> 5.1,5.1.1,5.1.2,5.2,5.2.2,5.2.3,7,7.2,7.3,7.4.1,8,8.1,8.1.3,8.2.1,8.2.2,8.2.3,9,9.3,9.3.2,9.3.3,9.4,9.5,10.1,10.2.1,10.2.2,10.2.3,10.3,10.3.1,10.3.2,11,11.1,12.2,12.3,13.1,13.2.1,13.2.3,13.2.5,13.2.6,13.3,13.4.1,13.4.2.1,13.4.2.2,14.1,14.2,17.2.3,19.15,19.16,19.17,19.20,21.11` prints nothing (144 lines at 3b: `<scratch>/chk3d/musts-open-at-3b.txt`).
 - `phase-3d2` is merged into `main`.
 

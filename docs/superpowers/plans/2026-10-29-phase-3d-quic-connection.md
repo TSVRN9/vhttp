@@ -15,7 +15,7 @@
 **Where the cut is (3d / 3d2).** 3d is every standalone machine; 3d2 is the `Connection` struct that composes them (receive path, transmit path, timers) and the HTTP/3 adapter.
 - Every connection-wide proof obligation (bytes sent ≤ 3× received, Initial datagrams ≥ 1200, nothing sent while draining, PNs strictly increasing, ACKs in their own space) is a property of the packetizer `poll_transmit`, so ACK generation and packetization cannot be split from the connection without leaving a half that has nothing to prove.
 - Paths are built into `Connection` from its first line (3d2 Task 1a). The 2026-10-28 drafts added paths afterwards, which meant re-proving `on_datagram` and `poll_transmit` with a per-path budget. This cut proves each big function once.
-- A task writes ✅ only on rows whose sections pass its own `duvet_q` run. Each 3d task closes the rows its module discharges on its own (43 rows); rows whose last MUST lands in the composed connection get a "touched (closed in 3d2 Tn)" note here and close in 3d2 (45 rows). `python3 -I <scratch>/chk3d/rows1029.py <scratch>/chk3b/d3.txt` prints `88 43 45` and asserts each of the 88 rows is owned exactly once.
+- A task writes ✅ only on rows whose sections pass its own `duvet_q` run. Each 3d task closes the rows its module discharges on its own (40 rows); rows whose last MUST lands in the composed connection get a "touched (closed in 3d2 Tn)" note here and close in 3d2 (48 rows; the 3d final review moved §5.1.1 (req) "Accept issued CID until retired", §8.2.3 and §14.2 there). `python3 -I <scratch>/chk3d/rows1029.py <scratch>/chk3b/d3.txt` prints `88 40 48` and asserts each of the 88 rows is owned exactly once.
 
 **Architecture:**
 - One module per machine, all in `crates/quic`: `ack_track`, `sent`, `recovery`, `cid`, `handshake`, `amp`, `datagram`, `route`, `lifecycle`, `path`. Task 1 edits 3c's `stream_id.rs`, `send_stream.rs` and `streams.rs`; Task 5 adds one theorem to 3b's `tp.rs`.
@@ -82,15 +82,15 @@
 
 ## Matrix rows these plans close
 
-RFC 9000, labels exactly as in `docs/requirements.md`. 3d closes 43, 3d2 closes 45 (88; checked by `chk3d/rows1029.py`).
+RFC 9000, labels exactly as in `docs/requirements.md`. 3d closes 40, 3d2 closes 48 (88; checked by `chk3d/rows1029.py`).
 - **Task 1:** none (3c strengthenings).
 - **Task 2:** §13.2.3, §13.2.5, §13.4.1, §13.4.2.1, §13.4.2.2 (5); touches §13.2.1 and §12.3 (closed in 3d2 Task 2a).
 - **Task 3:** none; touches §12.3 (closed in 3d2 Task 2a) and §13.3 (closed in 3d2 Task 3).
-- **Task 4:** §5.1, §5.1 (req) "Same CID not issued twice on a connection"; §5.1.1 and its 4 (req) rows; §5.1.2; §19.15 and its 5 open (req) rows; §19.16 and its 3 (req) rows; §10.3.2 (19).
+- **Task 4:** §5.1, §5.1 (req) "Same CID not issued twice on a connection"; §5.1.1 and 3 of its 4 (req) rows; §5.1.2; §19.15 and its 5 open (req) rows; §19.16 and its 3 (req) rows; §10.3.2 (18); touches §5.1.1 (req) "Accept issued CID until retired" (closed in 3d2 Task 1a, where every issued CID is registered and gated; 3d final review I1).
 - **Task 5:** §7; §7.2 and (req) "Server sets DCID from first received Initial", "Discard later Initial with different SCID"; §7.3 and (req) "Validate/send initial_source_connection_id; …"; §7.4.1 and (req) "Server MUST reject 0-RTT if restored values unsupported"; §8.1.3 and (req) "Server MUST attempt to validate a token in Initial" (10). Also closes the open tail of RFC 9114 §6.2 (not a 3d row).
-- **Task 6:** §5.2.2, §5.2.3, §14.2, §21.11 (4).
+- **Task 6:** §5.2.2, §5.2.3, §21.11 (3); touches §14.2 (closed in 3d2 Task 3, where a failed MTU probe stops sends; 3d final review I2).
 - **Task 7:** §10.1, §10.2.3, §11 (3).
-- **Task 8:** §8.2.3; §19.17 (2); touches §8.2.1 and its three non-small (req) rows (closed in 3d2 Task 2b, where the 1200-byte sends are built).
+- **Task 8:** §19.17 (1); touches §8.2.3, §8.2.1 and its three non-small (req) rows (closed in 3d2 Task 2b, where the second validation is started and padded; 3d final review M1).
 
 Touched notes replaced: 3b's on §5.2.2 (Task 6). 3b's on §10.3 and §19.20 and 3c's on §13.3 are replaced in 3d2.
 
@@ -320,7 +320,7 @@ Touched notes replaced: 3b's on §5.2.2 (Task 6). 3b's on §10.3 and §19.20 and
 - [ ] **Step 3: Implement.** Duvet-cite §5.1 (both MUSTs; the zero-length one as an exception), §5.1.1 (all four MUSTs), §5.1.2 (both MUSTs), §19.15 (the five open (req) MUSTs), §19.16 (all three; zero-length as exception), §10.3.2 ("MUST be difficult to guess" with "shell randomness" in the doc, "The same stateless reset token MUST NOT be used for multiple connection IDs" at the `ever` check; the static-key, CID-length and reuse-at-other-nodes MUSTs as exceptions `reason=No static key: each token is fresh shell randomness per connection ID, and no stateless reset is ever sent.`).
 - [ ] **Step 4: Mutations:** `issue` checks `active.len() <= min(..)`; `on_new_cid` step 8 before step 6; `matches_reset` ignores `used`; `on_retire` skips the own-DCID check; `on_retire` checks `next_seq` instead of `max_sent` (fails `retire_rules`' first call; preflight I3).
 - [ ] **Step 5:** Four checks, evidence, quote check; MUST coverage for `5.1,5.1.1,5.1.2,19.15,19.16,10.3.2`.
-- [ ] **Step 6: Commits:** `feat(quic): verified connection-ID issuance, retirement and peer CID set (RFC 9000 §5.1, §19.15-19.16)`; matrix: `✅ 3d: crates/quic/src/cid.rs` on the 19 Task 4 rows; zero-length rows note "exception: LOCAL_CID_LEN = 8"; §5.1.1 (req) "Accept issued CID until retired" notes "gate wired in conn.rs (3d2)".
+- [ ] **Step 6: Commits:** `feat(quic): verified connection-ID issuance, retirement and peer CID set (RFC 9000 §5.1, §19.15-19.16)`; matrix: `✅ 3d: crates/quic/src/cid.rs` on the 19 Task 4 rows; zero-length rows note "exception: LOCAL_CID_LEN = 8"; §5.1.1 (req) "Accept issued CID until retired" notes "gate wired in conn.rs (3d2)" (3d final review I1: that row is a touched note, closed in 3d2 Task 1a).
 
 ---
 
@@ -397,9 +397,9 @@ Touched notes replaced: 3b's on §5.2.2 (Task 6). 3b's on §10.3 and §19.20 and
     ```
     Prove `lemma_pad_exact` (bytes outside each Length value ≤ 50, so the chosen Length ends ≥ 350; its varint grows 1 → 2 exactly when it was 1 byte, never past 2 since Length < 16384).
 - Produces (`quic::route`):
-  - `pub type ConnId = u64;`; `pub const MAX_TABLE: usize = 4096;` (`// ponytail: linear-scan CID table capped at 4096 entries; HashMap when connections exceed ~100.`)
+  - `pub type ConnId = u64;`; `pub const MAX_TABLE: usize = 512;` (`// ponytail: linear-scan CID table, ~100 connections; a random-keyed SipHash index before production.`), `PER_CONN = ISSUE_CAP_ACTIVE + 1` (5), `MAX_CONNS = MAX_TABLE / PER_CONN` (102), `MAX_TOKENS = MAX_CONNS * PEER_CID_CAP` (3d final review I1, I3; was 4096 entries with room judged per newcomer).
   - **`pub enum CidUpdate { Add(Vec<u8>), Remove(Vec<u8>), AddToken([u8; 16]), RemoveToken([u8; 16]) }`**.
-  - **`pub struct CidTable { cids: Vec<(Vec<u8>, ConnId)>, tokens: Vec<([u8; 16], ConnId)> }`**: `new()`; `apply(&mut self, c: ConnId, u: &CidUpdate) -> (ok: bool)` (Add fails, unchanged, if the key is present for any connection or the list is at `MAX_TABLE`; Remove succeeds only for the owner); `remove_conn(&mut self, c)` (rebuilds both lists once); `lookup(&self, cid: &[u8]) -> Option<ConnId>`; `reset_owner(&self, tail: &[u8]) -> Option<ConnId>`; `has_room(&self) -> bool` (= `cids.len() + ISSUE_CAP_ACTIVE + 2 <= MAX_TABLE`).
+  - **`pub struct CidTable { cids: Vec<(Vec<u8>, ConnId)>, tokens: Vec<([u8; 16], ConnId)>, conns: Vec<ConnId> }`**: `new()`; `apply(&mut self, c: ConnId, u: &CidUpdate) -> (ok: bool)` (Add fails, unchanged, iff the key is present for any connection, `c` already owns `PER_CONN` CIDs, or `c` is not admitted and `MAX_CONNS` are; a connection's first Add admits it; never for lack of list room, since `wf` bounds `cids.len() <= conns.len() * PER_CONN <= MAX_TABLE` (`add_cid`); Remove succeeds only for the owner); `remove_conn(&mut self, c)` (drops `c` and rebuilds the three lists once); `lookup(&self, cid: &[u8]) -> Option<ConnId>`; `reset_owner(&self, tail: &[u8]) -> Option<ConnId>`; `has_room(&self) -> bool` (= `conns.len() < MAX_CONNS`; 3d final review I1).
   - **`pub enum Route { Existing(ConnId), NewInitial, VersionNegotiation(Vec<u8>), Reset(ConnId), Drop }`**.
   - **`pub open spec fn rfc_route(d: Seq<u8>, t: SpecTable) -> SpecRoute`**, `h = rfc_header(d, LOCAL_CID_LEN)`; the first rule that applies:
     1. `h` is Long/Short with `dcid` mapped to `c` → `Existing(c)`;
@@ -424,12 +424,12 @@ Touched notes replaced: 3b's on §5.2.2 (Task 6). 3b's on §10.3 and §19.20 and
     - **`route_vn`:** 3b's `vn_response` input → `VersionNegotiation(c0 00000000 04 0a0b0c0d 08 0001020304050607 00000001)`; truncated to 1199 → `Drop`.
     - **`route_reset`:** `[0x40] ++ [0x22; 8] ++ [0x33; 5] ++ [0x77; 16]` (30) → `Reset(7)`; tail `[0x78; 16]` → `Drop`; a 1200-byte Handshake long header with an unknown 8-byte DCID → `Drop`.
     - **`table_rules`:** `apply(8, Add([0x11; 8]))` false, lookup still 7; `apply(8, Remove(..))` false; `apply(7, Remove(..))` true, lookup None; `remove_conn(7)` empties both.
-    - **`table_full`:** add 4091 distinct 8-byte CIDs for connection 1 (4090 + 6 = 4096 still has room; preflight M2); `has_room()` false; `A2H` padded to 1200 with an unknown DCID → `Drop`.
+    - **`table_full`** (rewritten by the 3d final review, I1): `MAX_CONNS` connections with `PER_CONN` CIDs each all succeed (510 Adds); `has_room()` false; `A2H` padded to 1200 with an unknown DCID → `Drop`, a known one → `Existing`; a new connection and a 6th entry are refused; a Remove frees one slot of that connection only; `remove_conn` restores room. `admitted_until_removed`: a connection with no CIDs stays admitted.
 - [ ] **Step 2:** the tests fail.
-- [ ] **Step 3: Implement.** Duvet-cite §8.1's two server MUSTs at `amp_ok`/`on_sent` and `on_recv` (the rows close in 3d2 where every send is gated); §14.2 (the SHOULD at `MAX_DATAGRAM`; the cease-sending MUST as exception `reason=No PMTUD: we never determine a PMTU below 1200, and never send more than 1200 bytes.`); §5.2.2 (both MUSTs at rule 5); §5.2.3 and §21.11 (exceptions `reason=We never send a Stateless Reset.` plus `reason=No static key …` for §21.11's static-key MUST); §10.3 "MUST treat any packet ending in a valid stateless reset token as a Stateless Reset" at rule 4 (row closes in 3d2); §14.1's discard MUST at rule 2 (row closes in 3d2).
+- [ ] **Step 3: Implement.** Duvet-cite §8.1's two server MUSTs at `amp_ok`/`on_sent` and `on_recv` (the rows close in 3d2 where every send is gated); §14.2 (the SHOULD at `MAX_DATAGRAM`; the cease-sending MUST is cited at 3d2 Task 3's send gate on `Paths::mtu_failed`, with a pointer comment at `MAX_DATAGRAM`; 3d final review I2 replaced the original exception, whose reason a failed MTU probe made false); §5.2.2 (both MUSTs at rule 5); §5.2.3 and §21.11 (exceptions `reason=We never send a Stateless Reset.` plus `reason=No static key …` for §21.11's static-key MUST); §10.3 "MUST treat any packet ending in a valid stateless reset token as a Stateless Reset" at rule 4 (row closes in 3d2); §14.1's discard MUST at rule 2 (row closes in 3d2).
 - [ ] **Step 4: Mutations:** `amp_ok` over the whole trace only (fails at `on_sent` on a prefix); `budget` computed in `u64` without saturation (fails on overflow check); `pad_datagram` always adds `gap` (fails at `lemma_pad_exact`'s use); `rfc_route` rule order "reset before Existing" and "NewInitial before Existing" with the exec unchanged (each fails on `route`'s ensures; ruling: 3-before-1 is neutral, the rules match disjoint header kinds).
 - [ ] **Step 5:** Four checks, evidence, quote check; MUST coverage for `5.2.2,5.2.3,14.2,21.11`.
-- [ ] **Step 6: Commits:** `feat(quic): verified amplification trace budget, exact datagram length specs, CID routing (RFC 9000 §5.2.2, §8.1, §14)`; matrix: `✅ 3d: crates/quic/src/route.rs` on §5.2.2 (replacing 3b's touched note); `✅ 3d: route.rs (exception: never sends resets, no static key)` on §5.2.3 and §21.11; `✅ 3d: datagram.rs MAX_DATAGRAM (exception: no PMTUD)` on §14.2. Also mark §10.3.3 (3b-owned and excepted in stateless.rs, but its matrix row lacks ✅; outside the 88) as `✅ 3b: exception — we never send a Stateless Reset (stateless.rs)` (preflight M20).
+- [ ] **Step 6: Commits:** `feat(quic): verified amplification trace budget, exact datagram length specs, CID routing (RFC 9000 §5.2.2, §8.1, §14)`; matrix: `✅ 3d: crates/quic/src/route.rs` on §5.2.2 (replacing 3b's touched note); `✅ 3d: route.rs (exception: never sends resets, no static key)` on §5.2.3 and §21.11; §14.2 carries the touched note `3d: path.rs (mtu_failed), datagram.rs MAX_DATAGRAM (closed in 3d2 Task 3)` (3d final review I2). Also mark §10.3.3 (3b-owned and excepted in stateless.rs, but its matrix row lacks ✅; outside the 88) as `✅ 3b: exception — we never send a Stateless Reset (stateless.rs)` (preflight M20).
 
 ---
 
@@ -480,7 +480,7 @@ Touched notes replaced: 3b's on §5.2.2 (Task 6). 3b's on §10.3 and §19.20 and
 - Produces:
   - `pub const MAX_PATHS: usize = 4;` (`// ponytail: datagrams from a 5th distinct path are dropped uncounted (§9 "MUST either drop" branch).`), `pub const MAX_RESPONSES: usize = 4;` (per path; further challenges dropped until responses go out; the peer retransmits, §8.2.1 MAY).
   - **`pub enum PathState { Unvalidated, Validating, Validated }`** (Clone/Copy).
-  - **`pub struct Path`** — `id`, `amp: AmpBudget`, `state`, `challenge: Option<([u8; 8], u64 /*started_at, preflight I5*/, bool /*padded*/)>`, `challenge_owed: bool` (started, not yet sent), `mtu_ok: bool`, `responses: Vec<[u8; 8]>`, `dcid: Option<Vec<u8>>` (the peer CID we send with on this path; None = nothing may be sent there, §9.5; preflight I1), `peer_used: Option<Vec<u8>>` (our CID the peer last used on this path), ghost `challenges_rcvd: Seq<[u8; 8]>`, `responses_taken: Seq<[u8; 8]>`.
+  - **`pub struct Path`** — `id`, `amp: AmpBudget`, `state`, `challenge: Option<([u8; 8], u64 /*started_at, preflight I5*/, bool /*padded*/)>`, `challenge_owed: bool` (started, not yet sent), `mtu_ok: bool`, `mtu_failed: bool` (an MTU probe expired; 3d final review I2), `responses: Vec<[u8; 8]>`, `dcid: Option<Vec<u8>>` (the peer CID we send with on this path; None = nothing may be sent there, §9.5; preflight I1), `peer_used: Option<Vec<u8>>` (our CID the peer last used on this path), ghost `challenges_rcvd: Seq<[u8; 8]>`, `responses_taken: Seq<[u8; 8]>`.
   - **`pub struct Paths { paths: Vec<Path>, active: PathId, last_validated: Option<PathId> }`**; `wf()`: ids unique, `paths.len() <= MAX_PATHS`, `active` present; every `amp.wf()`; `responses_taken` is a sub-multiset of `challenges_rcvd` in order (one response per challenge, same data, §8.2.2); `last_validated is Some(p) ==> state(p) == Validated`; `responses.len() <= MAX_RESPONSES`.
   - `new(first: PathId) -> Paths` (Unvalidated, active); `index(&self, id) -> Option<usize>`; `insert(&mut self, id) -> (ok: bool)` (false when full).
   - `on_recv(&mut self, id, n: u64)`, `budget(&self, id) -> u64`, `on_sent(&mut self, id, n: u64)` (requires `n <= budget(id)`), `pub closed spec fn amp_trace(&self, id) -> Seq<AmpEv>` with `amp_ok` exported.
@@ -491,8 +491,8 @@ Touched notes replaced: 3b's on §5.2.2 (Task 6). 3b's on §10.3 and §19.20 and
   - **`take_challenge(&mut self, id, padded: bool) -> Option<[u8; 8]>`**: if owed, clears `challenge_owed`, records `padded`, returns the data (3d2 builds the datagram and says whether it reached 1200). The challenge's clock is its `start_challenge` time; `deadline`/`on_timeout` use it (preflight I5).
   - **`on_response(&mut self, data: [u8; 8]) -> (r: Option<PathId>)`**: matches *any* path's outstanding challenge (no arrival-path parameter, §8.2.2 "MUST NOT be enforced"); on a match `set_validated`, `challenge = None`, `mtu_ok = padded`, returns the path; else None.
   - **`needs_mtu_probe(&self, id) -> bool`** = `state == Validated && !mtu_ok && challenge is None` (§8.2.1, §8.2.3 second validation at 1200).
-  - **`on_timeout(&mut self, now: u64, pto_us: u64) -> (failed: Option<PathId>)`**: one failure per call. 3d2 Task 3 loops until None (preflight I5). For the first path with `challenge = Some((_, t, _))`, not owed, and `now >= t + 3·pto_us` (§8.2.4 SHOULD): clear the challenge, return it; state back to Unvalidated unless Validated (a failed MTU probe keeps Validated, `mtu_ok` false).
-  - `deadline(&self, pto_us) -> Option<u64>`, `active()`, `set_active(&mut self, id)`, `last_validated()`, `state(id)`, `dcid(id) -> Option<&[u8]>`, `set_dcid(&mut self, id, d: Option<&[u8]>)` (None clears it; preflight I1/I2), `peer_used(id) -> Option<&[u8]>`, `set_peer_used(&mut self, id, d: &[u8])`, `has_response(id) -> bool`, `challenge_owed(id) -> bool`.
+  - **`on_timeout(&mut self, now: u64, pto_us: u64) -> (failed: Option<PathId>)`**: one failure per call. 3d2 Task 3 loops until None (preflight I5). For the first path with `challenge = Some((_, t, _))`, not owed, and `now >= t + 3·pto_us` (§8.2.4 SHOULD): clear the challenge, return it; state back to Unvalidated unless Validated (a failed MTU probe keeps Validated, `mtu_ok` false). **3d final review I2:** a Validated path without `mtu_ok` whose challenge expires is marked `mtu_failed` and leaves `last_validated`/`prev_validated`: `Paths` remembers the last two usable (`Validated && !mtu_failed`) validated paths, and when the failed path was `last_validated`, `prev_validated` takes its place, so 3d2's §9.3.2 fallback is never the failed path. A later validation clears `mtu_failed`.
+  - `deadline(&self, pto_us) -> Option<u64>`, `active()`, `set_active(&mut self, id)`, `last_validated()`, `state(id)`, `dcid(id) -> Option<&[u8]>`, `set_dcid(&mut self, id, d: Option<&[u8]>)` (None clears it; preflight I1/I2), `peer_used(id) -> Option<&[u8]>`, `set_peer_used(&mut self, id, d: &[u8])`, `has_response(id) -> bool`, `challenge_owed(id) -> bool`, `mtu_failed(id) -> bool` (I2), `response_room(id) -> usize` (`MAX_RESPONSES` minus the owed responses; 3d final review M2).
 
 - [ ] **Step 1: Failing tests** (`tests/path.rs`; `D(x) = [x; 8]`):
   - **`respond_echo`:** `new(0)`, `on_challenge(0, D(1))`; `take_response(0) == Some(D(1))`, then `None`.
@@ -508,7 +508,7 @@ Touched notes replaced: 3b's on §5.2.2 (Task 6). 3b's on §10.3 and §19.20 and
 - [ ] **Step 3: Implement.** Duvet-cite §8.2.1 ("MUST use unpredictable data" at `start_challenge`; the expand MUST and "second path validation" MUST at `take_challenge`/`needs_mtu_probe` — the padding itself is 3d2's, so the expand (req) row's citation is repeated at 3d2's builder); §8.2.3 (at `needs_mtu_probe`); §19.17 (at `on_challenge`/`take_response`). §8.2.1's "MUST NOT discard … too small" is 3d2's.
 - [ ] **Step 4: Mutations:** `on_response` also requires the arrival path; `take_response` returns the newest; `needs_mtu_probe` ignores `mtu_ok`; `on_timeout` uses `2·pto_us`.
 - [ ] **Step 5:** Four checks, evidence, quote check; MUST coverage for `8.2.3,19.17`.
-- [ ] **Step 6: Commits:** `feat(quic): verified path table — per-path amplification, challenge/response bookkeeping (RFC 9000 §8.2, §19.17)`; matrix: `✅ 3d: crates/quic/src/path.rs` on §8.2.3 and §19.17; touched notes `3d: path.rs (closed in 3d2 Task 2b)` on §8.2.1 and its three non-small (req) rows.
+- [ ] **Step 6: Commits:** `feat(quic): verified path table — per-path amplification, challenge/response bookkeeping (RFC 9000 §8.2, §19.17)`; matrix: `✅ 3d: crates/quic/src/path.rs` on §19.17; touched notes `3d: path.rs (closed in 3d2 Task 2b)` on §8.2.1 and its three non-small (req) rows, and (3d final review M1) on §8.2.3: `needs_mtu_probe` only reports the obligation, 3d2 Task 2b starts and pads the second validation.
 
 ---
 
@@ -541,8 +541,8 @@ Touched notes replaced: 3b's on §5.2.2 (Task 6). 3b's on §10.3 and §19.20 and
 ## Exit criteria (Phase 3d)
 
 - All four checks pass on the merged tree, with N = the escape count of `main` at merge (preflight M19d).
-- The 43 Task 2–8 rows carry `✅ 3d: <file>`, and §12.3, §13.2.1, §13.3 and the four §8.2.1 rows carry touched notes; 3b's touched note on §5.2.2 is replaced; RFC 9114 §6.2's tail is closed.
-- `python3 -I <scratch>/duvet_q.py <json> 5.1,5.1.1,5.1.2,5.2.2,5.2.3,7,7.2,7.3,7.4.1,8.1.3,8.2.3,10.1,10.2.3,10.3.2,11,13.2.3,13.2.5,13.4.1,13.4.2.1,13.4.2.2,14.2,19.15,19.16,19.17,21.11` prints nothing.
+- The 40 Task 2–8 rows carry `✅ 3d: <file>`, and §12.3, §13.2.1, §13.3, the four §8.2.1 rows, §8.2.3, §14.2 and §5.1.1 (req) "Accept issued CID until retired" carry touched notes; 3b's touched note on §5.2.2 is replaced; RFC 9114 §6.2's tail is closed.
+- `python3 -I <scratch>/duvet_q.py <json> 5.1,5.1.1,5.1.2,5.2.2,5.2.3,7,7.2,7.3,7.4.1,8.1.3,8.2.3,10.1,10.2.3,10.3.2,11,13.2.3,13.2.5,13.4.1,13.4.2.1,13.4.2.2,19.15,19.16,19.17,21.11` prints nothing (§14.2 left the list with the 3d final review: its cease-sending MUST is cited in 3d2 Task 3).
 - `phase-3d` is merged into `main`; 3d2 then runs.
 
 ## Self-review (done while writing)
