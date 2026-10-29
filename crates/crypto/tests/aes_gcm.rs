@@ -53,6 +53,10 @@ fn gcm_spec_vectors() {
     assert_eq!(aes128_gcm_open(&k0, &iv0, &[], &r), Some(vec![]));
     let r = aes128_gcm_seal(&k0, &iv0, &[], &[0u8; 16]);
     assert_eq!(r, h("0388dace60b6a392f328c2b971b2fe78ab6e47d42cec13bdf53a67b21257bddf"));
+    assert_eq!(aes128_gcm_open(&k0, &iv0, &[], &r), Some(vec![0u8; 16]));
+    let mut bad = r.clone();
+    bad[31] ^= 1;
+    assert_eq!(aes128_gcm_open(&k0, &iv0, &[], &bad), None);
     let (k, iv, aad, pt) = (h(K4), h(IV4), h(AAD4), h(PT4));
     let r = aes128_gcm_seal(&k, &iv, &aad, &pt);
     assert_eq!(r, h(&format!("{CT4}{T4}")));

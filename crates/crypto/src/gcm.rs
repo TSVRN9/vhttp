@@ -808,7 +808,7 @@ pub fn aes128_gcm_open(key: &[u8], nonce: &[u8], aad: &[u8], ct: &[u8]) -> (r: O
     assert((diff == 0) == (ct@.subrange(ct.len() - 16, ct.len() as int) == t@));
     // ponytail: the only branch on tag bytes; it reveals only accept/reject, which the caller
     // learns anyway
-    if crate::ct::declassify(diff) != 0 {
+    if crate::ct::declassify(diff != 0) {
         return None;
     }
     // SP 800-38D §7.2 step 4: P = GCTR_K(inc32(J0), C), only after the tag matched.

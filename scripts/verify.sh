@@ -20,6 +20,10 @@ fail() { echo "verify.sh: $gate gate: $*" >&2; exit 1; }
 cd "$root"
 report=$CT_OUT/crypto/report-crypto.txt
 [ -f "$report" ] || fail "no $report"
+# The fe_from_be/sec1_decode_exec ct-declassify rows rely on these fns having no secret param.
+for f in fe_from_be sec1_decode_exec; do
+    grep -q "^checked crypto::p256::$f secret= ret=" "$report" || fail "crypto::p256::$f has a secret-labelled param (its ct-declassify row says none)"
+done
 g=$CT_OUT/gate
 mkdir -p "$g"
 awk '$1 == "declassify" { s = $NF; $1 = ""; $NF = ""; gsub(/^ +| +$/, ""); print $0, s }' "$report" | LC_ALL=C sort > "$g/report"
