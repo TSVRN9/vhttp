@@ -716,7 +716,7 @@ pub(crate) open spec fn sg_cell(f: spec_fn(Seq<int>, Seq<int>) -> int, i: int, j
 // Arithmetic helpers
 // ---------------------------------------------------------------------------------------------
 
-proof fn lemma_md(x: int)
+pub(crate) proof fn lemma_md(x: int)
     ensures
         fmod(x % P_LIT()) == fmod(x),
         fmod(x) == x % P_LIT(),
@@ -725,7 +725,7 @@ proof fn lemma_md(x: int)
     lemma_mod_twice(x, P_LIT());
 }
 
-proof fn lemma_cg_add(a: int, b: int, c: int, d: int)
+pub(crate) proof fn lemma_cg_add(a: int, b: int, c: int, d: int)
     requires
         fmod(a) == fmod(c),
         fmod(b) == fmod(d),
@@ -737,7 +737,7 @@ proof fn lemma_cg_add(a: int, b: int, c: int, d: int)
     lemma_add_mod_noop(c, d, p256_p());
 }
 
-proof fn lemma_cg_mul(a: int, b: int, c: int, d: int)
+pub(crate) proof fn lemma_cg_mul(a: int, b: int, c: int, d: int)
     requires
         fmod(a) == fmod(c),
         fmod(b) == fmod(d),
