@@ -1168,8 +1168,163 @@ verus! {{
     return "".join(o)
 
 
+
+# ---------------------------------------------------------------------------------------------
+# chain: nG = O by double-and-add over n's bits, with per-operation inverse witnesses
+# ---------------------------------------------------------------------------------------------
+
+CHAIN_CHUNK = 8
+
+
+def g_lit():
+    src = (ROOT / OUT / "field.rs").read_text()
+    return tuple(int(re.search(rf"fn {c}_LIT\(\) -> int {{\s*(\d+)int", src).group(1)) for c in ("GX", "GY"))
+
+
+def padd_w(a, b):
+    """order.rs `padd_fast` with its witness: (result, w); w = 0 when no inverse is taken."""
+    if a is None or b is None or (a[0] == b[0] and (a[1] + b[1]) % P == 0):
+        return point_add(a, b), 0
+    (x1, y1), (x2, y2) = a, b
+    den = 2 * y1 if x1 == x2 else x2 - x1
+    w = pow(den, P - 2, P)
+    assert den * w % P == 1
+    num = 3 * x1 * x1 - 3 if x1 == x2 else y2 - y1
+    lam = num * w % P
+    x3 = (lam * lam - x1 - x2) % P
+    r = (x3, (lam * (x1 - x3) - y1) % P)
+    assert r == point_add(a, b)
+    return r, w
+
+
+def chain_data():
+    """Chunks (E_k, PT_k, BITS_k, WS_k) and the final (E_32, PT_32)."""
+    G = g_lit()
+    bits = [c == "1" for c in bin(N)[3:]]  # the top bit seeds E_0 = 1
+    first = len(bits) % CHAIN_CHUNK or CHAIN_CHUNK
+    cuts = [0] + list(range(first, len(bits) + 1, CHAIN_CHUNK))
+    e, acc, out = 1, G, []
+    for lo, hi in zip(cuts, cuts[1:]):
+        e0, a0, ws = e, acc, []
+        for b in bits[lo:hi]:
+            acc, w = padd_w(acc, acc)
+            ws.append(w)
+            if b:
+                acc, w = padd_w(G, acc)
+            else:
+                w = 0
+            ws.append(w)
+            e = 2 * e + b
+        out.append((e0, a0, bits[lo:hi], ws))
+    assert e == N and len(out) == 32 and len(out[0][2]) == 7
+    print(f"chain ends at O: {acc is None}")
+    assert acc is None
+    return out, (e, acc)
+
+
+def gen_chain():
+    ch, (e_end, _) = chain_data()
+    n = len(ch)
+    pt = lambda a: "SpecPoint::Infinity" if a is None else f"SpecPoint::Affine({a[0]}int, {a[1]}int)"
+    o = [HEADER, f"""//! The nG = O chain: checkpoints PT_k = E_k G with PT_0 = G and PT_{n} = O. Each chunk lemma
+//! checks `chain(PT_k, BITS_k, WS_k) == Some(PT_(k+1))` by `compute_only`, `lemma_n_bits` checks
+//! E_(k+1) == bext(E_k, BITS_k) and E_{n} == n, and `lemma_chain` (order.rs) joins them.
+#![allow(non_snake_case)]
+#[allow(unused_imports)]
+use super::field::*;
+#[allow(unused_imports)]
+use super::order::*;
+#[allow(unused_imports)]
+use crate::p256::*;
+use vstd::prelude::*;
+
+verus! {{
+
+"""]
+    for k, (e, a, bits, ws) in enumerate(ch):
+        a_s = "G_LIT()" if k == 0 else pt(a)
+        bs = ", ".join("true" if b else "false" for b in bits)
+        wss = ",\n        ".join(f"{w}int" for w in ws)
+        o.append(f"""spec fn E_{k}() -> nat {{
+    {e}nat
+}}
+
+spec fn PT_{k}() -> SpecPoint {{
+    {a_s}
+}}
+
+spec fn BITS_{k}() -> Seq<bool> {{
+    seq![{bs}]
+}}
+
+spec fn WS_{k}() -> Seq<int> {{
+    seq![
+        {wss},
+    ]
+}}
+
+""")
+    o.append(f"""spec fn E_{n}() -> nat {{
+    N_LIT() as nat
+}}
+
+spec fn PT_{n}() -> SpecPoint {{
+    SpecPoint::Infinity
+}}
+
+""")
+    for k in range(n):
+        st = f"chain(PT_{k}(), BITS_{k}(), WS_{k}()) == Some(PT_{k + 1}())"
+        o.append(f"""proof fn lemma_chain_{k}()
+    ensures
+        {st},
+{{
+    assert({st}) by (compute_only);
+}}
+
+""")
+    st = " && ".join(f"bext(E_{k}(), BITS_{k}()) == E_{k + 1}()" for k in range(n))
+    o.append(f"""proof fn lemma_n_bits()
+    ensures
+        {st},
+{{
+    assert({st}) by (compute_only);
+}}
+
+""")
+    for k in range(n):
+        o.append(f"""proof fn lemma_step_{k}()
+    requires
+        scalar_mult(E_{k}(), p256_g()) == PT_{k}(),
+    ensures
+        scalar_mult(E_{k + 1}(), p256_g()) == PT_{k + 1}(),
+{{
+    lemma_chain_{k}();
+    lemma_n_bits();
+    lemma_chain(E_{k}(), BITS_{k}(), WS_{k}());
+}}
+
+""")
+    steps = "".join(f"    lemma_step_{k}();\n" for k in range(n))
+    o.append(f"""/// nG = O.
+pub(crate) proof fn lemma_chain_all()
+    ensures
+        scalar_mult(N_LIT() as nat, p256_g()) == SpecPoint::Infinity,
+{{
+    lemma_group_consts();
+    // 1 G = G + O = G
+    assert(scalar_mult(0, p256_g()) == SpecPoint::Infinity);
+    assert(scalar_mult(1, p256_g()) == point_add(p256_g(), scalar_mult(0, p256_g())));
+{steps}}}
+
+}} // verus!
+""")
+    return "".join(o)
+
+
 GENERATORS = {"pratt.rs": gen_pratt, "torsion_cert.rs": gen_torsion, "grid_small.rs": gen_grid_small}
 GENERATORS.update({f"grid_assoc_{k}.rs": (lambda k=k: gen_grid_assoc(k)) for k in ASSOC_I})
+GENERATORS["chain.rs"] = gen_chain
 
 
 def main():
