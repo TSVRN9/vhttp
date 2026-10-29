@@ -1,7 +1,7 @@
-//! Lockstep non-interference (Phase 8a Task 4): two runs of a well-typed program from agreeing
-//! frames either emit equal traces and step counts and end in agreeing frames, or their traces
-//! first differ at a `Declass` event. This task covers statements, intrinsics and intra-function
-//! control flow, under the temporary premise `no_fn_calls` (Task 5 adds calls).
+//! Lockstep non-interference: two runs of a well-typed program from agreeing frames either emit
+//! equal traces and step counts and end in agreeing frames, or their traces first differ at a
+//! `Declass` event. Statements, intrinsics, intra-function control flow and fn calls, by
+//! induction on fuel (recursive programs included); `theorem_ct` is the entry-point statement.
 #[allow(unused_imports)]
 use crate::ct::*;
 #[allow(unused_imports)]
@@ -14,18 +14,7 @@ use vstd::prelude::*;
 
 verus! {
 
-// ------------------------------------------------------------------ statement forms
-
-/// The trigger predicate for `no_fn_calls`.
-pub open spec fn nfc_block(blk: Block) -> bool {
-    !(blk.term matches Term::Call(Callee::Fn(_), _, _, _))
-}
-
-/// Temporary premise of this task: no block calls a fn (Task 5 deletes it).
-pub open spec fn no_fn_calls(p: Program) -> bool {
-    forall|f: nat, b: int| f < p.fns@.len() && 0 <= b < p.fns@[f as int].blocks@.len()
-        ==> #[trigger] nfc_block(p.fns@[f as int].blocks@[b])
-}
+// ------------------------------------------------------------------ NI statement
 
 pub open spec fn ni_ok(p: Program, ls: Seq<FnLab>, f: nat, r1: Res, r2: Res) -> bool {
     let (fin1, t1, n1) = r1.unwrap();
@@ -531,7 +520,7 @@ pub proof fn lemma_switch_target(ts: Seq<(u128, usize)>, k: nat, v: u128, o: usi
 }
 
 pub proof fn ni_goto(p: Program, ls: Seq<FnLab>, f: nat, b: nat, fr1: Frame, fr2: Frame, fuel: nat)
-    requires ni_pre(p, ls, f, b, fr1, fr2, fuel), no_fn_calls(p), p.fns@[f as int].blocks@[b as int].term is Goto,
+    requires ni_pre(p, ls, f, b, fr1, fr2, fuel), p.fns@[f as int].blocks@[b as int].term is Goto,
     ensures ni_ok(p, ls, f, run_from(p, f, b, fr1, fuel), run_from(p, f, b, fr2, fuel)),
     decreases fuel, 0nat,
 {
@@ -545,13 +534,13 @@ pub proof fn ni_goto(p: Program, ls: Seq<FnLab>, f: nat, b: nat, fr1: Frame, fr2
         let (r1, r2) = (run_from(p, f, b2 as nat, g1, fu), run_from(p, f, b2 as nat, g2, fu));
         assert(run_from(p, f, b, fr1, fuel) == match r1 { Some((h, t, n)) => Some((h, t1 + t, n1 + n)), None => None });
         assert(run_from(p, f, b, fr2, fuel) == match r2 { Some((h, t, n)) => Some((h, t2 + t, n1 + n)), None => None });
-        ni_local(p, ls, f, b2 as nat, g1, g2, fu);
+        ni(p, ls, f, b2 as nat, g1, g2, fu);
         if diverge(r1.unwrap().1, r2.unwrap().1) { dv_prefix(t1, r1.unwrap().1, r2.unwrap().1); }
     }
 }
 
 pub proof fn ni_switch(p: Program, ls: Seq<FnLab>, f: nat, b: nat, fr1: Frame, fr2: Frame, fuel: nat)
-    requires ni_pre(p, ls, f, b, fr1, fr2, fuel), no_fn_calls(p), p.fns@[f as int].blocks@[b as int].term is Switch,
+    requires ni_pre(p, ls, f, b, fr1, fr2, fuel), p.fns@[f as int].blocks@[b as int].term is Switch,
     ensures ni_ok(p, ls, f, run_from(p, f, b, fr1, fuel), run_from(p, f, b, fr2, fuel)),
     decreases fuel, 0nat,
 {
@@ -572,13 +561,13 @@ pub proof fn ni_switch(p: Program, ls: Seq<FnLab>, f: nat, b: nat, fr1: Frame, f
         let (r1, r2) = (run_from(p, f, tg as nat, g1, fu), run_from(p, f, tg as nat, g2, fu));
         assert(run_from(p, f, b, fr1, fuel) == match r1 { Some((h, t, n)) => Some((h, pre + t, n1 + n)), None => None });
         assert(run_from(p, f, b, fr2, fuel) == match r2 { Some((h, t, n)) => Some((h, pre + t, n1 + n)), None => None });
-        ni_local(p, ls, f, tg as nat, g1, g2, fu);
+        ni(p, ls, f, tg as nat, g1, g2, fu);
         if diverge(r1.unwrap().1, r2.unwrap().1) { dv_prefix(pre, r1.unwrap().1, r2.unwrap().1); }
     }
 }
 
 pub proof fn ni_assert(p: Program, ls: Seq<FnLab>, f: nat, b: nat, fr1: Frame, fr2: Frame, fuel: nat)
-    requires ni_pre(p, ls, f, b, fr1, fr2, fuel), no_fn_calls(p), p.fns@[f as int].blocks@[b as int].term is Assert,
+    requires ni_pre(p, ls, f, b, fr1, fr2, fuel), p.fns@[f as int].blocks@[b as int].term is Assert,
     ensures ni_ok(p, ls, f, run_from(p, f, b, fr1, fuel), run_from(p, f, b, fr2, fuel)),
     decreases fuel, 0nat,
 {
@@ -597,13 +586,13 @@ pub proof fn ni_assert(p: Program, ls: Seq<FnLab>, f: nat, b: nat, fr1: Frame, f
         let (r1, r2) = (run_from(p, f, b2 as nat, g1, fu), run_from(p, f, b2 as nat, g2, fu));
         assert(run_from(p, f, b, fr1, fuel) == match r1 { Some((h, t, n)) => Some((h, pre + t, n1 + n)), None => None });
         assert(run_from(p, f, b, fr2, fuel) == match r2 { Some((h, t, n)) => Some((h, pre + t, n1 + n)), None => None });
-        ni_local(p, ls, f, b2 as nat, g1, g2, fu);
+        ni(p, ls, f, b2 as nat, g1, g2, fu);
         if diverge(r1.unwrap().1, r2.unwrap().1) { dv_prefix(pre, r1.unwrap().1, r2.unwrap().1); }
     }
 }
 
 pub proof fn ni_call_intr(p: Program, ls: Seq<FnLab>, f: nat, b: nat, fr1: Frame, fr2: Frame, fuel: nat)
-    requires ni_pre(p, ls, f, b, fr1, fr2, fuel), no_fn_calls(p), p.fns@[f as int].blocks@[b as int].term matches Term::Call(Callee::Intr(_), _, _, _),
+    requires ni_pre(p, ls, f, b, fr1, fr2, fuel), p.fns@[f as int].blocks@[b as int].term matches Term::Call(Callee::Intr(_), _, _, _),
     ensures ni_ok(p, ls, f, run_from(p, f, b, fr1, fuel), run_from(p, f, b, fr2, fuel)),
     decreases fuel, 0nat,
 {
@@ -621,7 +610,7 @@ pub proof fn ni_call_intr(p: Program, ls: Seq<FnLab>, f: nat, b: nat, fr1: Frame
         assert(run_from(p, f, b, fr2, fuel) == match r2 { Some((h, t, n)) => Some((h, (t2 + e2) + t, n1 + x2 + n)), None => None });
         let (u1, u2) = (r1.unwrap().1, r2.unwrap().1);
         if e1 == e2 && agree(p, ls, f, h1, h2) && plc(p, ls, f, h1) && plc(p, ls, f, h2) {
-            ni_local(p, ls, f, next as nat, h1, h2, fu);
+            ni(p, ls, f, next as nat, h1, h2, fu);
             if diverge(u1, u2) { dv_prefix(t1 + e1, u1, u2); }
         } else {
             dv_prefix(t1, e1, e2);
@@ -631,7 +620,7 @@ pub proof fn ni_call_intr(p: Program, ls: Seq<FnLab>, f: nat, b: nat, fr1: Frame
 }
 
 pub proof fn ni_return(p: Program, ls: Seq<FnLab>, f: nat, b: nat, fr1: Frame, fr2: Frame, fuel: nat)
-    requires ni_pre(p, ls, f, b, fr1, fr2, fuel), no_fn_calls(p), p.fns@[f as int].blocks@[b as int].term is Return,
+    requires ni_pre(p, ls, f, b, fr1, fr2, fuel), p.fns@[f as int].blocks@[b as int].term is Return,
     ensures ni_ok(p, ls, f, run_from(p, f, b, fr1, fuel), run_from(p, f, b, fr2, fuel)),
     decreases fuel, 0nat,
 {
@@ -639,23 +628,223 @@ pub proof fn ni_return(p: Program, ls: Seq<FnLab>, f: nat, b: nat, fr1: Frame, f
     lemma_block(p, ls, f, b, fr1, fr2);
 }
 
-/// Lockstep NI of two runs from block `b` of fn `f` (no fn calls).
-pub proof fn ni_local(p: Program, ls: Seq<FnLab>, f: nat, b: nat, fr1: Frame, fr2: Frame, fuel: nat)
-    requires ni_pre(p, ls, f, b, fr1, fr2, fuel), no_fn_calls(p),
+// ------------------------------------------------------------------ calls
+
+/// `agree` implies `out_agree`.
+pub proof fn lemma_agree_out(p: Program, ls: Seq<FnLab>, f: nat, fr1: Frame, fr2: Frame)
+    requires agree(p, ls, f, fr1, fr2),
+    ensures out_agree(p, ls, f, fr1, fr2),
+{
+}
+
+/// Under the call-site rule of `ok_term` (each arg against its param), the two callee frames
+/// agree and satisfy `plc` under `ls[g]`, and the write-back locs and arg events are equal.
+pub proof fn lemma_call_enter_agree(p: Program, ls: Seq<FnLab>, f: nat, g: nat, args: Seq<Operand>, fr1: Frame, fr2: Frame)
+    requires
+        ok_prog(p, ls), g < p.fns@.len(), args.len() == p.fns@[g as int].nargs,
+        agree(p, ls, f, fr1, fr2), plc(p, ls, f, fr1), plc(p, ls, f, fr2),
+        forall|j: int| 0 <= j < args.len() ==> ok_arg(p.fns@[f as int], ls[f as int], p.fns@[g as int], ls[g as int], j, #[trigger] args[j]),
+    ensures ({
+        let (c1, wb1, e1) = call_enter(p, g, fr1, args);
+        let (c2, wb2, e2) = call_enter(p, g, fr2, args);
+        agree(p, ls, g, c1, c2) && plc(p, ls, g, c1) && plc(p, ls, g, c2) && wb1 == wb2 && e1 == e2
+    }),
+{
+    assert(wf_body(p, g));
+    lemma_call_enter_frames(p, ls, f, g, args, fr1, fr2);
+}
+
+/// Writing back slots related at the label of each write-back loc's root keeps `agree`.
+pub proof fn lemma_write_back_agree(p: Program, ls: Seq<FnLab>, f: nat, fr1: Frame, fr2: Frame, sl1: Seq<Val>, sl2: Seq<Val>, wb: Seq<Option<Loc>>)
+    requires
+        agree(p, ls, f, fr1, fr2),
+        forall|j: int| 0 <= j < wb.len() && (#[trigger] wb[j]) is Some ==>
+            val_rel(root_lab(ls[f as int], wb[j]->Some_0.root), nth(sl1, j as nat), nth(sl2, j as nat)),
+    ensures agree(p, ls, f, write_back(fr1, sl1, wb), write_back(fr2, sl2, wb)),
+    decreases wb.len(),
+{
+    if wb.len() > 0 {
+        let d = wb.drop_last();
+        assert forall|j: int| 0 <= j < d.len() && (#[trigger] d[j]) is Some implies
+            val_rel(root_lab(ls[f as int], d[j]->Some_0.root), nth(sl1, j as nat), nth(sl2, j as nat)) by {
+            assert(d[j] == wb[j]);
+        }
+        lemma_write_back_agree(p, ls, f, fr1, fr2, sl1, sl2, d);
+        let k = wb.len() - 1;
+        if let Some(m) = wb.last() {
+            assert(wb[k] is Some);
+            lemma_write_loc_agree(p, ls, f, write_back(fr1, sl1, d), write_back(fr2, sl2, d), m, nth(sl1, k as nat), nth(sl2, k as nat));
+        }
+    }
+}
+
+/// Callee `out_agree` and caller `agree` before give caller `agree`/`plc` after the write-back
+/// and the dst assignment, under the call-site rules of `ok_term`.
+pub proof fn lemma_call_leave_agree(p: Program, ls: Seq<FnLab>, f: nat, gi: usize, args: Vec<Operand>, dst: Place, next: usize,
+    fr1: Frame, fr2: Frame, cf1: Frame, cf2: Frame)
+    requires
+        ok_prog(p, ls), f < p.fns@.len(),
+        wf_term(p, f, Term::Call(Callee::Fn(gi), args, dst, next)),
+        ok_term(p, ls, f, Term::Call(Callee::Fn(gi), args, dst, next)),
+        agree(p, ls, f, fr1, fr2), plc(p, ls, f, fr1), plc(p, ls, f, fr2),
+        out_agree(p, ls, gi as nat, cf1, cf2), plc(p, ls, gi as nat, cf1), plc(p, ls, gi as nat, cf2),
+    ensures ({
+        let wb = call_enter(p, gi as nat, fr1, args@).1;
+        let (h1, d1) = call_leave(fr1, cf1, wb, dst);
+        let (h2, d2) = call_leave(fr2, cf2, wb, dst);
+        d1 == d2 && agree(p, ls, f, h1, h2) && plc(p, ls, f, h1) && plc(p, ls, f, h2)
+    }),
+{
+    let g = gi as nat;
+    let (b, l, gb, gl) = (p.fns@[f as int], ls[f as int], p.fns@[g as int], ls[g as int]);
+    let a = args@;
+    let wb = call_enter(p, g, fr1, a).1;
+    assert(wf_body(p, g));
+    // rule: Call(Fn(g)) | == for Mut-typed params: a write-back loc's root label is its slot's label
+    assert forall|j: int| 0 <= j < wb.len() && (#[trigger] wb[j]) is Some implies
+        val_rel(root_lab(l, wb[j]->Some_0.root), nth(cf1.slots, j as nat), nth(cf2.slots, j as nat)) by {
+        assert(ok_arg(b, l, gb, gl, j, a[j]));
+        lemma_arg_facts(p, ls, f, g, a, fr1, fr2, j);
+        assert(val_rel(slot_lab(gl, j as nat), cf1.slots[j], cf2.slots[j]));
+    }
+    lemma_write_back_agree(p, ls, f, fr1, fr2, cf1.slots, cf2.slots, wb);
+    lemma_plc_write_back(p, ls, f, fr1, cf1.slots, wb);
+    lemma_plc_write_back(p, ls, f, fr2, cf2.slots, wb);
+    let (w1, w2) = (write_back(fr1, cf1.slots, wb), write_back(fr2, cf2.slots, wb));
+    let (r1, r2) = (nth(cf1.locals, 0), nth(cf2.locals, 0));
+    // rule: Call(Fn(g)) | g's return label ⊑ wr(dst)
+    lemma_rel_shape(lab(gl, 0), r1, r2);
+    lemma_assign_agree(p, ls, f, w1, w2, dst, r1, r2);
+    lemma_plc_call_leave(p, ls, f, g, fr1, cf1, wb, dst);
+    lemma_plc_call_leave(p, ls, f, g, fr2, cf2, wb, dst);
+}
+
+pub proof fn ni_call_fn(p: Program, ls: Seq<FnLab>, f: nat, b: nat, fr1: Frame, fr2: Frame, fuel: nat)
+    requires ni_pre(p, ls, f, b, fr1, fr2, fuel), p.fns@[f as int].blocks@[b as int].term matches Term::Call(Callee::Fn(_), _, _, _),
+    ensures ni_ok(p, ls, f, run_from(p, f, b, fr1, fuel), run_from(p, f, b, fr2, fuel)),
+    decreases fuel, 0nat,
+{
+    let blk = p.fns@[f as int].blocks@[b as int];
+    lemma_block(p, ls, f, b, fr1, fr2);
+    let (g1, t1) = exec_stmts(blk.stmts@, 0, fr1);
+    let (g2, t2) = exec_stmts(blk.stmts@, 0, fr2);
+    let n1 = blk.stmts@.len() + 1;
+    let fu = (fuel - 1) as nat;
+    if let Term::Call(Callee::Fn(gi), args, dst, next) = blk.term {
+        let g = gi as nat;
+        lemma_call_enter_agree(p, ls, f, g, args@, g1, g2);
+        let (c1, wb, ae) = call_enter(p, g, g1, args@);
+        let c2 = call_enter(p, g, g2, args@).0;
+        let (q1, q2) = (run_from(p, g, 0, c1, fu), run_from(p, g, 0, c2, fu));
+        assert(run_from(p, f, b, fr1, fuel) == match q1 {
+            Some((cf, ct, cn)) => match run_from(p, f, next as nat, call_leave(g1, cf, wb, dst).0, fu) {
+                Some((h, t, n)) => Some((h, t1 + ae + ct + call_leave(g1, cf, wb, dst).1 + t, n1 + cn + n)),
+                None => None,
+            },
+            None => None,
+        });
+        assert(run_from(p, f, b, fr2, fuel) == match q2 {
+            Some((cf, ct, cn)) => match run_from(p, f, next as nat, call_leave(g2, cf, wb, dst).0, fu) {
+                Some((h, t, n)) => Some((h, t1 + ae + ct + call_leave(g2, cf, wb, dst).1 + t, n1 + cn + n)),
+                None => None,
+            },
+            None => None,
+        });
+        assert(wf_body(p, g));
+        ni(p, ls, g, 0, c1, c2, fu);
+        let ((cf1, ct1, cn1), (cf2, ct2, cn2)) = (q1.unwrap(), q2.unwrap());
+        let (h1, de1) = call_leave(g1, cf1, wb, dst);
+        let (h2, de2) = call_leave(g2, cf2, wb, dst);
+        let (u1, u2) = (run_from(p, f, next as nat, h1, fu).unwrap().1, run_from(p, f, next as nat, h2, fu).unwrap().1);
+        if !diverge(ct1, ct2) {
+            lemma_agree_out(p, ls, g, cf1, cf2);
+            lemma_call_leave_agree(p, ls, f, gi, args, dst, next, g1, g2, cf1, cf2);
+            ni(p, ls, f, next as nat, h1, h2, fu);
+            if diverge(u1, u2) { dv_prefix(t1 + ae + ct1 + de1, u1, u2); }
+        } else {
+            dv_prefix(t1 + ae, ct1, ct2);
+            dv_append(t1 + ae + ct1, t1 + ae + ct2, de1, de2);
+            dv_append(t1 + ae + ct1 + de1, t1 + ae + ct2 + de2, u1, u2);
+        }
+    }
+}
+
+/// Lockstep NI of two runs from block `b` of fn `f`.
+pub proof fn ni(p: Program, ls: Seq<FnLab>, f: nat, b: nat, fr1: Frame, fr2: Frame, fuel: nat)
+    requires ni_pre(p, ls, f, b, fr1, fr2, fuel),
     ensures ni_ok(p, ls, f, run_from(p, f, b, fr1, fuel), run_from(p, f, b, fr2, fuel)),
     decreases fuel, 1nat,
 {
-    let blk = p.fns@[f as int].blocks@[b as int];
-    assert(nfc_block(blk));
-    match blk.term {
+    match p.fns@[f as int].blocks@[b as int].term {
         Term::Goto(_) => ni_goto(p, ls, f, b, fr1, fr2, fuel),
         Term::Switch(_, _, _) => ni_switch(p, ls, f, b, fr1, fr2, fuel),
         Term::Assert(_, _, _) => ni_assert(p, ls, f, b, fr1, fr2, fuel),
+        Term::Call(Callee::Fn(_), _, _, _) => ni_call_fn(p, ls, f, b, fr1, fr2, fuel),
         Term::Call(Callee::Intr(_), _, _, _) => ni_call_intr(p, ls, f, b, fr1, fr2, fuel),
         Term::Return => ni_return(p, ls, f, b, fr1, fr2, fuel),
-        // Abort: the runs are None; Call(Fn): excluded by no_fn_calls
-        _ => {},
+        // the runs are None, contradicting ni_pre
+        Term::Abort => {},
     }
+}
+
+// ------------------------------------------------------------------ the theorem
+
+pub proof fn theorem_ct(p: Program, ls: Seq<FnLab>, f: nat, a1: Seq<Val>, a2: Seq<Val>,
+                        s1: Seq<Val>, s2: Seq<Val>, fuel: nat)
+    requires
+        ok_prog(p, ls), f < p.fns@.len(),
+        args_agree(p, ls, f, a1, a2, s1, s2),          // public params equal; secret params shape_eq
+        run_fn(p, f, init_entry(p, f, a1, s1), fuel) is Some,
+        run_fn(p, f, init_entry(p, f, a2, s2), fuel) is Some,
+    ensures ({
+        let (fr1, t1, n1) = run_fn(p, f, init_entry(p, f, a1, s1), fuel).unwrap();
+        let (fr2, t2, n2) = run_fn(p, f, init_entry(p, f, a2, s2), fuel).unwrap();
+        (t1 == t2 && n1 == n2 && out_agree(p, ls, f, fr1, fr2)) || diverge(t1, t2)
+    }),
+{
+    let (e1, e2) = (init_entry(p, f, a1, s1), init_entry(p, f, a2, s2));
+    lemma_entry_agree(p, ls, f, a1, a2, s1, s2);
+    assert(wf_body(p, f));
+    ni(p, ls, f, 0, e1, e2, fuel);
+    let (fr1, t1, n1) = run_fn(p, f, e1, fuel).unwrap();
+    let (fr2, t2, n2) = run_fn(p, f, e2, fuel).unwrap();
+    if !diverge(t1, t2) { lemma_agree_out(p, ls, f, fr1, fr2); }
+}
+
+/// The theorem's premises are satisfiable with differing secret inputs: a one-fn program
+/// `fn(x: u8) { return }` whose param is secret, with args `[0]` and `[1]`.
+pub proof fn sanity_args_agree_witness(p: Program, ls: Seq<FnLab>)
+    requires
+        p.fns@.len() == 1,
+        p.fns@[0].nargs == 1,
+        p.fns@[0].locals@ =~= seq![Ty::Int(IntTy::U8), Ty::Int(IntTy::U8)],
+        p.fns@[0].blocks@.len() == 1,
+        p.fns@[0].blocks@[0].stmts@.len() == 0,
+        p.fns@[0].blocks@[0].term == Term::Return,
+        ls.len() == 1,
+        ls[0].locals@ =~= seq![false, true],
+    ensures ({
+        let (a1, a2, s) = (seq![Val::Int(0)], seq![Val::Int(1)], seq![Val::Unit]);
+        &&& ok_prog(p, ls) && lab(ls[0], 1) && a1 != a2
+        &&& args_agree(p, ls, 0, a1, a2, s, s)
+        &&& run_fn(p, 0, init_entry(p, 0, a1, s), 1) is Some
+        &&& run_fn(p, 0, init_entry(p, 0, a2, s), 1) is Some
+    }),
+{
+    let (a1, a2, s) = (seq![Val::Int(0)], seq![Val::Int(1)], seq![Val::Unit]);
+    let bd = p.fns@[0];
+    let blk = bd.blocks@[0];
+    assert(!ty_has_mut(bd.locals@[0]) && wf_local_ty(bd.locals@[1]));
+    assert(wf_block(p, 0, blk));
+    assert(wf_body(p, 0));
+    assert(ok_block(p, ls, 0, blk));
+    assert(ok_body(p, ls, 0));
+    assert(ok_prog(p, ls));
+    assert(a1[0] != a2[0]);
+    assert(args_agree(p, ls, 0, a1, a2, s, s));
+    let (e1, e2) = (init_entry(p, 0, a1, s), init_entry(p, 0, a2, s));
+    assert(exec_stmts(blk.stmts@, 0, e1) == (e1, Seq::<Event>::empty()));
+    assert(exec_stmts(blk.stmts@, 0, e2) == (e2, Seq::<Event>::empty()));
 }
 
 } // verus!
