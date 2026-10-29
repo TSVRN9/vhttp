@@ -2,6 +2,7 @@
 //! with leakage events and step counts; the CT typing and its value/place lemmas.
 pub mod ct;
 pub mod ct_lemmas;
+pub mod ni;
 pub mod sem;
 pub mod sem_sanity;
 pub mod syntax;
