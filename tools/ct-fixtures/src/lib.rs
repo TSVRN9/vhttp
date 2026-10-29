@@ -390,4 +390,113 @@ pub mod fx {
             Discr::B => 2,
         }
     }
+
+    // ------------------------------------------------------------------ 8b translator coverage
+
+    #[cfg_attr(ct_check, ct::public(x))]
+    pub fn pos_str_unit(x: u8) -> Option<&'static str> {
+        // `&'static str` is an opaque `Unit`
+        if x == 0 {
+            Some("e")
+        } else {
+            None
+        }
+    }
+
+    #[cfg_attr(ct_check, ct::public)]
+    pub fn neg_str_len(s: &str) -> usize {
+        // Unresolved: `str::len` has no intr line, so no read of a `str` translates
+        s.len()
+    }
+
+    #[cfg_attr(ct_check, ct::public(v, i))]
+    pub fn pos_vec_elem_pair(v: &Vec<(u64, u64)>, i: usize) -> u64 {
+        // VecLen and VecIndex at element (u64, u64)
+        if i < v.len() {
+            v[i].0
+        } else {
+            0
+        }
+    }
+
+    pub struct TwoVecs {
+        pub a: Vec<u8>,
+        pub b: Vec<u8>,
+    }
+
+    #[cfg_attr(ct_check, ct::public(o, t))]
+    pub fn pos_drop_bounded(o: Option<Vec<u8>>, t: TwoVecs) -> u8 {
+        // drop glue that frees at most three Vec<u8> buffers
+        let _ = (&o, &t);
+        1
+    }
+
+    pub struct WithDrop {
+        pub v: Vec<u8>,
+    }
+
+    impl Drop for WithDrop {
+        fn drop(&mut self) {}
+    }
+
+    #[cfg_attr(ct_check, ct::public(w))]
+    pub fn neg_drop_user_impl(w: WithDrop) -> u8 {
+        // Unsupported: the drop glue runs `<WithDrop as Drop>::drop`
+        let _ = &w;
+        1
+    }
+
+    #[cfg_attr(ct_check, ct::public(x))]
+    pub fn pos_const_direct_tag(x: u8) -> Option<u64> {
+        // allocated constants of a Direct-tag enum
+        if x == 0 {
+            Some(5)
+        } else {
+            None
+        }
+    }
+
+    pub enum Code {
+        Conn(u64),
+        Stream(u64),
+    }
+
+    #[cfg_attr(ct_check, ct::public(x))]
+    pub fn pos_const_niche(x: u8) -> Option<Code> {
+        // allocated constants of an enum niche-encoded in `Code`'s tag
+        if x == 0 {
+            Some(Code::Stream(7))
+        } else {
+            None
+        }
+    }
+
+    pub struct Zst;
+
+    impl Zst {
+        pub fn get(&self, x: u8) -> u8 {
+            x ^ 1
+        }
+    }
+
+    #[cfg_attr(ct_check, ct::public(x))]
+    pub fn pos_const_ref_zst(x: u8) -> u8 {
+        // a constant `&Zst` method receiver
+        Zst.get(x)
+    }
+
+    pub struct Pair {
+        pub a: u8,
+        pub b: u64,
+    }
+
+    pub fn helper_pair(p: &Pair) -> u64 {
+        p.b ^ p.a as u64
+    }
+
+    #[cfg_attr(ct_check, ct::public)]
+    pub fn neg_const_ref_non_zst() -> u64 {
+        // Unsupported: a constant `&Pair` (a pointer to non-zero-sized data)
+        helper_pair(&Pair { a: 1, b: 2 })
+    }
 }

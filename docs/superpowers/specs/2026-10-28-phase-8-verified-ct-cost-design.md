@@ -667,7 +667,7 @@ pub proof fn theorem_cost(p: Program, certs: Seq<Cert>, sums: Seq<Option<Poly>>,
   - (iv) drop glue that frees a bounded number of `Vec<int>` buffers, as `Goto`.
 
   (v) `copy_from_slice` stays unmapped (a new intrinsic would be a SPEC-CHANGE to 8a), so `parse_path` and its callers are `None`.
-- **Re-baseline (8b Task 1b, before Task 2):** *to be appended by Task 1b as one dated line, X′/36 predicted bounded, with the targets that changed and why. The table and the 27/38 line above are never edited.*
+- **Re-baseline (8b Task 1b, before Task 2):** 2026-10-29: **23/36 predicted bounded** before the Task 2 Step 0 domain subtraction, which is not yet ruled (Task 2 records the final X′ here, before any proof). The 25 predicted `Some` (I3) less `parse_path` and `parse_new_connection_id`, which both call `copy_from_slice` ((v); the preflight named only `parse_path`). The other 23 translate with 1b's (i)–(iv), allocated ADT constants (vi) and `translate-crate vest_lib` (vii), and pass 8a typing with all-public labels. No predicted-`None` target translates.
 - **The structural gap is off-progress loops** (`off += consumed` with `consumed >= 1` from a callee's postcondition). Closing it needs callee return facts. That is 8b's stretch task, behind an explicit go/no-go.
 
 ## Risks and fallbacks
