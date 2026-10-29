@@ -14,7 +14,7 @@
 
 **Where the cut is (3d / 3d2).** 3d is every standalone machine; 3d2 is the `Connection` struct that composes them (receive path, transmit path, timers) and the HTTP/3 adapter.
 - Every connection-wide proof obligation (bytes sent ≤ 3× received, Initial datagrams ≥ 1200, nothing sent while draining, PNs strictly increasing, ACKs in their own space) is a property of the packetizer `poll_transmit`, so ACK generation and packetization cannot be split from the connection without leaving a half that has nothing to prove.
-- Paths are built into `Connection` from its first line (3d2 Task 1). The 2026-10-28 drafts added paths afterwards, which meant re-proving `on_datagram` and `poll_transmit` with a per-path budget. This cut proves each big function once.
+- Paths are built into `Connection` from its first line (3d2 Task 1a). The 2026-10-28 drafts added paths afterwards, which meant re-proving `on_datagram` and `poll_transmit` with a per-path budget. This cut proves each big function once.
 - A task writes ✅ only on rows whose sections pass its own `duvet_q` run. Each 3d task closes the rows its module discharges on its own (43 rows); rows whose last MUST lands in the composed connection get a "touched (closed in 3d2 Tn)" note here and close in 3d2 (45 rows). `python3 -I <scratch>/chk3d/rows1029.py <scratch>/chk3b/d3.txt` prints `88 43 45` and asserts each of the 88 rows is owned exactly once.
 
 **Architecture:**
@@ -33,10 +33,13 @@
 - **D1. Two plans, cut as above.** 3d2 starts after `phase-3d` merges.
 - **D2. Own uni streams are capped inside 3c's `StreamIds`, not in the adapter.** `MAX_OWN_UNI = 3` (RFC 9114 control, QPACK encoder, QPACK decoder). `open_local_uni` refuses `id / 4 >= 3`, and `StreamIds::wf` carries `used <= 3`. Every other `StreamIds` method already ensures `local_uni_spec()` unchanged, so the conjunct costs one proof per method in a 514-line file. h3 opens only stream 3 today; the cap is the RFC's three.
 - **D3. Absolute send-buffer bound in `Streams::wf`.** `tx_buffered() <= MAX_SEND_BUFFER` (1 MiB per connection). `write` gains an `Err` case when the new bytes don't fit; `send_room()` reports the room. Every other mutator ensures `tx_buffered` does not grow. `tx_buffered` (Σ physical `buf` length) is the memory itself; `tx_unacked` is not, because a reset empties the buffer while `acked_point` falls back to `acked_base`. 3d2's `Connection::stream_write` accepts a prefix (`min(len, send_room())`), and the 3d2 adapter defers the rest, so no write ever closes the connection for lack of room.
-- **D4. Range-set growth is bounded by in-flight records and an incoming-ACK range cap (obligation 3, "ACK-range cap").**
-  - `SendStream`'s `acked`/`lost` holes are exactly sent bytes that are in an in-flight record or in `lost`. With at most `MAX_INFLIGHT = 64` ack-eliciting packets in flight (`Recovery::can_send`, Task 3), a peer that acks alternate packets while drip-feeding credit stalls the sender at 64 holes; it cannot grow the sets further.
+- **D4. Range-set growth: a new-data gate, the in-flight cap and an incoming-ACK range cap (obligation 3, "ACK-range cap"; rewritten by the preflight, C1).**
+  - **Why the in-flight cap alone is not enough.** 3c's `poll_stream` loops `poll_data`, lost ranges first, so one record can carry ~200 STREAM frames for one stream. E8's PTO also moves everything in flight into `lost`, where 1-byte ranges separated by acked bytes never merge. Holes are therefore bounded by in-flight *frames* plus accumulated lost ranges, not by the 64 records: ~12.8k per stream.
+  - **The gate (Task 1).** `SendStream::poll_data` sends *new* data only while `acked.len() + lost.len() < MAX_SEND_RANGES` (64); lost data and a lone FIN are never gated. New data within one packet is contiguous, so each in-flight record (`MAX_INFLIGHT = 64`, `Recovery::can_send`, Task 3) adds at most one new-data hole per stream. That gives ~2·64 from new data.
+  - **The term the gate does not cover.** A large lost range retransmitted in ~1100-byte chunks, alternate-acked, then re-lost on PTO, fragments to chunk size. That adds at most ~`MAX_SEND_BUFFER` / ~1000, about 1000 ranges per connection.
+  - **Honest bound:** about 2·64 + ~1000 per connection, so O(10³) per `on_data_acked`.
   - `SentPackets::on_ack` reads at most the first ACK Range plus `MAX_ACK_RANGES_IN = 64` more, so each incoming ACK costs O(64 × in-flight).
-  - The count bound is pinned by test (3d2 Task 2 `alternate_ack_range_growth`), not proven. A proven per-`SendStream` cap would mean rewriting 3c's range code, whose proofs today cover only element bounds.
+  - **Tested, not proven.** 3c's `range_insert`/`range_remove` carry no length ensures ("Order and merging are exec behavior (tested); only the bounds are proven"), so a `wf` count conjunct is not cheap. Pinned by `range_gate_pto_cycles` (Task 1, simulated PTO cycles) and 3d2 Task 3 `alternate_ack_range_growth` (real PTOs).
 - **D5. Only ack-eliciting packets are recorded.** The 2026-10-28 draft recorded ACK-only packets too, and the PTO placeholder drained only eliciting ones, so ACK-only records leaked forever. `on_ack` tolerates acknowledged PNs with no record.
 - **D6. Congestion action is a packet-count AIMD placeholder** (cwnd 10 packets, +1 per acked packet up to 64, halved on loss, floor 2). This is "appropriate congestion control action" (§13.3) without RFC 9002's byte accounting. §13.3 therefore closes in 3d2 with no hand-off; Phase 6 replaces the bodies.
 - **D7. `peer_tp_wf` is exactly what 3b's parser guarantees** for `from_client = true`, proven in `tp.rs` (Task 5) because `tp_from_decreases` is private there. `on_peer_params` requires it, and `peer_tp_wf ==> stream_tp_ok` discharges `Streams::new` (obligation 4).
@@ -56,16 +59,17 @@
   - every function verifies at `--rlimit 4`. Put `#[verifier::spinoff_prover]` on any function that needs it (not an escape); never raise the rlimit; split a lemma instead;
   - **no `let … else` inside `proof fn`s** (crashes this Verus); use `match`/`if let`;
   - Verus models `Vec` length, not capacity: when state is dropped, assign a fresh `Vec::new()` / fresh struct, never `clear()`, and add a capacity test outside `verus!` through a `#[doc(hidden)] pub fn …_capacity(&self) -> usize` (3c `SendStream::buf_capacity` precedent);
-  - no per-event O(n) copy of attacker-sized data: rebuild a `Vec` at most once per call, never `remove(0)` in a loop over an attacker-sized vector, never re-copy a buffer tail per call (3c Tasks 2 and 4 precedents).
+  - no per-event O(n) copy of attacker-sized data: rebuild a `Vec` at most once per call, never `remove(0)` in a loop over an attacker-sized vector, never re-copy a buffer tail per call (3c Tasks 2 and 4 precedents);
+  - loops are isolated (Verus default `loop_isolation(true)`): restate `wf` and every pre-loop fact a loop body needs in its `invariant` (preflight M6).
 - **Base branch:** `phase-3d` from `main` (3c merged at c7ef8f0). Record main's head in the Task 1 report.
 - **No dependency, toolchain or profile change.** `crates/quic/Cargo.toml` is untouched in 3d; no `rust-toolchain.toml`; no `[profile.*]` edit (Phase 8a will pin rustc 1.98.1 and a release profile).
 - **The four checks, every task:**
-  1. `scripts/verify.sh` prints `verify.sh: all crates verified, duvet ok, escapes accounted (N)`, where **N is the value it prints on the base commit** (record it in the Task 1 report; 3d adds no escape, so N never changes);
-  2. `cargo build && cargo test` pass across the workspace with 0 warnings, every pre-existing test unchanged;
+  1. `scripts/verify.sh` prints the success line it prints on the base commit (today `verify.sh: all crates verified, duvet ok, escapes accounted (N)`; Phase 8a Task 10 rewords it, so match whatever the base prints; preflight M19a), where **N is the value it prints on the base commit** (record it in the Task 1 report; 3d adds no escape, so N never changes);
+  2. `cargo build && cargo test` pass across the workspace with 0 warnings, every pre-existing test unchanged; run them also as `cargo +1.98.1 build && cargo +1.98.1 test`, Phase 8a's pinned toolchain, so the 8a merge stays warning-free (preflight M19c);
   3. the escape grep contributes **0** lines from `crates/quic` (line grep and the multi-line `grep -Pz`);
   4. `duvet report` exits 0 (inside verify.sh).
 - **Evidence runs** (fresh targets, because `cargo verus` replays cached results when only the args change):
-  - `CARGO_TARGET_DIR=<scratch>/vt-3d-tN scripts/verify.sh` with an absolute path;
+  - `CARGO_TARGET_DIR=<scratch>/vt-3d-tN scripts/verify.sh` with an absolute path, plus `CT_TARGET_DIR=<scratch>/ct-3d-tN` once Phase 8a's `ct-check.sh` is on the base (preflight M19a);
   - `(cd crates/quic && CARGO_TARGET_DIR=<scratch>/vt-3d-tN-r4 cargo verus verify -- --rlimit 4)` in a **new** directory, printing quic `… 0 errors`;
   - then `rm -rf` both (the tmpfs is shared and capped).
   - While iterating, delete `target/verus-partial/debug/.fingerprint/quic-*` before each `cargo verus focus -- --rlimit 4`.
@@ -80,19 +84,19 @@
 
 RFC 9000, labels exactly as in `docs/requirements.md`. 3d closes 43, 3d2 closes 45 (88; checked by `chk3d/rows1029.py`).
 - **Task 1:** none (3c strengthenings).
-- **Task 2:** §13.2.3, §13.2.5, §13.4.1, §13.4.2.1, §13.4.2.2 (5); touches §13.2.1 and §12.3 (closed in 3d2 Task 2).
-- **Task 3:** none; touches §12.3 (closed in 3d2 Task 2) and §13.3 (closed in 3d2 Task 3).
+- **Task 2:** §13.2.3, §13.2.5, §13.4.1, §13.4.2.1, §13.4.2.2 (5); touches §13.2.1 and §12.3 (closed in 3d2 Task 2a).
+- **Task 3:** none; touches §12.3 (closed in 3d2 Task 2a) and §13.3 (closed in 3d2 Task 3).
 - **Task 4:** §5.1, §5.1 (req) "Same CID not issued twice on a connection"; §5.1.1 and its 4 (req) rows; §5.1.2; §19.15 and its 5 open (req) rows; §19.16 and its 3 (req) rows; §10.3.2 (19).
 - **Task 5:** §7; §7.2 and (req) "Server sets DCID from first received Initial", "Discard later Initial with different SCID"; §7.3 and (req) "Validate/send initial_source_connection_id; …"; §7.4.1 and (req) "Server MUST reject 0-RTT if restored values unsupported"; §8.1.3 and (req) "Server MUST attempt to validate a token in Initial" (10). Also closes the open tail of RFC 9114 §6.2 (not a 3d row).
 - **Task 6:** §5.2.2, §5.2.3, §14.2, §21.11 (4).
 - **Task 7:** §10.1, §10.2.3, §11 (3).
-- **Task 8:** §8.2.3; §19.17 (2); touches §8.2.1 and its three non-small (req) rows (closed in 3d2 Task 2, where the 1200-byte sends are built).
+- **Task 8:** §8.2.3; §19.17 (2); touches §8.2.1 and its three non-small (req) rows (closed in 3d2 Task 2b, where the 1200-byte sends are built).
 
 Touched notes replaced: 3b's on §5.2.2 (Task 6). 3b's on §10.3 and §19.20 and 3c's on §13.3 are replaced in 3d2.
 
 ## Review Focus
 
-1. **Own-uni cap and send-buffer cap really bind** (Task 1). `write(15, ..)` fails with a peer uni limit of 100; `write` of one byte beyond `send_room()` fails with nothing changed; a reset or a full ack restores the room. The new `Streams::wf` conjuncts are exported by `lemma_wf`, and no 3c test changed. Pinned: `own_uni_cap`, `send_buffer_cap`, `room_after_reset`.
+1. **Own-uni cap and send-buffer cap really bind** (Task 1). `write(15, ..)` fails with a peer uni limit of 100; `write` of one byte beyond `send_room()` fails with nothing changed; a reset or a full ack restores the room. The new `Streams::wf` conjuncts are exported by `lemma_wf`, and no 3c test changed. Pinned: `own_uni_cap`, `send_buffer_cap`, `room_after_reset`. The new-data gate (D4) holds across loss cycles. Pinned: `range_gate_pto_cycles` (preflight C1).
 2. **ACK-only records and incoming range cap** (Task 3). `on_sent` requires an ack-eliciting packet; an ACK for a PN with no record is fine; ranges past the 64th are ignored, not errors. Pinned: `ack_of_unrecorded_pn`, `ack_range_cap_in`.
 3. **RETIRE_CONNECTION_ID for the packet's own DCID, or beyond any sequence we issued.** Both PROTOCOL_VIOLATION; retiring twice is harmless. Pinned (Task 4): `retire_rules`.
 4. **NEW_CONNECTION_ID whose Retire Prior To covers the CID we send with.** We switch to the lowest active CID; CONNECTION_ID_LIMIT_ERROR is judged after retiring; an identical repeat is not an error. Pinned (Task 4): `rpt_switches_current`, `limit_after_retire`, `duplicate_ok`.
@@ -119,6 +123,12 @@ Touched notes replaced: 3b's on §5.2.2 (Task 6). 3b's on §10.3 and §19.20 and
   - `pub fn buffered(&self) -> (r: usize)`, requires `wf()`, ensures `r == self.buffered_spec()`.
   - `pub proof fn lemma_buffered(&self)`, requires `wf()`, ensures `self.buffered_spec() == if is_reset(self.state()) { 0 } else { (self.all_written().len() - self.acked_base_spec()) as nat }`.
   - New ensures: `write` — `r is Ok ==> final.buffered_spec() == old.buffered_spec() + data@.len()`; every other `&mut self` method (`poll_data`, `reset`, `on_stop_sending`, `on_max_stream_data`, `commit_reset`, `on_reset_lost`, `on_reset_acked`, `on_data_acked`, `on_data_lost`) — `final.buffered_spec() <= old.buffered_spec()`.
+  - **New-data gate (preflight C1, D4):**
+    - `pub const MAX_SEND_RANGES: usize = 64;` with `// ponytail: new data waits while acked+lost hold 64 ranges; per-stream hole bound is tested (D4), not proven.`
+    - `poll_data` takes its new-data branch only while `self.acked.len() + self.lost.len() < MAX_SEND_RANGES`; the lost-first and lone-FIN branches are unchanged.
+    - New ensures: `r matches Some(c) && c@.off >= old.sent_end_spec() && c@.data.len() > 0 ==> old.range_count() < MAX_SEND_RANGES`, with `pub closed spec fn range_count(&self) -> nat` = `acked@.len() + lost@.len()`.
+    - Sending nothing new is always allowed by `chunk_ok`, so 3c's proofs stand.
+    - Outside `verus!`: `#[doc(hidden)] pub fn range_counts(&self) -> (usize, usize)` (moved here from 3d2 Task 2).
 - Produces (`streams.rs`):
   - `pub const MAX_SEND_BUFFER: u64 = 1 << 20;` with `// ponytail: one 1 MiB send budget per connection; per-stream budgets if one response must not starve others.`
   - `Streams::wf` gains `self.tx_buffered() <= MAX_SEND_BUFFER as int` and `self.conn_recv.window_spec() == <the stored initial window>` (add a private field `rx_conn: u64`, set to `local.initial_max_data` in `new`).
@@ -127,13 +137,24 @@ Touched notes replaced: 3b's on §5.2.2 (Task 6). 3b's on §10.3 and §19.20 and
   - **`pub fn send_room(&self) -> (r: u64)`**, requires `wf()`, ensures `r as int == MAX_SEND_BUFFER - self.tx_buffered()`. One loop over `entries` summing `send.buffered()`; invariant `acc == sum(entries@.take(i), 9) <= tx_buffered()`. Needs private `lemma_sum_take(s, i, q)` (`sum(s.take(i + 1), q) == sum(s.take(i), q) + val(s[i], q)`) and `lemma_sum_prefix_le(s, i)` (q = 9 terms are ≥ 0). No overflow: every partial sum ≤ `MAX_SEND_BUFFER`.
   - New ensures on every other pub `&mut self` method (`on_frame`, `reset`, `stop_sending`, `poll_frames`, `on_frame_acked`, `on_frame_lost`): `final.tx_buffered() <= old.tx_buffered()` and `final.conn_recv_spec().window_spec() == old.conn_recv_spec().window_spec()`; `write` also keeps the window. `new` ensures `r.conn_recv_spec().window_spec() == local.initial_max_data` and `r.tx_buffered() == 0`.
   - `lemma_wf` additionally ensures `self.tx_buffered() <= MAX_SEND_BUFFER`, `self.rx_buffered_phys() <= 2 * self.conn_recv_spec().window_spec()` (from `rx_buffered <= counted − consumed <= limit − consumed <= window`), and `self.ids_spec().local_uni_spec().used_spec() <= MAX_OWN_UNI`.
-  - Module doc: replace the bullets "Our own uni streams", "Write backpressure" and "Window is not pinned" with one line each saying what is now enforced and where (`MAX_OWN_UNI`, `MAX_SEND_BUFFER`/`send_room`, D8). Keep "Loop on `poll_data`" and "ACK-range growth", adding "(discharged by 3d: `SentPackets::on_ack` range cap and `Recovery::can_send` in-flight cap)".
+  - Outside `verus!` (`streams.rs`): `#[doc(hidden)] pub fn send_range_counts(&self, id: u64) -> Option<(usize, usize)>` (moved here from 3d2 Task 2; preflight C1).
+  - Module doc: replace the bullets "Our own uni streams", "Write backpressure" and "Window is not pinned" with one line each saying what is now enforced and where (`MAX_OWN_UNI`, `MAX_SEND_BUFFER`/`send_room`, D8). Keep "Loop on `poll_data`". Rewrite "ACK-range growth" as: "bounded by the `MAX_SEND_RANGES` new-data gate in `SendStream::poll_data`, `Recovery::can_send`'s in-flight cap and `SentPackets::on_ack`'s range cap; about 2·64 + ~1000 ranges per connection, tested not proven (3d D4)" (preflight C1).
 
 - [ ] **Step 1: Failing tests** (`tests/stream_bounds.rs`; helpers `local()`/`peer()` copied from 3c's `tests/streams_rx.rs`, `S` = `Frame::Stream`):
   - **`own_uni_cap`:** `peer.initial_max_streams_uni = 100`: `write(3, b"a", false)`, `write(7, ..)`, `write(11, ..)` are `Ok(())`; `write(15, b"a", false) == Err(())`; `local_uni_limit() == 100`.
   - **`send_buffer_cap`:** `peer.initial_max_data = 1 << 30`, `_bidi_local = 1 << 30`. `S(0, 0, "GET", true)`; `send_room() == 1 << 20`; `write(0, &[7; 1 << 20], false) == Ok(())`; `send_room() == 0`; `write(0, &[7], false) == Err(())`; `write(0, &[], true) == Ok(())`.
   - **`room_after_ack`:** continue: `poll_frames(1 << 21, &mut out)` repeatedly until empty, `on_frame_acked(f)` for every frame polled; then `send_room() == 1 << 20` and `open_streams() == 0`.
   - **`room_after_reset`:** `S(0, 0, "GET", false)`, `write(0, &[1; 1000], false)`, `send_room() == (1 << 20) - 1000`; `reset(0, 1)`; `send_room() == 1 << 20`.
+  - **`range_gate_pto_cycles`** (preflight C1, simulated PTOs at the `Streams` level):
+    - `peer.initial_max_data = 1 << 30`, `_bidi_local = 1`; `S(0, 0, "GET", true)`; `write(0, &[9; 10_000], true)`.
+    - For r in 0..400:
+      - feed `MaxStreamData{0, r + 2}`;
+      - `poll_frames(1200, &mut pkt)`, one "packet" per call;
+      - `on_frame_acked` for the frames of every other packet that carried only new data;
+      - every 20 rounds, `on_frame_lost` for every frame still outstanding (a PTO).
+    - Assert throughout: both counts of `send_range_counts(0) <= 2 * MAX_SEND_RANGES + 1`.
+    - Assert once the gate closes: no new-data chunk is polled until a count drops below `MAX_SEND_RANGES`.
+    - The splitting adversary (D4's ~1000 term) is not exercised; say so in the test doc.
   - Every 3c test still passes unchanged.
 - [ ] **Step 2:** `cargo test -p quic --test stream_bounds` fails (no `send_room`, no cap).
 - [ ] **Step 3: Implement** in the order stream_id → send_stream → streams; verify each file with `cargo verus focus -- --verify-only-module <m> --rlimit 4` after deleting the quic fingerprint. No new Duvet citations (no rows).
@@ -141,7 +162,8 @@ Touched notes replaced: 3b's on §5.2.2 (Task 6). 3b's on §10.3 and §19.20 and
   - drop `id / 4 < MAX_OWN_UNI` from the `open_local_uni` exec guard → fails on `StreamIds::wf` in `open_local_uni`'s postcondition;
   - skip the `send_room()` check in `Streams::write` → fails on `Streams::wf`'s `tx_buffered` conjunct at `write`;
   - `send_room` returns `MAX_SEND_BUFFER - acc - 1` when `acc < MAX_SEND_BUFFER` → fails on its ensures;
-  - delete the `buffered_spec` ensures from `SendStream::on_data_acked` → fails in `streams.rs` at `on_frame_acked`'s new ensures.
+  - delete the `buffered_spec` ensures from `SendStream::on_data_acked` → fails in `streams.rs` at `on_frame_acked`'s new ensures;
+  - drop the `MAX_SEND_RANGES` gate from `poll_data` → fails `poll_data`'s new ensures (and `range_gate_pto_cycles`) (preflight C1).
 - [ ] **Step 5:** Four checks, evidence runs, quote check (unchanged count; no new citations). Report the five slowest quic functions and any function that newly needed `spinoff_prover`.
 - [ ] **Step 6: Commit:** `feat(quic): own-uni cap, absolute send-buffer bound and pinned receive window in the stream layer (3c follow-ups)`. No matrix commit.
 
@@ -171,7 +193,7 @@ Touched notes replaced: 3b's on §5.2.2 (Task 6). 3b's on §10.3 and §19.20 and
 - [ ] **Step 1: Failing tests** (`tests/ack_track.rs`; `A(largest, delay, first, ranges)` is an `AckFrame` with `ecn: None`; OneRtt unless stated):
   - **`dup_suppression`:** `on_packet(5, true, 0)`; `is_duplicate(5)` true, `is_duplicate(4)` false; `on_packet(4, ..)`, `on_packet(7, ..)`; `build_ack(0, 3, 1200) == Some(A(7, 0, 0, [(0, 1)]))`.
   - **`ack_matches_received`** (Initial): PNs 0, 1, 2, 5, 9, 10 → `Some(A(10, 0, 1, [(2, 0), (1, 2)]))`.
-  - **`range_cap`:** `on_packet(2k, true, 0)` for k = 0..=32; `is_duplicate(0)` and `(1)` true, `(3)` false; `build_ack` has 31 pairs and smallest acked PN 2; `largest() == Some(64)`.
+  - **`range_cap`:** `on_packet(2k, true, 0)` for k = 0..=32; `is_duplicate(0)` true, `(1)` and `(3)` false (floor = dropped hi + 1 = 1, preflight M1); `build_ack` has 31 pairs and smallest acked PN 2; `largest() == Some(64)`.
   - **`ack_scheduling`:** Initial `on_packet(0, true, 100)` → `ack_deadline(25_000) == Some(100)` (Handshake the same); OneRtt `on_packet(0, true, 100)` → `Some(25_100)`, `on_packet(1, true, 200)` → `Some(100)`, `on_ack_sent(false)` → `None`.
   - **`non_eliciting`:** `on_packet(0, false, 100)` → `ack_deadline(25_000) == None`, `ack_only_allowed() == false`, `has_new() == true`.
   - **`ack_delay_field`:** OneRtt `on_packet(7, true, 1000)`, `build_ack(9000, 3, 1200)` has `delay == 1000`; Initial the same has `delay == 0`.
@@ -180,7 +202,7 @@ Touched notes replaced: 3b's on §5.2.2 (Task 6). 3b's on §10.3 and §19.20 and
 - [ ] **Step 3: Implement.** Duvet-cite §13.2.1 (the immediate-ACK MUST at `ack_deadline`; both MUST NOTs and "MUST be acknowledged at least once within the maximum delay" at `on_ack_sent`/`ack_deadline`; the "MUST NOT send an ack-eliciting frame in all packets" MUST at `on_ack_sent`'s doc — we never add one); §13.2.3 (both MUSTs at the range drop); §13.2.5 (at `delay`); §12.3 "A receiver MUST discard a newly unprotected packet unless …" at `is_duplicate`; §13.4.1, §13.4.2.1, §13.4.2.2 as `type=exception`, `reason=ECN is not accessible (no IP_RECVTOS) and no ECT is set; every ACK has ecn: None.` at `ecn: None`.
 - [ ] **Step 4: Mutations:** `is_duplicate` ignores `floor`; `build_ack`'s gap `lo − hi − 2` → `− 1`; `on_ack_sent` skips the `ack_only_sent` increment; `ack_deadline` adds `max_ack_delay_us` for Handshake (fails on its ensures only if the ensures states the per-kind cases; state them).
 - [ ] **Step 5:** Four checks, evidence, quote check; MUST coverage for `13.2.3,13.2.5,13.4.1,13.4.2.1,13.4.2.2`.
-- [ ] **Step 6: Commits:** `feat(quic): verified received-PN tracking, duplicate suppression and ACK generation (RFC 9000 §12.3, §13.2)`; matrix: `✅ 3d: crates/quic/src/ack_track.rs` on §13.2.3, §13.2.5; touched notes on §13.2.1 and §12.3 `3d: ack_track.rs (ACK scheduling / duplicate suppression; closed in 3d2 Task 2)`; `✅ 3d: exception — ECN not accessible, no ECT set (ack_track.rs ecn: None)` on §13.4.1, §13.4.2.1, §13.4.2.2; `docs: mark RFC 9000 §13.2.x, §13.4.x closed in 3d`.
+- [ ] **Step 6: Commits:** `feat(quic): verified received-PN tracking, duplicate suppression and ACK generation (RFC 9000 §12.3, §13.2)`; matrix: `✅ 3d: crates/quic/src/ack_track.rs` on §13.2.3, §13.2.5; touched notes on §13.2.1 and §12.3 `3d: ack_track.rs (ACK scheduling / duplicate suppression; closed in 3d2 Task 2a)`; `✅ 3d: exception — ECN not accessible, no ECT set (ack_track.rs ecn: None)` on §13.4.1, §13.4.2.1, §13.4.2.2; `docs: mark RFC 9000 §13.2.x, §13.4.x closed in 3d`.
 
 ---
 
@@ -201,12 +223,12 @@ Touched notes replaced: 3b's on §5.2.2 (Task 6). 3b's on §10.3 and §19.20 and
   - `pub fn new() -> SentPackets`; `pub fn new_at(next: u64) -> SentPackets` (requires `next <= PN_MAX`; tests).
   - **`pub fn take_pn(&mut self) -> (r: Option<u64>)`**: `Some(n)` iff `old.next_pn < PN_MAX`, with `n == old.next_pn`, `next_pn == n + 1`, `issued == old.issued.insert(n)`, and `forall p in old.issued: p < n`. None = the sender reached 2⁶²−1 (3d2 closes silently).
   - **`pub fn on_sent(&mut self, p: SentPacket)`**: requires `p.ack_eliciting`, `p.pn == old.next_pn − 1`, `p.pn` not in `old.inflight`. ACK-only packets are never recorded (D5).
-  - **`pub fn on_ack(&mut self, a: &AckFrame, out: &mut Vec<SentPacket>) -> (r: Result<(), u64>)`**: requires `rfc_ack_ranges_valid(a.largest, a.first_range, a.ranges@)`. `Err(PROTOCOL_VIOLATION)` iff `a.largest >= next_pn` (§13.1 SHOULD), unchanged. Otherwise it appends every in-flight `p` with `ack_contains_capped(a@, p.pn)` to `out` in ascending order, keeps the rest in order (one rebuild of `inflight`, O(inflight · 64)), and sets `largest_acked = max(largest_acked, a.largest)`. PNs with no record are ignored. Ensures each moved record satisfies `ack_contains(a@, pn)` and leaves `inflight`.
+  - **`pub fn on_ack(&mut self, a: &AckFrame, out: &mut Vec<SentPacket>) -> (r: Result<(), u64>)`**: requires `rfc_ack_ranges_valid(a.largest, a.first_range, a.ranges@)`. `Err(PROTOCOL_VIOLATION)` iff `a.largest >= next_pn` (§13.1 SHOULD), unchanged. Otherwise it appends every in-flight `p` with `ack_contains_capped(a@, p.pn)` to `out` in ascending order, keeps the rest in order (one rebuild of `inflight`, O(inflight · 64)), and sets `largest_acked = max(largest_acked, a.largest)`. PNs with no record are ignored. Ensures each moved record satisfies `ack_contains(a@, pn)` and leaves `inflight`. `// ponytail: O(inflight × 65) per ACK frame; a merge-walk (inflight ascending, ranges descending) if profiling shows it.` (preflight M23)
   - **`pub fn on_packet_lost(&mut self, pn: u64) -> Option<SentPacket>`** (Phase 6 entry; removes and returns).
   - **`pub fn drain_inflight(&mut self, out: &mut Vec<SentPacket>)`**: moves every record (all are eliciting) to `out`; `inflight` becomes `Vec::new()`. PTO placeholder loss declaration and space discard both use it.
   - `pub fn largest_acked(&self) -> Option<u64>`, `pub fn next_pn(&self) -> u64`, `pub fn inflight_len(&self) -> usize`, `pub fn last_sent_time(&self) -> Option<u64>` (time of the newest record).
   - Outside `verus!`: `#[doc(hidden)] pub fn inflight_capacity(&self) -> usize`.
-- Produces (`quic::recovery`) — **the Phase 6 hook**; fixed signatures, placeholder bodies:
+- Produces (`quic::recovery`) — **the Phase 6 hook**; placeholder bodies. Phase 6 keeps the call sites but may extend these signatures (send times, sizes for RTT samples and persistent congestion), since the counts here don't carry what RFC 9002 needs (preflight M7):
   - `pub const PLACEHOLDER_PTO_US: u64 = 999_000;` (kInitialRtt 333 ms + 4·(333/2) ms), `pub const MAX_PTO_BACKOFF: u32 = 6;`, `pub const INITIAL_CWND_PACKETS: u64 = 10;`, `pub const MAX_INFLIGHT: u64 = 64;`, `pub const MIN_CWND_PACKETS: u64 = 2;`.
   - `pub struct Recovery { pto_count: u32, cwnd: u64 }`; `wf()`: `MIN_CWND_PACKETS <= cwnd <= MAX_INFLIGHT`, `pto_count <= MAX_PTO_BACKOFF`.
   - `pub fn new() -> Recovery` (cwnd 10).
@@ -253,13 +275,13 @@ Touched notes replaced: 3b's on §5.2.2 (Task 6). 3b's on §10.3 and §19.20 and
 - Consumes: `Frame::{NewConnectionId, RetireConnectionId}`, `frame_wf`, `PROTOCOL_VIOLATION`, `CONNECTION_ID_LIMIT_ERROR`, `RESET_TOKEN_LEN`.
 - Produces:
   - `pub const LOCAL_CID_LEN: usize = 8;` (+ `const _: () = assert!(LOCAL_CID_LEN >= 1);` — we never require a zero-length DCID, so the §19.15 send MUST NOT, the §19.15 zero-length-sender MUST on our side, the §19.16 zero-length-provider MUST and §5.1's shared-port MUST are exceptions with `reason=Our connection IDs are 8 bytes (LOCAL_CID_LEN); we never use zero-length connection IDs.`), `ISSUE_CAP_ACTIVE: u64 = 4`, `ISSUE_CAP_LIFETIME: usize = 16` (`// ponytail: lifetime cap (§5.1.1 MAY); raise if long-lived peers rotate CIDs often.`), `PEER_CID_CAP: u64 = 8` (the highest local `active_connection_id_limit` `local_tp_ok` allows).
-  - **`pub struct LocalCids`** — fields `active: Vec<(u64, [u8; 8], [u8; 16])>` (seq, cid, token), `ever: Vec<([u8; 8], [u8; 16])>` (≤ `ISSUE_CAP_LIFETIME`), `next_seq: u64`, `pending: Vec<u64>`, ghost `issued: Map<u64, Seq<u8>>`. `wf()`: `next_seq == ever.len()`; CIDs in `ever` pairwise distinct, tokens pairwise distinct (§5.1, §10.3.2); `active` ⊆ `issued`, seqs ascending; `issued.dom() == [0, next_seq)` (§5.1.1 +1 each).
+  - **`pub struct LocalCids`** — fields `active: Vec<(u64, [u8; 8], [u8; 16])>` (seq, cid, token), `ever: Vec<([u8; 8], [u8; 16])>` (≤ `ISSUE_CAP_LIFETIME`), `next_seq: u64`, `max_sent: u64` (the highest seq sent to the peer: 0, the handshake SCID, at `new`; raised by `commit_pending`; `max_sent < next_seq`; preflight I3), `pending: Vec<u64>`, ghost `issued: Map<u64, Seq<u8>>`. `wf()`: `next_seq == ever.len()`; CIDs in `ever` pairwise distinct, tokens pairwise distinct (§5.1, §10.3.2); `active` ⊆ `issued`, seqs ascending; `issued.dom() == [0, next_seq)` (§5.1.1 +1 each).
   - `pub fn new(cid0: [u8; 8], token0: [u8; 16]) -> LocalCids` (seq 0 is our handshake SCID; its token goes in our `stateless_reset_token` TP).
   - **`pub fn issue(&mut self, rand: &[u8], peer_limit: u64) -> (r: bool)`**: requires `rand.len() >= 24`; with `cid = rand[0..8]`, `token = rand[8..24]`, `r` iff `active.len() < min(peer_limit, ISSUE_CAP_ACTIVE)` (§5.1.1 MUST NOT provide more), `ever.len() < ISSUE_CAP_LIFETIME`, `cid ∉ ever`, `token ∉ ever`; then seq `next_seq` is added and pushed to `pending`. A collision returns false (3d2 retries next call).
   - `pub fn pending_frame(&self) -> Option<Frame>` (`NewConnectionId{seq, 0, cid, token}` for the first pending seq still active; ensures `frame_wf`), `pub fn commit_pending(&mut self)`, `pub fn on_frame_lost(&mut self, seq: u64)` (re-pend if active).
-  - **`pub fn on_retire(&mut self, seq: u64, packet_dcid: &[u8]) -> (r: Result<Option<[u8; 8]>, u64>)`**: `seq >= next_seq` → `Err(PROTOCOL_VIOLATION)`; active `seq` whose CID equals `packet_dcid` → `Err(PROTOCOL_VIOLATION)`; active → removed, `Ok(Some(cid))`; else `Ok(None)`. `is_active` stays true until this call (§5.1.1 accept until retired).
+  - **`pub fn on_retire(&mut self, seq: u64, packet_dcid: &[u8]) -> (r: Result<Option<[u8; 8]>, u64>)`**: `seq > max_sent` → `Err(PROTOCOL_VIOLATION)` (§19.16 "greater than any previously sent to the peer"; preflight I3); active `seq` whose CID equals `packet_dcid` → `Err(PROTOCOL_VIOLATION)`; active → removed, `Ok(Some(cid))`; else `Ok(None)`. `is_active` stays true until this call (§5.1.1 accept until retired).
   - `pub fn is_active(&self, cid: &[u8]) -> bool`, `pub fn seq_of(&self, cid: &[u8]) -> Option<u64>`, `pub fn active_len(&self) -> usize`.
-  - **`pub struct PeerCids`** — fields `zero_len: bool`, `active: Vec<(u64, Vec<u8>, Option<[u8; 16]>, bool /*used*/)>`, `current: u64`, `largest_rpt: u64`, `retire_pending: Vec<u64>`, `retire_unacked: Vec<u64>`, ghost `received: Map<u64, (Seq<u8>, Option<[u8; 16]>)>`. `wf()`: `current` active and used; every received seq is active, or in `retire_pending ∪ retire_unacked`, or its RETIRE was acked (never forgotten without retiring, §5.1.2); `active.len() <= PEER_CID_CAP`; every CID ≤ 20 bytes.
+  - **`pub struct PeerCids`** — fields `zero_len: bool`, `active: Vec<(u64, Vec<u8>, Option<[u8; 16]>, bool /*used*/)>`, `current: u64`, `largest_rpt: u64`, `retire_pending: Vec<u64>`, `retire_unacked: Vec<u64>`, ghost `received: Map<u64, (Seq<u8>, Option<[u8; 16]>)>`. `wf()`: `current` active and used; every received seq is active, or in `retire_pending ∪ retire_unacked`, or its RETIRE was acked (never forgotten without retiring, §5.1.2); `active.len() <= PEER_CID_CAP`; `retire_pending.len() + retire_unacked.len() <= 2 * PEER_CID_CAP` (preflight I4/M24: the memory bound is an invariant, not a consequence of closing); every CID ≤ 20 bytes.
   - `pub fn new(scid0: &[u8]) -> PeerCids`: requires `scid0.len() <= MAX_CID_LEN`; seq 0, no token, `zero_len = scid0.len() == 0`.
   - **`pub fn on_new_cid(&mut self, seq: u64, rpt: u64, cid: &[u8], token: [u8; 16], local_limit: u64) -> (r: Result<(), u64>)`**: requires `rpt <= seq`, `1 <= cid.len() <= 20`, `2 <= local_limit <= PEER_CID_CAP`. Check order (the body; the signature doesn't fix it):
     ```
@@ -275,7 +297,7 @@ Touched notes replaced: 3b's on §5.2.2 (Task 6). 3b's on §10.3 and §19.20 and
     8. active.len() > local_limit                                  -> Err(CONNECTION_ID_LIMIT_ERROR)   §5.1.1
     9. retire_pending.len() + retire_unacked.len() > 2 * local_limit -> Err(CONNECTION_ID_LIMIT_ERROR)   §5.1.2 MAY
     ```
-    On `Err` the state is unspecified (the connection closes).
+    Steps 8 and 9 are judged on the counts steps 5–6 *would* produce, before anything is mutated, so `r is Err ==> *final == *old` and `wf()` holds on every path (preflight I4: 3d2's `Connection::wf` keeps `peer_cids` after the close).
   - `pub fn current(&self) -> &[u8]`; `pub fn pending_retire(&self) -> Option<Frame>`, `commit_retire(&mut self)`, `retire_lost(&mut self, seq: u64)`, `retire_acked(&mut self, seq: u64)`.
   - **`pub fn matches_reset(&self, tail: &[u8; 16]) -> bool`**: true iff some *active and used* entry has `Some(tail)` (§10.3.1: never retired or unused ones). Constant-time style per D11, proven equal to the spec.
   - `pub fn used_tokens(&self) -> Vec<[u8; 16]>`; `pub fn has_unused(&self) -> bool`; `pub fn use_next(&mut self) -> Option<Vec<u8>>` (3d2 per-destination CIDs, §9.5).
@@ -283,7 +305,7 @@ Touched notes replaced: 3b's on §5.2.2 (Task 6). 3b's on §10.3 and §19.20 and
 - [ ] **Step 1: Failing tests** (`tests/cid.rs`; `T(x) = [x; 16]`, `R(x) = [x; 24]`; `PeerCids::new(&[0xc0; 8])`, `N(seq, rpt, cid, tok) = on_new_cid(seq, rpt, cid, tok, 2)` unless stated; `A = [0xa1; 8]`, `B = [0xb1; 8]`):
   - **`issue_sequence`** (`LocalCids::new([0xa0; 8], T(0xb0))`): `issue(&R(1), 4)` then `pending_frame() == Some(NewConnectionId{1, 0, [1; 8], T(1)})`; `issue(&R(2), 4)`, `issue(&R(3), 4)` true; `issue(&R(4), 4)` false (4 active); fresh: `issue(&R(1), 2)` true, `issue(&R(2), 2)` false.
   - **`no_reissue`:** `issue(&([0xa0; 8] ++ [9; 16]), 4)` false (CID); `issue(&([9; 8] ++ [0xb0; 16]), 4)` false (token); `issue(&R(1), 4)` true with seq 1.
-  - **`retire_rules`:** after seqs 1, 2: `on_retire(5, &[0xff; 8]) == Err(PROTOCOL_VIOLATION)`; `on_retire(1, &[1; 8]) == Err(PROTOCOL_VIOLATION)`; `on_retire(1, &[0xa0; 8]) == Ok(Some([1; 8]))`; again `Ok(None)`; `is_active(&[1; 8])` false, `(&[2; 8])` true.
+  - **`retire_rules`:** after seqs 1, 2: `on_retire(2, &[0xff; 8]) == Err(PROTOCOL_VIOLATION)` (issued, not yet sent; preflight I3); `pending_frame`/`commit_pending` twice (seqs 1, 2 sent); `on_retire(5, &[0xff; 8]) == Err(PROTOCOL_VIOLATION)`; `on_retire(1, &[1; 8]) == Err(PROTOCOL_VIOLATION)`; `on_retire(1, &[0xa0; 8]) == Ok(Some([1; 8]))`; again `Ok(None)`; `is_active(&[1; 8])` false, `(&[2; 8])` true.
   - **`lifetime_cap`:** issue and retire alternately (`peer_limit 4`): the 15th `issue` (seq 15) true, the 16th false.
   - **`zero_length_peer`:** `PeerCids::new(&[])`, `on_new_cid(1, 0, &[1; 8], T(1), 2) == Err(PROTOCOL_VIOLATION)`.
   - **`limit`:** `N(1, 0, &[1; 8], T(1)) == Ok`, `N(2, 0, &[2; 8], T(2)) == Err(CONNECTION_ID_LIMIT_ERROR)`.
@@ -296,7 +318,7 @@ Touched notes replaced: 3b's on §5.2.2 (Task 6). 3b's on §10.3 and §19.20 and
   - **`reset_token_used_only`:** `N(1, 0, A, T(1))` → `matches_reset(&T(1))` false (unused); `N(2, 1, B, T(2))` → `current() == A`, `matches_reset(&T(1))` true, `(&T(2))` false, `(&[0; 16])` false.
 - [ ] **Step 2:** the tests fail.
 - [ ] **Step 3: Implement.** Duvet-cite §5.1 (both MUSTs; the zero-length one as an exception), §5.1.1 (all four MUSTs), §5.1.2 (both MUSTs), §19.15 (the five open (req) MUSTs), §19.16 (all three; zero-length as exception), §10.3.2 ("MUST be difficult to guess" with "shell randomness" in the doc, "The same stateless reset token MUST NOT be used for multiple connection IDs" at the `ever` check; the static-key, CID-length and reuse-at-other-nodes MUSTs as exceptions `reason=No static key: each token is fresh shell randomness per connection ID, and no stateless reset is ever sent.`).
-- [ ] **Step 4: Mutations:** `issue` checks `active.len() <= min(..)`; `on_new_cid` step 8 before step 6; `matches_reset` ignores `used`; `on_retire` skips the own-DCID check.
+- [ ] **Step 4: Mutations:** `issue` checks `active.len() <= min(..)`; `on_new_cid` step 8 before step 6; `matches_reset` ignores `used`; `on_retire` skips the own-DCID check; `on_retire` checks `next_seq` instead of `max_sent` (fails `retire_rules`' first call; preflight I3).
 - [ ] **Step 5:** Four checks, evidence, quote check; MUST coverage for `5.1,5.1.1,5.1.2,19.15,19.16,10.3.2`.
 - [ ] **Step 6: Commits:** `feat(quic): verified connection-ID issuance, retirement and peer CID set (RFC 9000 §5.1, §19.15-19.16)`; matrix: `✅ 3d: crates/quic/src/cid.rs` on the 19 Task 4 rows; zero-length rows note "exception: LOCAL_CID_LEN = 8"; §5.1.1 (req) "Accept issued CID until retired" notes "gate wired in conn.rs (3d2)".
 
@@ -358,13 +380,13 @@ Touched notes replaced: 3b's on §5.2.2 (Task 6). 3b's on §10.3 and §19.20 and
   - ghost `pub enum AmpEv { Recv(nat), Sent(nat), Validated }`, spec `recv_sum`, `sent_sum`, `validated_in` over `Seq<AmpEv>`.
   - **`pub open spec fn amp_ok(t: Seq<AmpEv>) -> bool`** = `forall|i| 0 <= i <= t.len() && !validated_in(t.take(i)) ==> sent_sum(t.take(i)) <= 3 * recv_sum(t.take(i))` (§8.1 over every prefix).
   - **`pub struct AmpBudget { recv: u64, sent: u64, validated: bool, trace: Ghost<Seq<AmpEv>> }`**; `wf()`: `amp_ok(trace)`; `recv == min(recv_sum, u64::MAX)`; `!validated ==> sent == sent_sum`; `validated == validated_in(trace)`.
-  - `new()`; `on_recv(&mut self, n: u64)` (pushes `Recv(n)`, saturating); **`budget(&self) -> (b: u64)`** (`u64::MAX` if validated, else `min(3·recv − sent, u64::MAX)` in `u128`); **`on_sent(&mut self, n: u64)`** (requires `n <= budget()`, pushes `Sent(n)`, ensures `amp_ok`); `validate`; `is_validated`; `pub closed spec fn trace(&self)`.
+  - `new()`; `on_recv(&mut self, n: u64)` (pushes `Recv(n)`, saturating); **`budget(&self) -> (b: u64)`** (`u64::MAX − sent` if validated, else `min(3·recv − sent, u64::MAX − sent)` in `u128`, so `sent` never overflows; preflight M4); **`on_sent(&mut self, n: u64)`** (requires `n <= budget()`, pushes `Sent(n)`, ensures `amp_ok`); `validate`; `is_validated`; `pub closed spec fn trace(&self)`.
 - Produces (`quic::datagram`) — **the protection boundary for 3e**:
   - `pub type PathId = u64;`, `pub const MAX_DATAGRAM: usize = 1200;` (no PMTUD, §14.2 SHOULD), `pub const AEAD_TAG_LEN: usize = 16;`, `pub const MIN_PN_AND_PAYLOAD: usize = 4;` (RFC 9001 §5.4.2 sample allowance).
   - **`pub struct PlainPacket { pub kind: PacketKind, pub dcid: Vec<u8>, pub scid: Vec<u8>, pub token: Vec<u8>, pub pn: u64, pub frames: Vec<Frame> }`** + `SpecPlain`. **`pub open spec fn plain_wf(p: SpecPlain) -> bool`** = `frames_received(p.frames, p.kind)` (so each frame is `frame_wf`, permitted, not Padding/HandshakeDone, and every CRYPTO/STREAM `offset + |data| <= VARINT_MAX`) `&& p.dcid.len() <= MAX_CID_LEN && p.scid.len() <= MAX_CID_LEN && p.pn <= PN_MAX`. 3d2's `accept`/`on_datagram` require it; 3e discharges it from `parse_payload`'s ensures and its header checks.
   - **`pub struct OutPacket { pub kind: PacketKind, pub dcid: Vec<u8>, pub scid: Vec<u8>, pub pn: u64, pub pn_len: u8, pub frames: Vec<Frame>, pub padding: usize, pub spin: bool }`** (`padding` = zero bytes 3e appends after the frames; `spin` = the 1-RTT spin bit, ignored for long headers) + `SpecOutPacket`; **`pub struct OutDatagram { pub path: PathId, pub packets: Vec<OutPacket> }`** + `SpecOutDatagram`.
   - Length specs (3e's `protect` ensures its output length equals `out_packet_len(p@)`): `plaintext_len(p)` = Σ `spec_frame_bytes(f).len()` + `padding`; `length_field(p)` = `pn_len + plaintext_len + AEAD_TAG_LEN`; `out_packet_len(p)`: OneRtt `1 + |dcid| + pn_len + plaintext_len + 16`; Initial `7 + |dcid| + |scid| + 1 + rfc_varint_min_len(length_field) + pn_len + plaintext_len + 16` (the `+ 1` is Token Length 0); Handshake without the `+ 1`. `out_datagram_len(d)` = Σ.
-  - **`pub open spec fn out_packet_wf(p, largest_acked: Option<u64>) -> bool`**: `frames.len() >= 1`; `frames_sendable(frames, kind)` (`serialize_payload`'s precondition, §12.4/§12.5); `pn_encode_len(pn, largest_acked) == Some(pn_len)`; `pn_len + plaintext_len >= MIN_PN_AND_PAYLOAD`; `|dcid|, |scid| <= MAX_CID_LEN`, OneRtt ⇒ `scid == []`; `length_field < 16384`.
+  - **`pub open spec fn out_packet_wf(p, largest_acked: Option<u64>) -> bool`**: `frames.len() >= 1`; `frames_sendable(frames, kind)` (`serialize_payload`'s precondition, §12.4/§12.5); `pn_len_ok(pn, largest_acked, pn_len)` and `forall|m| 1 <= m < pn_len ==> !pn_len_ok(pn, largest_acked, m)`, which is `pn_encode_len`'s ensures; 3b has no spec twin (preflight M5); `pn_len + plaintext_len >= MIN_PN_AND_PAYLOAD`; `|dcid|, |scid| <= MAX_CID_LEN`, OneRtt ⇒ `scid == []`; `length_field < 16384`.
   - `pub fn packet_len(p: &OutPacket) -> (n: usize)` (`== out_packet_len(p@)`), `pub fn datagram_len(d: &OutDatagram) -> usize`.
   - **`pub fn add_sample_padding(p: &mut OutPacket)`**: `padding = max(padding, 4 − pn_len − frames_len)`; ensures `pn_len + plaintext_len >= 4`.
   - **`pub fn pad_datagram(d: &mut OutDatagram, target: usize)`**: requires `1 <= packets.len() <= 3`, `out_datagram_len(d) <= target`, `MIN_INITIAL_DATAGRAM <= target <= MAX_DATAGRAM`, every CID ≤ 20 bytes; ensures `out_datagram_len(d') == target` and only one packet's `padding` changed. Body (the signature doesn't fix it):
@@ -388,7 +410,7 @@ Touched notes replaced: 3b's on §5.2.2 (Task 6). 3b's on §10.3 and §19.20 and
   - **`pub fn route(datagram: &[u8], table: &CidTable) -> (r: Route)`**, ensures `r@ == rfc_route(datagram@, table@)`. **Binding for 3e:** call `version_negotiation` only via `route` (§17.2.1 once per datagram).
 
 - [ ] **Step 1: Failing tests.**
-  - `tests/amp.rs`: **`amp_budget`** (`new()` → 0; `on_recv(1200)` → 3600; `on_sent(3600)` → 0; `on_recv(1)` → 3; `validate()` → `u64::MAX`; `on_sent(10_000)` → `u64::MAX`); **`amp_saturating`** (`on_recv(u64::MAX)`, `on_recv(5)` → `u64::MAX`).
+  - `tests/amp.rs`: **`amp_budget`** (`new()` → 0; `on_recv(1200)` → 3600; `on_sent(3600)` → 0; `on_recv(1)` → 3; `validate()` → `u64::MAX − 3600`; `on_sent(10_000)` → `u64::MAX − 13_600`; preflight M4); **`amp_saturating`** (`on_recv(u64::MAX)`, `on_recv(5)` → `u64::MAX`).
   - `tests/datagram.rs` (`CRYPTO90` = the 90 CRYPTO bytes of RFC 9001 A.3; all `spin: false`):
     - **`a3_server_initial_len`:** `OutPacket{Initial, [], f067a5502a4262b5, 1, 2, [Ack{0, 0, 0, [], None}, Crypto{0, CRYPTO90}], 0, false}` → `packet_len == 135` (20-byte header `c1000000010008f067a5502a4262b50040750001` + 99 + 16).
     - **`a2_client_initial_len`:** `OutPacket{Initial, 8394c8f03e515708, [], 2, 4, [Crypto{0, <the 241 A.2 bytes>}], 917, false}` → `1200` (Length 1182, 2-byte varint, 22-byte header).
@@ -398,16 +420,16 @@ Touched notes replaced: 3b's on §5.2.2 (Task 6). 3b's on §10.3 and §19.20 and
     - **`pad_short`:** the 29-byte packet → `padding == 1173`, 1200.
   - `tests/route.rs` (`t` has, for connection 7, `Add(8394c8f03e515708)`, `Add([0x11; 8])`, `AddToken([0x77; 16])`; `A2H = c000000001088394c8f03e5157080000449e`):
     - **`route_existing`:** `A2H` zero-padded to 1200 → `Existing(7)`; `[0x40] ++ [0x11; 8] ++ [0; 20]` → `Existing(7)`.
-    - **`route_new_initial`:** `A2H` padded to 1200, empty table → `NewInitial`; a 7-byte-DCID Initial whose Length fits 1200 → `Drop`; `A2H` padded to 1199 → `Drop`.
+    - **`route_new_initial`:** `A2H` padded to 1200, empty table → `NewInitial`; a 7-byte-DCID Initial whose Length fits 1200 → `Drop`; `A2H` with Length `0x449d` padded to 1199 → `Drop`. A.2's own Length 1182 would fail `rfc_header` first and not test §14.1 (preflight M3).
     - **`route_vn`:** 3b's `vn_response` input → `VersionNegotiation(c0 00000000 04 0a0b0c0d 08 0001020304050607 00000001)`; truncated to 1199 → `Drop`.
     - **`route_reset`:** `[0x40] ++ [0x22; 8] ++ [0x33; 5] ++ [0x77; 16]` (30) → `Reset(7)`; tail `[0x78; 16]` → `Drop`; a 1200-byte Handshake long header with an unknown 8-byte DCID → `Drop`.
     - **`table_rules`:** `apply(8, Add([0x11; 8]))` false, lookup still 7; `apply(8, Remove(..))` false; `apply(7, Remove(..))` true, lookup None; `remove_conn(7)` empties both.
-    - **`table_full`:** add 4090 distinct 8-byte CIDs for connection 1; `has_room()` false; `A2H` padded to 1200 with an unknown DCID → `Drop`.
+    - **`table_full`:** add 4091 distinct 8-byte CIDs for connection 1 (4090 + 6 = 4096 still has room; preflight M2); `has_room()` false; `A2H` padded to 1200 with an unknown DCID → `Drop`.
 - [ ] **Step 2:** the tests fail.
 - [ ] **Step 3: Implement.** Duvet-cite §8.1's two server MUSTs at `amp_ok`/`on_sent` and `on_recv` (the rows close in 3d2 where every send is gated); §14.2 (the SHOULD at `MAX_DATAGRAM`; the cease-sending MUST as exception `reason=No PMTUD: we never determine a PMTU below 1200, and never send more than 1200 bytes.`); §5.2.2 (both MUSTs at rule 5); §5.2.3 and §21.11 (exceptions `reason=We never send a Stateless Reset.` plus `reason=No static key …` for §21.11's static-key MUST); §10.3 "MUST treat any packet ending in a valid stateless reset token as a Stateless Reset" at rule 4 (row closes in 3d2); §14.1's discard MUST at rule 2 (row closes in 3d2).
 - [ ] **Step 4: Mutations:** `amp_ok` over the whole trace only (fails at `on_sent` on a prefix); `budget` computed in `u64` without saturation (fails on overflow check); `pad_datagram` always adds `gap` (fails at `lemma_pad_exact`'s use); `rfc_route` rule order 3 before 1 with the exec unchanged (fails on `route`'s ensures).
 - [ ] **Step 5:** Four checks, evidence, quote check; MUST coverage for `5.2.2,5.2.3,14.2,21.11`.
-- [ ] **Step 6: Commits:** `feat(quic): verified amplification trace budget, exact datagram length specs, CID routing (RFC 9000 §5.2.2, §8.1, §14)`; matrix: `✅ 3d: crates/quic/src/route.rs` on §5.2.2 (replacing 3b's touched note); `✅ 3d: route.rs (exception: never sends resets, no static key)` on §5.2.3 and §21.11; `✅ 3d: datagram.rs MAX_DATAGRAM (exception: no PMTUD)` on §14.2.
+- [ ] **Step 6: Commits:** `feat(quic): verified amplification trace budget, exact datagram length specs, CID routing (RFC 9000 §5.2.2, §8.1, §14)`; matrix: `✅ 3d: crates/quic/src/route.rs` on §5.2.2 (replacing 3b's touched note); `✅ 3d: route.rs (exception: never sends resets, no static key)` on §5.2.3 and §21.11; `✅ 3d: datagram.rs MAX_DATAGRAM (exception: no PMTUD)` on §14.2. Also mark §10.3.3 (3b-owned and excepted in stateless.rs, but its matrix row lacks ✅; outside the 88) as `✅ 3b: exception — we never send a Stateless Reset (stateless.rs)` (preflight M20).
 
 ---
 
@@ -458,7 +480,7 @@ Touched notes replaced: 3b's on §5.2.2 (Task 6). 3b's on §10.3 and §19.20 and
 - Produces:
   - `pub const MAX_PATHS: usize = 4;` (`// ponytail: datagrams from a 5th distinct path are dropped uncounted (§9 "MUST either drop" branch).`), `pub const MAX_RESPONSES: usize = 4;` (per path; further challenges dropped until responses go out; the peer retransmits, §8.2.1 MAY).
   - **`pub enum PathState { Unvalidated, Validating, Validated }`** (Clone/Copy).
-  - **`pub struct Path`** — `id`, `amp: AmpBudget`, `state`, `challenge: Option<([u8; 8], u64 /*sent_at*/, bool /*padded*/)>`, `challenge_owed: bool` (started, not yet sent), `mtu_ok: bool`, `responses: Vec<[u8; 8]>`, `dcid: Option<Vec<u8>>` (the peer CID we send with on this path), `peer_used: Option<Vec<u8>>` (our CID the peer last used on this path), ghost `challenges_rcvd: Seq<[u8; 8]>`, `responses_taken: Seq<[u8; 8]>`.
+  - **`pub struct Path`** — `id`, `amp: AmpBudget`, `state`, `challenge: Option<([u8; 8], u64 /*started_at, preflight I5*/, bool /*padded*/)>`, `challenge_owed: bool` (started, not yet sent), `mtu_ok: bool`, `responses: Vec<[u8; 8]>`, `dcid: Option<Vec<u8>>` (the peer CID we send with on this path; None = nothing may be sent there, §9.5; preflight I1), `peer_used: Option<Vec<u8>>` (our CID the peer last used on this path), ghost `challenges_rcvd: Seq<[u8; 8]>`, `responses_taken: Seq<[u8; 8]>`.
   - **`pub struct Paths { paths: Vec<Path>, active: PathId, last_validated: Option<PathId> }`**; `wf()`: ids unique, `paths.len() <= MAX_PATHS`, `active` present; every `amp.wf()`; `responses_taken` is a sub-multiset of `challenges_rcvd` in order (one response per challenge, same data, §8.2.2); `last_validated is Some(p) ==> state(p) == Validated`; `responses.len() <= MAX_RESPONSES`.
   - `new(first: PathId) -> Paths` (Unvalidated, active); `index(&self, id) -> Option<usize>`; `insert(&mut self, id) -> (ok: bool)` (false when full).
   - `on_recv(&mut self, id, n: u64)`, `budget(&self, id) -> u64`, `on_sent(&mut self, id, n: u64)` (requires `n <= budget(id)`), `pub closed spec fn amp_trace(&self, id) -> Seq<AmpEv>` with `amp_ok` exported.
@@ -466,11 +488,11 @@ Touched notes replaced: 3b's on §5.2.2 (Task 6). 3b's on §10.3 and §19.20 and
   - **`on_challenge(&mut self, id, data: [u8; 8])`**: push to `responses` if room; ghost `challenges_rcvd.push(data)` (§19.17).
   - **`take_response(&mut self, id) -> (r: Option<[u8; 8]>)`**: pops the oldest; ensures `r` extends `responses_taken` consistently with `challenges_rcvd` (taken at most once).
   - **`start_challenge(&mut self, id, data: [u8; 8], now: u64)`**: `challenge = Some((data, now, false))`, `challenge_owed = true`, Unvalidated → Validating. `data` from shell randomness (§8.2.1 unpredictable).
-  - **`take_challenge(&mut self, id, padded: bool) -> Option<[u8; 8]>`**: if owed, clears `challenge_owed`, records `padded` and the send time, returns the data (3d2 builds the datagram and says whether it reached 1200).
+  - **`take_challenge(&mut self, id, padded: bool) -> Option<[u8; 8]>`**: if owed, clears `challenge_owed`, records `padded`, returns the data (3d2 builds the datagram and says whether it reached 1200). The challenge's clock is its `start_challenge` time; `deadline`/`on_timeout` use it (preflight I5).
   - **`on_response(&mut self, data: [u8; 8]) -> (r: Option<PathId>)`**: matches *any* path's outstanding challenge (no arrival-path parameter, §8.2.2 "MUST NOT be enforced"); on a match `set_validated`, `challenge = None`, `mtu_ok = padded`, returns the path; else None.
   - **`needs_mtu_probe(&self, id) -> bool`** = `state == Validated && !mtu_ok && challenge is None` (§8.2.1, §8.2.3 second validation at 1200).
-  - **`on_timeout(&mut self, now: u64, pto_us: u64) -> (failed: Option<PathId>)`**: for the first path with `challenge = Some((_, t, _))`, not owed, and `now >= t + 3·pto_us` (§8.2.4 SHOULD): clear the challenge, return it; state back to Unvalidated unless Validated (a failed MTU probe keeps Validated, `mtu_ok` false).
-  - `deadline(&self, pto_us) -> Option<u64>`, `active()`, `set_active(&mut self, id)`, `last_validated()`, `state(id)`, `dcid(id) -> Option<&[u8]>`, `set_dcid(&mut self, id, d: &[u8])`, `peer_used(id) -> Option<&[u8]>`, `set_peer_used(&mut self, id, d: &[u8])`, `has_response(id) -> bool`, `challenge_owed(id) -> bool`.
+  - **`on_timeout(&mut self, now: u64, pto_us: u64) -> (failed: Option<PathId>)`**: one failure per call. 3d2 Task 3 loops until None (preflight I5). For the first path with `challenge = Some((_, t, _))`, not owed, and `now >= t + 3·pto_us` (§8.2.4 SHOULD): clear the challenge, return it; state back to Unvalidated unless Validated (a failed MTU probe keeps Validated, `mtu_ok` false).
+  - `deadline(&self, pto_us) -> Option<u64>`, `active()`, `set_active(&mut self, id)`, `last_validated()`, `state(id)`, `dcid(id) -> Option<&[u8]>`, `set_dcid(&mut self, id, d: Option<&[u8]>)` (None clears it; preflight I1/I2), `peer_used(id) -> Option<&[u8]>`, `set_peer_used(&mut self, id, d: &[u8])`, `has_response(id) -> bool`, `challenge_owed(id) -> bool`.
 
 - [ ] **Step 1: Failing tests** (`tests/path.rs`; `D(x) = [x; 8]`):
   - **`respond_echo`:** `new(0)`, `on_challenge(0, D(1))`; `take_response(0) == Some(D(1))`, then `None`.
@@ -486,7 +508,7 @@ Touched notes replaced: 3b's on §5.2.2 (Task 6). 3b's on §10.3 and §19.20 and
 - [ ] **Step 3: Implement.** Duvet-cite §8.2.1 ("MUST use unpredictable data" at `start_challenge`; the expand MUST and "second path validation" MUST at `take_challenge`/`needs_mtu_probe` — the padding itself is 3d2's, so the expand (req) row's citation is repeated at 3d2's builder); §8.2.3 (at `needs_mtu_probe`); §19.17 (at `on_challenge`/`take_response`). §8.2.1's "MUST NOT discard … too small" is 3d2's.
 - [ ] **Step 4: Mutations:** `on_response` also requires the arrival path; `take_response` returns the newest; `needs_mtu_probe` ignores `mtu_ok`; `on_timeout` uses `2·pto_us`.
 - [ ] **Step 5:** Four checks, evidence, quote check; MUST coverage for `8.2.3,19.17`.
-- [ ] **Step 6: Commits:** `feat(quic): verified path table — per-path amplification, challenge/response bookkeeping (RFC 9000 §8.2, §19.17)`; matrix: `✅ 3d: crates/quic/src/path.rs` on §8.2.3 and §19.17; touched notes `3d: path.rs (closed in 3d2 Task 2)` on §8.2.1 and its three non-small (req) rows.
+- [ ] **Step 6: Commits:** `feat(quic): verified path table — per-path amplification, challenge/response bookkeeping (RFC 9000 §8.2, §19.17)`; matrix: `✅ 3d: crates/quic/src/path.rs` on §8.2.3 and §19.17; touched notes `3d: path.rs (closed in 3d2 Task 2b)` on §8.2.1 and its three non-small (req) rows.
 
 ---
 
@@ -495,30 +517,30 @@ Touched notes replaced: 3b's on §5.2.2 (Task 6). 3b's on §10.3 and §19.20 and
 | # | Obligation | Placed in |
 |---|---|---|
 | 1 | Cap the uni streams we open (h3: control + QPACK enc/dec = 3) | 3d Task 1 (`MAX_OWN_UNI` in `StreamIds::wf`, `uni_openable`) |
-| 2 | Absolute write backpressure (3c proves only buffered ≤ 2·unacked; `write` never refused) | 3d Task 1 (`MAX_SEND_BUFFER` in `Streams::wf`, `write` Err, `send_room`); 3d2 Task 1 (`stream_write` accepts a prefix); 3d2 Task 4 (adapter defers, `send_response` refuses while a deferral is pending, before h3 commits) |
-| 3 | ACK-range cap or min chunk, against alternate-ack + credit-drip growth | 3d Task 3 (`MAX_ACK_RANGES_IN`, `Recovery::can_send` ≤ 64 in flight, eliciting-only records); 3d2 Task 2 (`can_send` gate, `alternate_ack_range_growth` test) |
+| 2 | Absolute write backpressure (3c proves only buffered ≤ 2·unacked; `write` never refused) | 3d Task 1 (`MAX_SEND_BUFFER` in `Streams::wf`, `write` Err, `send_room`); 3d2 Task 1b (`stream_write` accepts a prefix); 3d2 Task 4 (adapter defers, `send_response` refuses while a deferral is pending, before h3 commits) |
+| 3 | ACK-range cap or min chunk, against alternate-ack + credit-drip growth | 3d Task 1 (`MAX_SEND_RANGES` new-data gate in `SendStream::poll_data`, `range_gate_pto_cycles`; preflight C1); 3d Task 3 (`MAX_ACK_RANGES_IN`, `Recovery::can_send` ≤ 64 in flight, eliciting-only records); 3d2 Task 2a (`can_send` gate); 3d2 Task 3 (`alternate_ack_range_growth` with PTO cycles). Bound tested, not proven (D4) |
 | 4 | `rfc_transport_params(b, true) == Ok(t) ==> stream_tp_ok(t)` for `peer_tp_wf` | 3d Task 5 (`theorem_peer_tp_wf`, `theorem_parsed_peer_stream_ok`) |
-| 5 | Loop on `poll_data`'s result, never on `next_off()` | 3d2 Task 2 (CRYPTO packing: `next_off` only sizes the header, one `poll_data` per space per packet, branch on its result); 3c's `poll_stream` already does |
-| 6 | Verus models Vec length: drop buffers on removal; capacity tests | 3d Tasks 3 (`drain_frees`); 3d2 Tasks 1–3 (`discard` assigns fresh `CryptoStream`/`SendStream`/`RecvPns`/`SentPackets`; `streams = None` on close; capacity tests) |
+| 5 | Loop on `poll_data`'s result, never on `next_off()` | 3d2 Task 2a (CRYPTO packing: `next_off` only sizes the header, one `poll_data` per space per packet, branch on its result); 3c's `poll_stream` already does |
+| 6 | Verus models Vec length: drop buffers on removal; capacity tests | 3d Tasks 3 (`drain_frees`); 3d2 Tasks 1a–3 (`discard` assigns fresh `CryptoStream`/`SendStream`/`RecvPns` and drains `SentPackets` (a fresh one would reset `next_pn`; preflight M17); `streams = None` on close; capacity tests) |
 | 7 | No per-event O(n) copies of attacker sizes | 3d Task 3 (`on_ack` rebuilds once), Task 6 (`remove_conn` once); 3d2 Task 4 (pending writes keep an offset, never re-copy the tail) |
 | 8 | Receive window not pinned (3c Task 5 Minor 1) | 3d Task 1 (window ensures, `lemma_wf` exports `rx_buffered_phys ≤ 2·window`) |
 | 2b-1 | Bounded streams; every event to H3Conn in order | 3d Task 5 (`local_tp_ok` ≤ `MAX_LOCAL_STREAMS`); 3d2 Task 4 (pump proof obligation) |
 | 2b-2 | `start()` before any event | 3d2 Task 4 (drain gated on `started`) |
 | 2b-3 | `initial_max_streams_uni >= 3` encoded | 3d Task 5 (`local_tp_ok`; RFC 9114 §6.2 tail closed) |
 | 2b-4 | Abort signal on Reset | 3d2 Task 4 (`AppEvent::Aborted(id)` on every client-bidi `Reset`) |
-| 3c | Frames polled are frames sent; forward every StopSending | 3d2 Task 2 (P8), Task 4 |
-| 3b | spin bit random per CID (§17.4); ack_contains meaningful under valid ranges | 3d Task 6 (`OutPacket.spin`); 3d2 Task 2 (`rand[128]` per CID change); 3d Task 3 (`on_ack` requires `rfc_ack_ranges_valid`) |
-| 4b | No 1-RTT processing before handshake complete (RFC 9001 §5.7) | 3d2 Task 1 (1-RTT dropped until `on_handshake_complete`; cite §5.7 there) |
+| 3c | Frames polled are frames sent; forward every StopSending | 3d2 Task 2a (P8), Task 4 |
+| 3b | spin bit random per CID (§17.4); ack_contains meaningful under valid ranges | 3d Task 6 (`OutPacket.spin`); 3d2 Tasks 1a–1b (`rand[128]` per CID change); 3d Task 3 (`on_ack` requires `rfc_ack_ranges_valid`) |
+| 4b | No 1-RTT processing before handshake complete (RFC 9001 §5.7) | 3d2 Task 1a (1-RTT dropped until `on_handshake_complete`; cite §5.7 there) |
 
 ## Binding notes for later phases
 
-- **3e:** `OutPacket` gains `spin: bool` (append `, false` to the 3e draft's literal `OutPacket{…}` vectors; 3e's `protect` passes it to `serialize_short_header`). `accept`/`on_datagram` now *require* `plain_wf` for every packet: discharge it from `parse_payload`'s `Ok` ensures (`frames_received`), the header's CID lengths and `decode_pn`'s bound. `RAND_LEN` is 129. Everything else in the 3e draft's 3d contract is unchanged.
+- **3e:** `OutPacket` gains `spin: bool` (append `, false` to the 3e draft's literal `OutPacket{…}` vectors; 3e's `protect` passes it to `serialize_short_header`). `accept`/`on_datagram` now *require* `plain_wf` for every packet: discharge it from `parse_payload`'s `Ok` ensures (`frames_received`), the header's CID lengths and `decode_pn`'s bound. `RAND_LEN` is 129. 3d2's `poll_transmit` now also exports `out_log()`, P7 on its result and P16 (`out_datagram_len <= MAX_DATAGRAM`), which 3e Task 5's `transmit` needs, so 3e's Decision 14 fallback is moot. 3e's cross-references to "3d Task 5/7", `2026-10-28-phase-3d2-quic-paths.md` and `tests/conn.rs` move to this plan's Task 6/8, 3d2 Tasks 1a–3 and `tests/conn_rx.rs` (preflight I6, M21). Everything else in the 3e draft's 3d contract is unchanged.
 - **Phase 4:** the TLS boundary is 3d2's `crypto_read`/`crypto_write`/`on_peer_params`/`on_handshake_complete`/`on_tls_alert` (the outline's `crypto_in`/`crypto_out`). `on_peer_params` requires `peer_tp_wf(tp@)`: call `theorem_peer_tp_wf` on the parsed extension. RFC 9001 A.2's ClientHello fails §7.3 against A.2's own header (`rfc9001_a2_iscid_mismatch`).
-- **Phase 6:** replace `Recovery`'s bodies (byte-based NewReno, RFC 9002 loss detection through `SentPackets::on_packet_lost`, `on_space_discarded`) keeping the signatures and the `amp_blocked` parameter; `MAX_INFLIGHT` stays as a memory cap.
+- **Phase 6:** replace `Recovery`'s bodies (byte-based NewReno, RFC 9002 loss detection through `SentPackets::on_packet_lost`, `on_space_discarded`) keeping the call sites and the `amp_blocked` parameter; signatures may grow (preflight M7); `MAX_INFLIGHT` stays as a memory cap.
 
 ## Exit criteria (Phase 3d)
 
-- All four checks pass on the merged tree with the base escape count N.
+- All four checks pass on the merged tree, with N = the escape count of `main` at merge (preflight M19d).
 - The 43 Task 2–8 rows carry `✅ 3d: <file>`, and §12.3, §13.2.1, §13.3 and the four §8.2.1 rows carry touched notes; 3b's touched note on §5.2.2 is replaced; RFC 9114 §6.2's tail is closed.
 - `python3 -I <scratch>/duvet_q.py <json> 5.1,5.1.1,5.1.2,5.2.2,5.2.3,7,7.2,7.3,7.4.1,8.1.3,8.2.3,10.1,10.2.3,10.3.2,11,13.2.3,13.2.5,13.4.1,13.4.2.1,13.4.2.2,14.2,19.15,19.16,19.17,21.11` prints nothing.
 - `phase-3d` is merged into `main`; 3d2 then runs.

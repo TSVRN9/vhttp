@@ -230,6 +230,12 @@ It consumes 3b `Frame` values and emits exactly the events `h3::conn` takes: `on
 **Key interfaces:**
 - `fn unprotect(datagram: &[u8], off: usize, keys: &PacketKeys, largest: Option<u64>, dcid_len: usize) -> Result<Option<(PlainPacket, usize)>, u64>`, where `Ok(None)` means drop.
 - `fn protect(p: &PlainPacket, keys: &PacketKeys, largest_acked: Option<u64>, out: &mut Vec<u8>)`.
+- **(preflight I6) What 3e consumes from 3d2 `Connection::poll_transmit`:**
+  - `out_log()` is pushed with exactly the returned datagram (unchanged on `None`);
+  - P7 holds on the result (`out_packet_wf` for every packet);
+  - `out_datagram_len(d) <= MAX_DATAGRAM`.
+
+  3e's send-side byte bound rests on these. `OutPacket` replaces `PlainPacket` on the send side, with `padding` and `spin` fields instead of `pad_to`.
 
 **Matrix rows it closes (5):** §9.7, §14, §14.2.1, §17.2, §17.3.1.
 
