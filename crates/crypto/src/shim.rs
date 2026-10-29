@@ -1,35 +1,6 @@
 //! Trusted shim: every RustCrypto call lives here. Plain Rust outside `verus!`; removed in phase 5.
 use sha2::{Digest, Sha256};
 
-pub(crate) fn aes128_encrypt_block(key: &[u8], block: &[u8]) -> [u8; 16] {
-    use aes::cipher::{BlockCipherEncrypt, KeyInit};
-    // unreachable: requires key@.len() == 16
-    let k: [u8; 16] = key.try_into().unwrap();
-    // unreachable: requires block@.len() == 16
-    let mut b: [u8; 16] = block.try_into().unwrap();
-    aes::Aes128::new(&k.into()).encrypt_block((&mut b).into());
-    b
-}
-
-pub(crate) fn aes128_gcm_seal(key: &[u8], nonce: &[u8], aad: &[u8], pt: &[u8]) -> Vec<u8> {
-    use aes_gcm::aead::{Aead, KeyInit, Payload};
-    // unreachable: requires key@.len() == 16
-    let k: [u8; 16] = key.try_into().unwrap();
-    // unreachable: requires nonce@.len() == 12
-    let n: [u8; 12] = nonce.try_into().unwrap();
-    // unreachable: requires pt@.len() <= GCM_MAX_PT_LEN (= P_MAX) and aad@.len() <= MAX_INPUT_LEN (< A_MAX)
-    aes_gcm::Aes128Gcm::new(&k.into()).encrypt(&n.into(), Payload { msg: pt, aad }).unwrap()
-}
-
-pub(crate) fn aes128_gcm_open(key: &[u8], nonce: &[u8], aad: &[u8], ct: &[u8]) -> Option<Vec<u8>> {
-    use aes_gcm::aead::{Aead, KeyInit, Payload};
-    // unreachable: requires key@.len() == 16
-    let k: [u8; 16] = key.try_into().unwrap();
-    // unreachable: requires nonce@.len() == 12
-    let n: [u8; 12] = nonce.try_into().unwrap();
-    aes_gcm::Aes128Gcm::new(&k.into()).decrypt(&n.into(), Payload { msg: ct, aad }).ok()
-}
-
 pub(crate) fn p256_public_key(d: &[u8]) -> Option<[u8; 65]> {
     use p256::elliptic_curve::sec1::ToSec1Point;
     // unreachable: requires d@.len() == 32
