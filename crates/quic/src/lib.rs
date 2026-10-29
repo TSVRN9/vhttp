@@ -3,7 +3,9 @@
 //! with their per-packet-type frame permissions, and transport parameters (3b).
 //! Credit counters (flow control) and stream-ID accounting, stream reassembly, CRYPTO
 //! streams, the receiving and sending parts of a stream, and the connection's streams (3c).
+//! Received packet numbers and ACK generation (3d).
 pub mod ack;
+pub mod ack_track;
 pub mod codes;
 pub mod crypto_stream;
 mod export_check;
