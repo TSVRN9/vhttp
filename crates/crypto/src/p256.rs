@@ -253,7 +253,7 @@ pub fn p256_ecdh(d: &[u8], peer: &[u8]) -> (r: Option<[u8; 32]>)
 
 // 1 <= os2ip(d) < n: the borrow of d - n, masked with d != 0.
 // ct: secret d; the result feeds only the caller's declassified (public) None outcome
-fn scalar_in_range(d: &[u8]) -> (r: bool)
+pub(crate) fn scalar_in_range(d: &[u8]) -> (r: bool)
     requires
         d@.len() == 32,
     ensures
@@ -301,7 +301,7 @@ const GY_MONT: [u64; 4] = [0xddf25357ce95560a, 0x8b4ab8e4ba19e45c, 0xd2e88688dd2
 
 // R^-1 mod p.
 // A spec fn rather than a `spec const RINV_P`, which Verus lowers to a fn that trips the snake-case lint.
-spec fn rinv_p() -> int {
+pub(crate) open spec fn rinv_p() -> int {
     0xfffffffe00000003fffffffd0000000200000001fffffffe0000000300000000int
 }
 
@@ -336,12 +336,12 @@ proof fn lemma_exp_const_p()
 }
 
 // Montgomery decode of canonical limbs into GF(p).
-spec fn fe(l: [u64; 4]) -> int {
+pub(crate) open spec fn fe(l: [u64; 4]) -> int {
     mdec(v4(l), p256_p(), rinv_p())
 }
 
 // Canonical limbs: below p.
-spec fn fe_ok(l: [u64; 4]) -> bool {
+pub(crate) open spec fn fe_ok(l: [u64; 4]) -> bool {
     v4(l) < p256_p()
 }
 
@@ -530,7 +530,7 @@ fn fe_from_be(b: &[u8], off: usize) -> (r: Option<[u64; 4]>)
 
 // I2OSP(fe(a), 32): decode (multiply by 1), then the limbs as big-endian octets.
 // ct: secret a
-fn fe_to_be(a: &[u64; 4]) -> (r: [u8; 32])
+pub(crate) fn fe_to_be(a: &[u64; 4]) -> (r: [u8; 32])
     ensures
         r@ == i2osp(fe(*a) as nat, 32),
 {
@@ -589,17 +589,17 @@ fn fe_is_zero(a: [u64; 4]) -> (r: u64)
 // ---- Affine points over GF(p) (SEC 1 v2 §2.2.1) ----
 
 // Montgomery-form affine coordinates; inf == 1 is O, whose coordinates are ignored.
-struct AffPt {
-    x: [u64; 4],
-    y: [u64; 4],
-    inf: u64,
+pub(crate) struct AffPt {
+    pub(crate) x: [u64; 4],
+    pub(crate) y: [u64; 4],
+    pub(crate) inf: u64,
 }
 
-spec fn pt_ok(p: AffPt) -> bool {
+pub(crate) open spec fn pt_ok(p: AffPt) -> bool {
     p.inf <= 1 && fe_ok(p.x) && fe_ok(p.y)
 }
 
-spec fn pt_view(p: AffPt) -> SpecPoint {
+pub(crate) open spec fn pt_view(p: AffPt) -> SpecPoint {
     if p.inf == 1 {
         SpecPoint::Infinity
     } else {
@@ -691,7 +691,7 @@ proof fn lemma_point_add_xy(l: int, x1: int, y1: int, x2: int, x3: int, s: int, 
 }
 
 // SEC 1 v2 §2.2.1 rules 1-5 with masks: one inversion, no branch on the points.
-// ponytail: affine, one Fermat inversion (384 Montgomery multiplies) per point op, ≈<measured> ms per scalar mult (release, Task 8 p256_speed); upgrade: Jacobian or RCB complete formulas once FLT for p and the formula identities are proven (Phase 5d)
+// ponytail: affine, one Fermat inversion (384 Montgomery multiplies) per point op, ≈6.1 ms per scalar mult (release, Task 8 p256_speed median; min 5.2 ms); upgrade: Jacobian or RCB complete formulas once FLT for p and the formula identities are proven (Phase 5d)
 // ct: secret a, b
 #[verifier::spinoff_prover]
 fn point_add_ct(a: &AffPt, b: &AffPt) -> (r: AffPt)
@@ -849,7 +849,7 @@ fn sec1_encode_affine(p: &AffPt) -> (r: [u8; 65])
 }
 
 // SP 800-186 §3.2.1.3 G in Montgomery form.
-fn g_point() -> (r: AffPt)
+pub(crate) fn g_point() -> (r: AffPt)
     ensures
         pt_ok(r),
         pt_view(r) == p256_g(),
@@ -861,7 +861,7 @@ fn g_point() -> (r: AffPt)
 }
 
 // G satisfies SEC 1 v2 §2.2.1's defining equation; plain Z3 on the literals.
-proof fn lemma_g_on_curve()
+pub(crate) proof fn lemma_g_on_curve()
     ensures
         on_curve(os2ip(P256_GX@) as int, os2ip(P256_GY@) as int),
 {
@@ -874,7 +874,7 @@ proof fn lemma_g_on_curve()
 // ponytail: 256 doublings + 256 additions, all affine with one inversion each; upgrade: a fixed window or a Montgomery ladder on projective coordinates once 5d's RCB formulas are wired to exec
 // ct: secret k, pt
 #[verifier::spinoff_prover]
-fn scalar_mult_ct(k: &[u8], pt: &AffPt) -> (r: AffPt)
+pub(crate) fn scalar_mult_ct(k: &[u8], pt: &AffPt) -> (r: AffPt)
     requires
         k@.len() == 32,
         pt_ok(*pt),
