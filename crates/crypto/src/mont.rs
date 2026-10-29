@@ -67,7 +67,7 @@ proof fn bv_split128(x: u128) by (bit_vector)
 }
 
 // a * b + c + d as (low, high) limbs.
-// ct: secret a, b, c, d
+#[cfg_attr(ct_check, ct::secret(a, b, c, d))]
 fn mac(a: u64, b: u64, c: u64, d: u64) -> (r: (u64, u64))
     ensures
         r.0 as int + r.1 as int * 0x1_0000_0000_0000_0000 == a as int * b as int + c as int + d as int,
@@ -156,7 +156,7 @@ proof fn lemma_chain4(
 }
 
 // One CIOS row: r * 2^64 == t + ai * B + q * M, with r < 2M.
-// ct: secret t, ai, b; public m, mp
+#[cfg_attr(ct_check, ct::secret(t, ai, b), ct::public(m, mp))]
 // `z` is read only by proof code, which a plain `cargo build` erases.
 #[allow(unused_variables)]
 #[verifier::spinoff_prover]
@@ -284,7 +284,7 @@ pub(crate) proof fn bv_sel(x: u64, y: u64, b: u64) by (bit_vector)
 }
 
 // a - b - bin as (low limb, borrow).
-// ct: secret a, b, bin
+#[cfg_attr(ct_check, ct::secret(a, b, bin))]
 fn sbb(a: u64, b: u64, bin: u64) -> (r: (u64, u64))
     requires
         bin <= 1,
@@ -408,7 +408,7 @@ proof fn lemma_sub_chain(
 }
 
 // Montgomery product: r < m and r * 2^256 == a * b (mod m).
-// ct: secret a, b; public m, mp
+#[cfg_attr(ct_check, ct::secret(a, b), ct::public(m, mp))]
 // The row quotients and `d4` are read only by proof code, which a plain `cargo build` erases.
 #[allow(unused_variables)]
 #[verifier::spinoff_prover]
@@ -500,7 +500,7 @@ pub(crate) fn mont_mul(a: &[u64; 4], b: &[u64; 4], m: &[u64; 4], mp: u64) -> (r:
 }
 
 // a + b + cin as (low limb, carry).
-// ct: secret a, b, cin
+#[cfg_attr(ct_check, ct::secret(a, b, cin))]
 fn adc(a: u64, b: u64, cin: u64) -> (r: (u64, u64))
     requires
         cin <= 1,
@@ -517,7 +517,7 @@ fn adc(a: u64, b: u64, cin: u64) -> (r: (u64, u64))
 }
 
 // 4-limb add with carry out.
-// ct: secret a, b
+#[cfg_attr(ct_check, ct::secret(a, b))]
 fn add4(a: &[u64; 4], b: &[u64; 4]) -> (r: ([u64; 4], u64))
     ensures
         r.1 <= 1,
@@ -554,7 +554,7 @@ fn add4(a: &[u64; 4], b: &[u64; 4]) -> (r: ([u64; 4], u64))
 }
 
 // 4-limb subtract with borrow out: the shared constant-time compare and subtract.
-// ct: secret a, b
+#[cfg_attr(ct_check, ct::secret(a, b))]
 pub(crate) fn sub4(a: &[u64; 4], b: &[u64; 4]) -> (r: ([u64; 4], u64))
     ensures
         r.1 <= 1,
@@ -591,7 +591,7 @@ pub(crate) fn sub4(a: &[u64; 4], b: &[u64; 4]) -> (r: ([u64; 4], u64))
 }
 
 // Masked 4-limb select: b == 1 picks x, b == 0 picks y.
-// ct: secret b, x, y
+#[cfg_attr(ct_check, ct::secret(b, x, y))]
 pub(crate) fn select4(b: u64, x: &[u64; 4], y: &[u64; 4]) -> (r: [u64; 4])
     requires
         b <= 1,
@@ -640,7 +640,7 @@ proof fn bv_xor_eq(x: u64, y: u64) by (bit_vector)
 }
 
 // 1 iff v4(a) == 0, without branching.
-// ct: secret a
+#[cfg_attr(ct_check, ct::secret(a))]
 pub(crate) fn is_zero4(a: &[u64; 4]) -> (r: u64)
     ensures
         r <= 1,
@@ -654,7 +654,7 @@ pub(crate) fn is_zero4(a: &[u64; 4]) -> (r: u64)
 }
 
 // 1 iff a == b limb for limb, without branching.
-// ct: secret a, b
+#[cfg_attr(ct_check, ct::secret(a, b))]
 pub(crate) fn eq4(a: &[u64; 4], b: &[u64; 4]) -> (r: u64)
     ensures
         r <= 1,
@@ -676,7 +676,7 @@ pub(crate) fn eq4(a: &[u64; 4], b: &[u64; 4]) -> (r: u64)
 }
 
 // (a + b) mod m for a, b < m: add, then a masked conditional subtract.
-// ct: secret a, b; public m
+#[cfg_attr(ct_check, ct::secret(a, b), ct::public(m))]
 pub(crate) fn add_mod(a: &[u64; 4], b: &[u64; 4], m: &[u64; 4]) -> (r: [u64; 4])
     requires
         v4(*a) < v4(*m),
@@ -705,7 +705,7 @@ pub(crate) fn add_mod(a: &[u64; 4], b: &[u64; 4], m: &[u64; 4]) -> (r: [u64; 4])
 }
 
 // (a - b) mod m (Euclidean) for a, b < m: subtract, then a masked conditional add of m.
-// ct: secret a, b; public m
+#[cfg_attr(ct_check, ct::secret(a, b), ct::public(m))]
 pub(crate) fn sub_mod(a: &[u64; 4], b: &[u64; 4], m: &[u64; 4]) -> (r: [u64; 4])
     requires
         v4(*a) < v4(*m),
@@ -923,7 +923,7 @@ pub(crate) proof fn bv_bit_u8(b: u8, k: u8) by (bit_vector)
 }
 
 // x^e in Montgomery form, by square-and-multiply over the public big-endian exponent e.
-// ct: secret x; public e, m, mp, one
+#[cfg_attr(ct_check, ct::secret(x), ct::public(e, m, mp, one))]
 // ponytail: plain square-and-multiply over the public exponent, 256 squarings + popcount(e) multiplies (≈12 µs per fe_inv, release, Task 8 p256_speed median: 6.1 ms per scalar mult / 512 point ops of one inversion each); upgrade: a fixed addition chain (~115 fewer multiplies) with one exponent-arithmetic proof per step
 pub(crate) fn mont_pow(
     x: &[u64; 4],
@@ -1072,7 +1072,7 @@ proof fn lemma_os2ip_be8(s: Seq<u8>)
 }
 
 // The u64 whose big-endian bytes are b[off..off + 8].
-// ct: secret b; public off
+#[cfg_attr(ct_check, ct::secret(b), ct::public(off))]
 fn load_be64(b: &[u8], off: usize) -> (r: u64)
     requires
         off + 8 <= b@.len(),
@@ -1090,7 +1090,7 @@ fn load_be64(b: &[u8], off: usize) -> (r: u64)
 }
 
 // Limbs of the big-endian 32-octet integer b[off..off + 32].
-// ct: secret b; public off
+#[cfg_attr(ct_check, ct::secret(b), ct::public(off))]
 pub(crate) fn limbs_from_be(b: &[u8], off: usize) -> (r: [u64; 4])
     requires
         off + 32 <= b@.len(),
@@ -1118,7 +1118,7 @@ pub(crate) fn limbs_from_be(b: &[u8], off: usize) -> (r: [u64; 4])
 }
 
 // I2OSP(v4(l), 32): the limbs as 32 big-endian octets.
-// ct: secret l
+#[cfg_attr(ct_check, ct::secret(l))]
 pub(crate) fn limbs_to_be(l: &[u64; 4]) -> (r: [u8; 32])
     ensures
         r@ == i2osp(v4(*l) as nat, 32),

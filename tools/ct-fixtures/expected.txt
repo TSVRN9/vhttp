@@ -1,0 +1,44 @@
+ok ct_fixtures::fx::pos_bare_public
+ok ct_fixtures::fx::pos_call_chain
+ok ct_fixtures::fx::pos_declassified_branch
+ok ct_fixtures::fx::pos_ghost_arg
+ok ct_fixtures::fx::pos_key_first_root
+ok ct_fixtures::fx::pos_label_line
+ok ct_fixtures::fx::pos_len_of_secret_slice
+ok ct_fixtures::fx::pos_masked_select
+ok ct_fixtures::fx::pos_mut_param_update
+ok ct_fixtures::fx::pos_public_loop_over_secret_array
+ok ct_fixtures::fx::pos_u128_mul_mask
+reject ct_fixtures::fx::W::g Root
+reject ct_fixtures::fx::neg_ambiguous_callee Unsupported
+reject ct_fixtures::fx::neg_ambiguous_generic Unsupported
+reject ct_fixtures::fx::neg_box Unsupported
+reject ct_fixtures::fx::neg_char Unsupported
+reject ct_fixtures::fx::neg_closure_call Unsupported
+reject ct_fixtures::fx::neg_drop_non_vec Unsupported
+reject ct_fixtures::fx::neg_duplicate_param_name Attr
+reject ct_fixtures::fx::neg_dyn Unsupported
+reject ct_fixtures::fx::neg_enum_discriminant Unsupported
+reject ct_fixtures::fx::neg_float Unsupported
+reject ct_fixtures::fx::neg_fn_pointer_call Unsupported
+reject ct_fixtures::fx::neg_interior_mut Unsupported
+reject ct_fixtures::fx::neg_intr_type_args Unsupported
+reject ct_fixtures::fx::neg_key_second_root Unsupported
+reject ct_fixtures::fx::neg_label_line_missing_param Attr
+reject ct_fixtures::fx::neg_missing_param_name Attr
+reject ct_fixtures::fx::neg_mut_param_label ArgLabel,MutLabel
+reject ct_fixtures::fx::neg_raw_pointer Unsupported
+reject ct_fixtures::fx::neg_root_without_label Root
+reject ct_fixtures::fx::neg_secret_and_and SecretSwitch
+reject ct_fixtures::fx::neg_secret_div SecretAssert,SecretDivOperand
+reject ct_fixtures::fx::neg_secret_early_return SecretSwitch
+reject ct_fixtures::fx::neg_secret_if SecretSwitch
+reject ct_fixtures::fx::neg_secret_index SecretAssert,SecretIndex
+reject ct_fixtures::fx::neg_secret_match SecretSwitch
+reject ct_fixtures::fx::neg_secret_rem_u128 SecretDivOperand
+reject ct_fixtures::fx::neg_secret_shift SecretShift
+reject ct_fixtures::fx::neg_secret_to_unlabeled_helper ArgLabel
+reject ct_fixtures::fx::neg_secret_while SecretSwitch
+reject ct_fixtures::fx::neg_unknown_attr Attr
+reject ct_fixtures::fx::neg_unknown_param_name Attr
+reject ct_fixtures::fx::neg_unresolved_callee Unresolved

@@ -74,6 +74,7 @@ pub proof fn lemma_spec_hkdf_expand_len(prk: Seq<u8>, info: Seq<u8>, len: nat)
 }
 
 // buf[0..32] := t, the rest unchanged: writes T(i-1) into HKDF-Expand's reused buffer.
+#[cfg_attr(ct_check, ct::secret(buf, t))]
 fn copy_t(buf: &mut Vec<u8>, t: &[u8; 32])
     requires
         old(buf)@.len() >= 32,
@@ -97,6 +98,7 @@ fn copy_t(buf: &mut Vec<u8>, t: &[u8; 32])
 }
 
 /// RFC 5869 §2.2; verified against spec_hkdf_extract.
+#[cfg_attr(ct_check, ct::secret(ikm), ct::public(salt))]
 pub fn hkdf_extract(salt: &[u8], ikm: &[u8]) -> (r: [u8; 32])
     requires
         salt@.len() <= MAX_INPUT_LEN,
@@ -109,6 +111,7 @@ pub fn hkdf_extract(salt: &[u8], ikm: &[u8]) -> (r: [u8; 32])
 
 /// RFC 5869 §2.3; verified against spec_hkdf_expand. 8160 = 255 * HashLen is the output bound.
 #[verifier::spinoff_prover]
+#[cfg_attr(ct_check, ct::secret(prk), ct::public(info, len))]
 pub fn hkdf_expand(prk: &[u8], info: &[u8], len: usize) -> (r: Vec<u8>)
     requires
         prk@.len() == 32,
