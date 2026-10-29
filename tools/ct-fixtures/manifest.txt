@@ -48,3 +48,10 @@ root ct_fixtures::fx::neg_interior_mut
 root ct_fixtures::fx::neg_enum_discriminant
 root ct_fixtures::fx::pos_label_line
 root ct_fixtures::fx::neg_label_line_missing_param
+# Ambiguous keys. The `W::g` root names two fns. Keys are bound across the crate's roots in
+# manifest order, so pos_key_first_root must stay before neg_key_second_root.
+root ct_fixtures::fx::W::g
+root ct_fixtures::fx::neg_ambiguous_callee
+root ct_fixtures::fx::neg_ambiguous_generic
+root ct_fixtures::fx::pos_key_first_root
+root ct_fixtures::fx::neg_key_second_root
