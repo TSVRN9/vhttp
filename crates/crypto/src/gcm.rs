@@ -149,6 +149,7 @@ proof fn bv_gf128_step(x: u128, z: u128, v: u128, s: u128) by (bit_vector)
 // ponytail: 128 masked shift/xor steps per 16-byte block, ≈0.16 µs/block (release); upgrade:
 // carry-less multiply (PCLMULQDQ) behind an equivalence lemma. 4-bit Shoup tables are faster
 // but index by H, so not constant-time style
+#[cfg_attr(ct_check, ct::secret(x, y))]
 fn gf128_mul_exec(x: u128, y: u128) -> (r: u128)
     ensures
         r == gf128_mul(x, y),
@@ -192,6 +193,7 @@ proof fn bv_shr_zero() by (bit_vector)
 }
 
 // SP 800-38D §6.1: a 16-byte block as a 128-bit big-endian integer.
+#[cfg_attr(ct_check, ct::secret(src), ct::public(off))]
 fn load_be128(src: &[u8], off: usize) -> (r: u128)
     requires
         off + 16 <= src@.len(),
@@ -289,6 +291,7 @@ proof fn lemma_i2osp_be16(x: u128)
 }
 
 // SP 800-38D §6.1: a 128-bit integer as a 16-byte big-endian block.
+#[cfg_attr(ct_check, ct::secret(x))]
 fn store_be128(x: u128) -> (r: [u8; 16])
     ensures
         r@ == i2osp(x as nat, 16),
@@ -319,6 +322,7 @@ fn store_be128(x: u128) -> (r: [u8; 16])
 }
 
 // SP 800-38D §6.4 GHASH over data || 0^v, continuing from y = GHASH_H(s[0..off]).
+#[cfg_attr(ct_check, ct::secret(y, h, data))]
 fn ghash_padded(
     y: u128,
     h: u128,
@@ -513,6 +517,7 @@ pub proof fn lemma_gctr_len(key: Seq<u8>, icb: Seq<u8>, x: Seq<u8>)
 }
 
 // SP 800-38D §6.5 GCTR from counter block nonce || [c0]_32, appended to out.
+#[cfg_attr(ct_check, ct::secret(rk, x, out), ct::public(nonce, c0))]
 fn gctr_append(
     rk: &[u8; 176],
     Ghost(key): Ghost<Seq<u8>>,
@@ -601,6 +606,7 @@ proof fn lemma_pad16(d: Seq<u8>)
 }
 
 // SP 800-38D §7.1 steps 1, 2, 5, 6: the tag GCTR_K(J0, GHASH_H(A || 0^v || C || 0^u || lengths)).
+#[cfg_attr(ct_check, ct::secret(rk, c), ct::public(nonce, aad))]
 fn gcm_tag_exec(
     rk: &[u8; 176],
     Ghost(key): Ghost<Seq<u8>>,
@@ -719,6 +725,7 @@ proof fn bv_ctacc(acc: u8, a: u8, b: u8) by (bit_vector)
 }
 
 /// SP 800-38D §7.1 (96-bit IV, 128-bit tag); verified against spec_gcm_seal.
+#[cfg_attr(ct_check, ct::secret(key, pt), ct::public(nonce, aad))]
 pub fn aes128_gcm_seal(key: &[u8], nonce: &[u8], aad: &[u8], pt: &[u8]) -> (r: Vec<u8>)
     requires
         key@.len() == 16,
@@ -749,6 +756,7 @@ pub fn aes128_gcm_seal(key: &[u8], nonce: &[u8], aad: &[u8], pt: &[u8]) -> (r: V
 }
 
 /// SP 800-38D §7.2; verified against spec_gcm_open. The tag is checked before any plaintext is produced.
+#[cfg_attr(ct_check, ct::secret(key), ct::public(nonce, aad, ct))]
 pub fn aes128_gcm_open(key: &[u8], nonce: &[u8], aad: &[u8], ct: &[u8]) -> (r: Option<Vec<u8>>)
     requires
         key@.len() == 16,
@@ -800,7 +808,7 @@ pub fn aes128_gcm_open(key: &[u8], nonce: &[u8], aad: &[u8], ct: &[u8]) -> (r: O
     assert((diff == 0) == (ct@.subrange(ct.len() - 16, ct.len() as int) == t@));
     // ponytail: the only branch on tag bytes; it reveals only accept/reject, which the caller
     // learns anyway
-    if diff != 0 {
+    if crate::ct::declassify(diff != 0) {
         return None;
     }
     // SP 800-38D §7.2 step 4: P = GCTR_K(inc32(J0), C), only after the tag matched.

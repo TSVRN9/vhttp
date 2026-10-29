@@ -1,0 +1,10 @@
+[package]
+name = "ct-driver"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ctcore = { path = "../../crates/ctcore" }
+
+# own workspace: cargo verus and the root workspace never see this rustc_private crate
+[workspace]

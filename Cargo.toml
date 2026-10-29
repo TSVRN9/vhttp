@@ -1,3 +1,31 @@
 [workspace]
 members = ["crates/*"]
 resolver = "2"
+
+# unverified code keeps the checks
+[profile.release]
+overflow-checks = true
+
+# verified: Verus proves exec arithmetic does not overflow
+[profile.release.package.wire]
+overflow-checks = false
+
+# verified: Verus proves exec arithmetic does not overflow
+[profile.release.package.h3]
+overflow-checks = false
+
+# verified: Verus proves exec arithmetic does not overflow
+[profile.release.package.quic]
+overflow-checks = false
+
+# verified: Verus proves exec arithmetic does not overflow
+[profile.release.package.tls]
+overflow-checks = false
+
+# verified: Verus proves exec arithmetic does not overflow
+[profile.release.package.crypto]
+overflow-checks = false
+
+# verified: Verus proves exec arithmetic does not overflow
+[profile.release.package.ctcore]
+overflow-checks = false

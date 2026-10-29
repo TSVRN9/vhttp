@@ -42,6 +42,7 @@ proof fn lemma_hmac_k0(key: Seq<u8>)
 }
 
 // RFC 2104 §2 steps (1)-(7), with the core's 2^61-byte hash bound on msg.
+#[cfg_attr(ct_check, ct::secret(key, msg))]
 pub(crate) fn hmac_sha256_core(key: &[u8], msg: &[u8]) -> (r: [u8; 32])
     requires
         key@.len() <= MAX_INPUT_LEN,
@@ -104,6 +105,7 @@ pub(crate) fn hmac_sha256_core(key: &[u8], msg: &[u8]) -> (r: [u8; 32])
 }
 
 /// RFC 2104 §2 (B = 64, L = 32); verified against spec_hmac_sha256.
+#[cfg_attr(ct_check, ct::secret(key, msg))]
 pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> (r: [u8; 32])
     requires
         key@.len() <= MAX_INPUT_LEN,
