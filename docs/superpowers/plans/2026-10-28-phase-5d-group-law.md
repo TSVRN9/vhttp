@@ -35,7 +35,7 @@ All probes live in `<scratch>/probe-5d/`, where `<scratch>` is `/tmp/claude-1000
 
     | fact | measurement |
     |---|---|
-    | per-assert timeout | wall-clock ≈ 0.22 s × rlimit: about 0.87 s at `--rlimit 4` and 9 s at 40 (`tr*.rs`); `#[verifier::rlimit(40)]` on the fn does **not** raise it |
+    | per-assert timeout | wall-clock ≈ 0.22 s × rlimit: about 0.87 s at `--rlimit 4` and 9 s at 40 (`tr*.rs`); `#[verifier::rlimit(40)]` on the fn does **not** raise it | *(superseded: see Amendments A1)*
     | recursion depth | 1000 frames pass, 3000 fail (`d.rs`) |
     | memoization | none: `f(k-1) + f(k-1)` is exponential, `let` sharing works (`memo.rs`) |
     | cost per evaluator step | grows with the size of the values touched, superlinearly for bigints: a 1 Mbit int arg costs 27 ms per call, 8 Mbit 630 ms, an 8k-node datatype 1.5 ms, a 10k-element `Seq` 0.7 ms (`bi.rs`, `dt*.rs`, `sq.rs`) |
@@ -178,7 +178,7 @@ All probes live in `<scratch>/probe-5d/`, where `<scratch>` is `/tmp/claude-1000
     - Probe: going through `os2ip` is 60× slower (D1).
   - **Shape:** one assert per proof fn.
   - **Chunks to `forall`.** Each chunk's compute assert ensures a recursive range predicate, e.g. `cells_ok(i, j, lo, hi)` (recursion on `hi − lo`). One induction lemma per grid family, written once (`lemma_cells_forall` in `red.rs`, reused by `grid_small.rs` and `assoc_id.rs`), turns the chunk conjunction into the `forall` premise of `lemma_identity`. Never one Z3 query over all chunks.
-  - **Timing:** each assert ≤ 0.15 s measured at `--rlimit 4`, a 6× margin under the wall-clock cap, which a loaded machine erodes. Recursion inside compute ≤ 300 deep. Spec fn bodies evaluated by compute have ≤ 30 `let`s. No reliance on memoization.
+  - **Timing:** each assert ≤ 0.15 s measured at `--rlimit 4`, a 6× margin under the wall-clock cap, which a loaded machine erodes. Recursion inside compute ≤ 300 deep. Spec fn bodies evaluated by compute have ≤ 30 `let`s. No reliance on memoization. *(superseded: see Amendments A1)*
   - Revert failing compute negative controls at once.
 - **Generator.**
   - `scripts/gen_p256_group.py` is stdlib-only, run as `python3 -I scripts/gen_p256_group.py [--check]`.
@@ -192,7 +192,7 @@ All probes live in `<scratch>/probe-5d/`, where `<scratch>` is `/tmp/claude-1000
   - `scripts/p256_pratt.json` comes from `scripts/p256_pratt_factor.py` (needs sympy; offline, untrusted, documented in its docstring). The generator only reads it.
 - **TRUSTED.md row**, added in Task 2. It must not start with `| crypto::`, so the gate's row count is unchanged:
   ```
-  | `by (compute_only)` results (Verus's spec-function interpreter): the 5b S-box chunks and the 5d Pratt certificates, torsion certificate, identity grids and nG chain are accepted from the interpreter's evaluation without a Z3 re-check, so an interpreter bug could make them unsound. Its per-assert timeout is wall-clock (≈0.22 s × rlimit), so a heavily loaded machine can make a chunk fail, never wrongly pass | crates/crypto/src/aes.rs, crates/crypto/src/p256_group/ | part of Verus (already in the trusted base); listed so the reliance is visible | never |
+  | `by (compute_only)` results (Verus's spec-function interpreter): the 5b S-box chunks and the 5d Pratt certificates, torsion certificate, identity grids and nG chain are accepted from the interpreter's evaluation without a Z3 re-check, so an interpreter bug could make them unsound. Its per-assert timeout is wall-clock (≈0.22 s × rlimit), so a heavily loaded machine can make a chunk fail, never wrongly pass | crates/crypto/src/aes.rs, crates/crypto/src/p256_group/ | part of Verus (already in the trusted base); listed so the reliance is visible | never | *(superseded: see Amendments A1)*
   ```
 - **Proof patterns.**
   - `integer_ring` is unavailable. `nonlinear_arith` only with at most one product per side or tiny bodies (the 5c D1 probes).
@@ -219,7 +219,7 @@ All probes live in `<scratch>/probe-5d/`, where `<scratch>` is `/tmp/claude-1000
 1. **Vacuous proofs.** A theorem can verify because its premise is unsatisfiable or a predicate is trivially true (`fits`, `on3`, `valid`, `rfits` with the −1 zero sentinel). Task 5 adds `lemma_identity_nonvacuous`, and Task 8 runs spot vectors (G+G, G+(−G)) through `dec`/`rcb`. Each must use a premise that is actually satisfied.
 2. **Degree tracking too small for its grid.** If `rd_mul` drops the +3 per shared y-bit (the F_i factor) or mishandles the −1 sentinel, the grid would be too small. The `lemma_rfits_mul` proof must reject that. The Task 5 mutation makes `rd_mul` omit the +3 and must fail on `lemma_rfits_mul`, not elsewhere.
 3. **Interface drift against 5c.** The exported statements are copied byte for byte. `lemma_5c_interface_smoke` (Task 9) calls both lemmas exactly as 5c Tasks 6–7 will: a doubling step on a ghost `ev`, and `1 <= k < p256_n()` with k: nat.
-4. **Compute timeouts under load.** The cap is wall-clock, so verify.sh could fail on a busy machine. Every chunk is ≤ 0.15 s at `--rlimit 4`. The Task 7 report includes a run with four parallel `cargo verus focus` jobs, for each grid module.
+4. **Compute timeouts under load.** The cap is wall-clock, so verify.sh could fail on a busy machine. Every chunk is ≤ 0.15 s at `--rlimit 4`. The Task 7 report includes a run with four parallel `cargo verus focus` jobs, for each grid module. *(superseded: see Amendments A1)*
 5. **The spec's exact branch conditions.** `point_add` compares coordinates with plain `==` and tests `fmod(y1 + y2) == 0` before doubling. The correspondence (Task 8) must split on exactly those conditions, and must prove y2 == y1, as ints in [0, p), in the doubling branch. Spot vector: P + P with y1 ≠ 0, and P + (−P), on G.
 
 ---
@@ -649,7 +649,7 @@ That is about 3000 hand-written lines over 10 tasks, with 4 of them 5b-scale. 5a
 - `crate::p256_group::{lemma_scalar_mult_double, lemma_scalar_mult_g_nonzero}` have exactly the frozen statements, and `lemma_5c_interface_smoke` verifies.
 - TRUSTED.md gains only the `compute_only` row, and `| crypto::` rows are unchanged.
 - `gen_p256_group.py --check` passes. Every `@generated` file is reproduced byte for byte.
-- No 5d function takes ≥ 60 s. Every compute chunk is ≤ 0.15 s at `--rlimit 4`, and the parallel load test passes.
+- No 5d function takes ≥ 60 s. Every compute chunk is ≤ 0.15 s at `--rlimit 4`, and the parallel load test passes. *(superseded: see Amendments A1)*
 - `phase-5d` is merged into `main`. The controller then amends 5c's Global Constraints `compute_only` bullet so that it governs 5c's files (`p256.rs`, `ecdsa.rs`, `mont.rs`) and names `p256_group` as 5d's scope. This is a wording-only change, which 5c Task 6's preflight records.
 
 ## Self-review (done while writing)
@@ -679,3 +679,11 @@ That is about 3000 hand-written lines over 10 tasks, with 4 of them 5b-scale. 5a
   - **Probed after the advisor's review:** the 60× cost of an `os2ip`-based modulus, which is why the literal-constant rule exists.
   - **Not probed:** the proof effort of Tasks 1, 4, 5 and 8. These are standard inductive developments with no compute, sized by analogy with 5b.
 - **Type consistency.** `Proj`, `PF`/`PD`, `RF`/`RD`, `MP`, `curve_pt`, `on3`, `valid`/`dec`/`enc`, `powmod` and `finv_fast` are used with one meaning throughout. The exported names match 5c @ 4812b13.
+
+
+## Amendments (controller rulings during execution, 2026-10-29)
+
+- **A1. The compute limits are deterministic, not wall-clock** (measured in Task 3, fix round 1). The evaluator enforces a recursion-depth cap of about 120 nested calls × rlimit, plus a step budget proportional to rlimit. Neither depends on wall time or machine load. The rule that replaces "≤ 0.15 s at `--rlimit 4`" (D1 table, Timing bullet, TRUSTED row text, Review Focus 4, exit criterion): **every compute lemma passes a fresh run at `--rlimit 0.6`**, a 6× margin. The parallel load test is no longer needed. TRUSTED.md states the deterministic mechanism.
+- **A2. Inverse-witness tables are allowed** (Task 10). `WS_k` Seq tables may appear in compute. Each witness w is checked in compute (`den·w ≡ 1 mod p`) and tied to `finv` by `lemma_finv_unique`, so none of them is trusted.
+- **A3. Inline Z3 algebra.** The Task 3 exception covered degree-4 Q2 identities proved with hand-applied vstd distribution lemmas. After Task 5, `nonlinear_arith` is allowed only for single-assert monomial reorders that contain no `%` (group.rs, rcb.rs, poly.rs smoke). Every polynomial identity still goes through the grid machinery.
+- **A4. The verify-time budget is wall-clock.** It is crypto `verify.sh` total time. 5d adds +7.1 s of wall time (19.6 → 26.7 s), within budget. Solver CPU time across threads rose by about 95 s and runs in parallel.
