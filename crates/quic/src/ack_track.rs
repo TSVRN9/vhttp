@@ -35,6 +35,11 @@ pub open spec fn lo_ge(r: Seq<(u64, u64)>, m: u64) -> bool {
 /// the floor.
 pub open spec fn ranges_wf(r: Seq<(u64, u64)>, floor: u64, seen: Set<u64>) -> bool {
     &&& r.len() <= MAX_ACK_RANGES
+    &&& ranges_inv(r, floor, seen)
+}
+
+/// `ranges_wf` without the length bound, which an insertion may exceed by one.
+pub open spec fn ranges_inv(r: Seq<(u64, u64)>, floor: u64, seen: Set<u64>) -> bool {
     &&& ranges_ok(r)
     &&& lo_ge(r, floor)
     &&& forall|p: u64| in_ranges(r, p) ==> #[trigger] seen.contains(p)
@@ -48,6 +53,7 @@ pub open spec fn insert_post(r: Seq<(u64, u64)>, s: Seq<(u64, u64)>, pn: u64, m:
     &&& lo_ge(s, m)
     &&& forall|p: u64| #[trigger] in_ranges(s, p) == (in_ranges(r, p) || p == pn)
     &&& 0 < s.len() <= r.len() + 1
+    &&& s.len() == r.len() + 1 && r.len() > 0 && pn > r.last().1 ==> s.last() == r.last()
     &&& s[0].1 == if r.len() > 0 && r[0].1 > pn {
         r[0].1
     } else {
@@ -120,7 +126,11 @@ pub struct RecvPns {
     eliciting_since_ack: u64,
     first_unacked_time: Option<u64>,
     new_since_ack: bool,
+    /// The smallest ack-eliciting packet number received since the last ACK was sent.
+    unacked_low: Option<u64>,
     seen: Ghost<Set<u64>>,
+    /// The ack-eliciting packet numbers received since the last ACK was sent.
+    unreported: Ghost<Set<u64>>,
     eliciting_rcvd: Ghost<nat>,
     ack_only_sent: Ghost<nat>,
 }
@@ -144,6 +154,17 @@ impl RecvPns {
         }
         &&& self.ack_only_sent@ + self.eliciting_since_ack <= self.eliciting_rcvd@
         &&& (self.eliciting_since_ack > 0) == (self.first_unacked_time is Some)
+        &&& forall|p: u64| #[trigger] self.unreported@.contains(p) ==> in_ranges(self.ranges@, p)
+        &&& match self.unacked_low {
+            Some(u) => forall|p: u64| #[trigger] self.unreported@.contains(p) ==> u <= p,
+            None => self.unreported@ == Set::<u64>::empty(),
+        }
+    }
+
+    /// The ack-eliciting packet numbers received since the last ACK was sent. None of them
+    /// has been dropped from the ranges (`lemma_unreported_acked`).
+    pub closed spec fn unreported(&self) -> Set<u64> {
+        self.unreported@
     }
 
     pub closed spec fn kind_spec(&self) -> PacketKind {
@@ -179,8 +200,14 @@ impl RecvPns {
         self.ack_only_sent@
     }
 
+    /// Seen, below the floor, or refused because taking it would drop a range: with the list
+    /// full, `pn` below the lowest range, or the lowest range holding an ack-eliciting packet
+    /// number no ACK has reported yet.
     pub closed spec fn is_duplicate_spec(&self, pn: u64) -> bool {
-        pn < self.floor || in_ranges(self.ranges@, pn)
+        ||| pn < self.floor
+        ||| in_ranges(self.ranges@, pn)
+        ||| self.ranges@.len() == MAX_ACK_RANGES && (pn < self.ranges@.last().0 || (
+        self.unacked_low matches Some(u) && self.ranges@.last().1 >= u))
     }
 
     pub closed spec fn ack_only_allowed_spec(&self) -> bool {
@@ -214,7 +241,36 @@ impl RecvPns {
             forall|pn: u64| !#[trigger] self.is_duplicate_spec(pn) ==> !self.seen().contains(pn),
             self.ack_only_sent() <= self.eliciting_rcvd(),
             (self.eliciting_since_ack() > 0) == (self.first_unacked() is Some),
+            forall|p: u64| #[trigger] self.unreported().contains(p) ==> self.seen().contains(p),
     {
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+    //# Every packet SHOULD be acknowledged at least once, and ack-eliciting
+    //# packets MUST be acknowledged at least once within the maximum delay
+    //# an endpoint communicated using the max_ack_delay transport parameter;
+    //# see Section 18.2.
+    /// Every ack-eliciting packet number received since the last ACK was sent is still
+    /// reported by the frame for all remembered ranges: no range holding one is dropped.
+    pub proof fn lemma_unreported_acked(&self, p: u64, delay: u64)
+        requires
+            self.wf(),
+            self.unreported().contains(p),
+        ensures
+            self.range_count() > 0,
+            ack_contains(self.ack_candidate((self.range_count() - 1) as nat, delay), p),
+    {
+        let r = self.ranges@;
+        let k = (r.len() - 1) as nat;
+        let a = ack_of(r, k, delay);
+        assert(in_ranges(r, p));
+        let j = choose|j: int| #![trigger r[j]] 0 <= j < r.len() && r[j].0 <= p <= r[j].1;
+        if j == 0 {
+            assert(ack_range(a, -1).0 <= p <= ack_range(a, -1).1);
+        } else {
+            lemma_ack_range_is(r, k, delay, j - 1);
+            assert(ack_range(a, j - 1).0 <= p <= ack_range(a, j - 1).1);
+        }
     }
 
     pub fn new(kind: PacketKind) -> (r: RecvPns)
@@ -227,6 +283,7 @@ impl RecvPns {
             !r.has_new_spec(),
             r.eliciting_rcvd() == 0,
             r.ack_only_sent() == 0,
+            r.unreported() == Set::<u64>::empty(),
     {
         RecvPns {
             kind,
@@ -237,7 +294,9 @@ impl RecvPns {
             eliciting_since_ack: 0,
             first_unacked_time: None,
             new_since_ack: false,
+            unacked_low: None,
             seen: Ghost(Set::empty()),
+            unreported: Ghost(Set::empty()),
             eliciting_rcvd: Ghost(0),
             ack_only_sent: Ghost(0),
         }
@@ -247,7 +306,8 @@ impl RecvPns {
     //# A receiver MUST discard a newly unprotected packet unless it is
     //# certain that it has not processed another packet with the same packet
     //# number from the same packet number space.
-    /// `pn` was processed already, or is below the floor where we can no longer tell.
+    /// `pn` was processed already, is below the floor where we can no longer tell, or would
+    /// force out a range that may hold an unacknowledged ack-eliciting packet.
     #[verifier::when_used_as_spec(is_duplicate_spec)]
     pub fn is_duplicate(&self, pn: u64) -> (d: bool)
         requires
@@ -274,6 +334,18 @@ impl RecvPns {
                 return true;
             }
             i = i + 1;
+        }
+        let n = self.ranges.len();
+        if n == MAX_ACK_RANGES {
+            let (lo, hi) = self.ranges[n - 1];
+            if pn < lo {
+                return true;
+            }
+            if let Some(u) = self.unacked_low {
+                if hi >= u {
+                    return true;
+                }
+            }
         }
         false
     }
@@ -331,14 +403,31 @@ impl RecvPns {
             final(self).ack_only_sent() == old(self).ack_only_sent(),
             ack_eliciting ==> final(self).ack_only_allowed(),
             !ack_eliciting ==> final(self).eliciting_since_ack() == old(self).eliciting_since_ack()
-                && final(self).first_unacked() == old(self).first_unacked(),
+                && final(self).first_unacked() == old(self).first_unacked()
+                && final(self).unreported() == old(self).unreported(),
+            ack_eliciting ==> final(self).eliciting_since_ack() == (if old(self).eliciting_since_ack()
+                < u64::MAX {
+                (old(self).eliciting_since_ack() + 1) as u64
+            } else {
+                old(self).eliciting_since_ack()
+            }) && final(self).first_unacked() == (if old(self).first_unacked() is Some {
+                old(self).first_unacked()
+            } else {
+                Some(now)
+            }) && final(self).unreported() == old(self).unreported().insert(pn),
             final(self).has_new(),
     {
         let ghost s1 = self.seen@.insert(pn);
+        let ghost u1 = if ack_eliciting {
+            self.unreported@.insert(pn)
+        } else {
+            self.unreported@
+        };
         proof {
             lemma_not_seen(self.ranges@, self.floor, self.seen@, pn);
+            lemma_unreported_pre(self.ranges@, self.unacked_low, self.unreported@, u1, pn);
         }
-        add_range(&mut self.ranges, &mut self.floor, pn, Ghost(self.seen@));
+        add_range(&mut self.ranges, &mut self.floor, pn, Ghost(self.seen@), Ghost(u1));
         let keep = match self.largest {
             Some(l) => l > pn,
             None => false,
@@ -354,10 +443,20 @@ impl RecvPns {
             if self.first_unacked_time.is_none() {
                 self.first_unacked_time = Some(now);
             }
+            let low = match self.unacked_low {
+                Some(u) => if u < pn {
+                    u
+                } else {
+                    pn
+                },
+                None => pn,
+            };
+            self.unacked_low = Some(low);
             self.eliciting_rcvd = Ghost(self.eliciting_rcvd@ + 1);
         }
         self.new_since_ack = true;
         self.seen = Ghost(s1);
+        self.unreported = Ghost(u1);
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
@@ -603,6 +702,7 @@ impl RecvPns {
             final(self).kind_spec() == old(self).kind_spec(),
             final(self).largest() == old(self).largest(),
             final(self).eliciting_since_ack() == 0,
+            final(self).unreported() == Set::<u64>::empty(),
             !final(self).has_new(),
             final(self).eliciting_rcvd() == old(self).eliciting_rcvd(),
             final(self).ack_only_sent() == old(self).ack_only_sent() + (if ack_only {
@@ -614,6 +714,8 @@ impl RecvPns {
         self.eliciting_since_ack = 0;
         self.first_unacked_time = None;
         self.new_since_ack = false;
+        self.unacked_low = None;
+        self.unreported = Ghost(Set::empty());
         if ack_only {
             self.ack_only_sent = Ghost(self.ack_only_sent@ + 1);
         }
@@ -638,12 +740,22 @@ fn ack_pair(v: &Vec<(u64, u64)>, i: usize) -> (g: (u64, u64))
 }
 
 /// Adds `pn` to the ranges, dropping the lowest range past `MAX_ACK_RANGES` and raising the
-/// floor above it.
-fn add_range(v: &mut Vec<(u64, u64)>, floor: &mut u64, pn: u64, Ghost(seen): Ghost<Set<u64>>)
+/// floor above it. `unrep` (the unreported packet numbers, `pn` possibly among them) stays
+/// inside the ranges: the caller refuses any `pn` that would force out a range holding one.
+fn add_range(
+    v: &mut Vec<(u64, u64)>,
+    floor: &mut u64,
+    pn: u64,
+    Ghost(seen): Ghost<Set<u64>>,
+    Ghost(unrep): Ghost<Set<u64>>,
+)
     requires
         ranges_wf(old(v)@, *old(floor), seen),
         !(pn < *old(floor) || in_ranges(old(v)@, pn)),
         pn <= PN_MAX,
+        forall|p: u64| #[trigger] unrep.contains(p) ==> in_ranges(old(v)@, p) || p == pn,
+        old(v)@.len() == MAX_ACK_RANGES ==> pn >= old(v)@.last().0 && forall|p: u64|
+            #[trigger] unrep.contains(p) && p != pn ==> p > old(v)@.last().1,
     ensures
         ranges_wf(final(v)@, *final(floor), seen.insert(pn)),
         final(v)@.len() > 0,
@@ -652,12 +764,19 @@ fn add_range(v: &mut Vec<(u64, u64)>, floor: &mut u64, pn: u64, Ghost(seen): Gho
         } else {
             pn
         },
+        forall|p: u64| #[trigger] unrep.contains(p) ==> in_ranges(final(v)@, p),
 {
+    hide(ranges_wf);
+    hide(ranges_inv);
+    hide(insert_post);
     let ghost r0 = v@;
+    proof {
+        lemma_insert_ready(r0, *floor, seen, pn);
+    }
     insert_pn(v, pn, Ghost(*floor));
     let ghost mid = v@;
     proof {
-        lemma_insert_seen(r0, mid, *floor, seen, pn);
+        lemma_insert_inv(r0, mid, *floor, seen, pn, unrep);
     }
     if v.len() > MAX_ACK_RANGES {
         match v.pop() {
@@ -675,6 +794,7 @@ fn add_range(v: &mut Vec<(u64, u64)>, floor: &mut u64, pn: u64, Ghost(seen): Gho
                 // `RecvPns::largest` is kept apart from the ranges.
                 proof {
                     lemma_drop_lowest(mid, *floor, seen.insert(pn));
+                    lemma_drop_keeps(r0, mid, *floor, pn, unrep);
                 }
                 *floor = hi + 1;
             },
@@ -772,6 +892,24 @@ proof fn lemma_splice_index(r: Seq<(u64, u64)>, a: int, b: int, x: (u64, u64))
     reveal(splice);
 }
 
+/// Element `k` of a splice.
+proof fn lemma_splice_at(r: Seq<(u64, u64)>, a: int, b: int, x: (u64, u64), k: int)
+    requires
+        0 <= a <= b <= r.len(),
+        0 <= k < r.len() + 1 - (b - a),
+    ensures
+        splice(r, a, b, x).len() == r.len() + 1 - (b - a),
+        splice(r, a, b, x)[k] == if k < a {
+            r[k]
+        } else if k == a {
+            x
+        } else {
+            r[k + b - a - 1]
+        },
+{
+    reveal(splice);
+}
+
 proof fn lemma_splice_ok(r: Seq<(u64, u64)>, a: int, b: int, x: (u64, u64), m: u64)
     requires
         ranges_ok(r),
@@ -786,19 +924,15 @@ proof fn lemma_splice_ok(r: Seq<(u64, u64)>, a: int, b: int, x: (u64, u64), m: u
         lo_ge(splice(r, a, b, x), m),
 {
     let s = splice(r, a, b, x);
-    lemma_splice_index(r, a, b, x);
+    let n = r.len() + 1 - (b - a);
+    lemma_splice_at(r, a, b, x, 0);
+    assert forall|k: int| #![trigger s[k]] 0 <= k < s.len() implies s[k].0 <= s[k].1 <= PN_MAX
+        && s[k].0 >= m by {
+        lemma_splice_at(r, a, b, x, k);
+    }
     assert forall|k: int| #![trigger s[k]] 0 < k < s.len() implies s[k].1 + 1 < s[k - 1].0 by {
-        if k < a {
-            assert(s[k - 1] == r[k - 1]);
-        } else if k == a {
-            assert(s[k - 1] == r[a - 1]);
-        } else if k == a + 1 {
-            assert(s[k - 1] == x);
-            assert(s[k] == r[b]);
-        } else {
-            assert(s[k - 1] == r[k - 1 + b - a - 1]);
-            assert(s[k] == r[k + b - a - 1]);
-        }
+        lemma_splice_at(r, a, b, x, k);
+        lemma_splice_at(r, a, b, x, k - 1);
     }
 }
 
@@ -876,6 +1010,14 @@ proof fn lemma_splice_insert(r: Seq<(u64, u64)>, a: int, b: int, x: (u64, u64), 
     } else {
         r[0]
     });
+    if s.len() == r.len() + 1 && r.len() > 0 && pn > r.last().1 {
+        assert(a == b);
+        if a == r.len() {
+            assert(x.1 + 1 < r[a - 1].0);
+        } else {
+            assert(s[s.len() - 1] == r[r.len() - 1]);
+        }
+    }
 }
 
 /// After the search loop: range `i - 1` lies above `pn` and range `i` below it.
@@ -1015,9 +1157,12 @@ proof fn lemma_new_range(r: Seq<(u64, u64)>, i: int, pn: u64, m: u64)
     hide(insert_post);
     let x = (pn, pn);
     lemma_eq_insert(r, i, x);
-    if i > 0 {
-        assert(r[0].1 > pn);
-    }
+    assert(ranges_ok(r) && lo_ge(r, m));
+    assert(i > 0 ==> x.1 + 1 < r[i - 1].0);
+    assert(i < r.len() ==> r[i].1 + 1 < x.0);
+    assert(covers(r, i, i, x, pn));
+    assert(r.len() > 0 && r[0].1 > pn ==> i > 0 || x.1 == r[0].1);
+    assert(!(r.len() > 0 && r[0].1 > pn) ==> i == 0 && x.1 == pn);
     lemma_splice_insert(r, i, i, x, pn, m);
 }
 
@@ -1031,23 +1176,120 @@ proof fn lemma_not_seen(r: Seq<(u64, u64)>, floor: u64, seen: Set<u64>, pn: u64)
 {
 }
 
-/// The seen-set conjuncts after `insert_pn`, for the seen set with `pn` added.
-proof fn lemma_insert_seen(r0: Seq<(u64, u64)>, r1: Seq<(u64, u64)>, floor: u64, seen: Set<u64>, pn: u64)
+/// `add_range`'s precondition gives `insert_pn`'s.
+proof fn lemma_insert_ready(r: Seq<(u64, u64)>, floor: u64, seen: Set<u64>, pn: u64)
+    requires
+        ranges_wf(r, floor, seen),
+        !(pn < floor || in_ranges(r, pn)),
+        pn <= PN_MAX,
+    ensures
+        insert_pre(r, pn, floor),
+        r.len() <= MAX_ACK_RANGES,
+{
+}
+
+/// After `insert_pn`: the range invariant for the seen set with `pn` added, the unreported
+/// numbers inside the ranges, and the shape facts `add_range` returns.
+proof fn lemma_insert_inv(
+    r0: Seq<(u64, u64)>,
+    r1: Seq<(u64, u64)>,
+    floor: u64,
+    seen: Set<u64>,
+    pn: u64,
+    unrep: Set<u64>,
+)
     requires
         ranges_wf(r0, floor, seen),
-        forall|p: u64| #[trigger] in_ranges(r1, p) == (in_ranges(r0, p) || p == pn),
+        insert_post(r0, r1, pn, floor),
+        forall|p: u64| #[trigger] unrep.contains(p) ==> in_ranges(r0, p) || p == pn,
     ensures
-        forall|p: u64| #[trigger] seen.insert(pn).contains(p) ==> p < floor || in_ranges(r1, p),
-        forall|p: u64| in_ranges(r1, p) ==> #[trigger] seen.insert(pn).contains(p),
+        ranges_inv(r1, floor, seen.insert(pn)),
+        r1.len() <= MAX_ACK_RANGES ==> ranges_wf(r1, floor, seen.insert(pn)),
+        0 < r1.len() <= r0.len() + 1,
+        r0.len() <= MAX_ACK_RANGES,
+        r1[0].1 == if r0.len() > 0 && r0[0].1 > pn {
+            r0[0].1
+        } else {
+            pn
+        },
+        forall|p: u64| #[trigger] unrep.contains(p) ==> in_ranges(r1, p),
 {
-    assert forall|p: u64| #[trigger] seen.insert(pn).contains(p) implies p < floor || in_ranges(r1, p) by {
+    let s1 = seen.insert(pn);
+    assert forall|p: u64| #[trigger] s1.contains(p) implies p < floor || in_ranges(r1, p) by {
         if p != pn {
             assert(seen.contains(p));
         }
     }
-    assert forall|p: u64| in_ranges(r1, p) implies #[trigger] seen.insert(pn).contains(p) by {
+    assert forall|p: u64| in_ranges(r1, p) implies #[trigger] s1.contains(p) by {
         if p != pn {
             assert(in_ranges(r0, p));
+        }
+    }
+    assert forall|p: u64| #[trigger] unrep.contains(p) implies in_ranges(r1, p) by {
+        assert(in_ranges(r0, p) || p == pn);
+    }
+}
+
+/// The dropped range held no unreported number: they all lie above the old lowest range,
+/// which is what goes.
+proof fn lemma_drop_keeps(r0: Seq<(u64, u64)>, r1: Seq<(u64, u64)>, floor: u64, pn: u64, unrep: Set<u64>)
+    requires
+        insert_post(r0, r1, pn, floor),
+        r0.len() == MAX_ACK_RANGES,
+        r1.len() == MAX_ACK_RANGES + 1,
+        !in_ranges(r0, pn),
+        pn >= r0.last().0,
+        forall|p: u64| #[trigger] unrep.contains(p) && p != pn ==> p > r0.last().1,
+        forall|p: u64| #[trigger] unrep.contains(p) ==> in_ranges(r1, p),
+    ensures
+        forall|p: u64| #[trigger] unrep.contains(p) ==> in_ranges(r1.drop_last(), p),
+{
+    let n = r0.len() - 1;
+    if pn <= r0[n].1 {
+        assert(in_ranges(r0, pn));
+    }
+    assert(r1.last() == r0.last());
+    let t = r1.drop_last();
+    assert forall|p: u64| #[trigger] unrep.contains(p) implies in_ranges(t, p) by {
+        let j = choose|j: int| #![trigger r1[j]] 0 <= j < r1.len() && r1[j].0 <= p <= r1[j].1;
+        if j < t.len() {
+            assert(t[j] == r1[j]);
+        } else {
+            assert(r1[j] == r0[n]);
+        }
+    }
+}
+
+/// `on_packet`'s refusal rule gives `add_range`'s condition on the unreported numbers.
+proof fn lemma_unreported_pre(
+    r: Seq<(u64, u64)>,
+    low: Option<u64>,
+    unrep: Set<u64>,
+    u1: Set<u64>,
+    pn: u64,
+)
+    requires
+        forall|p: u64| #[trigger] unrep.contains(p) ==> in_ranges(r, p),
+        match low {
+            Some(u) => forall|p: u64| #[trigger] unrep.contains(p) ==> u <= p,
+            None => unrep == Set::<u64>::empty(),
+        },
+        u1 == unrep || u1 == unrep.insert(pn),
+        !(r.len() == MAX_ACK_RANGES && (pn < r.last().0 || (low matches Some(u) && r.last().1
+            >= u))),
+    ensures
+        forall|p: u64| #[trigger] u1.contains(p) ==> in_ranges(r, p) || p == pn,
+        r.len() == MAX_ACK_RANGES ==> pn >= r.last().0 && forall|p: u64|
+            #[trigger] u1.contains(p) && p != pn ==> p > r.last().1,
+{
+    assert forall|p: u64| #[trigger] u1.contains(p) implies in_ranges(r, p) || p == pn by {
+        if p != pn {
+            assert(unrep.contains(p));
+        }
+    }
+    if r.len() == MAX_ACK_RANGES {
+        assert forall|p: u64| #[trigger] u1.contains(p) && p != pn implies p > r.last().1 by {
+            assert(unrep.contains(p));
         }
     }
 }
@@ -1072,20 +1314,11 @@ proof fn lemma_sorted_trans(r: Seq<(u64, u64)>, i: int, j: int)
 proof fn lemma_drop_lowest(r: Seq<(u64, u64)>, floor: u64, seen: Set<u64>)
     requires
         r.len() == MAX_ACK_RANGES + 1,
-        ranges_ok(r),
-        lo_ge(r, floor),
-        forall|p: u64| #[trigger] seen.contains(p) ==> p < floor || in_ranges(r, p),
-        forall|p: u64| in_ranges(r, p) ==> #[trigger] seen.contains(p),
+        ranges_inv(r, floor, seen),
     ensures
-        ({
-            let t = r.drop_last();
-            let f = (r.last().1 + 1) as u64;
-            &&& ranges_ok(t)
-            &&& lo_ge(t, f)
-            &&& forall|p: u64| #[trigger] seen.contains(p) ==> p < f || in_ranges(t, p)
-            &&& forall|p: u64| in_ranges(t, p) ==> #[trigger] seen.contains(p)
-            &&& t[0] == r[0]
-        }),
+        ranges_wf(r.drop_last(), (r.last().1 + 1) as u64, seen),
+        r.drop_last()[0] == r[0],
+        r.last().1 < PN_MAX + 1,
 {
     let t = r.drop_last();
     let f = (r.last().1 + 1) as u64;
