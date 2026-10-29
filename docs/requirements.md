@@ -186,14 +186,14 @@ Total keyword count: 44 across 22 sections.
 | 4.4 | Handling stream cancellation | 1 | yes | 3 | Keep flow control state until terminal. ✅ 3c: crates/quic/src/streams.rs |
 | 4.5 | Stream final size | 2 | yes | 3 | Account final size in connection flow control; no data at/after final size. ✅ 3c: crates/quic/src/streams.rs |
 | 4.6 | Controlling concurrency | 5 | yes | 3 | Stream limit > 2^60 is an error; STREAM_LIMIT_ERROR; ignore non-increasing MAX_STREAMS. ✅ 3c: crates/quic/src/stream_id.rs |
-| 5.1 | Connection ID | 3 | yes | 3 | CIDs must not be correlatable by observers; no zero-length-CID port sharing (we issue non-zero CIDs). |
-| 5.1 (req) | Same CID not issued twice on a connection | 1 | yes | 3 | "the same connection ID MUST NOT be issued more than once on the same connection". |
-| 5.1.1 | Issuing connection IDs | 4 | yes | 3 | See req rows below. |
-| 5.1.1 (req) | Sequence number increases by 1 | 1 | yes | 3 | "The sequence number on each newly issued connection ID MUST increase by 1." |
-| 5.1.1 (req) | Accept issued CID until retired | 1 | yes | 3 | Must accept packets with an issued CID for the connection lifetime or until RETIRE_CONNECTION_ID. |
-| 5.1.1 (req) | Do not exceed peer's active_connection_id_limit | 1 | yes | 3 | "MUST NOT provide more connection IDs than the peer's limit." |
-| 5.1.1 (req) | CONNECTION_ID_LIMIT_ERROR on excess active CIDs | 1 | yes | 3 | If active CIDs exceed our advertised active_connection_id_limit after processing NEW_CONNECTION_ID, close with CONNECTION_ID_LIMIT_ERROR. |
-| 5.1.2 | Consuming and retiring connection IDs | 2 | yes | 3 | Retire CIDs below increased Retire Prior To before activating new one; never forget a CID without retiring it. |
+| 5.1 | Connection ID | 3 | yes | 3 | CIDs must not be correlatable by observers; no zero-length-CID port sharing (we issue non-zero CIDs). zero-length port-sharing MUST: exception: LOCAL_CID_LEN = 8. ✅ 3d: crates/quic/src/cid.rs |
+| 5.1 (req) | Same CID not issued twice on a connection | 1 | yes | 3 | "the same connection ID MUST NOT be issued more than once on the same connection". ✅ 3d: crates/quic/src/cid.rs |
+| 5.1.1 | Issuing connection IDs | 4 | yes | 3 | See req rows below. ✅ 3d: crates/quic/src/cid.rs |
+| 5.1.1 (req) | Sequence number increases by 1 | 1 | yes | 3 | "The sequence number on each newly issued connection ID MUST increase by 1." ✅ 3d: crates/quic/src/cid.rs |
+| 5.1.1 (req) | Accept issued CID until retired | 1 | yes | 3 | Must accept packets with an issued CID for the connection lifetime or until RETIRE_CONNECTION_ID. gate wired in conn.rs (3d2). ✅ 3d: crates/quic/src/cid.rs |
+| 5.1.1 (req) | Do not exceed peer's active_connection_id_limit | 1 | yes | 3 | "MUST NOT provide more connection IDs than the peer's limit." ✅ 3d: crates/quic/src/cid.rs |
+| 5.1.1 (req) | CONNECTION_ID_LIMIT_ERROR on excess active CIDs | 1 | yes | 3 | If active CIDs exceed our advertised active_connection_id_limit after processing NEW_CONNECTION_ID, close with CONNECTION_ID_LIMIT_ERROR. ✅ 3d: crates/quic/src/cid.rs |
+| 5.1.2 | Consuming and retiring connection IDs | 2 | yes | 3 | Retire CIDs below increased Retire Prior To before activating new one; never forget a CID without retiring it. ✅ 3d: crates/quic/src/cid.rs |
 | 5.2 | Matching packets to connections | 1 | yes | 3 | Error on bad packet content or fully revert changes. |
 | 5.2.1 | Client packet handling | 1 | no | N/A (client-only) | Client discards packets with a different version. |
 | 5.2.2 | Server packet handling | 2 | yes | 3 | Drop smaller-than-1200 packets with unsupported version (no VN); drop all other unmatched packets. 3b codec: crates/quic/src/stateless.rs (closed in 3d) |
@@ -270,7 +270,7 @@ Total keyword count: 44 across 22 sections.
 | 10.2.3 | Immediate close during the handshake | 3 | yes | 3 | 1-RTT CONNECTION_CLOSE once confirmed; 0x1d to 0x1c replacement; clear reason phrase. |
 | 10.3 | Stateless reset | 5 | yes | 3 | CONNECTION_CLOSE if able; reset < 3x trigger; discard too-small packets; short header; any packet ending in valid token is a reset. Sending rows (short header, < 3x trigger) vacuous: we never send a Stateless Reset (sending is a MAY); Duvet exceptions in crates/quic/src/stateless.rs. Receive side (discard too small, token match) closed in 3d |
 | 10.3.1 | Detecting a stateless reset | 4 | yes | 3 | Constant-time token comparison; only for used, unretired CIDs; enter draining. |
-| 10.3.2 | Calculating a stateless reset token | 5 | yes | 3 | Hard to guess; unique per CID; CID length handling; no CID reuse across static-key nodes. |
+| 10.3.2 | Calculating a stateless reset token | 5 | yes | 3 | Hard to guess; unique per CID; CID length handling; no CID reuse across static-key nodes. static-key MUSTs: exception (no static key, tokens are fresh randomness). ✅ 3d: crates/quic/src/cid.rs |
 | 10.3.3 | Looping | 1 | yes | 3 | Reset must be smaller than trigger. Vacuous: we never send a Stateless Reset; Duvet exception in crates/quic/src/stateless.rs |
 | 11 | Error handling | 1 | yes | 3 | No stateless reset if connection state exists. |
 | 11.1 | Connection errors | 1 | yes | 3 | Fatal errors via CONNECTION_CLOSE. |
@@ -337,19 +337,19 @@ Total keyword count: 44 across 22 sections.
 | 19.11 | MAX_STREAMS frames | 4 | yes | 3 | ✅ 3c: crates/quic/src/stream_id.rs |
 | 19.13 | STREAM_DATA_BLOCKED frames | 1 | yes | 3 | ✅ 3c: crates/quic/src/streams.rs |
 | 19.14 | STREAMS_BLOCKED frames | 1 | yes | 3 | ✅ 3b: crates/quic/src/frame.rs |
-| 19.15 | NEW_CONNECTION_ID frames | 8 | yes | 3 | Each requirement has its own row. |
+| 19.15 | NEW_CONNECTION_ID frames | 8 | yes | 3 | Each requirement has its own row. ✅ 3d: crates/quic/src/cid.rs |
 | 19.15 (req) | Length < 1 or > 20 is FRAME_ENCODING_ERROR | 1 | yes | 3 | ✅ 3b: crates/quic/src/frame.rs |
-| 19.15 (req) | MUST NOT send if peer requires zero-length DCID | 1 | yes | 3 |  |
-| 19.15 (req) | Zero-length-DCID sender receiving NEW_CONNECTION_ID is PROTOCOL_VIOLATION | 1 | yes | 3 |  |
-| 19.15 (req) | Duplicate frame not a connection error | 1 | yes | 3 |  |
+| 19.15 (req) | MUST NOT send if peer requires zero-length DCID | 1 | yes | 3 | exception: LOCAL_CID_LEN = 8. ✅ 3d: crates/quic/src/cid.rs |
+| 19.15 (req) | Zero-length-DCID sender receiving NEW_CONNECTION_ID is PROTOCOL_VIOLATION | 1 | yes | 3 | ✅ 3d: crates/quic/src/cid.rs |
+| 19.15 (req) | Duplicate frame not a connection error | 1 | yes | 3 | ✅ 3d: crates/quic/src/cid.rs |
 | 19.15 (req) | Retire Prior To <= Sequence Number (sending) | 1 | yes | 3 | ✅ 3b: crates/quic/src/frame.rs |
 | 19.15 (req) | Retire Prior To > Sequence Number received is FRAME_ENCODING_ERROR | 1 | yes | 3 | ✅ 3b: crates/quic/src/frame.rs |
-| 19.15 (req) | Ignore non-increasing Retire Prior To | 1 | yes | 3 |  |
-| 19.15 (req) | Send RETIRE_CONNECTION_ID for sequence below earlier Retire Prior To | 1 | yes | 3 |  |
-| 19.16 | RETIRE_CONNECTION_ID frames | 3 | yes | 3 | Each requirement has its own row. |
-| 19.16 (req) | Sequence number greater than any sent is PROTOCOL_VIOLATION | 1 | yes | 3 |  |
-| 19.16 (req) | Sequence MUST NOT refer to the packet's own DCID | 1 | yes | 3 |  |
-| 19.16 (req) | Zero-length-CID provider receiving RETIRE_CONNECTION_ID is PROTOCOL_VIOLATION | 1 | yes | 3 |  |
+| 19.15 (req) | Ignore non-increasing Retire Prior To | 1 | yes | 3 | ✅ 3d: crates/quic/src/cid.rs |
+| 19.15 (req) | Send RETIRE_CONNECTION_ID for sequence below earlier Retire Prior To | 1 | yes | 3 | ✅ 3d: crates/quic/src/cid.rs |
+| 19.16 | RETIRE_CONNECTION_ID frames | 3 | yes | 3 | Each requirement has its own row. ✅ 3d: crates/quic/src/cid.rs |
+| 19.16 (req) | Sequence number greater than any sent is PROTOCOL_VIOLATION | 1 | yes | 3 | ✅ 3d: crates/quic/src/cid.rs |
+| 19.16 (req) | Sequence MUST NOT refer to the packet's own DCID | 1 | yes | 3 | ✅ 3d: crates/quic/src/cid.rs |
+| 19.16 (req) | Zero-length-CID provider receiving RETIRE_CONNECTION_ID is PROTOCOL_VIOLATION | 1 | yes | 3 | exception: LOCAL_CID_LEN = 8. ✅ 3d: crates/quic/src/cid.rs |
 | 19.17 | PATH_CHALLENGE frames | 1 | yes | 3 | Recipient MUST generate PATH_RESPONSE with same data (see 8.2.2 rows). |
 | 19.20 | HANDSHAKE_DONE frames | 2 | yes | 3 | Server sends only after handshake complete; receipt is PROTOCOL_VIOLATION. 3b codec: crates/quic/src/frame.rs (closed in 3d) |
 | 19.21 | Extension frames | 3 | no | Declined (optional: HTTP/3 extensions) | Applies only to endpoints using extension frames; unknown frame handling is in 12.4. |
