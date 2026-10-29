@@ -276,19 +276,19 @@ Total keyword count: 44 across 22 sections.
 | 11.1 | Connection errors | 1 | yes | 3 | Fatal errors via CONNECTION_CLOSE. |
 | 11.2 | Stream errors | 1 | yes | 3 | RESET_STREAM only instigated by the application (HTTP/3 layer). ✅ 3c: crates/quic/src/streams.rs |
 | 12.2 | Coalescing packets | 4 | yes | 3 | Process coalesced packets; same CID within datagram; ack separately. |
-| 12.3 | Packet numbers | 5 | yes | 3 | Monotonic, never reused, 2^62-1 limit closes silently, duplicate suppression after decryption. |
+| 12.3 | Packet numbers | 5 | yes | 3 | Monotonic, never reused, 2^62-1 limit closes silently, duplicate suppression after decryption. 3d: ack_track.rs (ACK scheduling / duplicate suppression; closed in 3d2 Task 2a) |
 | 12.4 | Frames and frame types | 5 | yes | 3 | Rows for frame-type encoding below; no-frame packet and disallowed frame are PROTOCOL_VIOLATION; unknown frame FRAME_ENCODING_ERROR. ✅ 3b: crates/quic/src/payload.rs |
 | 12.4 (req) | Frame type MUST use shortest possible encoding | 1 | yes | 3 | "a frame type MUST use the shortest possible encoding"; sender must emit minimal type varint; receiver should reject non-minimal (relies on phase 1 minimal-encoding decision for varint). ✅ 3b: crates/quic/src/frame.rs |
 | 12.5 | Frames and number spaces | 2 | yes | 3 | Frame/space restrictions (0x1d only in application space). ✅ 3b: crates/quic/src/payload.rs |
 | 13.1 | Packet processing | 1 | yes | 3 | ACK only after decryption and full frame processing. |
-| 13.2.1 | Sending ACK frames | 5 | yes | 3 | Immediate ACK for Initial/Handshake; max_ack_delay; one ACK-only packet per ack-eliciting; no feedback loops. |
-| 13.2.3 | Managing ACK ranges | 2 | yes | 3 | Retain ranges; retain largest PN. |
-| 13.2.5 | Measuring and reporting host delay | 1 | yes | 3 | Exclude delays not under endpoint control. |
+| 13.2.1 | Sending ACK frames | 5 | yes | 3 | Immediate ACK for Initial/Handshake; max_ack_delay; one ACK-only packet per ack-eliciting; no feedback loops. 3d: ack_track.rs (ACK scheduling / duplicate suppression; closed in 3d2 Task 2a) |
+| 13.2.3 | Managing ACK ranges | 2 | yes | 3 | Retain ranges; retain largest PN. ✅ 3d: crates/quic/src/ack_track.rs |
+| 13.2.5 | Measuring and reporting host delay | 1 | yes | 3 | Exclude delays not under endpoint control. ✅ 3d: crates/quic/src/ack_track.rs |
 | 13.2.6 | ACK frames and packet protection | 3 | yes | 3 | Same-space ACK; 0-RTT-ack rule vacuous (we reject 0-RTT). |
 | 13.3 | Retransmission of information | 4 | yes | 3 | RESET_STREAM unchanged; HANDSHAKE_DONE retransmitted; accept outdated frames; congestion action on loss. 3c: crates/quic/src/streams.rs (stream-family retransmission: RESET_STREAM resent unchanged, the current credit value resent, no STREAM after a reset; closed in 3d) |
-| 13.4.1 | Reporting ECN counts | 1 | yes | 3 | Provide ECN feedback if accessible; needs IP_RECVTOS in shell (otherwise relies on "if accessible"). |
-| 13.4.2.1 | Receiving ACK frames with ECN counts | 1 | yes | 3 | Only if we send ECT; vacuous otherwise. |
-| 13.4.2.2 | ECN validation outcomes | 2 | yes | 3 | Only if we send ECT; vacuous otherwise. |
+| 13.4.1 | Reporting ECN counts | 1 | yes | 3 | Provide ECN feedback if accessible; needs IP_RECVTOS in shell (otherwise relies on "if accessible"). ✅ 3d: exception — ECN not accessible, no ECT set (ack_track.rs ecn: None) |
+| 13.4.2.1 | Receiving ACK frames with ECN counts | 1 | yes | 3 | Only if we send ECT; vacuous otherwise. ✅ 3d: exception — ECN not accessible, no ECT set (ack_track.rs ecn: None) |
+| 13.4.2.2 | ECN validation outcomes | 2 | yes | 3 | Only if we send ECT; vacuous otherwise. ✅ 3d: exception — ECN not accessible, no ECT set (ack_track.rs ecn: None) |
 | 14 | Datagram size | 4 | yes | 3 | 1200-byte minimum path; no IP fragmentation; DF where possible; never close on bad-size datagram. |
 | 14.1 | Initial datagram size | 4 | partial | 3 | Server rows below; client padding is client-only. |
 | 14.1 (req) | Client expands Initial datagrams to 1200 | 1 | no | N/A (client-only) |  |
