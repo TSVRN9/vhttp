@@ -432,6 +432,9 @@ impl Lifecycle {
                 &&& final(self).phase_spec() == old(self).phase_spec()
                 &&& final(self).deadline_spec() == old(self).deadline_spec()
                 &&& final(self).close_spec() == old(self).close_spec()
+                &&& final(self).owed_spec() == old(self).owed_spec()
+                &&& final(self).first_sent_spec() == old(self).first_sent_spec()
+                &&& final(self).budget_trace() == old(self).budget_trace()
             },
             amp_ok(final(self).budget_trace()),
     {
@@ -465,6 +468,7 @@ impl Lifecycle {
                 &&& final(self).phase_spec() == old(self).phase_spec()
                 &&& final(self).deadline_spec() == old(self).deadline_spec()
             },
+            final(self).close_spec() == old(self).close_spec(),
             amp_ok(final(self).budget_trace()),
     {
         match self.phase {
@@ -496,6 +500,9 @@ impl Lifecycle {
             final(self).wf(),
             final(self).phase_spec() == old(self).phase_spec(),
             phase_le(old(self).phase_spec(), final(self).phase_spec()),
+            final(self).close_spec() == old(self).close_spec(),
+            final(self).deadline_spec() == old(self).deadline_spec(),
+            final(self).first_sent_spec() == old(self).first_sent_spec(),
             amp_ok(final(self).budget_trace()),
     {
         if let Phase::Closing = self.phase {
@@ -547,6 +554,8 @@ impl Lifecycle {
             phase_le(old(self).phase_spec(), final(self).phase_spec()),
             !final(self).owed_spec(),
             final(self).first_sent_spec(),
+            final(self).close_spec() == old(self).close_spec(),
+            final(self).deadline_spec() == old(self).deadline_spec(),
             amp_ok(final(self).budget_trace()),
             old(self).first_sent_spec() ==> final(self).budget_trace()
                 == old(self).budget_trace().push(AmpEv::Sent(n as nat)),
@@ -562,6 +571,7 @@ impl Lifecycle {
         requires
             old(self).wf(),
         ensures
+            final(self).close_spec() == old(self).close_spec(),
             final(self).wf(),
             phase_le(old(self).phase_spec(), final(self).phase_spec()),
             (old(self).phase_spec() is Closing || old(self).phase_spec() is Draining)

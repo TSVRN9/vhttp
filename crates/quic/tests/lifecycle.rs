@@ -1,5 +1,4 @@
 //! Phase 3d idle timeout, close and draining (RFC 9000 §10.1, §10.2).
-use quic::codes::*;
 use quic::frame::*;
 use quic::lifecycle::*;
 use quic::payload::PacketKind;
@@ -85,7 +84,6 @@ fn first_error_wins_and_reason_cap() {
     l.enter_closing(1, 10, false, 6, b"later");
     assert_eq!(l.close_info(), &Some((true, 5, vec![7; 64])));
     assert_eq!(l.deadline(), Some(30));
-    let _ = APPLICATION_ERROR;
 }
 
 #[test]
