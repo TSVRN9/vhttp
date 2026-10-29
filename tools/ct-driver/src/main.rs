@@ -4,20 +4,28 @@
 //!
 //! Environment: `CT_CRATES` (comma-separated crate names), `CT_MANIFEST` (colon-separated manifest
 //! paths), `CT_OUT` (report dir, created if missing), `CT_MODE` = `check` (default) | `census`.
+//!
+//! Check mode writes `$CT_OUT/report-<crate>.txt` with one verdict per manifest root of the crate
+//! (`root <path> ok`, or one `reject <path> <Kind> <site> ..` line per kind and site), and for ok
+//! roots the `checked` and `declassify` lines. Rejections are verdicts, not build errors; only a
+//! failure to produce the report (manifest, I/O, no root for the crate) fails the build.
+//! Only `secret(..)` labels are enforced; `public(..)` is a declaration (see `translate.rs`).
 #![feature(rustc_private)]
 extern crate rustc_driver;
 extern crate rustc_interface;
 extern crate rustc_middle;
 #[macro_use]
 extern crate rustc_public;
+extern crate rustc_public_bridge;
 
 mod manifest;
+mod translate;
 
 use manifest::Manifest;
-use rustc_public::mir::mono::Instance;
+use rustc_public::mir::mono::{Instance, InstanceKind};
 use rustc_public::mir::{Body, TerminatorKind};
 use rustc_public::{CompilerError, CrateDef, DefId, ItemKind};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::{exit, Command};
 
@@ -103,10 +111,10 @@ fn main() {
         args.push(f.to_string());
     }
     let res = run!(&args, || {
-        let r = roots(&krate, &m).and_then(|roots| match mode {
-            Mode::Census => census(&krate, &m, &roots, &out),
-            Mode::Check => Err("check mode is not implemented yet (Task 7b)".to_string()),
-        });
+        let r = match mode {
+            Mode::Census => roots(&krate, &m).and_then(|roots| census(&krate, &m, &roots, &out)),
+            Mode::Check => check(&krate, &m, &out),
+        };
         match r {
             Ok(()) => ControlFlow::Continue(()),
             Err(e) => ControlFlow::Break(e),
@@ -125,11 +133,22 @@ fn main() {
 /// items count, keyed by their def name, since `ct_key` strips generic args), or a generic match.
 /// Roots of other crates are skipped (they are checked when their crate compiles).
 fn roots(krate: &str, m: &Manifest) -> Result<Vec<Instance>, String> {
+    pick_roots(krate, &crate_roots(krate, m)?, &local_fns())
+}
+
+/// The manifest roots whose crate prefix is `krate`; none is an error.
+fn crate_roots<'m>(krate: &str, m: &'m Manifest) -> Result<Vec<&'m String>, String> {
     let prefix = format!("{krate}::");
     let want: Vec<&String> = m.roots.iter().filter(|r| r.starts_with(&prefix)).collect();
     if want.is_empty() {
         return Err(format!("no manifest root for analysed crate {krate}"));
     }
+    Ok(want)
+}
+
+/// The local fn items by key: `Some` instance when monomorphic; generic items (never roots) are
+/// keyed by their def name, so they still make a shared key ambiguous.
+pub fn local_fns() -> Vec<(String, Option<Instance>)> {
     let mut items = Vec::new();
     for item in rustc_public::all_local_items() {
         if item.kind() != ItemKind::Fn {
@@ -137,10 +156,10 @@ fn roots(krate: &str, m: &Manifest) -> Result<Vec<Instance>, String> {
         }
         items.push(match Instance::try_from(item) {
             Ok(inst) => (ct_key(&inst), Some(inst)),
-            Err(_) => (strip_generic_args(&item.name()), None), // generic: never a root
+            Err(_) => (strip_generic_args(&item.name()), None),
         });
     }
-    pick_roots(krate, &want, &items)
+    items
 }
 
 /// Each wanted key must name exactly one of `items`, and that one must be monomorphic (`Some`).
@@ -194,20 +213,24 @@ pub fn normal_blocks(body: &Body) -> Vec<usize> {
     out
 }
 
-/// The callee lookup order of the spec: an `intr` line wins; otherwise a callee with a body in
-/// the crate being compiled or a `translate-crate` is internal (entered); otherwise it is a leaf.
+/// The callee lookup order of the spec: an `intr` line wins; otherwise a plain fn item (not a
+/// shim, virtual or compiler intrinsic) with a body in the crate being compiled or a
+/// `translate-crate` is internal (entered); otherwise it is a leaf.
 pub fn is_internal(krate: &str, m: &Manifest, callee: &Instance) -> bool {
     let key = ct_key(callee);
     let c = callee.def.krate().name;
-    !m.intr.iter().any(|(p, _)| *p == key) && callee.has_body() && (c == krate || m.translate_crates.contains(&c))
+    !m.intr.iter().any(|(p, _)| *p == key)
+        && callee.kind == InstanceKind::Item
+        && callee.has_body()
+        && (c == krate || m.translate_crates.contains(&c))
 }
 
 /// What a key must denote uniquely: the def for a leaf (an `intr` line or `Unresolved` speaks
 /// about the generic def, so `Ghost::<Seq<u8>>` and `Ghost::<int>` are one claim), and the instance
 /// for an internal fn or a root (each instance is its own translated body).
-type KeyId = (DefId, Option<Instance>);
+pub type KeyId = (DefId, Option<Instance>);
 
-fn key_id(krate: &str, m: &Manifest, inst: &Instance) -> KeyId {
+pub fn key_id(krate: &str, m: &Manifest, inst: &Instance) -> KeyId {
     (inst.def.def_id(), is_internal(krate, m, inst).then_some(*inst))
 }
 
@@ -254,6 +277,112 @@ fn census(krate: &str, m: &Manifest, roots: &[Instance], out: &std::path::Path) 
         return Ok(());
     }
     Err(format!("census: {}", errs.into_iter().collect::<Vec<_>>().join("; ")))
+}
+
+/// Check mode: per root of `krate`, its own closure, its own `Program` and `check_program` call,
+/// its own verdict; then the report, sorted.
+fn check(krate: &str, m: &Manifest, out: &std::path::Path) -> Result<(), String> {
+    let (mut lines, mut declass) = (BTreeSet::new(), BTreeMap::<String, BTreeSet<String>>::new());
+    for r in crate_roots(krate, m)? {
+        match verdict(m, r) {
+            Ok((infos, ls)) => {
+                lines.insert(format!("root {r} ok\n"));
+                for (i, l) in infos.iter().zip(&ls) {
+                    let sec: Vec<String> = (0..i.param_names.len())
+                        .filter(|&j| l.locals.get(1 + j) == Some(&true))
+                        .map(|j| if i.param_names[j].is_empty() { format!("#{}", j + 1) } else { i.param_names[j].clone() })
+                        .collect();
+                    let ret = if l.locals.first() == Some(&true) { 's' } else { 'p' };
+                    lines.insert(format!("checked {} secret={} ret={ret}\n", i.path, sec.join(",")));
+                    declass.entry(i.path.clone()).or_default().extend(i.declassify_sites.iter().cloned());
+                }
+            }
+            Err(rejects) => {
+                // one line per (root, kind, site): the first two words of a reject text
+                let mut seen = HashSet::new();
+                for x in rejects {
+                    if seen.insert(x.split_whitespace().take(2).collect::<Vec<_>>().join(" ")) {
+                        lines.insert(format!("reject {r} {x}\n"));
+                    }
+                }
+            }
+        }
+    }
+    for (f, sites) in declass {
+        lines.extend(sites.iter().enumerate().map(|(k, s)| format!("declassify {f}#{} {s}\n", k + 1)));
+    }
+    let file = out.join(format!("report-{krate}.txt"));
+    std::fs::write(&file, lines.into_iter().collect::<String>()).map_err(|e| format!("{}: {e}", file.display()))
+}
+
+/// One root's verdict: its fns and checked labels, or its reject texts (`<Kind> <rest>`): the
+/// translation errors, then the attribute rules, then `check_program`'s rejection sites.
+fn verdict(m: &Manifest, root: &str) -> Result<(Vec<translate::FnInfo>, Vec<ctcore::ct::FnLab>), Vec<String>> {
+    use translate::TrErr;
+    let tr_text = |e: &TrErr| match e {
+        TrErr::Unsupported { path, what, span } => format!("Unsupported {span} {path}: {what}"),
+        TrErr::Unresolved { path, callee, span } => format!("Unresolved {span} {path} calls {callee}"),
+        TrErr::Attr { path, msg } => format!("Attr {path}: {msg}"),
+        TrErr::Root { path, msg } => format!("Root {path}: {msg}"),
+    };
+    let (p, infos) = translate::translate_closure(m, root).map_err(|es| es.iter().map(tr_text).collect::<Vec<_>>())?;
+    let mut errs = Vec::new();
+    for i in &infos {
+        if let Some(msg) = &i.attr_err {
+            errs.push(TrErr::Attr { path: i.path.clone(), msg: msg.clone() });
+        } else if i.is_root && i.decl.is_none() {
+            errs.push(TrErr::Root { path: i.path.clone(), msg: "a root needs a ct:: attribute".into() });
+        }
+    }
+    if !errs.is_empty() {
+        return Err(errs.iter().map(tr_text).collect());
+    }
+    let decl: Vec<Option<Vec<bool>>> = infos.iter().map(|i| i.decl.clone()).collect();
+    match ctcore::check_program(&p, &decl) {
+        Ok(ls) => Ok((infos, ls)),
+        Err(rs) => Err(rs.iter().map(|rj| reject_text(&p, &infos, rj)).collect()),
+    }
+}
+
+/// `<Kind> <file>:<line> <fn>`; at a call, also the callee, and for `ArgLabel(j)` its param name
+/// (the label of a `Mut` param must equal the caller buffer's, so this names the param to fix).
+fn reject_text(p: &ctcore::Program, infos: &[translate::FnInfo], rj: &ctcore::Reject) -> String {
+    use ctcore::RejectKind as K;
+    let Some(i) = infos.get(rj.f) else { return format!("NotWf fn #{} out of range", rj.f) };
+    let site = match rj.stmt {
+        Some(s) => i.stmt_spans.get(rj.block).and_then(|v| v.get(s)),
+        None => i.block_spans.get(rj.block),
+    };
+    let site = site.map_or("?", |s| s.as_str());
+    let term = (rj.stmt.is_none()).then(|| p.fns.get(rj.f).and_then(|b| b.blocks.get(rj.block)).map(|b| &b.term)).flatten();
+    let callee = match term {
+        Some(ctcore::Term::Call(ctcore::Callee::Fn(g), ..)) => infos.get(*g),
+        _ => None,
+    };
+    let kind = match &rj.kind {
+        K::SecretSwitch => "SecretSwitch",
+        K::SecretAssert => "SecretAssert",
+        K::SecretIndex => "SecretIndex",
+        K::SecretDivOperand => "SecretDivOperand",
+        K::SecretShift => "SecretShift",
+        K::SecretAlloc => "SecretAlloc",
+        K::SecretRange => "SecretRange",
+        K::ArgLabel(_) => "ArgLabel",
+        K::RetLabel => "RetLabel",
+        K::MutLabel => "MutLabel",
+        K::NotWf => "NotWf",
+        K::Recursion => "Recursion",
+        K::InferFailed => "InferFailed",
+    };
+    let mut s = format!("{kind} {site} in {}", i.path);
+    if let Some(g) = callee {
+        s += &format!(" calling {}", g.path);
+        if let K::ArgLabel(j) = rj.kind {
+            let name = g.param_names.get(j).map_or("", |n| n.as_str());
+            s += &format!(" param #{} {name}", j + 1);
+        }
+    }
+    s
 }
 
 #[cfg(test)]

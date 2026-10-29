@@ -1,0 +1,50 @@
+# ct-driver manifest for the fixtures (TRUSTED format: tools/ct-driver/src/manifest.rs), used
+# only by scripts/ct-check.sh. Every fixture is a root; the helper_* fns are reached, not roots.
+intr ct_fixtures::ct::declassify Declassify
+intr ct_fixtures::ct::ghost_fallback GhostUnit
+# Declared at Vec<u8>, the only element type of the crypto census; neg_intr_type_args reaches
+# the same key at Vec<u64>, which the translator's type-arg guard rejects.
+intr std::vec::Vec::push VecPush
+# Label lines pass the same naming check as attributes.
+label ct_fixtures::fx::pos_label_line secret(k) public(n)
+label ct_fixtures::fx::neg_label_line_missing_param secret(a)
+
+root ct_fixtures::fx::pos_masked_select
+root ct_fixtures::fx::pos_public_loop_over_secret_array
+root ct_fixtures::fx::pos_len_of_secret_slice
+root ct_fixtures::fx::pos_declassified_branch
+root ct_fixtures::fx::pos_call_chain
+root ct_fixtures::fx::pos_mut_param_update
+root ct_fixtures::fx::pos_u128_mul_mask
+root ct_fixtures::fx::pos_ghost_arg
+root ct_fixtures::fx::pos_bare_public
+root ct_fixtures::fx::neg_secret_if
+root ct_fixtures::fx::neg_secret_match
+root ct_fixtures::fx::neg_secret_and_and
+root ct_fixtures::fx::neg_secret_early_return
+root ct_fixtures::fx::neg_secret_while
+root ct_fixtures::fx::neg_secret_index
+root ct_fixtures::fx::neg_secret_div
+root ct_fixtures::fx::neg_secret_rem_u128
+root ct_fixtures::fx::neg_secret_shift
+root ct_fixtures::fx::neg_secret_to_unlabeled_helper
+root ct_fixtures::fx::neg_unresolved_callee
+root ct_fixtures::fx::neg_unknown_param_name
+root ct_fixtures::fx::neg_missing_param_name
+root ct_fixtures::fx::neg_duplicate_param_name
+root ct_fixtures::fx::neg_unknown_attr
+root ct_fixtures::fx::neg_root_without_label
+root ct_fixtures::fx::neg_float
+root ct_fixtures::fx::neg_raw_pointer
+root ct_fixtures::fx::neg_intr_type_args
+root ct_fixtures::fx::neg_mut_param_label
+root ct_fixtures::fx::neg_char
+root ct_fixtures::fx::neg_box
+root ct_fixtures::fx::neg_dyn
+root ct_fixtures::fx::neg_fn_pointer_call
+root ct_fixtures::fx::neg_closure_call
+root ct_fixtures::fx::neg_drop_non_vec
+root ct_fixtures::fx::neg_interior_mut
+root ct_fixtures::fx::neg_enum_discriminant
+root ct_fixtures::fx::pos_label_line
+root ct_fixtures::fx::neg_label_line_missing_param
