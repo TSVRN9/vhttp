@@ -183,3 +183,34 @@ fn capacity_bounded() {
     assert!(p.capacities(0).0 <= MAX_PATHS);
     assert!(p.capacities(0).1 <= MAX_RESPONSES);
 }
+
+#[test]
+fn handshake_path_mtu_ok() {
+    let mut p = Paths::new(0);
+    assert!(!p.mtu_ok(0));
+    p.set_validated(0);
+    assert!(p.mtu_ok(0));
+    assert!(!p.needs_mtu_probe(0));
+}
+
+#[test]
+fn rechallenge_keeps_clock() {
+    let mut p = challenged(100, true);
+    p.start_challenge(1, D(10), 5_000);
+    assert_eq!(p.take_challenge(1, true), Some(D(10)));
+    assert_eq!(p.deadline(999_000), Some(2_997_100));
+    assert_eq!(p.on_response(D(9)), None);
+    assert_eq!(p.on_timeout(2_997_100, 999_000), Some(1));
+    assert_eq!(p.state(1), PathState::Unvalidated);
+}
+
+#[test]
+fn unpadded_response_keeps_mtu_ok() {
+    let mut p = challenged(0, true);
+    assert_eq!(p.on_response(D(9)), Some(1));
+    p.start_challenge(1, D(10), 10);
+    assert_eq!(p.take_challenge(1, false), Some(D(10)));
+    assert_eq!(p.on_response(D(10)), Some(1));
+    assert!(p.mtu_ok(1));
+    assert!(!p.needs_mtu_probe(1));
+}
