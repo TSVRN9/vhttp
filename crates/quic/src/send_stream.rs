@@ -181,6 +181,11 @@ fn range_remove(
     *v = out;
 }
 
+// ponytail: new data waits while acked+lost hold 64 ranges; per-stream hole bound is tested (D4), not proven.
+/// `poll_data` sends new data only while the acked and lost range lists hold fewer ranges
+/// than this in all.
+pub const MAX_SEND_RANGES: usize = 64;
+
 /// `min(off + len, end)`, without overflow.
 fn clamp_end(off: u64, len: u64, end: u64) -> (r: u64)
     ensures
@@ -285,6 +290,11 @@ impl SendStream {
         self.buf@.len()
     }
 
+    /// Ranges held in the acked and lost lists.
+    pub closed spec fn range_count(&self) -> nat {
+        self.acked@.len() + self.lost@.len()
+    }
+
     pub closed spec fn sent_end_spec(&self) -> u64 {
         self.sent_end
     }
@@ -387,6 +397,29 @@ impl SendStream {
         self.credit.lemma_wf();
     }
 
+    /// The send buffer's length: the bytes written past `acked_base`, none once reset.
+    pub fn buffered(&self) -> (r: usize)
+        requires
+            self.wf(),
+        ensures
+            r == self.buffered_spec(),
+    {
+        self.buf.len()
+    }
+
+    pub proof fn lemma_buffered(&self)
+        requires
+            self.wf(),
+        ensures
+            self.buffered_spec() == if is_reset(self.state()) {
+                0
+            } else {
+                (self.all_written().len() - self.acked_base_spec()) as nat
+            },
+    {
+        self.lemma_wf();
+    }
+
     pub fn new(max: u64) -> (r: SendStream)
         ensures
             r.wf(),
@@ -396,6 +429,7 @@ impl SendStream {
             r.sent_end() == 0,
             r.max() == max,
             r.reset_spec() is None,
+            r.buffered_spec() == 0,
     {
         let r = SendStream {
             state: SendState::Ready,
@@ -464,6 +498,7 @@ impl SendStream {
                 || old(self).fin_written_spec() || old(self).all_written().len() + data@.len()
                 > VARINT_MAX),
             r is Err ==> *final(self) == *old(self),
+            r is Ok ==> final(self).buffered_spec() == old(self).buffered_spec() + data@.len(),
             r is Ok ==> {
                 &&& final(self).all_written() == old(self).all_written() + data@
                 &&& final(self).fin_written_spec() == fin
@@ -510,6 +545,9 @@ impl SendStream {
             no_data(old(self).state()) ==> r is None,
             r is None ==> *final(self) == *old(self),
             r matches Some(c) ==> chunk_ok(*old(self), *final(self), c@, max_len, conn_avail),
+            final(self).buffered_spec() <= old(self).buffered_spec(),
+            r matches Some(c) && c@.off >= old(self).sent_end_spec() && c@.data.len() > 0
+                ==> old(self).range_count() < MAX_SEND_RANGES,
     {
         match self.state {
             //= https://www.rfc-editor.org/rfc/rfc9000#section-3.3
@@ -525,7 +563,10 @@ impl SendStream {
         if self.lost.len() > 0 {
             self.retransmit(max_len)
         } else {
-            self.send_new(max_len, conn_avail)
+            // The new-data gate (3d D4): a lone FIN still goes.
+            let new_ok = self.acked.len() < MAX_SEND_RANGES && self.lost.len() < MAX_SEND_RANGES
+                - self.acked.len();
+            self.send_new(max_len, conn_avail, new_ok)
         }
     }
 
@@ -548,6 +589,8 @@ impl SendStream {
             final(self).pending_reset() == old(self).pending_reset(),
             r is None ==> *final(self) == *old(self),
             r matches Some(c) ==> chunk_ok(*old(self), *final(self), c@, max_len, 0),
+            final(self).buffered_spec() == old(self).buffered_spec(),
+            r matches Some(c) ==> c@.off < old(self).sent_end_spec(),
     {
         let (s, e) = self.lost[0];
         if max_len == 0 {
@@ -584,9 +627,9 @@ impl SendStream {
     //= https://www.rfc-editor.org/rfc/rfc9000#section-4.5
     //# An endpoint MUST NOT send data on a stream at or beyond the final
     //# size.
-    /// New bytes from `sent_end`, within every limit, with the FIN once the chunk reaches the
-    /// end of the written data; or a lone FIN that is owed.
-    fn send_new(&mut self, max_len: u64, conn_avail: u64) -> (r: Option<Chunk>)
+    /// New bytes from `sent_end`, within every limit and only if `new_ok`, with the FIN once
+    /// the chunk reaches the end of the written data; or a lone FIN that is owed.
+    fn send_new(&mut self, max_len: u64, conn_avail: u64, new_ok: bool) -> (r: Option<Chunk>)
         requires
             old(self).wf(),
             old(self).lost@.len() == 0,
@@ -601,11 +644,16 @@ impl SendStream {
             final(self).pending_reset() == old(self).pending_reset(),
             r is None ==> *final(self) == *old(self),
             r matches Some(c) ==> chunk_ok(*old(self), *final(self), c@, max_len, conn_avail),
+            final(self).buffered_spec() == old(self).buffered_spec(),
+            r matches Some(c) && c@.data.len() > 0 ==> new_ok,
     {
         proof {
             self.credit.lemma_wf();
         }
         let mut len = self.written - self.sent_end;
+        if !new_ok {
+            len = 0;
+        }
         if len > max_len {
             len = max_len;
         }
@@ -722,6 +770,7 @@ impl SendStream {
             code <= VARINT_MAX,
         ensures
             final(self).wf(),
+            final(self).buffered_spec() <= old(self).buffered_spec(),
             send_step_ok(old(self).state(), final(self).state()),
             final(self).all_written() == old(self).all_written(),
             final(self).sent_end() == old(self).sent_end(),
@@ -761,6 +810,7 @@ impl SendStream {
             code <= VARINT_MAX,
         ensures
             final(self).wf(),
+            final(self).buffered_spec() <= old(self).buffered_spec(),
             send_step_ok(old(self).state(), final(self).state()),
             final(self).all_written() == old(self).all_written(),
             final(self).sent_end() == old(self).sent_end(),
@@ -782,6 +832,7 @@ impl SendStream {
             old(self).wf(),
         ensures
             final(self).wf(),
+            final(self).buffered_spec() <= old(self).buffered_spec(),
             final(self).state() == old(self).state(),
             final(self).all_written() == old(self).all_written(),
             final(self).fin_written_spec() == old(self).fin_written_spec(),
@@ -823,6 +874,7 @@ impl SendStream {
             old(self).wf(),
         ensures
             final(self).wf(),
+            final(self).buffered_spec() <= old(self).buffered_spec(),
             final(self).state() == old(self).state(),
             final(self).all_written() == old(self).all_written(),
             final(self).sent_end() == old(self).sent_end(),
@@ -840,6 +892,7 @@ impl SendStream {
             old(self).wf(),
         ensures
             final(self).wf(),
+            final(self).buffered_spec() <= old(self).buffered_spec(),
             final(self).state() == old(self).state(),
             final(self).all_written() == old(self).all_written(),
             final(self).sent_end() == old(self).sent_end(),
@@ -863,6 +916,7 @@ impl SendStream {
             old(self).wf(),
         ensures
             final(self).wf(),
+            final(self).buffered_spec() <= old(self).buffered_spec(),
             send_step_ok(old(self).state(), final(self).state()),
             final(self).state() == if old(self).state() is ResetSent {
                 SendState::ResetRecvd
@@ -888,6 +942,7 @@ impl SendStream {
             old(self).wf(),
         ensures
             final(self).wf(),
+            final(self).buffered_spec() <= old(self).buffered_spec(),
             send_step_ok(old(self).state(), final(self).state()),
             final(self).all_written() == old(self).all_written(),
             final(self).fin_written_spec() == old(self).fin_written_spec(),
@@ -990,6 +1045,7 @@ impl SendStream {
             old(self).wf(),
         ensures
             final(self).wf(),
+            final(self).buffered_spec() <= old(self).buffered_spec(),
             final(self).state() == old(self).state(),
             final(self).all_written() == old(self).all_written(),
             final(self).fin_written_spec() == old(self).fin_written_spec(),
@@ -1032,5 +1088,11 @@ impl SendStream {
     #[doc(hidden)]
     pub fn buf_capacity(&self) -> usize {
         self.buf.capacity()
+    }
+
+    /// Test support: the acked and lost range lists' lengths.
+    #[doc(hidden)]
+    pub fn range_counts(&self) -> (usize, usize) {
+        (self.acked.len(), self.lost.len())
     }
 }
