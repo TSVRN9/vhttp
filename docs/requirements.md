@@ -177,13 +177,13 @@ Total keyword count: 44 across 22 sections.
 |---|---|---|---|---|---|
 | 1.2 | Terms and Definitions (BCP 14 boilerplate) | 5 | no | N/A (boilerplate) | Keyword-definition boilerplate, not a requirement; no phase bucket fits, N/A used. |
 | 2.1 | Stream types and identifiers | 1 | yes | 3 | Never reuse a stream ID. ✅ 3c: crates/quic/src/stream_id.rs |
-| 2.2 | Sending and receiving data | 3 | yes | 3 | Ordered delivery; same data at same offset; respect peer flow limits. 3c: reassembly.rs ordered delivery (closed in Task 6); 3c: recv_stream.rs (closed in Task 6) |
+| 2.2 | Sending and receiving data | 3 | yes | 3 | Ordered delivery; same data at same offset; respect peer flow limits. ✅ 3c: crates/quic/src/streams.rs (peer flow limits; ordered delivery in crates/quic/src/reassembly.rs and crates/quic/src/recv_stream.rs, unchanged retransmitted data in crates/quic/src/send_stream.rs) |
 | 3.2 | Receiving stream states | 1 | yes | 3 | Opening stream N implicitly creates all lower-numbered streams of that type. ✅ 3c: crates/quic/src/streams.rs |
 | 3.3 | Permitted frame types | 2 | yes | 3 | No frames from terminal states; no STREAM/STREAM_DATA_BLOCKED after RESET_STREAM. ✅ 3c: crates/quic/src/send_stream.rs |
-| 3.5 | Solicited state transitions | 1 | yes | 3 | STOP_SENDING in Ready/Send must trigger RESET_STREAM. |
-| 4.1 | Data flow control | 3 | yes | 3 | Do not exceed limits; FLOW_CONTROL_ERROR on violation; ignore non-increasing MAX_DATA/MAX_STREAM_DATA. |
-| 4.2 | Increasing flow control limits | 1 | yes | 3 | Do not wait for *_BLOCKED before raising credit. |
-| 4.4 | Handling stream cancellation | 1 | yes | 3 | Keep flow control state until terminal. |
+| 3.5 | Solicited state transitions | 1 | yes | 3 | STOP_SENDING in Ready/Send must trigger RESET_STREAM. ✅ 3c: crates/quic/src/streams.rs |
+| 4.1 | Data flow control | 3 | yes | 3 | Do not exceed limits; FLOW_CONTROL_ERROR on violation; ignore non-increasing MAX_DATA/MAX_STREAM_DATA. ✅ 3c: crates/quic/src/streams.rs (non-increasing limits ignored in crates/quic/src/flow.rs) |
+| 4.2 | Increasing flow control limits | 1 | yes | 3 | Do not wait for *_BLOCKED before raising credit. ✅ 3c: crates/quic/src/streams.rs |
+| 4.4 | Handling stream cancellation | 1 | yes | 3 | Keep flow control state until terminal. ✅ 3c: crates/quic/src/streams.rs |
 | 4.5 | Stream final size | 2 | yes | 3 | Account final size in connection flow control; no data at/after final size. ✅ 3c: crates/quic/src/streams.rs |
 | 4.6 | Controlling concurrency | 5 | yes | 3 | Stream limit > 2^60 is an error; STREAM_LIMIT_ERROR; ignore non-increasing MAX_STREAMS. ✅ 3c: crates/quic/src/stream_id.rs |
 | 5.1 | Connection ID | 3 | yes | 3 | CIDs must not be correlatable by observers; no zero-length-CID port sharing (we issue non-zero CIDs). |
@@ -274,7 +274,7 @@ Total keyword count: 44 across 22 sections.
 | 10.3.3 | Looping | 1 | yes | 3 | Reset must be smaller than trigger. Vacuous: we never send a Stateless Reset; Duvet exception in crates/quic/src/stateless.rs |
 | 11 | Error handling | 1 | yes | 3 | No stateless reset if connection state exists. |
 | 11.1 | Connection errors | 1 | yes | 3 | Fatal errors via CONNECTION_CLOSE. |
-| 11.2 | Stream errors | 1 | yes | 3 | RESET_STREAM only instigated by the application (HTTP/3 layer). |
+| 11.2 | Stream errors | 1 | yes | 3 | RESET_STREAM only instigated by the application (HTTP/3 layer). ✅ 3c: crates/quic/src/streams.rs |
 | 12.2 | Coalescing packets | 4 | yes | 3 | Process coalesced packets; same CID within datagram; ack separately. |
 | 12.3 | Packet numbers | 5 | yes | 3 | Monotonic, never reused, 2^62-1 limit closes silently, duplicate suppression after decryption. |
 | 12.4 | Frames and frame types | 5 | yes | 3 | Rows for frame-type encoding below; no-frame packet and disallowed frame are PROTOCOL_VIOLATION; unknown frame FRAME_ENCODING_ERROR. ✅ 3b: crates/quic/src/payload.rs |
@@ -285,7 +285,7 @@ Total keyword count: 44 across 22 sections.
 | 13.2.3 | Managing ACK ranges | 2 | yes | 3 | Retain ranges; retain largest PN. |
 | 13.2.5 | Measuring and reporting host delay | 1 | yes | 3 | Exclude delays not under endpoint control. |
 | 13.2.6 | ACK frames and packet protection | 3 | yes | 3 | Same-space ACK; 0-RTT-ack rule vacuous (we reject 0-RTT). |
-| 13.3 | Retransmission of information | 4 | yes | 3 | RESET_STREAM unchanged; HANDSHAKE_DONE retransmitted; accept outdated frames; congestion action on loss. |
+| 13.3 | Retransmission of information | 4 | yes | 3 | RESET_STREAM unchanged; HANDSHAKE_DONE retransmitted; accept outdated frames; congestion action on loss. 3c: crates/quic/src/streams.rs (stream-family retransmission: RESET_STREAM resent unchanged, the current credit value resent, no STREAM after a reset; closed in 3d) |
 | 13.4.1 | Reporting ECN counts | 1 | yes | 3 | Provide ECN feedback if accessible; needs IP_RECVTOS in shell (otherwise relies on "if accessible"). |
 | 13.4.2.1 | Receiving ACK frames with ECN counts | 1 | yes | 3 | Only if we send ECT; vacuous otherwise. |
 | 13.4.2.2 | ECN validation outcomes | 2 | yes | 3 | Only if we send ECT; vacuous otherwise. |
@@ -332,8 +332,8 @@ Total keyword count: 44 across 22 sections.
 | 19.7 (req) | Client empty-token error; clients MUST NOT send NEW_TOKEN | 2 | no | N/A (client-only) |  |
 | 19.7 (req) | Server treats receipt of NEW_TOKEN as PROTOCOL_VIOLATION | 1 | yes | 3 | ✅ 3b: crates/quic/src/frame.rs |
 | 19.8 | STREAM frames | 2 | yes | 3 | STREAM_STATE_ERROR; offset/length limit. ✅ 3c: crates/quic/src/streams.rs |
-| 19.9 | MAX_DATA frames | 2 | yes | 3 | FLOW_CONTROL_ERROR on excess. |
-| 19.10 | MAX_STREAM_DATA frames | 4 | yes | 3 |  |
+| 19.9 | MAX_DATA frames | 2 | yes | 3 | FLOW_CONTROL_ERROR on excess. ✅ 3c: crates/quic/src/streams.rs |
+| 19.10 | MAX_STREAM_DATA frames | 4 | yes | 3 | ✅ 3c: crates/quic/src/streams.rs |
 | 19.11 | MAX_STREAMS frames | 4 | yes | 3 | ✅ 3c: crates/quic/src/stream_id.rs |
 | 19.13 | STREAM_DATA_BLOCKED frames | 1 | yes | 3 | ✅ 3c: crates/quic/src/streams.rs |
 | 19.14 | STREAMS_BLOCKED frames | 1 | yes | 3 | ✅ 3b: crates/quic/src/frame.rs |
