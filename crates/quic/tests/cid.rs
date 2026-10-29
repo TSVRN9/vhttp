@@ -223,6 +223,27 @@ fn duplicate_ok() {
 }
 
 #[test]
+fn repeat_with_higher_rpt_retires() {
+    let mut p = peer();
+    assert_eq!(N(&mut p, 1, 0, &A, T(1)), Ok(()));
+    assert_eq!(N(&mut p, 2, 0, &B, T(2)), Err(CONNECTION_ID_LIMIT_ERROR));
+    // The same frame again, now with Retire Prior To 1: seq 0 is retired (§5.1.2).
+    assert_eq!(N(&mut p, 1, 1, &A, T(1)), Ok(()));
+    assert_eq!(p.largest_rpt(), 1);
+    assert_eq!(p.current(), &A);
+    assert!(p.is_active(&A));
+    assert!(!p.is_active(&[0xc0; 8]));
+    assert_eq!(p.pending_retire(), Some(Frame::RetireConnectionId(0)));
+    // Repeating it again changes nothing more.
+    assert_eq!(N(&mut p, 1, 1, &A, T(1)), Ok(()));
+    assert_eq!(N(&mut p, 1, 0, &A, T(1)), Ok(()));
+    assert_eq!(retires(&mut p), vec![0]);
+    assert_eq!(p.largest_rpt(), 1);
+    // Room was made: a new CID fits now.
+    assert_eq!(N(&mut p, 2, 0, &B, T(2)), Ok(()));
+}
+
+#[test]
 fn non_increasing_rpt() {
     let mut p = peer();
     assert_eq!(N(&mut p, 1, 1, &A, T(1)), Ok(()));

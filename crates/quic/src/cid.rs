@@ -1007,6 +1007,13 @@ impl PeerCids {
         }
     }
 
+    /// An exact repeat whose increased Retire Prior To would exceed `2 * local_limit`
+    /// retirements outstanding (§5.1.2 MAY).
+    pub open spec fn repeat_limit_hit(&self, rpt: u64, local_limit: u64) -> bool {
+        rpt > self.largest_rpt_spec() && self.backlog() + count_below(self.entries(), rpt) > 2
+            * local_limit
+    }
+
     /// The invariant, in terms of the accessors.
     pub proof fn lemma_wf(&self)
         requires
@@ -1349,7 +1356,9 @@ impl PeerCids {
     /// Processes NEW_CONNECTION_ID{seq, rpt, cid, token} against our advertised
     /// `active_connection_id_limit` (`local_limit`). In order:
     /// 1. zero-length peer CIDs: PROTOCOL_VIOLATION (§19.15);
-    /// 2. an exact repeat: Ok, nothing changes (§19.15);
+    /// 2. an exact repeat: Ok, nothing changes (§19.15), unless its `rpt` increases the
+    ///    largest Retire Prior To: then the older CIDs are retired as in 5 (§5.1.2), and the
+    ///    repeated CID stays;
     /// 3. the same seq with another CID or token, or the CID or token under another seq:
     ///    PROTOCOL_VIOLATION (§19.15 and §10.3.2 MAYs);
     /// 4. seq below the largest Retire Prior To: queue its RETIRE_CONNECTION_ID unless
@@ -1390,9 +1399,40 @@ impl PeerCids {
                 seq,
                 cid@,
                 token@,
-            ) && old(self).cid_limit_hit(seq, rpt, local_limit)),
-            !old(self).zero_len_spec() && peer_same(old(self).entries(), seq, cid@, token@)
-                ==> *final(self) == *old(self),
+            ) && old(self).cid_limit_hit(seq, rpt, local_limit) || !old(self).zero_len_spec()
+                && peer_same(old(self).entries(), seq, cid@, token@) && old(
+                self).repeat_limit_hit(rpt, local_limit)),
+            !old(self).zero_len_spec() && peer_same(old(self).entries(), seq, cid@, token@) && rpt
+                <= old(self).largest_rpt_spec() ==> *final(self) == *old(self),
+            r is Ok && peer_same(old(self).entries(), seq, cid@, token@) && rpt > old(
+                self).largest_rpt_spec() ==> {
+                &&& final(self).largest_rpt_spec() == rpt
+                &&& peer_same(final(self).entries(), seq, cid@, token@)
+                &&& forall|s: u64| #[trigger]
+                    peer_has_seq(final(self).entries(), s) <==> (peer_has_seq(old(self).entries(), s)
+                        && s >= rpt)
+                &&& forall|c: Seq<u8>| #[trigger]
+                    peer_has_cid(final(self).entries(), c) ==> peer_has_cid(old(self).entries(), c)
+                &&& final(self).entries().len() <= old(self).entries().len()
+                &&& final(self).backlog() <= 2 * local_limit
+                &&& final(self).retire_pending_spec() == old(self).retire_pending_spec() + seqs_of(
+                    old(self).entries().take(count_below(old(self).entries(), rpt) as int),
+                )
+                &&& final(self).retire_unacked_spec() == old(self).retire_unacked_spec()
+                &&& peer_has_seq(final(self).entries(), old(self).current_spec()) ==> final(self).current_spec() == old(self).current_spec()
+                &&& !peer_has_seq(final(self).entries(), old(self).current_spec()) ==> forall|
+                    s: u64,
+                |
+                    peer_has_seq(final(self).entries(), s) ==> final(self).current_spec() <= s
+                &&& forall|s: u64| #[trigger]
+                    peer_used(final(self).entries(), s) ==> peer_used(old(self).entries(), s) || s
+                        == final(self).current_spec()
+                &&& forall|s: u64|
+                    #![trigger peer_used(old(self).entries(), s)]
+                    #![trigger peer_used(final(self).entries(), s)]
+                    peer_used(old(self).entries(), s) && peer_has_seq(final(self).entries(), s)
+                        ==> peer_used(final(self).entries(), s)
+            },
             r is Ok && !peer_same(old(self).entries(), seq, cid@, token@) && seq >= old(
                 self).largest_rpt_spec() ==> final(self).entries().len() <= local_limit && final(
                 self).backlog() <= 2 * local_limit,
@@ -1458,7 +1498,15 @@ impl PeerCids {
         proof {
             lemma_same_not_clash(self.active@, seq, cid@, token@);
         }
+        let backlog = self.retire_pending.len() as u64 + self.retire_unacked.len() as u64;
         if same {
+            if rpt <= self.largest_rpt {
+                return Ok(());
+            }
+            if backlog + k as u64 > 2 * local_limit {
+                return Err(CONNECTION_ID_LIMIT_ERROR);
+            }
+            self.repeat_raise(k, rpt, Ghost(seq), Ghost(cid@), Ghost(token@));
             return Ok(());
         }
         if clash {
@@ -1470,7 +1518,6 @@ impl PeerCids {
                 assert(same_at(self.active@[w], seq, cid@, token@) || clash_at(self.active@[w], seq, cid@, token@));
             }
         }
-        let backlog = self.retire_pending.len() as u64 + self.retire_unacked.len() as u64;
         if seq < self.largest_rpt {
             if contains_u64(&self.retire_pending, seq) || contains_u64(&self.retire_unacked, seq) {
                 return Ok(());
@@ -1514,6 +1561,88 @@ impl PeerCids {
             }
         }
         Ok(())
+    }
+
+    /// An exact repeat whose Retire Prior To increases the largest one: retire every active
+    /// seq below `rpt` and fix `current`; the repeated entry (seq >= rpt) stays (§5.1.2).
+    fn repeat_raise(
+        &mut self,
+        k: usize,
+        rpt: u64,
+        Ghost(seq): Ghost<u64>,
+        Ghost(c): Ghost<Seq<u8>>,
+        Ghost(t): Ghost<Seq<u8>>,
+    )
+        requires
+            old(self).wf(),
+            rpt <= seq,
+            rpt <= VARINT_MAX,
+            peer_same(old(self).active@, seq, c, t),
+            k == count_below(old(self).active@, rpt),
+            k <= old(self).active@.len(),
+            forall|j: int| 0 <= j < k ==> (#[trigger] old(self).active@[j]).0 < rpt,
+            forall|j: int|
+                k <= j < old(self).active@.len() ==> (#[trigger] old(self).active@[j]).0 >= rpt,
+            old(self).retire_pending@.len() + old(self).retire_unacked@.len() + k <= 2
+                * PEER_CID_CAP,
+        ensures
+            final(self).wf(),
+            final(self).largest_rpt == if rpt > old(self).largest_rpt {
+                rpt
+            } else {
+                old(self).largest_rpt
+            },
+            peer_same(final(self).active@, seq, c, t),
+            forall|s: u64| #[trigger]
+                peer_has_seq(final(self).active@, s) <==> (peer_has_seq(old(self).active@, s) && s
+                    >= rpt),
+            forall|x: Seq<u8>| #[trigger]
+                peer_has_cid(final(self).active@, x) ==> peer_has_cid(old(self).active@, x),
+            final(self).active@.len() <= old(self).active@.len(),
+            final(self).retire_pending@ == old(self).retire_pending@ + seqs_of(
+                old(self).active@.take(k as int),
+            ),
+            final(self).retire_unacked == old(self).retire_unacked,
+            final(self).zero_len == old(self).zero_len,
+            peer_has_seq(final(self).active@, old(self).current) ==> final(self).current == old(
+                self).current,
+            !peer_has_seq(final(self).active@, old(self).current) ==> forall|s: u64|
+                peer_has_seq(final(self).active@, s) ==> final(self).current <= s,
+            forall|s: u64| #[trigger]
+                peer_used(final(self).active@, s) ==> peer_used(old(self).active@, s) || s
+                    == final(self).current,
+            forall|s: u64|
+                #![trigger peer_used(old(self).active@, s)]
+                #![trigger peer_used(final(self).active@, s)]
+                peer_used(old(self).active@, s) && peer_has_seq(final(self).active@, s) ==> peer_used(
+                    final(self).active@,
+                    s,
+                ),
+    {
+        let ghost e0 = self.active@;
+        let ghost cur0 = self.current;
+        let ghost w = choose|w: int| 0 <= w < e0.len() && same_at(#[trigger] e0[w], seq, c, t);
+        self.retire_prefix(k, rpt);
+        let ghost e1 = self.active@;
+        proof {
+            lemma_skip_membership(e0, k as int, rpt, seq, c, t);
+            assert(w >= k) by {
+                if w < k {
+                    assert(e0[w].0 < rpt);
+                }
+            }
+            assert(e1[w - k] == e0[w]);
+        }
+        self.fix_current();
+        proof {
+            let e3 = self.active@;
+            assert(same_at(e3[w - k], seq, c, t));
+            assert(peer_has_seq(e3, cur0) <==> peer_has_seq(e1, cur0));
+            assert forall|s: u64|
+                peer_used(e0, s) && peer_has_seq(e3, s) implies peer_used(e3, s) by {
+                assert(peer_has_seq(e0, s));
+            }
+        }
     }
 
     /// NEW_CONNECTION_ID for a sequence number below the largest Retire Prior To: queue its
