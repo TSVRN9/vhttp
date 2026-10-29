@@ -194,26 +194,85 @@ pub open spec fn spec_p256_ecdh(d: Seq<u8>, peer: Seq<u8>) -> Option<Seq<u8>> {
     }
 }
 
-/// Trusted shim: the body is RustCrypto p256; the ensures is the trusted statement.
-#[verifier::external_body]
+/// SEC 1 v2 §3.2.1 step 2 (Q = dG, §2.3.3 uncompressed); verified against spec_p256_public_key (dG != O by the Phase 5d group lemmas).
+// ct: secret d
 pub fn p256_public_key(d: &[u8]) -> (r: Option<[u8; 65]>)
     requires
         d@.len() == 32,
     ensures
         r.deep_view() == spec_p256_public_key(d@),
 {
-    crate::shim::p256_public_key(d)
+    hide(point_add);
+    hide(scalar_mult);
+    hide(finv);
+    // ct: declassify d in [1, n - 1] (key validity is a public error outcome)
+    if !crate::ct::declassify(scalar_in_range(d)) {
+        return None;
+    }
+    proof {
+        lemma_g_on_curve();
+    }
+    let q = scalar_mult_ct(d, &g_point());
+    proof {
+        crate::p256_group::lemma_scalar_mult_g_nonzero(os2ip(d@));
+    }
+    let e = sec1_encode_affine(&q);
+    assert(e.deep_view() =~= e@);
+    Some(e)
 }
 
-/// Trusted shim: the body is RustCrypto p256; the ensures is the trusted statement.
-#[verifier::external_body]
+/// SEC 1 v2 §3.3.1; verified against spec_p256_ecdh.
+// ct: secret d; public peer
 pub fn p256_ecdh(d: &[u8], peer: &[u8]) -> (r: Option<[u8; 32]>)
     requires
         d@.len() == 32,
     ensures
         r.deep_view() == spec_p256_ecdh(d@, peer@),
 {
-    crate::shim::p256_ecdh(d, peer)
+    hide(point_add);
+    hide(scalar_mult);
+    hide(finv);
+    // ct: declassify d in [1, n - 1] (key validity is a public error outcome)
+    if !crate::ct::declassify(scalar_in_range(d)) {
+        return None;
+    }
+    // ct: branch on public input
+    let pt = match sec1_decode_exec(peer) {
+        Some(pt) => pt,
+        None => return None,
+    };
+    let q = scalar_mult_ct(d, &pt);
+    // ct: declassify P = O (ECDH failure is a public outcome, D8)
+    if crate::ct::declassify(q.inf) == 1 {
+        return None;
+    }
+    let z = fe_to_be(&q.x);
+    assert(z.deep_view() =~= z@);
+    Some(z)
+}
+
+// 1 <= os2ip(d) < n: the borrow of d - n, masked with d != 0.
+// ct: secret d; the result feeds only the caller's declassified (public) None outcome
+fn scalar_in_range(d: &[u8]) -> (r: bool)
+    requires
+        d@.len() == 32,
+    ensures
+        r == scalar_valid(d@),
+{
+    let dl = limbs_from_be(d, 0);
+    let nl = limbs_from_be(&P256_N, 0);
+    let dn = sub4(&dl, &nl);
+    let lt = dn.1;
+    let nz = 1 - is_zero4(&dl);
+    proof {
+        assert(d@.subrange(0, 32) =~= d@);
+        assert(P256_N@.subrange(0, 32) =~= P256_N@);
+        lemma_v4_bound(dl);
+        lemma_v4_bound(nl);
+        lemma_v4_bound(dn.0);
+        bv_and01(lt, nz);
+    }
+    (lt & nz) == 1
 }
 
 // ---- GF(p) in Montgomery form over crate::mont (R = 2^256); values from Task 1 Step 4 ----
@@ -724,7 +783,6 @@ fn on_curve_fe(x: [u64; 4], y: [u64; 4]) -> (r: bool)
 // SEC 1 v2 §2.3.4 step 3, uncompressed only (RFC 8446 §4.2.8.2): 0x04 || X || Y with X, Y < p
 // (§2.3.6 step 1) and on the curve (step 3.5).
 // ct: public b (peer input only; never call on secret data)
-#[allow(dead_code)]  // used from Task 7
 fn sec1_decode_exec(b: &[u8]) -> (r: Option<AffPt>)
     ensures
         r.is_some() == sec1_decode(b@).is_some(),
@@ -751,7 +809,6 @@ fn sec1_decode_exec(b: &[u8]) -> (r: Option<AffPt>)
 
 // SEC 1 v2 §2.3.3 step 3: 0x04 || FE2OSP(x) || FE2OSP(y).
 // ct: secret p
-#[allow(dead_code)]  // used from Task 7
 fn sec1_encode_affine(p: &AffPt) -> (r: [u8; 65])
     requires
         pt_ok(*p),
@@ -792,7 +849,6 @@ fn sec1_encode_affine(p: &AffPt) -> (r: [u8; 65])
 }
 
 // SP 800-186 §3.2.1.3 G in Montgomery form.
-#[allow(dead_code)]  // used from Task 7
 fn g_point() -> (r: AffPt)
     ensures
         pt_ok(r),
@@ -818,7 +874,6 @@ proof fn lemma_g_on_curve()
 // ponytail: 256 doublings + 256 additions, all affine with one inversion each; upgrade: a fixed window or a Montgomery ladder on projective coordinates once 5d's RCB formulas are wired to exec
 // ct: secret k, pt
 #[verifier::spinoff_prover]
-#[allow(dead_code)]  // used from Task 7
 fn scalar_mult_ct(k: &[u8], pt: &AffPt) -> (r: AffPt)
     requires
         k@.len() == 32,
