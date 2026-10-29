@@ -6,6 +6,7 @@ Not trusted: every emitted datum is re-checked by Verus (certificates by compute
 import filecmp
 import json
 import math
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -390,7 +391,626 @@ pub(crate) proof fn lemma_bezout_cert()
 """
 
 
-GENERATORS = {"pratt.rs": gen_pratt, "torsion_cert.rs": gen_torsion}
+# ---------------------------------------------------------------------------------------------
+# grid_small: curve-point grids, and the chunks of the RCB correspondence identities (rcb.rs)
+# ---------------------------------------------------------------------------------------------
+
+GRID_N = 13
+GRID_X = [0, 5, 6, 8, 9, 12, 13, 17, 23, 24, 25, 26, 29]  # planner check (plan Task 6)
+SENT = [-1, -1, -1]
+
+
+def fcurve(x):
+    return (x**3 - 3 * x + B) % P
+
+
+def grid_points():
+    """The first GRID_N x >= 0 with f(x) a nonzero square mod p, and y = f(x)^((p+1)/4)."""
+    assert P % 4 == 3
+    xs, x = [], 0
+    while len(xs) < GRID_N:
+        if fcurve(x) and pow(fcurve(x), (P - 1) // 2, P) == 1:
+            xs.append(x)
+        x += 1
+    ys = [pow(fcurve(x), (P + 1) // 4, P) for x in xs]
+    assert xs == GRID_X and all(y * y % P == fcurve(x) and y for x, y in zip(xs, ys))
+    return xs, ys
+
+
+def rmax(u, v):
+    """Mirror of red.rs `rmax`."""
+    if u[0] < 0:
+        return v
+    if v[0] < 0:
+        return u
+    return [max(a, b) for a, b in zip(u, v)]
+
+
+class Deg:
+    """Mirror of red.rs `rd_*` (8 x 3 degree tables, sentinel row[0] < 0)."""
+
+    def k(self, c):
+        return [[0, 0, 0]] + [SENT] * 7
+
+    def x(self, i):
+        return [[int(i == j) for j in range(3)]] + [SENT] * 7
+
+    def y(self, i):
+        return [[0, 0, 0] if s == 1 << i else SENT for s in range(8)]
+
+    def add(self, a, b):
+        return [rmax(a[s], b[s]) for s in range(8)]
+
+    @staticmethod
+    def pair(a, b, s, r):
+        u, v, m = a[s], b[s ^ r], s & (s ^ r)
+        if u[0] < 0 or v[0] < 0:
+            return SENT
+        return [u[i] + v[i] + 3 * (m >> i & 1) for i in range(3)]
+
+    def mul(self, a, b):
+        out = []
+        for r in range(8):
+            acc = self.pair(a, b, 0, r)
+            for k in range(1, 8):
+                acc = rmax(acc, self.pair(a, b, k, r))
+            out.append(acc)
+        return out
+
+    def sc(self, c, a):
+        return self.mul(self.k(c), a)
+
+    def sub(self, a, b):
+        return self.add(a, self.mul(self.k(-1), b))
+
+
+class MDeg(Deg):
+    """Mirror of poly.rs `dsum`/`dmax` for the y-free identities (rcb.rs `*_ds`)."""
+
+    def k(self, c):
+        return [0, 0, 0]
+
+    def x(self, i):
+        return [int(i == j) for j in range(3)]
+
+    def add(self, a, b):
+        return [max(u, v) for u, v in zip(a, b)]
+
+    def mul(self, a, b):
+        return [u + v for u, v in zip(a, b)]
+
+
+class Plain:
+    """Mirror of rcb.rs's plain spec fns (`fm` reduces each product mod p)."""
+
+    def __init__(self, xs, ys):
+        self.xs, self.ys = xs, ys
+
+    def k(self, c):
+        return c
+
+    def x(self, i):
+        return self.xs[i]
+
+    def y(self, i):
+        return self.ys[i]
+
+    def add(self, a, b):
+        return a + b
+
+    def sub(self, a, b):
+        return a - b
+
+    def mul(self, a, b):
+        return a * b % P
+
+    def sc(self, c, a):
+        return c * a
+
+
+def rcb(R, a, b):
+    """Mirror of rcb.rs `rcb`/`rcb_d` (RCB 2016 eq. (1), a = -3)."""
+    x1, y1, z1 = a
+    x2, y2, z2 = b
+    b3 = R.k(3 * B)
+    t0 = R.add(R.mul(x1, z2), R.mul(x2, z1))
+    y12, z12 = R.mul(y1, y2), R.mul(z1, z2)
+    bz = R.mul(b3, z12)
+    u = R.sub(R.add(y12, R.sc(3, t0)), bz)
+    v = R.add(R.sub(y12, R.sc(3, t0)), bz)
+    w = R.sub(R.add(R.sc(-3, R.mul(x1, x2)), R.mul(b3, t0)), R.sc(9, z12))
+    s = R.add(R.mul(x1, y2), R.mul(x2, y1))
+    r = R.add(R.mul(y1, z2), R.mul(y2, z1))
+    q = R.sub(R.sc(3, R.mul(x1, x2)), R.sc(3, z12))
+    return (R.sub(R.mul(s, u), R.mul(r, w)), R.add(R.mul(v, u), R.mul(q, w)),
+            R.add(R.mul(r, v), R.mul(s, q)))
+
+
+def g_chord(R):
+    x0, x1, y0, y1 = R.x(0), R.x(1), R.y(0), R.y(1)
+    d, ln = R.sub(x1, x0), R.sub(y1, y0)
+    d2 = R.mul(d, d)
+    d3 = R.mul(d2, d)
+    xn = R.sub(R.mul(ln, ln), R.mul(R.add(x0, x1), d2))
+    yn = R.sub(R.mul(ln, R.sub(R.mul(x0, d2), xn)), R.mul(y0, d3))
+    return d2, d3, xn, yn
+
+
+def g_dbl(R):
+    x0, y0 = R.x(0), R.y(0)
+    e, ln = R.sc(2, y0), R.sub(R.sc(3, R.mul(x0, x0)), R.k(3))
+    e2 = R.mul(e, e)
+    e3 = R.mul(e2, e)
+    xn = R.sub(R.mul(ln, ln), R.mul(R.sc(2, x0), e2))
+    yn = R.sub(R.mul(ln, R.sub(R.mul(x0, e2), xn)), R.mul(y0, e3))
+    return e2, e3, xn, yn
+
+
+def g_fv(R, x):
+    return R.add(R.sub(R.mul(R.mul(x, x), x), R.sc(3, x)), R.k(B))
+
+
+def g_w(R, x1, x2):
+    s, t = R.add(x1, x2), R.mul(x1, x2)
+    ss, b = R.mul(s, s), R.k(B)
+    bc = R.add(R.add(R.mul(ss, s), R.sc(6, R.mul(s, t))), R.sc(6, s))
+    c0 = R.sub(R.sub(R.sub(R.sub(R.mul(R.mul(t, t), t), R.sc(3, R.mul(t, ss))), R.sc(3, R.mul(t, t))),
+                     R.sc(9, ss)), R.sc(9, t))
+    return R.add(R.add(R.sub(R.mul(b, bc), R.sc(8, R.mul(b, b))), c0), R.k(27))
+
+
+def g_clo(R, xn, yn, d):
+    return R.sub(R.mul(yn, yn), R.add(R.sub(R.mul(R.mul(xn, xn), xn), R.sc(3, R.mul(xn, R.mul(d, d)))),
+                                      R.mul(R.k(B), R.mul(d, R.mul(d, d)))))
+
+
+def g_pts(R):
+    return (R.x(0), R.y(0), R.k(1)), (R.x(1), R.y(1), R.k(1))
+
+
+def g_inv(R):
+    p, _ = g_pts(R)
+    return rcb(R, p, (p[0], R.sub(R.k(P), p[1]), p[2]))
+
+
+def i_chord_z(R):
+    p, q = g_pts(R)
+    d2, d3, xn, yn = g_chord(R)
+    zm = rcb(R, p, (q[0], R.sc(-1, q[1]), q[2]))[2]
+    return R.sub(R.mul(rcb(R, p, q)[2], zm), R.mul(d3, g_w(R, R.x(0), R.x(1))))
+
+
+def i_coord(pp, ch, k, dk):
+    """X3 d^2 - xn Z3 (k = 0, dk = 0) or Y3 d^3 - yn Z3 (k = 1, dk = 1)."""
+    def f(R):
+        p, q = g_pts(R)
+        o, c = rcb(R, p, q if pp else p), ch(R)
+        return R.sub(R.mul(o[k], c[dk]), R.mul(c[2 + k], o[2]))
+    return f
+
+
+# rcb.rs's identities, in its order: name -> mirror
+IDS = {
+    "chord_x": i_coord(True, g_chord, 0, 0),
+    "chord_y": i_coord(True, g_chord, 1, 1),
+    "chord_z": i_chord_z,
+    "dbl_x": i_coord(False, g_dbl, 0, 0),
+    "dbl_y": i_coord(False, g_dbl, 1, 1),
+    "dbl_z": lambda R: R.sub(rcb(R, *[g_pts(R)[0]] * 2)[2], R.mul(R.sc(8, R.y(0)), g_fv(R, R.x(0)))),
+    "inv_x": lambda R: g_inv(R)[0],
+    "inv_z": lambda R: g_inv(R)[2],
+    "inv_y": lambda R: R.sub(g_inv(R)[1], rcb(R, *[g_pts(R)[0]] * 2)[1]),
+    "closure_chord": lambda R: g_clo(R, *(lambda c: (c[2], c[3], c[0]))(g_chord(R))),
+    "closure_dbl": lambda R: g_clo(R, *(lambda c: (c[2], c[3], c[0]))(g_dbl(R))),
+}
+
+
+def g_r1(R, x1, x2):
+    s, t = R.add(x1, x2), R.mul(x1, x2)
+    return R.sc(2, R.sub(R.add(R.mul(s, s), R.sc(2, t)), R.k(6)))
+
+
+def g_r0(R, x1, x2):
+    s, t = R.add(x1, x2), R.mul(x1, x2)
+    return R.sc(-2, R.add(R.add(R.k(-4 * B), R.mul(t, s)), R.sc(3, s)))
+
+
+def g_q(R, x1, x2, e):
+    s, t = R.add(x1, x2), R.mul(x1, x2)
+    return R.sub(R.add(R.sc(2, R.mul(e, e)), R.mul(s, e)), R.add(t, R.k(3)))
+
+
+def i_res1(R):
+    x1, x2 = R.x(0), R.x(1)
+    s, t = R.add(x1, x2), R.mul(x1, x2)
+    a, b = g_r0(R, x1, x2), g_r1(R, x1, x2)
+    return R.add(R.sub(R.sub(R.sc(2, R.mul(a, a)), R.mul(R.mul(s, a), b)), R.mul(R.add(t, R.k(3)), R.mul(b, b))),
+                 R.sc(16, g_w(R, x1, x2)))
+
+
+def i_res2(R):
+    x1, x2, e = R.x(0), R.x(1), R.x(2)
+    lin = R.sub(R.sc(4, e), R.sc(2, R.add(x1, x2)))
+    return R.sub(R.sub(R.sub(R.sc(8, g_fv(R, e)), R.mul(g_q(R, x1, x2, e), lin)), R.mul(g_r1(R, x1, x2), e)),
+                 g_r0(R, x1, x2))
+
+
+RES = {"res1": i_res1, "res2": i_res2}
+
+
+def rd_sizes(d):
+    rows = [r for r in d if r[0] >= 0]
+    return [max(r[i] for r in rows) + 1 for i in range(3)]
+
+
+def sgn(sig, ys):
+    return [-y if sig >> i & 1 else y for i, y in enumerate(ys)]
+
+
+def point_add(a, b):
+    """Literal transcription of p256.rs `point_add` (None is Infinity)."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    (x1, y1), (x2, y2) = a, b
+    if x1 == x2 and (y1 + y2) % P == 0:
+        return None
+    finv = lambda x: pow(x, P - 2, P)
+    lam = (3 * x1 * x1 - 3) * finv(2 * y1) % P if x1 == x2 else (y2 - y1) * finv(x2 - x1) % P
+    x3 = (lam * lam - x1 - x2) % P
+    return (x3, (lam * (x1 - x3) - y1) % P)
+
+
+def rcb_check():
+    """RCB-decoded vs point_add: 200 random pairs of multiples of G, plus G+G, G+(-G), G+O."""
+    src = (ROOT / OUT / "field.rs").read_text()
+    G = tuple(int(re.search(rf"fn {c}_LIT\(\) -> int {{\s*(\d+)int", src).group(1)) for c in ("GX", "GY"))
+    assert fcurve(G[0]) == G[1] ** 2 % P
+
+    def mult(k):
+        acc, base = None, G
+        while k:
+            if k & 1:
+                acc = point_add(acc, base)
+            base, k = point_add(base, base), k >> 1
+        return acc
+
+    enc = lambda a: (0, 1, 0) if a is None else (a[0], a[1], 1)
+    dec = lambda c: None if c[2] % P == 0 else (c[0] * pow(c[2], P - 2, P) % P, c[1] * pow(c[2], P - 2, P) % P)
+    rng = __import__("random").Random(20261028)
+    pairs = [(mult(rng.randrange(1, N)), mult(rng.randrange(1, N))) for _ in range(200)]
+    pairs += [(G, G), (G, (G[0], P - G[1])), (G, None)]
+    ok = sum(dec(rcb(Plain([], []), enc(a), enc(b))) == point_add(a, b) for a, b in pairs)
+    assert ok == len(pairs) == 203
+    print(f"rcb vs point_add: {ok}/{len(pairs)}")
+
+
+def grid_sizes():
+    """Identity name -> grid sizes [n0, n1, n2] (tracked degree + 1)."""
+    sz = {n: rd_sizes(f(Deg())) for n, f in IDS.items()}
+    sz.update({n: [d + 1 for d in f(MDeg())] for n, f in RES.items()})
+    assert all(1 <= v <= GRID_N for n in sz.values() for v in n) and all(sz[n][2] == 1 for n in IDS)
+    return sz
+
+
+def grid_check(gx, gy, sz):
+    ok = 0
+    for n, f in IDS.items():
+        n0, n1, _ = sz[n]
+        ok += all(f(Plain([gx[i], gx[j], gx[0]], sgn(sig, [gy[i], gy[j], gy[0]]))) % P == 0
+                  for i in range(n0) for j in range(n1) for sig in range(8))
+    for n, f in RES.items():
+        n0, n1, n2 = sz[n]
+        ok += all(f(Plain([i, j, l], [])) % P == 0 for i in range(n0) for j in range(n1) for l in range(n2))
+    assert ok == len(IDS) + len(RES)
+    print(f"all identities zero on grid: {ok}/{len(IDS) + len(RES)}")
+
+
+# Identities with two RCB degree tables exceed one compute assert's budget at --rlimit 0.6: the
+# tables are emitted as literals, each checked by its own compute assert, and `idd_<name>_of`
+# takes them in place of the RCB calls.
+SPLIT = {
+    "chord_z": [("rcb_d(pt_d(0), pt_d(1))", lambda R: rcb(R, *g_pts(R))),
+                ("rcb_d(pt_d(0), ptm_d())", lambda R: rcb(R, g_pts(R)[0], (R.x(1), R.sc(-1, R.y(1)), R.k(1))))],
+    "inv_y": [("rcb_d(pt_d(0), ptn_d())", lambda R: g_inv(R)), ("rcb_d(pt_d(0), pt_d(0))", lambda R: rcb(R, *[g_pts(R)[0]] * 2))],
+}
+
+
+def pd_lit(t):
+    rd = lambda d: "seq![" + ", ".join("seq![" + ", ".join(f"{v}int" if k == 0 else str(v) for k, v in enumerate(r))
+                                       + "]" for r in d) + "]"
+    return f"PD {{\n        x: {rd(t[0])},\n        y: {rd(t[1])},\n        z: {rd(t[2])},\n    }}"
+
+
+def deg_lemma(name, n):
+    ns = f"seq![{n[0]}int, {n[1]}, {n[2]}]"
+    if name not in SPLIT:
+        return f"""pub(crate) proof fn lemma_deg_{name}()
+    ensures
+        deg_ok(idd_{name}(), {ns}),
+{{
+    assert(deg_ok(idd_{name}(), {ns})) by (compute_only);
+}}
+
+"""
+    o, calls = [], []
+    for k, (expr, mirror) in enumerate(SPLIT[name]):
+        st = f"{expr} == pdl_{name}_{k}()"
+        o.append(f"""/// {expr}.
+pub(crate) open spec fn pdl_{name}_{k}() -> PD {{
+    {pd_lit(mirror(Deg()))}
+}}
+
+proof fn lemma_deg_{name}_t{k}()
+    ensures
+        {st},
+{{
+    assert({st}) by (compute_only);
+}}
+
+""")
+        calls.append(f"    lemma_deg_{name}_t{k}();\n")
+    lits = ", ".join(f"pdl_{name}_{k}()" for k in range(len(SPLIT[name])))
+    full = f"deg_ok(idd_{name}_of({lits}), {ns})"
+    return "".join(o) + f"""proof fn lemma_deg_{name}_c()
+    ensures
+        {full},
+{{
+    assert({full}) by (compute_only);
+}}
+
+pub(crate) proof fn lemma_deg_{name}()
+    ensures
+        deg_ok(idd_{name}(), {ns}),
+{{
+{"".join(calls)}    lemma_deg_{name}_c();
+}}
+
+"""
+
+
+def int_chain(name, vals):
+    body = " else ".join(f"if i == {k} {{\n        {v}int\n    }}" for k, v in enumerate(vals))
+    return f"pub(crate) open spec fn {name}(i: int) -> int {{\n    {body} else {{\n        0\n    }}\n}}\n\n"
+
+
+def conj(terms, ind="    "):
+    return f"\n{ind}    && ".join(terms)
+
+
+def gen_grid_small():
+    gx, gy = grid_points()
+    sz = grid_sizes()
+    grid_check(gx, gy, sz)
+    rcb_check()
+    n = GRID_N
+    o = [HEADER, f"""//! Grid data and chunked `compute_only` checks for rcb.rs's identities: the first {n} x >= 0 with
+//! f(x) = x^3 - 3x + b a nonzero square mod p and y = f(x)^((p+1)/4), each identity at every grid
+//! cell and y-sign choice, and each identity's degree table against its grid sizes.
+#[allow(unused_imports)]
+use super::field::*;
+#[allow(unused_imports)]
+use super::rcb::*;
+#[allow(unused_imports)]
+use super::red::*;
+#[allow(unused_imports)]
+use crate::p256::*;
+use vstd::prelude::*;
+
+verus! {{
+
+"""]
+    o.append(int_chain("gx", gx))
+    o.append(int_chain("gy", gy))
+    lit = ([f"pt_lit(gx({t}), gy({t}))" for t in range(n)] + ["0 <= gx(0)"]
+           + [f"gx({t}) < gx({t + 1})" for t in range(n - 1)] + [f"gx({n - 1}) < P_LIT()"])
+    split = " else ".join(f"if t == {t} {{\n            }}" for t in range(n))
+    o.append(f"""/// The grid points are curve points with y != 0, and the x-values increase within [0, p).
+pub(crate) open spec fn pts_lit() -> bool {{
+    {conj(lit)}
+}}
+
+proof fn lemma_grid_pts_lit()
+    ensures
+        pts_lit(),
+{{
+    assert(pts_lit()) by (compute_only);
+}}
+
+proof fn lemma_gx_lt(i: int, j: int)
+    requires
+        pts_lit(),
+        0 <= i < j < {n},
+    ensures
+        gx(i) < gx(j),
+    decreases j - i,
+{{
+    if i + 1 < j {{
+        lemma_gx_lt(i + 1, j);
+    }}
+    assert(gx(i) < gx(i + 1)) by {{
+        {split.replace("t ==", "i ==").replace("            ", "        ")}
+    }}
+}}
+
+/// `lemma_identity`'s grid-point premises at the {n} points.
+pub(crate) proof fn lemma_grid_pts_ok()
+    ensures
+        forall|t: int| 0 <= t < {n} ==> #[trigger] gpt_ok(gx(t), gy(t)),
+        forall|i: int, j: int|
+            0 <= i < {n} && 0 <= j < {n} && i != j ==> fmod(#[trigger] gx(i)) != fmod(#[trigger] gx(j)),
+{{
+    lemma_grid_pts_lit();
+    lemma_group_consts();
+    reveal(pt_lit);
+    assert forall|t: int| 0 <= t < {n} implies #[trigger] gpt_ok(gx(t), gy(t)) && 0 <= gx(t) < P_LIT() by {{
+        assert(pt_lit(gx(t), gy(t)) && 0 <= gx(t) < P_LIT()) by {{
+            {split}
+        }}
+    }}
+    assert forall|i: int, j: int| 0 <= i < {n} && 0 <= j < {n} && i != j implies fmod(#[trigger] gx(i))
+        != fmod(#[trigger] gx(j)) by {{
+        if i < j {{
+            lemma_gx_lt(i, j);
+        }} else {{
+            lemma_gx_lt(j, i);
+        }}
+        assert(gpt_ok(gx(i), gy(i)) && gpt_ok(gx(j), gy(j)));
+        vstd::arithmetic::div_mod::lemma_small_mod(gx(i) as nat, P_LIT() as nat);
+        vstd::arithmetic::div_mod::lemma_small_mod(gx(j) as nat, P_LIT() as nat);
+    }}
+}}
+
+/// The grid sequences `lemma_identity` takes hold the index fns the chunks evaluate.
+pub(crate) proof fn lemma_grid_seq(n0: int, n1: int, n2: int, i: int, j: int, l: int)
+    requires
+        0 <= i < n0 && 0 <= j < n1 && 0 <= l < n2,
+    ensures
+        gpt(grid_x(n0, n1, n2), i, j, l) == seq![gx(i), gx(j), gx(l)],
+        gpt(grid_y(n0, n1, n2), i, j, l) == seq![gy(i), gy(j), gy(l)],
+{{
+    assert(gpt(grid_x(n0, n1, n2), i, j, l) =~= seq![gx(i), gx(j), gx(l)]);
+    assert(gpt(grid_y(n0, n1, n2), i, j, l) =~= seq![gy(i), gy(j), gy(l)]);
+}}
+
+""")
+    for name in IDS:
+        n0, n1, n2 = sz[name]
+        cell = "".join(f"\n    &&& id_{name}(xs, sgn({k}, ys)) % P_LIT() == 0" for k in range(8))
+        two = n1 > 1
+        perm = "|i: int, l: int, j: int|" if two else "|j: int, l: int, i: int|"
+        o.append(f"// ---- {name}: grid {n0} x {n1} x {n2}\n\n")
+        o.append(deg_lemma(name, (n0, n1, n2)))
+        o.append(f"""
+
+#[verifier::opaque]
+pub(crate) open spec fn cell_{name}(i: int, j: int, l: int) -> bool {{
+    let xs = seq![gx(i), gx(j), gx(l)];
+    let ys = seq![gy(i), gy(j), gy(l)];{cell}
+}}
+
+pub(crate) open spec fn c_{name}() -> spec_fn(int, int, int) -> bool {{
+    {perm} cell_{name}(i, j, l)
+}}
+
+""")
+        rows = range(n0) if two else [0]
+        hi = n1 if two else n0
+        calls = []
+        for i in rows:
+            st = f"cells_ok(c_{name}(), {i}, 0, 0, {hi})"
+            # the row's cells as a forall (Z3, kept small: one row per lemma)
+            q, cl, ap = (("j", f"cell_{name}({i}, j, 0)", f"c_{name}()({i}, 0, j)") if two
+                         else ("i", f"cell_{name}(i, 0, 0)", f"c_{name}()(0, 0, i)"))
+            o.append(f"""proof fn lemma_{name}_r{i}()
+    ensures
+        {st},
+{{
+    assert({st}) by (compute_only);
+}}
+
+proof fn lemma_{name}_w{i}()
+    ensures
+        forall|{q}: int| 0 <= {q} < {hi} ==> #[trigger] {cl},
+{{
+    lemma_{name}_r{i}();
+    lemma_cells_forall(c_{name}(), {i}, 0, 0, {hi});
+    assert forall|{q}: int| 0 <= {q} < {hi} implies #[trigger] {cl} by {{
+        assert({ap});
+    }}
+}}
+
+""")
+            calls.append(f"    lemma_{name}_w{i}();\n")
+        if two:
+            pick = " else ".join(f"if i == {i} {{\n            }}" for i in rows)
+            inst = f"""        assert(cell_{name}(i, j, l)) by {{
+            {pick}
+        }}
+"""
+        else:
+            inst = f"        assert(cell_{name}(i, j, l));\n"
+        o.append(f"""pub(crate) proof fn lemma_cells_{name}()
+    ensures
+        forall|i: int, j: int, l: int|
+            0 <= i < {n0} && 0 <= j < {n1} && 0 <= l < {n2} ==> #[trigger] sg_cell(fn_{name}(), i, j, l),
+{{
+    hide(id_{name});
+{"".join(calls)}    assert forall|i: int, j: int, l: int| 0 <= i < {n0} && 0 <= j < {n1} && 0 <= l < {n2} implies #[trigger] sg_cell(
+        fn_{name}(),
+        i,
+        j,
+        l,
+    ) by {{
+{inst}        reveal(cell_{name});
+        reveal(sg_cell);
+    }}
+}}
+
+""")
+    # y-free identities: grid {{0, ..., n - 1}} per variable
+    for name, args in (("res1", "i, j"), ("res2", "i, j, l")):
+        n0, n1, n2 = sz[name]
+        three = name == "res2"
+        perm = "|i: int, j: int, l: int|" if three else "|i: int, l: int, j: int|"
+        rows = [(i, j) for i in range(n0) for j in range(n1)] if three else [(i, 0) for i in range(n0)]
+        hi = n2 if three else n1
+        st = conj([f"cells_ok(c_{name}(), {i}, {j}, 0, {hi})" for i, j in rows], "    ")
+        calls = "".join(f"    lemma_cells_forall(c_{name}(), {i}, {j}, 0, {hi});\n" for i, j in rows)
+        if three:
+            pick = " else ".join(f"if i == {i} && j == {j} {{\n            }}" for i, j in rows)
+            inst = f"c_{name}()(i, j, l)"
+            qv, rng = "i: int, j: int, l: int", f"0 <= i < {n0} && 0 <= j < {n1} && 0 <= l < {n2}"
+        else:
+            pick = " else ".join(f"if i == {i} {{\n            }}" for i, _ in rows)
+            inst = f"c_{name}()(i, 0, j)"
+            qv, rng = "i: int, j: int", f"0 <= i < {n0} && 0 <= j < {n1}"
+        o.append(f"""// ---- {name}: grid {n0} x {n1} x {n2} over {{0, 1, ...}}
+
+#[verifier::opaque]
+pub(crate) open spec fn cell_{name}(i: int, j: int, l: int) -> bool {{
+    id_{name}({args}) % P_LIT() == 0
+}}
+
+pub(crate) open spec fn c_{name}() -> spec_fn(int, int, int) -> bool {{
+    {perm} cell_{name}(i, j, l)
+}}
+
+pub(crate) proof fn lemma_deg_{name}()
+    ensures
+        ds_ok({name}_ds(), seq![{n0}int, {n1}, {n2}]),
+{{
+    assert(ds_ok({name}_ds(), seq![{n0}int, {n1}, {n2}])) by (compute_only);
+}}
+
+proof fn lemma_{name}_c()
+    ensures
+        {st},
+{{
+    assert({st}) by (compute_only);
+}}
+
+pub(crate) proof fn lemma_cells_{name}()
+    ensures
+        forall|{qv}| #![trigger id_{name}({args})] {rng} ==> id_{name}({args}) % P_LIT() == 0,
+{{
+    hide(id_{name});
+    lemma_{name}_c();
+{calls}    assert forall|{qv}| #![trigger id_{name}({args})] {rng} implies id_{name}({args}) % P_LIT() == 0 by {{
+        assert({inst}) by {{
+            {pick}
+        }}
+        reveal(cell_{name});
+    }}
+}}
+
+""")
+    o[-1] = o[-1].rstrip("\n") + "\n\n} // verus!\n"
+    return "".join(o)
+
+
+GENERATORS = {"pratt.rs": gen_pratt, "torsion_cert.rs": gen_torsion, "grid_small.rs": gen_grid_small}
 
 
 def main():
