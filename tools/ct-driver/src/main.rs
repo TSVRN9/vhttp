@@ -114,6 +114,9 @@ fn main() {
     for f in ["-Zinline-mir=no", "--cfg", "ct_check", "-Zcrate-attr=feature(register_tool)", "-Zcrate-attr=register_tool(ct)"] {
         args.push(f.to_string());
     }
+    if encode_mir(&m, &krate) {
+        args.push("-Zalways-encode-mir".into());
+    }
     let res = run!(&args, || {
         let r = match mode {
             Mode::Census => roots(&krate, &m).and_then(|roots| census(&krate, &m, &roots, &out)),
@@ -131,6 +134,16 @@ fn main() {
         Err(CompilerError::Interrupted(e)) => die(&e),
         Err(CompilerError::Failed) => exit(1),
     }
+}
+
+/// Whether an analysed crate's compile adds `-Zalways-encode-mir`: a `translate-crate` line names
+/// it, so the crates analysed after it may translate its bodies, which rustc otherwise leaves out
+/// of the metadata unless they are generic or small enough to inline (`body=no`). The flag changes
+/// which MIR is available, never what it is. No `translate-crate` line names crypto, so its builds
+/// are unchanged. A dependency outside `CT_CRATES` (vest_lib) is compiled as is: a body it did not
+/// encode fails translation as `no MIR body`.
+fn encode_mir(m: &Manifest, krate: &str) -> bool {
+    m.translate_crates.iter().any(|c| c == krate)
 }
 
 /// The manifest roots of crate `krate`, as instances of its local fn items. Errors: no root for
@@ -334,7 +347,9 @@ fn selftest(krate: &str, m: &Manifest, out: &std::path::Path) -> Result<(), Stri
     let mut lines = String::new();
     let mut by_key = HashMap::new();
     for (n, line) in text.lines().enumerate() {
-        let toks: Vec<&str> = line.split_whitespace().take_while(|t| !t.starts_with('#')).collect();
+        // a comment starts at a `#` token other than a `#k(..)` enum value
+        let comment = |t: &&str| t.starts_with('#') && !t[1..].starts_with(|ch: char| ch.is_ascii_digit());
+        let toks: Vec<&str> = line.split_whitespace().take_while(|t| !comment(t)).collect();
         let Some((&path, rest)) = toks.split_first() else { continue };
         if !path.starts_with(&prefix) {
             continue;

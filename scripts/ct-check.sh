@@ -1,10 +1,10 @@
 #!/bin/sh
 # Constant-time checker runs: build tools/ct-driver, then analyse the fixtures under it and diff
 # their verdicts against tools/ct-fixtures/expected.txt, then run the interpreter selftest
-# (tools/ct-driver/selftest.txt) over crates/crypto, then check crypto's roots (all must be ok) and
-# the negative control (--cfg ct_negative; exactly its one reject). Target dirs live under CT_TARGET_DIR
-# (default $root/target/ct), one subdir per run, except that selftest shares crypto's (same flags);
-# reports under $CT_OUT/<run>.
+# (tools/ct-driver/selftest.txt) over crates/crypto and over the parser crates (wire, h3, quic),
+# then check crypto's roots (all must be ok) and the negative control (--cfg ct_negative; exactly
+# its one reject). Target dirs live under CT_TARGET_DIR (default $root/target/ct), one subdir per
+# run, except that selftest shares crypto's (same flags); reports under $CT_OUT/<run>.
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root" # rust-toolchain.toml pins rustc 1.98.1, the one ct-driver links against
@@ -20,21 +20,32 @@ RUSTC_BOOTSTRAP=1 RUSTFLAGS="-L $sr/lib -C link-args=-Wl,-rpath,$sr/lib" \
     --target-dir "$CT_TARGET_DIR/driver" || fail "driver build failed"
 driver=$CT_TARGET_DIR/driver/release/ct-driver
 
-# analyse <run> <crate> <manifest> <mode> <cargo args..>: a fresh <mode> build of <crate> (cargo
-# skips fresh crates, and manifests and CT_* are not cargo inputs, so clean it first); sets
-# $report to its output file.
+# analyse <run> <crates> <manifest> <mode> <cargo args..>: a fresh <mode> build of each of the
+# comma-separated <crates> (cargo skips fresh crates, and manifests and CT_* are not cargo inputs,
+# so clean them first); sets $reports to their output files, one per crate, and $report to the
+# first.
 analyse() {
-    run=$1 crate=$2 manifest=$3 mode=$4
+    run=$1 crates=$2 manifest=$3 mode=$4
     shift 4
     case $run in selftest) td=$CT_TARGET_DIR/crypto ;; *) td=$CT_TARGET_DIR/$run ;; esac
     rm -rf "${CT_OUT:?}/$run"
-    cargo clean --release -q -p "$crate" "$@" --target-dir "$td"
-    RUSTC_WORKSPACE_WRAPPER=$driver RUSTC_BOOTSTRAP=1 CT_CRATES=$crate CT_MANIFEST=$manifest \
+    pkgs=$(printf '%s' "$crates" | tr ',' '\n' | sed 's/^/-p /' | tr '\n' ' ')
+    for c in $(printf '%s' "$crates" | tr ',' ' '); do
+        cargo clean --release -q -p "$c" "$@" --target-dir "$td"
+    done
+    # shellcheck disable=SC2086 # $pkgs is the word list `-p a -p b ..`
+    RUSTC_WORKSPACE_WRAPPER=$driver RUSTC_BOOTSTRAP=1 CT_CRATES=$crates CT_MANIFEST=$manifest \
         CT_OUT=$CT_OUT/$run CT_MODE=$mode CT_SELFTEST=$root/tools/ct-driver/selftest.txt \
-        cargo build --release --locked -q -p "$crate" "$@" --target-dir "$td" \
+        cargo build --release --locked -q $pkgs "$@" --target-dir "$td" \
         || fail "$run: analysis build failed"
-    case $mode in selftest) report=$CT_OUT/$run/selftest-$crate.txt ;; *) report=$CT_OUT/$run/report-$crate.txt ;; esac
-    [ -f "$report" ] || fail "$run: no $report"
+    reports=
+    for c in $(printf '%s' "$crates" | tr ',' ' '); do
+        case $mode in selftest) r=$CT_OUT/$run/selftest-$c.txt ;; *) r=$CT_OUT/$run/report-$c.txt ;; esac
+        [ -f "$r" ] || fail "$run: no $r"
+        reports="$reports $r"
+    done
+    report=${reports# }
+    report=${report%% *}
 }
 
 # verdicts <report>: one line per root, `ok <path>` or `reject <path> <K1,K2,..>` (kinds sorted
@@ -62,13 +73,24 @@ diff -u "$fx/expected.txt" "$got" || fail "fixtures: verdicts differ from expect
 n=$(wc -l < "$fx/expected.txt" | tr -d ' ')
 echo "ct-check: fixtures $n/$n"
 
-# Selftest: every vector line of selftest.txt must report `pass` (they are all crypto's).
+# Selftest: every vector line of selftest.txt must report `pass`; counted per crate prefix.
+st=$root/tools/ct-driver/selftest.txt
 analyse selftest crypto "$root/tools/ct-driver/manifest.txt" selftest
 grep -v '^pass ' "$report" >&2 && fail "selftest: vectors failed (above)"
-v=$(grep -c '^[^#[:space:]]' "$root/tools/ct-driver/selftest.txt")
+v=$(grep -c '^crypto::' "$st")
 p=$(grep -c "^pass " "$report" || true)
 [ "$p" -eq "$v" ] || fail "selftest: $p of $v vectors passed"
 echo "ct-check: selftest $p/$v"
+
+# The parser crates' vectors, under their own target dir (wire compiles with -Zalways-encode-mir).
+analyse parsers wire,h3,quic "$root/tools/ct-driver/manifest.txt" selftest
+# shellcheck disable=SC2086 # $reports is a list of paths without spaces
+cat $reports > "$CT_OUT/parsers/selftest.txt"
+grep -v '^pass ' "$CT_OUT/parsers/selftest.txt" >&2 && fail "selftest parsers: vectors failed (above)"
+v=$(grep -c -E '^(wire|h3|quic)::' "$st")
+p=$(grep -c "^pass " "$CT_OUT/parsers/selftest.txt" || true)
+[ "$p" -eq "$v" ] || fail "selftest parsers: $p of $v vectors passed"
+echo "ct-check: selftest parsers $p/$v"
 
 # The driver keys declassify sites by file:line, so a second call on a line would go uncounted.
 calls=$(grep -rho --include='*.rs' 'declassify(' "$root/crates/crypto/src" | wc -l)

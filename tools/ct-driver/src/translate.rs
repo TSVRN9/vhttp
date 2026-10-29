@@ -18,6 +18,7 @@
 use crate::manifest::Manifest;
 use crate::{bind_key, ct_key, is_internal, key_id, local_fns, normal_blocks, pick_roots, strip_generic_args, KeyId};
 use ctcore as c;
+use rustc_public::abi::{FieldsShape, Primitive, Scalar, TagEncoding, VariantsShape};
 use rustc_public::mir::alloc::GlobalAlloc;
 use rustc_public::mir::mono::Instance;
 use rustc_public::mir::{
@@ -27,8 +28,10 @@ use rustc_public::mir::{
 use rustc_public::ty::{
     AdtDef, AdtKind, Allocation, ConstantKind, GenericArgs, MirConst, RigidTy, Span, Ty, UintTy, VariantIdx,
 };
+use rustc_public::target::MachineInfo;
 use rustc_public::CrateDef;
 use rustc_public_bridge::IndexedVal;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 /// What check mode and the report need about one translated fn (index = its core fn index).
@@ -77,7 +80,7 @@ pub fn translate_closure(
         Ok(v) => v[0],
         Err(msg) => return Err(vec![TrErr::Root { path: r, msg }]),
     };
-    let mut tr = Tr { m, krate, index: HashMap::new(), order: vec![inst], by_key, errs: Vec::new() };
+    let mut tr = Tr { m, krate, index: HashMap::new(), order: vec![inst], by_key, errs: Vec::new(), drop_impls: HashMap::new() };
     tr.index.insert(inst, 0);
     if bind_key(tr.by_key, root, key_id(&tr.krate, m, &inst)).is_err() {
         return Err(vec![TrErr::Root { path: r, msg: "ambiguous key: another root's closure reached a different fn under it".into() }]);
@@ -107,16 +110,22 @@ struct Tr<'m> {
     order: Vec<Instance>,
     by_key: &'m mut HashMap<String, KeyId>,
     errs: Vec<TrErr>,
+    /// Per crate, the ADTs with their own `impl Drop` (coherence puts it in the ADT's crate).
+    drop_impls: HashMap<String, Vec<AdtDef>>,
 }
 
 /// One body being translated. `residue`: the fn-pointer-typed temporaries, which may only hold
 /// the erased `Ghost(..)` argument (a `ClosureFnPointer` cast of a closure constant) and only
 /// flow into a `GhostUnit` call; every other use reaches `place` and is rejected.
+/// `temps`/`pre`: the fresh locals (after the MIR ones) that hold allocated ADT constants, and
+/// their assignments, emitted before the statement or terminator being translated (`agg_const`).
 struct Cx<'b> {
     path: String,
     body: &'b rustc_public::mir::Body,
     residue: HashSet<usize>,
     span: String,
+    temps: RefCell<Vec<c::Ty>>,
+    pre: RefCell<Vec<c::Stmt>>,
 }
 
 pub fn site(sp: &Span) -> String {
@@ -135,7 +144,7 @@ impl Tr<'_> {
         let residue = (nargs + 1..body.locals().len())
             .filter(|&l| matches!(body.locals()[l].ty.kind().rigid(), Some(RigidTy::FnPtr(_))))
             .collect();
-        let mut cx = Cx { path: path.clone(), body: &body, residue, span: site(&body.span) };
+        let mut cx = Cx { path: path.clone(), body: &body, residue, span: site(&body.span), temps: RefCell::default(), pre: RefCell::default() };
         let n0 = self.errs.len();
         if body.spread_arg().is_some() {
             self.errs.push(cx.uns("a rust-call (closure) body".into()));
@@ -160,7 +169,9 @@ impl Tr<'_> {
             }
             for s in &blk.statements {
                 cx.span = site(&s.span);
-                match cx.stmt(s) {
+                let r = cx.stmt(s);
+                cx.flush_pre(&mut stmts, &mut spans);
+                match r {
                     Ok(Some(st)) => {
                         stmts.push(st);
                         spans.push(cx.span.clone());
@@ -170,7 +181,9 @@ impl Tr<'_> {
                 }
             }
             cx.span = site(&blk.terminator.span);
-            match self.term(&cx, &blk.terminator) {
+            let r = self.term(&cx, &blk.terminator);
+            cx.flush_pre(&mut stmts, &mut spans);
+            match r {
                 Ok((term, declass)) => {
                     if declass {
                         declassify_sites.push(cx.span.clone());
@@ -203,6 +216,7 @@ impl Tr<'_> {
         if self.errs.len() > n0 {
             return None;
         }
+        locals.extend(cx.temps.take());
         let info = FnInfo { path, is_root, decl, param_names, block_spans, declassify_sites, stmt_spans, attr_err };
         Some((c::Body { nargs, locals, blocks }, info))
     }
@@ -217,10 +231,11 @@ impl Tr<'_> {
             TerminatorKind::Return => c::Term::Return,
             TerminatorKind::Unreachable => c::Term::Abort,
             TerminatorKind::Drop { place, target, .. } => {
-                // Only drop glue that frees a `Vec` buffer, which the model does not observe.
+                // Only drop glue that frees a bounded number of `Vec<int>` buffers and runs no
+                // user code (`drop_bounded`); the model does not observe memory.
                 let ty = place.ty(cx.body.locals()).map_err(|e| cx.uns(format!("drop place type: {e}")))?;
-                if !vec_of(ty, |e| int_ty(e).is_some()) {
-                    return Err(cx.uns(format!("drop of {ty} (only Vec<int> drop glue is supported)")));
+                if !self.drop_bounded(ty, 0) {
+                    return Err(cx.uns(format!("drop of {ty} (only drop glue that frees a bounded number of Vec<int> buffers and runs no Drop impl is supported)")));
                 }
                 c::Term::Goto(*target)
             }
@@ -230,6 +245,53 @@ impl Tr<'_> {
             }
         };
         Ok((term, false))
+    }
+
+    /// Whether dropping a `t` frees a bounded number of `Vec<int>` buffers and runs no user code:
+    /// `t` is an int, a `Unit`-mapped type, `Vec<int>`, or a tuple or struct/enum (e.g. `Option`)
+    /// with no `impl Drop` of its own whose fields are such types. `Vec<E>` for any other `E` is
+    /// out: its glue is O(len) work the step model would hide.
+    fn drop_bounded(&mut self, t: Ty, depth: usize) -> bool {
+        if depth > 16 || int_ty(t).is_some() || is_str_ref(t) || vec_of(t, |e| int_ty(e).is_some()) {
+            return depth <= 16;
+        }
+        match t.kind().rigid() {
+            Some(RigidTy::Tuple(ts)) => ts.clone().into_iter().all(|e| self.drop_bounded(e, depth + 1)),
+            Some(RigidTy::Adt(def, args)) => {
+                let (def, args) = (*def, args.clone());
+                let name = def.name();
+                if name == "vstd::prelude::Ghost" || name == "vstd::prelude::Tracked" {
+                    return true;
+                }
+                if name == "std::vec::Vec" || def.is_box() || def.kind() == AdtKind::Union || self.own_drop(def) {
+                    return false;
+                }
+                def.variants().into_iter().all(|v| {
+                    v.fields().iter().all(|f| self.drop_bounded(rustc_public::CrateDefType::ty_with_args(f, &args), depth + 1))
+                })
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `def` has its own `impl Drop`, from its crate's trait impls.
+    fn own_drop(&mut self, def: AdtDef) -> bool {
+        let k = def.krate();
+        let impls = self.drop_impls.entry(k.name.clone()).or_insert_with(|| {
+            k.trait_impls()
+                .iter()
+                .filter_map(|i| {
+                    let tr = i.trait_impl().value;
+                    // by defining crate, not by printed path (`std::ops::Drop` re-exports it)
+                    let drop = tr.def_id.krate().name == "core" && tr.def_id.name().ends_with("::Drop");
+                    match tr.self_ty().kind().rigid() {
+                        Some(RigidTy::Adt(d, _)) if drop => Some(*d),
+                        _ => None,
+                    }
+                })
+                .collect()
+        });
+        impls.contains(&def)
     }
 
     /// The callee lookup order: an `intr` line; else an internal fn; else `Unresolved`.
@@ -275,6 +337,14 @@ impl Cx<'_> {
         TrErr::Unsupported { path: self.path.clone(), what, span: self.span.clone() }
     }
 
+    /// Moves the pending constant assignments (`pre`) to the end of `stmts`, at the current span.
+    fn flush_pre(&self, stmts: &mut Vec<c::Stmt>, spans: &mut Vec<String>) {
+        for st in self.pre.take() {
+            stmts.push(st);
+            spans.push(self.span.clone());
+        }
+    }
+
     fn local_ty(&self, l: usize, t: Ty) -> Result<c::Ty, TrErr> {
         if self.residue.contains(&l) {
             return Ok(c::Ty::Unit); // the Ghost residue's fn pointer (see `Cx`)
@@ -297,6 +367,11 @@ impl Cx<'_> {
             RigidTy::Adt(def, args) => return self.adt(*def, args, depth),
             RigidTy::Array(e, n) => c::Ty::Array(sub(*e)?, n.eval_target_usize().map_err(|e| self.uns(format!("array length: {e}")))?),
             RigidTy::Slice(e) => c::Ty::Slice(sub(*e)?),
+            // `str` is opaque: no rvalue or intrinsic reads one (`PtrMetadata` takes slice refs
+            // only, and `str` methods have no `intr` line)
+            RigidTy::Str => c::Ty::Unit,
+            RigidTy::Ref(_, p, Mutability::Not) if p.kind().is_str() => c::Ty::Unit,
+            RigidTy::Ref(_, p, Mutability::Mut) if p.kind().is_str() => return Err(self.uns(format!("type {t}"))),
             RigidTy::Ref(_, p, Mutability::Not) => c::Ty::Shr(sub(*p)?),
             RigidTy::Ref(_, p, Mutability::Mut) => c::Ty::Mut(sub(*p)?),
             // ZST fn items, and the type of ghost closures (calling a closure is rejected)
@@ -377,8 +452,9 @@ impl Cx<'_> {
         }
     }
 
-    /// Scalars give `Const`; ZSTs (fn items, unit, `PhantomData`, `Ghost<_>`, closures) give
-    /// `Lit(Unit)`; constant arrays and refs to them give `Lit(ConstVal)`, decoded little-endian.
+    /// Scalars give `Const`; ZSTs (fn items, unit, `PhantomData`, `Ghost<_>`, closures) and
+    /// `&str` give `Lit(Unit)`; constant arrays and refs to them give `Lit(ConstVal)`, decoded
+    /// little-endian; ADT constants and refs to ZSTs read a fresh local (`agg_const`).
     fn constant(&self, k: &MirConst) -> Result<c::Operand, TrErr> {
         let t = k.ty();
         match k.kind() {
@@ -389,6 +465,11 @@ impl Cx<'_> {
             ConstantKind::Allocated(a) => match self.ty(t, 0)? {
                 c::Ty::Int(it) => Ok(c::Operand::Const(it, self.scalar(a, 0, t)?)),
                 c::Ty::Unit if a.bytes.is_empty() => Ok(c::Operand::Lit(c::ConstVal::Unit)),
+                c::Ty::Unit if is_str_ref(t) => Ok(c::Operand::Lit(c::ConstVal::Unit)), // opaque: not read
+                c::Ty::Adt(_) => self.agg_const(t, a, 0, 0),
+                c::Ty::Shr(_) if !ref_to(t, Mutability::Not, |p| matches!(p.kind().rigid(), Some(RigidTy::Array(..)))) => {
+                    self.agg_const(t, a, 0, 0)
+                }
                 _ => Ok(c::Operand::Lit(self.const_val(t, a, 0, 0)?)),
             },
             _ => Err(self.uns(format!("unevaluated constant of type {t}"))),
@@ -425,6 +506,101 @@ impl Cx<'_> {
             }
             _ => Err(self.uns(format!("constant of type {t}"))),
         }
+    }
+
+    /// The value of type `t` at `off` in constant `a`, as an operand. An ADT goes to a fresh
+    /// local (`temps`), assigned `Aggregate(Adt(variant), fields)` in `pre`: core `Operand` has no
+    /// aggregate form. The variant and the field offsets come from `t`'s layout (`variant_at`);
+    /// fields are ints, `&str` (`Unit`, its bytes not read), ZSTs, int arrays (`const_val`) or
+    /// such ADTs. A shared ref to a zero-sized type (`&QuicVarInt<false>`, a method's
+    /// `self`) is a `RefShr` of a fresh local holding that value: every pointer to a ZST reads the
+    /// same value, so its bytes are not read. Any other pointer is `Unsupported`.
+    fn agg_const(&self, t: Ty, a: &Allocation, off: usize, depth: usize) -> Result<c::Operand, TrErr> {
+        if depth > 16 {
+            return Err(self.uns("constant nested too deeply".into()));
+        }
+        let ct = self.ty(t, 0)?;
+        let zst = |t: Ty| {
+            let sh = t.layout().map_err(|e| self.uns(format!("layout of {t}: {e}")))?.shape();
+            Ok(sh.is_sized() && sh.size.bytes() == 0)
+        };
+        let (v, fields) = match (&ct, t.kind().rigid()) {
+            (c::Ty::Int(it), _) => return Ok(c::Operand::Const(intty_copy(it), self.scalar(a, off, t)?)),
+            (c::Ty::Unit, _) if is_str_ref(t) => return Ok(c::Operand::Lit(c::ConstVal::Unit)),
+            (c::Ty::Unit, _) if zst(t)? => return Ok(c::Operand::Lit(c::ConstVal::Unit)),
+            (c::Ty::Shr(_), Some(RigidTy::Ref(_, p, Mutability::Not))) if !matches!(p.kind().rigid(), Some(RigidTy::Array(..))) => {
+                if !zst(*p)? {
+                    return Err(self.uns(format!("constant of type {t} (a ref to a non-zero-sized value)")));
+                }
+                let v = match self.agg_const(*p, a, off, depth + 1)? {
+                    c::Operand::Copy(pl) => pl,
+                    op => self.fresh(self.ty(*p, 0)?, c::Rvalue::Use(op)),
+                };
+                return Ok(c::Operand::Copy(self.fresh(ct, c::Rvalue::RefShr(v))));
+            }
+            (c::Ty::Array(..) | c::Ty::Shr(_), _) => return Ok(c::Operand::Lit(self.const_val(t, a, off, depth)?)),
+            (c::Ty::Adt(_), Some(RigidTy::Adt(def, args))) => {
+                let (v, offs) = self.variant_at(t, *def, a, off)?;
+                let vd = def.variant(VariantIdx::to_val(v)).ok_or_else(|| self.uns(format!("constant of type {t}: no variant {v}")))?;
+                let tys: Vec<Ty> = vd.fields().iter().map(|f| rustc_public::CrateDefType::ty_with_args(f, args)).collect();
+                if tys.len() != offs.len() {
+                    return Err(self.uns(format!("constant of type {t}: {} fields, {} offsets", tys.len(), offs.len())));
+                }
+                (v, tys.into_iter().zip(offs).collect::<Vec<_>>())
+            }
+            _ => return Err(self.uns(format!("constant of type {t}"))),
+        };
+        let ops = fields.into_iter().map(|(ft, o)| self.agg_const(ft, a, off + o, depth + 1)).collect::<Result<Vec<_>, _>>()?;
+        Ok(c::Operand::Copy(self.fresh(ct, c::Rvalue::Aggregate(c::AggKind::Adt(v), ops))))
+    }
+
+    /// A fresh local of type `ty` (after the MIR locals), assigned `rv` in `pre`.
+    fn fresh(&self, ty: c::Ty, rv: c::Rvalue) -> c::Place {
+        let local = self.body.locals().len() + self.temps.borrow().len();
+        self.temps.borrow_mut().push(ty);
+        self.pre.borrow_mut().push(c::Stmt::Assign(c::Place { local, proj: vec![] }, rv));
+        c::Place { local, proj: vec![] }
+    }
+
+    /// The variant index of the `t` (an ADT `def`) at `off` in `a`, and that variant's field
+    /// offsets, by the layout's rules: a single variant; a `Direct` tag equal to a variant's
+    /// discriminant; or a niche, where an integer tag `x` names variant `start + (x - niche_start)`
+    /// when that is within the niche variants (in the tag's width) and the untagged variant
+    /// otherwise. A tag with provenance (a pointer) is `Unsupported`, as is anything else.
+    fn variant_at(&self, t: Ty, def: AdtDef, a: &Allocation, off: usize) -> Result<(usize, Vec<usize>), TrErr> {
+        let uns = |why: &str| self.uns(format!("constant of type {t}: {why}"));
+        let sh = t.layout().map_err(|e| uns(&format!("layout: {e}")))?.shape();
+        let (tag, enc, tag_field, variants) = match &sh.variants {
+            VariantsShape::Single { index } => return Ok((index.to_index(), offsets(&sh.fields))),
+            VariantsShape::Multiple { tag, tag_encoding, tag_field, variants } => (tag, tag_encoding, *tag_field, variants),
+            VariantsShape::Empty => return Err(uns("uninhabited")),
+        };
+        let Scalar::Initialized { value: prim, .. } = tag else { return Err(uns("union tag")) };
+        let w = prim.size(&MachineInfo::target()).bytes();
+        let at = off + *offsets(&sh.fields).get(tag_field).ok_or_else(|| uns("no tag field"))?;
+        let ptr = MachineInfo::target_pointer_width().bytes();
+        if a.provenance.ptrs.iter().any(|(o, _)| *o < at + w && at < *o + ptr) {
+            return Err(uns("a pointer tag"));
+        }
+        let x = a.read_partial_uint(at..at + w).map_err(|e| uns(&format!("tag: {e}")))?;
+        let v = match enc {
+            TagEncoding::Direct => {
+                if matches!(prim, Primitive::Int { signed: true, .. }) {
+                    return Err(uns("a signed tag"));
+                }
+                (0..def.num_variants())
+                    .find(|&i| def.discriminant_for_variant(VariantIdx::to_val(i)).val == x)
+                    .ok_or_else(|| uns(&format!("tag {x} names no variant")))?
+            }
+            TagEncoding::Niche { untagged_variant, niche_variants, niche_start } => {
+                let (lo, hi) = (niche_variants.start().to_index(), niche_variants.end().to_index());
+                let mask = if w >= 16 { u128::MAX } else { (1u128 << (8 * w)) - 1 };
+                let rel = x.wrapping_sub(*niche_start) & mask;
+                if rel <= (hi - lo) as u128 { lo + rel as usize } else { untagged_variant.to_index() }
+            }
+        };
+        let offs = variants.get(v).ok_or_else(|| uns(&format!("no layout for variant {v}")))?;
+        Ok((v, offs.offsets.iter().map(|o| o.bytes()).collect()))
     }
 
     fn stmt(&self, s: &Statement) -> Result<Option<c::Stmt>, TrErr> {
@@ -521,10 +697,13 @@ impl Cx<'_> {
 
     /// The width/type-arg guard. `ct_key` drops generic args, so one `intr` line covers every
     /// instantiation of its def; a call is mapped only at the intrinsic's declared types: the
-    /// argument and result types of its spec row, with element type `u8` for the Vec/slice
-    /// intrinsics and `ty` for `Wrapping(op, ty)`.
-    // ponytail: element type is u8 only (the only one in the crypto census); widen per intrinsic
-    // when a checked crate needs another, the Vec rows are element-agnostic in sem.rs.
+    /// argument and result types of its spec row, with element type `E` for the Vec/slice
+    /// intrinsics (`elem_ok`) and `ty` for `Wrapping(op, ty)`.
+    // ponytail: admitted (intrinsic, element) pairs are u8 for every Vec/slice row, plus
+    // `(u64, u64)` for VecLen/VecIndex/VecPush/VecNew (the 8b census); widen per pair when a
+    // checked crate needs another (sem.rs's Vec rows are element-agnostic). SliceToVec,
+    // VecExtendFromSlice and ArrayAsSlice stay u8: their per-element cost of 1 is honest only for
+    // a bitwise copy, not a deep Clone.
     fn intr_types(&self, k: &c::Intrinsic, args: &[Operand], dst: &Place) -> Result<(), TrErr> {
         use c::Intrinsic as I;
         let a = args.iter().map(|o| self.op_ty(o)).collect::<Result<Vec<_>, _>>()?;
@@ -533,18 +712,22 @@ impl Cx<'_> {
         let vec_u8 = |t: Ty| vec_of(t, u8_);
         let slice_u8 = |t: Ty| matches!(t.kind().rigid(), Some(RigidTy::Slice(e)) if u8_(*e));
         let array_u8 = |t: Ty| matches!(t.kind().rigid(), Some(RigidTy::Array(e, _)) if u8_(*e));
+        let elem = |e: Ty| u8_(e) || elem_ok(k, e);
+        let vec_e = |t: Ty| vec_of(t, elem);
         let ok = match (k, &a[..]) {
             (I::Declassify, [x]) => *x == d,
             (I::GhostUnit, _) => matches!(self.ty(d, 0), Ok(c::Ty::Unit)),
-            (I::VecNew, []) => vec_u8(d),
+            (I::VecNew, []) => vec_e(d),
             (I::VecWithCapacity, [n]) => usize_(*n) && vec_u8(d),
-            (I::VecPush, [v, x]) => ref_to(*v, Mutability::Mut, vec_u8) && u8_(*x) && unit(d),
+            (I::VecPush, [v, x]) => ref_to(*v, Mutability::Mut, |t| vec_of(t, |e| e == *x)) && elem(*x) && unit(d),
             (I::VecExtendFromSlice, [v, s]) => ref_to(*v, Mutability::Mut, vec_u8) && ref_to(*s, Mutability::Not, slice_u8) && unit(d),
             (I::VecAsSlice, [v]) => ref_to(*v, Mutability::Not, vec_u8) && ref_to(d, Mutability::Not, slice_u8),
             (I::ArrayAsSlice, [r]) => ref_to(*r, Mutability::Not, array_u8) && ref_to(d, Mutability::Not, slice_u8),
-            (I::VecLen, [v]) => ref_to(*v, Mutability::Not, vec_u8) && usize_(d),
+            (I::VecLen, [v]) => ref_to(*v, Mutability::Not, vec_e) && usize_(d),
             (I::VecSet, [v, i, x]) => ref_to(*v, Mutability::Mut, vec_u8) && usize_(*i) && u8_(*x) && unit(d),
-            (I::VecIndex, [v, i]) => ref_to(*v, Mutability::Not, vec_u8) && usize_(*i) && ref_to(d, Mutability::Not, u8_),
+            (I::VecIndex, [v, i]) => {
+                ref_to(*v, Mutability::Not, |t| vec_of(t, |e| elem(e) && ref_to(d, Mutability::Not, |p| p == e))) && usize_(*i)
+            }
             (I::SliceSubrange, [s, lo, hi]) => {
                 ref_to(*s, Mutability::Not, slice_u8) && usize_(*lo) && usize_(*hi) && ref_to(d, Mutability::Not, slice_u8)
             }
@@ -563,6 +746,26 @@ impl Cx<'_> {
             Err(self.uns(format!("intrinsic {} reached at types ({}) -> {d}, not its declared types", intr_name(k), a.join(", "))))
         }
     }
+}
+
+/// The non-`u8` (intrinsic, element) pairs `intr_types` admits (see its `ponytail:` note).
+fn elem_ok(k: &c::Intrinsic, e: Ty) -> bool {
+    use c::Intrinsic as I;
+    let pair = matches!(e.kind().rigid(), Some(RigidTy::Tuple(ts)) if ts.len() == 2 && ts.iter().all(|t| is_uint(*t, UintTy::U64)));
+    matches!(k, I::VecLen | I::VecIndex | I::VecNew | I::VecPush) && pair
+}
+
+/// The field offsets of a struct-like layout, in source order (none for a primitive).
+fn offsets(f: &FieldsShape) -> Vec<usize> {
+    match f {
+        FieldsShape::Arbitrary { offsets } => offsets.iter().map(|o| o.bytes()).collect(),
+        _ => vec![],
+    }
+}
+
+/// `&str`.
+fn is_str_ref(t: Ty) -> bool {
+    matches!(t.kind().rigid(), Some(RigidTy::Ref(_, p, Mutability::Not)) if p.kind().is_str())
 }
 
 fn split(r: Result<Option<Vec<bool>>, String>) -> (Option<Vec<bool>>, Option<String>) {

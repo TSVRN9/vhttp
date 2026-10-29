@@ -696,9 +696,11 @@ pub struct Vector {
 }
 
 /// Parses the tokens after the path. Values: hex bytes (an `Arr` of byte `Int`s; `-` is the
-/// empty one), `0x<hex><int suffix>` (an `Int`, e.g. `0x0388u128`), `[v,v,..]` (an `Arr`), `()`,
-/// `None`, `Some(v)`.
-/// A plain arg that is an `Arr` is passed by shared reference (`Shr`): a slice or `&[T; N]`.
+/// empty one), `0x<hex><int suffix>` (an `Int`, e.g. `0x0388u128`), `true`/`false` (a `Bool`
+/// `Int`), `[v,v,..]` (an `Arr`), `(v,v,..)` (a `Tup`), `()`, `None`, `Some(v)`, and `#k(v,..)`
+/// (variant `k` of an enum, with those fields; `#k()` has none).
+/// A plain arg that is an `Arr` is passed by shared reference (`Shr`): a slice or `&[T; N]`; so is
+/// any plain arg of a `Shr` param (`check_vector`).
 pub fn parse_vector(toks: &[&str]) -> Result<Vector, String> {
     let at = toks.iter().position(|t| *t == "=>").ok_or("no `=>`")?;
     let args = toks[..at]
@@ -728,6 +730,28 @@ fn int_lit(t: &str) -> Option<(&str, u32)> {
     Some((digits, w))
 }
 
+/// `s` split at the commas outside any `(..)`/`[..]`; empty pieces dropped.
+fn split_top(s: &str) -> Vec<&str> {
+    let (mut out, mut depth, mut start) = (Vec::new(), 0i32, 0);
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&s[start..]);
+    out.into_iter().filter(|p| !p.is_empty()).collect()
+}
+
+fn values(s: &str) -> Result<Vec<IVal>, String> {
+    split_top(s).into_iter().map(value).collect()
+}
+
 fn value(t: &str) -> Result<IVal, String> {
     if t == "-" {
         return Ok(IVal::Arr(vec![]));
@@ -735,12 +759,24 @@ fn value(t: &str) -> Result<IVal, String> {
     if t == "()" {
         return Ok(IVal::Unit);
     }
+    match t {
+        "true" => return Ok(IVal::Int(1)),
+        "false" => return Ok(IVal::Int(0)),
+        _ => {}
+    }
     // core::option::Option: variant 0 is None, 1 is Some
     if t == "None" {
         return Ok(IVal::Adt(0, vec![]));
     }
     if let Some(inner) = t.strip_prefix("Some(").and_then(|r| r.strip_suffix(')')) {
         return Ok(IVal::Adt(1, vec![value(inner)?]));
+    }
+    if let Some((k, inner)) = t.strip_prefix('#').and_then(|r| r.strip_suffix(')')).and_then(|r| r.split_once('(')) {
+        let k = k.parse().map_err(|e| format!("{t}: variant index: {e}"))?;
+        return Ok(IVal::Adt(k, values(inner)?));
+    }
+    if let Some(inner) = t.strip_prefix('(').and_then(|r| r.strip_suffix(')')) {
+        return values(inner).map(IVal::Tup);
     }
     if t.starts_with("0x") {
         let (digits, w) =
@@ -752,7 +788,7 @@ fn value(t: &str) -> Result<IVal, String> {
         return Ok(IVal::Int(n));
     }
     if let Some(inner) = t.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
-        return inner.split(',').filter(|e| !e.is_empty()).map(value).collect::<Result<_, _>>().map(IVal::Arr);
+        return values(inner).map(IVal::Arr);
     }
     if t.len() % 2 != 0 || !t.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(format!("{t}: not a value"));
@@ -788,7 +824,15 @@ pub fn check_vector(p: &c::Program, v: &Vector) -> Result<u64, String> {
     if v.want.len() != 1 + muts.len() {
         return Err(format!("{} expected values for 1 return value and {} &mut params", v.want.len(), muts.len()));
     }
-    let args: Vec<IVal> = v.args.iter().map(|(_, a)| a.clone()).collect();
+    let args: Vec<IVal> = v
+        .args
+        .iter()
+        .enumerate()
+        .map(|(j, (m, a))| match (m, b.locals.get(1 + j), a) {
+            (false, Some(c::Ty::Shr(_)), v) if !matches!(v, IVal::Shr(_)) => IVal::Shr(Box::new(v.clone())),
+            _ => a.clone(),
+        })
+        .collect();
     let fr = init_entry(p, 0, &args, entry_slots(p, 0, &args));
     let (fr, _, steps) = run_fn(p, 0, fr, FUEL, false).ok_or("the run gave None (abort, failed assert or fuel)")?;
     let mut got = vec![fr.locals.into_iter().next().unwrap_or(IVal::Unit)];
@@ -1087,6 +1131,47 @@ mod tests {
         for bad in [&["0x1", "=>", "()"][..], &["0x100u8", "=>", "()"], &["abc", "=>", "()"], &["00"]] {
             assert!(parse_vector(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn vector_tuple_values() {
+        let v = parse_vector(&["[(0x1u64,0x2u64),(0x3u64,0x4u64)]", "=>", "Some((0x5u64,0x6usize))"]).unwrap();
+        let pair = |a, b| IVal::Tup(vec![Int(a), Int(b)]);
+        assert_eq!(v.args[0], (false, shr(Arr(vec![pair(1, 2), pair(3, 4)]))));
+        assert_eq!(v.want, vec![IVal::Adt(1, vec![pair(5, 6)])]);
+        assert_eq!(parse_vector(&["=>", "(0a0b,())"]).unwrap().want, vec![IVal::Tup(vec![arr(&[10, 11]), Unit])]);
+        assert!(parse_vector(&["=>", "(0x1u8,0x2)"]).is_err());
+    }
+
+    #[test]
+    fn vector_bool_values() {
+        assert_eq!(parse_vector(&["true", "=>", "false"]).unwrap().want, vec![Int(0)]);
+        assert_eq!(parse_vector(&["true", "=>", "false"]).unwrap().args[0], (false, Int(1)));
+        assert!(parse_vector(&["=>", "True"]).is_err());
+    }
+
+    #[test]
+    fn vector_enum_values() {
+        let v = parse_vector(&["#0()", "=>", "#1(#0(0x105u64))", "#2(0x7u8,[(0x1u64,0x2u64)])"]).unwrap();
+        assert_eq!(v.args[0], (false, IVal::Adt(0, vec![])));
+        assert_eq!(v.want[0], IVal::Adt(1, vec![IVal::Adt(0, vec![Int(0x105)])]));
+        assert_eq!(v.want[1], IVal::Adt(2, vec![Int(7), Arr(vec![IVal::Tup(vec![Int(1), Int(2)])])]));
+        for bad in ["#x(0x1u8)", "#1(0x1u8", "#1"] {
+            assert!(parse_vector(&["=>", bad]).is_err(), "{bad}");
+        }
+    }
+
+    /// A plain arg of a `Shr` param is passed by reference (an `Arr` already is).
+    #[test]
+    fn vector_shr_param_gets_a_ref() {
+        // fn(p: &Phase) -> Phase { *p }
+        let b = body(
+            1,
+            vec![c::Ty::Adt(vec![vec![]]), c::Ty::Shr(Box::new(c::Ty::Adt(vec![vec![]])))],
+            vec![blk(vec![set(lp(0), c::Rvalue::Use(c::Operand::Copy(pl(1, vec![c::Proj::Deref]))))], c::Term::Return)],
+        );
+        let p = c::Program { fns: vec![b] };
+        assert_eq!(check_vector(&p, &parse_vector(&["#0()", "=>", "#0()"]).unwrap()), Ok(2));
     }
 
     /// A suffixed int arg must have its param's width (through `&mut` too), and goes only to an
