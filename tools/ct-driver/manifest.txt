@@ -1,0 +1,31 @@
+# ct-driver manifest for crates/crypto (TRUSTED; format in tools/ct-driver/src/manifest.rs).
+# Paths are ct_keys: the resolved instance name with every `::<..>` generic-argument list removed.
+# Labels come from #[cfg_attr(ct_check, ct::secret(..), ct::public(..))] on the fn itself. Only
+# secret(..) is enforced; public(..) is a declaration, not a checked guarantee (sound for CT).
+
+# CT roots (spec §Labels and declassification).
+root crypto::aes::aes128_encrypt_block
+root crypto::gcm::aes128_gcm_seal
+root crypto::gcm::aes128_gcm_open
+root crypto::sha256::sha256
+root crypto::hmac::hmac_sha256
+root crypto::hkdf::hkdf_extract
+root crypto::hkdf::hkdf_expand
+
+# Intrinsics: every non-crypto key of `CT_MODE=census` over the roots above (census-crypto.txt),
+# each asserting that the std/vstd fn behaves as its core intrinsic. Never guessed.
+intr <std::vec::Vec<u8> as vstd::pervasive::VecAdditionalExecFns<u8>>::set VecSet
+intr core::num::<impl u32>::wrapping_add Wrapping Add U32
+intr std::array::<impl [u8; 128]>::as_slice ArrayAsSlice
+intr std::array::<impl [u8; 16]>::as_slice ArrayAsSlice
+intr std::array::<impl [u8; 32]>::as_slice ArrayAsSlice
+intr std::array::<impl [u8; 64]>::as_slice ArrayAsSlice
+intr std::vec::Vec::as_slice VecAsSlice
+intr std::vec::Vec::extend_from_slice VecExtendFromSlice
+intr std::vec::Vec::len VecLen
+intr std::vec::Vec::push VecPush
+intr std::vec::Vec::with_capacity VecWithCapacity
+intr vstd::prelude::Ghost::assume_new_fallback GhostUnit
+intr vstd::slice::slice_subrange SliceSubrange
+# Defined from Task 9 (crates/crypto/src/ct.rs); intr lines need not resolve in a given build.
+intr crypto::ct::declassify Declassify
