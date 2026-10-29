@@ -68,6 +68,11 @@ p=$(grep -c "^pass " "$report" || true)
 [ "$p" -eq "$v" ] || fail "selftest: $p of $v vectors passed"
 echo "ct-check: selftest $p/$v"
 
+# The driver keys declassify sites by file:line, so a second call on a line would go uncounted.
+calls=$(grep -rho --include='*.rs' 'declassify(' "$root/crates/crypto/src" | wc -l)
+lines=$(grep -rh --include='*.rs' 'declassify(' "$root/crates/crypto/src" | wc -l)
+[ "$calls" -eq "$lines" ] || fail "one declassify per line"
+
 # Crypto: every manifest root ok, no reject. F = distinct checked fns, R = manifest roots, D =
 # declassify sites.
 cm=$root/tools/ct-driver/manifest.txt
