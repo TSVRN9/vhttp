@@ -1,6 +1,7 @@
 #!/bin/sh
 # Constant-time checker runs: build tools/ct-driver, then analyse the fixtures under it and diff
-# their verdicts against tools/ct-fixtures/expected.txt. Target dirs live under CT_TARGET_DIR
+# their verdicts against tools/ct-fixtures/expected.txt, then run the interpreter selftest
+# (tools/ct-driver/selftest.txt) over crates/crypto. Target dirs live under CT_TARGET_DIR
 # (default $root/target/ct), one subdir per run; reports under $CT_OUT/<run>.
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -17,18 +18,19 @@ RUSTC_BOOTSTRAP=1 RUSTFLAGS="-L $sr/lib -C link-args=-Wl,-rpath,$sr/lib" \
     --target-dir "$CT_TARGET_DIR/driver" || fail "driver build failed"
 driver=$CT_TARGET_DIR/driver/release/ct-driver
 
-# analyse <run> <crate> <manifest> <cargo args..>: a fresh check-mode build of <crate> (cargo
-# skips fresh crates, and manifests and CT_* are not cargo inputs, so clean it first).
+# analyse <run> <crate> <manifest> <mode> <cargo args..>: a fresh <mode> build of <crate> (cargo
+# skips fresh crates, and manifests and CT_* are not cargo inputs, so clean it first); sets
+# $report to its output file.
 analyse() {
-    run=$1 crate=$2 manifest=$3
-    shift 3
+    run=$1 crate=$2 manifest=$3 mode=$4
+    shift 4
     rm -rf "${CT_OUT:?}/$run"
     cargo clean --release -q -p "$crate" "$@" --target-dir "$CT_TARGET_DIR/$run"
     RUSTC_WORKSPACE_WRAPPER=$driver RUSTC_BOOTSTRAP=1 CT_CRATES=$crate CT_MANIFEST=$manifest \
-        CT_OUT=$CT_OUT/$run CT_MODE=check \
+        CT_OUT=$CT_OUT/$run CT_MODE=$mode CT_SELFTEST=$root/tools/ct-driver/selftest.txt \
         cargo build --release --locked -q -p "$crate" "$@" --target-dir "$CT_TARGET_DIR/$run" \
         || fail "$run: analysis build failed"
-    report=$CT_OUT/$run/report-$crate.txt
+    case $mode in selftest) report=$CT_OUT/$run/selftest-$crate.txt ;; *) report=$CT_OUT/$run/report-$crate.txt ;; esac
     [ -f "$report" ] || fail "$run: no $report"
 }
 
@@ -49,10 +51,18 @@ no_missing() {
 }
 
 fx=$root/tools/ct-fixtures
-analyse fixtures ct_fixtures "$fx/manifest.txt" --manifest-path "$fx/Cargo.toml"
+analyse fixtures ct_fixtures "$fx/manifest.txt" check --manifest-path "$fx/Cargo.toml"
 got=$CT_OUT/fixtures/verdicts.txt
 verdicts "$report" > "$got"
 no_missing "$fx/manifest.txt" "$got"
 diff -u "$fx/expected.txt" "$got" || fail "fixtures: verdicts differ from expected.txt"
 n=$(wc -l < "$fx/expected.txt" | tr -d ' ')
 echo "ct-check: fixtures $n/$n"
+
+# Selftest: every vector line of selftest.txt must report `pass` (they are all crypto's).
+analyse selftest crypto "$root/tools/ct-driver/manifest.txt" selftest
+grep -v '^pass ' "$report" >&2 && fail "selftest: vectors failed (above)"
+v=$(grep -c '^[^#[:space:]]' "$root/tools/ct-driver/selftest.txt")
+p=$(grep -c "^pass " "$report" || true)
+[ "$p" -eq "$v" ] || fail "selftest: $p of $v vectors passed"
+echo "ct-check: selftest $p/$v"
