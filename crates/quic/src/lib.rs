@@ -6,7 +6,7 @@
 //! Received packet numbers and ACK generation, sent-packet records and incoming ACKs, the
 //! loss recovery hook, connection IDs, and the handshake's connection IDs and transport
 //! parameter checks, the anti-amplification budget, outgoing datagram lengths and datagram
-//! routing, and the idle timeout with the closing and draining states (3d).
+//! routing, the idle timeout with the closing and draining states, and the path table (3d).
 pub mod ack;
 pub mod ack_track;
 pub mod amp;
@@ -20,6 +20,7 @@ pub mod frame;
 pub mod handshake;
 pub mod header;
 pub mod lifecycle;
+pub mod path;
 pub mod payload;
 pub mod pn;
 pub mod reassembly;

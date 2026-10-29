@@ -63,7 +63,7 @@ pub fn ms_to_us(ms: u64) -> (r: u64)
     }
 }
 
-fn sat3(p: u64) -> (r: u64)
+pub(crate) fn sat3(p: u64) -> (r: u64)
     ensures
         r == spec_sat3(p),
 {
@@ -74,7 +74,7 @@ fn sat3(p: u64) -> (r: u64)
     }
 }
 
-fn sat_add(a: u64, b: u64) -> (r: u64)
+pub(crate) fn sat_add(a: u64, b: u64) -> (r: u64)
     ensures
         r == spec_sat_add(a, b),
 {
