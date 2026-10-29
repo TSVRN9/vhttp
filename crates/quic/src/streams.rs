@@ -284,6 +284,26 @@ pub open spec fn frame_post(
     &&& post_rest(s0, s1, f, ev0, ev1, r)
 }
 
+/// §3.5: an accepted STOP_SENDING for a sending part in Ready, Send or Data Sent resets it with
+/// the peer's code.
+pub open spec fn stop_resets(s0: Streams, s1: Streams, f: SpecFrame, r: Result<(), u64>) -> bool {
+    match f {
+        SpecFrame::StopSending { stream_id, error_code } => r is Ok ==> match s0.tx_part(
+            stream_id,
+        ) {
+            Some(p) => (p.state() is Ready || p.state() is Send || p.state() is DataSent)
+                ==> s1.reset_code(stream_id) == Some(error_code),
+            None => true,
+        },
+        _ => true,
+    }
+}
+
+/// The open stream's sending part is unchanged when other streams open.
+spec fn parts_kept(s0: Streams, s1: Streams) -> bool {
+    forall|j: u64| #[trigger] s0.tx_part(j) is Some ==> s1.tx_part(j) == s0.tx_part(j)
+}
+
 /// `frame_post` past the result.
 pub open spec fn post_rest(
     s0: Streams,
@@ -307,6 +327,7 @@ pub open spec fn post_rest(
         s1.send_reset(j) && !s0.send_reset(j) ==> f is StopSending && frame_stream_id(f)
             == Some(j)
     &&& forall|j: u64| #[trigger] s0.reset_code(j) is Some ==> s1.reset_code(j) == s0.reset_code(j)
+    &&& stop_resets(s0, s1, f, r)
     // E5: a closed peer stream is re-credited only as its entry is removed.
     &&& forall|b: bool| #[trigger]
         s1.peer_closed(b) == s0.peer_closed(b) || (s1.peer_closed(b) == s0.peer_closed(b) + 1
@@ -825,9 +846,9 @@ impl Streams {
             // (§4.1, §19.9), and each stream's within its MAX_STREAM_DATA (§19.10).
             self.conn_send_spec().used_spec() == self.tx_sent() <= self.conn_send_spec().max_spec(),
             forall|id: u64| #[trigger]
-                self.tx_part(id) is Some ==> self.tx_part(id)->0.sent_end() <= self.tx_part(
+                self.tx_part(id) is Some ==> self.tx_part(id)->0.wf() && self.tx_part(
                     id,
-                )->0.max(),
+                )->0.sent_end() <= self.tx_part(id)->0.max(),
             // Memory: the send buffers hold at most twice the bytes not yet acknowledged.
             0 <= self.tx_buffered() <= 2 * self.tx_unacked(),
     {
@@ -857,7 +878,7 @@ impl Streams {
         self.conn_send.lemma_wf();
         assert forall|id: u64| #[trigger] self.tx_part(id) is Some implies self.tx_part(
             id,
-        )->0.sent_end() <= self.tx_part(id)->0.max() by {
+        )->0.wf() && self.tx_part(id)->0.sent_end() <= self.tx_part(id)->0.max() by {
             if has_id(s, id) {
                 let k = choose|k: int| 0 <= k < s.len() && (#[trigger] s[k]).id == id;
                 assert(entry_ok(s[k], self.rx_bidi, self.rx_uni));
@@ -1063,6 +1084,7 @@ impl Streams {
             forall|b: bool| #[trigger]
                 final(self).ids.peer_credit_spec(b) == old(self).ids.peer_credit_spec(b),
             final(self).ids.local_uni_spec() == old(self).ids.local_uni_spec(),
+            parts_kept(*old(self), *final(self)),
     {
         let ghost s0 = *self;
         let bidi = x % 4 == 0;
@@ -1078,6 +1100,7 @@ impl Streams {
         self.rtr = Ghost(self.rtr@.insert(x, Seq::empty()));
         proof {
             lemma_open_one(s0, *self, x, e);
+            lemma_part_push(s0, *self, e);
         }
     }
 
@@ -1098,6 +1121,7 @@ impl Streams {
             forall|b: bool| #[trigger]
                 final(self).ids.peer_credit_spec(b) == old(self).ids.peer_credit_spec(b),
             final(self).ids.local_uni_spec() == old(self).ids.local_uni_spec(),
+            parts_kept(*old(self), *final(self)),
     {
         let ghost s0 = *self;
         let bidi = id % 4 == 0;
@@ -1119,6 +1143,7 @@ impl Streams {
                     self.ids.peer_credit_spec(b) == s0.ids.peer_credit_spec(b),
                 self.ids.local_uni_spec() == s0.ids.local_uni_spec(),
                 peer_id_allowed(id, s0.ids.peer_limit(bidi)),
+                parts_kept(s0, *self),
             decreases id + 4 - x,
         {
             proof {
@@ -1132,6 +1157,10 @@ impl Streams {
                 assert(MAX_STREAMS_LIMIT == 0x1000_0000_0000_0000) by (compute_only);
                 assert forall|j: u64| #[trigger] self.rx_trace(j) == s0.rx_trace(j) by {
                     assert(self.rx_trace(j) == s1.rx_trace(j));
+                }
+                assert forall|j: u64| #[trigger] s0.tx_part(j) is Some implies self.tx_part(j)
+                    == s0.tx_part(j) by {
+                    assert(s1.tx_part(j) == s0.tx_part(j));
                 }
             }
             x = x + 4;
@@ -1261,6 +1290,16 @@ impl Streams {
                 old(self).reset_code(j) is Some ==> final(self).reset_code(j) == old(
                     self,
                 ).reset_code(j),
+            ({
+                let e = old(self).entries@[i as int];
+                match f@ {
+                    SpecFrame::StopSending { stream_id, error_code } => (e.send is Some && (
+                    e.send->0.state() is Ready || e.send->0.state() is Send
+                        || e.send->0.state() is DataSent)) ==> final(self).reset_code(stream_id)
+                        == Some(error_code),
+                    _ => true,
+                }
+            }),
     {
         let ghost s0 = *self;
         let ghost id = self.entries@[i as int].id;
@@ -1437,6 +1476,7 @@ impl Streams {
         proof {
             self.ids.lemma_wf();
             assert(equiv(s0, s1));
+            assert(parts_kept(s0, s1));
         }
         let r = self.deliver(f, id, ev);
         let ghost s2 = *self;
@@ -1532,6 +1572,7 @@ impl Streams {
         };
         let ghost s1 = *self;
         proof {
+            lemma_part_at(s0, i as int);
             assert forall|j: u64| #[trigger] s1.is_removed(j) == s0.is_removed(j) by {}
             assert forall|b: bool| #[trigger] s1.peer_closed(b) == s0.peer_closed(b) by {}
             assert(post_rest(s0, s1, f@, event_views(ev0), event_views(ev@), r));
@@ -1751,11 +1792,17 @@ proof fn lemma_post_before(
 )
     requires
         equiv(s0, s1),
+        parts_kept(s0, s1),
         post_rest(s1, s2, f, ev0, ev1, r),
     ensures
         post_rest(s0, s2, f, ev0, ev1, r),
         rx_outcome(s1, f) == rx_outcome(s0, f),
 {
+    if let SpecFrame::StopSending { stream_id, .. } = f {
+        if s0.tx_part(stream_id) is Some {
+            assert(s1.tx_part(stream_id) == s0.tx_part(stream_id));
+        }
+    }
     assert forall|j: u64| #[trigger] s0.reset_code(j) is Some implies s2.reset_code(j)
         == s0.reset_code(j) by {
         assert(s1.reset_code(j) == s0.reset_code(j));
@@ -2016,6 +2063,26 @@ proof fn lemma_update(
         if y == id {
             assert(created(s0.ids, a[i].id));
         }
+    }
+}
+
+/// Pushing an entry keeps every existing sending part where `tx_part` finds it.
+proof fn lemma_part_push(s0: Streams, s1: Streams, e: Entry)
+    requires
+        s0.wf(),
+        s1.wf(),
+        s1.entries@ == s0.entries@.push(e),
+    ensures
+        parts_kept(s0, s1),
+{
+    assert forall|j: u64| #[trigger] s0.tx_part(j) is Some implies s1.tx_part(j) == s0.tx_part(
+        j,
+    ) by {
+        assert(has_id(s0.entries@, j));
+        let k = choose|k: int| 0 <= k < s0.entries@.len() && (#[trigger] s0.entries@[k]).id == j;
+        lemma_part_at(s0, k);
+        assert(s1.entries@[k] == s0.entries@[k]);
+        lemma_part_at(s1, k);
     }
 }
 
@@ -2342,6 +2409,222 @@ proof fn lemma_frames_bytes_push(fs: Seq<SpecFrame>, f: SpecFrame)
     }
 }
 
+/// What each frame `poll_frames` returns says about the state after the call: a STREAM frame's
+/// bytes end at or below its stream's bytes sent, which are within the peer's MAX_STREAM_DATA
+/// (and, by `lemma_wf`, Σ bytes sent is within MAX_DATA), and a RESET_STREAM's final size is
+/// its stream's bytes sent (§4.1, §19.9, §19.10).
+pub open spec fn tx_ok(s: Streams, f: SpecFrame) -> bool {
+    match f {
+        SpecFrame::Stream { stream_id, offset, data, .. } => match s.tx_part(stream_id) {
+            Some(q) => offset + data.len() <= q.sent_end() && q.sent_end() <= q.max(),
+            None => false,
+        },
+        SpecFrame::ResetStream { stream_id, final_size, .. } => match s.tx_part(stream_id) {
+            Some(q) => final_size == q.sent_end(),
+            None => false,
+        },
+        _ => true,
+    }
+}
+
+/// `tx_ok` as carried through `poll_frames`: a RESET_STREAM by its part's reset.
+spec fn tx_inv(s: Streams, f: SpecFrame) -> bool {
+    match f {
+        SpecFrame::Stream { stream_id, offset, data, .. } => match s.tx_part(stream_id) {
+            Some(q) => offset + data.len() <= q.sent_end(),
+            None => false,
+        },
+        SpecFrame::ResetStream { stream_id, error_code, final_size } => match s.tx_part(
+            stream_id,
+        ) {
+            Some(q) => q.reset_spec() == Some((error_code, final_size)),
+            None => false,
+        },
+        _ => true,
+    }
+}
+
+/// Every frame from index `n` on satisfies `tx_inv` in `s`.
+spec fn out_tx(s: Streams, n: int, out: Seq<Frame>) -> bool {
+    forall|k: int| n <= k < out.len() ==> tx_inv(s, (#[trigger] out[k])@)
+}
+
+/// Every frame from index `n` on is a STREAM frame of stream `id` ending at or below `se`.
+spec fn streamed(out: Seq<Frame>, n: int, id: u64, se: u64) -> bool {
+    forall|k: int|
+        n <= k < out.len() ==> match (#[trigger] out[k])@ {
+            SpecFrame::Stream { stream_id, offset, data, .. } => stream_id == id && offset
+                + data.len() <= se,
+            _ => false,
+        }
+}
+
+proof fn lemma_out_tx_push(s: Streams, n: int, out: Seq<Frame>, f: Frame)
+    requires
+        out_tx(s, n, out),
+        tx_inv(s, f@),
+    ensures
+        out_tx(s, n, out.push(f)),
+{
+    assert forall|k: int| n <= k < out.push(f).len() implies tx_inv(
+        s,
+        (#[trigger] out.push(f)[k])@,
+    ) by {
+        if k < out.len() {
+            assert(out.push(f)[k] == out[k]);
+        }
+    }
+}
+
+proof fn lemma_streamed_push(out: Seq<Frame>, o0: Seq<Frame>, id: u64, se: u64, se2: u64, f: Frame)
+    requires
+        out.len() >= o0.len(),
+        out.subrange(0, o0.len() as int) == o0,
+        streamed(out, o0.len() as int, id, se),
+        se <= se2,
+        f@ matches SpecFrame::Stream { stream_id, offset, data, .. } && stream_id == id && offset
+            + data.len() <= se2,
+    ensures
+        out.push(f).subrange(0, o0.len() as int) == o0,
+        streamed(out.push(f), o0.len() as int, id, se2),
+{
+    assert(out.push(f).subrange(0, o0.len() as int) =~= out.subrange(0, o0.len() as int));
+    assert forall|k: int| o0.len() <= k < out.push(f).len() implies match (#[trigger] out.push(
+        f,
+    )[k])@ {
+        SpecFrame::Stream { stream_id, offset, data, .. } => stream_id == id && offset + data.len()
+            <= se2,
+        _ => false,
+    } by {
+        if k < out.len() {
+            assert(out.push(f)[k] == out[k]);
+        }
+    }
+}
+
+/// Entry `i` changed only by bytes sent growing, with its ID and reset kept: `out_tx` carries
+/// over.
+proof fn lemma_tx_grows(s1: Streams, s2: Streams, i: int, n: int, o: Seq<Frame>)
+    requires
+        s1.wf(),
+        s2.wf(),
+        0 <= i < s1.entries@.len(),
+        s2.entries@.len() == s1.entries@.len(),
+        forall|k: int|
+            0 <= k < s1.entries@.len() && k != i ==> #[trigger] s2.entries@[k] == s1.entries@[k],
+        s2.entries@[i].id == s1.entries@[i].id,
+        s1.entries@[i].send is Some ==> s2.entries@[i].send is Some
+            && s2.entries@[i].send->0.sent_end() >= s1.entries@[i].send->0.sent_end()
+            && s2.entries@[i].send->0.reset_spec() == s1.entries@[i].send->0.reset_spec(),
+        out_tx(s1, n, o),
+    ensures
+        out_tx(s2, n, o),
+{
+    assert forall|k: int| n <= k < o.len() implies tx_inv(s2, (#[trigger] o[k])@) by {
+        let f = o[k]@;
+        let id = match f {
+            SpecFrame::Stream { stream_id, .. } => stream_id,
+            SpecFrame::ResetStream { stream_id, .. } => stream_id,
+            _ => 0,
+        };
+        if (f is Stream || f is ResetStream) && s1.tx_part(id) is Some {
+            assert(has_id(s1.entries@, id));
+            let j = choose|j: int|
+                0 <= j < s1.entries@.len() && (#[trigger] s1.entries@[j]).id == id;
+            lemma_part_at(s1, j);
+            assert(s2.entries@[j].id == id);
+            lemma_part_at(s2, j);
+        }
+    }
+}
+
+/// `out_tx` after `poll_stream` on entry `i` (stream `id`): the frames before it by
+/// `lemma_tx_grows`, the new ones by `streamed`.
+proof fn lemma_out_tx_stream(s: Streams, n: int, o0: Seq<Frame>, out: Seq<Frame>, id: u64)
+    requires
+        out_tx(s, n, o0),
+        0 <= n <= o0.len(),
+        out.len() >= o0.len(),
+        out.subrange(0, o0.len() as int) == o0,
+        s.tx_part(id) is Some,
+        streamed(out, o0.len() as int, id, s.tx_part(id)->0.sent_end()),
+    ensures
+        out_tx(s, n, out),
+{
+    assert forall|k: int| n <= k < out.len() implies tx_inv(s, (#[trigger] out[k])@) by {
+        if k < o0.len() {
+            assert(out[k] == out.subrange(0, o0.len() as int)[k]);
+        }
+    }
+}
+
+/// `poll_frames`'s ensures, from the passes' invariants.
+proof fn lemma_poll_post(
+    s0: Streams,
+    s: Streams,
+    pre: Seq<Frame>,
+    budget: nat,
+    out: Seq<Frame>,
+    room: usize,
+)
+    requires
+        kept(s0, s),
+        out_ok(s0, pre, budget, out, room),
+        out_tx(s, pre.len() as int, out),
+    ensures
+        ({
+            let new = out.skip(pre.len() as int);
+            &&& out.len() >= pre.len()
+            &&& out.subrange(0, pre.len() as int) == pre
+            &&& frames_sendable(frames_view(new), PacketKind::OneRtt)
+            &&& spec_frames_bytes(frames_view(new)).len() <= budget
+            &&& forall|k: int| 0 <= k < new.len() ==> polled_rule(s0, (#[trigger] new[k])@)
+            &&& forall|k: int| 0 <= k < new.len() ==> tx_ok(s, (#[trigger] new[k])@)
+        }),
+        s.wf(),
+        s.failed_spec() == s0.failed_spec(),
+        s.conn_send_spec().used_spec() == s.tx_sent() <= s.conn_send_spec().max_spec(),
+        forall|j: u64| #[trigger] s.reset_code(j) == s0.reset_code(j),
+        forall|j: u64| #[trigger] s.is_removed(j) == s0.is_removed(j),
+        forall|j: u64| #[trigger] s.rx_spec(j).events == s0.rx_spec(j).events,
+{
+    lemma_out_final(s0, pre, budget, out, room);
+    lemma_out_tx_final(s, pre, out);
+    s.lemma_wf();
+    assert forall|j: u64| #[trigger] s.rx_spec(j).events == s0.rx_spec(j).events by {
+        assert(s.rx_spec(j).state == s0.rx_spec(j).state);
+    }
+}
+
+/// `out_tx` at the end of `poll_frames` gives `tx_ok`.
+proof fn lemma_out_tx_final(s: Streams, pre: Seq<Frame>, out: Seq<Frame>)
+    requires
+        s.wf(),
+        pre.len() <= out.len(),
+        out_tx(s, pre.len() as int, out),
+    ensures
+        forall|k: int|
+            0 <= k < out.skip(pre.len() as int).len() ==> tx_ok(
+                s,
+                (#[trigger] out.skip(pre.len() as int)[k])@,
+            ),
+{
+    s.lemma_wf();
+    let new = out.skip(pre.len() as int);
+    assert forall|k: int| 0 <= k < new.len() implies tx_ok(s, (#[trigger] new[k])@) by {
+        assert(new[k] == out[pre.len() + k]);
+        let f = new[k]@;
+        let id = match f {
+            SpecFrame::Stream { stream_id, .. } => stream_id,
+            SpecFrame::ResetStream { stream_id, .. } => stream_id,
+            _ => 0,
+        };
+        if (f is Stream || f is ResetStream) && s.tx_part(id) is Some {
+            s.tx_part(id)->0.lemma_wf();
+        }
+    }
+}
+
 /// `poll_frames`'s output so far: `pre` kept, each new frame `polled_ok` against `s0`, and
 /// their bytes plus `room` the budget.
 spec fn out_ok(s0: Streams, pre: Seq<Frame>, budget: nat, out: Seq<Frame>, room: usize) -> bool {
@@ -2385,6 +2668,7 @@ proof fn lemma_out_init(s0: Streams, pre: Seq<Frame>, budget: nat, room: usize)
         room == budget,
     ensures
         out_ok(s0, pre, budget, pre, room),
+        out_tx(s0, pre.len() as int, pre),
         kept(s0, s0),
         sends_same(s0, s0),
 {
@@ -2425,21 +2709,28 @@ fn emit(
     Ghost(s0): Ghost<Streams>,
     Ghost(pre): Ghost<Seq<Frame>>,
     Ghost(budget): Ghost<nat>,
+    Ghost(cur): Ghost<Streams>,
 ) -> (sent: bool)
     requires
         frame_wf(f@),
         polled_rule(s0, f@),
         out_ok(s0, pre, budget, old(out)@, *old(room)),
+        out_tx(cur, pre.len() as int, old(out)@),
+        tx_inv(cur, f@),
     ensures
         out_ok(s0, pre, budget, final(out)@, *final(room)),
+        out_tx(cur, pre.len() as int, final(out)@),
 {
     // ponytail: double serialization for control frames; compute lengths with varint_len if it shows in profiles.
     let mut b: Vec<u8> = Vec::new();
     serialize_frame(&f, &mut b);
-    let _ = frame_type_of(&f);
+    proof {
+        lemma_frame_type_small(f@);
+    }
     if b.len() <= *room {
         proof {
             lemma_out_push(s0, pre, budget, out@, *room, f, (*room - b.len()) as usize);
+            lemma_out_tx_push(cur, pre.len() as int, out@, f);
         }
         *room = *room - b.len();
         out.push(f);
@@ -2512,10 +2803,18 @@ fn poll_stream(
         final(p).reset_spec() == old(p).reset_spec(),
         final(cs).max() == old(cs).max(),
         final(p).sent_end() - old(p).sent_end() == final(cs).used() - old(cs).used(),
+        final(p).sent_end() >= old(p).sent_end(),
         out_ok(s0, pre, budget, final(out)@, *final(room)),
+        final(out)@.len() >= old(out)@.len(),
+        final(out)@.subrange(0, old(out)@.len() as int) == old(out)@,
+        streamed(final(out)@, old(out)@.len() as int, id, final(p).sent_end()),
 {
     let ghost p0 = *p;
     let ghost c0 = *cs;
+    let ghost o0 = out@;
+    proof {
+        assert(out@.subrange(0, o0.len() as int) =~= o0);
+    }
     loop
         invariant
             p.wf(),
@@ -2529,6 +2828,10 @@ fn poll_stream(
             p.reset_spec() == p0.reset_spec(),
             cs.max() == c0.max(),
             p.sent_end() - p0.sent_end() == cs.used() - c0.used(),
+            p.sent_end() >= p0.sent_end(),
+            out@.len() >= o0.len(),
+            out@.subrange(0, o0.len() as int) == o0,
+            streamed(out@, o0.len() as int, id, p.sent_end()),
         decreases *room,
     {
         // `next_off` Some does not mean `poll_data` sends: loop on what `poll_data` returns.
@@ -2587,6 +2890,7 @@ fn poll_stream(
         proof {
             cs.lemma_wf();
         }
+        let ghost ps = p.sent_end();
         match p.poll_data(best, cs.available()) {
             None => break,
             Some(c) => {
@@ -2612,6 +2916,7 @@ fn poll_stream(
                         fin: cv.fin,
                     });
                     lemma_out_push(s0, pre, budget, out@, *room, f, (*room - len) as usize);
+                    lemma_streamed_push(out@, o0, id, ps, p.sent_end(), f);
                 }
                 *room = *room - len;
                 out.push(f);
@@ -3139,7 +3444,10 @@ impl Streams {
                 &&& spec_frames_bytes(frames_view(new)).len() <= budget
                 &&& forall|k: int|
                     0 <= k < new.len() ==> polled_rule(*old(self), (#[trigger] new[k])@)
+                &&& forall|k: int| 0 <= k < new.len() ==> tx_ok(*final(self), (#[trigger] new[k])@)
             }),
+            final(self).conn_send_spec().used_spec() == final(self).tx_sent()
+                <= final(self).conn_send_spec().max_spec(),
             forall|j: u64| #[trigger] final(self).reset_code(j) == old(self).reset_code(j),
             forall|j: u64| #[trigger] final(self).is_removed(j) == old(self).is_removed(j),
             forall|j: u64| #[trigger] final(self).rx_spec(j).events == old(self).rx_spec(j).events,
@@ -3151,16 +3459,39 @@ impl Streams {
         proof {
             lemma_out_init(s0, pre, b, room);
         }
-        self.poll_resets(&mut room, out, Ghost(s0), Ghost(pre), Ghost(b));
-        self.poll_stops(&mut room, out, Ghost(s0), Ghost(pre), Ghost(b));
-        self.poll_max_data(&mut room, out, Ghost(s0), Ghost(pre), Ghost(b));
-        self.poll_credits(&mut room, out, Ghost(s0), Ghost(pre), Ghost(b));
-        self.poll_max_streams(true, &mut room, out, Ghost(s0), Ghost(pre), Ghost(b));
-        self.poll_max_streams(false, &mut room, out, Ghost(s0), Ghost(pre), Ghost(b));
+        self.poll_control(&mut room, out, Ghost(s0), Ghost(pre), Ghost(b));
         self.poll_streams(&mut room, out, Ghost(s0), Ghost(pre), Ghost(b));
         proof {
-            lemma_out_final(s0, pre, b, out@, room);
+            lemma_poll_post(s0, *self, pre, b, out@, room);
         }
+    }
+
+    /// The control frames, in `poll_frames`'s order.
+    fn poll_control(
+        &mut self,
+        room: &mut usize,
+        out: &mut Vec<Frame>,
+        Ghost(s0): Ghost<Streams>,
+        Ghost(pre): Ghost<Seq<Frame>>,
+        Ghost(budget): Ghost<nat>,
+    )
+        requires
+            kept(s0, *old(self)),
+            sends_same(s0, *old(self)),
+            out_ok(s0, pre, budget, old(out)@, *old(room)),
+            out_tx(*old(self), pre.len() as int, old(out)@),
+        ensures
+            kept(s0, *final(self)),
+            sends_same(s0, *final(self)),
+            out_ok(s0, pre, budget, final(out)@, *final(room)),
+            out_tx(*final(self), pre.len() as int, final(out)@),
+    {
+        self.poll_resets(room, out, Ghost(s0), Ghost(pre), Ghost(budget));
+        self.poll_stops(room, out, Ghost(s0), Ghost(pre), Ghost(budget));
+        self.poll_max_data(room, out, Ghost(s0), Ghost(pre), Ghost(budget));
+        self.poll_credits(room, out, Ghost(s0), Ghost(pre), Ghost(budget));
+        self.poll_max_streams(true, room, out, Ghost(s0), Ghost(pre), Ghost(budget));
+        self.poll_max_streams(false, room, out, Ghost(s0), Ghost(pre), Ghost(budget));
     }
 
     /// Every pending RESET_STREAM.
@@ -3176,10 +3507,12 @@ impl Streams {
             kept(s0, *old(self)),
             sends_same(s0, *old(self)),
             out_ok(s0, pre, budget, old(out)@, *old(room)),
+            out_tx(*old(self), pre.len() as int, old(out)@),
         ensures
             kept(s0, *final(self)),
             sends_same(s0, *final(self)),
             out_ok(s0, pre, budget, final(out)@, *final(room)),
+            out_tx(*final(self), pre.len() as int, final(out)@),
     {
         let mut i: usize = 0;
         while i < self.entries.len()
@@ -3187,6 +3520,7 @@ impl Streams {
                 kept(s0, *self),
                 sends_same(s0, *self),
                 out_ok(s0, pre, budget, out@, *room),
+                out_tx(*self, pre.len() as int, out@),
             decreases self.entries@.len() - i,
         {
             proof {
@@ -3203,6 +3537,7 @@ impl Streams {
                     let p = self.entries@[i as int].send->0;
                     p.lemma_wf();
                     assert(self.resets@.contains_key(id) && self.resets@[id] == code);
+                    lemma_part_at(*self, i as int);
                 }
                 if emit(
                     Frame::ResetStream { stream_id: id, error_code: code, final_size: fs },
@@ -3211,22 +3546,31 @@ impl Streams {
                     Ghost(s0),
                     Ghost(pre),
                     Ghost(budget),
+                    Ghost(*self),
                 ) {
-                    self.commit_reset_at(i, Ghost(s0));
+                    self.commit_reset_at(i, Ghost(s0), Ghost(pre.len() as int), Ghost(out@));
                 }
             }
             i += 1;
         }
     }
 
-    fn commit_reset_at(&mut self, i: usize, Ghost(s0): Ghost<Streams>)
+    fn commit_reset_at(
+        &mut self,
+        i: usize,
+        Ghost(s0): Ghost<Streams>,
+        Ghost(n): Ghost<int>,
+        Ghost(o): Ghost<Seq<Frame>>,
+    )
         requires
             kept(s0, *old(self)),
             sends_same(s0, *old(self)),
             i < old(self).entries@.len(),
+            out_tx(*old(self), n, o),
         ensures
             kept(s0, *final(self)),
             sends_same(s0, *final(self)),
+            out_tx(*final(self), n, o),
     {
         let ghost s1 = *self;
         let mut e = Entry { id: 0, recv: None, send: None };
@@ -3244,6 +3588,7 @@ impl Streams {
             assert(self.entries@ == s1.entries@.update(i as int, ne));
             lemma_swap_same_rx(s1, *self, i as int, ne);
             lemma_swap_kept(s0, s1, *self, i as int, ne);
+            lemma_tx_grows(s1, *self, i as int, n, o);
         }
     }
 
@@ -3260,10 +3605,12 @@ impl Streams {
             kept(s0, *old(self)),
             sends_same(s0, *old(self)),
             out_ok(s0, pre, budget, old(out)@, *old(room)),
+            out_tx(*old(self), pre.len() as int, old(out)@),
         ensures
             kept(s0, *final(self)),
             sends_same(s0, *final(self)),
             out_ok(s0, pre, budget, final(out)@, *final(room)),
+            out_tx(*final(self), pre.len() as int, final(out)@),
     {
         let mut i: usize = 0;
         while i < self.entries.len()
@@ -3271,6 +3618,7 @@ impl Streams {
                 kept(s0, *self),
                 sends_same(s0, *self),
                 out_ok(s0, pre, budget, out@, *room),
+                out_tx(*self, pre.len() as int, out@),
             decreases self.entries@.len() - i,
         {
             proof {
@@ -3293,8 +3641,9 @@ impl Streams {
                     Ghost(s0),
                     Ghost(pre),
                     Ghost(budget),
+                    Ghost(*self),
                 ) {
-                    self.recv_op_at(i, 0, Ghost(s0));
+                    self.recv_op_at(i, 0, Ghost(s0), Ghost(pre.len() as int), Ghost(out@));
                 }
             }
             i += 1;
@@ -3304,11 +3653,20 @@ impl Streams {
     /// A control operation on entry `i`'s receiving part: 0 `commit_stop`, 1 `commit_credit`
     /// (if pending), 2 `stop_lost`, 3 `credit_lost`.
     #[verifier::spinoff_prover]
-    fn recv_op_at(&mut self, i: usize, op: u8, Ghost(s0): Ghost<Streams>)
+    fn recv_op_at(
+        &mut self,
+        i: usize,
+        op: u8,
+        Ghost(s0): Ghost<Streams>,
+        Ghost(n): Ghost<int>,
+        Ghost(o): Ghost<Seq<Frame>>,
+    )
         requires
             kept(s0, *old(self)),
             i < old(self).entries@.len(),
+            out_tx(*old(self), n, o),
         ensures
+            out_tx(*final(self), n, o),
             kept(s0, *final(self)),
             sends_same(s0, *old(self)) ==> sends_same(s0, *final(self)),
             final(self).ids == old(self).ids,
@@ -3358,6 +3716,7 @@ impl Streams {
             }
             lemma_swap(s1, *self, i as int, ne);
             lemma_swap_kept(s0, s1, *self, i as int, ne);
+            lemma_tx_grows(s1, *self, i as int, n, o);
             if op != 1 {
                 assert forall|j: u64| #[trigger] self.rx_trace(j) == s1.rx_trace(j) by {
                     if j == id && ne.recv is Some {
@@ -3381,16 +3740,19 @@ impl Streams {
             kept(s0, *old(self)),
             sends_same(s0, *old(self)),
             out_ok(s0, pre, budget, old(out)@, *old(room)),
+            out_tx(*old(self), pre.len() as int, old(out)@),
         ensures
             kept(s0, *final(self)),
             sends_same(s0, *final(self)),
             out_ok(s0, pre, budget, final(out)@, *final(room)),
+            out_tx(*final(self), pre.len() as int, final(out)@),
     {
         if let Some(v) = self.conn_recv.pending() {
             proof {
                 self.conn_recv.lemma_wf();
             }
-            if emit(Frame::MaxData(v), room, out, Ghost(s0), Ghost(pre), Ghost(budget)) {
+            let f = Frame::MaxData(v);
+            if emit(f, room, out, Ghost(s0), Ghost(pre), Ghost(budget), Ghost(*self)) {
                 let ghost s1 = *self;
                 self.conn_recv.commit();
                 proof {
@@ -3419,10 +3781,12 @@ impl Streams {
             kept(s0, *old(self)),
             sends_same(s0, *old(self)),
             out_ok(s0, pre, budget, old(out)@, *old(room)),
+            out_tx(*old(self), pre.len() as int, old(out)@),
         ensures
             kept(s0, *final(self)),
             sends_same(s0, *final(self)),
             out_ok(s0, pre, budget, final(out)@, *final(room)),
+            out_tx(*final(self), pre.len() as int, final(out)@),
     {
         let mut i: usize = 0;
         while i < self.entries.len()
@@ -3430,6 +3794,7 @@ impl Streams {
                 kept(s0, *self),
                 sends_same(s0, *self),
                 out_ok(s0, pre, budget, out@, *room),
+                out_tx(*self, pre.len() as int, out@),
             decreases self.entries@.len() - i,
         {
             let id = self.entries[i].id;
@@ -3449,8 +3814,9 @@ impl Streams {
                     Ghost(s0),
                     Ghost(pre),
                     Ghost(budget),
+                    Ghost(*self),
                 ) {
-                    self.recv_op_at(i, 1, Ghost(s0));
+                    self.recv_op_at(i, 1, Ghost(s0), Ghost(pre.len() as int), Ghost(out@));
                 }
             }
             i += 1;
@@ -3471,14 +3837,16 @@ impl Streams {
             kept(s0, *old(self)),
             sends_same(s0, *old(self)),
             out_ok(s0, pre, budget, old(out)@, *old(room)),
+            out_tx(*old(self), pre.len() as int, old(out)@),
         ensures
             kept(s0, *final(self)),
             sends_same(s0, *final(self)),
             out_ok(s0, pre, budget, final(out)@, *final(room)),
+            out_tx(*final(self), pre.len() as int, final(out)@),
     {
         if let Some(v) = self.ids.pending_max_streams(bidi) {
             let f = Frame::MaxStreams { bidi, max: v };
-            if emit(f, room, out, Ghost(s0), Ghost(pre), Ghost(budget)) {
+            if emit(f, room, out, Ghost(s0), Ghost(pre), Ghost(budget), Ghost(*self)) {
                 let ghost s1 = *self;
                 self.ids.commit_max_streams(bidi);
                 proof {
@@ -3502,9 +3870,11 @@ impl Streams {
             kept(s0, *old(self)),
             sends_same(s0, *old(self)),
             out_ok(s0, pre, budget, old(out)@, *old(room)),
+            out_tx(*old(self), pre.len() as int, old(out)@),
         ensures
             kept(s0, *final(self)),
             out_ok(s0, pre, budget, final(out)@, *final(room)),
+            out_tx(*final(self), pre.len() as int, final(out)@),
     {
         let mut i: usize = 0;
         while i < self.entries.len()
@@ -3515,6 +3885,7 @@ impl Streams {
                         s0.entries@[k],
                     ),
                 out_ok(s0, pre, budget, out@, *room),
+                out_tx(*self, pre.len() as int, out@),
             decreases self.entries@.len() - i,
         {
             proof {
@@ -3550,12 +3921,14 @@ impl Streams {
             old(self).entries@[i as int].send matches Some(p) && !no_data(p.state()),
             sstate(old(self).entries@[i as int]) == sstate(s0.entries@[i as int]),
             out_ok(s0, pre, budget, old(out)@, *old(room)),
+            out_tx(*old(self), pre.len() as int, old(out)@),
         ensures
             kept(s0, *final(self)),
             forall|k: int|
                 0 <= k < final(self).entries@.len() && k != i ==> #[trigger] final(self).entries@[k]
                     == old(self).entries@[k],
             out_ok(s0, pre, budget, final(out)@, *final(room)),
+            out_tx(*final(self), pre.len() as int, final(out)@),
     {
         let ghost s1 = *self;
         proof {
@@ -3564,6 +3937,7 @@ impl Streams {
             assert(s0.entries@[i as int].id == s1.entries@[i as int].id);
         }
         let id = self.entries[i].id;
+        let ghost o0 = out@;
         let mut e = Entry { id: 0, recv: None, send: None };
         self.entries.set_and_swap(i, &mut e);
         proof {
@@ -3584,6 +3958,9 @@ impl Streams {
             }
             lemma_swap(s1, *self, i as int, ne);
             lemma_swap_kept(s0, s1, *self, i as int, ne);
+            lemma_tx_grows(s1, *self, i as int, pre.len() as int, o0);
+            lemma_part_at(*self, i as int);
+            lemma_out_tx_stream(*self, pre.len() as int, o0, out@, id);
         }
     }
 
@@ -3599,6 +3976,13 @@ impl Streams {
             forall|j: u64| #[trigger] final(self).reset_code(j) == old(self).reset_code(j),
             forall|j: u64| #[trigger] final(self).rx_trace(j) == old(self).rx_trace(j),
             forall|j: u64| #[trigger] old(self).is_removed(j) ==> final(self).is_removed(j),
+            // E5: a peer stream is re-credited only as this ack removes it.
+            forall|b: bool| #[trigger]
+                final(self).peer_closed(b) == old(self).peer_closed(b) || (final(self).peer_closed(
+                    b,
+                ) == old(self).peer_closed(b) + 1 && (frame_stream_id(f@) matches Some(id) && (id
+                    % 4 == 0) == b && (id % 4 == 0 || id % 4 == 2) && final(self).is_removed(id)
+                    && !old(self).is_removed(id))),
     {
         match f {
             Frame::Stream { stream_id, offset, data, fin } => {
@@ -3669,7 +4053,7 @@ impl Streams {
             proof {
                 assert(kept(s0, s0));
             }
-            self.recv_op_at(i, op, Ghost(s0));
+            self.recv_op_at(i, op, Ghost(s0), Ghost(0), Ghost(Seq::<Frame>::empty()));
         }
     }
 
@@ -3686,6 +4070,11 @@ impl Streams {
             forall|j: u64| #[trigger] old(self).is_removed(j) ==> final(self).is_removed(j),
             op >= 2 ==> forall|j: u64|
                 #[trigger] final(self).is_removed(j) == old(self).is_removed(j),
+            forall|b: bool| #[trigger]
+                final(self).peer_closed(b) == old(self).peer_closed(b) || (final(self).peer_closed(
+                    b,
+                ) == old(self).peer_closed(b) + 1 && (id % 4 == 0) == b && (id % 4 == 0 || id % 4
+                    == 2) && final(self).is_removed(id) && !old(self).is_removed(id)),
     {
         let ghost s0 = *self;
         if let Some(i) = self.find(id) {

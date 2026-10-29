@@ -239,6 +239,7 @@ pub open spec fn chunk_ok(
     &&& c.data.len() <= max_len
     &&& c.new_bytes <= conn_avail
     &&& s2.sent_end() == s1.sent_end() + c.new_bytes
+    &&& end <= s2.sent_end()
     &&& s1.next_off() == Some(c.off)
     &&& !(s2.state() is Ready)
 }
