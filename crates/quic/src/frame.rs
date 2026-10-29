@@ -651,7 +651,7 @@ proof fn lemma_streams_limit()
     assert(MAX_STREAMS_LIMIT <= VARINT_MAX) by (compute_only);
 }
 
-proof fn lemma_frame_type_small(f: SpecFrame)
+pub proof fn lemma_frame_type_small(f: SpecFrame)
     ensures
         spec_frame_type(f) <= FRAME_HANDSHAKE_DONE,
 {
