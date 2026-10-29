@@ -223,6 +223,8 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7); the 45 rows t
 
 ### Task 1b: stream, CID and path frames, migration, reset detection (`quic::conn`) (preflight: Task 1 split, I7)
 
+> **Binding carry-over from 3d Task 4 (controller, 2026-10-29):** the stale-DCID rewrite (preflight I2, E4 hook) must run whenever `PeerCids::largest_rpt()` increases, not only when `current()` changes. A used non-current CID can be retired while `current` stays put (test `retire_of_used_non_current`). Use `PeerCids::is_active` to find paths that hold a retired CID.
+
 **Files:**
 - Modify: `crates/quic/src/conn.rs`
 - Test: `crates/quic/tests/conn_rx.rs` (append)
