@@ -18,6 +18,8 @@ mod grid_assoc_b;
 mod grid_assoc_c;
 mod grid_assoc_d;
 mod group;
+mod order;
+mod chain;
 
 #[allow(unused_imports)]
 use crate::p256::*;
@@ -86,6 +88,26 @@ proof fn lemma_5c_interface_smoke(ev: nat, pt: SpecPoint)
 {
     crate::p256_group::lemma_scalar_mult_double(ev, pt);
     assert(((2 * ev + 1) as nat - 1) as nat == (2 * ev) as nat);
+}
+
+/// kG != O for 1 <= k < n, i.e. ord(G) = n (statement frozen by 5c Task 7).
+pub(crate) proof fn lemma_scalar_mult_g_nonzero(k: nat)
+    requires
+        1 <= k < p256_n(),
+    ensures
+        !(scalar_mult(k, p256_g()) is Infinity),
+{
+    order::lemma_g_order(k);
+}
+
+/// 5c Task 7's call: a valid private key's scalar never maps G to O.
+proof fn lemma_5c_order_smoke(d: Seq<u8>)
+    requires
+        scalar_valid(d),
+    ensures
+        !(scalar_mult(crate::bytes::os2ip(d), p256_g()) is Infinity),
+{
+    crate::p256_group::lemma_scalar_mult_g_nonzero(crate::bytes::os2ip(d));
 }
 
 } // verus!
