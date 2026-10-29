@@ -1,4 +1,5 @@
 use crypto::p256::{p256_ecdh, p256_public_key, P256_B, P256_GX, P256_GY, P256_N, P256_P};
+use p256::elliptic_curve::sec1::ToSec1Point;
 
 fn h(s: &str) -> Vec<u8> {
     let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
@@ -81,4 +82,113 @@ fn p256_constants_match_rustcrypto() {
     one[31] = 1;
     let g = [&[0x04u8][..], &P256_GX, &P256_GY].concat();
     assert_eq!(p256_public_key(&one).unwrap().to_vec(), g);
+}
+
+// RustCrypto reference, called the way the removed shim called it.
+fn rc_public_key(d: &[u8]) -> Option<Vec<u8>> {
+    let d: [u8; 32] = d.try_into().unwrap();
+    let sk = p256::SecretKey::from_bytes((&d).into()).ok()?;
+    Some(sk.public_key().to_sec1_point(false).as_bytes().to_vec())
+}
+
+// RustCrypto reference; every peer here is 65 octets starting 0x04.
+fn rc_ecdh(d: &[u8], peer: &[u8]) -> Option<Vec<u8>> {
+    let d: [u8; 32] = d.try_into().unwrap();
+    let sk = p256::SecretKey::from_bytes((&d).into()).ok()?;
+    let pk = p256::PublicKey::from_sec1_bytes(peer).ok()?;
+    Some(p256::ecdh::diffie_hellman(sk.to_nonzero_scalar(), pk.as_affine()).raw_secret_bytes().to_vec())
+}
+
+fn pattern(i: usize) -> [u8; 32] {
+    core::array::from_fn(|j| (i * 37 + j * 11 + 1) as u8)
+}
+
+// The big-endian 32-octet a - b, for a >= b.
+fn sub_be(a: &[u8], b: &[u8]) -> Vec<u8> {
+    let mut r = vec![0u8; 32];
+    let mut borrow = 0i16;
+    for j in (0..32).rev() {
+        let v = a[j] as i16 - b[j] as i16 - borrow;
+        borrow = (v < 0) as i16;
+        r[j] = v.rem_euclid(256) as u8;
+    }
+    assert_eq!(borrow, 0);
+    r
+}
+
+fn small(k: u8) -> Vec<u8> {
+    let mut d = vec![0u8; 32];
+    d[31] = k;
+    d
+}
+
+fn g_sec1() -> Vec<u8> {
+    [&[0x04u8][..], &P256_GX, &P256_GY].concat()
+}
+
+#[test]
+fn public_key_matches_rustcrypto() {
+    let mut ds: Vec<Vec<u8>> = (0..64).map(|i| pattern(i).to_vec()).collect();
+    let mut top = vec![0u8; 32];
+    top[0] = 0x80;
+    ds.extend([small(1), small(2), sub_be(&P256_N, &small(1)), sub_be(&P256_N, &small(2)), top]);
+    for d in &ds {
+        let want = rc_public_key(d);
+        assert!(want.is_some(), "{d:02x?}");
+        assert_eq!(p256_public_key(d).map(|q| q.to_vec()), want, "{d:02x?}");
+    }
+}
+
+#[test]
+fn ecdh_matches_rustcrypto() {
+    // Peers whose x starts with a zero octet, found among the pattern scalars.
+    let zx: Vec<Vec<u8>> = (0..4096)
+        .filter_map(|i| rc_public_key(&pattern(i)))
+        .filter(|q| q[1] == 0)
+        .take(2)
+        .collect();
+    assert_eq!(zx.len(), 2);
+    let mut pairs: Vec<(Vec<u8>, Vec<u8>)> =
+        (0..30).map(|i| (pattern(i).to_vec(), rc_public_key(&pattern(i + 1)).unwrap())).collect();
+    pairs.extend(zx.into_iter().enumerate().map(|(i, q)| (pattern(40 + i).to_vec(), q)));
+    assert_eq!(pairs.len(), 32);
+    for (d, q) in &pairs {
+        let want = rc_ecdh(d, q);
+        assert!(want.is_some());
+        assert_eq!(p256_ecdh(d, q).map(|z| z.to_vec()), want, "{d:02x?} {q:02x?}");
+    }
+}
+
+#[test]
+fn ecdh_peer_edge_cases() {
+    let i = h(I);
+    let g = g_sec1();
+    let neg_g = [&[0x04u8][..], &P256_GX, &sub_be(&P256_P, &P256_GY)].concat();
+    let y0 = "66485c780e2f83d72433bd5d84a06bb6541c2af31dae871728bf856a174f93f4";
+    let x0 = h(&format!("04 {} {y0}", "00".repeat(32)));
+    let x1 = "09e78d4ef60d05f750f6636209092bc43cbdd6b47e11a9de20a9feb2a50bb96c";
+    let y1 = h(&format!("04 {x1} {}01", "00".repeat(31)));
+    for peer in [&g, &neg_g, &x0, &y1] {
+        let want = rc_ecdh(&i, peer);
+        assert!(want.is_some(), "{peer:02x?}");
+        assert_eq!(p256_ecdh(&i, peer).map(|z| z.to_vec()), want, "{peer:02x?}");
+    }
+    // dG's x is the public key's x; (n - 1)G = -G has x = Gx.
+    assert_eq!(p256_ecdh(&i, &g).unwrap().to_vec(), h(GI)[1..33].to_vec());
+    let nm1 = sub_be(&P256_N, &small(1));
+    assert_eq!(p256_ecdh(&nm1, &g).map(|z| z.to_vec()), rc_ecdh(&nm1, &g));
+    assert_eq!(p256_ecdh(&nm1, &g).unwrap(), P256_GX);
+}
+
+#[test]
+#[ignore] // timing only; run with --release -- --ignored --nocapture
+fn p256_speed() {
+    let (i, gr) = (h(I), h(GR));
+    let t = std::time::Instant::now();
+    std::hint::black_box(p256_public_key(std::hint::black_box(&i)));
+    let pk = t.elapsed();
+    let t = std::time::Instant::now();
+    std::hint::black_box(p256_ecdh(std::hint::black_box(&i), &gr));
+    let dh = t.elapsed();
+    println!("p256_public_key {pk:?}, p256_ecdh {dh:?}");
 }
