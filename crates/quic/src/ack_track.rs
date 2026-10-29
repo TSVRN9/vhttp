@@ -14,6 +14,11 @@ verus! {
 // ponytail: ranges we *generate*; older ranges are forgotten and their PNs refused (§13.2.3); raise if reordering is deep.
 pub const MAX_ACK_RANGES: usize = 32;
 
+/// The longest ACK frame `build_ack` can produce: type, Largest Acknowledged, ACK Delay and
+/// First ACK Range (at most 8 bytes each but the type), a one-byte range count, and
+/// `MAX_ACK_RANGES - 1` pairs of 8-byte varints. `max_len` this large always gets every range.
+pub const FULL_ACK_LEN: usize = 522;
+
 /// `p` lies in one of the inclusive ranges `r`.
 pub open spec fn in_ranges(r: Seq<(u64, u64)>, p: u64) -> bool {
     exists|i: int| #![trigger r[i]] 0 <= i < r.len() && r[i].0 <= p <= r[i].1
@@ -159,6 +164,12 @@ impl RecvPns {
             Some(u) => forall|p: u64| #[trigger] self.unreported@.contains(p) ==> u <= p,
             None => self.unreported@ == Set::<u64>::empty(),
         }
+        &&& self.unacked_low is Some ==> self.eliciting_since_ack > 0
+    }
+
+    /// The smallest ack-eliciting packet number received since the last ACK was sent.
+    pub closed spec fn unacked_low_spec(&self) -> Option<u64> {
+        self.unacked_low
     }
 
     /// The ack-eliciting packet numbers received since the last ACK was sent. None of them
@@ -242,6 +253,8 @@ impl RecvPns {
             self.ack_only_sent() <= self.eliciting_rcvd(),
             (self.eliciting_since_ack() > 0) == (self.first_unacked() is Some),
             forall|p: u64| #[trigger] self.unreported().contains(p) ==> self.seen().contains(p),
+            self.unacked_low_spec() is Some ==> self.eliciting_since_ack() > 0,
+            self.unacked_low_spec() is None ==> self.unreported() == Set::<u64>::empty(),
     {
     }
 
@@ -271,6 +284,17 @@ impl RecvPns {
             lemma_ack_range_is(r, k, delay, j - 1);
             assert(ack_range(a, j - 1).0 <= p <= ack_range(a, j - 1).1);
         }
+    }
+
+    /// The parts of `wf` that `build_ack` reads.
+    proof fn lemma_build_facts(&self)
+        requires
+            self.wf(),
+        ensures
+            ranges_wf(self.ranges@, self.floor, self.seen@),
+            self.ranges@.len() > 0 ==> self.largest == Some(self.ranges@[0].1),
+            self.ranges@.len() == 0 ==> self.largest is None,
+    {
     }
 
     pub fn new(kind: PacketKind) -> (r: RecvPns)
@@ -582,9 +606,17 @@ impl RecvPns {
                     },
                 }
             }),
+            max_len >= FULL_ACK_LEN && self.range_count() > 0 ==> (r matches Some(a) && a.ranges@.len()
+                + 1 == self.range_count()),
     {
         hide(ranges_wf);
+        hide(spec_ack_bytes);
+        hide(rfc_ack_ranges_valid);
+        hide(ack_encodable);
+        hide(ack_contains);
+        hide(RecvPns::wf);
         proof {
+            self.lemma_build_facts();
             lemma_ranges_wf_ok(self.ranges@, self.floor, self.seen@);
         }
         let n = self.ranges.len();
@@ -597,6 +629,7 @@ impl RecvPns {
         let ghost r = self.ranges@;
         proof {
             lemma_ack_len(r, 0, delay);
+            lemma_full_ack_fits(r, 0, delay);
             assert(ack_pairs(r).take(0) =~= Seq::<(u64, u64)>::empty());
         }
         let base: usize = 2 + varint_len(hi0) + varint_len(delay) + varint_len(first);
@@ -643,6 +676,9 @@ impl RecvPns {
         proof {
             lemma_ack_valid(r, (i - 1) as nat, delay);
             lemma_acked_seen(r, self.floor, self.seen@, (i - 1) as nat, delay);
+            if max_len >= FULL_ACK_LEN {
+                lemma_ack_complete(r, (i - 1) as nat, delay, max_len as int);
+            }
         }
         // §13.4 exceptions: see below.
         //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.1
@@ -733,6 +769,10 @@ fn ack_pair(v: &Vec<(u64, u64)>, i: usize) -> (g: (u64, u64))
     ensures
         g == ack_pairs(v@)[i - 1],
 {
+    hide(ack_pairs);
+    proof {
+        lemma_pair_at(v@, i - 1);
+    }
     let (plo, _) = v[i - 1];
     let (lo, hi) = v[i];
     assert(v@[i as int].1 + 1 < v@[i - 1].0);
@@ -1003,19 +1043,14 @@ proof fn lemma_splice_insert(r: Seq<(u64, u64)>, a: int, b: int, x: (u64, u64), 
 {
     lemma_splice_ok(r, a, b, x, m);
     lemma_splice_cover(r, a, b, x, pn);
-    lemma_splice_index(r, a, b, x);
     let s = splice(r, a, b, x);
-    assert(s[0] == if a == 0 {
-        x
-    } else {
-        r[0]
-    });
+    lemma_splice_at(r, a, b, x, 0);
     if s.len() == r.len() + 1 && r.len() > 0 && pn > r.last().1 {
         assert(a == b);
         if a == r.len() {
             assert(x.1 + 1 < r[a - 1].0);
         } else {
-            assert(s[s.len() - 1] == r[r.len() - 1]);
+            lemma_splice_at(r, a, b, x, s.len() - 1);
         }
     }
 }
@@ -1213,6 +1248,7 @@ proof fn lemma_insert_inv(
             pn
         },
         forall|p: u64| #[trigger] unrep.contains(p) ==> in_ranges(r1, p),
+        r1.len() == r0.len() + 1 && r0.len() > 0 && pn > r0.last().1 ==> r1.last() == r0.last(),
 {
     let s1 = seen.insert(pn);
     assert forall|p: u64| #[trigger] s1.contains(p) implies p < floor || in_ranges(r1, p) by {
@@ -1234,7 +1270,7 @@ proof fn lemma_insert_inv(
 /// which is what goes.
 proof fn lemma_drop_keeps(r0: Seq<(u64, u64)>, r1: Seq<(u64, u64)>, floor: u64, pn: u64, unrep: Set<u64>)
     requires
-        insert_post(r0, r1, pn, floor),
+        r1.len() == r0.len() + 1 && r0.len() > 0 && pn > r0.last().1 ==> r1.last() == r0.last(),
         r0.len() == MAX_ACK_RANGES,
         r1.len() == MAX_ACK_RANGES + 1,
         !in_ranges(r0, pn),
@@ -1320,12 +1356,45 @@ proof fn lemma_drop_lowest(r: Seq<(u64, u64)>, floor: u64, seen: Set<u64>)
         r.drop_last()[0] == r[0],
         r.last().1 < PN_MAX + 1,
 {
+    lemma_drop_floor(r);
+    assert(r.last() == r[r.len() - 1]);
+    lemma_drop_seen(r, floor, seen);
+}
+
+/// Every kept range lies above the new floor.
+proof fn lemma_drop_floor(r: Seq<(u64, u64)>)
+    requires
+        r.len() == MAX_ACK_RANGES + 1,
+        ranges_ok(r),
+    ensures
+        ranges_ok(r.drop_last()),
+        lo_ge(r.drop_last(), (r.last().1 + 1) as u64),
+        r.drop_last()[0] == r[0],
+        r.last().1 < PN_MAX + 1,
+{
     let t = r.drop_last();
     let f = (r.last().1 + 1) as u64;
     let n = r.len() - 1;
     assert forall|i: int| #![trigger t[i]] 0 <= i < t.len() implies t[i].0 >= f by {
         lemma_sorted_trans(r, i, n);
     }
+}
+
+/// The seen-set conjuncts survive the drop, with the floor just above the dropped range.
+proof fn lemma_drop_seen(r: Seq<(u64, u64)>, floor: u64, seen: Set<u64>)
+    requires
+        r.len() == MAX_ACK_RANGES + 1,
+        floor <= r.last().0 <= r.last().1 <= PN_MAX,
+        forall|p: u64| #[trigger] seen.contains(p) ==> p < floor || in_ranges(r, p),
+        forall|p: u64| in_ranges(r, p) ==> #[trigger] seen.contains(p),
+    ensures
+        forall|p: u64| #[trigger]
+            seen.contains(p) ==> p < (r.last().1 + 1) as u64 || in_ranges(r.drop_last(), p),
+        forall|p: u64| in_ranges(r.drop_last(), p) ==> #[trigger] seen.contains(p),
+{
+    let t = r.drop_last();
+    let f = (r.last().1 + 1) as u64;
+    let n = r.len() - 1;
     assert forall|p: u64| #[trigger] seen.contains(p) implies p < f || in_ranges(t, p) by {
         if in_ranges(r, p) {
             let j = choose|j: int| #![trigger r[j]] 0 <= j < r.len() && r[j].0 <= p <= r[j].1;
@@ -1333,7 +1402,7 @@ proof fn lemma_drop_lowest(r: Seq<(u64, u64)>, floor: u64, seen: Set<u64>)
                 assert(t[j] == r[j]);
             }
         } else {
-            assert(r[n].0 >= floor);
+            assert(p < floor);
         }
     }
     assert forall|p: u64| in_ranges(t, p) implies #[trigger] seen.contains(p) by {
@@ -1474,6 +1543,64 @@ proof fn lemma_ack_len(r: Seq<(u64, u64)>, k: nat, delay: u64)
     theorem_serialize_matches_rfc(k as u64);
     theorem_serialize_matches_rfc(a.first_range);
     assert(spec_ecn_bytes(None) =~= Seq::<u8>::empty());
+}
+
+/// Pair `k` of `ack_pairs(r)`.
+proof fn lemma_pair_at(r: Seq<(u64, u64)>, k: int)
+    requires
+        0 <= k,
+        k + 1 < r.len(),
+    ensures
+        ack_pairs(r)[k] == (((r[k].0 - r[k + 1].1) - 2) as u64, (r[k + 1].1 - r[k + 1].0) as u64),
+{
+}
+
+/// The pairs take at most 16 bytes each.
+proof fn lemma_pairs_len_bound(r: Seq<(u64, u64)>, k: nat)
+    requires
+        ranges_ok(r),
+        k < r.len(),
+    ensures
+        spec_pairs_bytes(ack_pairs(r).take(k as int)).len() <= 16 * k,
+    decreases k,
+{
+    if k == 0 {
+        assert(ack_pairs(r).take(0) =~= Seq::<(u64, u64)>::empty());
+    } else {
+        lemma_pairs_len_bound(r, (k - 1) as nat);
+        lemma_pairs_step(r, k - 1);
+    }
+}
+
+/// With `FULL_ACK_LEN` bytes of room, the longest fitting prefix is every range.
+proof fn lemma_ack_complete(r: Seq<(u64, u64)>, k: nat, delay: u64, max_len: int)
+    requires
+        ranges_ok(r),
+        k < r.len(),
+        r.len() <= MAX_ACK_RANGES,
+        delay <= VARINT_MAX,
+        max_len >= FULL_ACK_LEN,
+        k + 1 < r.len() ==> spec_ack_bytes(ack_of(r, k + 1, delay)).len() > max_len,
+    ensures
+        k + 1 == r.len(),
+{
+    if k + 1 < r.len() {
+        lemma_full_ack_fits(r, k + 1, delay);
+    }
+}
+
+/// Every candidate frame fits in `FULL_ACK_LEN` bytes.
+proof fn lemma_full_ack_fits(r: Seq<(u64, u64)>, k: nat, delay: u64)
+    requires
+        ranges_ok(r),
+        k < r.len(),
+        r.len() <= MAX_ACK_RANGES,
+        delay <= VARINT_MAX,
+    ensures
+        spec_ack_bytes(ack_of(r, k, delay)).len() <= FULL_ACK_LEN,
+{
+    lemma_ack_len(r, k, delay);
+    lemma_pairs_len_bound(r, k);
 }
 
 /// One more pair adds exactly its two varints.

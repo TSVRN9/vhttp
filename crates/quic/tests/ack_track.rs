@@ -61,6 +61,9 @@ fn range_cap() {
     assert_eq!(a.ranges.len(), 31);
     assert_eq!(smallest(&a), 2);
     assert_eq!(r.largest(), Some(64));
+    // Merging 2..4 leaves 31 ranges, so only the floor (dropped hi + 1 = 1) decides PN 1.
+    r.on_packet(3, false, 0);
+    assert!(!r.is_duplicate(1));
 }
 
 #[test]
