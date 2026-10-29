@@ -8,10 +8,38 @@ for c in "$root"/crates/*/; do
     (cd "$c" && cargo verus verify)
 done
 (cd "$root" && duvet report)
+# Constant-time check; its crypto report is read by the declassify gate, so pin where it goes.
+export CT_TARGET_DIR="${CT_TARGET_DIR:-$root/target/ct}"
+export CT_OUT="${CT_OUT:-$CT_TARGET_DIR/out}"
+"$root/scripts/ct-check.sh"
+# Declassify gate: the report's `declassify <X>#<k> <file>:<line>` sites, the TRUSTED.md
+# `| ct-declassify: <X>#<k>: ... | <file>:<line> |` rows and the non-comment `declassify(` lines
+# of crates/crypto/src/ (ct.rs holds the definition) must be the same lists, duplicates included.
+gate=declassify
+fail() { echo "verify.sh: $gate gate: $*" >&2; exit 1; }
+cd "$root"
+report=$CT_OUT/crypto/report-crypto.txt
+[ -f "$report" ] || fail "no $report"
+g=$CT_OUT/gate
+mkdir -p "$g"
+awk '$1 == "declassify" { s = $NF; $1 = ""; $NF = ""; gsub(/^ +| +$/, ""); print $0, s }' "$report" | LC_ALL=C sort > "$g/report"
+awk -F'|' '/^\| ct-declassify: / { k = $2; sub(/^ ct-declassify: /, "", k); sub(/: .*/, "", k); s = $3; gsub(/^ +| +$/, "", s); print k, s }' TRUSTED.md | LC_ALL=C sort > "$g/trusted"
+grep -rn --include='*.rs' 'declassify(' crates/crypto/src | grep -v '/ct\.rs:' | grep -vE '^[^:]*:[0-9]+:[[:space:]]*//' | cut -d: -f1,2 | LC_ALL=C sort > "$g/source"
+awk '{ print $NF }' "$g/report" | LC_ALL=C sort > "$g/report-sites"
+d=$(wc -l < "$g/report" | tr -d ' ')
+for k in $(awk '{ $NF = ""; print }' "$g/report"); do
+    grep -qF "| ct-declassify: $k: " TRUSTED.md || fail "$k has no TRUSTED.md ct-declassify row"
+done
+n=$(grep -c '^| ct-declassify: ' TRUSTED.md || true)
+[ "$n" -eq "$d" ] || fail "$d report sites but $n TRUSTED.md ct-declassify rows"
+n=$(wc -l < "$g/source" | tr -d ' ')
+[ "$n" -eq "$d" ] || fail "$d report sites but $n declassify( lines in crates/crypto/src"
+diff "$g/report" "$g/trusted" >&2 || fail "report sites and TRUSTED.md rows differ (diff above: < report, > TRUSTED.md)"
+diff "$g/report-sites" "$g/source" >&2 || fail "report sites and declassify( lines differ (diff above: < report, > source)"
 # Escape gate, per hit: every hit must be a bare #[verifier::external_body] line in
 # crates/crypto/src/; each one must precede a fn named by a `| crypto::<mod>::<fn>: ` row in
 # TRUSTED.md, and the attribute count must equal the number of `| crypto::` rows.
-fail() { echo "verify.sh: escape gate: $*" >&2; exit 1; }
+gate=escape
 rc=0
 hits=$(grep -rnE 'admit[[:space:]]*\(|assume[[:space:]]*\(|external_body|assume_specification|verifier[[:space:]]*(::|\()[[:space:]]*external|\baxiom\b' "$root/crates" --include='*.rs') || rc=$?
 [ "$rc" -le 1 ] || fail "grep failed (rc=$rc)"
@@ -34,4 +62,4 @@ done
 rows=$(grep -c '^| crypto::' "$root/TRUSTED.md" || true)
 [ "$attrs" -eq "$named" ] || fail "$attrs attributes but $named name a following fn"
 [ "$attrs" -eq "$rows" ] || fail "$attrs attributes but $rows TRUSTED.md crypto rows"
-echo "verify.sh: all crates verified, duvet ok, escapes accounted ($attrs)"
+echo "verify.sh: all crates verified, duvet ok, ct ok ($d declassify), escapes accounted ($attrs)"
