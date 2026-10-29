@@ -230,10 +230,10 @@ Total keyword count: 44 across 22 sections.
 | 8.1.3 (req) | NEW_TOKEN unlinkability and uniqueness | 2 | no | Declined (optional: NEW_TOKEN issuance) | We do not send NEW_TOKEN. |
 | 8.1.3 (req) | Server MUST attempt to validate a token in Initial | 1 | yes | 3 | We issue no tokens, so any token fails validation; must still handle without erroring (invalid NEW_TOKEN token: proceed as unvalidated; Retry-style invalid: INVALID_TOKEN). ✅ 3d: crates/quic/src/handshake.rs |
 | 8.1.4 | Address validation token integrity | 5 | no | Declined (optional: Retry) | Applies to tokens we issue; none issued. Anti-amplification still applies via 8.1. |
-| 8.2.1 | Initiating path validation | 4 | yes | 3 | Server initiates validation of a peer's new address (not migration). |
-| 8.2.1 (req) | Unpredictable PATH_CHALLENGE data | 1 | yes | 3 | RNG from shell. |
-| 8.2.1 (req) | Expand PATH_CHALLENGE datagrams to 1200 unless anti-amplification forbids | 1 | yes | 3 | Padding rule. |
-| 8.2.1 (req) | Second validation with 1200-byte datagram for MTU | 1 | yes | 3 | If first validation used a smaller datagram. |
+| 8.2.1 | Initiating path validation | 4 | yes | 3 | Server initiates validation of a peer's new address (not migration). 3d: path.rs (closed in 3d2 Task 2b) |
+| 8.2.1 (req) | Unpredictable PATH_CHALLENGE data | 1 | yes | 3 | RNG from shell. 3d: path.rs (closed in 3d2 Task 2b) |
+| 8.2.1 (req) | Expand PATH_CHALLENGE datagrams to 1200 unless anti-amplification forbids | 1 | yes | 3 | Padding rule. 3d: path.rs (closed in 3d2 Task 2b) |
+| 8.2.1 (req) | Second validation with 1200-byte datagram for MTU | 1 | yes | 3 | If first validation used a smaller datagram. 3d: path.rs (closed in 3d2 Task 2b) |
 | 8.2.1 (req) | Do NOT discard small datagrams carrying PATH_CHALLENGE/PATH_RESPONSE | 1 | yes | 3 | Exception to the 14.1 discard rule (Initial-only), watch interaction. |
 | 8.2.2 | Path validation responses | 7 | yes | 3 | Each requirement has its own row. |
 | 8.2.2 (req) | Echo PATH_CHALLENGE data in PATH_RESPONSE | 1 | yes | 3 | "MUST respond by echoing the data contained in the PATH_CHALLENGE frame in a PATH_RESPONSE frame." Required even though we decline initiating migration. |
@@ -243,7 +243,7 @@ Total keyword count: 44 across 22 sections.
 | 8.2.2 (req) | Expand PATH_RESPONSE datagram to 1200 | 1 | yes | 3 |  |
 | 8.2.2 (req) | Do not expand PATH_RESPONSE past anti-amplification limit | 1 | yes | 3 |  |
 | 8.2.2 (req) | At most one PATH_RESPONSE per PATH_CHALLENGE | 1 | yes | 3 | See 13.3. |
-| 8.2.3 | Successful path validation | 1 | yes | 3 | Re-validate with expanded datagram if MTU not yet confirmed. |
+| 8.2.3 | Successful path validation | 1 | yes | 3 | Re-validate with expanded datagram if MTU not yet confirmed. ✅ 3d: crates/quic/src/path.rs |
 | 9 | Connection migration | 5 | partial | 3 | Rows below. |
 | 9 (req) | MUST NOT initiate migration before handshake confirmed | 1 | no | Declined (optional: connection migration) | We never initiate migration. |
 | 9 (req) | disable_active_migration: no sends from different local address | 1 | no | Declined (optional: connection migration) | Parameter is server-sent; we never change local address. |
@@ -350,7 +350,7 @@ Total keyword count: 44 across 22 sections.
 | 19.16 (req) | Sequence number greater than any sent is PROTOCOL_VIOLATION | 1 | yes | 3 | ✅ 3d: crates/quic/src/cid.rs |
 | 19.16 (req) | Sequence MUST NOT refer to the packet's own DCID | 1 | yes | 3 | ✅ 3d: crates/quic/src/cid.rs |
 | 19.16 (req) | Zero-length-CID provider receiving RETIRE_CONNECTION_ID is PROTOCOL_VIOLATION | 1 | yes | 3 | exception: LOCAL_CID_LEN = 8. ✅ 3d: crates/quic/src/cid.rs |
-| 19.17 | PATH_CHALLENGE frames | 1 | yes | 3 | Recipient MUST generate PATH_RESPONSE with same data (see 8.2.2 rows). |
+| 19.17 | PATH_CHALLENGE frames | 1 | yes | 3 | Recipient MUST generate PATH_RESPONSE with same data (see 8.2.2 rows). ✅ 3d: crates/quic/src/path.rs |
 | 19.20 | HANDSHAKE_DONE frames | 2 | yes | 3 | Server sends only after handshake complete; receipt is PROTOCOL_VIOLATION. 3b codec: crates/quic/src/frame.rs (closed in 3d) |
 | 19.21 | Extension frames | 3 | no | Declined (optional: HTTP/3 extensions) | Applies only to endpoints using extension frames; unknown frame handling is in 12.4. |
 | 21.5 | Request forgery attacks | 1 | no | N/A (binds spec authors) | Requirement on future extensions, not an endpoint. |
