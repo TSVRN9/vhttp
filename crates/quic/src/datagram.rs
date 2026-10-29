@@ -432,14 +432,14 @@ fn plain_len(p: &OutPacket) -> (n: usize)
     frames_byte_len(&p.frames, p.kind) + p.padding
 }
 
-/// The packet's protected length.
-pub fn packet_len(p: &OutPacket) -> (n: usize)
+/// The packet's protected length, given its plaintext length `pt`.
+fn len_from(p: &OutPacket, pt: usize) -> (n: usize)
     requires
         out_packet_sized(p@),
+        pt == plaintext_len(p@),
     ensures
         n == out_packet_len(p@),
 {
-    let pt = plain_len(p);
     let lf = p.pn_len as usize + pt + AEAD_TAG_LEN;
     match p.kind {
         PacketKind::OneRtt => 1 + p.dcid.len() + p.pn_len as usize + pt + AEAD_TAG_LEN,
@@ -448,6 +448,16 @@ pub fn packet_len(p: &OutPacket) -> (n: usize)
         PacketKind::Handshake => 7 + p.dcid.len() + p.scid.len() + varint_len(lf as u64)
             + p.pn_len as usize + pt + AEAD_TAG_LEN,
     }
+}
+
+/// The packet's protected length.
+pub fn packet_len(p: &OutPacket) -> (n: usize)
+    requires
+        out_packet_sized(p@),
+    ensures
+        n == out_packet_len(p@),
+{
+    len_from(p, plain_len(p))
 }
 
 /// The datagram's length: its packets' protected lengths summed.
@@ -504,29 +514,47 @@ pub fn add_sample_padding(p: &mut OutPacket)
     }
 }
 
-/// The first packet with the most packet number and plaintext bytes, and the datagram length.
-fn pick(ps: &Vec<OutPacket>) -> (r: (usize, usize))
+proof fn lemma_take_step(s: Seq<SpecOutPacket>, j: int)
+    requires
+        0 <= j < s.len(),
+    ensures
+        packets_len(s.take(j + 1)) == packets_len(s.take(j)) + out_packet_len(s[j]),
+{
+    assert(s.take(j + 1).drop_last() =~= s.take(j));
+}
+
+/// The first packet with the most packet number and plaintext bytes, its Length, and the
+/// datagram length; each packet is serialized once.
+#[verifier::spinoff_prover]
+fn pick(ps: &Vec<OutPacket>) -> (r: (usize, usize, usize))
     requires
         1 <= ps.len() <= 3,
         forall|k: int| 0 <= k < ps.len() ==> out_packet_sized(#[trigger] ps@[k]@),
     ensures
         r.0 < ps.len(),
-        r.1 == packets_len(packets_view(ps@)),
+        r.1 == length_field(ps@[r.0 as int]@),
+        r.2 == packets_len(packets_view(ps@)),
         forall|k: int|
             0 <= k < ps.len() ==> (#[trigger] ps@[k]@).pn_len + plaintext_len(ps@[k]@)
                 <= ps@[r.0 as int]@.pn_len + plaintext_len(ps@[r.0 as int]@),
 {
     let ghost s = packets_view(ps@);
+    let pt0 = plain_len(&ps[0]);
     let mut best_i: usize = 0;
-    let mut best: usize = ps[0].pn_len as usize + plain_len(&ps[0]);
-    let mut total: usize = 0;
-    let mut j: usize = 0;
+    let mut best: usize = ps[0].pn_len as usize + pt0;
+    let mut total: usize = len_from(&ps[0], pt0);
+    let mut j: usize = 1;
+    proof {
+        lemma_take_step(s, 0);
+        assert(s.take(0) =~= Seq::<SpecOutPacket>::empty());
+        lemma_overhead(ps@[0]@);
+    }
     while j < ps.len()
         invariant
             s == packets_view(ps@),
             1 <= ps.len() <= 3,
             forall|k: int| 0 <= k < ps.len() ==> out_packet_sized(#[trigger] ps@[k]@),
-            j <= ps.len(),
+            1 <= j <= ps.len(),
             best_i < ps.len(),
             best == ps@[best_i as int]@.pn_len + plaintext_len(ps@[best_i as int]@),
             forall|k: int|
@@ -535,27 +563,27 @@ fn pick(ps: &Vec<OutPacket>) -> (r: (usize, usize))
             total <= 16434 * j,
         decreases ps.len() - j,
     {
-        let ghost sj = s.take(j as int + 1);
         proof {
-            assert(sj.drop_last() =~= s.take(j as int));
-            assert(sj.last() == ps@[j as int]@);
+            lemma_take_step(s, j as int);
             lemma_overhead(ps@[j as int]@);
         }
-        let q = ps[j].pn_len as usize + plain_len(&ps[j]);
+        let pt = plain_len(&ps[j]);
+        let q = ps[j].pn_len as usize + pt;
         if q > best {
             best = q;
             best_i = j;
         }
-        total = total + packet_len(&ps[j]);
+        total = total + len_from(&ps[j], pt);
         j += 1;
     }
     assert(s.take(j as int) =~= s);
-    (best_i, total)
+    (best_i, best + AEAD_TAG_LEN, total)
 }
 
 /// Pads one packet of `d` (the first with the most packet number and plaintext bytes) so the
 /// datagram is exactly `target` bytes. 3d2 calls it with 1200 for every datagram that carries
 /// an ack-eliciting Initial.
+#[verifier::spinoff_prover]
 pub fn pad_datagram(d: &mut OutDatagram, target: usize)
     requires
         1 <= old(d)@.packets.len() <= 3,
@@ -568,6 +596,7 @@ pub fn pad_datagram(d: &mut OutDatagram, target: usize)
         out_datagram_len(final(d)@) == target,
         out_datagram_sized(final(d)@),
         exists|i: int|
+            #![trigger final(d)@.packets[i]]
             0 <= i < old(d)@.packets.len() && final(d)@.packets == old(d)@.packets.update(
                 i,
                 padded(old(d)@.packets[i], (final(d)@.packets[i].padding - old(d)@.packets[i].padding) as nat),
@@ -587,9 +616,8 @@ pub fn pad_datagram(d: &mut OutDatagram, target: usize)
             assert(s[k] == d.packets@[k]@);
         }
     }
-    let (i, total) = pick(&d.packets);
+    let (i, lf, total) = pick(&d.packets);
     let gap = target - total;
-    let lf = d.packets[i].pn_len as usize + plain_len(&d.packets[i]) + AEAD_TAG_LEN;
     let long = match d.packets[i].kind {
         PacketKind::OneRtt => false,
         _ => true,

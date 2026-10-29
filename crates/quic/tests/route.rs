@@ -73,6 +73,18 @@ fn route_reset() {
     assert_eq!(route(&hs, &t), Route::Drop);
 }
 
+/// §10.3: the reset check precedes NewInitial, so a long header ending in a token is a reset.
+#[test]
+fn route_reset_before_new_initial() {
+    let t = table();
+    assert!(t.has_room());
+    let mut b = padded(hex("c000000001082222222222222222 0000449e"), 1200);
+    b[1184..].copy_from_slice(&[0x77; 16]);
+    assert_eq!(route(&b, &t), Route::Reset(7));
+    b[1199] = 0x78;
+    assert_eq!(route(&b, &t), Route::NewInitial);
+}
+
 #[test]
 fn table_rules() {
     let mut t = table();
