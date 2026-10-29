@@ -115,6 +115,13 @@ pub proof fn lemma_ch_ext_block_canonical(rest: Seq<u8>)
     }
 }
 
+proof fn lemma_cat_assoc(x: Seq<u8>, y: Seq<u8>, z: Seq<u8>)
+    ensures
+        (x + y) + z == x + (y + z),
+{
+    assert((x + y) + z =~= x + (y + z));
+}
+
 /// A parsed ClientHello body is exactly the canonical encoding of its fields.
 pub proof fn theorem_ch_fields_canonical(body: Seq<u8>)
     ensures
@@ -141,9 +148,11 @@ pub proof fn theorem_ch_fields_canonical(body: Seq<u8>)
         assert(r1 == b + (c + t));
         lemma_vec_canonical(body.skip(34), 0, 32, sid, r1);
         assert(body.skip(34) == a + (b + (c + t)));
-        assert(body =~= p0 + f.random + (a + (b + (c + t))));
+        lemma_cat_assoc(p0 + f.random, a, b + (c + t));
+        lemma_cat_assoc(p0 + f.random + a, b, c + t);
+        lemma_cat_assoc(p0 + f.random + a + b, c, t);
         assert(spec_ch_fields_bytes(f) == p0 + f.random + a + b + c + t);
-        assert(p0 + f.random + a + b + c + t =~= p0 + f.random + (a + (b + (c + t))));
+        assert(body =~= p0 + f.random + a + b + c + t);
     }
 }
 
@@ -552,7 +561,7 @@ fn ext_data(x: &Vec<Ext>, ty: u16) -> (r: Option<&[u8]>)
     }
 }
 
-fn has_u16(v: &Vec<u16>, t: u16) -> (r: bool)
+pub(crate) fn has_u16(v: &Vec<u16>, t: u16) -> (r: bool)
     ensures
         r == v@.contains(t),
 {
