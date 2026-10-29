@@ -350,7 +350,7 @@ Total keyword count: 44 across 22 sections.
 | 19.16 (req) | Sequence number greater than any sent is PROTOCOL_VIOLATION | 1 | yes | 3 | ✅ 3d: crates/quic/src/cid.rs |
 | 19.16 (req) | Sequence MUST NOT refer to the packet's own DCID | 1 | yes | 3 | ✅ 3d: crates/quic/src/cid.rs |
 | 19.16 (req) | Zero-length-CID provider receiving RETIRE_CONNECTION_ID is PROTOCOL_VIOLATION | 1 | yes | 3 | exception: LOCAL_CID_LEN = 8. ✅ 3d: crates/quic/src/cid.rs |
-| 19.17 | PATH_CHALLENGE frames | 1 | yes | 3 | Recipient MUST generate PATH_RESPONSE with same data (see 8.2.2 rows). ✅ 3d: crates/quic/src/path.rs |
+| 19.17 | PATH_CHALLENGE frames | 1 | yes | 3 | Recipient MUST generate PATH_RESPONSE with same data (see 8.2.2 rows). Owed responses capped at MAX_RESPONSES (4) per path; further challenges are dropped until responses go out (the peer retransmits). ✅ 3d: crates/quic/src/path.rs |
 | 19.20 | HANDSHAKE_DONE frames | 2 | yes | 3 | Server sends only after handshake complete; receipt is PROTOCOL_VIOLATION. 3b codec: crates/quic/src/frame.rs (closed in 3d) |
 | 19.21 | Extension frames | 3 | no | Declined (optional: HTTP/3 extensions) | Applies only to endpoints using extension frames; unknown frame handling is in 12.4. |
 | 21.5 | Request forgery attacks | 1 | no | N/A (binds spec authors) | Requirement on future extensions, not an endpoint. |

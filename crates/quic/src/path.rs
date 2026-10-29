@@ -12,7 +12,8 @@ use crate::lifecycle::*;
 
 verus! {
 
-// ponytail: datagrams from a 5th distinct path are dropped uncounted (§9 "MUST either drop" branch).
+// ponytail: paths never evicted; datagrams from a 5th distinct path are dropped uncounted; evict a
+// non-active unvalidated path when long-lived rebinding matters.
 pub const MAX_PATHS: usize = 4;
 
 /// Responses owed per path; further challenges are dropped until responses go out (the peer
@@ -682,7 +683,13 @@ impl Paths {
         }
     }
 
-    /// Path `id` is validated: by the handshake (§8.1) or by a PATH_RESPONSE (§8.2.3).
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.1
+    //# Sending UDP datagrams of this size ensures that the network path
+    //# supports a reasonable Path Maximum Transmission Unit (PMTU), in both
+    //# directions.
+    /// The handshake validated path `id` (§8.1). Its MTU is validated too: the Initial
+    /// datagrams on it were at least 1200 bytes each way (§14.1). PATH_RESPONSEs validate
+    /// through `on_response`.
     pub fn set_validated(&mut self, id: PathId)
         requires
             old(self).wf(),
@@ -695,6 +702,7 @@ impl Paths {
                 state: PathState::Validated,
                 amp_trace: old(self).path(id).amp_trace.push(AmpEv::Validated),
                 budget: final(self).path(id).budget,
+                mtu_ok: true,
                 ..old(self).path(id)
             }),
     {
@@ -705,6 +713,7 @@ impl Paths {
         }
         self.paths[i].amp.validate();
         self.paths[i].state = PathState::Validated;
+        self.paths[i].mtu_ok = true;
         self.last_validated = Some(id);
         proof {
             let t = a.paths@[i as int].amp.trace();
@@ -814,8 +823,9 @@ impl Paths {
     //# frame so that it can associate the peer's response with the
     //# corresponding PATH_CHALLENGE.
     /// Start validating path `id` with `data`, drawn from the shell's randomness at `now`. An
-    /// earlier challenge on the path is replaced. A Validated path stays Validated (an MTU
-    /// probe, §8.2.1).
+    /// earlier challenge on the path is replaced; while Validating, the new one keeps the
+    /// first one's start time, so the §8.2.4 3·PTO bound runs from the first challenge. A
+    /// Validated path stays Validated (an MTU probe, §8.2.1).
     pub fn start_challenge(&mut self, id: PathId, data: [u8; 8], now: u64)
         requires
             old(self).wf(),
@@ -825,7 +835,17 @@ impl Paths {
             kept(*old(self), *final(self), id),
             final(self).last_validated_spec() == old(self).last_validated_spec(),
             final(self).path(id) == (SpecPath {
-                challenge: Some((data, now, false)),
+                challenge: Some(
+                    (
+                        data,
+                        if old(self).path(id).state is Validating {
+                            old(self).path(id).challenge.unwrap().1
+                        } else {
+                            now
+                        },
+                        false,
+                    ),
+                ),
                 owed: true,
                 state: if old(self).path(id).state is Unvalidated {
                     PathState::Validating
@@ -840,7 +860,11 @@ impl Paths {
         proof {
             assert(path_wf(self.paths@[i as int]));
         }
-        self.paths[i].challenge = Some((data, now, false));
+        let t = match (self.paths[i].state, self.paths[i].challenge) {
+            (PathState::Validating, Some((_, t0, _))) => t0,
+            _ => now,
+        };
+        self.paths[i].challenge = Some((data, t, false));
         self.paths[i].challenge_owed = true;
         if let PathState::Unvalidated = self.paths[i].state {
             self.paths[i].state = PathState::Validating;
@@ -919,7 +943,7 @@ impl Paths {
                     amp_trace: old(self).path(q).amp_trace.push(AmpEv::Validated),
                     budget: final(self).path(q).budget,
                     challenge: None,
-                    mtu_ok: old(self).path(q).challenge.unwrap().2,
+                    mtu_ok: old(self).path(q).mtu_ok || old(self).path(q).challenge.unwrap().2,
                     ..old(self).path(q)
                 })
             },
@@ -951,7 +975,7 @@ impl Paths {
                         self.paths[i].amp.validate();
                         self.paths[i].state = PathState::Validated;
                         self.paths[i].challenge = None;
-                        self.paths[i].mtu_ok = padded;
+                        self.paths[i].mtu_ok = self.paths[i].mtu_ok || padded;
                         self.last_validated = Some(id);
                         proof {
                             let t = a.paths@[i as int].amp.trace();
@@ -1295,6 +1319,24 @@ impl Paths {
         proof {
             Paths::lemma_set(a, *self, i as int);
         }
+    }
+
+    pub open spec fn mtu_ok_spec(&self, id: PathId) -> bool {
+        self.path(id).mtu_ok
+    }
+
+    /// Path `id`'s MTU is validated: by the handshake, or by an answered challenge whose
+    /// datagram reached 1200 bytes.
+    #[verifier::when_used_as_spec(mtu_ok_spec)]
+    pub fn mtu_ok(&self, id: PathId) -> (r: bool)
+        requires
+            self.wf(),
+            self.has(id),
+        ensures
+            r == self.mtu_ok_spec(id),
+    {
+        let i = self.find(id);
+        self.paths[i].mtu_ok
     }
 
     /// A PATH_RESPONSE is owed on path `id` (`take_response` returns Some).
