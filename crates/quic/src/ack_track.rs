@@ -221,6 +221,14 @@ impl RecvPns {
         self.unacked_low matches Some(u) && self.ranges@.last().1 >= u))
     }
 
+    /// The list is full and its lowest range holds an ack-eliciting packet number no ACK has
+    /// reported yet: `is_duplicate` refuses every new packet number until an ACK goes out,
+    /// so the ACK is due at once (`ack_deadline`).
+    pub closed spec fn ack_blocked(&self) -> bool {
+        self.ranges@.len() == MAX_ACK_RANGES && (self.unacked_low matches Some(u)
+            && self.ranges@.last().1 >= u)
+    }
+
     pub closed spec fn ack_only_allowed_spec(&self) -> bool {
         self.eliciting_since_ack > 0
     }
@@ -498,7 +506,8 @@ impl RecvPns {
     //# A receiver SHOULD send an ACK frame after receiving at least two ack-
     //# eliciting packets.
     /// When an ACK is due: never without an unacknowledged ack-eliciting packet; at once in
-    /// Initial and Handshake, and in 1-RTT after two; else `max_ack_delay` after the first.
+    /// Initial and Handshake, and in 1-RTT after two or when `ack_blocked`; else
+    /// `max_ack_delay` after the first.
     pub fn ack_deadline(&self, max_ack_delay_us: u64) -> (d: Option<u64>)
         requires
             self.wf(),
@@ -506,7 +515,7 @@ impl RecvPns {
             self.eliciting_since_ack() == 0 ==> d is None,
             self.eliciting_since_ack() > 0 ==> self.first_unacked() is Some && d == Some(
                 match self.kind_spec() {
-                    PacketKind::OneRtt => if self.eliciting_since_ack() >= 2 {
+                    PacketKind::OneRtt => if self.eliciting_since_ack() >= 2 || self.ack_blocked() {
                         self.first_unacked()->0
                     } else if self.first_unacked()->0 + max_ack_delay_us > u64::MAX {
                         u64::MAX
@@ -520,10 +529,15 @@ impl RecvPns {
         if self.eliciting_since_ack == 0 {
             return None;
         }
+        let n = self.ranges.len();
+        let blocked = n == MAX_ACK_RANGES && match self.unacked_low {
+            Some(u) => self.ranges[n - 1].1 >= u,
+            None => false,
+        };
         match self.first_unacked_time {
             None => None,
             Some(t) => match self.kind {
-                PacketKind::OneRtt => if self.eliciting_since_ack >= 2 {
+                PacketKind::OneRtt => if self.eliciting_since_ack >= 2 || blocked {
                     Some(t)
                 } else if t > u64::MAX - max_ack_delay_us {
                     Some(u64::MAX)
@@ -1190,6 +1204,8 @@ proof fn lemma_new_range(r: Seq<(u64, u64)>, i: int, pn: u64, m: u64)
         insert_post(r, r.insert(i, (pn, pn)), pn, m),
 {
     hide(insert_post);
+    hide(ranges_ok);
+    hide(lo_ge);
     let x = (pn, pn);
     lemma_eq_insert(r, i, x);
     assert(ranges_ok(r) && lo_ge(r, m));

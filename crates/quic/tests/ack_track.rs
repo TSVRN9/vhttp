@@ -82,6 +82,26 @@ fn ack_scheduling() {
     assert_eq!(r.ack_deadline(25_000), None);
 }
 
+/// 3d final review M5: a full list whose lowest range holds the one unreported ack-eliciting
+/// PN refuses every new PN, so the ACK is due at once, not `max_ack_delay` later.
+#[test]
+fn ack_due_when_blocked() {
+    let mut r = RecvPns::new(PacketKind::OneRtt);
+    r.on_packet(0, true, 100);
+    for i in 1..32u64 {
+        r.on_packet(2 * i, false, 100 + i);
+    }
+    assert!(r.is_duplicate(1000));
+    assert_eq!(r.ack_deadline(25_000), Some(100));
+    let mut q = RecvPns::new(PacketKind::OneRtt);
+    q.on_packet(62, true, 100);
+    for i in 0..31u64 {
+        q.on_packet(2 * i, false, 100 + i);
+    }
+    assert!(!q.is_duplicate(1000));
+    assert_eq!(q.ack_deadline(25_000), Some(25_100));
+}
+
 #[test]
 fn non_eliciting() {
     let mut r = RecvPns::new(PacketKind::OneRtt);

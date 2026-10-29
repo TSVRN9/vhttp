@@ -114,6 +114,65 @@ fn failed_mtu_probe_keeps_validated() {
     assert!(p.needs_mtu_probe(1));
 }
 
+/// 3d final review I2: path 1 validated by an unpadded response is `last_validated`; its MTU
+/// probe expires. It is marked failed and the handshake path is the fallback again.
+#[test]
+fn failed_mtu_probe_recorded() {
+    let mut p = challenged(0, false);
+    p.set_active(1);
+    assert_eq!(p.on_response(D(9)), Some(1));
+    assert_eq!(p.last_validated(), Some(1));
+    assert!(!p.mtu_failed(1));
+    p.start_challenge(1, D(10), 10);
+    assert_eq!(p.take_challenge(1, true), Some(D(10)));
+    assert_eq!(p.on_timeout(13, 1), Some(1));
+    assert!(p.mtu_failed(1));
+    assert!(!p.mtu_failed(0));
+    assert_eq!(p.last_validated(), Some(0));
+    // A second failure leaves no fallback to the failed path.
+    let mut q = Paths::new(0);
+    assert!(q.insert(1));
+    q.start_challenge(1, D(1), 0);
+    q.take_challenge(1, false);
+    assert_eq!(q.on_response(D(1)), Some(1));
+    q.start_challenge(1, D(2), 0);
+    q.take_challenge(1, true);
+    assert_eq!(q.on_timeout(3, 1), Some(1));
+    assert_eq!(q.last_validated(), None);
+    // A later padded validation clears the failure.
+    q.start_challenge(1, D(3), 5);
+    q.take_challenge(1, true);
+    assert_eq!(q.on_response(D(3)), Some(1));
+    assert!(!q.mtu_failed(1) && q.mtu_ok(1));
+    assert_eq!(q.last_validated(), Some(1));
+}
+
+/// An MTU-confirmed validated path whose challenge expires is not an MTU failure.
+#[test]
+fn expired_challenge_mtu_ok_path() {
+    let mut p = Paths::new(0);
+    p.set_validated(0);
+    p.start_challenge(0, D(4), 0);
+    p.take_challenge(0, true);
+    assert_eq!(p.on_timeout(3, 1), Some(0));
+    assert!(!p.mtu_failed(0));
+    assert_eq!(p.last_validated(), Some(0));
+}
+
+#[test]
+fn response_room_counts() {
+    let mut p = Paths::new(0);
+    assert_eq!(p.response_room(0), MAX_RESPONSES);
+    p.on_challenge(0, D(1));
+    assert_eq!(p.response_room(0), MAX_RESPONSES - 1);
+    for x in 2..=5 {
+        p.on_challenge(0, D(x));
+    }
+    assert_eq!(p.response_room(0), 0);
+    p.take_response(0);
+    assert_eq!(p.response_room(0), 1);
+}
+
 #[test]
 fn timeout_lowest_first() {
     let mut p = Paths::new(0);

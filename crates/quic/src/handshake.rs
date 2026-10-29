@@ -166,6 +166,8 @@ impl View for HandshakeIds {
 //# uses for sending packets based on the first received Initial packet.
 //
 //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
+//= type=exception
+//= reason=We never accept 0-RTT.
 //# A server MUST reject 0-RTT data if the restored values for transport
 //# parameters cannot be supported.
 //

@@ -16,8 +16,12 @@ verus! {
 // non-active unvalidated path when long-lived rebinding matters.
 pub const MAX_PATHS: usize = 4;
 
+//= https://www.rfc-editor.org/rfc/rfc9000#section-21.9
+//# Endpoints MAY respond to this condition with a connection
+//# error or by dropping packets.
 /// Responses owed per path; further challenges are dropped until responses go out (the peer
-/// retransmits, §8.2.1 MAY).
+/// retransmits, §8.2.1 MAY). 3d2 drops a whole packet whose challenges exceed
+/// `response_room`, so a challenge is never lost inside a packet that is acknowledged.
 pub const MAX_RESPONSES: usize = 4;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -39,6 +43,10 @@ pub struct Path {
     challenge_owed: bool,
     /// A challenge in a datagram of at least 1200 bytes was answered.
     mtu_ok: bool,
+    /// An MTU probe (a challenge on a Validated path whose MTU is not confirmed) expired:
+    /// the path cannot carry 1200-byte datagrams (§14.2), so only probes and
+    /// CONNECTION_CLOSE may be sent on it.
+    mtu_failed: bool,
     /// PATH_RESPONSE data owed, oldest first.
     responses: Vec<[u8; 8]>,
     /// The peer CID we send with on this path; None: nothing may be sent there (§9.5).
@@ -57,6 +65,7 @@ pub struct SpecPath {
     pub challenge: Option<([u8; 8], u64, bool)>,
     pub owed: bool,
     pub mtu_ok: bool,
+    pub mtu_failed: bool,
     pub responses: Seq<[u8; 8]>,
     pub dcid: Option<Seq<u8>>,
     pub peer_used: Option<Seq<u8>>,
@@ -92,6 +101,7 @@ impl View for Path {
             challenge: self.challenge,
             owed: self.challenge_owed,
             mtu_ok: self.mtu_ok,
+            mtu_failed: self.mtu_failed,
             responses: self.responses@,
             dcid: opt_view(self.dcid),
             peer_used: opt_view(self.peer_used),
@@ -163,6 +173,7 @@ pub open spec fn fresh_path(id: PathId) -> SpecPath {
         challenge: None,
         owed: false,
         mtu_ok: false,
+        mtu_failed: false,
         responses: Seq::empty(),
         dcid: None,
         peer_used: None,
@@ -183,6 +194,16 @@ pub open spec fn expiry(p: SpecPath, pto_us: u64) -> u64 {
 
 pub open spec fn expired(p: SpecPath, now: u64, pto_us: u64) -> bool {
     timed(p) && now >= expiry(p, pto_us)
+}
+
+/// A path we may send ordinary data on: validated, and no MTU probe failed.
+pub open spec fn usable(p: SpecPath) -> bool {
+    p.state is Validated && !p.mtu_failed
+}
+
+/// An expiring challenge on this path was an MTU probe.
+pub open spec fn mtu_fail(p: SpecPath) -> bool {
+    p.state is Validated && !p.mtu_ok
 }
 
 /// `data` answers the path's sent challenge.
@@ -242,7 +263,9 @@ proof fn lemma_tcount_update(s: Seq<Path>, i: int, p: Path)
 pub struct Paths {
     paths: Vec<Path>,
     active: PathId,
+    /// The most recently validated usable path, and the one before it (§9.3.2 fallback).
     last_validated: Option<PathId>,
+    prev_validated: Option<PathId>,
 }
 
 /// `b` differs from `a` at most on path `id` and `last_validated`.
@@ -297,6 +320,18 @@ impl Paths {
         self.last_validated
     }
 
+    pub closed spec fn prev_validated_spec(&self) -> Option<PathId> {
+        self.prev_validated
+    }
+
+    /// `o` names path `id` or one of `self`'s two remembered validated paths.
+    spec fn drawn(&self, id: PathId, o: Option<PathId>) -> bool {
+        match o {
+            Some(p) => p == id || self.last_validated == Some(p) || self.prev_validated == Some(p),
+            None => true,
+        }
+    }
+
     /// The number of sent challenges awaiting a response: `on_timeout` lowers it.
     pub closed spec fn timed_count(&self) -> nat {
         tcount(self.paths@)
@@ -309,8 +344,9 @@ impl Paths {
                 == #[trigger] self.paths@[j].id ==> i == j
         &&& forall|i: int| 0 <= i < self.paths@.len() ==> path_wf(#[trigger] self.paths@[i])
         &&& self.has(self.active)
-        &&& self.last_validated matches Some(p) ==> self.has(p) && self.path(p).state
-            is Validated
+        &&& self.last_validated matches Some(p) ==> self.has(p) && usable(self.path(p))
+        &&& self.prev_validated matches Some(p) ==> self.has(p) && usable(self.path(p))
+            && self.last_validated != Some(p)
     }
 
     proof fn lemma_index(&self, i: int)
@@ -359,8 +395,9 @@ impl Paths {
         ensures
             self.ids().len() <= MAX_PATHS,
             self.has(self.active_spec()),
-            self.last_validated_spec() matches Some(p) ==> self.has(p) && self.path(p).state
-                is Validated,
+            self.last_validated_spec() matches Some(p) ==> self.has(p) && usable(self.path(p)),
+            self.prev_validated_spec() matches Some(p) ==> self.has(p) && usable(self.path(p))
+                && self.last_validated_spec() != Some(p),
             forall|q: PathId| #[trigger] self.has(q) ==> path_ok(self.path(q)),
             forall|q: PathId| #[trigger] self.has(q) ==> self.path(q).id == q,
             forall|q: PathId|
@@ -395,9 +432,15 @@ impl Paths {
             b.paths@[i].id == a.paths@[i].id,
             path_wf(b.paths@[i]),
             b.active == a.active,
-            a.paths@[i].state is Validated ==> b.paths@[i].state is Validated,
-            b.last_validated == a.last_validated || (b.last_validated == Some(a.paths@[i].id)
-                && b.paths@[i].state is Validated),
+            (b.last_validated == a.last_validated && b.prev_validated == a.prev_validated && (
+            usable(a.paths@[i]@) ==> usable(b.paths@[i]@))) || ({
+                &&& a.drawn(a.paths@[i].id, b.last_validated)
+                &&& a.drawn(a.paths@[i].id, b.prev_validated)
+                &&& b.last_validated == Some(a.paths@[i].id) || b.prev_validated == Some(
+                    a.paths@[i].id,
+                ) ==> usable(b.paths@[i]@)
+                &&& b.prev_validated is Some ==> b.last_validated != b.prev_validated
+            }),
         ensures
             b.wf(),
             kept(a, b, a.paths@[i].id),
@@ -424,6 +467,67 @@ impl Paths {
             if p != id {
                 assert(b.path(p) == a.path(p));
             }
+        }
+        if let Some(p) = b.prev_validated {
+            if p != id {
+                assert(b.path(p) == a.path(p));
+            }
+        }
+    }
+
+    /// Path `id` was just validated: it becomes `last_validated`, and the one before it (if
+    /// another path) `prev_validated`.
+    fn note_validated(&mut self, id: PathId)
+        ensures
+            final(self).paths == old(self).paths,
+            final(self).active == old(self).active,
+            final(self).last_validated == Some(id),
+            final(self).prev_validated == if old(self).last_validated == Some(id) {
+                old(self).prev_validated
+            } else {
+                old(self).last_validated
+            },
+    {
+        let same = match self.last_validated {
+            Some(p) => p == id,
+            None => false,
+        };
+        if !same {
+            self.prev_validated = self.last_validated;
+        }
+        self.last_validated = Some(id);
+    }
+
+    /// Path `id`'s MTU probe failed: it leaves the remembered validated paths.
+    fn forget_validated(&mut self, id: PathId)
+        ensures
+            final(self).paths == old(self).paths,
+            final(self).active == old(self).active,
+            final(self).last_validated == if old(self).last_validated == Some(id) {
+                old(self).prev_validated
+            } else {
+                old(self).last_validated
+            },
+            final(self).prev_validated == if old(self).last_validated == Some(id)
+                || old(self).prev_validated == Some(id) {
+                None
+            } else {
+                old(self).prev_validated
+            },
+    {
+        let last = match self.last_validated {
+            Some(p) => p == id,
+            None => false,
+        };
+        let prev = match self.prev_validated {
+            Some(p) => p == id,
+            None => false,
+        };
+        if last {
+            self.last_validated = self.prev_validated;
+            self.prev_validated = None;
+        } else if prev {
+            self.prev_validated = None;
         }
     }
 
@@ -478,6 +582,7 @@ impl Paths {
             challenge: None,
             challenge_owed: false,
             mtu_ok: false,
+            mtu_failed: false,
             responses: Vec::new(),
             dcid: None,
             peer_used: None,
@@ -504,7 +609,7 @@ impl Paths {
     {
         let mut paths = Vec::new();
         paths.push(Paths::fresh(first));
-        let r = Paths { paths, active: first, last_validated: None };
+        let r = Paths { paths, active: first, last_validated: None, prev_validated: None };
         proof {
             assert(r.ids() =~= seq![first]);
             r.lemma_index(0);
@@ -596,6 +701,10 @@ impl Paths {
             let j = a.lemma_has(a.active);
             self.lemma_index(j);
             if let Some(p) = self.last_validated {
+                let j = a.lemma_has(p);
+                self.lemma_index(j);
+            }
+            if let Some(p) = self.prev_validated {
                 let j = a.lemma_has(p);
                 self.lemma_index(j);
             }
@@ -698,11 +807,17 @@ impl Paths {
             final(self).wf(),
             kept(*old(self), *final(self), id),
             final(self).last_validated_spec() == Some(id),
+            final(self).prev_validated_spec() == if old(self).last_validated_spec() == Some(id) {
+                old(self).prev_validated_spec()
+            } else {
+                old(self).last_validated_spec()
+            },
             final(self).path(id) == (SpecPath {
                 state: PathState::Validated,
                 amp_trace: old(self).path(id).amp_trace.push(AmpEv::Validated),
                 budget: final(self).path(id).budget,
                 mtu_ok: true,
+                mtu_failed: false,
                 ..old(self).path(id)
             }),
     {
@@ -714,7 +829,8 @@ impl Paths {
         self.paths[i].amp.validate();
         self.paths[i].state = PathState::Validated;
         self.paths[i].mtu_ok = true;
-        self.last_validated = Some(id);
+        self.paths[i].mtu_failed = false;
+        self.note_validated(id);
         proof {
             let t = a.paths@[i as int].amp.trace();
             assert(t.push(AmpEv::Validated).drop_last() =~= t);
@@ -938,12 +1054,20 @@ impl Paths {
                 &&& answers(old(self).path(q), data)
                 &&& kept(*old(self), *final(self), q)
                 &&& final(self).last_validated_spec() == Some(q)
+                &&& final(self).prev_validated_spec() == if old(self).last_validated_spec() == Some(
+                    q,
+                ) {
+                    old(self).prev_validated_spec()
+                } else {
+                    old(self).last_validated_spec()
+                }
                 &&& final(self).path(q) == (SpecPath {
                     state: PathState::Validated,
                     amp_trace: old(self).path(q).amp_trace.push(AmpEv::Validated),
                     budget: final(self).path(q).budget,
                     challenge: None,
                     mtu_ok: old(self).path(q).mtu_ok || old(self).path(q).challenge.unwrap().2,
+                    mtu_failed: false,
                     ..old(self).path(q)
                 })
             },
@@ -976,7 +1100,8 @@ impl Paths {
                         self.paths[i].state = PathState::Validated;
                         self.paths[i].challenge = None;
                         self.paths[i].mtu_ok = self.paths[i].mtu_ok || padded;
-                        self.last_validated = Some(id);
+                        self.paths[i].mtu_failed = false;
+                        self.note_validated(id);
                         proof {
                             let t = a.paths@[i as int].amp.trace();
                             assert(t.push(AmpEv::Validated).drop_last() =~= t);
@@ -1024,7 +1149,9 @@ impl Paths {
 
     /// Abandon at most one expired validation (§8.2.4: 3·PTO after the challenge started):
     /// the lowest entry whose sent challenge has expired. Its challenge is cleared and it is
-    /// Unvalidated again, unless it was Validated (a failed MTU probe; `mtu_ok` stays false).
+    /// Unvalidated again, unless it was Validated. A Validated path without a confirmed MTU
+    /// failed its MTU probe: it is marked `mtu_failed` and leaves the two remembered
+    /// validated paths, so `last_validated` names a usable fallback (§9.3.2) or None.
     pub fn on_timeout(&mut self, now: u64, pto_us: u64) -> (failed: Option<PathId>)
         requires
             old(self).wf(),
@@ -1041,7 +1168,19 @@ impl Paths {
                         pto_us,
                     )
                 &&& kept(*old(self), *final(self), q)
-                &&& final(self).last_validated_spec() == old(self).last_validated_spec()
+                &&& final(self).last_validated_spec() == if mtu_fail(old(self).path(q))
+                    && old(self).last_validated_spec() == Some(q) {
+                    old(self).prev_validated_spec()
+                } else {
+                    old(self).last_validated_spec()
+                }
+                &&& final(self).prev_validated_spec() == if mtu_fail(old(self).path(q)) && (old(
+                    self,
+                ).last_validated_spec() == Some(q) || old(self).prev_validated_spec() == Some(q)) {
+                    None
+                } else {
+                    old(self).prev_validated_spec()
+                }
                 &&& final(self).path(q) == (SpecPath {
                     challenge: None,
                     state: if old(self).path(q).state is Validated {
@@ -1049,6 +1188,7 @@ impl Paths {
                     } else {
                         PathState::Unvalidated
                     },
+                    mtu_failed: old(self).path(q).mtu_failed || mtu_fail(old(self).path(q)),
                     ..old(self).path(q)
                 })
                 &&& final(self).timed_count() < old(self).timed_count()
@@ -1081,7 +1221,12 @@ impl Paths {
                         }
                         self.paths[i].challenge = None;
                         match self.paths[i].state {
-                            PathState::Validated => {},
+                            PathState::Validated => {
+                                if !self.paths[i].mtu_ok {
+                                    self.paths[i].mtu_failed = true;
+                                    self.forget_validated(id);
+                                }
+                            },
                             _ => {
                                 self.paths[i].state = PathState::Unvalidated;
                             },
@@ -1337,6 +1482,39 @@ impl Paths {
     {
         let i = self.find(id);
         self.paths[i].mtu_ok
+    }
+
+    pub open spec fn mtu_failed_spec(&self, id: PathId) -> bool {
+        self.path(id).mtu_failed
+    }
+
+    /// Path `id`'s MTU probe expired: it cannot carry 1200 bytes. 3d2's send gate sends only
+    /// probes and CONNECTION_CLOSE on it (§14.2, cited there), and never keeps it active.
+    #[verifier::when_used_as_spec(mtu_failed_spec)]
+    pub fn mtu_failed(&self, id: PathId) -> (r: bool)
+        requires
+            self.wf(),
+            self.has(id),
+        ensures
+            r == self.mtu_failed_spec(id),
+    {
+        let i = self.find(id);
+        self.paths[i].mtu_failed
+    }
+
+    /// How many more PATH_CHALLENGEs path `id` can take before `on_challenge` drops one.
+    pub fn response_room(&self, id: PathId) -> (r: usize)
+        requires
+            self.wf(),
+            self.has(id),
+        ensures
+            r == MAX_RESPONSES - self.path(id).responses.len(),
+    {
+        let i = self.find(id);
+        proof {
+            assert(path_wf(self.paths@[i as int]));
+        }
+        MAX_RESPONSES - self.paths[i].responses.len()
     }
 
     /// A PATH_RESPONSE is owed on path `id` (`take_response` returns Some).

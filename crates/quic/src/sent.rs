@@ -193,7 +193,8 @@ impl SentPackets {
         r
     }
 
-    /// Starts at packet number `next`, as if every smaller one were used (tests).
+    /// Test support: starts at packet number `next`, as if every smaller one were used.
+    #[doc(hidden)]
     pub fn new_at(next: u64) -> (r: SentPackets)
         requires
             next <= PN_MAX,

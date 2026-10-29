@@ -8,7 +8,7 @@ use vstd::prelude::*;
 
 verus! {
 
-// ponytail: placeholder recovery — fixed 999 ms initial PTO with doubling, packet-count AIMD window (10..64), PTO declares the space's in-flight data lost. Phase 6 (RFC 9002) replaces every body; the signatures stay.
+// ponytail: placeholder recovery — fixed 999 ms initial PTO with doubling, packet-count AIMD window (10..64), PTO declares the space's in-flight data lost, against RFC 9002 §6.2 (a PTO "MUST NOT cause prior unacknowledged packets to be marked as lost"). Phase 6 (RFC 9002) replaces every body; the signatures stay.
 /// kInitialRtt (333 ms) + 4 · (333 / 2) ms, the initial PTO of RFC 9002 §6.2.1 (Phase 6).
 pub const PLACEHOLDER_PTO_US: u64 = 999_000;
 
@@ -16,8 +16,8 @@ pub const MAX_PTO_BACKOFF: u32 = 6;
 
 pub const INITIAL_CWND_PACKETS: u64 = 10;
 
-/// Ack-eliciting packets in flight at most, per packet number space; also the memory cap on
-/// `SentPackets` records (3d D4).
+/// Ack-eliciting packets in flight at most, across all packet number spaces (3d2's gate sums
+/// the three `SentPackets`); so also the memory cap on their records (3d D4).
 pub const MAX_INFLIGHT: u64 = 64;
 
 pub const MIN_CWND_PACKETS: u64 = 2;
