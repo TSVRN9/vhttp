@@ -85,7 +85,7 @@ Matrix total = sum of the section rows' counts (`(req)` rows excluded). It equal
 | 5.2 | Connection Shutdown | 3 | yes | 2 | No new requests/pushes after GOAWAY received (we never initiate); our GOAWAY ids non-increasing; received GOAWAY with larger id = H3_ID_ERROR (client GOAWAY carries a push ID) ✅ 2b (peer GOAWAY with larger id = H3_ID_ERROR): crates/h3/src/uni.rs; ✅ 2b (our GOAWAY ids non-increasing, client-bidi (≡ 0 mod 4, RFC 9114 §7.2.6) and above every accepted request: `theorem_wf` over `highest_accepted`, which `req_call` raises to each accepted stream's ID; new requests at or above it rejected with H3_REQUEST_REJECTED): crates/h3/src/conn.rs |
 | 5.4 | Transport Closure | 1 | no | N/A (client-only) | Client assumption about unacknowledged requests |
 | 6.1 | Bidirectional Streams | 1 | no | N/A (client-only) | Client treats server-initiated bidi stream as H3_STREAM_CREATION_ERROR |
-| 6.2 | Unidirectional Streams | 5 | yes | 2 | Our transport params must allow peer >=3 uni streams (value chosen in h3 config, encoded in phase 3/4); unknown stream types: abort reading/discard, never an error (2); no state-changing stream types until peer supports; tolerate uni stream closed/reset before header ✅ 2b: crates/h3/src/uni.rs; crates/h3/src/limits.rs (`MIN_PEER_UNI_STREAMS`); ✅ 2b (sender side: we open only the control stream, stream 3): crates/h3/src/conn.rs (open: 3c `Streams::new` requires `initial_max_streams_uni >= 3`; encoded by 3d `local_tp_ok`, closed in 3d) |
+| 6.2 | Unidirectional Streams | 5 | yes | 2 | Our transport params must allow peer >=3 uni streams (value chosen in h3 config, encoded in phase 3/4); unknown stream types: abort reading/discard, never an error (2); no state-changing stream types until peer supports; tolerate uni stream closed/reset before header ✅ 2b: crates/h3/src/uni.rs; crates/h3/src/limits.rs (`MIN_PEER_UNI_STREAMS`); ✅ 2b (sender side: we open only the control stream, stream 3): crates/h3/src/conn.rs ✅ 3d: crates/quic/src/handshake.rs (local_tp_ok: 3 <= initial_max_streams_uni <= MAX_LOCAL_STREAMS) |
 | 6.2.1 | Control Streams | 6 | yes | 2 | Open one control stream with SETTINGS first; non-SETTINGS first frame = H3_MISSING_SETTINGS; second control stream = H3_STREAM_CREATION_ERROR; never close it nor STOP_SENDING it (2); closure = H3_CLOSED_CRITICAL_STREAM ✅ 2b (receive side): crates/h3/src/uni.rs; ✅ 2b (sender side: our control stream opened with SETTINGS first and never FIN-ed or reset, `start`/`shutdown` outputs pinned exactly; STOP_SENDING and RESET_STREAM only on request streams, so never on the peer's control stream; a second peer control stream = H3_STREAM_CREATION_ERROR end to end, `uni_fed` over `uni_seen()`; peer STOP_SENDING on stream 3 = H3_CLOSED_CRITICAL_STREAM; peer reset of its control stream = H3_CLOSED_CRITICAL_STREAM): crates/h3/src/conn.rs (`outs_ok`) |
 | 6.2.2 | Push Streams | 3 | partial | 2 | Client-initiated push stream received = connection error H3_STREAM_CREATION_ERROR (rejection rule, implemented) ✅ 2b: crates/h3/src/uni.rs |
 | 6.2.2 (req) | Push ID used once per push stream header | 1 | no | Declined (optional: server push) | "Each push ID MUST only be used once in a push stream header." We send no push streams |
@@ -200,20 +200,20 @@ Total keyword count: 44 across 22 sections.
 | 5.2.3 | Considerations for simple load balancers | 1 | yes | 3 | Conditional on simple LB deployment; avoid stateless reset oracle (see 21.11). |
 | 6.1 | Sending Version Negotiation packets | 1 | yes | 3 | Never send VN in response to VN. ✅ 3b: crates/quic/src/stateless.rs |
 | 6.2 | Handling Version Negotiation packets | 3 | no | N/A (client-only) | Client behavior. |
-| 7 | Cryptographic and transport handshake | 2 | yes | 3 | Handshake properties and explicit ALPN negotiation; TLS-side mechanics land in phase 4. |
-| 7.2 | Negotiating connection IDs | 6 | partial | 3 | Server rows below; 4 client-only MUSTs. |
+| 7 | Cryptographic and transport handshake | 2 | yes | 3 | Handshake properties and explicit ALPN negotiation; TLS-side mechanics land in phase 4. ✅ 3d: crates/quic/src/handshake.rs (ALPN here; handshake properties Phase 4 TLS) |
+| 7.2 | Negotiating connection IDs | 6 | partial | 3 | Server rows below; 4 client-only MUSTs. ✅ 3d: crates/quic/src/handshake.rs |
 | 7.2 (req) | Client DCID/SCID handling (DCID >= 8 bytes, keep same DCID, discard differing SCID, change DCID only on first Initial/Retry) | 4 | no | N/A (client-only) | Server only needs to accept a client's Initial DCID >= 8 bytes. |
-| 7.2 (req) | Server sets DCID from first received Initial | 1 | yes | 3 | "A server MUST set the Destination Connection ID it uses for sending packets based on the first received Initial packet." |
-| 7.2 (req) | Discard later Initial with different SCID | 1 | yes | 3 | Further DCID changes only via NEW_CONNECTION_ID. |
-| 7.3 | Authenticating connection IDs | 4 | partial | 3 | Server rows below; client-side checks are client-only. |
-| 7.3 (req) | Validate/send initial_source_connection_id; original_destination_connection_id sent by server | 3 | yes | 3 | Server sends correct values; validates client's initial_source_connection_id; absence is TRANSPORT_PARAMETER_ERROR. 3b codec: crates/quic/src/tp.rs (closed in 3d) |
+| 7.2 (req) | Server sets DCID from first received Initial | 1 | yes | 3 | "A server MUST set the Destination Connection ID it uses for sending packets based on the first received Initial packet." ✅ 3d: crates/quic/src/handshake.rs |
+| 7.2 (req) | Discard later Initial with different SCID | 1 | yes | 3 | Further DCID changes only via NEW_CONNECTION_ID. ✅ 3d: crates/quic/src/handshake.rs |
+| 7.3 | Authenticating connection IDs | 4 | partial | 3 | Server rows below; client-side checks are client-only. ✅ 3d: crates/quic/src/handshake.rs |
+| 7.3 (req) | Validate/send initial_source_connection_id; original_destination_connection_id sent by server | 3 | yes | 3 | Server sends correct values; validates client's initial_source_connection_id; absence is TRANSPORT_PARAMETER_ERROR. ✅ 3d: crates/quic/src/handshake.rs |
 | 7.3 (req) | retry_source_connection_id presence/absence/mismatch checks | 1 | no | N/A (client-only) | Client check; server never sends Retry (declined) so never sends retry_source_connection_id. Client sending it is an error per 18.2. |
 | 7.4 | Transport parameters | 2 | yes | 3 | Invalid value is TRANSPORT_PARAMETER_ERROR; each parameter at most once. ✅ 3b: crates/quic/src/tp.rs |
-| 7.4.1 | Values of transport parameters for 0-RTT | 9 | partial | 3 | Mostly 0-RTT / client rows below. |
+| 7.4.1 | Values of transport parameters for 0-RTT | 9 | partial | 3 | Mostly 0-RTT / client rows below. ✅ 3d: crates/quic/src/handshake.rs |
 | 7.4.1 (req) | New-parameter 0-RTT storage rule | 1 | no | N/A (client-only) | Requirement on parameter definers, not an endpoint. |
 | 7.4.1 (req) | Client remembered-parameter rules (do not use some remembered values, use server's new values, remember others, only remembered values in 0-RTT) | 5 | no | N/A (client-only) | Lines on client 0-RTT use (incl. the two MUSTs in the last sentence). |
 | 7.4.1 (req) | Server accepting 0-RTT must not reduce limits or alter values | 2 | no | Declined (optional: 0-RTT) | We never accept 0-RTT. |
-| 7.4.1 (req) | Server MUST reject 0-RTT if restored values unsupported | 1 | yes | 3 | Refusal path: we always reject 0-RTT. |
+| 7.4.1 (req) | Server MUST reject 0-RTT if restored values unsupported | 1 | yes | 3 | Refusal path: we always reject 0-RTT. ✅ 3d: crates/quic/src/handshake.rs (0-RTT never accepted: no PacketKind, 3e drops, no early_data) |
 | 7.4.2 | New transport parameters | 1 | yes | 3 | Ignore unknown transport parameters. ✅ 3b: crates/quic/src/tp.rs |
 | 7.5 | Cryptographic message buffering | 3 | yes | 3 | Buffer >= 4096 bytes out-of-order CRYPTO; CRYPTO_BUFFER_EXCEEDED; ACK packets whose CRYPTO was discarded. ✅ 3c: crates/quic/src/crypto_stream.rs |
 | 8 | Address validation | 1 | yes | 3 | 3x limit before validation; see 8.1 row. |
@@ -225,10 +225,10 @@ Total keyword count: 44 across 22 sections.
 | 8.1 (req) | Client Initial >= 1200 bytes if no Handshake keys, else Handshake packet | 1 | no | N/A (client-only) | Client behavior. |
 | 8.1.1 | Token construction | 1 | no | Declined (optional: NEW_TOKEN issuance) | Tokens come only via Retry/NEW_TOKEN; we send neither. |
 | 8.1.2 | Address validation using Retry packets | 1 | no | N/A (client-only) | Client repeats Retry token. |
-| 8.1.3 | Address validation for future connections | 7 | partial | 3 | Rows below. |
+| 8.1.3 | Address validation for future connections | 7 | partial | 3 | Rows below. ✅ 3d: crates/quic/src/handshake.rs |
 | 8.1.3 (req) | Client token inclusion/reuse rules | 4 | no | N/A (client-only) | Client include token, no Retry token reuse, no inapplicable token, Retry token used immediately. |
 | 8.1.3 (req) | NEW_TOKEN unlinkability and uniqueness | 2 | no | Declined (optional: NEW_TOKEN issuance) | We do not send NEW_TOKEN. |
-| 8.1.3 (req) | Server MUST attempt to validate a token in Initial | 1 | yes | 3 | We issue no tokens, so any token fails validation; must still handle without erroring (invalid NEW_TOKEN token: proceed as unvalidated; Retry-style invalid: INVALID_TOKEN). |
+| 8.1.3 (req) | Server MUST attempt to validate a token in Initial | 1 | yes | 3 | We issue no tokens, so any token fails validation; must still handle without erroring (invalid NEW_TOKEN token: proceed as unvalidated; Retry-style invalid: INVALID_TOKEN). ✅ 3d: crates/quic/src/handshake.rs |
 | 8.1.4 | Address validation token integrity | 5 | no | Declined (optional: Retry) | Applies to tokens we issue; none issued. Anti-amplification still applies via 8.1. |
 | 8.2.1 | Initiating path validation | 4 | yes | 3 | Server initiates validation of a peer's new address (not migration). |
 | 8.2.1 (req) | Unpredictable PATH_CHALLENGE data | 1 | yes | 3 | RNG from shell. |

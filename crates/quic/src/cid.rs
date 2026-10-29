@@ -2603,7 +2603,7 @@ proof fn lemma_used_after_mark(e: Seq<PeerEntry>, i: int)
 // Byte helpers
 // =============================================================================
 
-fn eq_bytes(a: &[u8], b: &[u8]) -> (r: bool)
+pub(crate) fn eq_bytes(a: &[u8], b: &[u8]) -> (r: bool)
     ensures
         r == (a@ == b@),
 {
