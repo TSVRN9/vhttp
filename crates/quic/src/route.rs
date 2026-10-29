@@ -16,6 +16,12 @@ pub type ConnId = u64;
 // ponytail: linear-scan CID table capped at 4096 entries; HashMap when connections exceed ~100.
 pub const MAX_TABLE: usize = 4096;
 
+/// The token list's cap. Each connection registers at most `PEER_CID_CAP` used tokens (3d2's
+/// binding), and there are at most `MAX_TABLE` connections (each owns at least one CID), so
+/// `AddToken` from well-formed callers never hits it.
+// ponytail: linear token scan, HashMap when connections exceed ~100.
+pub const MAX_TOKENS: usize = MAX_TABLE * PEER_CID_CAP as usize;
+
 /// A change a connection asks of the table: our CIDs it issued or retired, and the peer's
 /// reset tokens it learned or dropped.
 #[derive(Debug, PartialEq, Eq)]
@@ -94,7 +100,7 @@ pub open spec fn table_wf(t: SpecTable) -> bool {
     &&& keys_unique(t.cids)
     &&& keys_unique(t.tokens)
     &&& t.cids.len() <= MAX_TABLE
-    &&& t.tokens.len() <= MAX_TABLE
+    &&& t.tokens.len() <= MAX_TOKENS
 }
 
 /// Room for one more connection: its first CID plus `ISSUE_CAP_ACTIVE` issued ones, with
@@ -103,17 +109,19 @@ pub open spec fn table_room(t: SpecTable) -> bool {
     t.cids.len() + ISSUE_CAP_ACTIVE + 2 <= MAX_TABLE
 }
 
-/// What `apply` does to one list: `Add` needs a new key and room, `Remove` the owner.
+/// What `apply` does to one list of capacity `cap`: `Add` needs a new key and room, `Remove`
+/// the owner.
 pub open spec fn list_update(
     old: Seq<(Seq<u8>, ConnId)>,
     new: Seq<(Seq<u8>, ConnId)>,
     c: ConnId,
     k: Seq<u8>,
     add: bool,
+    cap: nat,
     ok: bool,
 ) -> bool {
     if add {
-        &&& ok == (find_key(old, k) is None && old.len() < MAX_TABLE)
+        &&& ok == (find_key(old, k) is None && old.len() < cap)
         &&& new == if ok {
             old.push((k, c))
         } else {
@@ -175,7 +183,7 @@ pub open spec fn header_owner(h: Option<SpecHeader>, t: SpecTable) -> Option<Con
 //# A server MUST discard an Initial packet that is carried in a UDP
 //# datagram with a payload that is smaller than the smallest allowed
 //# maximum datagram size of 1200 bytes.
-/// An Initial that may open a connection: in a datagram of at least 1200 bytes, with a DCID
+/// Rule 3: an Initial that may open a connection: in a datagram of at least 1200 bytes, with a DCID
 /// of at least 8 bytes (§7.2), and with room in the table.
 pub open spec fn opens_connection(d: Seq<u8>, h: Option<SpecHeader>, t: SpecTable) -> bool {
     match h {
@@ -189,7 +197,8 @@ pub open spec fn opens_connection(d: Seq<u8>, h: Option<SpecHeader>, t: SpecTabl
 //# However, endpoints MUST treat any packet ending in a
 //# valid stateless reset token as a Stateless Reset, as other QUIC
 //# versions might allow the use of a long header.
-/// The connection whose reset token ends `d`, for a datagram that matched no connection.
+/// Rule 2: the connection whose reset token ends `d`, for a datagram that matched no
+/// connection.
 pub open spec fn reset_of(d: Seq<u8>, t: SpecTable) -> Option<ConnId> {
     if d.len() >= MIN_SHORT_PACKET {
         find_key(t.tokens, d.subrange(d.len() - RESET_TOKEN_LEN, d.len() as int))
@@ -205,11 +214,13 @@ pub open spec fn reset_of(d: Seq<u8>, t: SpecTable) -> Option<ConnId> {
 //# Servers MUST drop incoming packets under all other circumstances.
 /// Where a datagram goes; the first rule that applies:
 /// 1. a version 1 header whose DCID is ours: that connection;
-/// 2. an Initial that `opens_connection` (§14.1, §7.2): a new connection;
-/// 3. an unsupported version in a datagram of at least 1200 bytes: Version Negotiation
+/// 2. a datagram of at least 21 bytes ending in a known reset token: a Stateless Reset of its
+///    connection (§10.3: any packet, long headers and other versions included; §10.3.1: no
+///    connection matched). It precedes rules 3 and 4, so every datagram not matched by CID
+///    gets the comparison;
+/// 3. an Initial that `opens_connection` (§14.1, §7.2): a new connection;
+/// 4. an unsupported version in a datagram of at least 1200 bytes: Version Negotiation
 ///    (§6, §5.2.2);
-/// 4. a datagram of at least 21 bytes ending in a known reset token: a Stateless Reset of its
-///    connection (§10.3, §10.3.1: no connection matched);
 /// 5. anything else is dropped: sub-1200 unsupported versions and Initials, unknown
 ///    Handshake and 0-RTT packets, unmatched short headers, and Initials when the table is
 ///    full (we do not send §5.2.2's CONNECTION_REFUSED, a SHOULD).
@@ -217,13 +228,13 @@ pub open spec fn rfc_route(d: Seq<u8>, t: SpecTable) -> SpecRoute {
     let h = rfc_header(d, LOCAL_CID_LEN as nat);
     if header_owner(h, t) is Some {
         SpecRoute::Existing(header_owner(h, t)->0)
+    } else if reset_of(d, t) is Some {
+        SpecRoute::Reset(reset_of(d, t)->0)
     } else if opens_connection(d, h, t) {
         SpecRoute::NewInitial
     } else if h matches Some(SpecHeader::UnsupportedVersion { .. })
         && rfc_version_negotiation(d) is Some {
         SpecRoute::VersionNegotiation(rfc_version_negotiation(d)->0)
-    } else if reset_of(d, t) is Some {
-        SpecRoute::Reset(reset_of(d, t)->0)
     } else {
         SpecRoute::Drop
     }
@@ -634,6 +645,7 @@ impl CidTable {
                     c,
                     k@,
                     true,
+                    MAX_TABLE as nat,
                     ok,
                 ),
                 CidUpdate::Remove(k) => final(self)@.tokens == old(self)@.tokens && list_update(
@@ -642,6 +654,7 @@ impl CidTable {
                     c,
                     k@,
                     false,
+                    MAX_TABLE as nat,
                     ok,
                 ),
                 CidUpdate::AddToken(t) => final(self)@.cids == old(self)@.cids && list_update(
@@ -650,6 +663,7 @@ impl CidTable {
                     c,
                     t@,
                     true,
+                    MAX_TOKENS as nat,
                     ok,
                 ),
                 CidUpdate::RemoveToken(t) => final(self)@.cids == old(self)@.cids && list_update(
@@ -658,6 +672,7 @@ impl CidTable {
                     c,
                     t@,
                     false,
+                    MAX_TOKENS as nat,
                     ok,
                 ),
             },
@@ -692,7 +707,7 @@ impl CidTable {
                 }
             },
             CidUpdate::AddToken(t) => {
-                if self.tokens.len() >= MAX_TABLE || token_index(&self.tokens, t.as_slice()).is_some() {
+                if self.tokens.len() >= MAX_TOKENS || token_index(&self.tokens, t.as_slice()).is_some() {
                     return false;
                 }
                 self.tokens.push((*t, c));
@@ -816,6 +831,12 @@ pub fn route(datagram: &[u8], table: &CidTable) -> (r: Route)
     if let Some(c) = owner {
         return Route::Existing(c);
     }
+    if datagram.len() >= MIN_SHORT_PACKET {
+        let tail = slice_subrange(datagram, datagram.len() - RESET_TOKEN_LEN, datagram.len());
+        if let Some(c) = table.reset_owner(tail) {
+            return Route::Reset(c);
+        }
+    }
     let opens = match &h {
         Some(Header::Long { ty: LongType::Initial, dcid, .. }) => datagram.len()
             >= MIN_INITIAL_DATAGRAM && 8 <= dcid.len() && table.has_room(),
@@ -827,12 +848,6 @@ pub fn route(datagram: &[u8], table: &CidTable) -> (r: Route)
     if let Some(Header::UnsupportedVersion { .. }) = &h {
         if let Some(v) = version_negotiation(datagram) {
             return Route::VersionNegotiation(v);
-        }
-    }
-    if datagram.len() >= MIN_SHORT_PACKET {
-        let tail = slice_subrange(datagram, datagram.len() - RESET_TOKEN_LEN, datagram.len());
-        if let Some(c) = table.reset_owner(tail) {
-            return Route::Reset(c);
         }
     }
     Route::Drop
