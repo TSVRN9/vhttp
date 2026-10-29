@@ -174,7 +174,9 @@ pub fn p256_ecdsa_sign(d: &[u8], msg: &[u8]) -> (r: Option<[u8; 64]>)
             let r = ecdsa_r_exec(&t);
             let s = ecdsa_s_exec(&limbs_from_be(d, 0), &reduce_n(&h1, 0), &limbs_from_be(&t, 0), &r);
             // ct: declassify the r = 0 / s = 0 outcomes (the RFC 6979 retry; r and s are public outputs)
-            if crate::ct::declassify(is_zero4(&r)) == 0 && crate::ct::declassify(is_zero4(&s)) == 0 {
+            if crate::ct::declassify(is_zero4(&r)) == 0
+                && crate::ct::declassify(is_zero4(&s)) == 0
+            {
                 proof {
                     lemma_least_suitable_choose(d@, h1@, i);
                 }
