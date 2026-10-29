@@ -264,15 +264,15 @@ Total keyword count: 44 across 22 sections.
 | 9.6.3 | Interaction of client migration and preferred address | 2 | no | Declined (optional: connection migration) | Client-only abandon rule is the row below; server protection rule only for preferred_address. |
 | 9.6.3 (req) | Client abandons original-address validation once the preferred address validates | 1 | no | N/A (client-only) | "the client MUST abandon validation of the original address and migrate to using the server's preferred address" |
 | 9.7 | Use of IPv6 flow label and migration | 1 | yes | 3 | Conditional on setting IPv6 flow labels; shell leaves kernel default. |
-| 10.1 | Idle timeout | 1 | yes | 3 | Idle timeout at least 3x PTO. |
+| 10.1 | Idle timeout | 1 | yes | 3 | Idle timeout at least 3x PTO. ✅ 3d: crates/quic/src/lifecycle.rs |
 | 10.2.1 | Closing connection state | 2 | yes | 3 | Limit closing-state sends to 3x received / unvalidated address. |
 | 10.2.2 | Draining connection state | 2 | yes | 3 | No packets sent while draining. |
-| 10.2.3 | Immediate close during the handshake | 3 | yes | 3 | 1-RTT CONNECTION_CLOSE once confirmed; 0x1d to 0x1c replacement; clear reason phrase. |
+| 10.2.3 | Immediate close during the handshake | 3 | yes | 3 | 1-RTT CONNECTION_CLOSE once confirmed; 0x1d to 0x1c replacement; clear reason phrase. ✅ 3d: crates/quic/src/lifecycle.rs |
 | 10.3 | Stateless reset | 5 | yes | 3 | CONNECTION_CLOSE if able; reset < 3x trigger; discard too-small packets; short header; any packet ending in valid token is a reset. Sending rows (short header, < 3x trigger) vacuous: we never send a Stateless Reset (sending is a MAY); Duvet exceptions in crates/quic/src/stateless.rs. Receive side (discard too small, token match) closed in 3d |
 | 10.3.1 | Detecting a stateless reset | 4 | yes | 3 | Constant-time token comparison; only for used, unretired CIDs; enter draining. |
 | 10.3.2 | Calculating a stateless reset token | 5 | yes | 3 | Hard to guess; unique per CID; CID length handling; no CID reuse across static-key nodes. static-key MUSTs: exception (no static key, tokens are fresh randomness). ✅ 3d: crates/quic/src/cid.rs |
 | 10.3.3 | Looping | 1 | yes | 3 | Reset must be smaller than trigger. ✅ 3b: exception — we never send a Stateless Reset (stateless.rs) |
-| 11 | Error handling | 1 | yes | 3 | No stateless reset if connection state exists. |
+| 11 | Error handling | 1 | yes | 3 | No stateless reset if connection state exists. ✅ 3d: exception — no stateless reset is ever sent |
 | 11.1 | Connection errors | 1 | yes | 3 | Fatal errors via CONNECTION_CLOSE. |
 | 11.2 | Stream errors | 1 | yes | 3 | RESET_STREAM only instigated by the application (HTTP/3 layer). ✅ 3c: crates/quic/src/streams.rs |
 | 12.2 | Coalescing packets | 4 | yes | 3 | Process coalesced packets; same CID within datagram; ack separately. |
