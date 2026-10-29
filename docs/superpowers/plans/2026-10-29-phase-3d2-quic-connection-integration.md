@@ -623,6 +623,16 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7); the 45 rows t
 
 ---
 
+## Bindings from 3d Tasks 7–8 reviews
+
+- **Paths (3d T8):**
+  - Per-id `Paths` ops require `has(id)`. Connection getters return `Option` via `Paths::index`, or carry the same precondition.
+  - A path whose MTU probe failed stays Validated with `mtu_ok(id) == false`. Send only probes on it, never other data, and never make it `active` (§8.2.4 "unusable").
+  - `set_validated` is handshake-only (§8.1), and it marks the MTU confirmed (§14.1).
+  - A PATH_CHALLENGE retransmission with new data goes through `start_challenge`, which keeps the validation clock while the path is Validating.
+  - If the Task 3 failure loop calls a `Paths` mutator besides `on_timeout`/`set_active`, that mutator needs a `timed_count`-unchanged ensures.
+- **Lifecycle (3d T7):** `Lifecycle` exposes closed spec accessors, not a View. The frame conditions on `on_recv_closing`, `on_close_sent`, `on_timeout`, `enter_draining` and `enter_closing` (non-Open) are the ones 3d2 may rely on.
+
 ## Binding notes for later phases
 
 - **3e:** `protect(p: &OutPacket, keys, out)` writes exactly `out_packet_len(p@)` bytes, including `p.padding` zero bytes and `p.spin` for short headers; datagrams are the packets concatenated. On receive: `unprotect` uses `largest = conn.largest_pn(kind)` and `dcid_len = LOCAL_CID_LEN`; call `conn.on_reset_candidate(last16, now)` when the first packet fails to decrypt; always call `on_datagram` with the UDP payload length, even with no surviving packet; every `PlainPacket` passed must satisfy `plain_wf` (from `parse_payload`'s ensures). `RAND_LEN` is 129. The harness's "A.2 → one reply ≤ 3600" is `harness_mirror`'s 47-byte ACK-only Initial.
