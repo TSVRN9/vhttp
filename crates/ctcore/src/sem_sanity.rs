@@ -626,6 +626,7 @@ pub proof fn sanity_declassify_event(p: Program)
 
 /// `_0 = slice_subrange(_1, 1, 10)` on a 3-element slice clamps `hi` to 3: `dst = &[2, 3]`,
 /// so `len(dst) <= len(r)`; the event keeps the raw bounds.
+#[verifier::spinoff_prover]
 pub proof fn sanity_subrange_clamps(p: Program)
     requires
         intr_prog(p, Intrinsic::SliceSubrange),

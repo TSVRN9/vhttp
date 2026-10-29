@@ -429,6 +429,25 @@ pub proof fn lemma_elems_shape(p: Program, ls: Seq<FnLab>, f: nat, fr1: Frame, f
     }
 }
 
+/// The `Bin` arm of `lemma_eval_rv_agree`, in a small context.
+pub proof fn lemma_bin_agree(p: Program, ls: Seq<FnLab>, f: nat, fr1: Frame, fr2: Frame, op: BinOp, ty: IntTy, x: Operand, y: Operand)
+    requires
+        agree(p, ls, f, fr1, fr2), plc(p, ls, f, fr1), plc(p, ls, f, fr2),
+        ok_rv(p.fns@[f as int], ls[f as int], Rvalue::Bin(op, ty, x, y)),
+    ensures ({
+        let rv = Rvalue::Bin(op, ty, x, y);
+        &&& eval_rv(fr1, rv).1 == eval_rv(fr2, rv).1
+        &&& !sec_rv(p.fns@[f as int], ls[f as int], rv) ==> eval_rv(fr1, rv).0 == eval_rv(fr2, rv).0
+        &&& shape_eq(eval_rv(fr1, rv).0, eval_rv(fr2, rv).0)
+    }),
+{
+    lemma_eval_op_agree(p, ls, f, fr1, fr2, x);
+    lemma_eval_op_agree(p, ls, f, fr1, fr2, y);
+    let (a1, b1) = (as_int(eval_op(fr1, x).0), as_int(eval_op(fr1, y).0));
+    let (a2, b2) = (as_int(eval_op(fr2, x).0), as_int(eval_op(fr2, y).0));
+    assert(op_ev(op, a1, b1) == op_ev(op, a2, b2));
+}
+
 pub proof fn lemma_eval_rv_agree(p: Program, ls: Seq<FnLab>, f: nat, fr1: Frame, fr2: Frame, rv: Rvalue)
     requires
         agree(p, ls, f, fr1, fr2), plc(p, ls, f, fr1), plc(p, ls, f, fr2),
@@ -441,13 +460,7 @@ pub proof fn lemma_eval_rv_agree(p: Program, ls: Seq<FnLab>, f: nat, fr1: Frame,
     let (b, l) = (p.fns@[f as int], ls[f as int]);
     match rv {
         Rvalue::Use(op) => lemma_eval_op_agree(p, ls, f, fr1, fr2, op),
-        Rvalue::Bin(op, ty, x, y) => {
-            lemma_eval_op_agree(p, ls, f, fr1, fr2, x);
-            lemma_eval_op_agree(p, ls, f, fr1, fr2, y);
-            let (a1, b1) = (as_int(eval_op(fr1, x).0), as_int(eval_op(fr1, y).0));
-            let (a2, b2) = (as_int(eval_op(fr2, x).0), as_int(eval_op(fr2, y).0));
-            assert(op_ev(op, a1, b1) == op_ev(op, a2, b2));
-        },
+        Rvalue::Bin(op, ty, x, y) => lemma_bin_agree(p, ls, f, fr1, fr2, op, ty, x, y),
         Rvalue::Un(_, _, x) => lemma_eval_op_agree(p, ls, f, fr1, fr2, x),
         Rvalue::Cast(_, _, x) => lemma_eval_op_agree(p, ls, f, fr1, fr2, x),
         Rvalue::Len(pl) => {
