@@ -173,7 +173,7 @@ pub fn p256_ecdsa_sign(d: &[u8], msg: &[u8]) -> (r: Option<[u8; 64]>)
         if crate::ct::declassify(scalar_in_range(&t)) {
             let r = ecdsa_r_exec(&t);
             let s = ecdsa_s_exec(&limbs_from_be(d, 0), &reduce_n(&h1, 0), &limbs_from_be(&t, 0), &r);
-            // ct: declassify the r = 0 / s = 0 outcomes (the RFC 6979 retry; r and s are public outputs)
+            // ct: declassify the r = 0 / s = 0 outcomes (the RFC 6979 retry is visible through the loop count; r = 0 or s = 0 has negligible probability)
             if crate::ct::declassify(is_zero4(&r)) == 0
                 && crate::ct::declassify(is_zero4(&s)) == 0
             {
