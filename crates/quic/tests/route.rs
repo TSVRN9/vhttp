@@ -105,39 +105,71 @@ fn table_rules() {
     assert_eq!(t.reset_owner(&[0x99; 16]), None);
 }
 
+fn cid(c: u64, i: u64) -> Vec<u8> {
+    [(c as u32).to_be_bytes(), (i as u32).to_be_bytes()].concat()
+}
+
+/// Admission counts connections: `MAX_CONNS` of them, each with `PER_CONN` CIDs, all fit.
 #[test]
 fn table_full() {
+    assert_eq!((PER_CONN, MAX_CONNS, MAX_TABLE), (5, 102, 512));
     let mut t = CidTable::new();
-    for i in 0..4091u32 {
-        let mut c = vec![0xaa; 4];
-        c.extend(i.to_be_bytes());
-        assert!(t.apply(1, &CidUpdate::Add(c)));
-        assert_eq!(t.has_room(), i < 4090);
+    for c in 0..MAX_CONNS as u64 {
+        assert!(t.has_room());
+        for i in 0..PER_CONN as u64 {
+            assert!(t.apply(c, &CidUpdate::Add(cid(c, i))));
+        }
     }
     assert!(!t.has_room());
     let mut unknown = hex(A2H);
     unknown[6] = 0x00;
     assert_eq!(route(&padded(unknown, 1200), &t), Route::Drop);
     let mut known = hex(A2H);
-    known[6..14].copy_from_slice(&[0xaa, 0xaa, 0xaa, 0xaa, 0, 0, 0, 9]);
-    assert_eq!(route(&padded(known, 1200), &t), Route::Existing(1));
-    for i in 4091..4096u32 {
-        assert!(t.apply(1, &CidUpdate::Add(i.to_be_bytes().to_vec())));
-    }
-    assert!(!t.apply(2, &CidUpdate::Add(vec![0xbb; 8])));
+    known[6..14].copy_from_slice(&cid(9, 4));
+    assert_eq!(route(&padded(known, 1200), &t), Route::Existing(9));
+    // A new connection is refused, and so is a 6th entry.
+    assert!(!t.apply(500, &CidUpdate::Add(vec![0xbb; 8])));
+    assert!(!t.apply(3, &CidUpdate::Add(vec![0xbc; 8])));
     assert_eq!(t.lookup(&[0xbb; 8]), None);
+    // A Remove frees a slot of that connection only.
+    assert!(t.apply(3, &CidUpdate::Remove(cid(3, 0))));
+    assert!(t.apply(3, &CidUpdate::Add(vec![0xbc; 8])));
+    assert!(!t.apply(500, &CidUpdate::Add(vec![0xbb; 8])));
+    t.remove_conn(7);
+    assert!(t.has_room());
+    assert!(t.apply(500, &CidUpdate::Add(vec![0xbb; 8])));
+    assert!(!t.has_room());
+}
+
+/// A connection stays admitted with no CIDs, until `remove_conn`.
+#[test]
+fn admitted_until_removed() {
+    let mut t = CidTable::new();
+    for c in 0..MAX_CONNS as u64 {
+        assert!(t.apply(c, &CidUpdate::Add(cid(c, 0))));
+    }
+    assert!(t.apply(1, &CidUpdate::Remove(cid(1, 0))));
+    assert!(!t.has_room());
+    assert!(t.apply(1, &CidUpdate::Add(cid(1, 1))));
+    t.remove_conn(1);
+    assert!(t.has_room());
 }
 
 #[test]
 fn remove_conn_frees() {
     let mut t = CidTable::new();
-    for i in 0..1000u32 {
-        assert!(t.apply(1, &CidUpdate::Add(i.to_be_bytes().to_vec())));
+    for c in 1..=100u64 {
+        for i in 0..5 {
+            assert!(t.apply(c, &CidUpdate::Add(cid(c, i))));
+        }
     }
     assert!(t.apply(1, &CidUpdate::AddToken([1; 16])));
-    assert!(t.apply(2, &CidUpdate::Add(vec![5; 8])));
-    t.remove_conn(1);
-    assert_eq!(t.lookup(&[5; 8]), Some(2));
-    assert!(t.capacities().0 < 1000);
-    assert_eq!(t.capacities().1, 0);
+    assert!(t.apply(200, &CidUpdate::Add(vec![5; 8])));
+    for c in 1..=100u64 {
+        t.remove_conn(c);
+    }
+    assert_eq!(t.lookup(&[5; 8]), Some(200));
+    let (c, k, n) = t.capacities();
+    assert!(c < 500 && n < 100, "{c} {n}");
+    assert_eq!(k, 0);
 }

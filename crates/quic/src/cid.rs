@@ -880,6 +880,39 @@ pub open spec fn count_below(e: Seq<PeerEntry>, rpt: u64) -> nat
 }
 
 /// The sequence numbers `a, a + 1, ..., b - 1` (empty when `b <= a`).
+/// What every successful `on_new_cid` that adds or re-raises `(seq, cid, tok)` guarantees:
+/// the entry is present, every seq below an increased `rpt` is queued for retirement in
+/// order, `current` moves only if it was retired (then to the lowest active seq), and the
+/// used marks are kept on surviving entries and gained only by `current`.
+pub open spec fn rpt_applied(
+    old: PeerCids,
+    new: PeerCids,
+    seq: u64,
+    cid: Seq<u8>,
+    tok: Seq<u8>,
+    rpt: u64,
+) -> bool {
+    &&& peer_same(new.entries(), seq, cid, tok)
+    &&& new.retire_pending_spec() == old.retire_pending_spec() + seq_range(
+        old.largest_rpt_spec(),
+        rpt,
+    )
+    &&& new.retire_unacked_spec() == old.retire_unacked_spec()
+    &&& peer_has_seq(new.entries(), old.current_spec()) ==> new.current_spec()
+        == old.current_spec()
+    &&& !peer_has_seq(new.entries(), old.current_spec()) ==> forall|s: u64|
+        peer_has_seq(new.entries(), s) ==> new.current_spec() <= s
+    &&& forall|s: u64| #[trigger]
+        peer_used(new.entries(), s) ==> peer_used(old.entries(), s) || s == new.current_spec()
+    &&& forall|s: u64|
+        #![trigger peer_used(old.entries(), s)]
+        #![trigger peer_used(new.entries(), s)]
+        peer_used(old.entries(), s) && peer_has_seq(new.entries(), s) ==> peer_used(
+            new.entries(),
+            s,
+        )
+}
+
 pub open spec fn seq_range(a: u64, b: u64) -> Seq<u64> {
     Seq::new(
         if b > a {
@@ -1465,7 +1498,6 @@ impl PeerCids {
             r is Ok && peer_same(old(self).entries(), seq, cid@, token@) && rpt > old(
                 self).largest_rpt_spec() ==> {
                 &&& final(self).largest_rpt_spec() == rpt
-                &&& peer_same(final(self).entries(), seq, cid@, token@)
                 &&& forall|s: u64| #[trigger]
                     peer_has_seq(final(self).entries(), s) <==> (peer_has_seq(old(self).entries(), s)
                         && s >= rpt)
@@ -1473,24 +1505,7 @@ impl PeerCids {
                     peer_has_cid(final(self).entries(), c) ==> peer_has_cid(old(self).entries(), c)
                 &&& final(self).entries().len() <= old(self).entries().len()
                 &&& final(self).backlog() <= 2 * PEER_CID_CAP
-                &&& final(self).retire_pending_spec() == old(self).retire_pending_spec() + seq_range(
-                    old(self).largest_rpt_spec(),
-                    rpt,
-                )
-                &&& final(self).retire_unacked_spec() == old(self).retire_unacked_spec()
-                &&& peer_has_seq(final(self).entries(), old(self).current_spec()) ==> final(self).current_spec() == old(self).current_spec()
-                &&& !peer_has_seq(final(self).entries(), old(self).current_spec()) ==> forall|
-                    s: u64,
-                |
-                    peer_has_seq(final(self).entries(), s) ==> final(self).current_spec() <= s
-                &&& forall|s: u64| #[trigger]
-                    peer_used(final(self).entries(), s) ==> peer_used(old(self).entries(), s) || s
-                        == final(self).current_spec()
-                &&& forall|s: u64|
-                    #![trigger peer_used(old(self).entries(), s)]
-                    #![trigger peer_used(final(self).entries(), s)]
-                    peer_used(old(self).entries(), s) && peer_has_seq(final(self).entries(), s)
-                        ==> peer_used(final(self).entries(), s)
+                &&& rpt_applied(*old(self), *final(self), seq, cid@, token@, rpt)
             },
             r is Ok && !peer_same(old(self).entries(), seq, cid@, token@) && seq >= old(
                 self).largest_rpt_spec() ==> final(self).entries().len() <= local_limit && final(
@@ -1503,7 +1518,6 @@ impl PeerCids {
                 } else {
                     old(self).largest_rpt_spec()
                 }
-                &&& peer_same(final(self).entries(), seq, cid@, token@)
                 &&& forall|s: u64| #[trigger]
                     peer_has_seq(final(self).entries(), s) <==> (s == seq || (peer_has_seq(
                         old(self).entries(),
@@ -1518,24 +1532,7 @@ impl PeerCids {
                     c: Seq<u8>,
                 | #[trigger]
                     peer_has_cid(old(self).entries(), c) ==> peer_has_cid(final(self).entries(), c)
-                &&& final(self).retire_pending_spec() == old(self).retire_pending_spec() + seq_range(
-                    old(self).largest_rpt_spec(),
-                    rpt,
-                )
-                &&& final(self).retire_unacked_spec() == old(self).retire_unacked_spec()
-                &&& peer_has_seq(final(self).entries(), old(self).current_spec()) ==> final(self).current_spec() == old(self).current_spec()
-                &&& !peer_has_seq(final(self).entries(), old(self).current_spec()) ==> forall|
-                    s: u64,
-                |
-                    peer_has_seq(final(self).entries(), s) ==> final(self).current_spec() <= s
-                &&& forall|s: u64| #[trigger]
-                    peer_used(final(self).entries(), s) ==> peer_used(old(self).entries(), s) || s
-                        == final(self).current_spec()
-                &&& forall|s: u64|
-                    #![trigger peer_used(old(self).entries(), s)]
-                    #![trigger peer_used(final(self).entries(), s)]
-                    peer_used(old(self).entries(), s) && peer_has_seq(final(self).entries(), s)
-                        ==> peer_used(final(self).entries(), s)
+                &&& rpt_applied(*old(self), *final(self), seq, cid@, token@, rpt)
             },
     {
         if self.zero_len {

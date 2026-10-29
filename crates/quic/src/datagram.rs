@@ -22,14 +22,8 @@ pub type PathId = u64;
 //# the absence of these mechanisms, QUIC endpoints SHOULD NOT send
 //# datagrams larger than the smallest allowed maximum datagram size.
 //
-//= https://www.rfc-editor.org/rfc/rfc9000#section-14.2
-//= type=exception
-//= reason=No PMTUD: we never determine a PMTU below 1200, and never send more than 1200 bytes.
-//# If a QUIC endpoint determines that the PMTU between any pair of local
-//# and remote IP addresses cannot support the smallest allowed maximum
-//# datagram size of 1200 bytes, it MUST immediately cease sending QUIC
-//# packets, except for those in PMTU probes or those containing
-//# CONNECTION_CLOSE frames, on the affected path.
+// §14.2's cease-sending MUST (a path that cannot carry 1200 bytes) closes in 3d2 Task 3: a
+// failed MTU probe sets `Paths::mtu_failed`, and conn.rs's send gate cites it there.
 /// Our maximum datagram size: no PMTU discovery, so the smallest allowed one.
 pub const MAX_DATAGRAM: usize = 1200;
 
