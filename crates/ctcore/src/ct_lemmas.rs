@@ -955,4 +955,186 @@ pub proof fn lemma_call_enter_frames(p: Program, ls: Seq<FnLab>, f: nat, g: nat,
     assert(wb1 == wb2);
 }
 
+// ------------------------------------------------------------------ plc: intrinsics and call_leave
+
+/// An operand's value under `plc`: no `Mut`, or (for a `mut_op`) a `Mut` with a good target.
+pub open spec fn arg_val_ok(b: Body, l: FnLab, fr: Frame, v: Val) -> bool {
+    no_mut(v) || (v matches Val::Mut(m) && root_ok(b, fr, m.root))
+}
+
+pub proof fn lemma_arg_val(p: Program, ls: Seq<FnLab>, f: nat, fr: Frame, args: Seq<Operand>, i: int)
+    requires plc(p, ls, f, fr), 0 <= i < args.len(), ok_op(p.fns@[f as int], ls[f as int], args[i]),
+    ensures
+        nth(op_vals(fr, args), i as nat) == eval_op(fr, args[i]).0,
+        arg_val_ok(p.fns@[f as int], ls[f as int], fr, eval_op(fr, args[i]).0),
+        !mut_op(p.fns@[f as int], args[i]) ==> no_mut(eval_op(fr, args[i]).0),
+{
+    let (b, l) = (p.fns@[f as int], ls[f as int]);
+    lemma_eval_op_plc(p, ls, f, fr, args[i]);
+    if mut_op(b, args[i]) {
+        let x = args[i]->Copy_0.local as int;
+        assert(match fr.locals[x] { Val::Mut(m) => b.locals@[x] is Mut && tgt_ok(b, l, fr, m, lab(l, x as nat)), v => no_mut(v) });
+    }
+}
+
+/// `elems` of a well-targeted value holds no `Mut`.
+pub proof fn lemma_elems_no_mut(p: Program, ls: Seq<FnLab>, f: nat, fr: Frame, v: Val)
+    requires plc(p, ls, f, fr), arg_val_ok(p.fns@[f as int], ls[f as int], fr, v),
+    ensures forall|i: int| 0 <= i < elems(fr, v).len() ==> no_mut(#[trigger] elems(fr, v)[i]),
+{
+    let t = match v { Val::Shr(bx) => *bx, Val::Mut(m) => read_loc(fr, m), _ => v };
+    if let Val::Mut(m) = v { lemma_wr_read(p, ls, f, fr, Cur::L(m)); }
+    assert(no_mut(t));
+    if let Val::Arr(xs) = t { assert forall|i: int| 0 <= i < xs.len() implies no_mut(#[trigger] xs[i]) by {} }
+}
+
+/// `grow` appends `no_mut` values at a good target.
+pub proof fn lemma_plc_grow(p: Program, ls: Seq<FnLab>, f: nat, fr: Frame, m: Val, xs: Seq<Val>)
+    requires
+        plc(p, ls, f, fr), arg_val_ok(p.fns@[f as int], ls[f as int], fr, m),
+        forall|i: int| 0 <= i < xs.len() ==> no_mut(#[trigger] xs[i]),
+    ensures grow(fr, m, xs) matches Some(g) ==> plc(p, ls, f, g),
+{
+    if let Val::Mut(l) = m {
+        lemma_wr_read(p, ls, f, fr, Cur::L(l));
+        if let Val::Arr(s) = read_loc(fr, l) {
+            let a = s + xs;
+            assert forall|i: int| 0 <= i < a.len() implies no_mut(#[trigger] a[i]) by {
+                if i < s.len() { assert(a[i] == s[i]); } else { assert(a[i] == xs[i - s.len()]); }
+            }
+            lemma_write_loc_plc(p, ls, f, fr, l, Val::Arr(a));
+        }
+    }
+}
+
+/// The writing intrinsics: VecPush, VecExtendFromSlice, VecSet.
+pub proof fn lemma_plc_intr_write(p: Program, ls: Seq<FnLab>, f: nat, fr: Frame, k: Intrinsic, args: Seq<Operand>, dst: Place)
+    requires
+        plc(p, ls, f, fr), ok_intr(p.fns@[f as int], ls[f as int], k, args, dst),
+        k is VecPush || k is VecExtendFromSlice || k is VecSet,
+    ensures intr_eff(k, fr, op_vals(fr, args)) matches Some((g, r, _)) ==> plc(p, ls, f, g) && no_mut(r),
+{
+    let (b, l) = (p.fns@[f as int], ls[f as int]);
+    let vs = op_vals(fr, args);
+    lemma_arg_val(p, ls, f, fr, args, 0);
+    lemma_arg_val(p, ls, f, fr, args, 1);
+    match k {
+        Intrinsic::VecPush => {
+            assert(no_mut(nth(vs, 1)));
+            let xs = seq![nth(vs, 1)];
+            assert forall|i: int| 0 <= i < xs.len() implies no_mut(#[trigger] xs[i]) by {}
+            lemma_plc_grow(p, ls, f, fr, nth(vs, 0), xs);
+        },
+        Intrinsic::VecExtendFromSlice => {
+            lemma_elems_no_mut(p, ls, f, fr, nth(vs, 1));
+            lemma_plc_grow(p, ls, f, fr, nth(vs, 0), elems(fr, nth(vs, 1)));
+        },
+        _ => {
+            lemma_arg_val(p, ls, f, fr, args, 2);
+            assert(no_mut(nth(vs, 2)));
+            if let Val::Mut(m) = nth(vs, 0) {
+                let i = as_int(nth(vs, 1));
+                lemma_write_loc_plc(p, ls, f, fr, Loc { root: m.root, path: m.path.push(PE::Index(i as nat)) }, nth(vs, 2));
+            }
+        },
+    }
+}
+
+/// The non-writing intrinsics leave the frame unchanged and give a `no_mut` result.
+pub proof fn lemma_plc_intr_val(p: Program, ls: Seq<FnLab>, f: nat, fr: Frame, k: Intrinsic, args: Seq<Operand>, dst: Place)
+    requires
+        plc(p, ls, f, fr), ok_intr(p.fns@[f as int], ls[f as int], k, args, dst),
+        !(k is VecPush || k is VecExtendFromSlice || k is VecSet),
+    ensures intr_eff(k, fr, op_vals(fr, args)) matches Some((g, r, _)) ==> g == fr && no_mut(r),
+{
+    let vs = op_vals(fr, args);
+    if args.len() > 0 { lemma_arg_val(p, ls, f, fr, args, 0); }
+    match k {
+        Intrinsic::Declassify | Intrinsic::VecAsSlice | Intrinsic::ArrayAsSlice => {
+            assert(no_mut(nth(vs, 0)));
+            assert(intr_eff(k, fr, vs) matches Some((g, r, _)) ==> g == fr && no_mut(r));
+        },
+        Intrinsic::VecNew | Intrinsic::VecWithCapacity => {
+            let e = Seq::<Val>::empty();
+            assert forall|i: int| 0 <= i < e.len() implies no_mut(#[trigger] e[i]) by {}
+        },
+        Intrinsic::VecIndex => {
+            lemma_elems_no_mut(p, ls, f, fr, nth(vs, 0));
+            let i = as_int(nth(vs, 1)) as nat;
+            if i < elems(fr, nth(vs, 0)).len() { assert(no_mut(elems(fr, nth(vs, 0))[i as int])); }
+            assert(no_mut(nth(elems(fr, nth(vs, 0)), i)));
+            assert(intr_eff(k, fr, vs) matches Some((g, r, _)) ==> g == fr && no_mut(r));
+        },
+        Intrinsic::SliceSubrange => {
+            lemma_elems_no_mut(p, ls, f, fr, nth(vs, 0));
+            let s = elems(fr, nth(vs, 0));
+            let (lo, hi) = (as_int(nth(vs, 1)), as_int(nth(vs, 2)));
+            let h = if (hi as nat) < s.len() { hi as int } else { s.len() as int };
+            let lw = if (lo as int) < h { lo as int } else { h };
+            let a = s.subrange(lw, h);
+            assert forall|i: int| 0 <= i < a.len() implies no_mut(#[trigger] a[i]) by { assert(a[i] == s[i + lw]); }
+            assert(no_mut(Val::Arr(a)));
+            assert(no_mut(Val::Shr(Box::new(Val::Arr(a)))));
+            assert(intr_eff(k, fr, vs) == Some((fr, Val::Shr(Box::new(Val::Arr(a))), seq![Event::Range(lo, hi)])));
+        },
+        Intrinsic::SliceToVec => {
+            lemma_elems_no_mut(p, ls, f, fr, nth(vs, 0));
+            assert(intr_eff(k, fr, vs) matches Some((g, r, _)) ==> g == fr && no_mut(r));
+        },
+        _ => {},
+    }
+    assert(intr_eff(k, fr, vs) matches Some((g, r, _)) ==> g == fr && no_mut(r));
+}
+
+/// `exec_intr` keeps `plc`.
+pub proof fn lemma_plc_intr(p: Program, ls: Seq<FnLab>, f: nat, fr: Frame, k: Intrinsic, args: Seq<Operand>, dst: Place)
+    requires
+        plc(p, ls, f, fr), ok_intr(p.fns@[f as int], ls[f as int], k, args, dst),
+        exec_intr(k, fr, args, dst) is Some,
+    ensures plc(p, ls, f, exec_intr(k, fr, args, dst).unwrap().0),
+{
+    if k is VecPush || k is VecExtendFromSlice || k is VecSet {
+        lemma_plc_intr_write(p, ls, f, fr, k, args, dst);
+    } else {
+        lemma_plc_intr_val(p, ls, f, fr, k, args, dst);
+    }
+    if let Some((g, r, _)) = intr_eff(k, fr, op_vals(fr, args)) {
+        assert(plc(p, ls, f, g) && no_mut(r));
+        if let Some((loc, _)) = place_loc(g, dst) { lemma_write_loc_plc(p, ls, f, g, loc, r); }
+    }
+}
+
+/// Writing back `no_mut` slots, at any locs, keeps `plc`.
+pub proof fn lemma_plc_write_back(p: Program, ls: Seq<FnLab>, f: nat, fr: Frame, slots: Seq<Val>, wb: Seq<Option<Loc>>)
+    requires plc(p, ls, f, fr), forall|j: int| 0 <= j < slots.len() ==> no_mut(#[trigger] slots[j]),
+    ensures plc(p, ls, f, write_back(fr, slots, wb)),
+    decreases wb.len(),
+{
+    if wb.len() > 0 {
+        lemma_plc_write_back(p, ls, f, fr, slots, wb.drop_last());
+        let j = (wb.len() - 1) as nat;
+        if j < slots.len() { assert(no_mut(slots[j as int])); }
+        if let Some(l) = wb.last() {
+            lemma_write_loc_plc(p, ls, f, write_back(fr, slots, wb.drop_last()), l, nth(slots, j));
+        }
+    }
+}
+
+/// `call_leave` keeps the caller's `plc`: the slots and the return value hold no `Mut`.
+pub proof fn lemma_plc_call_leave(p: Program, ls: Seq<FnLab>, f: nat, g: nat, fr: Frame, cf: Frame, wb: Seq<Option<Loc>>, dst: Place)
+    requires plc(p, ls, f, fr), plc(p, ls, g, cf), g < p.fns@.len(), wf_body(p, g),
+    ensures plc(p, ls, f, call_leave(fr, cf, wb, dst).0),
+{
+    let gb = p.fns@[g as int];
+    assert forall|j: int| 0 <= j < cf.slots.len() implies no_mut(#[trigger] cf.slots[j]) by {}
+    lemma_plc_write_back(p, ls, f, fr, cf.slots, wb);
+    let fr2 = write_back(fr, cf.slots, wb);
+    let r = nth(cf.locals, 0);
+    assert(cf.locals.len() > 0);
+    assert(match cf.locals[0] { Val::Mut(m) => gb.locals@[0] is Mut && tgt_ok(gb, ls[g as int], cf, m, lab(ls[g as int], 0)), v => no_mut(v) });
+    assert(!(gb.locals@[0] is Mut));
+    assert(no_mut(r));
+    if let Some((loc, _)) = place_loc(fr2, dst) { lemma_write_loc_plc(p, ls, f, fr2, loc, r); }
+}
+
 } // verus!
