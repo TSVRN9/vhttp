@@ -120,7 +120,8 @@ pub open spec fn div_like(op: BinOp) -> bool { op is Div || op is Rem }
 
 pub open spec fn shift_like(op: BinOp) -> bool { op is Shl || op is Shr }
 
-/// No `&mut` of an empty-projection `Mut`-typed local, so a `Mut` never targets one.
+/// A `&mut` of a place rooted at a `Mut`-typed local must start with `Deref` (a reborrow), so a
+/// `Mut` never targets a `Mut`-typed local.
 pub open spec fn refmut_ok(b: Body, pl: Place) -> bool {
     b.locals@[pl.local as int] is Mut ==> pl.proj@.len() > 0 && pl.proj@[0] is Deref
 }
@@ -146,6 +147,7 @@ pub open spec fn sec_rv(b: Body, l: FnLab, rv: Rvalue) -> bool {
 
 pub open spec fn ok_rv(b: Body, l: FnLab, rv: Rvalue) -> bool {
     match rv {
+        // rule: other Use/Bin/Un/Cast | join of their operands (no constraint)
         Rvalue::Use(op) => ok_op(b, l, op),
         Rvalue::Bin(op, _, x, y) => {
             &&& ok_op(b, l, x) && ok_op(b, l, y)
@@ -154,8 +156,10 @@ pub open spec fn ok_rv(b: Body, l: FnLab, rv: Rvalue) -> bool {
             // rule: Bin Shl/Shr | rhs public
             &&& shift_like(op) ==> !sec_op(b, l, y)
         },
+        // rule: other Use/Bin/Un/Cast | join of their operands (no constraint)
         Rvalue::Un(_, _, x) => ok_op(b, l, x),
         Rvalue::Cast(_, _, x) => ok_op(b, l, x),
+        // rule: Len, Discr | public (D7; no constraint)
         Rvalue::Len(pl) => ok_place(b, l, pl),
         Rvalue::Discr(pl) => ok_place(b, l, pl),
         // rule: wf (Mut not inside aggregates)
@@ -181,6 +185,7 @@ pub open spec fn ok_stmt(b: Body, l: FnLab, s: Stmt) -> bool {
             // rule: Assign(pl, rv) | lab(rv) ⊑ wr(pl)
             _ => sec_rv(b, l, rv) ==> lab(l, pl.local as nat),
         },
+        // rule: SetDiscr | no table row; the variant is a constant, so shapes stay equal (D7)
         Stmt::SetDiscr(pl, _) => ok_place(b, l, pl),
     }
 }
@@ -195,7 +200,9 @@ pub open spec fn ok_intr(b: Body, l: FnLab, k: Intrinsic, args: Seq<Operand>, ds
     &&& match k {
         // rule: Call(Intr) | Declassify result may be public
         Intrinsic::Declassify => args.len() == 1 && !mut_op(b, args[0]),
+        // rule: Call(Intr) | GhostUnit: no constraint (result Unit)
         Intrinsic::GhostUnit => true,
+        // rule: Call(Intr) | VecNew: no constraint (result empty)
         Intrinsic::VecNew => args.len() == 0,
         // rule: Call(Intr) | VecWithCapacity n public
         Intrinsic::VecWithCapacity => args.len() == 1 && !sa(b, l, args, 0),
@@ -244,6 +251,7 @@ pub open spec fn ok_term(p: Program, ls: Seq<FnLab>, f: nat, t: Term) -> bool {
     let b = p.fns@[f as int];
     let l = ls[f as int];
     match t {
+        // rule: Goto | no constraint (target range is wf)
         Term::Goto(_) => true,
         // rule: Switch, Assert | condition public
         Term::Switch(op, _, _) => ok_op(b, l, op) && !sec_op(b, l, op),
@@ -256,7 +264,9 @@ pub open spec fn ok_term(p: Program, ls: Seq<FnLab>, f: nat, t: Term) -> bool {
             // rule: Call(Fn(g)) | g's return label ⊑ wr(dst)
             &&& lab(gl, 0) ==> lab(l, dst.local as nat)
         },
+        // rule: Call(Intr) | per-intrinsic (ok_intr)
         Term::Call(Callee::Intr(k), args, dst, _) => ok_intr(b, l, k, args@, dst),
+        // rule: Return, Abort | no constraint
         Term::Return => true,
         Term::Abort => true,
     }
