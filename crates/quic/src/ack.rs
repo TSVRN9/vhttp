@@ -273,7 +273,7 @@ pub open spec fn spec_ack_bytes(a: SpecAck) -> Seq<u8> {
 // =============================================================================
 
 /// A walk invalid on a prefix stays invalid however it continues.
-proof fn lemma_ranges_prefix(s0: int, s: Seq<(u64, u64)>, t: Seq<(u64, u64)>)
+pub(crate) proof fn lemma_ranges_prefix(s0: int, s: Seq<(u64, u64)>, t: Seq<(u64, u64)>)
     requires
         rfc_ack_ranges_from(s0, s + t),
     ensures
