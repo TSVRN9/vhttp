@@ -195,7 +195,7 @@ pub open spec fn spec_p256_ecdh(d: Seq<u8>, peer: Seq<u8>) -> Option<Seq<u8>> {
 }
 
 /// SEC 1 v2 §3.2.1 step 2 (Q = dG, §2.3.3 uncompressed); verified against spec_p256_public_key (dG != O by the Phase 5d group lemmas).
-// ct: secret d
+#[cfg_attr(ct_check, ct::secret(d))]
 pub fn p256_public_key(d: &[u8]) -> (r: Option<[u8; 65]>)
     requires
         d@.len() == 32,
@@ -222,7 +222,7 @@ pub fn p256_public_key(d: &[u8]) -> (r: Option<[u8; 65]>)
 }
 
 /// SEC 1 v2 §3.3.1; verified against spec_p256_ecdh.
-// ct: secret d; public peer
+#[cfg_attr(ct_check, ct::secret(d), ct::public(peer))]
 pub fn p256_ecdh(d: &[u8], peer: &[u8]) -> (r: Option<[u8; 32]>)
     requires
         d@.len() == 32,
@@ -252,7 +252,8 @@ pub fn p256_ecdh(d: &[u8], peer: &[u8]) -> (r: Option<[u8; 32]>)
 }
 
 // 1 <= os2ip(d) < n: the borrow of d - n, masked with d != 0.
-// ct: secret d; the result feeds only the caller's declassified (public) None outcome
+// ct: the result feeds only the caller's declassified (public) None outcome
+#[cfg_attr(ct_check, ct::secret(d))]
 pub(crate) fn scalar_in_range(d: &[u8]) -> (r: bool)
     requires
         d@.len() == 32,
@@ -404,7 +405,7 @@ pub(crate) proof fn lemma_mul_one(x: int, y: int)
 }
 
 // fe(r) == fmod(fe(a) * fe(b)).
-// ct: secret a, b
+#[cfg_attr(ct_check, ct::secret(a, b))]
 fn fe_mul(a: [u64; 4], b: [u64; 4]) -> (r: [u64; 4])
     requires
         fe_ok(a),
@@ -424,7 +425,7 @@ fn fe_mul(a: [u64; 4], b: [u64; 4]) -> (r: [u64; 4])
 }
 
 // fe(r) == fmod(fe(a) + fe(b)).
-// ct: secret a, b
+#[cfg_attr(ct_check, ct::secret(a, b))]
 fn fe_add(a: [u64; 4], b: [u64; 4]) -> (r: [u64; 4])
     requires
         fe_ok(a),
@@ -444,7 +445,7 @@ fn fe_add(a: [u64; 4], b: [u64; 4]) -> (r: [u64; 4])
 }
 
 // fe(r) == fmod(fe(a) - fe(b)).
-// ct: secret a, b
+#[cfg_attr(ct_check, ct::secret(a, b))]
 fn fe_sub(a: [u64; 4], b: [u64; 4]) -> (r: [u64; 4])
     requires
         fe_ok(a),
@@ -464,7 +465,7 @@ fn fe_sub(a: [u64; 4], b: [u64; 4]) -> (r: [u64; 4])
 }
 
 // fe(r) == finv(fe(a)) == fe(a)^(p - 2) mod p (Fermat).
-// ct: secret a
+#[cfg_attr(ct_check, ct::secret(a))]
 fn fe_inv(a: [u64; 4]) -> (r: [u64; 4])
     requires
         fe_ok(a),
@@ -507,8 +508,8 @@ fn fe_from_be(b: &[u8], off: usize) -> (r: Option<[u64; 4]>)
     proof {
         lemma_v4_bound(d);
     }
-    // ct: branch on public input
-    if bo == 0 {
+    // ct: declassify x >= p (peer input only; it is this fn's public None outcome)
+    if crate::ct::declassify(bo) == 0 {
         None
     } else {
         let r = mont_mul(&x, &R2_P, &P_LIMBS, P_MP);
@@ -529,7 +530,7 @@ fn fe_from_be(b: &[u8], off: usize) -> (r: Option<[u64; 4]>)
 }
 
 // I2OSP(fe(a), 32): decode (multiply by 1), then the limbs as big-endian octets.
-// ct: secret a
+#[cfg_attr(ct_check, ct::secret(a))]
 pub(crate) fn fe_to_be(a: &[u64; 4]) -> (r: [u8; 32])
     ensures
         r@ == i2osp(fe(*a) as nat, 32),
@@ -547,7 +548,7 @@ pub(crate) fn fe_to_be(a: &[u64; 4]) -> (r: [u8; 32])
 }
 
 // 1 iff fe(a) == fe(b), without branching.
-// ct: secret a, b
+#[cfg_attr(ct_check, ct::secret(a, b))]
 fn fe_eq(a: [u64; 4], b: [u64; 4]) -> (r: u64)
     requires
         fe_ok(a),
@@ -566,7 +567,7 @@ fn fe_eq(a: [u64; 4], b: [u64; 4]) -> (r: u64)
 }
 
 // 1 iff fe(a) == 0, without branching.
-// ct: secret a
+#[cfg_attr(ct_check, ct::secret(a))]
 fn fe_is_zero(a: [u64; 4]) -> (r: u64)
     requires
         fe_ok(a),
@@ -619,7 +620,7 @@ proof fn bv_and01(a: u64, b: u64) by (bit_vector)
 }
 
 // Masked point select: b == 1 picks p, b == 0 picks q.
-// ct: secret b, p, q
+#[cfg_attr(ct_check, ct::secret(b, p, q))]
 fn sel_pt(b: u64, p: &AffPt, q: &AffPt) -> (r: AffPt)
     requires
         b <= 1,
@@ -692,7 +693,7 @@ proof fn lemma_point_add_xy(l: int, x1: int, y1: int, x2: int, x3: int, s: int, 
 
 // SEC 1 v2 §2.2.1 rules 1-5 with masks: one inversion, no branch on the points.
 // ponytail: affine, one Fermat inversion (384 Montgomery multiplies) per point op, ≈6.1 ms per scalar mult (release, Task 8 p256_speed median; min 5.2 ms); upgrade: Jacobian or RCB complete formulas once FLT for p and the formula identities are proven (Phase 5d)
-// ct: secret a, b
+#[cfg_attr(ct_check, ct::secret(a, b))]
 #[verifier::spinoff_prover]
 fn point_add_ct(a: &AffPt, b: &AffPt) -> (r: AffPt)
     requires
@@ -756,7 +757,8 @@ proof fn lemma_curve_rhs(x: int, b: int, r: int)
 }
 
 // SEC 1 v2 §2.3.4 step 3.5: y y == x x x - 3 x + b (mod p), in the spec's association (D8).
-// ct: public x, y (peer input only; never call on secret data)
+// ct: peer input only (x, y are secret-labeled only because fe_from_be's limbs come from secret-labeled helpers)
+#[cfg_attr(ct_check, ct::secret(x, y))]
 fn on_curve_fe(x: [u64; 4], y: [u64; 4]) -> (r: bool)
     requires
         fe_ok(x),
@@ -796,8 +798,8 @@ fn sec1_decode_exec(b: &[u8]) -> (r: Option<AffPt>)
     }
     // ct: branch on public input
     if let (Some(x), Some(y)) = (fe_from_be(b, 1), fe_from_be(b, 33)) {
-        // ct: branch on public input
-        if on_curve_fe(x, y) {
+        // ct: declassify the on-curve check (peer input only; it is this fn's public None outcome)
+        if crate::ct::declassify(on_curve_fe(x, y)) {
             Some(AffPt { x, y, inf: 0 })
         } else {
             None
@@ -808,7 +810,7 @@ fn sec1_decode_exec(b: &[u8]) -> (r: Option<AffPt>)
 }
 
 // SEC 1 v2 §2.3.3 step 3: 0x04 || FE2OSP(x) || FE2OSP(y).
-// ct: secret p
+#[cfg_attr(ct_check, ct::secret(p))]
 fn sec1_encode_affine(p: &AffPt) -> (r: [u8; 65])
     requires
         pt_ok(*p),
@@ -872,7 +874,7 @@ pub(crate) proof fn lemma_g_on_curve()
 // A = P + D, then a masked select keeps A (bit 1) or D (bit 0). The bits are those of the
 // big-endian scalar, so after byte j, bit b, R = (prefix) P (D6).
 // ponytail: 256 doublings + 256 additions, all affine with one inversion each; upgrade: a fixed window or a Montgomery ladder on projective coordinates once 5d's RCB formulas are wired to exec
-// ct: secret k, pt
+#[cfg_attr(ct_check, ct::secret(k, pt))]
 #[verifier::spinoff_prover]
 pub(crate) fn scalar_mult_ct(k: &[u8], pt: &AffPt) -> (r: AffPt)
     requires

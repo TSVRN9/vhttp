@@ -1,7 +1,8 @@
 #!/bin/sh
 # Constant-time checker runs: build tools/ct-driver, then analyse the fixtures under it and diff
 # their verdicts against tools/ct-fixtures/expected.txt, then run the interpreter selftest
-# (tools/ct-driver/selftest.txt) over crates/crypto. Target dirs live under CT_TARGET_DIR
+# (tools/ct-driver/selftest.txt) over crates/crypto, then check crypto's roots (all must be ok) and
+# the negative control (--cfg ct_negative; exactly its one reject). Target dirs live under CT_TARGET_DIR
 # (default $root/target/ct), one subdir per run; reports under $CT_OUT/<run>.
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -66,3 +67,32 @@ v=$(grep -c '^[^#[:space:]]' "$root/tools/ct-driver/selftest.txt")
 p=$(grep -c "^pass " "$report" || true)
 [ "$p" -eq "$v" ] || fail "selftest: $p of $v vectors passed"
 echo "ct-check: selftest $p/$v"
+
+# Crypto: every manifest root ok, no reject. F = distinct checked fns, R = manifest roots, D =
+# declassify sites.
+cm=$root/tools/ct-driver/manifest.txt
+analyse crypto crypto "$cm" check
+grep '^reject ' "$report" >&2 && fail "crypto: rejects (above)"
+got=$CT_OUT/crypto/verdicts.txt
+verdicts "$report" > "$got"
+no_missing "$cm" "$got"
+f=$(awk '$1 == "checked" { print $2 }' "$report" | LC_ALL=C sort -u | wc -l | tr -d ' ')
+r=$(grep -c '^root ' "$cm")
+d=$(grep -c '^declassify ' "$report" || true)
+echo "ct-check: crypto ok ($f fns, $r roots, $d declassify)"
+
+# Negative control: crypto::ct_negative::secret_branch (compiled only with --cfg ct_negative) is
+# the one reject, as SecretSwitch; every manifest.txt root stays ok.
+export RUSTFLAGS='--cfg ct_negative'
+analyse negative crypto "$cm:$root/tools/ct-driver/manifest-negative.txt" check
+unset RUSTFLAGS
+rj=$(grep '^reject ' "$report" || true)
+case $rj in
+    "reject crypto::ct_negative::secret_branch SecretSwitch "*) ;;
+    *) fail "negative: expected one SecretSwitch reject of secret_branch, got: ${rj:-none}" ;;
+esac
+[ "$(printf '%s\n' "$rj" | wc -l)" -eq 1 ] || fail "negative: more than one reject: $rj"
+got=$CT_OUT/negative/verdicts.txt
+verdicts "$report" > "$got"
+no_missing "$cm" "$got"
+echo "ct-check: negative control rejected"

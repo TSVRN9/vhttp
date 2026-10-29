@@ -509,7 +509,8 @@ No root reaches the RSA path, so it needs no manifest line (preflight).
   - T7 `p256_public_key`/`p256_ecdh`: `if !declassify(scalar_in_range(d))`;
   - T7 `p256_ecdh`: `declassify(q.inf) == 1`;
   - T8: `if declassify(scalar_in_range(&t))`;
-  - T8: `declassify(r)`/`declassify(s)` before `r != 0 && s != 0`.
+  - T8: the r = 0 / s = 0 outcomes, `declassify(is_zero4(&r)) == 0 && declassify(is_zero4(&s)) == 0` (8a Task 9 ruling: declassifying r/s themselves left `is_zero4`'s result secret, since each fn has one label summary);
+  - 8a Task 9 ruling, peer decode in `p256_ecdh`: `declassify(bo)` in `fe_from_be` (x >= p) and `declassify(on_curve_fe(x, y))` in `sec1_decode_exec`, both on peer bytes only and both equal to the fn's own `None` outcome.
 - **B2. Void (controller, 2026-10-28).** The post-preflight 5c plan (4812b13, D1 = A) has no branch on `q.inf` in `p256_public_key`: dG ≠ O comes from the Phase 5d lemma `lemma_scalar_mult_g_nonzero`, so the body never tests it.
 - **B3.** Turn every `// ct: secret …` line into `#[cfg_attr(ct_check, ct::secret(..), ct::public(..))]` when 8a's driver is available. Then convert the discipline's public-only helper list to nothing: under D4 those are checked as all-public automatically.
 
