@@ -638,6 +638,15 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
   - If the Task 3 failure loop calls a `Paths` mutator besides `on_timeout`/`set_active`, that mutator needs a `timed_count`-unchanged ensures.
 - **Lifecycle (3d T7):** `Lifecycle` exposes closed spec accessors, not a View. The frame conditions on `on_recv_closing`, `on_close_sent`, `on_timeout`, `enter_draining` and `enter_closing` (non-Open) are the ones 3d2 may rely on.
 
+## Residuals from the 3d final re-review (rule in the owning 3d2 task)
+
+- **N1:** `mtu_fail` marks any expired challenge on an MTU-unconfirmed Validated path, including §9.3.3's old-path challenge in `migrate`. That is safe, but the field doc in path.rs over-claims; fix the doc when Task 3 touches path.rs.
+- **N2:** only two validated paths are remembered. Add a `ponytail:` (a liveness-only loss after 0→1→2 when both fail) at the Task 3 fallback.
+- **N3:** P17 lets PATH_RESPONSE go to an `mtu_failed` path. Either restrict it to expanded datagrams (§14.2 exempts only probes and CONNECTION_CLOSE) or cite why it is needed (§8.2.2) and keep it under 1200.
+- **N4:** the never-fail argument for `MAX_TOKENS` depends on the 3e order binding. Task 1a states it as a requires on the token-registration path.
+- **N5:** doc nits at cid.rs:882 (`seq_range`/`rpt_applied`) and path.rs:271 (`kept`, `prev_validated`).
+
+
 ## Binding notes for later phases
 
 - **3e, from the 3d final review** (no 3e plan is under `docs/superpowers/plans` yet; carry these into its binding block):
