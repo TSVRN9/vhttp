@@ -684,6 +684,34 @@ impl SendStream {
         }
     }
 
+    /// How many bytes `poll_data` would send next if nothing else limited it: the first lost
+    /// range, else the written bytes not yet sent.
+    pub fn want(&self) -> u64
+        requires
+            self.wf(),
+    {
+        if self.lost.len() > 0 {
+            self.lost[0].1 - self.lost[0].0
+        } else {
+            self.written - self.sent_end
+        }
+    }
+
+    /// Whether `write` of `n` bytes would succeed.
+    pub fn writable(&self, n: usize) -> (r: bool)
+        requires
+            self.wf(),
+        ensures
+            r == ((self.state() is Ready || self.state() is Send) && !self.fin_written_spec()
+                && self.all_written().len() + n <= VARINT_MAX),
+    {
+        let open = match self.state {
+            SendState::Ready | SendState::Send => true,
+            _ => false,
+        };
+        open && !self.fin_written && n as u64 <= VARINT_MAX - self.written
+    }
+
     /// Abandons the stream with RESET_STREAM `code` (final size: the bytes sent). `fresh`:
     /// the stream was not already reset or fully acknowledged.
     pub fn reset(&mut self, code: u64) -> (fresh: bool)
