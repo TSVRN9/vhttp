@@ -256,6 +256,8 @@ fn non_increasing_rpt() {
 
 #[test]
 fn seq_below_rpt() {
+    // Retire Prior To 2 retires seqs 0 and 1 at once, seq 1 before it ever arrives; a late or
+    // replayed seq 1 is then already retired (§19.15 "unless it has already done so").
     let mut p = peer();
     assert_eq!(N(&mut p, 2, 2, &B, T(2)), Ok(()));
     assert_eq!(p.pending_retire(), Some(Frame::RetireConnectionId(0)));
@@ -270,9 +272,45 @@ fn seq_below_rpt() {
     assert_eq!(p.pending_retire(), None);
     p.retire_acked(1);
     assert_eq!(N(&mut p, 1, 0, &A, T(1)), Ok(()));
-    assert_eq!(retires(&mut p), vec![1]);
-    assert_eq!(N(&mut p, 1, 0, &A, T(1)), Ok(()));
     assert_eq!(p.pending_retire(), None);
+}
+
+#[test]
+fn replay_of_retired_seq_with_full_backlog() {
+    // Review Important 1: a byte-identical replay is never a connection error (§19.15).
+    let mut p = peer();
+    assert_eq!(N(&mut p, 1, 0, &A, T(1)), Ok(()));
+    assert_eq!(N(&mut p, 2, 2, &B, T(2)), Ok(()));
+    p.commit_retire();
+    p.commit_retire();
+    p.retire_acked(1);
+    for k in 3..=5u8 {
+        assert_eq!(N(&mut p, k as u64, k as u64, &[k; 8], T(k)), Ok(()), "k = {k}");
+    }
+    assert_eq!(N(&mut p, 1, 0, &A, T(1)), Ok(()));
+    assert_eq!(N(&mut p, 2, 2, &B, T(2)), Ok(()));
+    assert_eq!(retires(&mut p), vec![2, 3, 4]);
+    assert_eq!(p.current(), &[5; 8]);
+}
+
+#[test]
+fn rpt_jump_retires_unseen() {
+    let mut p = peer();
+    assert_eq!(N(&mut p, 3, 3, &[3; 8], T(3)), Ok(()));
+    assert_eq!(N(&mut p, 1, 0, &A, T(1)), Ok(()));
+    assert_eq!(N(&mut p, 2, 1, &B, T(2)), Ok(()));
+    assert_eq!(retires(&mut p), vec![0, 1, 2]);
+    assert!(!p.is_active(&A) && !p.is_active(&B));
+    for s in 0..3 {
+        p.retire_acked(s);
+    }
+    // A jump past `2 * local_limit` retirements is CONNECTION_ID_LIMIT_ERROR (§5.1.2 MAY),
+    // with nothing changed.
+    assert_eq!(N(&mut p, 8, 8, &[8; 8], T(8)), Err(CONNECTION_ID_LIMIT_ERROR));
+    assert_eq!(p.largest_rpt(), 3);
+    assert_eq!(p.pending_retire(), None);
+    assert_eq!(N(&mut p, 7, 7, &[7; 8], T(7)), Ok(()));
+    assert_eq!(retires(&mut p), vec![3, 4, 5, 6]);
 }
 
 #[test]
@@ -296,7 +334,8 @@ fn retire_backlog() {
     }
     assert_eq!(p.on_new_cid(5, 5, &[5; 8], T(5), 2), Err(CONNECTION_ID_LIMIT_ERROR));
     assert_eq!(p.current(), &[4; 8]);
-    // A late sequence number below Retire Prior To also counts against the backlog.
+    // A late or replayed sequence number below Retire Prior To is already retired: Ok, and
+    // it adds nothing to the backlog.
     assert_eq!(p.on_new_cid(0, 0, &[9; 8], T(9), 2), Ok(()));
     assert_eq!(p.on_new_cid(3, 0, &[3; 8], T(3), 2), Ok(()));
     assert_eq!(retires(&mut p), vec![0, 1, 2, 3]);
