@@ -102,10 +102,12 @@ Its job is to make "constant-time style" a checked property of `crates/crypto`, 
 
 **D4. Refinement of controller call 3 ("an unlabeled reachable fn is an error").**
 - ct-discipline.md says public-only exec fns get no comment, e.g. `sec1_decode_exec`, which `p256_ecdh` reaches. Requiring a label there would be a retrofit beyond turning comments into attributes. The rules below stay fail-closed:
-- **Roots** are listed in the manifest (`root <def-path>`). A root without a `ct::` attribute is an error, and so is a root path that doesn't resolve.
+- **Roots** are listed in the manifest (`root <def-path>`). A root without a `ct::` attribute (or a manifest `label` line, below) is an error, and so is a root path that doesn't resolve.
 - **A reachable non-root fn with a body and no attribute is checked as all-public.** Any call site that passes a secret argument to it is then rejected, so a missing label can never cause a silent accept.
 - **Bodyless, unresolved, or non-manifest foreign callees are an error.**
 - **A fn with an attribute must name every non-ghost parameter** in exactly one of `secret(..)` / `public(..)`. Unknown names, duplicates and missing names are errors. A bare `ct::public` (no list) means all parameters are public.
+- **Only `secret(..)` is enforced** (by the verified `decl_ok` check, D10). `ct::public(..)` and bare `ct::public` declarations are not enforced: inference may still label such a parameter secret. This is sound for CT: an extra-public label only weakens the claim on that fn's inputs and never hides a leak of a secret (8a Task 6).
+- **A manifest `label` line may label a root** (8a Task 7b ruling), under the same naming check as an attribute; the manifest is reviewed (TRUSTED.md). A root with neither a `ct::` attribute nor a `label` line is an error.
 
 **D5. Profile: release, with overflow checks off only for verified crates.**
 - The release profile turns overflow checks off by default, including in unverified code, which the Verus justification doesn't cover. So, in the root `Cargo.toml`:
@@ -156,7 +158,8 @@ crates/ctcore/            verified (Verus) library; in the workspace, so verify.
   src/lib.rs              escape gate cover it; depends on vstd only
   src/syntax.rs           core language (exec datatypes, shared by spec and exec)
   src/sem.rs              values, frames, places, run (spec), events, steps; binop (opaque)
-  src/ct.rs               labels, wf, ok_* typing (spec), NI lemmas + theorem_ct
+  src/ct.rs               labels, wf, ok_* typing (spec)
+  src/ct_lemmas.rs, ni.rs NI lemmas; ni.rs holds theorem_ct (ctcore::ni::theorem_ct, no re-export)
   src/check.rs            exec checker check_prog (ensures == ok_prog)
   src/infer.rs            exec label inference (unverified functionally)
   src/cost.rs, loops.rs   8b: certificates, validator, theorem_cost; inference
@@ -364,6 +367,19 @@ pub struct Program { pub fns: Vec<Body> }
 - block targets are in range;
 - arity matches.
 
+**Stricter rules in `ct.rs` (8a Task 3).** These only reject more programs, so they are sound; the real crypto MIR satisfies them, and the translator's output must too.
+- **`Mut` flow.** `mut_pl(pl)`: `pl` is an empty-projection place of a `Mut`-typed local. `mut_op(op)`: `op` copies such a place. Only these may hold a `Mut` value.
+  - `Assign(pl, Use(op))` with `mut_op(op)` needs `mut_pl(pl)` and `lab(op) == lab(pl)`.
+  - `Assign(pl, RefMut(q))` needs `mut_pl(pl)` and `lab(pl) == lab(q.local)`.
+  - `refmut_ok`: a `RefMut` of a place rooted at a `Mut`-typed local starts with `Deref` (a reborrow), so a `Mut` never targets a `Mut`-typed local.
+  - A `Mut` argument goes only into a `Mut`-typed parameter.
+- **No `Mut` operand** (`!mut_op`) in `Aggregate`, `Repeat`, `RefShr` (a snapshot), the `Declassify` argument, the `VecPush`/`VecSet` value, or the `VecAsSlice`/`ArrayAsSlice` source.
+- **Intrinsic arities** are exact: `VecNew` 0; `Declassify`, `VecWithCapacity`, `VecAsSlice`, `ArrayAsSlice`, `VecLen`, `SliceToVec` 1; `VecPush`, `VecExtendFromSlice`, `VecIndex`, `Wrapping` 2; `VecSet`, `SliceSubrange` 3.
+- **Places** (`ok_place`): the local is in range, and so is every `Index` local.
+- **`wf_body`**: at least one block; `nargs < locals.len()`; local 0's type has no `Mut`; every other local has `Mut` only at the top (`wf_local_ty`).
+- **`plc` and `args_agree`**: frame locals and slots have the body's lengths; no `Mut` inside non-`Mut` locals, entry arguments or slots (`no_mut`); a `Mut` target's root is a slot or a non-`Mut`-typed local (`root_ok`).
+- **`decl_ok`** carries index guards: an over-long `decl[f]` makes it false (fail closed).
+
 `ok_prog(p, ls)` = `wf(p)` ∧ `ls.len() == p.fns.len()` ∧ every `ls[f].locals.len() == p.fns[f].locals.len()` ∧ every body ok under its labels (preflight).
 
 **Agreement.**
@@ -371,7 +387,7 @@ pub struct Program { pub fns: Vec<Body> }
 - `shape_eq` is structural: `Arr` lengths equal, `Adt` variants equal, `Mut` locs equal, `Int`s always related.
 - `plc(p, ls, f, fr)` is the label-consistency invariant for `Mut` values.
 
-**Theorem** (`ct.rs`; the statement a reader trusts):
+**Theorem** (`ctcore::ni::theorem_ct`, in `ni.rs`; `diverge` and the predicates are in `ct.rs`; the statement a reader trusts). There is no re-export from `lib.rs`: a proof-fn re-export fails `cargo build` with E0432.
 
 ```rust
 pub open spec fn diverge(t1: Seq<Event>, t2: Seq<Event>) -> bool   // first difference is two Declass events (spike)
@@ -456,14 +472,17 @@ unless they first differ at a declassified value.
 ```
 root <def-path>                        # CT root; must resolve and carry a ct:: attribute
 intr <def-path> <Intrinsic>[ <BinOp> <IntTy>]
-label <def-path> secret(a,b) public(c) # for bodies that can't be annotated (third-party)
+label <def-path> secret(a,b) public(c) # bodies that can't be annotated (third-party); may label a root
 translate-crate <crate>                # foreign crates whose bodies may be translated
 ```
 - There is no `exclude` kind (preflight). A path that no root reaches needs no line. A reached callee is either translated, mapped by an `intr` line, or `Unresolved`; it is never skipped.
 - The `intr` paths are written from the driver's `census` output. They are never guessed.
-- Census lines, manifest matching and report lines all use one key (preflight): the resolved `Instance`'s item path (`CrateDef::name()` of `instance.def`), with every `::<…>` generic-argument list removed.
+- Census lines, manifest matching and report lines all use one key, the ct_key: `Instance::name()` of the resolved instance, with every `::<…>` generic-argument list removed (8a Task 7a ruling).
+  - Leaf and intrinsic callees are keyed by def. A type-argument guard requires each such call's instance generic arguments to match the intrinsic's declared types. The Vec/slice intrinsics are u8 only, and any other type argument is `Unsupported` (fail closed; widen when needed).
+  - Roots and internal callees are keyed by instance.
+  - Ambiguity is an error: a key that matches more than one distinct fn instance fails closed, for roots, internal callees and manifest/`intr` lookups alike.
 - `intr` lines need not resolve in a given build (preflight).
-- An `intr` path inside the analysed crate is a loader error, except `<crate>::ct::declassify` (preflight).
+- An `intr` path inside the analysed crate is a loader error, except `<crate>::ct::declassify` mapped to `Declassify` and `<crate>::ct::ghost_fallback` mapped to `GhostUnit` (8a Task 7a ruling). `Declassify` is allowed nowhere else.
 - Expected keys include the `Vec::with_capacity`, `push`, `extend_from_slice` and `as_slice` def paths; vstd's `Vec` `set` and `slice_subrange`/`slice_to_vec`; `u32::wrapping_add`; `Ghost::assume_new_fallback`; and `crypto::ct::declassify`.
 
 **Report** (`$CT_OUT/report-<crate>.txt`), one line per item:
@@ -494,15 +513,18 @@ Roots (manifest), with their labels:
 - `hmac_sha256`: secret(key, msg)
 - `hkdf_extract`: public(salt), secret(ikm)
 - `hkdf_expand`: secret(prk), public(info, len)
+- `p256_public_key`: secret(d)
+- `p256_ecdh`: secret(d), public(peer)
+- `p256_ecdsa_sign`: secret(d), public(msg) (8a Task 9)
 
 No root reaches the RSA path, so it needs no manifest line (preflight).
 
-**Declassify sites.**
+**Declassify sites.** The list of record is the `ct-declassify:` rows of TRUSTED.md, one per `declassify` line of the crypto report; verify.sh's declassify gate keeps the two, and the source, in sync. Each call sits on its own line (ct-check.sh guards it), because the driver keys sites by file:line.
 
-| # | Site | What becomes public | Code |
-|---|---|---|---|
-| 1 | `crypto::gcm::aes128_gcm_open` | the tag-compare outcome (accept/reject) | 5b, **new**: `if declassify(diff) != 0` (the existing `ponytail:` comment already argues it) |
-| 2–6 | P-256 (5c), when merged | ct-discipline points 1–4, plus point 5 below | 5c Tasks 7/8 |
+| Site | What becomes public | Code |
+|---|---|---|
+| `crypto::gcm::aes128_gcm_open` | the tag-compare outcome (accept/reject) | 5b, **new** in 8a: `if declassify(diff) != 0` (the existing `ponytail:` comment already argues it) |
+| P-256 (`crypto::p256`, `crypto::ecdsa`) | ct-discipline points 1–5 and the two peer-decode points (B1 below) | 5c Tasks 7/8, placement amended by the 8a Task 9 ruling |
 
 **Binding notes for Phase 5c**, which must reach 5c **before Task 7 starts**:
 - **B1.** Write the ruled declassify points with `crate::ct::declassify(..)` from day one, adding `ct.rs` exactly as in D3 if 8a hasn't landed:
@@ -524,10 +546,13 @@ New rows:
 | CT manifest: each `intr` line asserts a std/vstd fn behaves as its core intrinsic; each `label` line is reviewed (preflight) | `tools/ct-driver/manifest.txt` | std/vstd bodies are not translated | never |
 | CT core semantics and leakage model | `crates/ctcore/src/sem.rs`, the spec fns in `ct.rs` | events: branch/assert conditions, indices, div/rem operands (all widths), shift amounts, allocation sizes, subslice bounds, declassified values, steps. Shapes are public. The `binop`/`cast` transcription of Rust release semantics is hand-written | never |
 | Compiler and CPU preserve MIR-level CT | (toolchain) | analysis uses `-Zinline-mir=no`, the shipped build doesn't; LLVM may reintroduce branches or tables; variable-latency instructions beyond div/shift, caches beyond indices, speculation. Binary-level (dudect-style) checks are a later item | never |
-| ct-declassify: crypto::gcm::aes128_gcm_open#0: tag-compare outcome (accept/reject) is public; the caller learns it anyway | `crates/crypto/src/gcm.rs` | NI is relative to declassified values (the row text is unbackticked, so the gate's `^| ct-declassify: ` grep matches it) (preflight) | never |
+| ct-declassify: crypto::gcm::aes128_gcm_open#1: tag-compare outcome (accept/reject) is public; the caller learns it anyway | crates/crypto/src/gcm.rs:811 | NI is relative to declassified values (the row text is unbackticked, so the gate's `^| ct-declassify: ` grep matches it) (preflight) | never |
+
+There is one `ct-declassify:` row per report `declassify` line, keyed `<X>#<k>` exactly as the driver prints it. `#k` is 1-based (8a Task 9 ruling) and is a position in the driver's string-sorted site order, so it is unstable when lines move; every row therefore also names the site's `file:line` in its File column, and the gate compares that too. Each row gives the reason the value is public.
 
 Changed rows and lines:
-- **The AES/GCM timing row** becomes: "MIR-level constant time proved by `ctcore::theorem_ct` for `crypto::{aes,gcm,sha256,hmac,hkdf}` (scripts/ct-check.sh in verify.sh). Below MIR, see the compiler/CPU row."
+- **The AES/GCM timing row** becomes: "MIR-level constant time proved by `ctcore::ni::theorem_ct` for `crypto::{aes,gcm,sha256,hmac,hkdf}` (scripts/ct-check.sh in verify.sh). Below MIR, see the compiler/CPU row." It also says the claim is modulo the `ct-declassify:` rows and the CT trust-boundary rows.
+- **The 5c P-256 timing row** ("… never (known gap; checked by the Phase 8a CT checker)") is reworded the same way, for the roots `p256_public_key`, `p256_ecdh` and `p256_ecdsa_sign`.
 - **`tls::server::ct_eq32`** is unchanged. tls is not checked in 8a.
 - **The pins paragraph** gains: rustc 1.98.1 via `rust-toolchain.toml` (the build compiler is the verify compiler); the shipped artifact is `cargo build --release`, with overflow checks off for verified crates only (D5).
 - **The design spec's non-goal** "proven constant-time execution" is amended to: "proven at MIR level for crypto since Phase 8a; binary level unverified".
@@ -540,17 +565,22 @@ After the crate loop and `duvet report`, and before the escape gate, verify.sh r
 
 Before each analysis build, ct-check.sh deletes the old report and runs `cargo clean --release -p <crate>` in that build's own `--target-dir` (preflight). Cargo skips fresh crates, and manifests and `CT_*` are not cargo inputs.
 
-ct-check.sh:
+ct-check.sh, in this order:
 1. builds the driver;
-2. runs it over `crypto` and requires 0 `reject` lines and every manifest root `ok`;
-3. runs it over `crypto` with `--cfg ct_negative` and requires **exactly** the one reject `reject crypto::ct_negative::secret_branch SecretSwitch …` (preflight);
-4. runs the fixtures and diffs their report against `tools/ct-fixtures/expected.txt`;
-5. prints one line per run (preflight): `ct-check: fixtures N/N`, `ct-check: selftest V/V`, `ct-check: crypto ok (F fns, R roots, D declassify)` and `ct-check: negative control rejected`.
+2. runs the fixtures and diffs their verdicts against `tools/ct-fixtures/expected.txt`;
+3. runs the interpreter selftest over `crypto`;
+4. requires one `declassify(` call per line under `crates/crypto/src/` (`ct-check: one declassify per line`);
+5. runs it over `crypto` and requires 0 `reject` lines and every manifest root `ok`;
+6. runs it over `crypto` with `--cfg ct_negative` and requires **exactly** the one reject `reject crypto::ct_negative::secret_branch SecretSwitch …` (preflight);
+7. prints one line per run (preflight): `ct-check: fixtures N/N`, `ct-check: selftest V/V`, `ct-check: crypto ok (F fns, R roots, D declassify)` and `ct-check: negative control rejected`. Every count is derived, none is a literal.
 
-Then the **declassify gate**:
+ct-check.sh (and verify.sh's declassify gate, whose per-key loop word-splits) parses report and manifest lines as space-separated `awk` fields, so neither supports def paths containing spaces (for example an `<impl … for …>` root or declassify key). Such a path fails closed (the fixtures diff or the every-root-has-a-verdict check fails). No root has one today; the report format would need a delimiter change first.
+
+verify.sh exports `CT_TARGET_DIR` and `CT_OUT` (with ct-check.sh's defaults) before the call, so the gate reads the report the same run wrote. Then the **declassify gate**:
 - every `declassify X#k` report line has a TRUSTED.md row starting `| ct-declassify: X#k: `;
 - the row count equals the line count;
-- the number of non-comment `declassify(` lines under `crates/crypto/src/` equals that count too (preflight). The search is recursive and excludes `ct.rs`, where the definition is `declassify<T>(`.
+- the number of non-comment `declassify(` lines under `crates/crypto/src/` equals that count too (preflight). The search is recursive and excludes `ct.rs`, where the definition is `declassify<T>(`;
+- **the lists are equal, not just the counts** (a missing site and an extra one cancel in a count): the sorted `X#k file:line` pairs of the report equal those of the TRUSTED.md rows (File column), and the report's sorted `file:line` sites equal the source lines' `file:line`. Duplicates count.
 
 The final line becomes `verify.sh: all crates verified, duvet ok, ct ok (D declassify), escapes accounted (E)`, where E is main's escape count (preflight).
 
@@ -625,6 +655,9 @@ pub proof fn theorem_cost(p: Program, certs: Seq<Cert>, sums: Seq<Option<Poly>>,
 - **`cargo verus` interacting with a root `rust-toolchain.toml`.** 8a Task 1 checks this first. Fallback: the toolchain file pins 1.98.1 (Verus's own), so no conflict is expected.
 - **vest_lib bodies under `overflow-checks = true`.** Their MIR keeps `*WithOverflow` asserts, which the translator rejects. If 8b's census needs vest_lib bodies, the options are: a `vest_lib` per-package override plus a TRUSTED note (its proofs are re-checked by `cargo verus verify`), or accept the `None`s. This is a controller ruling at 8b Task 1.
 - **Offline rustup.** If `rustup component add rustc-dev` cannot download, use the spike's sha256-checked tarball overlay, documented in ct-check.sh.
+
+- **Known checker limitation: label summaries are context-insensitive**, one per fn. A helper called on both secret and public data is treated as secret everywhere. This forced two extra P-256 declassify sites on peer-only values (`fe_from_be`'s range borrow and the `on_curve_fe` result, 8a Task 9). Future work: label polymorphism or per-call-site summaries, which would remove those two sites.
+- **Translation-validation gap (8a Task 8):** no selftest vector exercises a signed or sign-extending cast. Crypto has no signed casts today; add a vector when one appears.
 
 ## Evidence
 
