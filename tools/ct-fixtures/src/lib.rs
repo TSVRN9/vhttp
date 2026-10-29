@@ -3,7 +3,7 @@
 //! must get `ok`; each negative control must be rejected with its stated kind (the comment
 //! after it) among the reported kinds. `expected.txt` holds the verdicts.
 
-/// The shims at the paths the manifest loader accepts: `<crate>::ct::{declassify, ghost_fallback}`.
+/// The shims at the paths the manifest loader accepts: `<crate>::ct::declassify` and `ct_fixtures::ct::ghost_fallback`.
 pub mod ct {
     /// Mapped to `Declassify`.
     pub fn declassify<T>(x: T) -> T {

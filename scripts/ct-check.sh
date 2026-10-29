@@ -3,7 +3,8 @@
 # their verdicts against tools/ct-fixtures/expected.txt, then run the interpreter selftest
 # (tools/ct-driver/selftest.txt) over crates/crypto, then check crypto's roots (all must be ok) and
 # the negative control (--cfg ct_negative; exactly its one reject). Target dirs live under CT_TARGET_DIR
-# (default $root/target/ct), one subdir per run; reports under $CT_OUT/<run>.
+# (default $root/target/ct), one subdir per run, except that selftest shares crypto's (same flags);
+# reports under $CT_OUT/<run>.
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root" # rust-toolchain.toml pins rustc 1.98.1, the one ct-driver links against
@@ -25,11 +26,12 @@ driver=$CT_TARGET_DIR/driver/release/ct-driver
 analyse() {
     run=$1 crate=$2 manifest=$3 mode=$4
     shift 4
+    case $run in selftest) td=$CT_TARGET_DIR/crypto ;; *) td=$CT_TARGET_DIR/$run ;; esac
     rm -rf "${CT_OUT:?}/$run"
-    cargo clean --release -q -p "$crate" "$@" --target-dir "$CT_TARGET_DIR/$run"
+    cargo clean --release -q -p "$crate" "$@" --target-dir "$td"
     RUSTC_WORKSPACE_WRAPPER=$driver RUSTC_BOOTSTRAP=1 CT_CRATES=$crate CT_MANIFEST=$manifest \
         CT_OUT=$CT_OUT/$run CT_MODE=$mode CT_SELFTEST=$root/tools/ct-driver/selftest.txt \
-        cargo build --release --locked -q -p "$crate" "$@" --target-dir "$CT_TARGET_DIR/$run" \
+        cargo build --release --locked -q -p "$crate" "$@" --target-dir "$td" \
         || fail "$run: analysis build failed"
     case $mode in selftest) report=$CT_OUT/$run/selftest-$crate.txt ;; *) report=$CT_OUT/$run/report-$crate.txt ;; esac
     [ -f "$report" ] || fail "$run: no $report"

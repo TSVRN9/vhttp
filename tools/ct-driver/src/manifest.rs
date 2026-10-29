@@ -13,9 +13,10 @@
 //! Each `intr` line asserts that a std/vstd fn behaves as its core intrinsic. `intr` lines need not
 //! resolve in a given build. Rules, whatever `CT_CRATES` is:
 //! - `<crate>::ct::declassify` maps only to `Declassify`, and `Declassify` only from such a path;
-//! - `<crate>::ct::ghost_fallback` maps only to `GhostUnit`.
+//! - `ct_fixtures::ct::ghost_fallback` maps only to `GhostUnit` (no other crate gets this shim:
+//!   a `GhostUnit` mapping skips the body, so an in-crate one with real code would go unchecked).
 //! An `intr` path inside a crate listed in `CT_CRATES` is an error (it would override that crate's
-//! own body), except those two shims.
+//! own body), except those shims.
 //!
 //! Labels (here and in `#[cfg_attr(ct_check, ct::secret(..), ct::public(..))]`): only `secret(..)`
 //! is enforced, as "this param is secret". A `public(..)` name is a declaration only; the checker
@@ -97,10 +98,11 @@ fn parse(m: &mut Manifest, file: &str, text: &str, crates: &[String]) -> Result<
     Ok(())
 }
 
-/// `Some(name)` when `path` is `<crate>::ct::<name>` for a shim name (`declassify`, `ghost_fallback`).
+/// `Some(name)` when `path` is `<crate>::ct::declassify` or `ct_fixtures::ct::ghost_fallback`.
 fn ct_shim(path: &str) -> Option<&str> {
     match path.split("::").collect::<Vec<_>>()[..] {
-        [c, "ct", name @ ("declassify" | "ghost_fallback")] if !c.is_empty() && c.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') => Some(name),
+        ["ct_fixtures", "ct", "ghost_fallback"] => Some("ghost_fallback"),
+        [c, "ct", name @ "declassify"] if !c.is_empty() && c.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') => Some(name),
         _ => None,
     }
 }
@@ -280,8 +282,9 @@ mod tests {
             ("\nlabel a::b secret(x)\nlabel a::b public(y)\n", "duplicate"),
             ("\nintr crypto::ct::declassify GhostUnit\n", "own intrinsic"),
             ("\nintr crypto::ct::declassify VecLen\n", "own intrinsic"),
-            ("\nintr crypto::ct::ghost_fallback Declassify\n", "own intrinsic"),
-            ("\nintr crypto::ct::ghost_fallback VecLen\n", "own intrinsic"),
+            ("\nintr ct_fixtures::ct::ghost_fallback Declassify\n", "own intrinsic"),
+            ("\nintr ct_fixtures::ct::ghost_fallback VecLen\n", "own intrinsic"),
+            ("\nintr crypto::ct::ghost_fallback GhostUnit\n", "analysed crate"),
             ("\nintr std::convert::identity Declassify\n", "Declassify maps only"),
             ("\nintr std::vec::Vec::len Declassify\n", "Declassify maps only"),
             ("\nintr crypto::x::ct::declassify Declassify\n", "Declassify maps only"),
@@ -297,12 +300,12 @@ mod tests {
 
     #[test]
     fn ct_shims_load_whatever_ct_crates_is() {
-        let shims = "intr crypto::ct::declassify Declassify\nintr crypto::ct::ghost_fallback GhostUnit\n\
+        let shims = "intr crypto::ct::declassify Declassify\n\
                      intr ct_fixtures::ct::declassify Declassify\nintr ct_fixtures::ct::ghost_fallback GhostUnit\n";
         for crates in [vec![], vec!["crypto".to_string()], vec!["wire".to_string()], vec!["ct_fixtures".to_string()]] {
             let mut m = Manifest::default();
             parse(&mut m, "m.txt", shims, &crates).unwrap();
-            assert_eq!(m.intr.len(), 4);
+            assert_eq!(m.intr.len(), 3);
         }
         // GhostUnit stays legal on a non-shim, non-analysed path (vstd's Ghost residue).
         assert!(p("intr vstd::prelude::Ghost::assume_new_fallback GhostUnit\n").is_ok());
