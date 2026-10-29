@@ -1,0 +1,23 @@
+# ct-driver selftest vectors (CT_MODE=selftest; format in tools/ct-driver/src/interp.rs):
+#   <def-path> <arg>... => <ret> <mut-out>...
+# Each fn's translated closure runs in the core interpreter; the return value and the final
+# pointee of every `mut:` (&mut) param must equal these exactly. Every expected value is also
+# checked against the compiled Rust by the crypto crate's own tests (named per line).
+
+# FIPS 197 Appendix C.1 (crates/crypto/tests/aes_gcm.rs)
+crypto::aes::aes128_encrypt_block 000102030405060708090a0b0c0d0e0f 00112233445566778899aabbccddeeff => 69c4e0d86a7b0430d8cdb78070b4c55a
+# FIPS 180-4 "abc" (crates/crypto/tests/sha256.rs)
+crypto::sha256::sha256 616263 => ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+# RFC 4231 test case 1: key 0x0b x 20, "Hi There" (crates/crypto/tests/hmac_hkdf.rs)
+crypto::hmac::hmac_sha256 0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b 4869205468657265 => b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7
+# GCM spec test case 2: K = 0^128, IV = 0^96, A empty, P = 0^128; C || T (crates/crypto/tests/aes_gcm.rs)
+crypto::gcm::aes128_gcm_seal 00000000000000000000000000000000 000000000000000000000000 - 00000000000000000000000000000000 => 0388dace60b6a392f328c2b971b2fe78ab6e47d42cec13bdf53a67b21257bddf
+# GCM test case 2: C . H in GF(2^128), from an SP 800-38D Algorithm 1 script that reproduces the
+# case's GHASH f38cbb1a..f885 (the ghash_tc2 test in crates/crypto/src/gcm.rs runs this product)
+crypto::gcm::gf128_mul_exec 0x0388dace60b6a392f328c2b971b2fe78u128 0x66e94bd4ef8a2c3b884cfa59ca342b2eu128 => 0x5e2ec746917062882c85b0685353deb7u128
+# P-256: the group order n as little-endian u64 limbs (N_LIMBS in crates/crypto/src/ecdsa.rs;
+# the p256 and ecdsa tests reach this fn through every scalar load)
+crypto::mont::limbs_from_be ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551 0x0usize => [0xf3b9cac2fc632551u64,0xbce6faada7179e84u64,0xffffffffffffffffu64,0xffffffff00000000u64]
+# P-256 ECDSA: DER of the RFC 6979 A.2.5 "sample" signature, appended to out = [aa] (der_vectors
+# in crates/crypto/tests/ecdsa.rs)
+crypto::ecdsa::serialize_ecdsa_der efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8 mut:aa => () aa3046022100efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716022100f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8

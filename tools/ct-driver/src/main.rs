@@ -3,7 +3,8 @@
 //! and are analysed; every other invocation passes through to rustc unchanged.
 //!
 //! Environment: `CT_CRATES` (comma-separated crate names), `CT_MANIFEST` (colon-separated manifest
-//! paths), `CT_OUT` (report dir, created if missing), `CT_MODE` = `check` (default) | `census`.
+//! paths), `CT_OUT` (report dir, created if missing), `CT_MODE` = `check` (default) | `census` |
+//! `selftest` (with `CT_SELFTEST` = the vector file, see `selftest`).
 //!
 //! Check mode writes `$CT_OUT/report-<crate>.txt` with one verdict per manifest root of the crate
 //! (`root <path> ok`, or one `reject <path> <Kind> <site> ..` line per kind and site), and for ok
@@ -18,6 +19,7 @@ extern crate rustc_middle;
 extern crate rustc_public;
 extern crate rustc_public_bridge;
 
+mod interp;
 mod manifest;
 mod translate;
 
@@ -73,6 +75,7 @@ pub fn strip_generic_args(s: &str) -> String {
 enum Mode {
     Check,
     Census,
+    Selftest,
 }
 
 fn env_list(var: &str, sep: char) -> Vec<String> {
@@ -98,7 +101,8 @@ fn main() {
     let mode = match std::env::var("CT_MODE").as_deref() {
         Err(_) | Ok("check") => Mode::Check,
         Ok("census") => Mode::Census,
-        Ok(other) => die(&format!("unknown CT_MODE {other:?} (check | census)")),
+        Ok("selftest") => Mode::Selftest,
+        Ok(other) => die(&format!("unknown CT_MODE {other:?} (check | census | selftest)")),
     };
     let paths: Vec<PathBuf> = env_list("CT_MANIFEST", ':').into_iter().map(PathBuf::from).collect();
     if paths.is_empty() {
@@ -114,6 +118,7 @@ fn main() {
         let r = match mode {
             Mode::Census => roots(&krate, &m).and_then(|roots| census(&krate, &m, &roots, &out)),
             Mode::Check => check(&krate, &m, &out),
+            Mode::Selftest => selftest(&krate, &m, &out),
         };
         match r {
             Ok(()) => ControlFlow::Continue(()),
@@ -315,16 +320,54 @@ fn check(krate: &str, m: &Manifest, out: &std::path::Path) -> Result<(), String>
     std::fs::write(&file, lines.into_iter().collect::<String>()).map_err(|e| format!("{}: {e}", file.display()))
 }
 
-/// One root's verdict: its fns and checked labels, or its reject texts (`<Kind> <rest>`): the
-/// translation errors, then the attribute rules, then `check_program`'s rejection sites.
-fn verdict(m: &Manifest, root: &str) -> Result<(Vec<translate::FnInfo>, Vec<ctcore::ct::FnLab>), Vec<String>> {
+/// Selftest (translation validation by vectors; the interpreter is not in the TCB): for each
+/// line `<path> <arg>... => <ret> <mut-out>...` of `$CT_SELFTEST` whose path is in `krate`,
+/// translate that fn's closure (`translate_closure`, no label rule), run it in `interp`, and
+/// compare the return value and every `&mut` param's final pointee exactly. Writes
+/// `selftest-<krate>.txt`, one line per vector in file order: `pass <path> steps=<n>` or
+/// `fail <path> <why>`. A malformed line, or no vector for `krate`, fails the build.
+fn selftest(krate: &str, m: &Manifest, out: &std::path::Path) -> Result<(), String> {
+    let file = std::env::var("CT_SELFTEST").map_err(|_| "CT_SELFTEST is not set".to_string())?;
+    let text = std::fs::read_to_string(&file).map_err(|e| format!("{file}: {e}"))?;
+    let prefix = format!("{krate}::");
+    let mut lines = String::new();
+    for (n, line) in text.lines().enumerate() {
+        let toks: Vec<&str> = line.split_whitespace().take_while(|t| !t.starts_with('#')).collect();
+        let Some((&path, rest)) = toks.split_first() else { continue };
+        if !path.starts_with(&prefix) {
+            continue;
+        }
+        let v = interp::parse_vector(rest).map_err(|e| format!("{file}:{}: {e}", n + 1))?;
+        let r = match translate::translate_closure(m, path) {
+            Ok((p, _)) => interp::check_vector(&p, &v),
+            Err(es) => Err(format!("translation failed: {} error(s), first: {}", es.len(), tr_text(&es[0]))),
+        };
+        lines += &match r {
+            Ok(steps) => format!("pass {path} steps={steps}\n"),
+            Err(e) => format!("fail {path} {e}\n"),
+        };
+    }
+    if lines.is_empty() {
+        return Err(format!("{file}: no selftest vector for analysed crate {krate}"));
+    }
+    let f = out.join(format!("selftest-{krate}.txt"));
+    std::fs::write(&f, lines).map_err(|e| format!("{}: {e}", f.display()))
+}
+
+fn tr_text(e: &translate::TrErr) -> String {
     use translate::TrErr;
-    let tr_text = |e: &TrErr| match e {
+    match e {
         TrErr::Unsupported { path, what, span } => format!("Unsupported {span} {path}: {what}"),
         TrErr::Unresolved { path, callee, span } => format!("Unresolved {span} {path} calls {callee}"),
         TrErr::Attr { path, msg } => format!("Attr {path}: {msg}"),
         TrErr::Root { path, msg } => format!("Root {path}: {msg}"),
-    };
+    }
+}
+
+/// One root's verdict: its fns and checked labels, or its reject texts (`<Kind> <rest>`): the
+/// translation errors, then the attribute rules, then `check_program`'s rejection sites.
+fn verdict(m: &Manifest, root: &str) -> Result<(Vec<translate::FnInfo>, Vec<ctcore::ct::FnLab>), Vec<String>> {
+    use translate::TrErr;
     let (p, infos) = translate::translate_closure(m, root).map_err(|es| es.iter().map(tr_text).collect::<Vec<_>>())?;
     let mut errs = Vec::new();
     for i in &infos {
