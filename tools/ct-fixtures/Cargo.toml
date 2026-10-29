@@ -1,0 +1,10 @@
+[package]
+name = "ct_fixtures"
+version = "0.1.0"
+edition = "2021"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(ct_check)'] }
+
+# own workspace: built only by scripts/ct-check.sh, under ct-driver
+[workspace]

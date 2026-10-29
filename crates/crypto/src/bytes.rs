@@ -46,4 +46,90 @@ pub open spec fn xor_bytes(a: Seq<u8>, b: Seq<u8>) -> Seq<u8> {
     Seq::new(a.len(), |i: int| a[i] ^ b[i])
 }
 
+/// OS2IP of a concatenation: the prefix is shifted left by the suffix's length in octets.
+pub proof fn lemma_os2ip_append(a: Seq<u8>, b: Seq<u8>)
+    ensures
+        os2ip(a + b) == os2ip(a) * vstd::arithmetic::power::pow(256, b.len()) + os2ip(b),
+    decreases b.len(),
+{
+    reveal(vstd::arithmetic::power::pow);
+    if b.len() == 0 {
+        assert(a + b =~= a);
+    } else {
+        let b1 = b.drop_last();
+        assert((a + b).drop_last() =~= a + b1);
+        lemma_os2ip_append(a, b1);
+        vstd::arithmetic::mul::lemma_mul_is_associative(
+            os2ip(a) as int,
+            vstd::arithmetic::power::pow(256, b1.len()),
+            256,
+        );
+        vstd::arithmetic::mul::lemma_mul_is_commutative(
+            256,
+            vstd::arithmetic::power::pow(256, b1.len()),
+        );
+    }
+}
+
+/// I2OSP into la + lb octets splits into the high la octets and the low lb octets.
+pub proof fn lemma_i2osp_append(x: nat, la: nat, lb: nat)
+    ensures
+        i2osp(x, la + lb) == i2osp((x as int / vstd::arithmetic::power::pow(256, lb)) as nat, la) + i2osp(
+            (x as int % vstd::arithmetic::power::pow(256, lb)) as nat,
+            lb,
+        ),
+    decreases lb,
+{
+    reveal(vstd::arithmetic::power::pow);
+    if lb == 0 {
+        assert(i2osp(x, la) + i2osp(0, 0) =~= i2osp(x, la));
+    } else {
+        let xi = x as int;
+        let p1 = vstd::arithmetic::power::pow(256, (lb - 1) as nat);
+        vstd::arithmetic::power::lemma_pow_positive(256, (lb - 1) as nat);
+        let y = xi % (256 * p1);
+        lemma_i2osp_append(x / 256, la, (lb - 1) as nat);
+        vstd::arithmetic::div_mod::lemma_div_denominator(xi, 256, p1);
+        vstd::arithmetic::div_mod::lemma_mod_breakdown(xi, 256, p1);
+        vstd::arithmetic::div_mod::lemma_mod_pos_bound(xi / 256, p1);
+        vstd::arithmetic::div_mod::lemma_mod_pos_bound(xi, 256 * p1);
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod_converse(
+            y,
+            256,
+            (xi / 256) % p1,
+            xi % 256,
+        );
+        assert(la + lb - 1 == la + (lb - 1) as nat);
+        assert(i2osp(x, la + lb) =~= i2osp((xi / (256 * p1)) as nat, la) + i2osp(y as nat, lb));
+    }
+}
+
+/// OS2IP of s is below 256^|s|.
+pub proof fn lemma_os2ip_bound(s: Seq<u8>)
+    ensures
+        os2ip(s) < vstd::arithmetic::power::pow(256, s.len()),
+    decreases s.len(),
+{
+    reveal(vstd::arithmetic::power::pow);
+    if s.len() > 0 {
+        lemma_os2ip_bound(s.drop_last());
+    }
+}
+
+/// OS2IP inverts I2OSP for x < 256^len.
+pub proof fn lemma_os2ip_i2osp(x: nat, len: nat)
+    requires
+        x < vstd::arithmetic::power::pow(256, len),
+    ensures
+        os2ip(i2osp(x, len)) == x,
+    decreases len,
+{
+    reveal(vstd::arithmetic::power::pow);
+    if len > 0 {
+        let s = i2osp(x, len);
+        assert(s.drop_last() =~= i2osp(x / 256, (len - 1) as nat));
+        lemma_os2ip_i2osp(x / 256, (len - 1) as nat);
+    }
+}
+
 } // verus!

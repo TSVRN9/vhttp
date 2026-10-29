@@ -29,7 +29,7 @@ Calls I made (the user can override them):
 - **Goal:** every RFC MUST/MUST NOT for an HTTP/3 server maps to a Verus spec plus proof, or to a documented reason it doesn't apply.
 - **Goal:** working interop with Chrome, Firefox, curl `--http3` and quiche; h3spec passes.
 - **Non-goal, for now:** 0-RTT, resumption/PSK, connection migration, Retry, server push, QPACK dynamic table (capacity 0), ChaCha20/AES-256, X25519, client certificates, HTTP/3 extensions (datagrams, WebTransport, extended CONNECT).
-- **Non-goal: proven constant-time execution.** Verus can't express timing properties. The plan is to write code in a constant-time style and add an unverified timing-leak check (dudect-style) later. This is documented as a known gap in production readiness.
+- **Non-goal: proven constant-time execution, at binary level.** Constant time is proven at MIR level for crypto since Phase 8a (`ctcore::ni::theorem_ct`, checked by `scripts/ct-check.sh` in `verify.sh`, for the manifest roots under their declared labels, relative to the `ct-declassify:` rows and the CT trust-boundary rows (front end, manifest, semantics/leakage model) in `TRUSTED.md`); binary level is unverified. Verus itself can't express timing properties. An unverified binary-level timing-leak check (dudect-style) is a later item, and the gap stays documented in production readiness.
 - **Anti-goal:** saying "proven" for anything that isn't. Every trusted component and every `assume`/`external_body` is listed in `TRUSTED.md`.
 
 ## Trusted base (documented in `TRUSTED.md`)
@@ -118,6 +118,8 @@ Parsers and serializers use `vest_lib` combinators, with round-trip and reject-m
 6. **Loss recovery & congestion control (RFC 9002).** RTT estimation, PTO, NewReno, plus proofs of invariants such as bytes in flight ≤ cwnd.
    **Exit:** proofs verify; behavior stays stable under induced loss.
 7. **Full conformance & browsers.** h3spec, h3i, quic-interop-runner (server role), Chrome and Firefox with a P-256 certificate from a local CA. The Duvet report has no unannotated MUSTs.
+8. **Verified analyses.** 8a CT checker (MIR level, crypto); 8b step bounds for parsers (attempt). Design: `docs/superpowers/specs/2026-10-28-phase-8-verified-ct-cost-design.md`.
+   **Exit (8a):** `verify.sh` runs `scripts/ct-check.sh` and the declassify gate, and prints `ct ok (D declassify)`.
 
 ## Verification (whole project)
 
