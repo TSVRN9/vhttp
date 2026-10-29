@@ -21,4 +21,4 @@ aes-gcm = { version = "=0.11.1", default-features = false, features = ["aes", "a
 verify = true
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)', 'cfg(ct_check)', 'cfg(ct_negative)'] }
