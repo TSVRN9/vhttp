@@ -16,8 +16,8 @@ mod manifest;
 use manifest::Manifest;
 use rustc_public::mir::mono::Instance;
 use rustc_public::mir::{Body, TerminatorKind};
-use rustc_public::{CompilerError, CrateDef, ItemKind};
-use std::collections::{BTreeSet, HashSet};
+use rustc_public::{CompilerError, CrateDef, DefId, ItemKind};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::{exit, Command};
 
@@ -93,6 +93,9 @@ fn main() {
         Ok(other) => die(&format!("unknown CT_MODE {other:?} (check | census)")),
     };
     let paths: Vec<PathBuf> = env_list("CT_MANIFEST", ':').into_iter().map(PathBuf::from).collect();
+    if paths.is_empty() {
+        die("CT_MANIFEST is not set or empty");
+    }
     let m = manifest::load(&paths).unwrap_or_else(|e| die(&e));
     let out = PathBuf::from(std::env::var("CT_OUT").unwrap_or_else(|_| die("CT_OUT is not set")));
     std::fs::create_dir_all(&out).unwrap_or_else(|e| die(&format!("{}: {e}", out.display())));
@@ -110,32 +113,61 @@ fn main() {
         }
     });
     match res {
-        Ok(()) | Err(CompilerError::Skipped) => {}
+        Ok(()) => {}
+        Err(CompilerError::Skipped) => die(&format!("rustc ran no analysis for crate {krate}")),
         Err(CompilerError::Interrupted(e)) => die(&e),
         Err(CompilerError::Failed) => exit(1),
     }
 }
 
-/// The manifest roots of crate `krate`, as instances of its local fn items. A root with this
-/// crate's prefix that matches no item is an error; roots of other crates are skipped.
+/// The manifest roots of crate `krate`, as instances of its local fn items. Errors: no root for
+/// this crate, a root matching no local fn, a root whose key names more than one local fn (generic
+/// items count, keyed by their def name, since `ct_key` strips generic args), or a generic match.
+/// Roots of other crates are skipped (they are checked when their crate compiles).
 fn roots(krate: &str, m: &Manifest) -> Result<Vec<Instance>, String> {
     let prefix = format!("{krate}::");
-    let mut want: Vec<&String> = m.roots.iter().filter(|r| r.starts_with(&prefix)).collect();
-    let mut found = Vec::new();
+    let want: Vec<&String> = m.roots.iter().filter(|r| r.starts_with(&prefix)).collect();
+    if want.is_empty() {
+        return Err(format!("no manifest root for analysed crate {krate}"));
+    }
+    let mut items = Vec::new();
     for item in rustc_public::all_local_items() {
         if item.kind() != ItemKind::Fn {
             continue;
         }
-        let Ok(inst) = Instance::try_from(item) else { continue }; // generic: not a root
-        let key = ct_key(&inst);
-        if let Some(i) = want.iter().position(|r| **r == key) {
-            want.remove(i);
-            found.push(inst);
+        items.push(match Instance::try_from(item) {
+            Ok(inst) => (ct_key(&inst), Some(inst)),
+            Err(_) => (strip_generic_args(&item.name()), None), // generic: never a root
+        });
+    }
+    pick_roots(krate, &want, &items)
+}
+
+/// Each wanted key must name exactly one of `items`, and that one must be monomorphic (`Some`).
+pub fn pick_roots<T: Copy>(krate: &str, want: &[&String], items: &[(String, Option<T>)]) -> Result<Vec<T>, String> {
+    let mut out = Vec::new();
+    for r in want {
+        let hits: Vec<Option<T>> = items.iter().filter(|(k, _)| k == *r).map(|(_, v)| *v).collect();
+        match hits[..] {
+            [Some(v)] => out.push(v),
+            [] | [None] => return Err(format!("root {r} matches no monomorphic fn in crate {krate}")),
+            _ => return Err(format!("root {r} is ambiguous: {} fns of crate {krate} share its key", hits.len())),
         }
     }
-    match want.first() {
-        Some(r) => Err(format!("root {r} matches no monomorphic fn in crate {krate}")),
-        None => Ok(found),
+    Ok(out)
+}
+
+/// Records that `key` names `v`. A key that already names a different value is ambiguous: `ct_key`
+/// strips generic args, so distinct fns can share one (`W::<u32>::f`, `W::<u64>::f`), and a
+/// manifest line or report line for it could not say which one it means.
+pub fn bind_key<T: Copy + Eq>(by_key: &mut HashMap<String, T>, key: &str, v: T) -> Result<(), T> {
+    match by_key.get(key) {
+        Some(prev) if *prev != v => Err(*prev),
+        Some(_) => Ok(()),
+        None => {
+            by_key.insert(key.to_string(), v);
+            Ok(())
+        }
     }
 }
 
@@ -170,11 +202,25 @@ pub fn is_internal(krate: &str, m: &Manifest, callee: &Instance) -> bool {
     !m.intr.iter().any(|(p, _)| *p == key) && callee.has_body() && (c == krate || m.translate_crates.contains(&c))
 }
 
+/// What a key must denote uniquely: the def for a leaf (an `intr` line or `Unresolved` speaks
+/// about the generic def, so `Ghost::<Seq<u8>>` and `Ghost::<int>` are one claim), and the instance
+/// for an internal fn or a root (each instance is its own translated body).
+type KeyId = (DefId, Option<Instance>);
+
+fn key_id(krate: &str, m: &Manifest, inst: &Instance) -> KeyId {
+    (inst.def.def_id(), is_internal(krate, m, inst).then_some(*inst))
+}
+
 /// Census: from the roots, follow `Call`s through internal callees; write one line per reached
 /// callee to `census-<krate>.txt`, sorted and unique. A call whose callee is not a resolvable
-/// fn item (a fn-pointer or closure call) is reported and fails the build after the file is written.
+/// fn item (a fn-pointer or closure call), and a key reached as more than one distinct instance
+/// (roots included), are reported and fail the build after the file is written.
 fn census(krate: &str, m: &Manifest, roots: &[Instance], out: &std::path::Path) -> Result<(), String> {
     let mut seen: HashSet<Instance> = roots.iter().copied().collect();
+    let mut by_key: HashMap<String, KeyId> = HashMap::new();
+    for r in roots {
+        let _ = bind_key(&mut by_key, &ct_key(r), key_id(krate, m, r)); // distinct roots have distinct keys (pick_roots)
+    }
     let mut work = roots.to_vec();
     let (mut lines, mut errs) = (BTreeSet::new(), BTreeSet::new());
     while let Some(inst) = work.pop() {
@@ -190,8 +236,13 @@ fn census(krate: &str, m: &Manifest, roots: &[Instance], out: &std::path::Path) 
                 errs.insert(format!("{}: call to an unresolvable callee {func:?}", ct_key(&inst)));
                 continue;
             };
+            let key = ct_key(&callee);
+            if let Err((def, prev)) = bind_key(&mut by_key, &key, key_id(krate, m, &callee)) {
+                let prev = prev.map_or_else(|| def.name(), |p| p.name());
+                errs.insert(format!("ambiguous key {key}: reached as {prev} and {}", callee.name()));
+            }
             let yn = if callee.has_body() { "yes" } else { "no" };
-            lines.insert(format!("callee {} crate={} body={yn}\n", ct_key(&callee), callee.def.krate().name));
+            lines.insert(format!("callee {key} crate={} body={yn}\n", callee.def.krate().name));
             if is_internal(krate, m, &callee) && seen.insert(callee) {
                 work.push(callee);
             }
@@ -208,6 +259,31 @@ fn census(krate: &str, m: &Manifest, roots: &[Instance], out: &std::path::Path) 
 #[cfg(test)]
 mod tests {
     use super::strip_generic_args as k;
+    use super::{bind_key, pick_roots};
+    use std::collections::HashMap;
+
+    #[test]
+    fn ambiguous_root_key_is_an_error() {
+        let key = "kc::W::f".to_string();
+        let want = [&key];
+        // `impl W<u32> { fn f }` and `impl W<u64> { fn f }` both key to `kc::W::f`.
+        let two = [(key.clone(), Some(1)), (key.clone(), Some(2))];
+        assert!(pick_roots("kc", &want, &two).unwrap_err().contains("ambiguous"));
+        let mono_and_generic = [(key.clone(), Some(1)), (key.clone(), None)];
+        assert!(pick_roots("kc", &want, &mono_and_generic).unwrap_err().contains("ambiguous"));
+        assert!(pick_roots::<u8>("kc", &want, &[(key.clone(), None)]).unwrap_err().contains("no monomorphic"));
+        assert!(pick_roots("kc", &want, &[("kc::g".to_string(), Some(1))]).unwrap_err().contains("no monomorphic"));
+        assert_eq!(pick_roots("kc", &want, &[(key.clone(), Some(7)), ("kc::g".to_string(), Some(8))]).unwrap(), [7]);
+    }
+
+    #[test]
+    fn ambiguous_callee_key_is_an_error() {
+        let mut m = HashMap::new();
+        assert_eq!(bind_key(&mut m, "kc::W::f", 1), Ok(()));
+        assert_eq!(bind_key(&mut m, "kc::W::f", 1), Ok(())); // same instance again: fine
+        assert_eq!(bind_key(&mut m, "kc::W::f", 2), Err(1)); // a second instance: ambiguous
+        assert_eq!(bind_key(&mut m, "kc::g", 2), Ok(()));
+    }
 
     #[test]
     fn ct_key_strips_generic_args_only() {
