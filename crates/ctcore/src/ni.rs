@@ -789,6 +789,13 @@ pub proof fn ni(p: Program, ls: Seq<FnLab>, f: nat, b: nat, fr1: Frame, fr2: Fra
 
 // ------------------------------------------------------------------ the theorem
 
+/// Constant time, relative to declassified values. Let `ls` label a well-typed program
+/// (`ok_prog`; `check_program` returns only such labels). Take two runs of fn `f` that both
+/// complete at a common fuel, from inputs that agree on the public params and slots (secret ones
+/// need only equal shapes). Then the two runs emit the same leakage trace and the same step count
+/// and end with publicly-equal outputs (the return value and the `&mut` slots), unless their
+/// traces first differ at two unequal `Declass` events: what leaks is at most what is declassified.
+/// Runs that do not both complete are not covered (termination-insensitive).
 pub proof fn theorem_ct(p: Program, ls: Seq<FnLab>, f: nat, a1: Seq<Val>, a2: Seq<Val>,
                         s1: Seq<Val>, s2: Seq<Val>, fuel: nat)
     requires
