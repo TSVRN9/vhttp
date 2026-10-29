@@ -25,7 +25,7 @@
 //!   `Output::StreamWrite` to `write`.
 //! - **ACK-range growth** is bounded by the `MAX_SEND_RANGES` new-data gate in
 //!   `SendStream::poll_data`, `Recovery::can_send`'s in-flight cap and `SentPackets::on_ack`'s
-//!   range cap; about 2·64 + ~1000 ranges per connection, tested not proven (3d D4).
+//!   range cap; about 2·64 per send stream plus ~1000 per connection, tested not proven (3d D4).
 //! - **Loop on `poll_data`, not `next_off`.** `next_off()` returning `Some` does not mean
 //!   `poll_data` sends anything (stream or connection credit may be 0); a
 //!   `while next_off().is_some()` loop spins forever on a blocked stream.
