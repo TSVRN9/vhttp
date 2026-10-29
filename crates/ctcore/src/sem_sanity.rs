@@ -672,6 +672,419 @@ pub proof fn sanity_subrange_clamps(p: Program)
     assert(run_from(p, 0, 0, fr, 2) == Some((f2, ev, 2nat))) by { reveal(run_from); }
 }
 
+/// `ops_ev` of one operand.
+proof fn ops_ev_1(fr: Frame, ops: Seq<Operand>)
+    requires ops.len() == 1,
+    ensures ops_ev(fr, ops) == eval_op(fr, ops[0]).1,
+{
+    assert(ops.drop_last().len() == 0);
+    assert(ops_ev(fr, ops.drop_last()) == Seq::<Event>::empty());
+    assert(Seq::<Event>::empty() + eval_op(fr, ops[0]).1 =~= eval_op(fr, ops[0]).1);
+}
+
+/// `ops_ev` of three operands, left to right.
+proof fn ops_ev_3(fr: Frame, ops: Seq<Operand>)
+    requires ops.len() == 3,
+    ensures ops_ev(fr, ops) == eval_op(fr, ops[0]).1 + eval_op(fr, ops[1]).1 + eval_op(fr, ops[2]).1,
+{
+    let d1 = ops.drop_last();
+    let d2 = d1.drop_last();
+    ops_ev_1(fr, d2);
+    assert(d2[0] == ops[0]);
+    assert(d1[1] == ops[1]);
+    assert(ops_ev(fr, d1) == ops_ev(fr, d2) + eval_op(fr, ops[1]).1);
+}
+
+/// `_x[_y]` with `_x = Arr(s)` and `_y = i < len(s)` reads `s[i]` and emits `Idx(i)`.
+proof fn idx_read(fr: Frame, pl: Place, x: usize, y: usize, s: Seq<Val>, i: u128)
+    requires
+        pl.local == x, pl.proj@ == seq![Proj::Index(y)],
+        x < fr.locals.len(), y < fr.locals.len(),
+        fr.locals[x as int] == Val::Arr(s), fr.locals[y as int] == Val::Int(i), i < s.len(),
+    ensures read_place(fr, pl) == (s[i as int], seq![Event::Idx(i)]),
+{
+    let e = Seq::<Event>::empty();
+    let ps = pl.proj@;
+    let l1 = Loc { root: Root::Local(x as nat), path: seq![PE::Index(i as nat)] };
+    assert(local_loc(x as nat).path.push(PE::Index(i as nat)) =~= l1.path);
+    assert(step(fr, Cur::L(local_loc(x as nat)), ps[0]) == (Cur::L(l1), seq![Event::Idx(i)]));
+    assert(walk(fr, ps, 1, Cur::L(l1)) == (Cur::L(l1), e));
+    assert(seq![Event::Idx(i)] + e =~= seq![Event::Idx(i)]);
+    assert(walk(fr, ps, 0, Cur::L(local_loc(x as nat))) == (Cur::L(l1), seq![Event::Idx(i)]));
+    assert(l1.path.drop_first() =~= seq![]);
+    assert(l1.path[0] == PE::Index(i as nat));
+    assert(get(Val::Arr(s), PE::Index(i as nat)) == s[i as int]);
+    assert(read_at(s[i as int], l1.path.drop_first()) == s[i as int]);
+    assert(read_loc(fr, l1) == s[i as int]);
+}
+
+pub open spec fn arr_10_20_30() -> Val { Val::Arr(seq![Val::Int(10), Val::Int(20), Val::Int(30)]) }
+
+pub open spec fn callee_fr() -> Frame { Frame { locals: seq![Val::Unit, Val::Int(20)], slots: seq![Val::Unit] } }
+
+/// Caller: `_3 = f1(_1[_2]) -> bb1`, `bb1: return`, with `_1 = [10, 20, 30]`, `_2 = 1`.
+/// Callee: `assert(const 1_bool == true) -> bb1`, `bb1: return`. The caller's trace is the
+/// arg's `Idx(1)`, then the callee's `Cond(1)`; steps 1 + 2 + 1.
+pub proof fn sanity_call_trace_includes_callee(p: Program)
+    requires
+        p.fns@.len() == 2,
+        p.fns@[0].blocks@.len() == 2,
+        p.fns@[0].blocks@[0].stmts@.len() == 0,
+        p.fns@[0].blocks@[0].term matches Term::Call(Callee::Fn(1), args, d, 1) && args@.len() == 1 && local(d, 3)
+            && (args@[0] matches Operand::Copy(a) && a.local == 1 && a.proj@ == seq![Proj::Index(2)]),
+        p.fns@[0].blocks@[1].stmts@.len() == 0,
+        p.fns@[0].blocks@[1].term == Term::Return,
+        p.fns@[1].locals@.len() == 2,
+        p.fns@[1].blocks@.len() == 2,
+        p.fns@[1].blocks@[0].stmts@.len() == 0,
+        p.fns@[1].blocks@[0].term matches Term::Assert(c, exp, b) && c == Operand::Const(IntTy::Bool, 1) && exp && b == 1,
+        p.fns@[1].blocks@[1].stmts@.len() == 0,
+        p.fns@[1].blocks@[1].term == Term::Return,
+    ensures
+        run_fn(p, 0, fr4(Val::Unit, arr_10_20_30(), Val::Int(1)), 3)
+            == Some((fr4(Val::Unit, arr_10_20_30(), Val::Int(1)), seq![Event::Idx(1), Event::Cond(1)], 4nat)),
+{
+    hide(run_from);
+    hide(exec_stmts);
+    hide(exec_intr);
+    hide(call_enter);
+    hide(call_leave);
+    let e = Seq::<Event>::empty();
+    let fr = fr4(Val::Unit, arr_10_20_30(), Val::Int(1));
+    let cf = callee_fr();
+    let none = seq![Option::<Loc>::None];
+    assert(exec_stmts(p.fns@[0].blocks@[0].stmts@, 0, fr) == (fr, e)) by { reveal(exec_stmts); }
+    assert(exec_stmts(p.fns@[0].blocks@[1].stmts@, 0, fr) == (fr, e)) by { reveal(exec_stmts); }
+    assert(exec_stmts(p.fns@[1].blocks@[0].stmts@, 0, cf) == (cf, e)) by { reveal(exec_stmts); }
+    assert(exec_stmts(p.fns@[1].blocks@[1].stmts@, 0, cf) == (cf, e)) by { reveal(exec_stmts); }
+    assert(run_from(p, 1, 1, cf, 1) == Some((cf, e, 1nat))) by { reveal(run_from); }
+    assert(e + e + seq![Event::Cond(1)] + e =~= seq![Event::Cond(1)]);
+    assert(run_from(p, 1, 0, cf, 2) == Some((cf, seq![Event::Cond(1)], 2nat))) by { reveal(run_from); }
+    assert(run_from(p, 0, 1, fr, 2) == Some((fr, e, 1nat))) by { reveal(run_from); }
+    if let Term::Call(_, args, dst, _) = p.fns@[0].blocks@[0].term {
+        assert(call_enter(p, 1, fr, args@) == (cf, none, seq![Event::Idx(1)])) by {
+            reveal(call_enter);
+            if let Operand::Copy(a) = args@[0] {
+                idx_read(fr, a, 1, 2, seq![Val::Int(10), Val::Int(20), Val::Int(30)], 1);
+            }
+            ops_ev_1(fr, args@);
+            assert(op_vals(fr, args@) =~= seq![Val::Int(20)]);
+            let (c, wb, ae) = call_enter(p, 1, fr, args@);
+            assert(c.locals =~= cf.locals);
+            assert(c.slots =~= cf.slots);
+            assert(wb =~= none);
+        }
+        assert(call_leave(fr, cf, none, dst) == (fr, e)) by {
+            reveal(call_leave);
+            assert(none.drop_last().len() == 0);
+            assert(write_back(fr, cf.slots, none.drop_last()) == fr);
+            assert(write_back(fr, cf.slots, none) == fr);
+            assert(assign(fr, dst, Val::Unit).0.locals =~= fr.locals);
+        }
+    }
+    assert(e + seq![Event::Idx(1)] + seq![Event::Cond(1)] + e + e =~= seq![Event::Idx(1), Event::Cond(1)]);
+    assert(run_from(p, 0, 0, fr, 3) == Some((fr, seq![Event::Idx(1), Event::Cond(1)], 4nat))) by { reveal(run_from); }
+}
+
+pub open spec fn set_fr(x: Val) -> Frame {
+    Frame { locals: seq![Val::Unit, Val::Mut(slot0()), Val::Arr(seq![Val::Int(1), Val::Int(7)]), Val::Int(0)],
+        slots: seq![Val::Arr(seq![Val::Int(5), x])] }
+}
+
+/// The arg values, arg events, target write and dst write of `sanity_vec_set_events`.
+proof fn vec_set_parts(fr: Frame, args: Seq<Operand>, dst: Place)
+    requires
+        fr == set_fr(Val::Int(6)),
+        local(dst, 0),
+        args.len() == 3,
+        args[0] matches Operand::Copy(a) && local(a, 1),
+        args[1] matches Operand::Copy(a) && a.local == 2 && a.proj@ == seq![Proj::Index(3)],
+        args[2] == Operand::Const(IntTy::U8, 9),
+    ensures
+        op_vals(fr, args) == seq![Val::Mut(slot0()), Val::Int(1), Val::Int(9)],
+        ops_ev(fr, args) == seq![Event::Idx(0)],
+        write_loc(fr, Loc { root: Root::Slot(0), path: slot0().path.push(PE::Index(1)) }, Val::Int(9)) == set_fr(Val::Int(9)),
+        assign(set_fr(Val::Int(9)), dst, Val::Unit) == (set_fr(Val::Int(9)), Seq::<Event>::empty()),
+{
+    let e = Seq::<Event>::empty();
+    let f2 = set_fr(Val::Int(9));
+    if let Operand::Copy(a) = args[0] { assert(read_place(fr, a) == (Val::Mut(slot0()), e)); }
+    if let Operand::Copy(a) = args[1] { idx_read(fr, a, 2, 3, seq![Val::Int(1), Val::Int(7)], 0); }
+    ops_ev_3(fr, args);
+    assert(e + seq![Event::Idx(0)] + e =~= seq![Event::Idx(0)]);
+    assert(op_vals(fr, args) =~= seq![Val::Mut(slot0()), Val::Int(1), Val::Int(9)]);
+    let l = Loc { root: Root::Slot(0), path: seq![PE::Index(1)] };
+    assert(slot0().path.push(PE::Index(1)) =~= l.path);
+    assert(l.path.drop_first() =~= seq![]);
+    assert(seq![Val::Int(5), Val::Int(6)].update(1, Val::Int(9)) =~= seq![Val::Int(5), Val::Int(9)]);
+    let t = Val::Arr(seq![Val::Int(5), Val::Int(6)]);
+    assert(l.path[0] == PE::Index(1));
+    assert(get(t, PE::Index(1)) == Val::Int(6));
+    assert(write_at(Val::Int(6), l.path.drop_first(), Val::Int(9)) == Val::Int(9));
+    assert(write_at(t, l.path, Val::Int(9)) == Val::Arr(seq![Val::Int(5), Val::Int(9)]));
+    assert(write_loc(fr, l, Val::Int(9)).slots =~= f2.slots);
+    assert(assign(f2, dst, Val::Unit).0.locals =~= f2.locals);
+}
+
+/// `_0 = VecSet(_1, _2[_3], const 9_u8)` with `_1 = Mut(Slot(0), [])`, `_2 = [1, 7]`, `_3 = 0`:
+/// sets index 1 of slot 0; the trace is the arg's `Idx(0)`, then the set's `Idx(1)`.
+pub proof fn sanity_vec_set_events(p: Program)
+    requires
+        intr_prog(p, Intrinsic::VecSet),
+        intr_args(p).len() == 3,
+        intr_args(p)[0] matches Operand::Copy(a) && local(a, 1),
+        intr_args(p)[1] matches Operand::Copy(a) && a.local == 2 && a.proj@ == seq![Proj::Index(3)],
+        intr_args(p)[2] == Operand::Const(IntTy::U8, 9),
+    ensures run_fn(p, 0, set_fr(Val::Int(6)), 2) == Some((set_fr(Val::Int(9)), seq![Event::Idx(0), Event::Idx(1)], 2nat)),
+{
+    hide(run_from);
+    hide(exec_stmts);
+    hide(exec_intr);
+    hide(call_enter);
+    hide(call_leave);
+    hide(eval_op);
+    hide(op_vals);
+    hide(ops_ev);
+    let e = Seq::<Event>::empty();
+    let ev = seq![Event::Idx(0), Event::Idx(1)];
+    let (fr, f2) = (set_fr(Val::Int(6)), set_fr(Val::Int(9)));
+    let args = intr_args(p);
+    assert(exec_stmts(p.fns@[0].blocks@[0].stmts@, 0, fr) == (fr, e)) by { reveal(exec_stmts); }
+    assert(exec_stmts(p.fns@[0].blocks@[1].stmts@, 0, f2) == (f2, e)) by { reveal(exec_stmts); }
+    if let Term::Call(_, _, dst, _) = p.fns@[0].blocks@[0].term {
+        assert(exec_intr(Intrinsic::VecSet, fr, args, dst) == Some((f2, ev, 0nat))) by {
+            reveal(exec_intr);
+            vec_set_parts(fr, args, dst);
+            assert(seq![Event::Idx(0)] + seq![Event::Idx(1)] + e =~= ev);
+        }
+    }
+    assert(run_from(p, 0, 1, f2, 1) == Some((f2, e, 1nat))) by { reveal(run_from); }
+    assert(e + ev + e =~= ev);
+    assert(run_from(p, 0, 0, fr, 2) == Some((f2, ev, 2nat))) by { reveal(run_from); }
+}
+
+/// `_0 = Vec::with_capacity(const 16_usize)` emits `Alloc(16)`.
+pub proof fn sanity_with_capacity_alloc(p: Program)
+    requires intr_prog(p, Intrinsic::VecWithCapacity), intr_args(p) == seq![Operand::Const(IntTy::Usize, 16)],
+    ensures run_fn(p, 0, fr1(Val::Unit), 2) == Some((fr1(Val::Arr(seq![])), seq![Event::Alloc(16)], 2nat)),
+{
+    hide(run_from);
+    hide(exec_stmts);
+    hide(exec_intr);
+    hide(call_enter);
+    hide(call_leave);
+    let e = Seq::<Event>::empty();
+    let ev = seq![Event::Alloc(16)];
+    let (fr, f2) = (fr1(Val::Unit), fr1(Val::Arr(seq![])));
+    let args = intr_args(p);
+    assert(exec_stmts(p.fns@[0].blocks@[0].stmts@, 0, fr) == (fr, e)) by { reveal(exec_stmts); }
+    assert(exec_stmts(p.fns@[0].blocks@[1].stmts@, 0, f2) == (f2, e)) by { reveal(exec_stmts); }
+    if let Term::Call(_, _, dst, _) = p.fns@[0].blocks@[0].term {
+        assert(exec_intr(Intrinsic::VecWithCapacity, fr, args, dst) == Some((f2, ev, 0nat))) by {
+            reveal(exec_intr);
+            ops_ev_1(fr, args);
+            assert(op_vals(fr, args) =~= seq![Val::Int(16)]);
+            assert(assign(fr, dst, Val::Arr(seq![])).0.locals =~= f2.locals);
+            assert(e + ev + e =~= ev);
+        }
+    }
+    assert(run_from(p, 0, 1, f2, 1) == Some((f2, e, 1nat))) by { reveal(run_from); }
+    assert(e + ev + e =~= ev);
+    assert(run_from(p, 0, 0, fr, 2) == Some((f2, ev, 2nat))) by { reveal(run_from); }
+}
+
+pub open spec fn r_10_20() -> Val { Val::Shr(Box::new(Val::Arr(seq![Val::Int(10), Val::Int(20)]))) }
+
+/// The arg values and events and the dst write of `sanity_vec_index_idx`.
+proof fn vec_index_parts(fr: Frame, args: Seq<Operand>, dst: Place)
+    requires
+        fr == fr2(Val::Unit, r_10_20(), seq![]),
+        local(dst, 0),
+        args.len() == 2,
+        args[0] matches Operand::Copy(a) && local(a, 1),
+        args[1] == Operand::Const(IntTy::Usize, 1),
+    ensures
+        op_vals(fr, args) == seq![r_10_20(), Val::Int(1)],
+        ops_ev(fr, args) == Seq::<Event>::empty(),
+        nth(elems(fr, r_10_20()), 1) == Val::Int(20),
+        assign(fr, dst, Val::Shr(Box::new(Val::Int(20)))) == (fr2(Val::Shr(Box::new(Val::Int(20))), r_10_20(), seq![]), Seq::<Event>::empty()),
+{
+    let e = Seq::<Event>::empty();
+    if let Operand::Copy(a) = args[0] { assert(read_place(fr, a) == (r_10_20(), e)); }
+    assert(eval_op(fr, args[0]).1 == e);
+    assert(eval_op(fr, args[1]).1 == e);
+    ops_ev_empty(fr, args);
+    assert(op_vals(fr, args) =~= seq![r_10_20(), Val::Int(1)]);
+    assert(assign(fr, dst, Val::Shr(Box::new(Val::Int(20)))).0.locals =~= fr2(Val::Shr(Box::new(Val::Int(20))), r_10_20(), seq![]).locals);
+}
+
+/// `_0 = Index::index(_1, const 1_usize)` on `&[10, 20]` gives `&20` and emits `Idx(1)`.
+pub proof fn sanity_vec_index_idx(p: Program)
+    requires
+        intr_prog(p, Intrinsic::VecIndex),
+        intr_args(p).len() == 2,
+        intr_args(p)[0] matches Operand::Copy(a) && local(a, 1),
+        intr_args(p)[1] == Operand::Const(IntTy::Usize, 1),
+    ensures ({
+        let r = r_10_20();
+        run_fn(p, 0, fr2(Val::Unit, r, seq![]), 2)
+            == Some((fr2(Val::Shr(Box::new(Val::Int(20))), r, seq![]), seq![Event::Idx(1)], 2nat))
+    }),
+{
+    hide(run_from);
+    hide(exec_stmts);
+    hide(exec_intr);
+    hide(call_enter);
+    hide(call_leave);
+    hide(eval_op);
+    hide(op_vals);
+    hide(ops_ev);
+    let e = Seq::<Event>::empty();
+    let ev = seq![Event::Idx(1)];
+    let r = r_10_20();
+    let (fr, f2) = (fr2(Val::Unit, r, seq![]), fr2(Val::Shr(Box::new(Val::Int(20))), r, seq![]));
+    let args = intr_args(p);
+    assert(exec_stmts(p.fns@[0].blocks@[0].stmts@, 0, fr) == (fr, e)) by { reveal(exec_stmts); }
+    assert(exec_stmts(p.fns@[0].blocks@[1].stmts@, 0, f2) == (f2, e)) by { reveal(exec_stmts); }
+    if let Term::Call(_, _, dst, _) = p.fns@[0].blocks@[0].term {
+        assert(exec_intr(Intrinsic::VecIndex, fr, args, dst) == Some((f2, ev, 0nat))) by {
+            reveal(exec_intr);
+            vec_index_parts(fr, args, dst);
+            assert(e + ev + e =~= ev);
+        }
+    }
+    assert(run_from(p, 0, 1, f2, 1) == Some((f2, e, 1nat))) by { reveal(run_from); }
+    assert(e + ev + e =~= ev);
+    assert(run_from(p, 0, 0, fr, 2) == Some((f2, ev, 2nat))) by { reveal(run_from); }
+}
+
+/// The arg values and events and the dst write of `sanity_wrapping_events`.
+proof fn wrapping_parts(fr: Frame, args: Seq<Operand>, dst: Place)
+    requires
+        fr == fr1(Val::Unit),
+        local(dst, 0),
+        args == seq![Operand::Const(IntTy::U32, 7), Operand::Const(IntTy::U32, 2)],
+    ensures
+        op_vals(fr, args) == seq![Val::Int(7), Val::Int(2)],
+        ops_ev(fr, args) == Seq::<Event>::empty(),
+        assign(fr, dst, Val::Int(binop(BinOp::Div, IntTy::U32, 7, 2)))
+            == (fr1(Val::Int(binop(BinOp::Div, IntTy::U32, 7, 2))), Seq::<Event>::empty()),
+{
+    let e = Seq::<Event>::empty();
+    assert(eval_op(fr, args[0]).1 == e);
+    assert(eval_op(fr, args[1]).1 == e);
+    ops_ev_empty(fr, args);
+    assert(op_vals(fr, args) =~= seq![Val::Int(7), Val::Int(2)]);
+    assert(assign(fr, dst, Val::Int(binop(BinOp::Div, IntTy::U32, 7, 2))).0.locals =~= seq![Val::Int(binop(BinOp::Div, IntTy::U32, 7, 2))]);
+}
+
+/// `_0 = wrapping_div::<u32>(const 7, const 2)` emits `DivOps(7, 2)`; the result stays symbolic.
+pub proof fn sanity_wrapping_events(p: Program)
+    requires
+        intr_prog(p, Intrinsic::Wrapping(BinOp::Div, IntTy::U32)),
+        intr_args(p) == seq![Operand::Const(IntTy::U32, 7), Operand::Const(IntTy::U32, 2)],
+    ensures
+        run_fn(p, 0, fr1(Val::Unit), 2)
+            == Some((fr1(Val::Int(binop(BinOp::Div, IntTy::U32, 7, 2))), seq![Event::DivOps(7, 2)], 2nat)),
+{
+    hide(run_from);
+    hide(exec_stmts);
+    hide(exec_intr);
+    hide(call_enter);
+    hide(call_leave);
+    hide(eval_op);
+    hide(op_vals);
+    hide(ops_ev);
+    let e = Seq::<Event>::empty();
+    let ev = seq![Event::DivOps(7, 2)];
+    let (fr, f2) = (fr1(Val::Unit), fr1(Val::Int(binop(BinOp::Div, IntTy::U32, 7, 2))));
+    let args = intr_args(p);
+    assert(exec_stmts(p.fns@[0].blocks@[0].stmts@, 0, fr) == (fr, e)) by { reveal(exec_stmts); }
+    assert(exec_stmts(p.fns@[0].blocks@[1].stmts@, 0, f2) == (f2, e)) by { reveal(exec_stmts); }
+    if let Term::Call(_, _, dst, _) = p.fns@[0].blocks@[0].term {
+        assert(exec_intr(Intrinsic::Wrapping(BinOp::Div, IntTy::U32), fr, args, dst) == Some((f2, ev, 0nat))) by {
+            reveal(exec_intr);
+            wrapping_parts(fr, args, dst);
+            assert(e + ev + e =~= ev);
+        }
+    }
+    assert(run_from(p, 0, 1, f2, 1) == Some((f2, e, 1nat))) by { reveal(run_from); }
+    assert(e + ev + e =~= ev);
+    assert(run_from(p, 0, 0, fr, 2) == Some((f2, ev, 2nat))) by { reveal(run_from); }
+}
+
+pub open spec fn ext_fr(v: Seq<Val>) -> Frame {
+    Frame { locals: seq![Val::Unit, Val::Mut(slot0()), Val::Shr(Box::new(Val::Arr(seq![Val::Int(3), Val::Int(4)])))],
+        slots: seq![Val::Arr(v)] }
+}
+
+/// The arg values and events, the append and the dst write of `sanity_extend_cost`.
+proof fn extend_parts(fr: Frame, args: Seq<Operand>, dst: Place)
+    requires
+        fr == ext_fr(seq![Val::Int(1)]),
+        local(dst, 0),
+        args.len() == 2,
+        args[0] matches Operand::Copy(a) && local(a, 1),
+        args[1] matches Operand::Copy(a) && local(a, 2),
+    ensures
+        op_vals(fr, args) == seq![Val::Mut(slot0()), Val::Shr(Box::new(Val::Arr(seq![Val::Int(3), Val::Int(4)])))],
+        ops_ev(fr, args) == Seq::<Event>::empty(),
+        elems(fr, Val::Shr(Box::new(Val::Arr(seq![Val::Int(3), Val::Int(4)])))) == seq![Val::Int(3), Val::Int(4)],
+        grow(fr, Val::Mut(slot0()), seq![Val::Int(3), Val::Int(4)]) == Some(ext_fr(seq![Val::Int(1), Val::Int(3), Val::Int(4)])),
+        assign(ext_fr(seq![Val::Int(1), Val::Int(3), Val::Int(4)]), dst, Val::Unit)
+            == (ext_fr(seq![Val::Int(1), Val::Int(3), Val::Int(4)]), Seq::<Event>::empty()),
+{
+    let e = Seq::<Event>::empty();
+    let f2 = ext_fr(seq![Val::Int(1), Val::Int(3), Val::Int(4)]);
+    let s = Val::Shr(Box::new(Val::Arr(seq![Val::Int(3), Val::Int(4)])));
+    if let Operand::Copy(a) = args[0] { assert(read_place(fr, a) == (Val::Mut(slot0()), e)); }
+    if let Operand::Copy(a) = args[1] { assert(read_place(fr, a) == (s, e)); }
+    assert(eval_op(fr, args[0]).1 == e);
+    assert(eval_op(fr, args[1]).1 == e);
+    ops_ev_empty(fr, args);
+    assert(op_vals(fr, args) =~= seq![Val::Mut(slot0()), s]);
+    assert(seq![Val::Int(1)] + seq![Val::Int(3), Val::Int(4)] =~= seq![Val::Int(1), Val::Int(3), Val::Int(4)]);
+    assert(write_loc(fr, slot0(), Val::Arr(seq![Val::Int(1), Val::Int(3), Val::Int(4)])).slots =~= f2.slots);
+    assert(assign(f2, dst, Val::Unit).0.locals =~= f2.locals);
+}
+
+/// `_0 = Vec::extend_from_slice(_1, _2)` with slot 0 = `[1]` and `_2 = &[3, 4]` gives `[1, 3, 4]`
+/// and costs `len(_2) = 2` extra steps: 1 + 2 + 1.
+pub proof fn sanity_extend_cost(p: Program)
+    requires
+        intr_prog(p, Intrinsic::VecExtendFromSlice),
+        intr_args(p).len() == 2,
+        intr_args(p)[0] matches Operand::Copy(a) && local(a, 1),
+        intr_args(p)[1] matches Operand::Copy(a) && local(a, 2),
+    ensures
+        run_fn(p, 0, ext_fr(seq![Val::Int(1)]), 2)
+            == Some((ext_fr(seq![Val::Int(1), Val::Int(3), Val::Int(4)]), Seq::<Event>::empty(), 4nat)),
+{
+    hide(run_from);
+    hide(exec_stmts);
+    hide(exec_intr);
+    hide(call_enter);
+    hide(call_leave);
+    hide(eval_op);
+    hide(op_vals);
+    hide(ops_ev);
+    let e = Seq::<Event>::empty();
+    let (fr, f2) = (ext_fr(seq![Val::Int(1)]), ext_fr(seq![Val::Int(1), Val::Int(3), Val::Int(4)]));
+    let args = intr_args(p);
+    assert(exec_stmts(p.fns@[0].blocks@[0].stmts@, 0, fr) == (fr, e)) by { reveal(exec_stmts); }
+    assert(exec_stmts(p.fns@[0].blocks@[1].stmts@, 0, f2) == (f2, e)) by { reveal(exec_stmts); }
+    if let Term::Call(_, _, dst, _) = p.fns@[0].blocks@[0].term {
+        assert(exec_intr(Intrinsic::VecExtendFromSlice, fr, args, dst) == Some((f2, e, 2nat))) by {
+            reveal(exec_intr);
+            extend_parts(fr, args, dst);
+            assert(e + e + e =~= e);
+        }
+    }
+    assert(run_from(p, 0, 1, f2, 1) == Some((f2, e, 1nat))) by { reveal(run_from); }
+    assert(e + e + e =~= e);
+    assert(run_from(p, 0, 0, fr, 2) == Some((f2, e, 4nat))) by { reveal(run_from); }
+}
+
 pub proof fn sanity_fuel_zero_is_none(p: Program)
     requires
         p.fns@.len() == 1,

@@ -273,11 +273,12 @@ pub open spec fn place_loc(fr: Frame, pl: Place) -> Option<(Loc, Seq<Event>)> {
     }
 }
 
-/// `pl := v`, with the place's events. A write to a `None` place is a no-op (`wf` excludes it).
+/// `pl := v`, with the place's events. A write to a `None` place is a no-op that still emits
+/// the place walk's events.
 pub open spec fn assign(fr: Frame, pl: Place, v: Val) -> (Frame, Seq<Event>) {
     match place_loc(fr, pl) {
         Some((l, e)) => (write_loc(fr, l, v), e),
-        None => (fr, seq![]),
+        None => (fr, place_walk(fr, pl).1),
     }
 }
 
@@ -361,7 +362,7 @@ pub open spec fn eval_rv(fr: Frame, rv: Rvalue) -> (Val, Seq<Event>) {
         },
         Rvalue::RefMut(pl) => match place_loc(fr, pl) {
             Some((l, e)) => (Val::Mut(l), e),
-            None => (Val::Unit, seq![]),
+            None => (Val::Unit, place_walk(fr, pl).1),
         },
     }
 }
@@ -381,7 +382,7 @@ pub open spec fn exec_stmt(fr: Frame, s: Stmt) -> (Frame, Seq<Event>) {
                 Val::Adt(_, vs) => Val::Adt(k as nat, vs),
                 v => v,
             }), e),
-            None => (fr, seq![]),
+            None => (fr, place_walk(fr, pl).1),
         },
     }
 }
