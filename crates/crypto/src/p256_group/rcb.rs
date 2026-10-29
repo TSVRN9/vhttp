@@ -761,7 +761,7 @@ pub(crate) open spec fn lkp(a: PF, v: Proj, xs: Seq<int>, ys: Seq<int>) -> bool 
     lk(a.x, v.x, xs, ys) && lk(a.y, v.y, xs, ys) && lk(a.z, v.z, xs, ys)
 }
 
-proof fn lemma_lk_m(a: RF, b: RF, va: int, vb: int, xs: Seq<int>, ys: Seq<int>)
+pub(crate) proof fn lemma_lk_m(a: RF, b: RF, va: int, vb: int, xs: Seq<int>, ys: Seq<int>)
     requires
         on3(xs, ys),
         lk(a, va, xs, ys),
@@ -794,7 +794,7 @@ proof fn lemma_lk_c(c: int, a: RF, va: int, xs: Seq<int>, ys: Seq<int>)
     lemma_lk_mul(rf_k(c), a, xs, ys, c, va);
 }
 
-proof fn lemma_lk_s(a: RF, b: RF, va: int, vb: int, xs: Seq<int>, ys: Seq<int>)
+pub(crate) proof fn lemma_lk_s(a: RF, b: RF, va: int, vb: int, xs: Seq<int>, ys: Seq<int>)
     requires
         on3(xs, ys),
         lk(a, va, xs, ys),
@@ -822,7 +822,7 @@ proof fn lemma_lk_r(a: RF, v: int, xs: Seq<int>, ys: Seq<int>)
     lemma_md(v);
 }
 
-proof fn lemma_pt_link(i: nat, xs: Seq<int>, ys: Seq<int>)
+pub(crate) proof fn lemma_pt_link(i: nat, xs: Seq<int>, ys: Seq<int>)
     requires
         on3(xs, ys),
         i < 3,
@@ -1109,7 +1109,7 @@ pub(crate) open spec fn pfits(a: PF, d: PD) -> bool {
     rfits(a.x, d.x) && rfits(a.y, d.y) && rfits(a.z, d.z)
 }
 
-proof fn lemma_rfits_sub(a: RF, b: RF, da: RD, db: RD)
+pub(crate) proof fn lemma_rfits_sub(a: RF, b: RF, da: RD, db: RD)
     requires
         rfits(a, da),
         rfits(b, db),
@@ -1131,7 +1131,7 @@ proof fn lemma_rfits_sc(c: int, a: RF, da: RD)
     lemma_rfits_mul(rf_k(c), a, rd_k(), da);
 }
 
-proof fn lemma_pt_fits(i: nat)
+pub(crate) proof fn lemma_pt_fits(i: nat)
     requires
         i < 3,
     ensures

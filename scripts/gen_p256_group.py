@@ -1010,7 +1010,166 @@ pub(crate) proof fn lemma_cells_{name}()
     return "".join(o)
 
 
+# ---------------------------------------------------------------------------------------------
+# grid_assoc_{a,b,c,d}: the associativity minors (assoc_id.rs) on the 10 x 13 x 10 grid
+# ---------------------------------------------------------------------------------------------
+
+ASSOC_N = [10, 13, 10]
+ASSOC_I = {"a": range(0, 3), "b": range(3, 6), "c": range(6, 8), "d": range(8, 10)}
+ASSOC_H = 5  # grid cells (x 8 y-signs) per compute chunk; passes at --rlimit 0.15
+
+
+def a_pts(R):
+    return [(R.x(i), R.y(i), R.k(1)) for i in range(3)]
+
+
+def a_minor(R, m, l, r):
+    """Mirror of assoc_id.rs `minor`/`minor_d`."""
+    u, v = [(0, 1), (0, 2), (1, 2)][m]
+    return R.sub(R.mul(l[u], r[v]), R.mul(r[u], l[v]))
+
+
+# The four RCB degree tables, outermost last: (Verus expression, mirror).
+ASSOC_LV = {
+    "01": ("rcb_d(pt_d(0), pt_d(1))", lambda R, t: rcb(R, *a_pts(R)[:2])),
+    "12": ("rcb_d(pt_d(1), pt_d(2))", lambda R, t: rcb(R, *a_pts(R)[1:])),
+    "l": ("rcb_d(pdl_assoc_01(), pt_d(2))", lambda R, t: rcb(R, t["01"], a_pts(R)[2])),
+    "r": ("rcb_d(pt_d(0), pdl_assoc_12())", lambda R, t: rcb(R, a_pts(R)[0], t["12"])),
+}
+
+
+def assoc_tables():
+    t = {}
+    for k, (_, f) in ASSOC_LV.items():
+        t[k] = f(Deg(), t)
+    sizes = [rd_sizes(a_minor(Deg(), m, t["l"], t["r"])) for m in range(3)]
+    assert [max(s[i] for s in sizes) for i in range(3)] == ASSOC_N, sizes
+    return t
+
+
+def assoc_check(gx, gy):
+    n0, n1, n2 = ASSOC_N
+    ok = tot = 0
+    for i in range(n0):
+        for j in range(n1):
+            for l in range(n2):
+                for sig in range(8):
+                    R = Plain([gx[i], gx[j], gx[l]], sgn(sig, [gy[i], gy[j], gy[l]]))
+                    a0, a1, a2 = a_pts(R)
+                    lt, rt = rcb(R, rcb(R, a0, a1), a2), rcb(R, a0, rcb(R, a1, a2))
+                    ok += all(a_minor(R, m, lt, rt) % P == 0 for m in range(3))
+                    tot += 1
+    assert ok == tot == n0 * n1 * n2 * 8
+    print(f"assoc: {ok}/{tot} sign-points zero")
+
+
+def gen_assoc_degrees():
+    t, ns, o = assoc_tables(), f"seq![{ASSOC_N[0]}int, {ASSOC_N[1]}, {ASSOC_N[2]}]", []
+    for k, (expr, _) in ASSOC_LV.items():
+        st = f"{expr} == pdl_assoc_{k}()"
+        o.append(f"""/// {expr}.
+pub(crate) open spec fn pdl_assoc_{k}() -> PD {{
+    {pd_lit(t[k])}
+}}
+
+pub(crate) proof fn lemma_assoc_deg_{k}()
+    ensures
+        {st},
+{{
+    assert({st}) by (compute_only);
+}}
+
+""")
+    for m in range(3):
+        st = f"deg_ok(minor_d({m}, pdl_assoc_l(), pdl_assoc_r()), {ns})"
+        o.append(f"""pub(crate) proof fn lemma_assoc_deg_m{m}()
+    ensures
+        {st},
+{{
+    assert({st}) by (compute_only);
+}}
+
+""")
+    return "".join(o)
+
+
+def gen_grid_assoc(part):
+    gx, gy = grid_points()
+    if part == "a":
+        assoc_check(gx, gy)
+    rows, (_, n1, n2) = ASSOC_I[part], ASSOC_N
+    o = [HEADER, f"""//! Chunked `compute_only` checks of assoc_id.rs's three minors at grid cells (i, j, l) with
+//! {rows.start} <= i < {rows.stop}, j < {n1}, l < {n2}, under all 8 y-signs"""
+         + (", and the literal degree tables of\n//! its four RCB calls." if part == "a" else ".") + f"""
+#[allow(unused_imports)]
+use super::assoc_id::*;
+#[allow(unused_imports)]
+use super::rcb::*;
+#[allow(unused_imports)]
+use super::red::*;
+use vstd::prelude::*;
+
+verus! {{
+
+"""]
+    if part == "a":
+        o.append(gen_assoc_degrees())
+    for i in rows:
+        for j in range(n1):
+            for h in range(n2 // ASSOC_H):
+                st = f"cells_ok(c_assoc(), {i}, {j}, {h * ASSOC_H}, {(h + 1) * ASSOC_H})"
+                o.append(f"""proof fn lemma_assoc_{i}_{j}_{h}()
+    ensures
+        {st},
+{{
+    reveal(assoc_cell);
+    assert({st}) by (compute_only);
+}}
+
+""")
+            calls = "".join(f"    lemma_assoc_{i}_{j}_{h}();\n    lemma_cells_forall(c_assoc(), {i}, {j}, "
+                            f"{h * ASSOC_H}, {(h + 1) * ASSOC_H});\n" for h in range(n2 // ASSOC_H))
+            o.append(f"""proof fn lemma_assoc_w_{i}_{j}()
+    ensures
+        forall|l: int| 0 <= l < {n2} ==> #[trigger] assoc_cell({i}, {j}, l),
+{{
+{calls}    assert forall|l: int| 0 <= l < {n2} implies #[trigger] assoc_cell({i}, {j}, l) by {{
+        assert(c_assoc()({i}, {j}, l));
+    }}
+}}
+
+""")
+        pick = " else ".join(f"if j == {j} {{\n        }}" for j in range(n1))
+        calls = "".join(f"    lemma_assoc_w_{i}_{j}();\n" for j in range(n1))
+        o.append(f"""proof fn lemma_assoc_row_{i}()
+    ensures
+        forall|j: int, l: int| 0 <= j < {n1} && 0 <= l < {n2} ==> #[trigger] assoc_cell({i}, j, l),
+{{
+{calls}    assert forall|j: int, l: int| 0 <= j < {n1} && 0 <= l < {n2} implies #[trigger] assoc_cell({i}, j, l) by {{
+        {pick}
+    }}
+}}
+
+""")
+    rng = f"{rows.start} <= i < {rows.stop} && 0 <= j < {n1} && 0 <= l < {n2}"
+    pick = " else ".join(f"if i == {i} {{\n        }}" for i in rows)
+    calls = "".join(f"    lemma_assoc_row_{i}();\n" for i in rows)
+    o.append(f"""pub(crate) proof fn lemma_assoc_cells_{part}()
+    ensures
+        forall|i: int, j: int, l: int| {rng} ==> #[trigger] assoc_cell(i, j, l),
+{{
+{calls}    assert forall|i: int, j: int, l: int| {rng} implies #[trigger] assoc_cell(i, j, l) by {{
+        {pick}
+    }}
+}}
+
+}} // verus!
+""")
+    return "".join(o)
+
+
 GENERATORS = {"pratt.rs": gen_pratt, "torsion_cert.rs": gen_torsion, "grid_small.rs": gen_grid_small}
+GENERATORS.update({f"grid_assoc_{k}.rs": (lambda k=k: gen_grid_assoc(k)) for k in ASSOC_I})
 
 
 def main():
