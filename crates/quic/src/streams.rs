@@ -25,6 +25,17 @@
 //!   `Output::StreamWrite` to `write`.
 //! - **Our own uni streams.** `write` opens them up to the peer's MAX_STREAMS limit (up to
 //!   2^60) and nothing here caps them; the adapter opens only stream 3.
+//! - **Write backpressure.** The proven send-side bound is relative: buffered bytes ≤
+//!   2·(unacknowledged bytes) per stream. Nothing here caps the total, so the caller must stop
+//!   calling `write` once its own absolute budget is reached.
+//! - **ACK-range growth.** Each send part keeps acked/lost range lists whose length grows when
+//!   the peer acks alternate packets while drip-feeding credit; the caller caps ACK ranges or
+//!   enforces a minimum chunk size.
+//! - **Loop on `poll_data`, not `next_off`.** `next_off()` returning `Some` does not mean
+//!   `poll_data` sends anything (stream or connection credit may be 0); a
+//!   `while next_off().is_some()` loop spins forever on a blocked stream.
+//! - **Window is not pinned.** `lemma_wf` bounds receive memory by 2·limit; the tighter
+//!   2·window bound also needs the window to stay fixed, which no ensures states yet.
 use vstd::prelude::*;
 use crate::codes::*;
 use crate::flow::*;

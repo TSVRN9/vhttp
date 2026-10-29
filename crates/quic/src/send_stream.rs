@@ -658,7 +658,8 @@ impl SendStream {
         Some(Chunk { off, data, fin, new_bytes: len })
     }
 
-    /// The offset `poll_data` would send at next, if it sends anything.
+    /// The offset `poll_data` would send at next, if it sends anything. `Some` does not mean
+    /// `poll_data` will send: credit may be 0. Loop on `poll_data`'s result, not on this.
     #[verifier::when_used_as_spec(next_off_spec)]
     pub fn next_off(&self) -> (r: Option<u64>)
         requires
