@@ -3312,6 +3312,7 @@ impl Connection {
             r.0@.len() <= 1,
             ack_ok(frames_view(r.0@), self.recv(k)),
             r.0@.len() == 1 ==> frames_view(r.0@)[0] is Ack,
+            self.recv(k).has_new() && room >= FULL_ACK_LEN && self.recv(k).range_count() > 0 ==> r.0@.len() == 1,
             forall|i: int|
                 0 <= i < r.0@.len() ==> !ack_eliciting(
                     spec_frame_type(#[trigger] frames_view(r.0@)[i]),
@@ -3447,18 +3448,46 @@ impl Connection {
             tx_frames(frames_view(final(fs)@), PacketKind::OneRtt, base, *final(left) as nat, room),
             extends(frames_view(old(fs)@), frames_view(final(fs)@)),
     {
-        let ghost k = PacketKind::OneRtt;
+        self.handshake_done_frame(left, fs, Ghost(base), Ghost(room));
+        self.new_cid_frames(left, fs, Ghost(base), Ghost(room));
+        self.retire_cid_frames(left, fs, Ghost(base), Ghost(room));
+    }
+
+    /// HANDSHAKE_DONE if it is owed and fits: it counts as Sent exactly when it is placed.
+    #[verifier::spinoff_prover]
+    fn handshake_done_frame(
+        &mut self,
+        left: &mut usize,
+        fs: &mut Vec<Frame>,
+        Ghost(base): Ghost<int>,
+        Ghost(room): Ghost<nat>,
+    )
+        requires
+            old(self).wf(),
+            tx_frames(frames_view(old(fs)@), PacketKind::OneRtt, base, *old(left) as nat, room),
+        ensures
+            final(self).wf(),
+            final(self).tx_kept(*old(self)),
+            final(self).streams == old(self).streams,
+            final(self).polled == old(self).polled,
+            tx_frames(frames_view(final(fs)@), PacketKind::OneRtt, base, *final(left) as nat, room),
+            extends(frames_view(old(fs)@), frames_view(final(fs)@)),
+            (final(fs)@.len() == old(fs)@.len() + 1) <==> (old(self).hs_done is Pending
+                && final(self).hs_done is Sent),
+            final(fs)@.len() == old(fs)@.len() ==> final(self).hs_done == old(self).hs_done,
+            final(fs)@.len() == old(fs)@.len() + 1 ==> final(fs)@.last()@ is HandshakeDone,
+            final(fs)@.len() <= old(fs)@.len() + 1,
+    {
         //= https://www.rfc-editor.org/rfc/rfc9000#section-19.20
         //# Servers MUST
         //# NOT send a HANDSHAKE_DONE frame before completing the handshake.
         // P9: this is 1-RTT, so `complete`; the long-header spaces do not permit the frame.
         if matches!(self.hs_done, HsDone::Pending) {
-            if try_place(Frame::HandshakeDone, left, fs, Ghost(k), Ghost(base), Ghost(room)) {
+            let f = Frame::HandshakeDone;
+            if try_place(f, left, fs, Ghost(PacketKind::OneRtt), Ghost(base), Ghost(room)) {
                 self.hs_done = HsDone::Sent;
             }
         }
-        self.new_cid_frames(left, fs, Ghost(base), Ghost(room));
-        self.retire_cid_frames(left, fs, Ghost(base), Ghost(room));
     }
 
     /// Each NEW_CONNECTION_ID that fits, stopping at the first that does not.
@@ -3480,17 +3509,23 @@ impl Connection {
             final(self).polled == old(self).polled,
             tx_frames(frames_view(final(fs)@), PacketKind::OneRtt, base, *final(left) as nat, room),
             extends(frames_view(old(fs)@), frames_view(final(fs)@)),
+            final(self).hs_done == old(self).hs_done,
+            final(self).local_cids.pending_spec().len() + final(fs)@.len() == old(self).local_cids.pending_spec().len()
+                + old(fs)@.len(),
     {
         let ghost s0 = *self;
         let ghost sf0 = frames_view(fs@);
+        let ghost total = self.local_cids.pending_spec().len() + fs@.len();
         loop
             invariant
                 self.wf(),
                 self.tx_kept(s0),
                 self.streams == s0.streams,
                 self.polled == s0.polled,
+                self.hs_done == s0.hs_done,
                 tx_frames(frames_view(fs@), PacketKind::OneRtt, base, *left as nat, room),
                 extends(sf0, frames_view(fs@)),
+                self.local_cids.pending_spec().len() + fs@.len() == total,
             decreases self.local_cids.pending_spec().len(),
         {
             let f = match self.local_cids.pending_frame() {
@@ -3526,17 +3561,24 @@ impl Connection {
             final(self).polled == old(self).polled,
             tx_frames(frames_view(final(fs)@), PacketKind::OneRtt, base, *final(left) as nat, room),
             extends(frames_view(old(fs)@), frames_view(final(fs)@)),
+            final(self).hs_done == old(self).hs_done,
+            final(self).peer_cids.retire_pending_spec().len() + final(fs)@.len() == old(
+                self,
+            ).peer_cids.retire_pending_spec().len() + old(fs)@.len(),
     {
         let ghost s0 = *self;
         let ghost sf0 = frames_view(fs@);
+        let ghost total = self.peer_cids.retire_pending_spec().len() + fs@.len();
         loop
             invariant
                 self.wf(),
                 self.tx_kept(s0),
                 self.streams == s0.streams,
                 self.polled == s0.polled,
+                self.hs_done == s0.hs_done,
                 tx_frames(frames_view(fs@), PacketKind::OneRtt, base, *left as nat, room),
                 extends(sf0, frames_view(fs@)),
+                self.peer_cids.retire_pending_spec().len() + fs@.len() == total,
             decreases self.peer_cids.retire_pending_spec().len(),
         {
             let f = match self.peer_cids.pending_retire() {
@@ -3656,6 +3698,7 @@ impl Connection {
         requires
             self.wf(),
         ensures
+            r == ack_is_due(self.recv(k), spec_ms_to_us(self.local_tp.max_ack_delay), now),
             r ==> self.recv(k).ack_only_allowed(),
     {
         if !self.recv_ref(k).ack_only_allowed() {
@@ -3756,6 +3799,13 @@ impl Connection {
             final(self).phase_spec() is Open ==> final(self).tx_kept(*old(self)),
             r is None ==> final(self).polled@.len() == 0,
             !(k is OneRtt) ==> final(self).polled == old(self).polled,
+            // §13.2.1: a due ACK that fits goes out.
+            final(self).phase_spec() is Open && old(self).recv(k).has_new() && room >= FULL_ACK_LEN
+                && old(self).recv(k).range_count() > 0 && ack_is_due(
+                old(self).recv(k),
+                spec_ms_to_us(old(self).local_tp.max_ack_delay),
+                now,
+            ) ==> r is Some,
             r matches Some((p, eliciting, ack_only)) ==> {
                 &&& final(self).phase_spec() is Open
                 &&& old(self).packet_ok(p@, k, room as nat)
@@ -3862,6 +3912,7 @@ impl Connection {
             final(self).recv(k) == old(self).recv(k),
             final(self).sent_kept(*old(self), k),
             final(self).sent(k).next_pn_spec() == old(self).sent(k).next_pn_spec(),
+            recorded(old(self).sent(k).inflight_spec(), final(self).sent(k).inflight_spec(), p@),
     {
         let size = packet_len(p);
         let rec = SentPacket {
@@ -3871,6 +3922,11 @@ impl Connection {
             ack_eliciting: true,
             frames: record_frames(p.frames.as_slice()),
         };
+        let ghost o = self.sent(k).inflight_spec();
+        let ghost g = rec;
+        proof {
+            lemma_record_holds(p.frames@, g.frames@);
+        }
         match k {
             PacketKind::Initial => {
                 self.sent_i.on_sent(rec);
@@ -3887,6 +3943,10 @@ impl Connection {
         }
         self.recovery.on_packet_sent(k, p.pn, size as u64, now);
         self.idle.on_eliciting_sent(now);
+        proof {
+            assert(self.sent(k).inflight_spec() == o.push(g));
+            assert(o.push(g).drop_last() =~= o);
+        }
     }
 
     /// Every other space's records and packet numbers, every `largest_acked`, and what
@@ -3987,6 +4047,8 @@ impl Connection {
             p@.frames[0] matches SpecFrame::Ack(a) ==> forall|u: u64|
                 #[trigger] old(self).recv(k).unreported().contains(u) ==> ack_contains(a, u),
             p@.frames[0] is Ack ==> final(self).recv(k).unreported() == Set::<u64>::empty(),
+            eliciting ==> recorded(old(self).sent(k).inflight_spec(), final(self).sent(k).inflight_spec(), p@),
+            !eliciting ==> final(self).sent(k).inflight_spec() == old(self).sent(k).inflight_spec(),
     {
         let ghost s0 = *self;
         proof {
@@ -4033,9 +4095,13 @@ impl Connection {
             r is None ==> final(self).polled@.len() == 0,
             r is None && final(self).phase_spec() is Open ==> final(self).tx_kept(*old(self)),
             !(k is OneRtt) ==> final(self).polled == old(self).polled,
-            r matches Some((p, _, _)) ==> {
+            r matches Some((p, eliciting, _)) ==> {
                 &&& old(self).packet_ok(p@, k, room as nat)
                 &&& polled_in_packet(final(self).polled@, p@)
+                &&& eliciting == exists|i: int|
+                    0 <= i < p@.frames.len() && ack_eliciting(spec_frame_type(#[trigger] p@.frames[i]))
+                &&& eliciting ==> recorded(old(self).sent(k).inflight_spec(), final(self).sent(k).inflight_spec(), p@)
+                &&& !eliciting ==> final(self).sent(k).inflight_spec() == old(self).sent(k).inflight_spec()
                 &&& final(self).sent(k).next_pn_spec() == p@.pn + 1
                 &&& final(self).paths == old(self).paths
                 &&& final(self).lc == old(self).lc
@@ -4938,6 +5004,57 @@ pub open spec fn pns_fresh(log: Seq<u64>, s: Seq<u64>, next: u64) -> bool {
     &&& forall|i: int, j: int| 0 <= i < log.len() && 0 <= j < s.len() ==> #[trigger] log[i] < #[trigger] s[j]
 }
 
+/// `RecvPns::ack_deadline`'s ensures as a test: an ACK-only packet may go, and its ACK is due.
+spec fn ack_is_due(r: RecvPns, max_ack_delay_us: u64, now: u64) -> bool {
+    &&& r.ack_only_allowed()
+    &&& r.eliciting_since_ack() > 0
+    &&& now >= match r.kind_spec() {
+        PacketKind::OneRtt => if r.eliciting_since_ack() >= 2 || r.ack_blocked() {
+            r.first_unacked()->0 as int
+        } else if r.first_unacked()->0 + max_ack_delay_us > u64::MAX {
+            u64::MAX as int
+        } else {
+            r.first_unacked()->0 + max_ack_delay_us
+        },
+        _ => r.first_unacked()->0 as int,
+    }
+}
+
+/// Every retransmittable frame of `frames` is in the record's `rec`.
+spec fn records(rec: Seq<SpecFrame>, frames: Seq<SpecFrame>) -> bool {
+    forall|j: int| 0 <= j < frames.len() && retransmittable(#[trigger] frames[j]) ==> frame_from(rec, frames[j], 0)
+}
+
+/// `s` is `o` with one record pushed: `p`'s, holding its retransmittable frames.
+spec fn recorded(o: Seq<SentPacket>, s: Seq<SentPacket>, p: SpecOutPacket) -> bool {
+    &&& s.len() == o.len() + 1
+    &&& s.drop_last() == o
+    &&& s.last().pn == p.pn
+    &&& records(s.last()@.frames, p.frames)
+}
+
+/// `record_frames`' second ensures, in `records`' terms.
+proof fn lemma_record_holds(frames: Seq<Frame>, rec: Seq<Frame>)
+    requires
+        forall|j: int|
+            0 <= j < frames.len() && retransmittable(#[trigger] frames[j]@) ==> frame_from(
+                frames_view(rec),
+                frames[j]@,
+                0,
+            ),
+    ensures
+        records(frames_view(rec), frames_view(frames)),
+{
+    let v = frames_view(frames);
+    assert forall|j: int| 0 <= j < v.len() && retransmittable(#[trigger] v[j]) implies frame_from(
+        frames_view(rec),
+        v[j],
+        0,
+    ) by {
+        assert(v[j] == frames[j]@);
+    }
+}
+
 /// A record keeps these (3d D5).
 pub open spec fn retransmittable(f: SpecFrame) -> bool {
     !(f is Padding || f is Ping || f is Ack || f is ConnectionClose || f is PathChallenge
@@ -5375,7 +5492,7 @@ fn try_place(
         tx_frames(frames_view(final(fs)@), k, base, *final(left) as nat, room),
         extends(frames_view(old(fs)@), frames_view(final(fs)@)),
         !placed ==> final(fs)@ == old(fs)@ && *final(left) == *old(left),
-        placed ==> final(fs)@.len() == old(fs)@.len() + 1,
+        placed ==> final(fs)@.len() == old(fs)@.len() + 1 && final(fs)@.last()@ == f@,
 {
     let n = frame_len(&f);
     if n > *left {
