@@ -909,4 +909,1379 @@ pub fn exec_sym_block(b: &Body, blk: &Block, facts: &Vec<Fact>) -> (r: Eff)
     r
 }
 
+// ------------------------------------------------------------------ atom order
+
+pub open spec fn ty_rank(t: IntTy) -> nat {
+    match t {
+        IntTy::U8 => 0, IntTy::U16 => 1, IntTy::U32 => 2, IntTy::U64 => 3, IntTy::U128 => 4, IntTy::Usize => 5,
+        IntTy::I8 => 6, IntTy::I16 => 7, IntTy::I32 => 8, IntTy::I64 => 9, IntTy::I128 => 10, IntTy::Isize => 11,
+        IntTy::Bool => 12,
+    }
+}
+
+fn ex_ty_rank(t: &IntTy) -> (r: u8)
+    ensures r as nat == ty_rank(*t),
+{
+    match t {
+        IntTy::U8 => 0, IntTy::U16 => 1, IntTy::U32 => 2, IntTy::U64 => 3, IntTy::U128 => 4, IntTy::Usize => 5,
+        IntTy::I8 => 6, IntTy::I16 => 7, IntTy::I32 => 8, IntTy::I64 => 9, IntTy::I128 => 10, IntTy::Isize => 11,
+        IntTy::Bool => 12,
+    }
+}
+
+pub open spec fn spec_atom_lt(a: Atom, b: Atom) -> bool
+    decreases a,
+{
+    match a {
+        Atom::Const(x) => match b { Atom::Const(y) => x < y, _ => true },
+        Atom::Val(x, s) => match b {
+            Atom::Const(_) => false,
+            Atom::Val(y, t) => x < y || (x == y && ty_rank(s) < ty_rank(t)),
+            _ => true,
+        },
+        Atom::Len(x) => match b {
+            Atom::Len(y) => x < y,
+            Atom::Gap(_, _) => true,
+            _ => false,
+        },
+        Atom::Gap(a1, b1) => match b {
+            Atom::Gap(a2, b2) => spec_atom_lt(*a1, *a2) || (*a1 == *a2 && spec_atom_lt(*b1, *b2)),
+            _ => false,
+        },
+    }
+}
+
+/// `spec_atom_lt` is total and irreflexive.
+pub proof fn lemma_atom_lt_total(a: Atom, b: Atom)
+    ensures a == b || spec_atom_lt(a, b) || spec_atom_lt(b, a), !spec_atom_lt(a, a),
+    decreases a,
+{
+    match (a, b) {
+        (Atom::Gap(a1, b1), Atom::Gap(a2, b2)) => {
+            lemma_atom_lt_total(*a1, *a2);
+            lemma_atom_lt_total(*b1, *b2);
+        },
+        (Atom::Gap(a1, b1), _) => {
+            lemma_atom_lt_total(*a1, *a1);
+            lemma_atom_lt_total(*b1, *b1);
+        },
+        _ => {},
+    }
+}
+
+pub fn atom_lt(a: &Atom, b: &Atom) -> (r: bool)
+    ensures r == spec_atom_lt(*a, *b),
+    decreases a,
+{
+    match a {
+        Atom::Const(x) => match b { Atom::Const(y) => *x < *y, _ => true },
+        Atom::Val(x, s) => match b {
+            Atom::Const(_) => false,
+            Atom::Val(y, t) => *x < *y || (*x == *y && ex_ty_rank(s) < ex_ty_rank(t)),
+            _ => true,
+        },
+        Atom::Len(x) => match b {
+            Atom::Len(y) => *x < *y,
+            Atom::Gap(_, _) => true,
+            _ => false,
+        },
+        Atom::Gap(a1, b1) => match b {
+            Atom::Gap(a2, b2) => atom_lt(a1, a2) || (atom_eq(a1, a2) && atom_lt(b1, b2)),
+            _ => false,
+        },
+    }
+}
+
+/// Non-decreasing and of degree at most 2.
+fn mono_canonical(m: &Mono) -> (r: bool) {
+    m.atoms.len() < 2 || (m.atoms.len() == 2 && !atom_lt(&m.atoms[1], &m.atoms[0]))
+}
+
+fn poly_canonical(p: &Poly) -> (r: bool) {
+    let mut i: usize = 0;
+    while i < p.monos.len()
+        invariant i <= p.monos@.len(),
+        decreases p.monos.len() - i,
+    {
+        if !mono_canonical(&p.monos[i]) { return false; }
+        i += 1;
+    }
+    true
+}
+
+// ------------------------------------------------------------------ values of monomials
+
+proof fn lemma_atoms0(fr: Frame, s: Seq<Atom>)
+    requires s.len() == 0,
+    ensures atoms_val(fr, s) == 1,
+{
+}
+
+proof fn lemma_atoms1(fr: Frame, s: Seq<Atom>)
+    requires s.len() == 1,
+    ensures atoms_val(fr, s) == atom_val(fr, s[0]),
+{
+    reveal_with_fuel(atoms_val, 2);
+}
+
+proof fn lemma_atoms2(fr: Frame, s: Seq<Atom>)
+    requires s.len() == 2,
+    ensures atoms_val(fr, s) == atom_val(fr, s[0]) * atom_val(fr, s[1]),
+{
+    reveal_with_fuel(atoms_val, 3);
+    assert(s.drop_first()[0] == s[1]);
+}
+
+proof fn lemma_monos_empty(fr: Frame, ms: Seq<Mono>)
+    requires ms.len() == 0,
+    ensures monos_val(fr, ms) == 0,
+{
+}
+
+proof fn lemma_monos_push(fr: Frame, ms: Seq<Mono>, m: Mono)
+    ensures monos_val(fr, ms.push(m)) == monos_val(fr, ms) + mono_val(fr, m),
+    decreases ms.len(),
+{
+    let u = ms.push(m);
+    if ms.len() == 0 {
+        lemma_monos_empty(fr, u.drop_first());
+        lemma_monos_empty(fr, ms);
+        assert(u[0] == m);
+    } else {
+        assert(u.drop_first() =~= ms.drop_first().push(m));
+        lemma_monos_push(fr, ms.drop_first(), m);
+        assert(u[0] == ms[0]);
+    }
+}
+
+proof fn lemma_take_step(fr: Frame, ms: Seq<Mono>, i: int)
+    requires 0 <= i < ms.len(),
+    ensures monos_val(fr, ms.take(i + 1)) == monos_val(fr, ms.take(i)) + mono_val(fr, ms[i]),
+{
+    assert(ms.take(i + 1) =~= ms.take(i).push(ms[i]));
+    lemma_monos_push(fr, ms.take(i), ms[i]);
+}
+
+proof fn lemma_take_ends(ms: Seq<Mono>)
+    ensures ms.take(ms.len() as int) =~= ms, ms.take(0).len() == 0,
+{
+}
+
+proof fn lemma_monos_update(fr: Frame, ms: Seq<Mono>, j: int, m2: Mono)
+    requires 0 <= j < ms.len(),
+    ensures monos_val(fr, ms.update(j, m2)) + mono_val(fr, ms[j]) == monos_val(fr, ms) + mono_val(fr, m2),
+    decreases ms.len(),
+{
+    let u = ms.update(j, m2);
+    if j == 0 {
+        assert(u.drop_first() =~= ms.drop_first());
+    } else {
+        assert(u.drop_first() =~= ms.drop_first().update(j - 1, m2));
+        lemma_monos_update(fr, ms.drop_first(), j - 1, m2);
+        assert(u[0] == ms[0]);
+        assert(ms.drop_first()[j - 1] == ms[j]);
+    }
+}
+
+proof fn lemma_monos_same(fr: Frame, a: Seq<Mono>, b: Seq<Mono>)
+    requires monos_same(a, b),
+    ensures monos_val(fr, a) == monos_val(fr, b),
+    decreases a.len(),
+{
+    if a.len() > 0 {
+        assert(mono_same(a[0], b[0]));
+        assert forall|i: int| 0 <= i < a.drop_first().len() implies #[trigger] mono_same(a.drop_first()[i], b.drop_first()[i]) by {
+            assert(mono_same(a[i + 1], b[i + 1]));
+        }
+        lemma_monos_same(fr, a.drop_first(), b.drop_first());
+    }
+}
+
+// ------------------------------------------------------------------ products
+
+proof fn lemma_scale(c: nat, x: nat, y: nat)
+    requires x <= y,
+    ensures c * x <= c * y,
+{
+    assert(c * x <= c * y) by (nonlinear_arith) requires x <= y, c >= 0;
+}
+
+proof fn lemma_scale_one(c: nat, x: nat)
+    ensures c * (x + 1) == c * x + c,
+{
+    assert(c * (x + 1) == c * x + c) by (nonlinear_arith);
+}
+
+proof fn lemma_scale_add(c: nat, x: nat, y: nat)
+    ensures c * (x + y) == c * x + c * y,
+{
+    assert(c * (x + y) == c * x + c * y) by (nonlinear_arith);
+}
+
+proof fn lemma_product_le(a: nat, a2: nat, b: nat, b2: nat)
+    requires a <= a2, b <= b2,
+    ensures a * b <= a2 * b2,
+{
+    assert(a * b <= a2 * b) by (nonlinear_arith) requires a <= a2, b >= 0;
+    assert(a2 * b <= a2 * b2) by (nonlinear_arith) requires b <= b2, a2 >= 0;
+}
+
+/// `g'·u' + u <= g·u` when `g' + 1 <= g` and `u' <= u`.
+proof fn lemma_mono_credit(g1: nat, g: nat, u1: nat, u: nat)
+    requires g1 + 1 <= g, u1 <= u,
+    ensures g1 * u1 + u <= g * u,
+{
+    assert(g1 * u1 <= g1 * u) by (nonlinear_arith) requires u1 <= u, g1 >= 0;
+    assert((g1 + 1) * u <= g * u) by (nonlinear_arith) requires g1 + 1 <= g, u >= 0;
+    assert((g1 + 1) * u == g1 * u + u) by (nonlinear_arith);
+}
+
+proof fn lemma_assoc(c: nat, k: nat, x: nat)
+    ensures (c * k) * x == c * (k * x),
+{
+    assert((c * k) * x == c * (k * x)) by (nonlinear_arith);
+}
+
+proof fn lemma_comm(x: nat, y: nat)
+    ensures x * y == y * x,
+{
+    assert(x * y == y * x) by (nonlinear_arith);
+}
+
+proof fn lemma_mul_nat(x: nat, y: nat)
+    ensures x * y >= 0,
+{
+    assert(x * y >= 0) by (nonlinear_arith) requires x >= 0, y >= 0;
+}
+
+// ------------------------------------------------------------------ building monomials
+
+fn const_atom(a: &Atom) -> (r: Option<u64>)
+    ensures r matches Some(k) ==> *a == Atom::Const(k), r is None ==> !(*a is Const),
+{
+    match a { Atom::Const(k) => Some(*k), _ => None }
+}
+
+/// `c·a`, with a `Const` folded into the coefficient.
+fn fold1(c: u64, a: Atom) -> (r: Option<Mono>)
+    ensures r matches Some(m) ==> forall|fr: Frame| #[trigger] mono_val(fr, m) == c as nat * atom_val(fr, a),
+{
+    let ghost g = a;
+    match const_atom(&a) {
+        Some(k) => match c.checked_mul(k) {
+            Some(v) => {
+                let m = Mono { coef: v, atoms: Vec::new() };
+                proof {
+                    assert forall|fr: Frame| #[trigger] mono_val(fr, m) == c as nat * atom_val(fr, g) by {
+                        lemma_atoms0(fr, m.atoms@);
+                    }
+                }
+                Some(m)
+            },
+            None => None,
+        },
+        None => {
+            let mut atoms: Vec<Atom> = Vec::new();
+            atoms.push(a);
+            let m = Mono { coef: c, atoms };
+            proof {
+                assert forall|fr: Frame| #[trigger] mono_val(fr, m) == c as nat * atom_val(fr, g) by {
+                    lemma_atoms1(fr, m.atoms@);
+                }
+            }
+            Some(m)
+        },
+    }
+}
+
+/// `c·a1·a2`, sorted non-decreasing, with `Const`s folded.
+fn fold2(c: u64, a1: Atom, a2: Atom) -> (r: Option<Mono>)
+    ensures r matches Some(m) ==> forall|fr: Frame| #[trigger] mono_val(fr, m) == c as nat * (atom_val(fr, a1) * atom_val(fr, a2)),
+{
+    let ghost (g1, g2) = (a1, a2);
+    if let Some(k) = const_atom(&a1) {
+        if let Some(v) = c.checked_mul(k) {
+            let r = fold1(v, a2);
+            proof {
+                if r is Some {
+                    let m = r.unwrap();
+                    assert forall|fr: Frame| #[trigger] mono_val(fr, m) == c as nat * (atom_val(fr, g1) * atom_val(fr, g2)) by {
+                        lemma_assoc(c as nat, k as nat, atom_val(fr, g2));
+                    }
+                }
+            }
+            return r;
+        }
+        return None;
+    }
+    if let Some(k) = const_atom(&a2) {
+        if let Some(v) = c.checked_mul(k) {
+            let r = fold1(v, a1);
+            proof {
+                if r is Some {
+                    let m = r.unwrap();
+                    assert forall|fr: Frame| #[trigger] mono_val(fr, m) == c as nat * (atom_val(fr, g1) * atom_val(fr, g2)) by {
+                        lemma_assoc(c as nat, k as nat, atom_val(fr, g1));
+                        lemma_comm(k as nat, atom_val(fr, g1));
+                    }
+                }
+            }
+            return r;
+        }
+        return None;
+    }
+    let swap = atom_lt(&a2, &a1);
+    let mut atoms: Vec<Atom> = Vec::new();
+    if swap { atoms.push(a2); atoms.push(a1); } else { atoms.push(a1); atoms.push(a2); }
+    let m = Mono { coef: c, atoms };
+    proof {
+        assert forall|fr: Frame| #[trigger] mono_val(fr, m) == c as nat * (atom_val(fr, g1) * atom_val(fr, g2)) by {
+            lemma_atoms2(fr, m.atoms@);
+            lemma_comm(atom_val(fr, g1), atom_val(fr, g2));
+        }
+    }
+    Some(m)
+}
+
+// ------------------------------------------------------------------ polynomial sums
+
+/// Concatenation: coefficients are compared by `poly_dominates`, so no addition can overflow.
+pub fn poly_add(a: &Poly, b: &Poly) -> (r: Option<Poly>)
+    ensures r matches Some(q) ==> forall|fr: Frame| #[trigger] poly_val(fr, q) == poly_val(fr, *a) + poly_val(fr, *b),
+{
+    let copy = poly_copy(a);
+    proof {
+        assert forall|fr: Frame| #[trigger] monos_val(fr, copy.monos@) == poly_val(fr, *a) + monos_val(fr, b.monos@.take(0)) by {
+            lemma_monos_same(fr, copy.monos@, a.monos@);
+            lemma_monos_empty(fr, b.monos@.take(0));
+        }
+    }
+    let mut out = copy.monos;
+    let mut i: usize = 0;
+    while i < b.monos.len()
+        invariant
+            i <= b.monos@.len(),
+            forall|fr: Frame| #[trigger] monos_val(fr, out@) == poly_val(fr, *a) + monos_val(fr, b.monos@.take(i as int)),
+        decreases b.monos.len() - i,
+    {
+        let ghost o0 = out@;
+        let m = mono_copy(&b.monos[i]);
+        out.push(m);
+        proof {
+            assert forall|fr: Frame| #[trigger] monos_val(fr, out@) == poly_val(fr, *a) + monos_val(fr, b.monos@.take(i + 1)) by {
+                assert(monos_val(fr, o0) == poly_val(fr, *a) + monos_val(fr, b.monos@.take(i as int)));
+                lemma_monos_push(fr, o0, m);
+                lemma_take_step(fr, b.monos@, i as int);
+                assert(out@ == o0.push(m));
+            }
+        }
+        i += 1;
+    }
+    proof { lemma_take_ends(b.monos@); }
+    Some(Poly { monos: out })
+}
+
+// ------------------------------------------------------------------ domination
+
+/// Takes `c` of `atoms` out of the coefficients left in `rem`.
+fn spend(rem: Vec<Mono>, atoms: &Vec<Atom>, c: u64) -> (r: (bool, Vec<Mono>))
+    ensures r.0 ==> forall|fr: Frame| #[trigger] monos_val(fr, rem@) >= monos_val(fr, r.1@) + c as nat * atoms_val(fr, atoms@),
+{
+    let ghost orig = rem@;
+    let mut rem = rem;
+    let mut need = c;
+    let mut j: usize = 0;
+    proof {
+        assert forall|fr: Frame| #[trigger] monos_val(fr, orig) == monos_val(fr, rem@) + (c - need) * atoms_val(fr, atoms@) by {
+            assert((c - need) * atoms_val(fr, atoms@) == 0);
+        }
+    }
+    while j < rem.len()
+        invariant
+            j <= rem@.len(), need <= c,
+            forall|fr: Frame| #[trigger] monos_val(fr, orig) == monos_val(fr, rem@) + (c - need) * atoms_val(fr, atoms@),
+        decreases rem@.len() - j,
+    {
+        if need > 0 && atoms_eq(&rem[j].atoms, atoms) {
+            let have = rem[j].coef;
+            let t = if have < need { have } else { need };
+            let m2 = Mono { coef: have - t, atoms: atoms_copy(atoms) };
+            let ghost r0 = rem@;
+            let ghost n0 = need;
+            rem.set(j, m2);
+            need = need - t;
+            proof {
+                assert forall|fr: Frame| #[trigger] monos_val(fr, orig) == monos_val(fr, rem@) + (c - need) * atoms_val(fr, atoms@) by {
+                    let av = atoms_val(fr, atoms@);
+                    assert(monos_val(fr, orig) == monos_val(fr, r0) + (c - n0) * av);
+                    lemma_monos_update(fr, r0, j as int, m2);
+                    assert(mono_val(fr, m2) + t as nat * av == mono_val(fr, r0[j as int])) by {
+                        lemma_scale_add(av, (have - t) as nat, t as nat);
+                        lemma_comm(av, (have - t) as nat);
+                        lemma_comm(av, t as nat);
+                        lemma_comm(av, have as nat);
+                    }
+                    assert((c - n0) * av + t as nat * av == (c - need) * av) by {
+                        lemma_scale_add(av, (c - n0) as nat, t as nat);
+                        lemma_comm(av, (c - n0) as nat);
+                        lemma_comm(av, t as nat);
+                        lemma_comm(av, (c - need) as nat);
+                    }
+                }
+            }
+        }
+        j += 1;
+    }
+    if need > 0 { return (false, rem); }
+    (true, rem)
+}
+
+/// Syntactic matching on atom lists, `extra` from the constant monomials. Two lists that are the
+/// same value in a different order do not match: canonical order is what makes this complete.
+pub fn poly_dominates(lhs: &Poly, rhs: &Poly, extra: u64) -> (r: bool)
+    ensures r ==> forall|fr: Frame| #[trigger] poly_val(fr, *lhs) >= poly_val(fr, *rhs) + extra,
+{
+    let copy = poly_copy(lhs);
+    proof {
+        assert forall|fr: Frame| #[trigger] monos_val(fr, copy.monos@) == poly_val(fr, *lhs) by {
+            lemma_monos_same(fr, copy.monos@, lhs.monos@);
+        }
+    }
+    let mut rem = copy.monos;
+    let mut i: usize = 0;
+    while i < rhs.monos.len()
+        invariant
+            i <= rhs.monos@.len(),
+            forall|fr: Frame| #[trigger] poly_val(fr, *lhs) >= monos_val(fr, rem@) + monos_val(fr, rhs.monos@.take(i as int)),
+        decreases rhs.monos.len() - i,
+    {
+        let ghost r0 = rem@;
+        let s = spend(rem, &rhs.monos[i].atoms, rhs.monos[i].coef);
+        if !s.0 { return false; }
+        rem = s.1;
+        proof {
+            assert forall|fr: Frame| #[trigger] poly_val(fr, *lhs) >= monos_val(fr, rem@) + monos_val(fr, rhs.monos@.take(i + 1)) by {
+                assert(poly_val(fr, *lhs) >= monos_val(fr, r0) + monos_val(fr, rhs.monos@.take(i as int)));
+                assert(monos_val(fr, r0) >= monos_val(fr, rem@) + mono_val(fr, rhs.monos@[i as int]));
+                lemma_take_step(fr, rhs.monos@, i as int);
+            }
+        }
+        i += 1;
+    }
+    let no_atoms: Vec<Atom> = Vec::new();
+    let ghost r0 = rem@;
+    let s = spend(rem, &no_atoms, extra);
+    if !s.0 { return false; }
+    proof {
+        lemma_take_ends(rhs.monos@);
+        assert forall|fr: Frame| #[trigger] poly_val(fr, *lhs) >= poly_val(fr, *rhs) + extra by {
+            lemma_atoms0(fr, no_atoms@);
+            assert(poly_val(fr, *lhs) >= monos_val(fr, r0) + monos_val(fr, rhs.monos@.take(rhs.monos@.len() as int)));
+            assert(monos_val(fr, r0) >= monos_val(fr, s.1@) + extra as nat * atoms_val(fr, no_atoms@));
+        }
+    }
+    true
+}
+
+// ------------------------------------------------------------------ facts
+
+fn fact_implied(have: &Vec<Fact>, f: &Fact) -> (r: bool)
+    ensures r ==> forall|fr: Frame| #[trigger] facts_hold(fr, have@) ==> fact_holds(fr, *f),
+{
+    let mut i: usize = 0;
+    while i < have.len()
+        invariant i <= have@.len(),
+        decreases have.len() - i,
+    {
+        let hit = fact_eq(&have[i], f) || match (&have[i], f) {
+            (Fact::Lt(x1, y1), Fact::Le(x2, y2)) => atom_eq(x1, x2) && atom_eq(y1, y2),
+            _ => false,
+        };
+        if hit {
+            proof {
+                assert forall|fr: Frame| #[trigger] facts_hold(fr, have@) implies fact_holds(fr, *f) by {
+                    assert(fact_holds(fr, have@[i as int]));
+                }
+            }
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+pub fn facts_imply(have: &Vec<Fact>, need: &Vec<Fact>) -> (r: bool)
+    ensures r ==> forall|fr: Frame| #[trigger] facts_hold(fr, have@) ==> facts_hold(fr, need@),
+{
+    let mut i: usize = 0;
+    while i < need.len()
+        invariant
+            i <= need@.len(),
+            forall|j: int, fr: Frame| 0 <= j < i && #[trigger] facts_hold(fr, have@) ==> fact_holds(fr, #[trigger] need@[j]),
+        decreases need.len() - i,
+    {
+        if !fact_implied(have, &need[i]) { return false; }
+        i += 1;
+    }
+    proof {
+        assert forall|fr: Frame| #[trigger] facts_hold(fr, have@) implies facts_hold(fr, need@) by {
+            assert forall|j: int| 0 <= j < need@.len() implies fact_holds(fr, #[trigger] need@[j]) by {}
+        }
+    }
+    true
+}
+
+// ------------------------------------------------------------------ pulling atoms back
+
+pub open spec fn pull_ctx(rels: Seq<Rel>, facts: Seq<Fact>, pre: Frame, post: Frame) -> bool {
+    facts_hold(pre, facts) && rels_sound(rels, pre, post)
+}
+
+pub open spec fn di(d: bool) -> nat { if d { 1 } else { 0 } }
+
+/// `a` at `post` is at most `img` at `pre`, less one for a decrement.
+pub open spec fn atom_up(rels: Seq<Rel>, facts: Seq<Fact>, a: Atom, img: Atom, d: bool) -> bool {
+    forall|pre: Frame, post: Frame| #[trigger] pull_ctx(rels, facts, pre, post) ==> atom_val(post, a) + di(d) <= atom_val(pre, img)
+}
+
+pub open spec fn atom_exact(rels: Seq<Rel>, facts: Seq<Fact>, a: Atom, img: Atom) -> bool {
+    forall|pre: Frame, post: Frame| #[trigger] pull_ctx(rels, facts, pre, post) ==> atom_val(post, a) == atom_val(pre, img)
+}
+
+proof fn lemma_rel_sound_at(rels: Seq<Rel>, x: usize, pre: Frame, post: Frame)
+    requires rels_sound(rels, pre, post), (x as nat) < rels.len(),
+    ensures rel_sound(rels[x as int], x as nat, pre, post),
+{
+    assert(rel_sound(rels[x as int], (x as int) as nat, pre, post));
+}
+
+fn pull_val(rels: &Vec<Rel>, facts: &Vec<Fact>, x: usize, ty: &IntTy) -> (r: Option<Atom>)
+    ensures r matches Some(img) ==> atom_up(rels@, facts@, Atom::Val(x, *ty), img, false),
+{
+    if x >= rels.len() { return None; }
+    let r = match &rels[x] {
+        Rel::Same => Some(Atom::Val(x, int_ty_copy(ty))),
+        Rel::ValEq(Atom::Val(y, t), k) => if *k == 0 && int_ty_eq(t, ty) { Some(Atom::Val(*y, int_ty_copy(ty))) } else { None },
+        Rel::ValEq(Atom::Const(c), k) => if *k == 0 { Some(Atom::Const(*c)) } else { None },
+        Rel::ValLe(a) => Some(atom_copy(a)),
+        _ => None,
+    };
+    proof {
+        if r is Some {
+            let img = r.unwrap();
+            assert forall|pre: Frame, post: Frame| #[trigger] pull_ctx(rels@, facts@, pre, post)
+                implies atom_val(post, Atom::Val(x, *ty)) + di(false) <= atom_val(pre, img) by {
+                lemma_rel_sound_at(rels@, x, pre, post);
+                assert(val_nat(*ty, nth(post.locals, x as nat)) == atom_val(post, Atom::Val(x, *ty)));
+            }
+        }
+    }
+    r
+}
+
+fn pull_len(rels: &Vec<Rel>, facts: &Vec<Fact>, x: usize) -> (r: Option<Atom>)
+    ensures r matches Some(img) ==> atom_up(rels@, facts@, Atom::Len(x), img, false),
+{
+    if x >= rels.len() { return None; }
+    let r = match &rels[x] {
+        Rel::Same => Some(Atom::Len(x)),
+        Rel::LenEq(a) => Some(atom_copy(a)),
+        Rel::LenLe(a) => Some(atom_copy(a)),
+        _ => None,
+    };
+    proof {
+        if r is Some {
+            let img = r.unwrap();
+            assert forall|pre: Frame, post: Frame| #[trigger] pull_ctx(rels@, facts@, pre, post)
+                implies atom_val(post, Atom::Len(x)) + di(false) <= atom_val(pre, img) by {
+                lemma_rel_sound_at(rels@, x, pre, post);
+            }
+        }
+    }
+    r
+}
+
+/// The image of a `Gap`'s subtrahend, where the two values are equal.
+fn pull_exact(rels: &Vec<Rel>, facts: &Vec<Fact>, b: &Atom) -> (r: Option<Atom>)
+    ensures r matches Some(img) ==> atom_exact(rels@, facts@, *b, img),
+{
+    let r = match b {
+        Atom::Val(x, ty) => if *x >= rels.len() { None } else {
+            match &rels[*x] {
+                Rel::Same => Some(Atom::Val(*x, int_ty_copy(ty))),
+                Rel::ValEq(Atom::Val(y, t), k) => if *k == 0 && int_ty_eq(t, ty) { Some(Atom::Val(*y, int_ty_copy(ty))) } else { None },
+                _ => None,
+            }
+        },
+        Atom::Len(x) => if *x >= rels.len() { None } else {
+            match &rels[*x] {
+                Rel::Same => Some(Atom::Len(*x)),
+                Rel::LenEq(a) => Some(atom_copy(a)),
+                _ => None,
+            }
+        },
+        _ => None,
+    };
+    proof {
+        if r is Some {
+            let img = r.unwrap();
+            assert forall|pre: Frame, post: Frame| #[trigger] pull_ctx(rels@, facts@, pre, post)
+                implies atom_val(post, *b) == atom_val(pre, img) by {
+                match *b {
+                    Atom::Val(x, _) => lemma_rel_sound_at(rels@, x, pre, post),
+                    Atom::Len(x) => lemma_rel_sound_at(rels@, x, pre, post),
+                    _ => {},
+                }
+            }
+        }
+    }
+    r
+}
+
+/// `facts` has `Lt(lhs, rhs)`.
+fn has_lt(facts: &Vec<Fact>, lhs: &Atom, rhs: &Atom) -> (r: bool)
+    ensures r ==> forall|fr: Frame| #[trigger] facts_hold(fr, facts@) ==> atom_val(fr, *lhs) < atom_val(fr, *rhs),
+{
+    let mut i: usize = 0;
+    while i < facts.len()
+        invariant i <= facts@.len(),
+        decreases facts.len() - i,
+    {
+        let hit = match &facts[i] {
+            Fact::Lt(x, y) => atom_eq(x, lhs) && atom_eq(y, rhs),
+            _ => false,
+        };
+        if hit {
+            proof {
+                assert forall|fr: Frame| #[trigger] facts_hold(fr, facts@) implies atom_val(fr, *lhs) < atom_val(fr, *rhs) by {
+                    assert(fact_holds(fr, facts@[i as int]));
+                }
+            }
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// `b` is a counter this block increments: `Val(i, ty)` with rel `ValEq(Val(i, ty), 1)`.
+fn inc_counter(rels: &Vec<Rel>, b: &Atom) -> (r: bool)
+    ensures r ==> b is Val && (b->Val_0 as nat) < rels@.len()
+        && rels@[b->Val_0 as int] == Rel::ValEq(*b, 1),
+{
+    match b {
+        Atom::Val(i, ty) => *i < rels.len() && match &rels[*i] {
+            Rel::ValEq(a, k) => *k == 1 && atom_eq(a, b),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn pull_gap(rels: &Vec<Rel>, facts: &Vec<Fact>, a: &Atom, a1: Atom, b: &Atom) -> (r: (Atom, bool))
+    requires atom_up(rels@, facts@, *a, a1, false),
+    ensures atom_up(rels@, facts@, Atom::Gap(Box::new(*a), Box::new(*b)), r.0, r.1),
+{
+    let ghost g = a1;
+    let ghost whole = Atom::Gap(Box::new(*a), Box::new(*b));
+    if let Some(img) = pull_exact(rels, facts, b) {
+        let ghost gi = img;
+        let r = Atom::Gap(Box::new(a1), Box::new(img));
+        proof {
+            assert forall|pre: Frame, post: Frame| #[trigger] pull_ctx(rels@, facts@, pre, post)
+                implies atom_val(post, whole) + di(false) <= atom_val(pre, r) by {
+                assert(atom_val(post, *a) + di(false) <= atom_val(pre, g));
+                assert(atom_val(post, *b) == atom_val(pre, gi));
+            }
+        }
+        return (r, false);
+    }
+    if inc_counter(rels, b) {
+        let d = has_lt(facts, b, &a1);
+        let r = Atom::Gap(Box::new(a1), Box::new(atom_copy(b)));
+        proof {
+            assert forall|pre: Frame, post: Frame| #[trigger] pull_ctx(rels@, facts@, pre, post)
+                implies atom_val(post, whole) + di(d) <= atom_val(pre, r) by {
+                assert(atom_val(post, *a) + di(false) <= atom_val(pre, g));
+                lemma_rel_sound_at(rels@, b->Val_0, pre, post);
+                assert(atom_val(post, *b) == atom_val(pre, *b) + 1);
+                if d { assert(atom_val(pre, *b) < atom_val(pre, g)); }
+            }
+        }
+        return (r, d);
+    }
+    proof {
+        assert forall|pre: Frame, post: Frame| #[trigger] pull_ctx(rels@, facts@, pre, post)
+            implies atom_val(post, whole) + di(false) <= atom_val(pre, g) by {
+            assert(atom_val(post, *a) + di(false) <= atom_val(pre, g));
+        }
+    }
+    (a1, false)
+}
+
+/// The image of a post-atom at the block's start, and whether it is a decrement.
+fn pull_atom(rels: &Vec<Rel>, facts: &Vec<Fact>, a: &Atom) -> (r: Option<(Atom, bool)>)
+    ensures r matches Some((img, d)) ==> atom_up(rels@, facts@, *a, img, d),
+    decreases a,
+{
+    match a {
+        Atom::Const(c) => {
+            let r = Atom::Const(*c);
+            proof {
+                assert forall|pre: Frame, post: Frame| #[trigger] pull_ctx(rels@, facts@, pre, post)
+                    implies atom_val(post, *a) + di(false) <= atom_val(pre, r) by {}
+            }
+            Some((r, false))
+        },
+        Atom::Val(x, ty) => match pull_val(rels, facts, *x, ty) { Some(i) => Some((i, false)), None => None },
+        Atom::Len(x) => match pull_len(rels, facts, *x) { Some(i) => Some((i, false)), None => None },
+        Atom::Gap(x, y) => match pull_atom(rels, facts, x) {
+            Some((a1, d)) => {
+                let ghost g = a1;
+                proof {
+                    assert forall|pre: Frame, post: Frame| #[trigger] pull_ctx(rels@, facts@, pre, post)
+                        implies atom_val(post, **x) + di(false) <= atom_val(pre, g) by {
+                        assert(atom_val(post, **x) + di(d) <= atom_val(pre, g));
+                    }
+                }
+                Some(pull_gap(rels, facts, x, a1, y))
+            },
+            None => None,
+        },
+    }
+}
+
+// ------------------------------------------------------------------ pulling monomials back
+
+pub open spec fn cr_val(fr: Frame, cr: Option<Mono>) -> nat {
+    match cr { Some(m) => mono_val(fr, m), None => 0 }
+}
+
+pub open spec fn mono_up(rels: Seq<Rel>, facts: Seq<Fact>, m: Mono, up: Mono, cr: Option<Mono>) -> bool {
+    forall|pre: Frame, post: Frame| #[trigger] pull_ctx(rels, facts, pre, post) ==> mono_val(post, m) + cr_val(pre, cr) <= mono_val(pre, up)
+}
+
+fn pull_mono1(rels: &Vec<Rel>, facts: &Vec<Fact>, m: &Mono) -> (r: Option<(Mono, Option<Mono>)>)
+    requires m.atoms@.len() == 1,
+    ensures r matches Some((up, cr)) ==> mono_up(rels@, facts@, *m, up, cr),
+{
+    let c = m.coef;
+    match pull_atom(rels, facts, &m.atoms[0]) {
+        Some((img, d)) => {
+            let ghost gi = img;
+            match fold1(c, img) {
+                Some(up) => {
+                    let cr = if d { Some(Mono { coef: c, atoms: Vec::new() }) } else { None };
+                    proof {
+                        assert forall|pre: Frame, post: Frame| #[trigger] pull_ctx(rels@, facts@, pre, post)
+                            implies mono_val(post, *m) + cr_val(pre, cr) <= mono_val(pre, up) by {
+                            let p = atom_val(post, m.atoms@[0]);
+                            let i = atom_val(pre, gi);
+                            lemma_atoms1(post, m.atoms@);
+                            assert(p + di(d) <= i);
+                            lemma_scale(c as nat, p + di(d), i);
+                            if d {
+                                lemma_atoms0(pre, cr.unwrap().atoms@);
+                                lemma_scale_one(c as nat, p);
+                            }
+                        }
+                    }
+                    Some((up, cr))
+                },
+                None => None,
+            }
+        },
+        None => None,
+    }
+}
+
+/// What a decrement in a degree-2 monomial owes, scaled by the coefficient.
+proof fn lemma_mono2_credit(c: nat, p1: nat, p2: nat, i1: nat, i2: nat)
+    requires p1 + 1 <= i1, p2 <= i2,
+    ensures c * (p1 * p2) + c * i2 <= c * (i1 * i2),
+{
+    lemma_mono_credit(p1, i1, p2, i2);
+    lemma_scale(c, p1 * p2 + i2, i1 * i2);
+    lemma_mul_nat(p1, p2);
+    lemma_scale_add(c, p1 * p2, i2);
+}
+
+proof fn lemma_mono2_up(rels: Seq<Rel>, facts: Seq<Fact>, m: Mono, up: Mono, cr: Option<Mono>, i1: Atom, d1: bool, i2: Atom, d2: bool, pre: Frame, post: Frame)
+    requires
+        m.atoms@.len() == 2, pull_ctx(rels, facts, pre, post),
+        atom_up(rels, facts, m.atoms@[0], i1, d1), atom_up(rels, facts, m.atoms@[1], i2, d2),
+        mono_val(pre, up) == m.coef as nat * (atom_val(pre, i1) * atom_val(pre, i2)),
+        d1 ==> (cr matches Some(x) && mono_val(pre, x) == m.coef as nat * atom_val(pre, i2)),
+        !d1 && d2 ==> (cr matches Some(x) && mono_val(pre, x) == m.coef as nat * atom_val(pre, i1)),
+        !d1 && !d2 ==> cr is None,
+    ensures mono_val(post, m) + cr_val(pre, cr) <= mono_val(pre, up),
+{
+    let (c, p1, p2, v1, v2) = (m.coef as nat, atom_val(post, m.atoms@[0]), atom_val(post, m.atoms@[1]), atom_val(pre, i1), atom_val(pre, i2));
+    lemma_atoms2(post, m.atoms@);
+    assert(p1 + di(d1) <= v1 && p2 + di(d2) <= v2);
+    if d1 {
+        lemma_mono2_credit(c, p1, p2, v1, v2);
+    } else if d2 {
+        lemma_mono2_credit(c, p2, p1, v2, v1);
+        lemma_comm(p2, p1);
+        lemma_comm(v2, v1);
+    } else {
+        lemma_product_le(p1, v1, p2, v2);
+        lemma_scale(c, p1 * p2, v1 * v2);
+    }
+}
+
+fn pull_mono2(rels: &Vec<Rel>, facts: &Vec<Fact>, m: &Mono) -> (r: Option<(Mono, Option<Mono>)>)
+    requires m.atoms@.len() == 2,
+    ensures r matches Some((up, cr)) ==> mono_up(rels@, facts@, *m, up, cr),
+{
+    let c = m.coef;
+    let p1 = pull_atom(rels, facts, &m.atoms[0]);
+    let p2 = pull_atom(rels, facts, &m.atoms[1]);
+    if p1.is_none() || p2.is_none() { return None; }
+    let (i1, d1) = p1.unwrap();
+    let (i2, d2) = p2.unwrap();
+    let cr = if d1 {
+        match fold1(c, atom_copy(&i2)) { Some(x) => Some(x), None => return None }
+    } else if d2 {
+        match fold1(c, atom_copy(&i1)) { Some(x) => Some(x), None => return None }
+    } else {
+        None
+    };
+    let ghost (g1, g2) = (i1, i2);
+    match fold2(c, i1, i2) {
+        Some(up) => {
+            proof {
+                assert forall|pre: Frame, post: Frame| #[trigger] pull_ctx(rels@, facts@, pre, post)
+                    implies mono_val(post, *m) + cr_val(pre, cr) <= mono_val(pre, up) by {
+                    assert(mono_val(pre, up) == c as nat * (atom_val(pre, g1) * atom_val(pre, g2)));
+                    lemma_mono2_up(rels@, facts@, *m, up, cr, g1, d1, g2, d2, pre, post);
+                }
+            }
+            Some((up, cr))
+        },
+        None => None,
+    }
+}
+
+// ponytail: degree at most 2; higher degree needs a multiset-product lemma.
+fn pull_mono(rels: &Vec<Rel>, facts: &Vec<Fact>, m: &Mono) -> (r: Option<(Mono, Option<Mono>)>)
+    ensures r matches Some((up, cr)) ==> mono_up(rels@, facts@, *m, up, cr),
+{
+    if m.atoms.len() == 0 {
+        let up = mono_copy(m);
+        let ghost none = Option::<Mono>::None;
+        proof {
+            assert forall|pre: Frame, post: Frame| #[trigger] pull_ctx(rels@, facts@, pre, post)
+                implies mono_val(post, *m) + cr_val(pre, none) <= mono_val(pre, up) by {
+                lemma_atoms0(post, m.atoms@);
+                lemma_atoms0(pre, up.atoms@);
+            }
+        }
+        Some((up, None))
+    } else if m.atoms.len() == 1 {
+        pull_mono1(rels, facts, m)
+    } else if m.atoms.len() == 2 {
+        pull_mono2(rels, facts, m)
+    } else {
+        None
+    }
+}
+
+pub open spec fn monos_up(rels: Seq<Rel>, facts: Seq<Fact>, q: Seq<Mono>, up: Seq<Mono>, cr: Seq<Mono>) -> bool {
+    forall|pre: Frame, post: Frame| #[trigger] pull_ctx(rels, facts, pre, post) ==> monos_val(post, q) + monos_val(pre, cr) <= monos_val(pre, up)
+}
+
+proof fn lemma_monos_up_step(rels: Seq<Rel>, facts: Seq<Fact>, q: Seq<Mono>, i: int, up: Seq<Mono>, cr: Seq<Mono>, u: Mono, c: Option<Mono>, up2: Seq<Mono>, cr2: Seq<Mono>)
+    requires
+        0 <= i < q.len(), monos_up(rels, facts, q.take(i), up, cr), mono_up(rels, facts, q[i], u, c),
+        up2 == up.push(u), cr2 == (match c { Some(x) => cr.push(x), None => cr }),
+    ensures monos_up(rels, facts, q.take(i + 1), up2, cr2),
+{
+    assert forall|pre: Frame, post: Frame| #[trigger] pull_ctx(rels, facts, pre, post)
+        implies monos_val(post, q.take(i + 1)) + monos_val(pre, cr2) <= monos_val(pre, up2) by {
+        assert(monos_val(post, q.take(i)) + monos_val(pre, cr) <= monos_val(pre, up));
+        assert(mono_val(post, q[i]) + cr_val(pre, c) <= mono_val(pre, u));
+        lemma_take_step(post, q, i);
+        lemma_monos_push(pre, up, u);
+        if let Some(x) = c { lemma_monos_push(pre, cr, x); }
+    }
+}
+
+/// `q` at `post`, plus a credit at `pre`, is at most `up` at `pre`.
+pub fn pull_post(q: &Poly, e: &Eff, facts: &Vec<Fact>) -> (r: Option<(Poly, Poly)>)
+    ensures r matches Some((up, credit)) ==> forall|pre: Frame, post: Frame, s: nat|
+        facts_hold(pre, facts@) && #[trigger] eff_sound(eff_view(*e), pre, post, s)
+            ==> poly_val(post, *q) + poly_val(pre, credit) <= poly_val(pre, up),
+{
+    let mut up: Vec<Mono> = Vec::new();
+    let mut cr: Vec<Mono> = Vec::new();
+    let mut i: usize = 0;
+    proof {
+        assert forall|pre: Frame, post: Frame| #[trigger] pull_ctx(e.rel@, facts@, pre, post)
+            implies monos_val(post, q.monos@.take(0)) + monos_val(pre, cr@) <= monos_val(pre, up@) by {
+            lemma_monos_empty(post, q.monos@.take(0));
+        }
+    }
+    while i < q.monos.len()
+        invariant i <= q.monos@.len(), monos_up(e.rel@, facts@, q.monos@.take(i as int), up@, cr@),
+        decreases q.monos.len() - i,
+    {
+        match pull_mono(&e.rel, facts, &q.monos[i]) {
+            Some((u, c)) => {
+                let ghost (up0, cr0, g_u, g_c) = (up@, cr@, u, c);
+                up.push(u);
+                if let Some(x) = c { cr.push(x); }
+                proof { lemma_monos_up_step(e.rel@, facts@, q.monos@, i as int, up0, cr0, g_u, g_c, up@, cr@); }
+            },
+            None => return None,
+        }
+        i += 1;
+    }
+    let r = (Poly { monos: up }, Poly { monos: cr });
+    proof {
+        lemma_take_ends(q.monos@);
+        assert forall|pre: Frame, post: Frame, s: nat|
+            facts_hold(pre, facts@) && #[trigger] eff_sound(eff_view(*e), pre, post, s)
+                implies poly_val(post, *q) + poly_val(pre, r.1) <= poly_val(pre, r.0) by {
+            assert(pull_ctx(e.rel@, facts@, pre, post));
+        }
+    }
+    Some(r)
+}
+
+// ------------------------------------------------------------------ bounds under the edge's facts
+
+/// `a`, raised by the first `Le(a, u)` or `Lt(a, u)`; a `Gap` keeps its subtrahend.
+fn raise_atom(facts: &Vec<Fact>, a: &Atom) -> (r: Atom)
+    ensures forall|fr: Frame| #[trigger] facts_hold(fr, facts@) ==> atom_val(fr, *a) <= atom_val(fr, r),
+    decreases a,
+{
+    let mut i: usize = 0;
+    while i < facts.len()
+        invariant i <= facts@.len(),
+        decreases facts.len() - i,
+    {
+        let u = match &facts[i] {
+            Fact::Le(t, u) => if atom_eq(t, a) { Some(atom_copy(u)) } else { None },
+            Fact::Lt(t, u) => if atom_eq(t, a) { Some(atom_copy(u)) } else { None },
+        };
+        if let Some(u) = u {
+            proof {
+                let gu = u;
+                assert forall|fr: Frame| #[trigger] facts_hold(fr, facts@) implies atom_val(fr, *a) <= atom_val(fr, gu) by {
+                    assert(fact_holds(fr, facts@[i as int]));
+                }
+            }
+            return u;
+        }
+        i += 1;
+    }
+    match a {
+        Atom::Gap(x, y) => {
+            let x2 = raise_atom(facts, x);
+            let r = Atom::Gap(Box::new(x2), Box::new(atom_copy(y)));
+            proof {
+                assert forall|fr: Frame| #[trigger] facts_hold(fr, facts@) implies atom_val(fr, *a) <= atom_val(fr, r) by {
+                    assert(atom_val(fr, **x) <= atom_val(fr, x2));
+                }
+            }
+            r
+        },
+        _ => {
+            let r = atom_copy(a);
+            proof {
+                assert forall|fr: Frame| #[trigger] facts_hold(fr, facts@) implies atom_val(fr, *a) <= atom_val(fr, r) by {}
+            }
+            r
+        },
+    }
+}
+
+/// `m` with each atom raised. The coefficient stays, so nothing overflows.
+fn raise_mono(facts: &Vec<Fact>, m: &Mono) -> (r: Option<Mono>)
+    ensures r matches Some(u) ==> forall|fr: Frame| #[trigger] facts_hold(fr, facts@) ==> mono_val(fr, *m) <= mono_val(fr, u),
+{
+    if m.atoms.len() == 0 {
+        let u = mono_copy(m);
+        proof {
+            assert forall|fr: Frame| #[trigger] facts_hold(fr, facts@) implies mono_val(fr, *m) <= mono_val(fr, u) by {
+                lemma_atoms0(fr, m.atoms@);
+                lemma_atoms0(fr, u.atoms@);
+            }
+        }
+        Some(u)
+    } else if m.atoms.len() == 1 {
+        let a = raise_atom(facts, &m.atoms[0]);
+        let mut atoms: Vec<Atom> = Vec::new();
+        atoms.push(a);
+        let u = Mono { coef: m.coef, atoms };
+        proof {
+            assert forall|fr: Frame| #[trigger] facts_hold(fr, facts@) implies mono_val(fr, *m) <= mono_val(fr, u) by {
+                lemma_atoms1(fr, m.atoms@);
+                lemma_atoms1(fr, u.atoms@);
+                lemma_scale(m.coef as nat, atom_val(fr, m.atoms@[0]), atom_val(fr, u.atoms@[0]));
+            }
+        }
+        Some(u)
+    } else if m.atoms.len() == 2 {
+        let a0 = raise_atom(facts, &m.atoms[0]);
+        let a1 = raise_atom(facts, &m.atoms[1]);
+        let mut atoms: Vec<Atom> = Vec::new();
+        atoms.push(a0);
+        atoms.push(a1);
+        let u = Mono { coef: m.coef, atoms };
+        proof {
+            assert forall|fr: Frame| #[trigger] facts_hold(fr, facts@) implies mono_val(fr, *m) <= mono_val(fr, u) by {
+                lemma_atoms2(fr, m.atoms@);
+                lemma_atoms2(fr, u.atoms@);
+                let (x0, x1, y0, y1) = (atom_val(fr, m.atoms@[0]), atom_val(fr, m.atoms@[1]), atom_val(fr, u.atoms@[0]), atom_val(fr, u.atoms@[1]));
+                lemma_product_le(x0, y0, x1, y1);
+                lemma_scale(m.coef as nat, x0 * x1, y0 * y1);
+            }
+        }
+        Some(u)
+    } else {
+        None
+    }
+}
+
+fn budget_has(budget: &Vec<Mono>, atoms: &Vec<Atom>) -> (r: bool) {
+    let mut i: usize = 0;
+    while i < budget.len()
+        invariant i <= budget@.len(),
+        decreases budget.len() - i,
+    {
+        if atoms_eq(&budget[i].atoms, atoms) { return true; }
+        i += 1;
+    }
+    false
+}
+
+/// `pot` and the credits of the monomials of `p` that pull back.
+fn make_budget(p: &Poly, pot: &Poly, e: &Eff, pre_facts: &Vec<Fact>) -> (r: Vec<Mono>) {
+    let mut budget = poly_copy(pot).monos;
+    let mut i: usize = 0;
+    while i < p.monos.len()
+        invariant i <= p.monos@.len(),
+        decreases p.monos.len() - i,
+    {
+        if let Some((_, Some(c))) = pull_mono(&e.rel, pre_facts, &p.monos[i]) { budget.push(c); }
+        i += 1;
+    }
+    budget
+}
+
+/// `p`, with what the block cannot pay as written raised under `post_facts`.
+pub fn bound_post(p: &Poly, pot: &Poly, e: &Eff, pre_facts: &Vec<Fact>, post_facts: &Vec<Fact>) -> (r: Option<Poly>)
+    ensures r matches Some(q) ==> forall|fr: Frame| #[trigger] facts_hold(fr, post_facts@) ==> poly_val(fr, q) >= poly_val(fr, *p),
+{
+    let budget = make_budget(p, pot, e, pre_facts);
+    let mut out: Vec<Mono> = Vec::new();
+    let mut i: usize = 0;
+    while i < p.monos.len()
+        invariant
+            i <= p.monos@.len(),
+            forall|fr: Frame| #[trigger] facts_hold(fr, post_facts@) ==> monos_val(fr, out@) >= monos_val(fr, p.monos@.take(i as int)),
+        decreases p.monos.len() - i,
+    {
+        let m = &p.monos[i];
+        let keep = match pull_mono(&e.rel, pre_facts, m) {
+            Some((up, _)) => budget_has(&budget, &up.atoms),
+            None => false,
+        };
+        let next = if keep {
+            mono_copy(m)
+        } else {
+            match raise_mono(post_facts, m) { Some(u) => u, None => return None }
+        };
+        let ghost o0 = out@;
+        proof {
+            assert forall|fr: Frame| #[trigger] facts_hold(fr, post_facts@) implies mono_val(fr, *m) <= mono_val(fr, next) by {}
+        }
+        out.push(next);
+        proof {
+            assert forall|fr: Frame| #[trigger] facts_hold(fr, post_facts@) implies monos_val(fr, out@) >= monos_val(fr, p.monos@.take(i + 1)) by {
+                assert(monos_val(fr, o0) >= monos_val(fr, p.monos@.take(i as int)));
+                assert(mono_val(fr, *m) <= mono_val(fr, next));
+                lemma_take_step(fr, p.monos@, i as int);
+                lemma_monos_push(fr, o0, next);
+            }
+        }
+        i += 1;
+    }
+    proof { lemma_take_ends(p.monos@); }
+    Some(Poly { monos: out })
+}
+
+// ------------------------------------------------------------------ instantiating a summary
+
+proof fn lemma_read_empty(fr: Frame, q: Place)
+    requires q.proj@.len() == 0,
+    ensures read_place(fr, q).0 == nth(fr.locals, q.local as nat),
+{
+    assert(walk(fr, q.proj@, 0, Cur::L(local_loc(q.local as nat))).0 == Cur::L(local_loc(q.local as nat)));
+    assert(local_loc(q.local as nat).path.len() == 0);
+}
+
+pub open spec fn enter_frame(p: Program, g: nat, fr: Frame, args: Seq<Operand>) -> Frame { call_enter(p, g, fr, args).0 }
+
+/// A callee local that is no parameter is `Unit` at entry.
+proof fn lemma_enter_unit(p: Program, g: nat, fr: Frame, args: Seq<Operand>, j: usize)
+    requires g < p.fns@.len(), !(1 <= j <= args.len() && (j as nat) < p.fns@[g as int].locals@.len()),
+    ensures nth(enter_frame(p, g, fr, args).locals, j as nat) == Val::Unit,
+{
+}
+
+/// A parameter copied from a local: the atoms read the same, through a `Mut`'s slot too.
+proof fn lemma_enter_copy(p: Program, g: nat, fr: Frame, args: Seq<Operand>, j: usize, q: Place, ty: IntTy)
+    requires
+        g < p.fns@.len(), 1 <= j <= args.len(), (j as nat) < p.fns@[g as int].locals@.len(),
+        args[j - 1] == Operand::Copy(q), q.proj@.len() == 0,
+    ensures
+        atom_val(enter_frame(p, g, fr, args), Atom::Val(j, ty)) == atom_val(fr, Atom::Val(q.local, ty)),
+        atom_val(enter_frame(p, g, fr, args), Atom::Len(j)) == atom_val(fr, Atom::Len(q.local)),
+{
+    lemma_read_empty(fr, q);
+    let cf = enter_frame(p, g, fr, args);
+    let vs = op_vals(fr, args);
+    assert(vs[j - 1] == nth(fr.locals, q.local as nat));
+    assert(nth(cf.locals, j as nat) == cf.locals[j as int]);
+    if let Val::Mut(l) = vs[j - 1] {
+        let s = Loc { root: Root::Slot((j - 1) as nat), path: seq![] };
+        assert(cf.locals[j as int] == Val::Mut(s));
+        assert(cf.slots[j - 1] == read_loc(fr, l));
+        assert(nth(cf.slots, (j - 1) as nat) == cf.slots[j - 1]);
+        assert(read_loc(cf, s) == cf.slots[j - 1]);
+    }
+}
+
+proof fn lemma_enter_const(p: Program, g: nat, fr: Frame, args: Seq<Operand>, j: usize, t: IntTy, n: u128)
+    requires
+        g < p.fns@.len(), 1 <= j <= args.len(), (j as nat) < p.fns@[g as int].locals@.len(),
+        args[j - 1] == Operand::Const(t, n),
+    ensures atom_val(enter_frame(p, g, fr, args), Atom::Val(j, t)) == uval(t, n) as nat,
+{
+    let cf = enter_frame(p, g, fr, args);
+    assert(op_vals(fr, args)[j - 1] == Val::Int(n));
+    assert(nth(cf.locals, j as nat) == cf.locals[j as int]);
+}
+
+fn is_param(p: &Program, g: usize, args: &Vec<Operand>, j: usize) -> (r: bool)
+    requires g < p.fns@.len(),
+    ensures r == (1 <= j <= args@.len() && (j as nat) < p.fns@[g as int].locals@.len()),
+{
+    1 <= j && j <= args.len() && j < p.fns[g].locals.len()
+}
+
+pub open spec fn inst_eq(p: Program, g: nat, args: Seq<Operand>, a: Atom, img: Atom) -> bool {
+    forall|fr: Frame| #[trigger] atom_val(fr, img) == atom_val(enter_frame(p, g, fr, args), a)
+}
+
+fn inst_val(p: &Program, g: usize, args: &Vec<Operand>, j: usize, ty: &IntTy) -> (r: Option<Atom>)
+    requires g < p.fns@.len(),
+    ensures r matches Some(img) ==> inst_eq(*p, g as nat, args@, Atom::Val(j, *ty), img),
+{
+    let a = Atom::Val(j, int_ty_copy(ty));
+    if !is_param(p, g, args, j) {
+        let r = Atom::Const(0);
+        proof {
+            assert forall|fr: Frame| #[trigger] atom_val(fr, r) == atom_val(enter_frame(*p, g as nat, fr, args@), a) by {
+                lemma_enter_unit(*p, g as nat, fr, args@, j);
+            }
+        }
+        return Some(r);
+    }
+    match &args[j - 1] {
+        Operand::Copy(q) => if q.proj.len() == 0 {
+            let r = Atom::Val(q.local, int_ty_copy(ty));
+            proof {
+                assert forall|fr: Frame| #[trigger] atom_val(fr, r) == atom_val(enter_frame(*p, g as nat, fr, args@), a) by {
+                    lemma_enter_copy(*p, g as nat, fr, args@, j, *q, *ty);
+                }
+            }
+            Some(r)
+        } else {
+            None
+        },
+        Operand::Const(t, n) => {
+            let u = exec_uval(t, *n);
+            if int_ty_eq(t, ty) && u <= u64::MAX as u128 {
+                let r = Atom::Const(u as u64);
+                proof {
+                    assert forall|fr: Frame| #[trigger] atom_val(fr, r) == atom_val(enter_frame(*p, g as nat, fr, args@), a) by {
+                        lemma_enter_const(*p, g as nat, fr, args@, j, *t, *n);
+                    }
+                }
+                Some(r)
+            } else {
+                None
+            }
+        },
+        _ => None,
+    }
+}
+
+fn inst_len(p: &Program, g: usize, args: &Vec<Operand>, j: usize) -> (r: Option<Atom>)
+    requires g < p.fns@.len(),
+    ensures r matches Some(img) ==> inst_eq(*p, g as nat, args@, Atom::Len(j), img),
+{
+    let a = Atom::Len(j);
+    if !is_param(p, g, args, j) {
+        let r = Atom::Const(0);
+        proof {
+            assert forall|fr: Frame| #[trigger] atom_val(fr, r) == atom_val(enter_frame(*p, g as nat, fr, args@), a) by {
+                lemma_enter_unit(*p, g as nat, fr, args@, j);
+            }
+        }
+        return Some(r);
+    }
+    match &args[j - 1] {
+        Operand::Copy(q) => if q.proj.len() == 0 {
+            let r = Atom::Len(q.local);
+            proof {
+                assert forall|fr: Frame| #[trigger] atom_val(fr, r) == atom_val(enter_frame(*p, g as nat, fr, args@), a) by {
+                    lemma_enter_copy(*p, g as nat, fr, args@, j, *q, IntTy::Usize);
+                }
+            }
+            Some(r)
+        } else {
+            None
+        },
+        _ => None,
+    }
+}
+
+fn inst_atom(p: &Program, g: usize, args: &Vec<Operand>, a: &Atom) -> (r: Option<Atom>)
+    requires g < p.fns@.len(),
+    ensures r matches Some(img) ==> inst_eq(*p, g as nat, args@, *a, img),
+    decreases a,
+{
+    match a {
+        Atom::Const(c) => {
+            let r = Atom::Const(*c);
+            proof {
+                assert forall|fr: Frame| #[trigger] atom_val(fr, r) == atom_val(enter_frame(*p, g as nat, fr, args@), *a) by {}
+            }
+            Some(r)
+        },
+        Atom::Val(j, ty) => inst_val(p, g, args, *j, ty),
+        Atom::Len(j) => inst_len(p, g, args, *j),
+        Atom::Gap(x, y) => match (inst_atom(p, g, args, x), inst_atom(p, g, args, y)) {
+            (Some(x2), Some(y2)) => {
+                let ghost (gx, gy) = (x2, y2);
+                let r = Atom::Gap(Box::new(x2), Box::new(y2));
+                proof {
+                    assert forall|fr: Frame| #[trigger] atom_val(fr, r) == atom_val(enter_frame(*p, g as nat, fr, args@), *a) by {
+                        assert(atom_val(fr, gx) == atom_val(enter_frame(*p, g as nat, fr, args@), **x));
+                        assert(atom_val(fr, gy) == atom_val(enter_frame(*p, g as nat, fr, args@), **y));
+                    }
+                }
+                Some(r)
+            },
+            _ => None,
+        },
+    }
+}
+
+pub open spec fn mono_inst(p: Program, g: nat, args: Seq<Operand>, m: Mono, q: Mono) -> bool {
+    forall|fr: Frame| #[trigger] mono_val(fr, q) == mono_val(enter_frame(p, g, fr, args), m)
+}
+
+fn inst_mono(p: &Program, g: usize, args: &Vec<Operand>, m: &Mono) -> (r: Option<Mono>)
+    requires g < p.fns@.len(),
+    ensures r matches Some(q) ==> mono_inst(*p, g as nat, args@, *m, q),
+{
+    if m.atoms.len() == 0 {
+        let q = mono_copy(m);
+        proof {
+            assert forall|fr: Frame| #[trigger] mono_val(fr, q) == mono_val(enter_frame(*p, g as nat, fr, args@), *m) by {
+                lemma_atoms0(fr, q.atoms@);
+                lemma_atoms0(enter_frame(*p, g as nat, fr, args@), m.atoms@);
+            }
+        }
+        Some(q)
+    } else if m.atoms.len() == 1 {
+        match inst_atom(p, g, args, &m.atoms[0]) {
+            Some(a) => {
+                let ghost ga = a;
+                let r = fold1(m.coef, a);
+                proof {
+                    if r is Some {
+                        let q = r.unwrap();
+                        assert forall|fr: Frame| #[trigger] mono_val(fr, q) == mono_val(enter_frame(*p, g as nat, fr, args@), *m) by {
+                            lemma_atoms1(enter_frame(*p, g as nat, fr, args@), m.atoms@);
+                            assert(atom_val(fr, ga) == atom_val(enter_frame(*p, g as nat, fr, args@), m.atoms@[0]));
+                        }
+                    }
+                }
+                r
+            },
+            None => None,
+        }
+    } else if m.atoms.len() == 2 {
+        match (inst_atom(p, g, args, &m.atoms[0]), inst_atom(p, g, args, &m.atoms[1])) {
+            (Some(a0), Some(a1)) => {
+                let ghost (g0, g1) = (a0, a1);
+                let r = fold2(m.coef, a0, a1);
+                proof {
+                    if r is Some {
+                        let q = r.unwrap();
+                        assert forall|fr: Frame| #[trigger] mono_val(fr, q) == mono_val(enter_frame(*p, g as nat, fr, args@), *m) by {
+                            lemma_atoms2(enter_frame(*p, g as nat, fr, args@), m.atoms@);
+                            assert(atom_val(fr, g0) == atom_val(enter_frame(*p, g as nat, fr, args@), m.atoms@[0]));
+                            assert(atom_val(fr, g1) == atom_val(enter_frame(*p, g as nat, fr, args@), m.atoms@[1]));
+                        }
+                    }
+                }
+                r
+            },
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+/// A callee's summary, over the caller's frame at the call.
+pub fn instantiate(sum: &Poly, p: &Program, g: usize, args: &Vec<Operand>) -> (r: Option<Poly>)
+    ensures r matches Some(q) ==> forall|fr: Frame| #[trigger] poly_val(fr, q) >= poly_val(call_enter(*p, g as nat, fr, args@).0, *sum),
+{
+    if g >= p.fns.len() { return None; }
+    let mut out: Vec<Mono> = Vec::new();
+    let mut i: usize = 0;
+    while i < sum.monos.len()
+        invariant
+            i <= sum.monos@.len(), g < p.fns@.len(),
+            forall|fr: Frame| #[trigger] monos_val(fr, out@) == monos_val(enter_frame(*p, g as nat, fr, args@), sum.monos@.take(i as int)),
+        decreases sum.monos.len() - i,
+    {
+        match inst_mono(p, g, args, &sum.monos[i]) {
+            Some(q) => {
+                let ghost (o0, gq) = (out@, q);
+                out.push(q);
+                proof {
+                    assert forall|fr: Frame| #[trigger] monos_val(fr, out@) == monos_val(enter_frame(*p, g as nat, fr, args@), sum.monos@.take(i + 1)) by {
+                        let cf = enter_frame(*p, g as nat, fr, args@);
+                        assert(monos_val(fr, o0) == monos_val(cf, sum.monos@.take(i as int)));
+                        assert(mono_val(fr, gq) == mono_val(cf, sum.monos@[i as int]));
+                        lemma_monos_push(fr, o0, gq);
+                        lemma_take_step(cf, sum.monos@, i as int);
+                    }
+                }
+            },
+            None => return None,
+        }
+        i += 1;
+    }
+    let q = Poly { monos: out };
+    proof {
+        lemma_take_ends(sum.monos@);
+        assert forall|fr: Frame| #[trigger] poly_val(fr, q) >= poly_val(call_enter(*p, g as nat, fr, args@).0, *sum) by {
+            assert(monos_val(fr, out@) == monos_val(enter_frame(*p, g as nat, fr, args@), sum.monos@.take(sum.monos@.len() as int)));
+        }
+    }
+    Some(q)
+}
+
 } // verus!
