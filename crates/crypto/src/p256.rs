@@ -253,6 +253,7 @@ pub fn p256_ecdh(d: &[u8], peer: &[u8]) -> (r: Option<[u8; 32]>)
 
 // 1 <= os2ip(d) < n: the borrow of d - n, masked with d != 0.
 // ct: the result feeds only the caller's declassified (public) None outcome
+#[inline(never)]
 #[cfg_attr(ct_check, ct::secret(d))]
 pub(crate) fn scalar_in_range(d: &[u8]) -> (r: bool)
     requires

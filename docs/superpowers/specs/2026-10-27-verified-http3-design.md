@@ -113,7 +113,7 @@ Parsers and serializers use `vest_lib` combinators, with round-trip and reject-m
    Vest has already done TLS 1.3 message formats; reuse its approach.
 
    **Exit:** proofs verify; RFC 9001 Appendix A sample packets reproduce byte-for-byte; **first real interop**: `curl --http3` and the quiche client fetch a response.
-5. **`crypto` implementations.** Replace each `external_body` with verified code behind the same `ensures`, in this order: SHA-256 → HMAC → HKDF → AES-128 → GCM → P-256 (field, scalar, point ops) → ECDH → ECDSA (RFC 6979) → RSASSA-PSS-SHA256 signing (bignum modexp, CRT, MGF1, EMSA-PSS encoding). Upper layers need no changes. This is the largest phase. Bit-vector and nonlinear arithmetic proofs come in small lemma steps, using Verus `by (bit_vector)` / `by (nonlinear_arith)`.
+5. **`crypto` implementations.** Replace each `external_body` with verified code behind the same `ensures`, in this order: SHA-256 → HMAC → HKDF → AES-128 → GCM → P-256 (field, scalar, point ops) → ECDH → ECDSA (RFC 6979) → RSASSA-PSS-SHA256 signing (bignum modexp, MGF1, EMSA-PSS encoding; no CRT, see the 5e plan). Upper layers need no changes. This is the largest phase. Bit-vector and nonlinear arithmetic proofs come in small lemma steps, using Verus `by (bit_vector)` / `by (nonlinear_arith)`.
    **Exit:** proofs verify; NIST CAVP + Wycheproof vectors pass; the RustCrypto shim and its `TRUSTED.md` entries are gone.
 6. **Loss recovery & congestion control (RFC 9002).** RTT estimation, PTO, NewReno, plus proofs of invariants such as bytes in flight ≤ cwnd.
    **Exit:** proofs verify; behavior stays stable under induced loss.
