@@ -267,6 +267,11 @@ Probed in preflight: 12 fns verify at `--rlimit 4` with no splitting (over `Seq`
 
 ### Task 6: RSA under the CT checker; phase exit
 
+**From the crypto binary audit (.superpowers/archive/crypto-binary-audit.md, in the main checkout):**
+- The object read must use what `cargo build --release` ships: the crate's rlib (5 codegen units today). `cargo rustc ... --emit=obj` gives 1 codegen unit and different inlining, so it isn't the shipped code. Read both, and repeat C1's check on the rlib.
+- `#[inline(never)]` on `p256::scalar_in_range`, so a rejected key's branch reveals only the declassified bit (the audit's F1, tested: no proof impact). Update TRUSTED.md citations after p256.rs:257.
+- The compiler/CPU row gains: "Object code of the 30 non-RSA crypto functions was audited once, 2026-11-02, rustc 1.98.1 x86-64, no masked select became a branch; coverage tiers and what was not checked are in the audit. Not dudect, and inlining varies with codegen units, so this does not carry to other builds." Commit the audit file as docs/crypto-binary-audit.md.
+
 **Files:**
 - Modify: `tools/ct-driver/manifest.txt`, `tools/ct-driver/selftest.txt`, `scripts/verify.sh`, `TRUSTED.md`, `docs/requirements.md`, `docs/superpowers/specs/2026-10-27-verified-http3-design.md`
 
