@@ -109,6 +109,17 @@ pub open spec fn unacked_of(a: SpecAck, s: Seq<SentPacket>) -> Seq<SentPacket>
     }
 }
 
+/// `unacked_of` keeps a subset, so an ACK never raises the in-flight count.
+pub proof fn lemma_unacked_len(a: SpecAck, s: Seq<SentPacket>)
+    ensures
+        unacked_of(a, s).len() <= s.len(),
+    decreases s.len(),
+{
+    if s.len() > 0 {
+        lemma_unacked_len(a, s.drop_last());
+    }
+}
+
 /// The packets sent in one packet number space.
 pub struct SentPackets {
     next_pn: u64,

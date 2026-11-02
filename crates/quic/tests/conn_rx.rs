@@ -6,6 +6,7 @@ use quic::conn::*;
 use quic::datagram::*;
 use quic::frame::Frame;
 use quic::lifecycle::Phase;
+use quic::path::PathState;
 use quic::payload::PacketKind;
 use quic::route::CidUpdate;
 use quic::tp::*;
@@ -206,4 +207,119 @@ fn established_state() {
     let mut v = Vec::new();
     c.poll_cid_updates(&mut v);
     assert!(v.is_empty());
+}
+
+#[test]
+fn crypto_delivered() {
+    let mut c = conn();
+    let mut out = Vec::new();
+    c.crypto_read(PacketKind::Initial, &mut out);
+    assert_eq!(out, vec![1; 100]);
+    let mut u = Vec::new();
+    c.poll_cid_updates(&mut u);
+    assert_eq!(u, vec![CidUpdate::Add(S1.to_vec()), CidUpdate::Add(L0.to_vec())]);
+}
+
+#[test]
+fn small_datagram_initial_dropped() {
+    let mut c = conn();
+    c.on_datagram(0, 1199, vec![ini(3, vec![Frame::Ping])], 1, &rnd(3));
+    assert_eq!(c.largest_pn(PacketKind::Initial), Some(2));
+    assert_eq!(c.phase(), Phase::Open);
+}
+
+#[test]
+fn coalesced_dcid_rule() {
+    let mut c = conn();
+    // `ini` has DCID S1, `hs` has L0: §12.2 ignores the second packet.
+    c.on_datagram(0, 1200, vec![ini(3, vec![Frame::Ping]), hs(0, vec![Frame::Ping])], 1, &rnd(3));
+    assert_eq!(c.largest_pn(PacketKind::Handshake), None);
+    assert_eq!(c.largest_pn(PacketKind::Initial), Some(3));
+}
+
+#[test]
+fn handshake_validates_and_discards() {
+    let mut c = conn();
+    c.on_datagram(0, 1100, vec![ini2(3, vec![Frame::Ping]), hs(0, vec![Frame::Ping])], 1, &rnd(3));
+    assert_eq!(c.largest_pn(PacketKind::Handshake), Some(0));
+    assert_eq!(c.largest_pn(PacketKind::Initial), None);
+    assert_eq!(c.path_state(0), Some(PathState::Validated));
+    assert_eq!(c.phase(), Phase::Open);
+    assert_eq!(c.crypto_capacity(PacketKind::Initial), 0);
+}
+
+#[test]
+fn later_initial_other_scid() {
+    let mut c = conn();
+    let p = pkt(PacketKind::Initial, &S1, &[0xc2; 8], 3, vec![Frame::Ping]);
+    c.on_datagram(0, 1200, vec![p], 1, &rnd(3));
+    assert_eq!(c.largest_pn(PacketKind::Initial), Some(2));
+    assert_eq!(c.phase(), Phase::Open);
+}
+
+#[test]
+fn duplicate_pn() {
+    let mut c = conn();
+    let mut out = Vec::new();
+    c.crypto_read(PacketKind::Initial, &mut out);
+    c.on_datagram(0, 1200, vec![ini(2, vec![Frame::Crypto { offset: 100, data: vec![2; 10] }])], 1, &rnd(3));
+    let mut out = Vec::new();
+    c.crypto_read(PacketKind::Initial, &mut out);
+    assert_eq!(out, Vec::<u8>::new());
+}
+
+#[test]
+fn one_rtt_before_complete() {
+    let mut c = conn();
+    c.on_datagram(0, 1200, vec![one(0, vec![Frame::Ping])], 1, &rnd(3));
+    assert_eq!(c.largest_pn(PacketKind::OneRtt), None);
+}
+
+#[test]
+fn ack_of_unsent() {
+    let mut c = conn();
+    c.on_datagram(0, 1200, vec![ini(3, vec![Frame::Ack(A(9, 0, 0, vec![]))])], 1, &rnd(3));
+    assert_eq!(c.phase(), Phase::Closing);
+    assert_eq!(c.close_info(), &Some((false, 0x0a, vec![])));
+}
+
+#[test]
+fn connection_close_drains() {
+    let mut c = established_rx();
+    c.on_datagram(0, 1200, vec![one(0, vec![CC(false, 0, &[])])], 11, &rnd(3));
+    assert_eq!(c.phase(), Phase::Draining);
+    assert!(!c.streams_live());
+}
+
+#[test]
+fn long_header_other_path_dropped() {
+    let mut c = conn();
+    c.on_datagram(1, 1200, vec![ini(3, vec![Frame::Ping])], 1, &rnd(3));
+    assert_eq!(c.largest_pn(PacketKind::Initial), Some(2));
+}
+
+#[test]
+fn challenge_flood_dropped() {
+    let mut c = established_rx();
+    let f = (1..=5).map(|x| Frame::PathChallenge(D(x))).collect();
+    c.on_datagram(0, 1200, vec![one(0, f)], 11, &rnd(3));
+    assert_eq!(c.largest_pn(PacketKind::OneRtt), None);
+    assert!(!c.response_owed(0));
+}
+
+#[test]
+fn stream_run_coalesces() {
+    let s = |id, offset, data: &[u8], fin| Frame::Stream { stream_id: id, offset, data: data.to_vec(), fin };
+    let adj = [s(4, 10, &[1, 2], false), s(4, 12, &[3], false), s(4, 13, &[4], true), Frame::Ping];
+    let (run, e) = stream_run(&adj, 0).unwrap();
+    assert_eq!(run, s(4, 10, &[1, 2, 3, 4], true));
+    assert_eq!(e, 3);
+    // A gap, another stream, a frame of another type, and the end of the record end a run.
+    assert!(stream_run(&[s(4, 10, &[1], false), s(4, 12, &[2], false)], 0).is_none());
+    assert!(stream_run(&[s(4, 10, &[1], false), s(8, 11, &[2], false)], 0).is_none());
+    assert!(stream_run(&adj, 2).is_none());
+    assert!(stream_run(&[Frame::Ping, s(4, 0, &[1], false)], 0).is_none());
+    let (run, e) = stream_run(&[s(4, 0, &[1], false), s(4, 1, &[2], false), s(4, 9, &[3], false)], 0).unwrap();
+    assert_eq!(run, s(4, 0, &[1, 2], false));
+    assert_eq!(e, 2);
 }
