@@ -879,7 +879,6 @@ pub open spec fn count_below(e: Seq<PeerEntry>, rpt: u64) -> nat
     }
 }
 
-/// The sequence numbers `a, a + 1, ..., b - 1` (empty when `b <= a`).
 /// What every successful `on_new_cid` that adds or re-raises `(seq, cid, tok)` guarantees:
 /// the entry is present, every seq below an increased `rpt` is queued for retirement in
 /// order, `current` moves only if it was retired (then to the lowest active seq), and the
@@ -923,6 +922,7 @@ pub open spec fn entries_survive(o: Seq<PeerEntry>, n: Seq<PeerEntry>) -> bool {
         }
 }
 
+/// The sequence numbers `a, a + 1, ..., b - 1` (empty when `b <= a`).
 pub open spec fn seq_range(a: u64, b: u64) -> Seq<u64> {
     Seq::new(
         if b > a {

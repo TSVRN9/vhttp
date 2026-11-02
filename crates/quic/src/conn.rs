@@ -1470,6 +1470,7 @@ impl Connection {
                 dcid: opt_slice_view(d),
                 ..old(self).paths.path(q)
             }),
+            final(self).lc == old(self).lc,
     {
         let ghost s0 = *self;
         self.paths.set_dcid(q, d);
@@ -1505,8 +1506,12 @@ impl Connection {
             final(self).frames_kept(*old(self)),
             final(self).peer_cids == old(self).peer_cids,
             kept(old(self).paths, final(self).paths, q),
-            final(self).paths.path(q).dcid == opt_slice_view(d),
+            final(self).paths.path(q) == (SpecPath {
+                dcid: opt_slice_view(d),
+                ..old(self).paths.path(q)
+            }),
             final(self).peer_used_kept(*old(self)),
+            final(self).lc == old(self).lc,
     {
         let ghost s0 = *self;
         self.put_dcid(q, d);
@@ -1607,6 +1612,9 @@ impl Connection {
                 ),
             final(self).peer_used_kept(*old(self)),
             r ==> final(self).not_stale(q) && final(self).paths.path(q).dcid is Some,
+            final(self).paths.path(q).state == old(self).paths.path(q).state,
+            final(self).paths.path(q).mtu_failed == old(self).paths.path(q).mtu_failed,
+            final(self).lc == old(self).lc,
             !r ==> final(self).paths == old(self).paths && final(self).peer_cids == old(self).peer_cids,
             !r ==> forall|i: int|
                 0 <= i < old(self).peer_cids.entries().len() ==> (
@@ -2235,6 +2243,12 @@ impl Connection {
             }
             if let Some(i) = self.paths.index(q) {
                 if !was[i] {
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.4
+                    //# On confirming a peer's ownership of its new address, an endpoint MUST
+                    //# immediately reset the congestion controller and round-trip time
+                    //# estimator for the new path to initial values (see Appendices A.3 and
+                    //# B.3 of [QUIC-RECOVERY]) unless the only change in the peer's address
+                    //# is its port number.
                     self.recovery.on_path_validated();
                     proof {
                         assert(s0.paths.ids()[i as int] == q);
@@ -2293,6 +2307,7 @@ impl Connection {
             final(self).wf(),
             final(self).frames_kept(*old(self)),
             final(self).paths == old(self).paths,
+            final(self).lc == old(self).lc,
             final(self).recovery == old(self).recovery,
             r is None <==> old(self).chal_used == 4,
             r is None ==> final(self).chal_used == old(self).chal_used,
@@ -2325,6 +2340,8 @@ impl Connection {
             final(self).frames_kept(*old(self)),
             final(self).paths.active_spec() == old(self).paths.active_spec(),
             final(self).recovery == old(self).recovery,
+            final(self).lc == old(self).lc,
+            final(self).paths.path(q).mtu_failed == old(self).paths.path(q).mtu_failed,
             final(self).peer_used_kept(*old(self)),
             forall|r: PathId| r != q ==> #[trigger] final(self).paths.path(r) == old(self).paths.path(r),
             final(self).paths.path(q).state == if old(self).chal_used < 4 && old(self).paths.path(q).state is Unvalidated {
@@ -2609,13 +2626,14 @@ impl Connection {
     /// §13.3: frame `f` of a lost record of space `k`. Outdated frames are accepted: 3c's credit
     /// `on_max` ignores decreases.
     #[verifier::spinoff_prover]
-    #[allow(dead_code)]  // Called from Task 3.
     fn on_lost_frame(&mut self, k: PacketKind, f: &Frame)
         requires
             old(self).wf(),
         ensures
             final(self).wf(),
             final(self).frames_kept(*old(self)),
+            final(self).paths == old(self).paths,
+            final(self).lc == old(self).lc,
             final(self).hs_done == (if f@ is HandshakeDone && !(old(self).hs_done is Acked) {
                 HsDone::Pending
             } else {
@@ -2770,17 +2788,41 @@ impl Connection {
         self.streams = None;
     }
 
+    /// The peer's max_ack_delay in microseconds; its default until TLS delivers its parameters.
+    closed spec fn peer_mad_spec(&self) -> u64 {
+        spec_ms_to_us(
+            match self.peer_tp {
+                Some(t) => t.max_ack_delay,
+                None => 25u64,
+            },
+        )
+    }
+
+    fn peer_mad(&self) -> (r: u64)
+        ensures
+            r == self.peer_mad_spec(),
+    {
+        ms_to_us(
+            match &self.peer_tp {
+                Some(t) => t.max_ack_delay,
+                None => 25,
+            },
+        )
+    }
+
+    closed spec fn pto_spec(&self) -> u64 {
+        self.recovery.pto_us_spec(PacketKind::OneRtt, self.peer_mad_spec())
+    }
+
     /// The current 1-RTT probe timeout.
     #[verifier::spinoff_prover]
     fn pto(&self) -> (r: u64)
         requires
             self.wf(),
+        ensures
+            r == self.pto_spec(),
     {
-        let ms = match &self.peer_tp {
-            Some(t) => t.max_ack_delay,
-            None => 25,
-        };
-        self.recovery.pto_us(PacketKind::OneRtt, ms_to_us(ms))
+        self.recovery.pto_us(PacketKind::OneRtt, self.peer_mad())
     }
 
     // =========================================================================
@@ -2916,6 +2958,8 @@ impl Connection {
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
             final(self).frames_kept(*old(self)),
+            final(self).paths == old(self).paths,
+            final(self).lc == old(self).lc,
     {
         if !self.complete {
             return;
@@ -2932,6 +2976,8 @@ impl Connection {
                 self.wf(),
                 self.out_log() == old(self).out_log(),
                 self.frames_kept(*old(self)),
+                self.paths == old(self).paths,
+                self.lc == old(self).lc,
             decreases 4 - i,
         {
             let s = slice_subrange(rand.as_slice(), 24 * i, 24 * i + 24);
@@ -5047,7 +5093,13 @@ impl Connection {
         proof {
             self.paths.lemma_wf();
         }
-        // P17: §14.2's send gate, local to this body.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2
+        //# If a QUIC endpoint determines that the PMTU between any pair of local
+        //# and remote IP addresses cannot support the smallest allowed maximum
+        //# datagram size of 1200 bytes, it MUST immediately cease sending QUIC
+        //# packets, except for those in PMTU probes or those containing
+        //# CONNECTION_CLOSE frames, on the affected path.
+        // P17: the send gate, local to this body.
         if self.paths.mtu_failed(q) {
             return None;
         }
@@ -5889,6 +5941,10 @@ impl Connection {
     //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
     //# A PATH_RESPONSE frame MUST be sent on the network path where the
     //# PATH_CHALLENGE frame was received.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.4
+    //# Packets sent on the old path MUST NOT contribute to
+    //# congestion control or RTT estimation for the new path.
+    // ponytail: one shared Recovery, so old-path records acked after on_path_validated still raise cwnd; Phase 6 keeps per-path state.
     // ponytail: one datagram per owed response, outside congestion control (E2): on a validated path 62 bytes in draws 4800 out (77:1), attacker-paced; every owed response in one 1200-byte packet gives 19:1. Phase 6 decides, with E2.
     /// PATH_RESPONSE and PATH_CHALLENGE datagrams, ahead of data: one 1-RTT packet, not recorded (E2).
     /// A None with the connection still Open has left what `tx_kept` reads alone.
@@ -6067,6 +6123,518 @@ impl Connection {
     }
 
     // =========================================================================
+    // Timers
+    // =========================================================================
+
+    /// Sending on the handshake path is blocked by §8.1 (RFC 9002 §6.2.2.1: no PTO then).
+    closed spec fn amp_blocked_spec(&self) -> bool {
+        !(self.paths.state_spec(self.hs_path) is Validated) && self.paths.budget_spec(self.hs_path) == 0
+    }
+
+    /// §10.1's deadline: `effective_idle_us` after `idle.last`.
+    closed spec fn idle_term(&self) -> Option<u64> {
+        let l = self.local_tp.max_idle_timeout;
+        let p = match self.peer_tp {
+            Some(t) => t.max_idle_timeout,
+            None => 0u64,
+        };
+        if l == 0 && p == 0 {
+            None
+        } else {
+            Some(
+                spec_sat_add(
+                    self.idle.last,
+                    spec_max(spec_ms_to_us(spec_min_nz(l, p)), spec_sat3(self.pto_spec())),
+                ),
+            )
+        }
+    }
+
+    /// When space `k` owes an ACK, `RecvPns::ack_deadline` for a live space.
+    closed spec fn ack_term(&self, k: PacketKind) -> Option<u64> {
+        let r = self.recv(k);
+        let first = r.first_unacked()->0;
+        let m = spec_ms_to_us(self.local_tp.max_ack_delay);
+        if !self.live(k) || r.eliciting_since_ack() == 0 {
+            None
+        } else {
+            Some(
+                match k {
+                    PacketKind::OneRtt => if r.eliciting_since_ack() >= 2 || r.ack_blocked() {
+                        first
+                    } else if first + m > u64::MAX {
+                        u64::MAX
+                    } else {
+                        (first + m) as u64
+                    },
+                    _ => first,
+                },
+            )
+        }
+    }
+
+    /// When space `k`'s PTO fires: never for a dead space, with nothing in flight, or while §8.1
+    /// blocks sending (RFC 9002 §6.2.2.1).
+    closed spec fn pto_term(&self, k: PacketKind) -> Option<u64> {
+        let s = self.sent(k).inflight_spec();
+        if !self.live(k) || s.len() == 0 || self.amp_blocked_spec() {
+            None
+        } else {
+            Some(
+                crate::recovery::sat_add(
+                    s.last().time,
+                    self.recovery.pto_us_spec(k, self.peer_mad_spec()),
+                ),
+            )
+        }
+    }
+
+    /// `r` is no later than every deadline `on_timeout` and `poll_transmit` act on, so a shell that
+    /// sleeps until `r` misses none. A Closed connection has none: `lc.deadline` is stale there.
+    pub closed spec fn timers_cover(&self, r: Option<u64>) -> bool {
+        match self.lc.phase_spec() {
+            Phase::Open => {
+                &&& covers(r, self.idle_term())
+                &&& forall|k: PacketKind| covers(r, #[trigger] self.ack_term(k))
+                &&& forall|k: PacketKind| covers(r, #[trigger] self.pto_term(k))
+                &&& forall|q: PathId|
+                    #[trigger] self.paths.has(q) && timed(self.paths.path(q)) ==> covers(
+                        r,
+                        Some(expiry(self.paths.path(q), self.pto_spec())),
+                    )
+            },
+            Phase::Closing | Phase::Draining => r == self.lc.deadline_spec(),
+            Phase::Closed => r is None,
+        }
+    }
+
+    /// What `on_timeout(now, ..)` guarantees of `self`, from `o`.
+    pub closed spec fn timed_out(&self, o: Connection, now: u64) -> bool {
+        // P15 (§9.3.2, §14.2): the active path's challenge expired, so the active path is usable.
+        &&& expired(o.paths.path(o.paths.active_spec()), now, o.pto_spec()) ==> usable(
+            self.paths.path(self.paths.active_spec()),
+        ) || self.lc.phase_spec() is Closed
+        // §10.1.
+        &&& o.lc.phase_spec() is Open && o.idle_term() is Some && now >= o.idle_term()->0 ==> !(
+        self.lc.phase_spec() is Open)
+        // §10.2.
+        &&& (o.lc.phase_spec() is Closing || o.lc.phase_spec() is Draining) && o.lc.deadline_spec() is Some
+            && now >= o.lc.deadline_spec()->0 ==> self.lc.phase_spec() is Closed
+    }
+
+    #[verifier::spinoff_prover]
+    fn idle_deadline(&self) -> (r: Option<u64>)
+        requires
+            self.wf(),
+        ensures
+            r == self.idle_term(),
+    {
+        let peer = match &self.peer_tp {
+            Some(t) => Some(t.max_idle_timeout),
+            None => None,
+        };
+        match effective_idle_us(self.local_tp.max_idle_timeout, peer, self.pto()) {
+            Some(e) => Some(self.idle.deadline(e)),
+            None => None,
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    fn ack_deadline_of(&self, k: PacketKind) -> (r: Option<u64>)
+        requires
+            self.wf(),
+        ensures
+            r == self.ack_term(k),
+    {
+        if !self.is_live(k) {
+            return None;
+        }
+        self.recv_ref(k).ack_deadline(ms_to_us(self.local_tp.max_ack_delay))
+    }
+
+    #[verifier::spinoff_prover]
+    fn pto_deadline_of(&self, k: PacketKind) -> (r: Option<u64>)
+        requires
+            self.wf(),
+        ensures
+            r == self.pto_term(k),
+    {
+        if !self.is_live(k) {
+            return None;
+        }
+        let h = self.hs_path;
+        let blocked = !matches!(self.paths.state(h), PathState::Validated) && self.paths.budget(h) == 0;
+        self.recovery.pto_deadline(k, self.sent_ref(k).last_sent_time(), self.peer_mad(), blocked)
+    }
+
+    /// The earliest deadline of an Open connection.
+    #[verifier::spinoff_prover]
+    fn open_timeout(&self) -> (r: Option<u64>)
+        requires
+            self.wf(),
+            self.lc.phase_spec() is Open,
+        ensures
+            self.timers_cover(r),
+    {
+        let m0 = self.idle_deadline();
+        let m1 = earlier(m0, self.ack_deadline_of(PacketKind::Initial));
+        let m2 = earlier(m1, self.ack_deadline_of(PacketKind::Handshake));
+        let m3 = earlier(m2, self.ack_deadline_of(PacketKind::OneRtt));
+        let m4 = earlier(m3, self.pto_deadline_of(PacketKind::Initial));
+        let m5 = earlier(m4, self.pto_deadline_of(PacketKind::Handshake));
+        let m6 = earlier(m5, self.pto_deadline_of(PacketKind::OneRtt));
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-9.4
+        //# This timer SHOULD be set as described in Section 6.2.1 of
+        //# [QUIC-RECOVERY] and MUST NOT be more aggressive.
+        let pd = self.paths.deadline(self.pto());
+        let m7 = earlier(m6, pd);
+        proof {
+            lemma_covers_chain(m7, m6, m5);
+            lemma_covers_chain(m7, m5, m4);
+            lemma_covers_chain(m7, m4, m3);
+            lemma_covers_chain(m7, m3, m2);
+            lemma_covers_chain(m7, m2, m1);
+            lemma_covers_chain(m7, m1, m0);
+            assert(covers(m7, self.idle_term()));
+            assert forall|k: PacketKind| covers(m7, #[trigger] self.ack_term(k)) by {
+                match k {
+                    PacketKind::Initial => lemma_covers_chain(m7, m1, self.ack_term(k)),
+                    PacketKind::Handshake => lemma_covers_chain(m7, m2, self.ack_term(k)),
+                    PacketKind::OneRtt => lemma_covers_chain(m7, m3, self.ack_term(k)),
+                }
+            }
+            assert forall|k: PacketKind| covers(m7, #[trigger] self.pto_term(k)) by {
+                match k {
+                    PacketKind::Initial => lemma_covers_chain(m7, m4, self.pto_term(k)),
+                    PacketKind::Handshake => lemma_covers_chain(m7, m5, self.pto_term(k)),
+                    PacketKind::OneRtt => lemma_covers_chain(m7, m6, self.pto_term(k)),
+                }
+            }
+            assert forall|q: PathId| #[trigger] self.paths.has(q) && timed(self.paths.path(q)) implies covers(
+                m7,
+                Some(expiry(self.paths.path(q), self.pto_spec())),
+            ) by {
+                assert(pd is Some);
+                assert(pd->0 <= expiry(self.paths.path(q), self.pto_spec()));
+            }
+        }
+        m7
+    }
+
+    /// When to call `on_timeout` next. None once Closed, or if no timer runs.
+    #[verifier::spinoff_prover]
+    pub fn next_timeout(&self) -> (r: Option<u64>)
+        requires
+            self.wf(),
+        ensures
+            self.timers_cover(r),
+    {
+        match self.lc.phase() {
+            Phase::Closed => None,
+            Phase::Closing | Phase::Draining => self.lc.deadline(),
+            Phase::Open => self.open_timeout(),
+        }
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+    //# Upon detecting losses, a sender MUST take appropriate congestion
+    //# control action.
+    /// Space `k`'s PTO fired: everything in flight is lost (the placeholder, recovery.rs), its frames
+    /// are requeued, and the space owes a probe (E8).
+    #[verifier::spinoff_prover]
+    fn fire_pto(&mut self, k: PacketKind, now: u64)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).frames_kept(*old(self)),
+            final(self).paths == old(self).paths,
+            final(self).lc == old(self).lc,
+    {
+        let mut lost: Vec<SentPacket> = Vec::new();
+        match k {
+            PacketKind::Initial => self.sent_i.drain_inflight(&mut lost),
+            PacketKind::Handshake => self.sent_h.drain_inflight(&mut lost),
+            PacketKind::OneRtt => self.sent_1.drain_inflight(&mut lost),
+        }
+        self.recovery.on_packets_lost(k, lost.len(), now);
+        let ghost s0 = *old(self);
+        let mut i: usize = 0;
+        while i < lost.len()
+            invariant
+                i <= lost@.len(),
+                self.wf(),
+                self.frames_kept(s0),
+                self.paths == s0.paths,
+                self.lc == s0.lc,
+            decreases lost@.len() - i,
+        {
+            let frames = lost[i].frames.as_slice();
+            let mut j: usize = 0;
+            while j < frames.len()
+                invariant
+                    j <= frames@.len(),
+                    self.wf(),
+                    self.frames_kept(s0),
+                    self.paths == s0.paths,
+                    self.lc == s0.lc,
+                decreases frames@.len() - j,
+            {
+                self.on_lost_frame(k, &frames[j]);
+                j += 1;
+            }
+            i += 1;
+        }
+        self.recovery.on_pto_fired();
+        match k {
+            PacketKind::Initial => self.probe_i = true,
+            PacketKind::Handshake => self.probe_h = true,
+            PacketKind::OneRtt => self.probe_1 = true,
+        }
+    }
+
+    /// Whether space `k`'s PTO has fired by `now`.
+    #[verifier::spinoff_prover]
+    fn pto_passed(&self, k: PacketKind, now: u64) -> (r: bool)
+        requires
+            self.wf(),
+    {
+        match self.pto_deadline_of(k) {
+            Some(d) => now >= d,
+            None => false,
+        }
+    }
+
+    /// Abandons every expired validation, and says whether the active path's was one. Only `paths`
+    /// changes.
+    #[verifier::spinoff_prover]
+    fn expire_paths(&mut self, now: u64, pto0: u64) -> (active_failed: bool)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).frames_kept(*old(self)),
+            *final(self) == (Connection { paths: final(self).paths, ..*old(self) }),
+            final(self).paths.active_spec() == old(self).paths.active_spec(),
+            expired(old(self).paths.path(old(self).paths.active_spec()), now, pto0) ==> active_failed,
+    {
+        let ghost s = *self;
+        let a = self.paths.active();
+        let mut active_failed = false;
+        loop
+            invariant
+                self.wf(),
+                self.frames_kept(s),
+                *self == (Connection { paths: self.paths, ..s }),
+                self.paths.active_spec() == a,
+                a == s.paths.active_spec(),
+                !active_failed ==> self.paths.path(a) == s.paths.path(a),
+            ensures
+                self.wf(),
+                self.frames_kept(s),
+                *self == (Connection { paths: self.paths, ..s }),
+                self.paths.active_spec() == a,
+                expired(s.paths.path(a), now, pto0) ==> active_failed,
+            decreases self.paths.timed_count(),
+        {
+            let ghost s1 = *self;
+            proof {
+                s1.paths.lemma_wf();
+            }
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-9.4
+            //# This timer SHOULD be set as described in Section 6.2.1 of
+            //# [QUIC-RECOVERY] and MUST NOT be more aggressive.
+            match self.paths.on_timeout(now, pto0) {
+                None => {
+                    proof {
+                        assert(s1.paths.has(a));
+                    }
+                    break;
+                },
+                Some(f) => {
+                    proof {
+                        self.lemma_path_edit(s1, f);
+                        self.lemma_dcids_same(s1, f);
+                        assert(s1.paths.has(s1.hs_path));
+                    }
+                    if f == a {
+                        active_failed = true;
+                    }
+                },
+            }
+        }
+        active_failed
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3.2
+    //# To protect the connection from failing due to such a spurious
+    //# migration, an endpoint MUST revert to using the last validated peer
+    //# address when validation of a new peer address fails.
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3.2
+    //# If an endpoint has no state about the last validated peer address, it
+    //# MUST close the connection silently by discarding all connection
+    //# state.
+    // ponytail: only two validated paths are remembered, so after 0→1→2 with both 1 and 2 failing we close although 0 might still work (liveness only); a longer validated history if migration chains matter.
+    /// The active path is no longer usable: back to the last validated one, which `Paths::wf` makes
+    /// usable. It takes an unused CID if it has lost its own, so `wf_dcids` holds; with none left,
+    /// or no such path, the connection closes silently.
+    #[verifier::spinoff_prover]
+    fn fall_back(&mut self)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).out_log() == old(self).out_log(),
+            final(self).frames_kept(*old(self)),
+            final(self).lc == old(self).lc || final(self).lc.phase_spec() is Closed,
+            usable(final(self).paths.path(final(self).paths.active_spec())) || final(self).lc.phase_spec() is Closed,
+    {
+        proof {
+            self.paths.lemma_wf();
+        }
+        let v = match self.paths.last_validated() {
+            Some(v) => v,
+            None => {
+                self.lc.close_silently();
+                self.streams = None;
+                return;
+            },
+        };
+        if self.paths.dcid(v).is_none() {
+            proof {
+                self.lemma_weak_of_wf();
+            }
+            let ghost s0 = *self;
+            if !self.fresh_dcid(v) {
+                self.lc.close_silently();
+                self.streams = None;
+                return;
+            }
+            proof {
+                assert forall|q: PathId| #[trigger] self.paths.has(q) implies self.not_stale(q) by {
+                    if q != v {
+                        assert(s0.paths.has(q));
+                        assert(s0.not_stale(q));
+                        if let Some(c) = self.paths.path(q).dcid {
+                            assert(peer_has_cid(s0.peer_cids.entries(), c));
+                            assert(peer_has_cid(self.peer_cids.entries(), c));
+                        }
+                    }
+                }
+                self.lemma_wf_of_weak();
+            }
+        }
+        let ghost s1 = *self;
+        self.paths.set_active(v);
+        proof {
+            self.lemma_active_set(s1, v);
+        }
+    }
+
+    /// Starts the §8.2.3 probe on every path that needs one, from the unused slices of `rand`:
+    /// `on_path_frame` could not start one when `chal_used` was 4 (3d2 preflight M6).
+    #[verifier::spinoff_prover]
+    fn retry_mtu_probes(&mut self, now: u64, rand: &[u8; RAND_LEN])
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).frames_kept(*old(self)),
+            final(self).lc == old(self).lc,
+            final(self).paths.active_spec() == old(self).paths.active_spec(),
+            usable(old(self).paths.path(old(self).paths.active_spec())) ==> usable(
+                final(self).paths.path(final(self).paths.active_spec()),
+            ),
+    {
+        let ghost s = *self;
+        let ghost a = self.paths.active_spec();
+        let n = self.paths.len();
+        let mut i: usize = 0;
+        while i < n
+            invariant
+                i <= n,
+                n == self.paths.ids().len(),
+                self.wf(),
+                self.frames_kept(s),
+                self.lc == s.lc,
+                self.paths.active_spec() == a,
+                usable(s.paths.path(a)) ==> usable(self.paths.path(a)),
+            decreases n - i,
+        {
+            let q = self.path_at(i);
+            if self.paths.needs_mtu_probe(q) {
+                self.challenge_path(q, now, rand);
+            }
+            i += 1;
+        }
+    }
+
+    /// The timers `next_timeout` named. The clock never goes back, so a late or early `now` is safe.
+    #[verifier::spinoff_prover]
+    pub fn on_timeout(&mut self, now: u64, rand: &[u8; RAND_LEN])
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).out_log() == old(self).out_log(),
+            final(self).timed_out(*old(self), now),
+    {
+        let ghost o = *self;
+        if now > self.now {
+            self.now = now;
+        }
+        self.chal_used = 0;
+        let t = self.now;
+        let pto0 = self.pto();
+        // Step 1: the closing and draining deadlines.
+        self.lc.on_timeout(t);
+        if !matches!(self.lc.phase(), Phase::Open) {
+            self.streams = None;
+        }
+        // Step 2.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-10.1
+        //# To avoid excessively small idle timeout periods, endpoints MUST
+        //# increase the idle timeout period to be at least three times the
+        //# current Probe Timeout (PTO).
+        if matches!(self.lc.phase(), Phase::Open) {
+            if let Some(d) = self.idle_deadline() {
+                if t >= d {
+                    self.lc.close_silently();
+                    self.streams = None;
+                }
+            }
+        }
+        // Step 3: the first live space whose PTO passed.
+        if matches!(self.lc.phase(), Phase::Open) {
+            if self.pto_passed(PacketKind::Initial, t) {
+                self.fire_pto(PacketKind::Initial, t);
+            } else if self.pto_passed(PacketKind::Handshake, t) {
+                self.fire_pto(PacketKind::Handshake, t);
+            } else if self.pto_passed(PacketKind::OneRtt, t) {
+                self.fire_pto(PacketKind::OneRtt, t);
+            }
+        }
+        // Steps 4 and 5, in every phase but Closed: P15 has no phase, and a CONNECTION_CLOSE goes to
+        // the active path too.
+        if !matches!(self.lc.phase(), Phase::Closed) {
+            let active_failed = self.expire_paths(t, pto0);
+            proof {
+                self.paths.lemma_wf();
+            }
+            let a = self.paths.active();
+            if active_failed && (!matches!(self.paths.state(a), PathState::Validated) || self.paths.mtu_failed(a)) {
+                self.fall_back();
+            }
+        }
+        // Step 6.
+        self.issue_cids(rand);
+        if matches!(self.lc.phase(), Phase::Open) {
+            self.retry_mtu_probes(t, rand);
+        }
+    }
+
+    // =========================================================================
     // Getters
     // =========================================================================
 
@@ -6209,6 +6777,37 @@ impl Connection {
 // =============================================================================
 // Helpers
 // =============================================================================
+
+/// `r` is no later than `a`.
+pub open spec fn covers(r: Option<u64>, a: Option<u64>) -> bool {
+    a matches Some(d) ==> r matches Some(m) && m <= d
+}
+
+proof fn lemma_covers_chain(a: Option<u64>, b: Option<u64>, c: Option<u64>)
+    requires
+        covers(a, b),
+        covers(b, c),
+    ensures
+        covers(a, c),
+{
+}
+
+/// The earlier deadline; None only when both are.
+fn earlier(a: Option<u64>, b: Option<u64>) -> (r: Option<u64>)
+    ensures
+        covers(r, a),
+        covers(r, b),
+{
+    match (a, b) {
+        (Some(x), Some(y)) => Some(if x <= y {
+            x
+        } else {
+            y
+        }),
+        (Some(x), None) => Some(x),
+        (None, y) => y,
+    }
+}
 
 /// Whether two optional byte strings are equal.
 fn opt_eq(a: Option<&[u8]>, b: Option<&[u8]>) -> (r: bool)
@@ -7434,10 +8033,10 @@ impl Connection {
         c.0.saturating_add(c.1).saturating_add(tx)
     }
 
-    /// Test support: when the idle timer last restarted.
+    /// Test support: stream `id`'s acked and lost send-range counts (3d Task 1).
     #[doc(hidden)]
-    pub fn idle_last_for_test(&self) -> u64 {
-        self.idle.last
+    pub fn send_range_counts(&self, id: u64) -> Option<(usize, usize)> {
+        self.streams.as_ref().and_then(|s| s.send_range_counts(id))
     }
 
     /// Test support: the amplification budget of `q`, None when absent (the only reading of a

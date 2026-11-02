@@ -858,7 +858,9 @@ fn ack_of_path_packet() {
 fn idle_refreshed_by_path_send() {
     let mut c = established();
     c.on_datagram(0, 1200, vec![one(1, vec![Frame::PathChallenge(D(1))])], 30, &rnd(5));
-    assert_eq!(c.idle_last_for_test(), 30);
     assert!(has_response(&c.poll_transmit(40).unwrap()));
-    assert_eq!(c.idle_last_for_test(), 40);
+    c.on_timeout(30_000_035, &rnd(6));
+    assert_eq!(c.phase(), Phase::Open);
+    c.on_timeout(30_000_040, &rnd(6));
+    assert_eq!(c.phase(), Phase::Closed);
 }
