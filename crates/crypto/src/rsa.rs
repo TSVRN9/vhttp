@@ -140,4 +140,269 @@ pub fn rsa_pss_sha256_sign(key: &RsaPrivateKey, msg: &[u8], salt: &[u8]) -> (r: 
     crate::shim::rsa_pss_sign(&key.n, &key.e, &key.d, &key.p, &key.q, msg, salt)
 }
 
+proof fn lemma_mgf1_blocks_len(seed: Seq<u8>, n: nat)
+    ensures
+        mgf1_blocks(seed, n).len() == n * 32,
+    decreases n,
+{
+    if n > 0 {
+        lemma_mgf1_blocks_len(seed, (n - 1) as nat);
+        lemma_spec_sha256_len(seed + i2osp((n - 1) as nat, 4));
+    }
+}
+
+proof fn lemma_mgf1_len(seed: Seq<u8>, len: nat)
+    ensures
+        mgf1_sha256(seed, len).len() == len,
+{
+    lemma_mgf1_blocks_len(seed, (len + 31) / 32);
+    assert(((len + 31) / 32) * 32 >= len) by (nonlinear_arith);
+}
+
+/// RFC 8017 Appendix B.2.1; verified against mgf1_sha256. 512 is the largest emLen we sign with.
+#[allow(dead_code)] // used from Task 5, removed there.
+#[cfg_attr(ct_check, ct::secret(seed), ct::public(len))]
+fn mgf1_exec(seed: &[u8; 32], len: usize) -> (r: Vec<u8>)
+    requires
+        len <= 512,
+    ensures
+        r@ == mgf1_sha256(seed@, len as nat),
+{
+    hide(spec_sha256);
+    let blocks: usize = (len + 31) / 32;
+    let mut out: Vec<u8> = Vec::with_capacity(blocks * 32);
+    let mut c: usize = 0;
+    // ct: the loop count comes from the public len
+    while c < blocks
+        invariant
+            blocks <= 16,
+            c <= blocks,
+            out@.len() == c * 32,
+            out@ == mgf1_blocks(seed@, c as nat),
+        decreases blocks - c,
+    {
+        let w = c as u32;
+        let mut input: Vec<u8> = Vec::with_capacity(36);
+        input.extend_from_slice(seed.as_slice());
+        input.push((w >> 24) as u8);
+        input.push((w >> 16) as u8);
+        input.push((w >> 8) as u8);
+        input.push(w as u8);
+        proof {
+            lemma_i2osp_be4(w);
+            assert(input@ =~= seed@ + i2osp(c as nat, 4));
+        }
+        let h = sha256(input.as_slice());
+        out.extend_from_slice(h.as_slice());
+        c = c + 1;
+        proof {
+            assert(mgf1_blocks(seed@, c as nat) == mgf1_blocks(seed@, (c - 1) as nat) + spec_sha256(
+                seed@ + i2osp((c - 1) as nat, 4),
+            ));
+        }
+    }
+    assert(blocks * 32 >= len) by (nonlinear_arith)
+        requires
+            blocks == (len + 31) / 32,
+    ;
+    let mut r: Vec<u8> = Vec::with_capacity(len);
+    r.extend_from_slice(vstd::slice::slice_subrange(out.as_slice(), 0, len));
+    assert(r@ =~= mgf1_sha256(seed@, len as nat));
+    r
+}
+
+/// RFC 8017 §9.1.1 steps 2 and 5-12, in the order of the spec's let chain; verified against
+/// emsa_pss_encode. 2047..=4095 are the emBits of the 2048-4096-bit moduli of `rsa_key_wf`.
+#[allow(dead_code)] // used from Task 5, removed there.
+#[cfg_attr(ct_check, ct::secret(salt, msg), ct::public(em_bits))]
+fn emsa_pss_encode_exec(msg: &[u8], em_bits: usize, salt: &[u8]) -> (r: Vec<u8>)
+    requires
+        msg@.len() <= MAX_INPUT_LEN,
+        salt@.len() == 32,
+        2047 <= em_bits <= 4095,
+    ensures
+        r@ == emsa_pss_encode(msg@, em_bits as nat, salt@),
+        r@.len() == (em_bits + 7) / 8,
+{
+    hide(spec_sha256);
+    let em_len: usize = (em_bits + 7) / 8;
+    let m_hash = sha256(msg);
+    let mut mp: Vec<u8> = Vec::with_capacity(72);
+    let mut i: usize = 0;
+    // ct: a constant count
+    while i < 8
+        invariant
+            i <= 8,
+            mp@ == Seq::new(i as nat, |_j: int| 0x00u8),
+        decreases 8 - i,
+    {
+        mp.push(0u8);
+        i = i + 1;
+        assert(mp@ =~= Seq::new(i as nat, |_j: int| 0x00u8));
+    }
+    mp.extend_from_slice(m_hash.as_slice());
+    mp.extend_from_slice(salt);
+    assert(mp@ =~= Seq::new(8, |_j: int| 0x00u8) + spec_sha256(msg@) + salt@);
+    let hh = sha256(mp.as_slice());
+    let ghost spec_hh = spec_sha256(Seq::new(8, |_j: int| 0x00u8) + spec_sha256(msg@) + salt@);
+    let ps_len: usize = em_len - 66;
+    let mut db: Vec<u8> = Vec::with_capacity(em_len - 33);
+    let mut p: usize = 0;
+    // ct: the loop count comes from the public em_bits
+    while p < ps_len
+        invariant
+            p <= ps_len,
+            db@ == Seq::new(p as nat, |_j: int| 0x00u8),
+        decreases ps_len - p,
+    {
+        db.push(0u8);
+        p = p + 1;
+        assert(db@ =~= Seq::new(p as nat, |_j: int| 0x00u8));
+    }
+    db.push(1u8);
+    db.extend_from_slice(salt);
+    let ghost spec_db = Seq::new((em_len - 66) as nat, |_j: int| 0x00u8) + seq![0x01u8] + salt@;
+    assert(db@ =~= spec_db);
+    let mask = mgf1_exec(&hh, em_len - 33);
+    proof {
+        lemma_mgf1_len(hh@, (em_len - 33) as nat);
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(em_len);
+    let dbs = db.as_slice();
+    let ms = mask.as_slice();
+    let mut j: usize = 0;
+    // ct: the loop count comes from the public em_bits
+    while j < em_len - 33
+        invariant
+            em_len == (em_bits + 7) / 8,
+            256 <= em_len <= 512,
+            j <= em_len - 33,
+            dbs@ == db@,
+            ms@ == mask@,
+            db@.len() == em_len - 33,
+            mask@.len() == em_len - 33,
+            out@.len() == j,
+            forall|q: int| 0 <= q < j ==> #[trigger] out@[q] == db@[q] ^ mask@[q],
+        decreases em_len - 33 - j,
+    {
+        out.push(dbs[j] ^ ms[j]);
+        j = j + 1;
+    }
+    let ghost masked = xor_bytes(db@, mask@);
+    assert(out@ =~= masked);
+    // ct: the shift amount comes from the public em_bits
+    let top: u8 = out.as_slice()[0] & (0xffu8 >> ((8 * em_len - em_bits) as u8));
+    out.set(0, top);
+    out.extend_from_slice(hh.as_slice());
+    out.push(0xbcu8);
+    assert(out@ =~= masked.update(0, top) + spec_hh + seq![0xbcu8]);
+    out
+}
+
 } // verus!
+
+#[cfg(test)]
+#[path = "../tests/vecdata/mod.rs"]
+mod vecdata;
+
+#[cfg(test)]
+mod tests {
+    use super::vecdata::*;
+    use super::*;
+    use ::rsa::traits::PublicKeyParts;
+    use ::rsa::BoxedUint;
+    use sha2::Digest;
+
+    fn u(b: &[u8]) -> BoxedUint {
+        BoxedUint::from_be_slice_vartime(b)
+    }
+
+    // s^e mod n as em_len octets; the octets above em_len must be zero.
+    fn recover_em(pubk: &::rsa::RsaPublicKey, sig: &[u8], em_len: usize) -> Vec<u8> {
+        let s = BoxedUint::from_be_slice(sig, pubk.n_bits_precision()).unwrap();
+        let m = ::rsa::hazmat::rsa_encrypt(pubk, &s).unwrap().to_be_bytes();
+        let (hi, em) = m.split_at(m.len() - em_len);
+        assert!(hi.iter().all(|&x| x == 0));
+        em.to_vec()
+    }
+
+    #[test]
+    fn emsa_matches_cavp() {
+        let (mut nh, mut eh) = (String::new(), String::new());
+        let mut count = 0;
+        for r in rsp_records(&data("nist/SigGenPSS_186-3.txt")) {
+            if r.contains_key("n") || r.contains_key("e") {
+                // n, then e and d, each in its own blank-line record; keep the latest
+                for (k, dst) in [("n", &mut nh), ("e", &mut eh)] {
+                    if let Some(v) = r.get(k) {
+                        *dst = v.clone();
+                    }
+                }
+                continue;
+            }
+            if r.get("mod").map(|m| m == "3072") != Some(true) || r.get("SHAAlg").map(|a| a == "SHA256") != Some(true) {
+                continue;
+            }
+            let pubk = ::rsa::RsaPublicKey::new(u(&hex(&nh)), u(&hex(&eh))).unwrap();
+            let em = recover_em(&pubk, &hex(&r["S"]), 384);
+            assert_eq!(emsa_pss_encode_exec(&hex(&r["Msg"]), 3071, &hex(&r["SaltVal"])), em, "vector {count}");
+            count += 1;
+        }
+        assert_eq!(count, 10);
+    }
+
+    #[test]
+    fn wycheproof_emsa_2048() {
+        let j = parse_json(&data("wycheproof/rsa_pss_2048_sha256_mgf1_32_test.json"));
+        let mut count = 0;
+        for g in j.get("testGroups").arr() {
+            let pk = g.get("publicKey");
+            let pubk = ::rsa::RsaPublicKey::new(u(&hex(pk.get("modulus").str())), u(&hex(pk.get("publicExponent").str()))).unwrap();
+            for t in g.get("tests").arr() {
+                if t.get("result").str() != "valid" {
+                    continue;
+                }
+                let em = recover_em(&pubk, &hex(t.get("sig").str()), 256);
+                let hh: [u8; 32] = em[223..255].try_into().unwrap();
+                let mask = mgf1_exec(&hh, 223);
+                let salt: Vec<u8> = em[191..223].iter().zip(&mask[191..]).map(|(a, b)| a ^ b).collect();
+                assert_eq!(emsa_pss_encode_exec(&hex(t.get("msg").str()), 2047, &salt), em, "tcId {}", t.get("tcId").num());
+                count += 1;
+            }
+        }
+        assert_eq!(count, 63);
+    }
+
+    // The 2052-bit key and signature of tests/rsa_pss.rs::pss_rsa2052_masking_kat: 5 bits cleared.
+    #[test]
+    fn emsa_mask_bits() {
+        let p = hex("0359e29889111427d45e0a7d1b5c4fcd20e9385365d6ba47237a07f61f43b9749dbb0c4ca0eb731d3505fa1a9fc7f7523e6c50834c294e22c524e43aeeb0b55838130129e1f44cbd55f65573b7c241692a297239ab52fb2aeb9b83b5aaa35367c28d8a98818559deb516bebdd3ff5d2feefda32eb265a0e6b2045463b3752856d7");
+        let q = hex("03a2b01240d78fc8bd35a783bc29d19d100eb37822718cbde0cc246fc1bb49532f7354f1b0aa87bc5ba741eb43e5542ee7611dc7907d37ed6573590269c94fcc528907746d7dca3d7dfaddeba94578e47d176de829c93365099f7f1dcd23b918bae692e04987b30c9e7082ff5f6594b456755ecc7c5938e8ec8bdd6b2c85bcc92d");
+        let sig = hex("04a08314b43fed2b7ea3d175947e1680f6b9b515e96c5e597935b5fcbb51e4f9e4d297e3e95b9a7d2865c5aa3d71b394295be3a0d23684d892a92fe81041304162ae6c1500e67821c05d2d8f02b654517a2a5cb890cc513be2a1e89d05ebf6cbbaf4b7ad62d4c90645952724280d5784289a0555f4d040b8f26cfbada65ac5006bc98a5920f708144f89b52d8ee326e53a64738d409ab946000965fcd0a0e717d4af6bcd5cfed126fa0088531a9b8b5fda2aded8ddf5c5bd4e4c3ab596f118847be17ebab2ba75d03854011a515e854538bcc04cc2a208d8b3c75e8d050872d6290ce7bda30129bd9c8f91ee35561465242362a9cd961fd77cc09f4c8252e751bb");
+        let k = ::rsa::RsaPrivateKey::from_p_q(u(&p), u(&q), BoxedUint::from(65537u32)).unwrap();
+        let em = recover_em(&k.to_public_key(), &sig, 257);
+        let salt: Vec<u8> = (0..32).collect();
+        assert_eq!(em[0] >> 3, 0);
+        assert_eq!(emsa_pss_encode_exec(b"TLS 1.3, server CertificateVerify", 2051, &salt), em);
+    }
+
+    #[test]
+    fn emsa_len_2049() {
+        let r = emsa_pss_encode_exec(b"m", 2048, &[7u8; 32]);
+        assert_eq!(r.len(), 256);
+        assert_eq!(r[255], 0xbc);
+    }
+
+    #[test]
+    fn mgf1_one_block() {
+        let seed = [0x5au8; 32];
+        let mut m = seed.to_vec();
+        m.extend_from_slice(&[0u8; 4]);
+        assert_eq!(mgf1_exec(&seed, 20), sha2::Sha256::digest(&m)[..20]);
+    }
+
+    #[test]
+    fn mgf1_len_zero() {
+        assert!(mgf1_exec(&[1u8; 32], 0).is_empty());
+    }
+}
