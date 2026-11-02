@@ -553,7 +553,13 @@ impl Connection {
         &&& !is_stream_layer_frame(f) ==> n.streams == self.streams
     }
 
-    /// A datagram of `datagram_len` bytes on `path`, with its decrypted packets in order.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+    //# For example, if decryption fails (because the keys are
+    //# not available or for any other reason), the receiver MAY either
+    //# discard or buffer the packet for later processing and MUST attempt to
+    //# process the remaining packets.
+    /// A datagram of `datagram_len` bytes on `path`, with its decrypted packets in order: 3e discards
+    /// a packet it cannot decrypt and hands over the rest.
     #[verifier::spinoff_prover]
     pub fn on_datagram(
         &mut self,
@@ -598,6 +604,15 @@ impl Connection {
         // §12.2: the first packet's DCID, even if the gate drops that packet.
         let first = slice_to_vec(packets[0].dcid.as_slice());
         let now = self.now;
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+        //# Receivers MUST be able to
+        //# process coalesced packets.
+        //
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+        //# The receiver of coalesced QUIC packets MUST
+        //# individually process each QUIC packet and separately acknowledge
+        //# them, as if they were received as the payload of different UDP
+        //# datagrams.
         for p in it: packets
             invariant
                 self.wf(),
@@ -859,6 +874,16 @@ impl Connection {
     //# A server MUST NOT process
     //# incoming 1-RTT protected packets before the TLS handshake is
     //# complete.
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.1
+    //# A server MUST discard an Initial packet that is carried in a UDP
+    //# datagram with a payload that is smaller than the smallest allowed
+    //# maximum datagram size of 1200 bytes.
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.3
+    //# Duplicate suppression MUST
+    //# happen after removing packet protection for the reasons described in
+    //# Section 9.5 of [QUIC-TLS].
     /// Whether packet `p` of a `len`-byte datagram on `path` is processed. Too small a packet is
     /// `MIN_SHORT_PACKET` (route, 3b) or a failed decryption (3e), so it never reaches this
     /// point; the only size rule here is §14.1's for Initial, so small PATH_* datagrams pass. Too
@@ -3338,6 +3363,18 @@ impl Connection {
         //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.3
         //# An acknowledgment for a 1-RTT
         //# packet MUST be carried in a 1-RTT packet.
+        //
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.6
+        //= type=exception
+        //= reason=We never accept 0-RTT.
+        //# Packets that a client sends with 0-RTT packet protection MUST be
+        //# acknowledged by the server in packets protected by 1-RTT keys.
+        //
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.3
+        //= type=exception
+        //= reason=client-only
+        //# A client MUST NOT send 0-RTT packets once it starts processing 1-RTT
+        //# packets from the server.
         match self.recv_ref(k).build_ack(now, self.local_tp.ack_delay_exponent, room) {
             None => (fs, room),
             Some(a) => {
@@ -3447,8 +3484,27 @@ impl Connection {
             final(self).polled == old(self).polled,
             tx_frames(frames_view(final(fs)@), PacketKind::OneRtt, base, *final(left) as nat, room),
             extends(frames_view(old(fs)@), frames_view(final(fs)@)),
+            final(self).hs_done == old(self).hs_done || (old(self).hs_done is Pending && final(self).hs_done is Sent),
+            old(self).hs_done is Pending && final(self).hs_done is Sent ==> frames_view(
+                final(fs)@,
+            )[old(fs)@.len() as int] is HandshakeDone,
+            // HANDSHAKE_DONE counts as Sent only with its frame; a CID leaves its queue only with one.
+            final(self).local_cids.pending_spec().len() + final(self).peer_cids.retire_pending_spec().len()
+                + final(fs)@.len() == old(self).local_cids.pending_spec().len()
+                + old(self).peer_cids.retire_pending_spec().len() + old(fs)@.len() + (if old(self).hs_done is Pending
+                && final(self).hs_done is Sent {
+                1int
+            } else {
+                0int
+            }),
     {
+        let ghost n0 = fs@.len();
         self.handshake_done_frame(left, fs, Ghost(base), Ghost(room));
+        proof {
+            if fs@.len() == n0 + 1 {
+                assert(frames_view(fs@)[n0 as int] == fs@.last()@);
+            }
+        }
         self.new_cid_frames(left, fs, Ghost(base), Ghost(room));
         self.retire_cid_frames(left, fs, Ghost(base), Ghost(room));
     }
@@ -3477,6 +3533,8 @@ impl Connection {
             final(fs)@.len() == old(fs)@.len() ==> final(self).hs_done == old(self).hs_done,
             final(fs)@.len() == old(fs)@.len() + 1 ==> final(fs)@.last()@ is HandshakeDone,
             final(fs)@.len() <= old(fs)@.len() + 1,
+            final(self).local_cids == old(self).local_cids,
+            final(self).peer_cids == old(self).peer_cids,
     {
         //= https://www.rfc-editor.org/rfc/rfc9000#section-19.20
         //# Servers MUST
@@ -3512,6 +3570,7 @@ impl Connection {
             final(self).hs_done == old(self).hs_done,
             final(self).local_cids.pending_spec().len() + final(fs)@.len() == old(self).local_cids.pending_spec().len()
                 + old(fs)@.len(),
+            final(self).peer_cids == old(self).peer_cids,
     {
         let ghost s0 = *self;
         let ghost sf0 = frames_view(fs@);
@@ -3526,6 +3585,7 @@ impl Connection {
                 tx_frames(frames_view(fs@), PacketKind::OneRtt, base, *left as nat, room),
                 extends(sf0, frames_view(fs@)),
                 self.local_cids.pending_spec().len() + fs@.len() == total,
+                self.peer_cids == s0.peer_cids,
             decreases self.local_cids.pending_spec().len(),
         {
             let f = match self.local_cids.pending_frame() {
@@ -3565,6 +3625,7 @@ impl Connection {
             final(self).peer_cids.retire_pending_spec().len() + final(fs)@.len() == old(
                 self,
             ).peer_cids.retire_pending_spec().len() + old(fs)@.len(),
+            final(self).local_cids == old(self).local_cids,
     {
         let ghost s0 = *self;
         let ghost sf0 = frames_view(fs@);
@@ -3579,6 +3640,7 @@ impl Connection {
                 tx_frames(frames_view(fs@), PacketKind::OneRtt, base, *left as nat, room),
                 extends(sf0, frames_view(fs@)),
                 self.peer_cids.retire_pending_spec().len() + fs@.len() == total,
+                self.local_cids == s0.local_cids,
             decreases self.peer_cids.retire_pending_spec().len(),
         {
             let f = match self.peer_cids.pending_retire() {
@@ -3815,6 +3877,7 @@ impl Connection {
                 &&& ack_only ==> old(self).recv(k).ack_only_allowed() && p@.frames[0] is Ack
                 &&& eliciting ==> old(self).inflight_total() < MAX_INFLIGHT
                 &&& polled_in_packet(final(self).polled@, p@)
+                &&& k is Initial && eliciting ==> can_pad
             },
     {
         proof {
@@ -3839,6 +3902,7 @@ impl Connection {
         if may_elicit {
             self.collect_others(k, left, &mut fs, Ghost(room as nat));
         }
+        assert(!may_elicit ==> fs@.len() == n);
         let eliciting = is_ack_eliciting(fs.as_slice());
         proof {
             lemma_eliciting(fs@, n as int);
@@ -4013,8 +4077,11 @@ impl Connection {
     closed spec fn sends_kept_but(&self, o: Connection) -> bool {
         &&& self.out_log@ == o.out_log@
         &&& self.paths == o.paths
+        &&& self.ids == o.ids
         &&& self.lc == o.lc
         &&& self.complete == o.complete
+        &&& self.live_i == o.live_i
+        &&& self.live_h == o.live_h
         &&& self.streams == o.streams
         &&& self.polled == o.polled
     }
@@ -4098,14 +4165,18 @@ impl Connection {
             r matches Some((p, eliciting, _)) ==> {
                 &&& old(self).packet_ok(p@, k, room as nat)
                 &&& polled_in_packet(final(self).polled@, p@)
+                &&& k is Initial && eliciting ==> can_pad
                 &&& eliciting == exists|i: int|
                     0 <= i < p@.frames.len() && ack_eliciting(spec_frame_type(#[trigger] p@.frames[i]))
                 &&& eliciting ==> recorded(old(self).sent(k).inflight_spec(), final(self).sent(k).inflight_spec(), p@)
                 &&& !eliciting ==> final(self).sent(k).inflight_spec() == old(self).sent(k).inflight_spec()
                 &&& final(self).sent(k).next_pn_spec() == p@.pn + 1
                 &&& final(self).paths == old(self).paths
+                &&& final(self).ids == old(self).ids
                 &&& final(self).lc == old(self).lc
                 &&& final(self).complete == old(self).complete
+                &&& final(self).live_i == old(self).live_i
+                &&& final(self).live_h == old(self).live_h
                 &&& forall|j: PacketKind| j != k ==> #[trigger] final(self).sent(j).next_pn_spec()
                     == old(self).sent(j).next_pn_spec()
                 &&& forall|j: PacketKind| #[trigger] final(self).sent(j).largest_acked_spec()
@@ -4141,6 +4212,38 @@ impl Connection {
         Some((p, eliciting, ack_only))
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    //# Prior to validating the client address, servers MUST NOT send more
+    //# than three times as many bytes as the number of bytes they have
+    //# received.
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    //# For the purposes of
+    //# avoiding amplification prior to address validation, servers MUST
+    //# count all of the payload bytes received in datagrams that are
+    //# uniquely attributed to a single connection.
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    //= type=exception
+    //= reason=client-only
+    //# Clients MUST ensure that UDP datagrams containing Initial packets
+    //# have UDP payloads of at least 1200 bytes, adding PADDING frames as
+    //# necessary.
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    //= type=exception
+    //= reason=client-only
+    //# To
+    //# prevent this deadlock, clients MUST send a packet on a Probe Timeout
+    //# (PTO); see Section 6.2 of [QUIC-RECOVERY].
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    //= type=exception
+    //= reason=client-only
+    //# Specifically, the client
+    //# MUST send an Initial packet in a UDP datagram that contains at least
+    //# 1200 bytes if it does not have Handshake keys, and otherwise send a
+    //# Handshake packet.
     /// `d` went out on `q`: the only `Paths::on_sent` and the only log push, so the budget's `Sent`
     /// entries are exactly the log (P1). The caller snapshots `next_pn` before committing `d`'s
     /// packets, which puts their numbers above every logged one.
@@ -4163,6 +4266,7 @@ impl Connection {
             final(self).wf(),
             final(self).out_log() == old(self).out_log().push(d@),
             final(self).sends_only_logged(*old(self)),
+            final(self).lc == old(self).lc,
     {
         let ghost s0 = *self;
         let n = datagram_len(d);
@@ -4260,8 +4364,954 @@ impl Connection {
         self.lemma_dcids_same(o, q);
     }
 
-    /// One datagram, or None. Provisional: 1-RTT only (Task 2a-ii adds Closing, path datagrams and
-    /// the long-header spaces); its ensures stay.
+    /// The Destination Connection ID of every packet: the long-header spaces end at `complete`.
+    closed spec fn tx_dcid(&self) -> Seq<u8> {
+        if self.complete {
+            self.active_dcid_spec()
+        } else {
+            self.ids@.client_scid
+        }
+    }
+
+    /// `p` is a packet `transmit_ok` accepts, by what `self` was before the datagram was built.
+    closed spec fn packet_built(&self, p: SpecOutPacket) -> bool {
+        &&& out_packet_wf(p, self.sent(p.kind).largest_acked_spec())
+        &&& self.sent(p.kind).next_pn_spec() <= p.pn
+        &&& p.dcid == self.tx_dcid()
+        &&& forall|j: int|
+            0 <= j < p.frames.len() ==> (#[trigger] p.frames[j] matches SpecFrame::Ack(a) ==> forall|pn: u64|
+                #[trigger] ack_contains(a, pn) ==> self.recv(p.kind).seen().contains(pn))
+        &&& forall|j: int| 0 <= j < p.frames.len() && #[trigger] p.frames[j] is HandshakeDone ==> self.complete
+    }
+
+    /// `self` is `o` with the packets `s` built, not yet sent.
+    closed spec fn built_ok(&self, o: Connection, s: Seq<SpecOutPacket>) -> bool {
+        &&& self.paths == o.paths
+        &&& self.ids == o.ids
+        &&& self.lc == o.lc
+        &&& self.complete == o.complete
+        &&& self.live_i == o.live_i
+        &&& self.live_h == o.live_h
+        &&& self.out_log@ == o.out_log@
+        &&& forall|j: PacketKind| #[trigger] self.sent(j).largest_acked_spec() == o.sent(j).largest_acked_spec()
+        &&& forall|j: PacketKind| #[trigger] self.recv(j).seen() == o.recv(j).seen()
+        &&& forall|j: PacketKind| o.sent(j).next_pn_spec() <= #[trigger] self.sent(j).next_pn_spec()
+        &&& forall|i: int| 0 <= i < s.len() ==> o.packet_built(#[trigger] s[i])
+        &&& forall|k: PacketKind|
+            pns_built(#[trigger] packets_pns(s, k), o.sent(k).next_pn_spec(), self.sent(k).next_pn_spec())
+    }
+
+    /// `tx_kept` as `sent(j)`, `recv(j)` and `live(j)`.
+    proof fn lemma_tx_kept(&self, o: Connection)
+        requires
+            self.tx_kept(o),
+        ensures
+            forall|j: PacketKind| #[trigger] self.sent(j) == o.sent(j),
+            forall|j: PacketKind| #[trigger] self.recv(j) == o.recv(j),
+            forall|j: PacketKind| #[trigger] self.live(j) == o.live(j),
+    {
+        assert forall|j: PacketKind| #[trigger] self.sent(j) == o.sent(j) by {
+            match j {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
+        assert forall|j: PacketKind| #[trigger] self.recv(j) == o.recv(j) by {
+            match j {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
+        assert forall|j: PacketKind| #[trigger] self.live(j) == o.live(j) by {
+            match j {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
+    }
+
+    proof fn lemma_built_empty(&self, o: Connection)
+        requires
+            self.tx_kept(o),
+        ensures
+            self.built_ok(o, Seq::empty()),
+    {
+        self.lemma_tx_kept(o);
+        assert forall|k: PacketKind|
+            pns_built(#[trigger] packets_pns(Seq::empty(), k), o.sent(k).next_pn_spec(), self.sent(k).next_pn_spec()) by {
+            assert(packets_pns(Seq::empty(), k) =~= Seq::<u64>::empty());
+        }
+    }
+
+    /// A space that sent nothing changed nothing `built_ok` reads.
+    proof fn lemma_built_kept(&self, c: Connection, o: Connection, s: Seq<SpecOutPacket>)
+        requires
+            c.built_ok(o, s),
+            self.tx_kept(c),
+        ensures
+            self.built_ok(o, s),
+    {
+        self.lemma_tx_kept(c);
+        assert forall|k: PacketKind|
+            pns_built(#[trigger] packets_pns(s, k), o.sent(k).next_pn_spec(), self.sent(k).next_pn_spec()) by {
+            assert(self.sent(k) == c.sent(k));
+            assert(pns_built(packets_pns(s, k), o.sent(k).next_pn_spec(), c.sent(k).next_pn_spec()));
+        }
+        assert forall|j: PacketKind| o.sent(j).next_pn_spec() <= #[trigger] self.sent(j).next_pn_spec() by {
+            assert(self.sent(j) == c.sent(j));
+            assert(o.sent(j).next_pn_spec() <= c.sent(j).next_pn_spec());
+        }
+    }
+
+    /// `p`, numbered from `c`'s space `p.kind`, joins `s` once `self` has taken its number.
+    proof fn lemma_built_push(&self, c: Connection, o: Connection, s: Seq<SpecOutPacket>, p: SpecOutPacket)
+        requires
+            c.wf(),
+            c.built_ok(o, s),
+            c.live(p.kind),
+            p.pn == c.sent(p.kind).next_pn_spec(),
+            p.dcid == c.space_dcid(p.kind),
+            out_packet_wf(p, c.sent(p.kind).largest_acked_spec()),
+            ack_ok(p.frames, c.recv(p.kind)),
+            self.paths == c.paths,
+            self.ids == c.ids,
+            self.lc == c.lc,
+            self.complete == c.complete,
+            self.live_i == c.live_i,
+            self.live_h == c.live_h,
+            self.out_log@ == c.out_log@,
+            self.sent(p.kind).next_pn_spec() == p.pn + 1,
+            forall|j: PacketKind| j != p.kind ==> #[trigger] self.sent(j).next_pn_spec() == c.sent(j).next_pn_spec(),
+            forall|j: PacketKind| #[trigger] self.sent(j).largest_acked_spec() == c.sent(j).largest_acked_spec(),
+            forall|j: PacketKind| #[trigger] self.recv(j).seen() == c.recv(j).seen(),
+        ensures
+            self.built_ok(o, s.push(p)),
+    {
+        let k = p.kind;
+        let s2 = s.push(p);
+        assert(c.wf_parts());
+        assert(o.sent(k).largest_acked_spec() == c.sent(k).largest_acked_spec());
+        assert(c.recv(k).seen() == o.recv(k).seen());
+        assert(o.sent(k).next_pn_spec() <= c.sent(k).next_pn_spec());
+        assert(p.dcid == o.tx_dcid()) by {
+            match k {
+                PacketKind::OneRtt => {},
+                _ => {},
+            }
+        }
+        assert forall|j: int| 0 <= j < p.frames.len() implies (#[trigger] p.frames[j] matches SpecFrame::Ack(a)
+            ==> forall|pn: u64| #[trigger] ack_contains(a, pn) ==> o.recv(k).seen().contains(pn)) by {
+            if let SpecFrame::Ack(a) = p.frames[j] {
+                assert(ack_full(a, c.recv(k)));
+            }
+        }
+        assert forall|j: int| 0 <= j < p.frames.len() && #[trigger] p.frames[j] is HandshakeDone implies o.complete by {
+            assert(frame_permitted(spec_frame_type(p.frames[j]), k));
+            match k {
+                PacketKind::OneRtt => {},
+                _ => {},
+            }
+        }
+        assert(o.packet_built(p));
+        assert forall|i: int| 0 <= i < s2.len() implies o.packet_built(#[trigger] s2[i]) by {
+            if i < s.len() {
+                assert(s2[i] == s[i]);
+            }
+        }
+        assert(s2.drop_last() =~= s);
+        assert(s2.last() == p);
+        assert forall|j: PacketKind| o.sent(j).next_pn_spec() <= #[trigger] self.sent(j).next_pn_spec() by {
+            assert(o.sent(j).next_pn_spec() <= c.sent(j).next_pn_spec());
+        }
+        assert forall|m: PacketKind|
+            pns_built(#[trigger] packets_pns(s2, m), o.sent(m).next_pn_spec(), self.sent(m).next_pn_spec()) by {
+            let a = packets_pns(s, m);
+            assert(pns_built(a, o.sent(m).next_pn_spec(), c.sent(m).next_pn_spec()));
+            if m == k {
+                let b = packets_pns(s2, m);
+                assert(b == a.push(p.pn));
+                assert forall|x: int, y: int| 0 <= x < y < b.len() implies #[trigger] b[x] < #[trigger] b[y] by {
+                    if y < a.len() {
+                        assert(b[x] == a[x] && b[y] == a[y]);
+                    } else {
+                        assert(b[x] == a[x] && b[y] == p.pn);
+                    }
+                }
+                assert forall|x: int| 0 <= x < b.len() implies #[trigger] b[x] < self.sent(m).next_pn_spec()
+                    && o.sent(m).next_pn_spec() <= b[x] by {
+                    if x < a.len() {
+                        assert(b[x] == a[x]);
+                    } else {
+                        assert(b[x] == p.pn);
+                    }
+                }
+            } else {
+                assert(packets_pns(s2, m) == a);
+                assert(self.sent(m).next_pn_spec() == c.sent(m).next_pn_spec());
+            }
+        }
+    }
+
+    /// `pad_datagram`'s `s2` is `s`, as far as `built_ok` reads.
+    proof fn lemma_built_padded(&self, o: Connection, s: Seq<SpecOutPacket>, s2: Seq<SpecOutPacket>, i: int, x: nat)
+        requires
+            self.built_ok(o, s),
+            0 <= i < s.len(),
+            s2 == s.update(i, padded(s[i], x)),
+            forall|m: int, la: Option<u64>|
+                #![trigger out_packet_wf(s2[m], la)]
+                0 <= m < s.len() && out_packet_wf(s[m], la) ==> out_packet_wf(s2[m], la),
+        ensures
+            self.built_ok(o, s2),
+            has_eliciting_initial(s2) == has_eliciting_initial(s),
+    {
+        assert forall|m: int| 0 <= m < s2.len() implies o.packet_built(#[trigger] s2[m]) by {
+            assert(o.packet_built(s[m]));
+            assert(s2[m].kind == s[m].kind);
+            assert(s2[m].frames == s[m].frames);
+            assert(out_packet_wf(s[m], o.sent(s[m].kind).largest_acked_spec()));
+            assert(out_packet_wf(s2[m], o.sent(s[m].kind).largest_acked_spec()));
+        }
+        assert forall|k: PacketKind|
+            pns_built(#[trigger] packets_pns(s2, k), o.sent(k).next_pn_spec(), self.sent(k).next_pn_spec()) by {
+            lemma_pns_padded(s, i, x, k);
+            assert(pns_built(packets_pns(s, k), o.sent(k).next_pn_spec(), self.sent(k).next_pn_spec()));
+        }
+        if has_eliciting_initial(s) {
+            let (a, b) = choose|a: int, b: int|
+                0 <= a < s.len() && s[a].kind is Initial && 0 <= b < s[a].frames.len() && ack_eliciting(
+                    spec_frame_type(#[trigger] s[a].frames[b]),
+                );
+            assert(s2[a].frames[b] == s[a].frames[b]);
+        }
+        if has_eliciting_initial(s2) {
+            let (a, b) = choose|a: int, b: int|
+                0 <= a < s2.len() && s2[a].kind is Initial && 0 <= b < s2[a].frames.len() && ack_eliciting(
+                    spec_frame_type(#[trigger] s2[a].frames[b]),
+                );
+            assert(s[a].frames[b] == s2[a].frames[b]);
+        }
+    }
+
+    /// What `commit_datagram` asks of the packets' numbers.
+    proof fn lemma_built_fresh(&self, o: Connection, s: Seq<SpecOutPacket>)
+        requires
+            o.wf(),
+            self.built_ok(o, s),
+        ensures
+            forall|k: PacketKind|
+                #[trigger] pns_fresh(log_pns(self.out_log@, k), packets_pns(s, k), self.sent(k).next_pn_spec()),
+    {
+        assert(o.wf_pn());
+        assert forall|k: PacketKind|
+            #[trigger] pns_fresh(log_pns(self.out_log@, k), packets_pns(s, k), self.sent(k).next_pn_spec()) by {
+            let l = log_pns(self.out_log@, k);
+            let b = packets_pns(s, k);
+            assert(pns_built(b, o.sent(k).next_pn_spec(), self.sent(k).next_pn_spec()));
+            assert(pns_ok(l, o.sent(k).next_pn_spec())) by {
+                match k {
+                    PacketKind::Initial => {},
+                    PacketKind::Handshake => {},
+                    PacketKind::OneRtt => {},
+                }
+            }
+            assert forall|i: int, j: int| 0 <= i < l.len() && 0 <= j < b.len() implies #[trigger] l[i] < #[trigger] b[j] by {
+                assert(l[i] < o.sent(k).next_pn_spec());
+                assert(o.sent(k).next_pn_spec() <= b[j]);
+            }
+        }
+    }
+
+    /// `transmit_ok` and P6, for the packets of `d`, once `self` has committed it after `c`.
+    proof fn lemma_built_sent(&self, c: Connection, o: Connection, d: SpecOutDatagram)
+        requires
+            c.built_ok(o, d.packets),
+            out_datagram_len(d) <= MAX_DATAGRAM,
+            forall|j: PacketKind| #[trigger] self.sent(j) == c.sent(j),
+            forall|j: PacketKind| #[trigger] self.recv(j) == c.recv(j),
+            self.complete == c.complete,
+        ensures
+            transmit_ok(o, *self, d),
+            same_dcid(d),
+    {
+        assert forall|i: int| 0 <= i < d.packets.len() implies out_packet_wf(
+            #[trigger] d.packets[i],
+            self.sent(d.packets[i].kind).largest_acked_spec(),
+        ) by {
+            let k = d.packets[i].kind;
+            assert(o.packet_built(d.packets[i]));
+            assert(self.sent(k) == c.sent(k));
+            assert(c.sent(k).largest_acked_spec() == o.sent(k).largest_acked_spec());
+        }
+        assert forall|i: int| 0 <= i < d.packets.len() implies o.sent((#[trigger] d.packets[i]).kind).next_pn_spec()
+            <= d.packets[i].pn by {
+            assert(o.packet_built(d.packets[i]));
+        }
+        assert forall|k: PacketKind| #[trigger] pns_ok(packets_pns(d.packets, k), self.sent(k).next_pn_spec()) by {
+            assert(self.sent(k) == c.sent(k));
+            assert(pns_built(packets_pns(d.packets, k), o.sent(k).next_pn_spec(), c.sent(k).next_pn_spec()));
+        }
+        assert forall|i: int, j: int| 0 <= i < d.packets.len() && 0 <= j < d.packets[i].frames.len() implies (
+        #[trigger] d.packets[i].frames[j] matches SpecFrame::Ack(a) ==> forall|pn: u64|
+            #[trigger] ack_contains(a, pn) ==> self.recv(d.packets[i].kind).seen().contains(pn)) by {
+            let k = d.packets[i].kind;
+            assert(o.packet_built(d.packets[i]));
+            assert(self.recv(k) == c.recv(k));
+            assert(c.recv(k).seen() == o.recv(k).seen());
+        }
+        assert forall|i: int, j: int|
+            0 <= i < d.packets.len() && 0 <= j < d.packets[i].frames.len() && #[trigger] d.packets[i].frames[j]
+                is HandshakeDone implies self.live(PacketKind::OneRtt) by {
+            assert(o.packet_built(d.packets[i]));
+        }
+        assert forall|i: int, j: int| 0 <= i < d.packets.len() && 0 <= j < d.packets.len() implies #[trigger] d.packets[i].dcid
+            == #[trigger] d.packets[j].dcid by {
+            assert(o.packet_built(d.packets[i]));
+            assert(o.packet_built(d.packets[j]));
+        }
+    }
+
+    /// Whether `paths.mtu_failed` holds for `q`.
+    pub closed spec fn mtu_failed_at(&self, q: PathId) -> bool {
+        self.paths.mtu_failed_spec(q)
+    }
+
+    /// `self` is `o` after a close of `n` bytes, sent as `o`'s closing state allowed: the first
+    /// without a closing budget (the path's holds it), any later one charged to it.
+    pub closed spec fn close_sent(&self, o: Connection, n: nat) -> bool {
+        &&& n <= u64::MAX
+        &&& o.lc.may_send_spec(n as u64)
+        &&& self.lc.first_sent_spec()
+        &&& !self.lc.owed_spec()
+        &&& o.lc.first_sent_spec() ==> self.lc.budget_trace() == o.lc.budget_trace().push(AmpEv::Sent(n))
+    }
+
+    fn is_live(&self, k: PacketKind) -> (r: bool)
+        ensures
+            r == self.live(k),
+    {
+        match k {
+            PacketKind::Initial => self.live_i,
+            PacketKind::Handshake => self.live_h,
+            PacketKind::OneRtt => self.complete,
+        }
+    }
+
+    /// Adds the next packet of space `k`, if it is live, due and fits what is left of `budget`.
+    #[verifier::spinoff_prover]
+    fn add_space_packet(
+        &mut self,
+        k: PacketKind,
+        budget: usize,
+        can_pad: bool,
+        now: u64,
+        d: &mut OutDatagram,
+        pad: &mut bool,
+        Ghost(o): Ghost<Connection>,
+    )
+        requires
+            o.wf(),
+            old(self).wf(),
+            old(self).phase_spec() is Open,
+            old(self).polled@.len() == 0,
+            old(self).live(k) ==> old(self).sent(k).next_pn_spec() < PN_MAX,
+            old(self).built_ok(o, old(d)@.packets),
+            old(d)@.packets.len() <= 2,
+            out_datagram_sized(old(d)@),
+            budget <= MAX_DATAGRAM,
+            out_datagram_len(old(d)@) <= budget,
+            *old(pad) == has_eliciting_initial(old(d)@.packets),
+            *old(pad) ==> can_pad,
+        ensures
+            final(self).wf(),
+            final(self).out_log() == old(self).out_log(),
+            !(k is OneRtt) ==> final(self).polled@.len() == 0,
+            !(final(self).phase_spec() is Open) ==> final(self).polled@.len() == 0,
+            final(d)@.path == old(d)@.path,
+            final(self).phase_spec() is Open ==> {
+                &&& final(self).built_ok(o, final(d)@.packets)
+                &&& final(d)@.packets.len() <= old(d)@.packets.len() + 1
+                &&& out_datagram_sized(final(d)@)
+                &&& out_datagram_len(final(d)@) <= budget
+                &&& *final(pad) == has_eliciting_initial(final(d)@.packets)
+                &&& *final(pad) ==> can_pad
+                &&& polled_placed(final(self).polled@, final(d)@)
+                &&& forall|j: PacketKind| j != k ==> #[trigger] final(self).sent(j).next_pn_spec()
+                    == old(self).sent(j).next_pn_spec()
+            },
+    {
+        let ghost c = *self;
+        let ghost s = d@.packets;
+        proof {
+            assert(polled_placed(self.polled@, d@));
+        }
+        if !self.is_live(k) {
+            return;
+        }
+        let left = budget - datagram_len(d);
+        let room = match self.room_for(k, left) {
+            Some(r) => r,
+            None => return,
+        };
+        let (p, eliciting, _) = match self.build_space_packet(k, room, can_pad, now) {
+            Some(x) => x,
+            None => {
+                proof {
+                    if self.phase_spec() is Open {
+                        self.lemma_built_kept(c, o, s);
+                        self.lemma_tx_kept(c);
+                        assert(polled_placed(self.polled@, d@));
+                    }
+                }
+                return;
+            },
+        };
+        let ghost v = p@;
+        d.packets.push(p);
+        if matches!(k, PacketKind::Initial) && eliciting {
+            *pad = true;
+        }
+        proof {
+            let s2 = s.push(v);
+            assert(d@.packets =~= s2);
+            assert(c.packet_ok(v, k, room as nat));
+            self.lemma_built_push(c, o, s, v);
+            assert(s2.drop_last() =~= s);
+            assert(s2.last() == v);
+            // `room_for`'s reservation, at the length `collect_frames` chose.
+            assert(min_pn_len(c.sent(k).next_pn_spec(), c.sent(k).largest_acked_spec(), v.pn_len as nat));
+            assert forall|i: int| 0 <= i < s2.len() implies out_packet_sized(#[trigger] s2[i]) by {
+                if i < s.len() {
+                    assert(s2[i] == s[i]);
+                }
+            }
+            assert(in_tail(self.polled@, v.frames, 0));
+            assert forall|i: int| 0 <= i < self.polled@.len() implies frame_in_datagram(d@, #[trigger] self.polled@[i]) by {
+                assert(frame_from(v.frames, self.polled@[i], 0));
+                let n = choose|n: int| 0 <= n < v.frames.len() && #[trigger] v.frames[n] == self.polled@[i];
+                assert(d@.packets[s.len() as int] == v);
+                assert(d@.packets[s.len() as int].frames[n] == self.polled@[i]);
+            }
+            if eliciting && k is Initial {
+                let m = choose|m: int| 0 <= m < v.frames.len() && ack_eliciting(spec_frame_type(#[trigger] v.frames[m]));
+                assert(s2[s.len() as int].frames[m] == v.frames[m]);
+            }
+            assert(has_eliciting_initial(s2) == *pad) by {
+                if has_eliciting_initial(s2) {
+                    let (a, b) = choose|a: int, b: int|
+                        0 <= a < s2.len() && s2[a].kind is Initial && 0 <= b < s2[a].frames.len() && ack_eliciting(
+                            spec_frame_type(#[trigger] s2[a].frames[b]),
+                        );
+                    if a == s.len() {
+                        assert(s2[a].frames[b] == v.frames[b]);
+                    } else {
+                        assert(s2[a] == s[a]);
+                    }
+                }
+                if has_eliciting_initial(s) {
+                    let (a, b) = choose|a: int, b: int|
+                        0 <= a < s.len() && s[a].kind is Initial && 0 <= b < s[a].frames.len() && ack_eliciting(
+                            spec_frame_type(#[trigger] s[a].frames[b]),
+                        );
+                    assert(s2[a] == s[a]);
+                }
+            }
+        }
+    }
+
+    /// The ordinary datagram of the Open state: a packet of each space with something due.
+    #[verifier::spinoff_prover]
+    fn data_datagram(&mut self, now: u64, Ghost(o): Ghost<Connection>) -> (r: Option<OutDatagram>)
+        requires
+            o.wf(),
+            old(self).wf(),
+            old(self).phase_spec() is Open,
+            old(self).polled@.len() == 0,
+            old(self).tx_kept(o),
+            forall|k: PacketKind| #[trigger] old(self).live(k) ==> old(self).sent(k).next_pn_spec() < PN_MAX,
+        ensures
+            final(self).wf(),
+            final(self).out_log() == match r {
+                Some(d) => old(self).out_log().push(d@),
+                None => old(self).out_log(),
+            },
+            final(self).polled().len() > 0 ==> r is Some,
+            r matches Some(d) ==> {
+                &&& transmit_ok(o, *final(self), d@)
+                &&& polled_placed(final(self).polled(), d@)
+                &&& initial_padded(d@)
+                &&& same_dcid(d@)
+                &&& !o.mtu_failed_at(d@.path)
+            },
+    {
+        // ponytail: one datagram per call (the shell loops), one CRYPTO frame per space per packet.
+        let q = self.paths.active();
+        proof {
+            self.paths.lemma_wf();
+        }
+        // P17: §14.2's send gate, local to this body.
+        if self.paths.mtu_failed(q) {
+            return None;
+        }
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-14.1
+        //# The server MUST also limit the number of bytes it sends before
+        //# validating the address of the client; see Section 8.
+        let b = self.paths.budget(q);
+        let budget = if b > MAX_DATAGRAM as u64 {
+            MAX_DATAGRAM
+        } else {
+            b as usize
+        };
+        let can_pad = budget >= MIN_INITIAL_DATAGRAM;
+        let mut d = OutDatagram { path: q, packets: Vec::new() };
+        let mut pad = false;
+        proof {
+            self.lemma_built_empty(o);
+            assert(d@.packets =~= Seq::<SpecOutPacket>::empty());
+            assert(self.live(PacketKind::Initial) ==> self.sent(PacketKind::Initial).next_pn_spec() < PN_MAX);
+            assert(self.live(PacketKind::Handshake) ==> self.sent(PacketKind::Handshake).next_pn_spec() < PN_MAX);
+            assert(self.live(PacketKind::OneRtt) ==> self.sent(PacketKind::OneRtt).next_pn_spec() < PN_MAX);
+        }
+        // A packet number that cannot be encoded closes silently (`collect_frames`). An earlier space's
+        // packet is then recorded and unsent, harmless once Closed; OneRtt runs last, so no polled
+        // frame is at risk.
+        self.add_space_packet(PacketKind::Initial, budget, can_pad, now, &mut d, &mut pad, Ghost(o));
+        if !matches!(self.lc.phase(), Phase::Open) {
+            return None;
+        }
+        self.add_space_packet(PacketKind::Handshake, budget, can_pad, now, &mut d, &mut pad, Ghost(o));
+        if !matches!(self.lc.phase(), Phase::Open) {
+            return None;
+        }
+        self.add_space_packet(PacketKind::OneRtt, budget, can_pad, now, &mut d, &mut pad, Ghost(o));
+        if !matches!(self.lc.phase(), Phase::Open) {
+            return None;
+        }
+        if d.packets.len() == 0 {
+            proof {
+                if self.polled@.len() > 0 {
+                    assert(frame_in_datagram(d@, self.polled@[0]));
+                }
+            }
+            return None;
+        }
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-14.1
+        //# Similarly, a server MUST expand the payload of all UDP
+        //# datagrams carrying ack-eliciting Initial packets to at least the
+        //# smallest allowed maximum datagram size of 1200 bytes.
+        //
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-14.1
+        //= type=exception
+        //= reason=client-only
+        //# A client MUST expand the payload of all UDP datagrams carrying
+        //# Initial packets to at least the smallest allowed maximum datagram
+        //# size of 1200 bytes by adding PADDING frames to the Initial packet or
+        //# by coalescing the Initial packet; see Section 12.2.
+        if pad {
+            let ghost s = d@.packets;
+            let ghost placed = self.polled@;
+            pad_datagram(&mut d, MIN_INITIAL_DATAGRAM);
+            proof {
+                let s2 = d@.packets;
+                let i = choose|i: int|
+                    #![trigger s2[i]]
+                    0 <= i < s.len() && s2 == s.update(i, padded(s[i], (s2[i].padding - s[i].padding) as nat))
+                        && s2[i].padding >= s[i].padding;
+                self.lemma_built_padded(o, s, s2, i, (s2[i].padding - s[i].padding) as nat);
+                assert forall|m: int| 0 <= m < placed.len() implies frame_in_datagram(d@, #[trigger] placed[m]) by {
+                    let (x, y) = choose|x: int, y: int|
+                        0 <= x < s.len() && 0 <= y < s[x].frames.len() && #[trigger] s[x].frames[y] == placed[m];
+                    assert(s2[x].frames[y] == s[x].frames[y]);
+                }
+            }
+        }
+        proof {
+            self.lemma_built_fresh(o, d@.packets);
+            assert(self.paths == o.paths);
+        }
+        let ghost c = *self;
+        self.commit_datagram(q, &d);
+        proof {
+            self.lemma_only_logged(c);
+            self.lemma_built_sent(c, o, d@);
+        }
+        Some(d)
+    }
+
+    /// The packet number length a close in space `k` takes; None if the space cannot number one.
+    #[verifier::spinoff_prover]
+    fn close_pn_len(&self, k: PacketKind) -> (r: Option<u8>)
+        requires
+            self.wf(),
+        ensures
+            r matches Some(n) ==> self.sent(k).next_pn_spec() < PN_MAX && min_pn_len(
+                self.sent(k).next_pn_spec(),
+                self.sent(k).largest_acked_spec(),
+                n as nat,
+            ),
+    {
+        proof {
+            self.sent(k).lemma_wf();
+        }
+        if self.sent_ref(k).next_pn() >= PN_MAX {
+            return None;
+        }
+        pn_encode_len(self.sent_ref(k).next_pn(), self.sent_ref(k).largest_acked())
+    }
+
+    /// The close's packet for space `k`; its packet number is not taken yet.
+    #[verifier::spinoff_prover]
+    fn close_packet(&self, k: PacketKind, pn_len: u8, app: bool, code: u64, reason: &[u8]) -> (p: OutPacket)
+        requires
+            self.wf(),
+            code <= VARINT_MAX,
+            reason@.len() <= 64,
+            min_pn_len(self.sent(k).next_pn_spec(), self.sent(k).largest_acked_spec(), pn_len as nat),
+        ensures
+            self.close_built(p@, k),
+    {
+        let f = close_frame(app, code, reason, k);
+        let ghost g = f@;
+        proof {
+            lemma_close_len(g);
+        }
+        let mut fs: Vec<Frame> = Vec::new();
+        fs.push(f);
+        proof {
+            assert(frames_view(fs@) =~= seq![g]);
+            assert(seq![g] =~= Seq::<SpecFrame>::empty().push(g));
+            lemma_frames_bytes_push(Seq::<SpecFrame>::empty(), g);
+            assert(frames_view(fs@)[0] == g);
+            assert(CLOSE_FRAME_MAX <= MAX_DATAGRAM);
+        }
+        let _h = self.header_bytes(k);
+        self.make_packet(k, fs, pn_len, Ghost(1int), Ghost(CLOSE_FRAME_MAX as nat))
+    }
+
+    /// `p` is `self`'s close for space `k`: one CONNECTION_CLOSE, under the next packet number.
+    closed spec fn close_built(&self, p: SpecOutPacket, k: PacketKind) -> bool {
+        &&& p.kind == k
+        &&& p.pn == self.sent(k).next_pn_spec()
+        &&& p.dcid == self.space_dcid(k)
+        &&& out_packet_wf(p, self.sent(k).largest_acked_spec())
+        &&& out_packet_len(p) <= CLOSE_PACKET_MAX
+        &&& p.frames.len() == 1
+        &&& p.frames[0] is ConnectionClose
+    }
+
+    /// `spaces` are distinct live spaces, at most 2 (`close_spaces`).
+    closed spec fn spaces_ok(&self, spaces: Seq<PacketKind>) -> bool {
+        &&& spaces.len() <= 2
+        &&& forall|i: int| 0 <= i < spaces.len() ==> self.live(#[trigger] spaces[i])
+        &&& forall|i: int, j: int| 0 <= i < j < spaces.len() ==> #[trigger] spaces[i] != #[trigger] spaces[j]
+    }
+
+    proof fn lemma_spaces_ok(&self, spaces: Seq<PacketKind>)
+        requires
+            self.wf(),
+            self.complete ==> spaces == seq![PacketKind::OneRtt],
+            !self.complete ==> spaces == spec_close_spaces(self.live_i, self.live_h, false),
+        ensures
+            self.spaces_ok(spaces),
+    {
+        if !self.complete {
+            let i0 = if self.live_i {
+                seq![PacketKind::Initial]
+            } else {
+                Seq::empty()
+            };
+            let h0 = if self.live_h {
+                seq![PacketKind::Handshake]
+            } else {
+                Seq::empty()
+            };
+            assert(spaces =~= i0 + h0);
+            assert forall|i: int| 0 <= i < spaces.len() implies self.live(#[trigger] spaces[i]) by {
+                if self.live_i && i == 0 {
+                    assert(spaces[i] == PacketKind::Initial);
+                } else {
+                    assert(spaces[i] == PacketKind::Handshake);
+                }
+            }
+            assert forall|i: int, j: int| 0 <= i < j < spaces.len() implies #[trigger] spaces[i]
+                != #[trigger] spaces[j] by {
+                assert(spaces[i] == PacketKind::Initial && spaces[j] == PacketKind::Handshake);
+            }
+        } else {
+            assert(spaces[0] == PacketKind::OneRtt);
+        }
+    }
+
+    /// The close's packets, one per space; None if a space cannot number one.
+    #[verifier::spinoff_prover]
+    fn close_packets(&self, spaces: &Vec<PacketKind>, app: bool, code: u64, reason: &[u8]) -> (r: Option<Vec<OutPacket>>)
+        requires
+            self.wf(),
+            code <= VARINT_MAX,
+            reason@.len() <= 64,
+            spaces@.len() <= 2,
+        ensures
+            r matches Some(ps) ==> {
+                &&& ps@.len() == spaces@.len()
+                &&& forall|i: int| 0 <= i < ps@.len() ==> self.close_built(#[trigger] ps@[i]@, spaces@[i])
+                &&& forall|i: int| 0 <= i < ps@.len() ==> self.sent(#[trigger] spaces@[i]).next_pn_spec() < PN_MAX
+                &&& packets_len(packets_view(ps@)) <= CLOSE_PACKET_MAX * ps@.len()
+            },
+    {
+        let mut ps: Vec<OutPacket> = Vec::new();
+        let mut j: usize = 0;
+        proof {
+            assert(packets_view(ps@) =~= Seq::<SpecOutPacket>::empty());
+        }
+        while j < spaces.len()
+            invariant
+                self.wf(),
+                code <= VARINT_MAX,
+                reason@.len() <= 64,
+                spaces@.len() <= 2,
+                j <= spaces@.len(),
+                ps@.len() == j,
+                forall|i: int| 0 <= i < j ==> self.close_built(#[trigger] ps@[i]@, spaces@[i]),
+                forall|i: int| 0 <= i < j ==> self.sent(#[trigger] spaces@[i]).next_pn_spec() < PN_MAX,
+                packets_len(packets_view(ps@)) <= CLOSE_PACKET_MAX * j,
+            decreases spaces@.len() - j,
+        {
+            let k = spaces[j];
+            let n = match self.close_pn_len(k) {
+                Some(n) => n,
+                None => return None,
+            };
+            let p = self.close_packet(k, n, app, code, reason);
+            let ghost v = p@;
+            let ghost s = packets_view(ps@);
+            ps.push(p);
+            proof {
+                let s2 = packets_view(ps@);
+                assert(s2 =~= s.push(v));
+                assert(s2.drop_last() =~= s);
+                assert(s2.last() == v);
+            }
+            j += 1;
+        }
+        Some(ps)
+    }
+
+    /// The numbers of `s`'s packets, built on `o` for the distinct spaces `spaces`, are taken.
+    #[verifier::spinoff_prover]
+    fn commit_close_pns(&mut self, spaces: &Vec<PacketKind>, Ghost(s): Ghost<Seq<SpecOutPacket>>, Ghost(o): Ghost<Connection>)
+        requires
+            o.wf(),
+            old(self).wf(),
+            old(self).tx_kept(o),
+            old(self).spaces_ok(spaces@),
+            s.len() == spaces@.len(),
+            forall|i: int| 0 <= i < s.len() ==> old(self).close_built(#[trigger] s[i], spaces@[i]),
+            forall|i: int| 0 <= i < s.len() ==> old(self).sent(#[trigger] spaces@[i]).next_pn_spec() < PN_MAX,
+        ensures
+            final(self).wf(),
+            final(self).built_ok(o, s),
+            final(self).polled == old(self).polled,
+    {
+        let ghost c0 = *self;
+        let mut j: usize = 0;
+        proof {
+            self.lemma_built_empty(o);
+            assert(s.take(0) =~= Seq::<SpecOutPacket>::empty());
+        }
+        while j < spaces.len()
+            invariant
+                c0 == *old(self),
+                o.wf(),
+                c0.tx_kept(o),
+                c0.spaces_ok(spaces@),
+                s.len() == spaces@.len(),
+                forall|i: int| 0 <= i < s.len() ==> c0.close_built(#[trigger] s[i], spaces@[i]),
+                forall|i: int| 0 <= i < s.len() ==> c0.sent(#[trigger] spaces@[i]).next_pn_spec() < PN_MAX,
+                self.wf(),
+                j <= spaces@.len(),
+                self.built_ok(o, s.take(j as int)),
+                self.polled == c0.polled,
+                forall|i: int| j <= i < s.len() ==> self.sent(#[trigger] spaces@[i]).next_pn_spec() == c0.sent(spaces@[i]).next_pn_spec(),
+            decreases spaces@.len() - j,
+        {
+            let k = spaces[j];
+            let ghost c = *self;
+            let ghost v = s[j as int];
+            proof {
+                assert(c0.close_built(s[j as int], spaces@[j as int]));
+                assert(c0.sent(spaces@[j as int]).next_pn_spec() < PN_MAX);
+                assert(self.sent(k).next_pn_spec() == c0.sent(k).next_pn_spec());
+            }
+            self.commit_pn(k);
+            proof {
+                self.lemma_sent_kept(c, k);
+                self.lemma_seen_kept(c);
+                assert(c0.live(k));
+                assert(c.live(k));
+                c0.lemma_tx_kept(o);
+                assert(c.sent(k).largest_acked_spec() == o.sent(k).largest_acked_spec());
+                assert(c.space_dcid(k) == c0.space_dcid(k));
+                assert forall|i: int| 0 <= i < v.frames.len() implies (#[trigger] v.frames[i] matches SpecFrame::Ack(a)
+                    ==> i == 0 && ack_full(a, c.recv(k))) by {
+                    assert(i == 0);
+                }
+                self.lemma_built_push(c, o, s.take(j as int), v);
+                assert(s.take(j as int + 1) =~= s.take(j as int).push(v));
+                assert forall|i: int| j + 1 <= i < s.len() implies self.sent(#[trigger] spaces@[i]).next_pn_spec()
+                    == c0.sent(spaces@[i]).next_pn_spec() by {
+                    assert(spaces@[j as int] != spaces@[i]);
+                }
+            }
+            j += 1;
+        }
+        proof {
+            assert(s.take(s.len() as int) =~= s);
+        }
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.1
+    //# An endpoint in the closing
+    //# state sends a packet containing a CONNECTION_CLOSE frame in response
+    //# to any incoming packet that it attributes to the connection.
+    /// The Closing state's datagram, if a close is owed and within both budgets: the path's (§8.1) and
+    /// the closing state's (`Lifecycle`). A packet number is taken only when the datagram goes.
+    #[verifier::spinoff_prover]
+    fn build_close(&mut self, Ghost(o): Ghost<Connection>) -> (r: Option<OutDatagram>)
+        requires
+            o.wf(),
+            old(self).wf(),
+            old(self).phase_spec() is Closing,
+            old(self).polled@.len() == 0,
+            old(self).tx_kept(o),
+        ensures
+            final(self).wf(),
+            final(self).polled@.len() == 0,
+            final(self).out_log() == match r {
+                Some(d) => old(self).out_log().push(d@),
+                None => old(self).out_log(),
+            },
+            r matches Some(d) ==> {
+                &&& transmit_ok(o, *final(self), d@)
+                &&& out_datagram_len(d@) <= MAX_DATAGRAM
+                &&& only_close(d@)
+                &&& same_dcid(d@)
+                &&& final(self).close_sent(o, out_datagram_len(d@))
+            },
+    {
+        proof {
+            self.paths.lemma_wf();
+        }
+        let q = self.paths.active();
+        let (app, code, reason) = match self.lc.close_info() {
+            Some((a, c, r)) => (*a, *c, slice_to_vec(r.as_slice())),
+            None => return None,
+        };
+        let spaces = close_spaces(self.complete, self.live_i, self.live_h, self.complete);
+        proof {
+            self.lemma_spaces_ok(spaces@);
+        }
+        let ps = match self.close_packets(&spaces, app, code, reason.as_slice()) {
+            Some(ps) => ps,
+            None => {
+                // §12.3: the space is out of packet numbers, and a close would need one.
+                self.lc.close_silently();
+                return None;
+            },
+        };
+        if ps.len() == 0 {
+            return None;
+        }
+        let d = OutDatagram { path: q, packets: ps };
+        let ghost s = d@.packets;
+        proof {
+            assert forall|i: int| 0 <= i < s.len() implies out_packet_sized(#[trigger] s[i]) by {
+                assert(s[i] == d.packets@[i]@);
+                assert(self.close_built(d.packets@[i]@, spaces@[i]));
+            }
+            assert forall|i: int| 0 <= i < s.len() implies self.close_built(#[trigger] s[i], spaces@[i]) by {
+                assert(s[i] == d.packets@[i]@);
+            }
+            assert(out_datagram_len(d@) <= CLOSE_PACKET_MAX * 2) by {
+                assert(CLOSE_PACKET_MAX * s.len() <= CLOSE_PACKET_MAX * 2) by (nonlinear_arith)
+                    requires
+                        s.len() <= 2,
+                ;
+            }
+        }
+        let n = datagram_len(&d) as u64;
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.1
+        //# An endpoint in the closing state MUST either discard
+        //# packets received from an unvalidated address or limit the cumulative
+        //# size of packets it sends to an unvalidated address to three times the
+        //# size of packets it receives from that address.
+        //
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.1
+        //# To avoid being used for an amplification attack,
+        //# such endpoints MUST limit the cumulative size of packets it sends to
+        //# three times the cumulative size of the packets that are received and
+        //# attributed to the connection.
+        if n > self.paths.budget(q) || !self.lc.may_send_close(n) {
+            return None;
+        }
+        let ghost c0 = *self;
+        self.commit_close_pns(&spaces, Ghost(s), Ghost(o));
+        proof {
+            self.lemma_built_fresh(o, s);
+            assert(self.paths == c0.paths);
+        }
+        let ghost c = *self;
+        self.commit_datagram(q, &d);
+        self.lc.on_close_sent(n);
+        proof {
+            self.lemma_only_logged(c);
+            self.lemma_built_sent(c, o, d@);
+            assert forall|i: int, j: int| 0 <= i < s.len() && 0 <= j < s[i].frames.len() implies #[trigger] s[i].frames[j]
+                is ConnectionClose by {
+                assert(c0.close_built(s[i], spaces@[i]));
+                assert(j == 0);
+            }
+        }
+        Some(d)
+    }
+
+    /// PATH_RESPONSE and PATH_CHALLENGE datagrams (§8.2.2: never delayed). Task 2b writes the body;
+    /// a None with the connection still Open must leave what `tx_kept` reads alone.
+    #[verifier::spinoff_prover]
+    fn build_path_datagram(&mut self, _now: u64, Ghost(o): Ghost<Connection>) -> (r: Option<OutDatagram>)
+        requires
+            o.wf(),
+            old(self).wf(),
+            old(self).phase_spec() is Open,
+            old(self).polled@.len() == 0,
+            old(self).tx_kept(o),
+        ensures
+            final(self).wf(),
+            final(self).polled@.len() == 0,
+            final(self).out_log() == match r {
+                Some(d) => old(self).out_log().push(d@),
+                None => old(self).out_log(),
+            },
+            r is None && final(self).phase_spec() is Open ==> final(self).tx_kept(o),
+            r matches Some(d) ==> {
+                &&& transmit_ok(o, *final(self), d@)
+                &&& initial_padded(d@)
+                &&& same_dcid(d@)
+                &&& o.mtu_failed_at(d@.path) ==> mtu_failed_frames(d@)
+            },
+    {
+        None
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8
+    //# Therefore, after receiving packets from an address that is not yet
+    //# validated, an endpoint MUST limit the amount of data it sends to the
+    //# unvalidated address to three times the amount of data received from
+    //# that address.
+    /// One datagram, or None. P1 (§8, §8.1, §14.1): `commit_datagram` is the only `on_sent`, and it
+    /// counts the padded datagram, so `wf_amp` bounds 3e's written bytes (`out_packet_len`), per path.
     #[verifier::spinoff_prover]
     pub fn poll_transmit(&mut self, now: u64) -> (r: Option<OutDatagram>)
         requires
@@ -4279,117 +5329,100 @@ impl Connection {
                 PacketKind::Handshake,
             ).inflight_spec().len() + final(self).sent(PacketKind::OneRtt).inflight_spec().len()
                 <= MAX_INFLIGHT,
+            // P2.
+            r matches Some(d) ==> initial_padded(d@),
+            // P3.
+            old(self).phase_spec() is Draining || old(self).phase_spec() is Closed ==> r is None,
+            r matches Some(d) ==> (old(self).phase_spec() is Closing ==> only_close(d@) && final(self).close_sent(
+                *old(self),
+                out_datagram_len(d@),
+            )),
+            // P6.
+            r matches Some(d) ==> same_dcid(d@),
+            // P17.
+            r matches Some(d) ==> (old(self).mtu_failed_at(d@.path) ==> mtu_failed_frames(d@)),
+            // §12.3.
+            old(self).phase_spec() is Open ==> forall|k: PacketKind|
+                #[trigger] old(self).live(k) && old(self).sent(k).next_pn_spec() == PN_MAX ==> r is None
+                    && final(self).phase_spec() is Closed,
     {
+        let ghost o = *old(self);
         if now > self.now {
             self.now = now;
         }
         self.polled = Ghost(Seq::empty());
-        if !matches!(self.lc.phase(), Phase::Open) || !self.complete {
-            return None;
+        match self.lc.phase() {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.2
+            //# While otherwise identical to the closing state, an
+            //# endpoint in the draining state MUST NOT send any packets.
+            Phase::Draining | Phase::Closed => return None,
+            Phase::Closing => {
+                let r = self.build_close(Ghost(o));
+                proof {
+                    if r is Some {
+                        lemma_only_close(r->0@);
+                    }
+                }
+                return r;
+            },
+            Phase::Open => {},
         }
-        if self.sent_1.next_pn() >= PN_MAX {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-12.3
+        //# If the packet number for sending
+        //# reaches 2^62-1, the sender MUST close the connection without sending
+        //# a CONNECTION_CLOSE frame or any further packets; an endpoint MAY send
+        //# a Stateless Reset (Section 10.3) in response to further packets that
+        //# it receives.
+        // Checked for every live space before anything is polled.
+        if (self.live_i && self.sent_i.next_pn() >= PN_MAX) || (self.live_h && self.sent_h.next_pn() >= PN_MAX) || (
+        self.complete && self.sent_1.next_pn() >= PN_MAX) {
             self.lc.close_silently();
             self.streams = None;
             return None;
         }
-        let ghost s0 = *self;
-        let q = self.paths.active();
         proof {
-            self.paths.lemma_wf();
-        }
-        let b = self.paths.budget(q);
-        let budget = if b > MAX_DATAGRAM as u64 {
-            MAX_DATAGRAM
-        } else {
-            b as usize
-        };
-        let room = match self.room_for(PacketKind::OneRtt, budget) {
-            Some(r) => r,
-            None => return None,
-        };
-        let now = self.now;
-        let can_pad = budget >= MIN_INITIAL_DATAGRAM;
-        let (p, _, _) = match self.build_space_packet(PacketKind::OneRtt, room, can_pad, now) {
-            Some(x) => x,
-            None => return None,
-        };
-        let ghost p_view = p@;
-        let mut packets: Vec<OutPacket> = Vec::new();
-        packets.push(p);
-        let d = OutDatagram { path: q, packets };
-        let ghost p0 = p_view;
-        proof {
-            assert(d@.packets =~= seq![p0]);
-            self.lemma_one_packet(s0, p0, d@, room as nat, budget as nat);
-        }
-        let ghost s1 = *self;
-        self.commit_datagram(q, &d);
-        proof {
-            self.lemma_only_logged(s1);
-            lemma_one_packet_ok(s0, *self, p0, d@, room as nat);
-            lemma_polled_placed(self.polled@, p0, d@);
-        }
-        Some(d)
-    }
-
-    /// `s0`'s packet `p`, built on the way to `self`, makes a datagram `commit_datagram` accepts.
-    proof fn lemma_one_packet(&self, s0: Connection, p: SpecOutPacket, d: SpecOutDatagram, room: nat, budget: nat)
-        requires
-            s0.wf(),
-            d.path == s0.paths.active_spec(),
-            d.packets == seq![p],
-            s0.packet_ok(p, PacketKind::OneRtt, room),
-            forall|n: nat|
-                #[trigger] min_pn_len(
-                    s0.sent(PacketKind::OneRtt).next_pn_spec(),
-                    s0.sent(PacketKind::OneRtt).largest_acked_spec(),
-                    n,
-                ) ==> room + s0.header_bytes_spec(PacketKind::OneRtt) + n + AEAD_TAG_LEN + 3 <= budget,
-            budget <= MAX_DATAGRAM,
-            budget <= s0.paths.budget_spec(d.path),
-            self.paths == s0.paths,
-            self.out_log@ == s0.out_log@,
-            self.sent(PacketKind::OneRtt).next_pn_spec() == p.pn + 1,
-            forall|j: PacketKind| j != PacketKind::OneRtt ==> #[trigger] self.sent(j).next_pn_spec()
-                == s0.sent(j).next_pn_spec(),
-        ensures
-            self.paths.has(d.path),
-            out_datagram_sized(d),
-            out_datagram_len(d) <= self.paths.budget_spec(d.path),
-            out_datagram_len(d) <= MAX_DATAGRAM,
-            forall|k: PacketKind|
-                #[trigger] pns_fresh(
-                    log_pns(self.out_log@, k),
-                    packets_pns(d.packets, k),
-                    self.sent(k).next_pn_spec(),
-                ),
-    {
-        s0.paths.lemma_wf();
-        assert(d.packets[0] == p);
-        assert(min_pn_len(
-            s0.sent(PacketKind::OneRtt).next_pn_spec(),
-            s0.sent(PacketKind::OneRtt).largest_acked_spec(),
-            p.pn_len as nat,
-        ));
-        lemma_packets_len_one(p);
-        assert forall|i: int| 0 <= i < d.packets.len() implies out_packet_sized(#[trigger] d.packets[i]) by {
-            assert(i == 0);
-        }
-        assert(s0.wf_pn());
-        assert forall|k: PacketKind|
-            #[trigger] pns_fresh(log_pns(self.out_log@, k), packets_pns(d.packets, k), self.sent(k).next_pn_spec()) by {
-            lemma_packets_pns_one(p, k);
-            if k is OneRtt {
-                let s = packets_pns(d.packets, k);
-                let l = log_pns(self.out_log@, k);
-                assert(s == seq![p.pn]);
-                assert(pns_ok(l, s0.sent_1.next_pn_spec()));
-                assert forall|i: int, j: int| 0 <= i < l.len() && 0 <= j < s.len() implies #[trigger] l[i]
-                    < #[trigger] s[j] by {
-                    assert(l[i] < s0.sent_1.next_pn_spec());
-                    assert(s[j] == p.pn);
+            assert forall|k: PacketKind| #[trigger] o.live(k) implies o.sent(k).next_pn_spec() < PN_MAX by {
+                match k {
+                    PacketKind::Initial => {},
+                    PacketKind::Handshake => {},
+                    PacketKind::OneRtt => {},
                 }
             }
+        }
+        let now = self.now;
+        if let Some(d) = self.build_path_datagram(now, Ghost(o)) {
+            return Some(d);
+        }
+        if !matches!(self.lc.phase(), Phase::Open) {
+            return None;
+        }
+        proof {
+            self.lemma_tx_kept(o);
+            assert forall|k: PacketKind| #[trigger] self.live(k) implies self.sent(k).next_pn_spec() < PN_MAX by {
+                assert(o.live(k));
+                assert(self.sent(k) == o.sent(k));
+            }
+        }
+        self.data_datagram(now, Ghost(o))
+    }
+
+    /// Test support (3d2 preflight M9): `sent(k)` jumps to packet number `next`, as if the numbers
+    /// below it were used. `wf_pn` holds because `next` only grows.
+    #[doc(hidden)]
+    pub fn skip_pns_for_test(&mut self, k: PacketKind, next: u64)
+        requires
+            old(self).wf(),
+            old(self).sent(k).next_pn_spec() <= next <= PN_MAX,
+            old(self).sent(k).inflight_spec().len() == 0,
+        ensures
+            final(self).wf(),
+            final(self).out_log() == old(self).out_log(),
+            final(self).sent(k).next_pn_spec() == next,
+    {
+        match k {
+            PacketKind::Initial => self.sent_i = SentPackets::new_at(next),
+            PacketKind::Handshake => self.sent_h = SentPackets::new_at(next),
+            PacketKind::OneRtt => self.sent_1 = SentPackets::new_at(next),
         }
     }
 
@@ -4942,6 +5975,47 @@ pub open spec fn transmit_ok(o: Connection, c: Connection, d: SpecOutDatagram) -
             is HandshakeDone ==> c.live(PacketKind::OneRtt)
 }
 
+/// A datagram with an ack-eliciting Initial in it.
+pub open spec fn has_eliciting_initial(s: Seq<SpecOutPacket>) -> bool {
+    exists|i: int, j: int|
+        0 <= i < s.len() && s[i].kind is Initial && 0 <= j < s[i].frames.len() && ack_eliciting(
+            spec_frame_type(#[trigger] s[i].frames[j]),
+        )
+}
+
+/// P2 (§14.1): an ack-eliciting Initial goes out in exactly 1200 bytes.
+pub open spec fn initial_padded(d: SpecOutDatagram) -> bool {
+    has_eliciting_initial(d.packets) ==> out_datagram_len(d) == 1200
+}
+
+//= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+//# Senders MUST NOT coalesce QUIC packets
+//# with different connection IDs into a single UDP datagram.
+/// P6: one Destination Connection ID in a datagram.
+pub open spec fn same_dcid(d: SpecOutDatagram) -> bool {
+    forall|i: int, j: int|
+        0 <= i < d.packets.len() && 0 <= j < d.packets.len() ==> #[trigger] d.packets[i].dcid
+            == #[trigger] d.packets[j].dcid
+}
+
+/// P3: only CONNECTION_CLOSE.
+pub open spec fn only_close(d: SpecOutDatagram) -> bool {
+    forall|i: int, j: int|
+        0 <= i < d.packets.len() && 0 <= j < d.packets[i].frames.len() ==> #[trigger] d.packets[i].frames[j]
+            is ConnectionClose
+}
+
+/// P17 (§14.2): what a path that cannot carry 1200 bytes may be sent: probes, in a 1200-byte
+/// datagram if one answers the peer, and CONNECTION_CLOSE.
+pub open spec fn mtu_failed_frames(d: SpecOutDatagram) -> bool {
+    forall|i: int, j: int|
+        0 <= i < d.packets.len() && 0 <= j < d.packets[i].frames.len() ==> {
+            &&& #[trigger] d.packets[i].frames[j] is PathChallenge || d.packets[i].frames[j] is PathResponse
+                || d.packets[i].frames[j] is Padding || d.packets[i].frames[j] is ConnectionClose
+            &&& d.packets[i].frames[j] is PathResponse ==> out_datagram_len(d) == 1200
+        }
+}
+
 /// P8: every frame in `polled` is in `d`.
 pub open spec fn polled_placed(polled: Seq<SpecFrame>, d: SpecOutDatagram) -> bool {
     forall|i: int| 0 <= i < polled.len() ==> frame_in_datagram(d, #[trigger] polled[i])
@@ -5269,6 +6343,78 @@ proof fn lemma_ack_reports(a: SpecAck, r: RecvPns)
     }
 }
 
+/// A CONNECTION_CLOSE's bytes, at most: a 64-byte reason under `lemma_close_len`.
+#[allow(dead_code)]
+const CLOSE_FRAME_MAX: usize = 83;
+
+/// A close's packet, at most: `CLOSE_FRAME_MAX`, a 40-byte header and 4-byte number, and what `lemma_room`
+/// adds. Two of them fit `MAX_DATAGRAM`.
+#[allow(dead_code)]
+const CLOSE_PACKET_MAX: usize = 146;
+
+/// A datagram of nothing but CONNECTION_CLOSE passes P2 and P17.
+proof fn lemma_only_close(d: SpecOutDatagram)
+    requires
+        only_close(d),
+    ensures
+        initial_padded(d),
+        mtu_failed_frames(d),
+{
+    if has_eliciting_initial(d.packets) {
+        let (a, b) = choose|a: int, b: int|
+            0 <= a < d.packets.len() && d.packets[a].kind is Initial && 0 <= b < d.packets[a].frames.len()
+                && ack_eliciting(spec_frame_type(#[trigger] d.packets[a].frames[b]));
+        assert(d.packets[a].frames[b] is ConnectionClose);
+    }
+    assert forall|i: int, j: int| 0 <= i < d.packets.len() && 0 <= j < d.packets[i].frames.len() implies {
+        &&& #[trigger] d.packets[i].frames[j] is PathChallenge || d.packets[i].frames[j] is PathResponse
+            || d.packets[i].frames[j] is Padding || d.packets[i].frames[j] is ConnectionClose
+        &&& d.packets[i].frames[j] is PathResponse ==> out_datagram_len(d) == 1200
+    } by {
+        assert(d.packets[i].frames[j] is ConnectionClose);
+    }
+}
+
+/// `pns_ok`, and nothing below `low`.
+spec fn pns_built(s: Seq<u64>, low: u64, next: u64) -> bool {
+    &&& pns_ok(s, next)
+    &&& forall|i: int| 0 <= i < s.len() ==> low <= #[trigger] s[i]
+}
+
+/// Padding changes no packet number.
+proof fn lemma_pns_padded(s: Seq<SpecOutPacket>, i: int, x: nat, k: PacketKind)
+    requires
+        0 <= i < s.len(),
+    ensures
+        packets_pns(s.update(i, padded(s[i], x)), k) == packets_pns(s, k),
+    decreases s.len(),
+{
+    let u = s.update(i, padded(s[i], x));
+    if i == s.len() - 1 {
+        assert(u.drop_last() =~= s.drop_last());
+    } else {
+        assert(u.drop_last() =~= s.drop_last().update(i, padded(s[i], x)));
+        assert(s.drop_last()[i] == s[i]);
+        lemma_pns_padded(s.drop_last(), i, x, k);
+    }
+}
+
+/// `spec_frame_bytes` of a CONNECTION_CLOSE with a reason of at most 64 bytes.
+proof fn lemma_close_len(f: SpecFrame)
+    requires
+        frame_wf(f),
+        f matches SpecFrame::ConnectionClose { reason, .. } && reason.len() <= 64,
+    ensures
+        spec_frame_bytes(f).len() <= CLOSE_FRAME_MAX,
+{
+    if let SpecFrame::ConnectionClose { app, error_code, frame_type, reason } = f {
+        theorem_serialize_matches_rfc(spec_frame_type(f));
+        theorem_serialize_matches_rfc(error_code);
+        theorem_serialize_matches_rfc(frame_type);
+        theorem_serialize_matches_rfc(reason.len() as u64);
+    }
+}
+
 proof fn lemma_not_inflight(s: SentPackets)
     requires
         s.wf(),
@@ -5280,36 +6426,6 @@ proof fn lemma_not_inflight(s: SentPackets)
         let i = choose|i: int| 0 <= i < s.inflight_spec().len() && (#[trigger] s.inflight_spec()[i]).pn == s.next_pn_spec();
         assert(s.inflight_spec()[i].pn < s.next_pn_spec());
     }
-}
-
-/// A datagram with one packet.
-proof fn lemma_packets_pns_one(p: SpecOutPacket, k: PacketKind)
-    ensures
-        packets_pns(seq![p], k) == if p.kind == k {
-            seq![p.pn]
-        } else {
-            Seq::<u64>::empty()
-        },
-{
-    let s = seq![p];
-    let e = Seq::<SpecOutPacket>::empty();
-    assert(s.drop_last() =~= e);
-    assert(s.last() == p);
-    assert(packets_pns(e, k) =~= Seq::<u64>::empty());
-    if p.kind == k {
-        assert(Seq::<u64>::empty().push(p.pn) =~= seq![p.pn]);
-    }
-}
-
-proof fn lemma_packets_len_one(p: SpecOutPacket)
-    ensures
-        packets_len(seq![p]) == out_packet_len(p),
-{
-    let s = seq![p];
-    let e = Seq::<SpecOutPacket>::empty();
-    assert(s.drop_last() =~= e);
-    assert(s.last() == p);
-    assert(packets_len(e) == 0);
 }
 
 /// `log + d` is still `pns_ok`, for `d` above everything logged.
@@ -5521,59 +6637,6 @@ proof fn lemma_crypto_len(off: u64, d: Seq<u8>)
     theorem_serialize_matches_rfc(FRAME_CRYPTO);
     theorem_serialize_matches_rfc(off);
     theorem_serialize_matches_rfc(d.len() as u64);
-}
-
-proof fn lemma_polled_placed(polled: Seq<SpecFrame>, p: SpecOutPacket, d: SpecOutDatagram)
-    requires
-        d.packets == seq![p],
-        polled_in_packet(polled, p),
-    ensures
-        polled_placed(polled, d),
-{
-    assert forall|i: int| 0 <= i < polled.len() implies frame_in_datagram(d, #[trigger] polled[i]) by {
-        assert(frame_from(p.frames, polled[i], 0));
-        let n = choose|n: int| 0 <= n < p.frames.len() && #[trigger] p.frames[n] == polled[i];
-        assert(d.packets[0] == p);
-        assert(d.packets[0].frames[n] == polled[i]);
-    }
-}
-
-/// `transmit_ok` for one packet, `o` the state it was built from and `c` after its commit.
-proof fn lemma_one_packet_ok(o: Connection, c: Connection, p: SpecOutPacket, d: SpecOutDatagram, room: nat)
-    requires
-        d.packets == seq![p],
-        p.kind is OneRtt,
-        o.packet_ok(p, PacketKind::OneRtt, room),
-        out_datagram_len(d) <= MAX_DATAGRAM,
-        c.live(PacketKind::OneRtt),
-        c.sent(PacketKind::OneRtt).next_pn_spec() == p.pn + 1,
-        forall|j: PacketKind| #[trigger] c.sent(j).largest_acked_spec() == o.sent(j).largest_acked_spec(),
-        forall|j: PacketKind| #[trigger] c.recv(j).seen() == o.recv(j).seen(),
-    ensures
-        transmit_ok(o, c, d),
-{
-    assert forall|i: int| 0 <= i < d.packets.len() implies out_packet_wf(
-        #[trigger] d.packets[i],
-        c.sent(d.packets[i].kind).largest_acked_spec(),
-    ) by {
-        assert(d.packets[i] == p);
-    }
-    assert forall|i: int| 0 <= i < d.packets.len() implies o.sent((#[trigger] d.packets[i]).kind).next_pn_spec()
-        <= d.packets[i].pn by {
-        assert(d.packets[i] == p);
-    }
-    assert forall|k: PacketKind| #[trigger] pns_ok(packets_pns(d.packets, k), c.sent(k).next_pn_spec()) by {
-        lemma_packets_pns_one(p, k);
-        if k is OneRtt {
-            assert(packets_pns(d.packets, k)[0] == p.pn);
-        }
-    }
-    assert forall|i: int, j: int| 0 <= i < d.packets.len() && 0 <= j < d.packets[i].frames.len() implies (
-    #[trigger] d.packets[i].frames[j] matches SpecFrame::Ack(a) ==> forall|pn: u64|
-        #[trigger] ack_contains(a, pn) ==> c.recv(d.packets[i].kind).seen().contains(pn)) by {
-        assert(d.packets[i] == p);
-        assert(p.frames[j] == d.packets[i].frames[j]);
-    }
 }
 
 } // verus!
