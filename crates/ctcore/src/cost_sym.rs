@@ -4,8 +4,6 @@
 #[allow(unused_imports)]
 use crate::cost::*;
 #[allow(unused_imports)]
-use crate::cost_sanity::*;
-#[allow(unused_imports)]
 use crate::ct::*;
 #[allow(unused_imports)]
 use crate::ct_lemmas::*;
@@ -577,6 +575,31 @@ proof fn lemma_binop_cmp(op: BinOp, ty: IntTy, x: u128, y: u128)
 }
 
 // ------------------------------------------------------------------ places and frames
+
+pub open spec fn local(pl: Place, x: usize) -> bool { pl.local == x && pl.proj@.len() == 0 }
+
+pub proof fn lemma_read_local(fr: Frame, pl: Place, x: usize)
+    requires local(pl, x), (x as nat) < fr.locals.len(),
+    ensures read_place(fr, pl).0 == fr.locals[x as int],
+        place_loc(fr, pl) == Some((local_loc(x as nat), Seq::<Event>::empty())),
+{
+    assert(pl.proj@.len() == 0);
+    assert(walk(fr, pl.proj@, 0, Cur::L(local_loc(pl.local as nat))).0 == Cur::L(local_loc(x as nat)));
+    assert(place_walk(fr, pl).1 =~= Seq::<Event>::empty());
+    assert(nth(fr.locals, x as nat) == fr.locals[x as int]);
+    assert(local_loc(x as nat).path.len() == 0);
+}
+
+/// `x := v` for an empty-projection place.
+pub proof fn lemma_assign_local(fr: Frame, pl: Place, x: usize, v: Val)
+    requires local(pl, x), (x as nat) < fr.locals.len(),
+    ensures assign(fr, pl, v).0 == (Frame { locals: fr.locals.update(x as int, v), slots: fr.slots }),
+{
+    lemma_read_local(fr, pl, x);
+    assert(local_loc(x as nat).path.len() == 0);
+    let l = local_loc(x as nat);
+    assert(write_at(fr.locals[x as int], l.path, v) == v);
+}
 
 /// A cursor at a location that reads no `Mut` stays at its root.
 proof fn lemma_step_root(p: Program, ls: Seq<FnLab>, f: nat, fr: Frame, c: Cur, pr: Proj, r: nat)
@@ -1490,6 +1513,98 @@ pub proof fn sanity_temp_copy(b: Body, d5: Place, y3: Place, d4: Place, t5: Plac
     let st1 = sym_stmt(b, st0, s0, facts);
     assert(st1.rels[5] == Rel::ValEq(Atom::Val(3, IntTy::Usize), 0));
     assert(st1.rels[3] is Same);
+}
+
+pub open spec fn lp(pl: Place, x: usize) -> bool { pl.local == x && pl.proj@.len() == 0 }
+pub open spec fn usz(b: Body, x: int) -> bool { b.locals@[x] == Ty::Int(IntTy::Usize) }
+pub open spec fn v(x: usize) -> Atom { Atom::Val(x, IntTy::Usize) }
+
+/// parse bb9: `_15 = copy _13; _14 = Lt(move _15, copy _8); switchInt(move _14) -> [0: bb12, otherwise: bb10]`.
+pub proof fn sanity_parse_test_edge(b: Body, blk: Block, d15: Place, s13: Place, d14: Place, m15: Place, s8: Place, c14: Place, ts: Vec<(u128, usize)>, facts: Seq<Fact>)
+    requires
+        b.locals@.len() == 26, usz(b, 13), usz(b, 15), usz(b, 8), b.locals@[14] == Ty::Int(IntTy::Bool),
+        lp(d15, 15), lp(s13, 13), lp(d14, 14), lp(m15, 15), lp(s8, 8), lp(c14, 14),
+        blk.stmts@ == seq![
+            Stmt::Assign(d15, Rvalue::Use(Operand::Copy(s13))),
+            Stmt::Assign(d14, Rvalue::Bin(BinOp::Lt, IntTy::Usize, Operand::Copy(m15), Operand::Copy(s8)))],
+        blk.term == Term::Switch(Operand::Copy(c14), ts, 10), ts@ == seq![(0u128, 12usize)],
+        facts.len() == 0,
+    ensures ({
+        let e = sym_block(b, blk, facts);
+        &&& e.rel[13] is Same && e.rel[8] is Same
+        &&& e.rel[15] == Rel::ValEq(v(13), 0)
+        &&& e.edge.len() == 2
+        &&& e.edge[0].0 == 12 && e.edge[0].1 =~= seq![Fact::Le(v(8), v(13))]
+        &&& e.edge[1].0 == 10 && e.edge[1].1 =~= seq![Fact::Lt(v(13), v(8))]
+    }),
+{
+    let (s0, s1) = (blk.stmts@[0], blk.stmts@[1]);
+    lemma_state2(b, s0, s1, facts);
+    assert(sym_state(b, blk.stmts@, facts) == stmts2_state(b, s0, s1, facts)) by {
+        assert(blk.stmts@ =~= seq![s0, s1]);
+    }
+    let st0 = SymSt { rels: Seq::new(b.locals@.len(), |i: int| Rel::Same), cmp: None };
+    let st1 = sym_stmt(b, st0, s0, facts);
+    assert(st1.rels[15] == Rel::ValEq(v(13), 0));
+    assert(st1.rels[13] is Same);
+    assert(st1.rels[8] is Same);
+    let st = sym_state(b, blk.stmts@, facts);
+    assert(st.cmp == Some(Cmp { c: 14, op: BinOp::Lt, a: v(13), b: v(8) }));
+    assert(carry(st.rels, facts) =~= seq![]) by { reveal_with_fuel(carry_from, 2); }
+    reveal_with_fuel(switch_target, 3);
+    assert(switch_target(ts@, 0, 0, 10) == 12usize);
+    assert(switch_target(ts@, 0, 1, 10) == 10usize);
+    let e = sym_block(b, blk, facts);
+    assert(e.edge[0].1 =~= seq![Fact::Le(v(8), v(13))]);
+    assert(e.edge[1].1 =~= seq![Fact::Lt(v(13), v(8))]);
+}
+
+/// parse bb11's last statement, `_13 = Add(copy _13, const 1_usize); goto bb9`, after the others'
+/// writes. Then what `pull_post`'s decrement arm owes follows from `eff_sound` and the `Lt` pre-fact.
+pub proof fn sanity_parse_increment(b: Body, blk: Block, d18: Place, s3: Place, d11: Place, d13: Place, s13: Place, rv18: Rvalue, rv11: Rvalue, facts: Seq<Fact>, pre: Frame, post: Frame)
+    requires
+        b.locals@.len() == 26, usz(b, 13), usz(b, 8), !(b.locals@[18] is Mut), !(b.locals@[11] is Mut),
+        forall|i: int| 0 <= i < 26 ==> !(#[trigger] b.locals@[i] is Mut),
+        lp(d18, 18), lp(d11, 11), lp(d13, 13), lp(s13, 13),
+        rv18 == Rvalue::Use(Operand::Copy(s3)), s3.local == 3, s3.proj@.len() == 2,
+        rv11 is Bin && rv11->Bin_0 is BitOr,
+        blk.stmts@ == seq![
+            Stmt::Assign(d18, rv18),
+            Stmt::Assign(d11, rv11),
+            Stmt::Assign(d13, Rvalue::Bin(BinOp::Add, IntTy::Usize, Operand::Copy(s13), Operand::Const(IntTy::Usize, 1)))],
+        blk.term == Term::Goto(9),
+        facts =~= seq![Fact::Lt(v(13), v(8))],
+        facts_hold(pre, facts),
+        eff_sound(sym_block(b, blk, facts), pre, post, 9),
+    ensures ({
+        let e = sym_block(b, blk, facts);
+        &&& e.rel[13] == Rel::ValEq(v(13), 1)
+        &&& e.rel[8] is Same
+        &&& atom_val(post, Atom::Gap(Box::new(v(8)), Box::new(v(13)))) + 1 == atom_val(pre, Atom::Gap(Box::new(v(8)), Box::new(v(13))))
+    }),
+{
+    reveal_with_fuel(sym_from, 4);
+    let st0 = SymSt { rels: Seq::new(b.locals@.len(), |i: int| Rel::Same), cmp: None };
+    let ss = blk.stmts@;
+    let st1 = sym_stmt(b, st0, ss[0], facts);
+    let st2 = sym_stmt(b, st1, ss[1], facts);
+    assert(st1.rels[13] is Same && st1.rels[8] is Same);
+    assert(st2.rels[13] is Same && st2.rels[8] is Same);
+    assert(inc_fact(facts[0], 13, IntTy::Usize));
+    let e = sym_block(b, blk, facts);
+    assert(e.rel[13] == Rel::ValEq(v(13), 1));
+    assert(rel_sound(e.rel[13], 13, pre, post));
+    assert(rel_sound(e.rel[8], 8, pre, post));
+    assert(fact_holds(pre, facts[0]));
+    let (a8, a13) = (v(8), v(13));
+    assert(atom_val(post, a8) == atom_val(pre, a8));
+    assert(atom_val(post, a13) == atom_val(pre, a13) + 1);
+    assert(atom_val(pre, a13) < atom_val(pre, a8));
+    lemma_gap_dec(atom_val(pre, a8), atom_val(pre, a13));
+    reveal_with_fuel(atom_val, 2);
+    let g = Atom::Gap(Box::new(a8), Box::new(a13));
+    assert(atom_val(post, g) == gap(atom_val(post, a8), atom_val(post, a13)));
+    assert(atom_val(pre, g) == gap(atom_val(pre, a8), atom_val(pre, a13)));
 }
 
 } // verus!
