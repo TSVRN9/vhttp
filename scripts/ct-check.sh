@@ -2,7 +2,7 @@
 # Constant-time checker runs: build tools/ct-driver, then analyse the fixtures under it and diff
 # their verdicts against tools/ct-fixtures/expected.txt, then run the interpreter selftest
 # (tools/ct-driver/selftest.txt) over crates/crypto and over the parser crates (wire, h3, quic),
-# then diff the fixtures' step bounds against expected-cost.txt, then check crypto's roots (all
+# then diff the fixtures' and the parser targets' step bounds against their expected-cost.txt, then check crypto's roots (all
 # must be ok) and the negative control (--cfg ct_negative; exactly its one reject). Target dirs
 # live under CT_TARGET_DIR (default $root/target/ct), one subdir per run, except that selftest
 # shares crypto's (same flags); reports under $CT_OUT/<run>.
@@ -120,6 +120,22 @@ cost_verdicts "$report" > "$got"
 diff -u "$fx/expected-cost.txt" "$got" || fail "cost fixtures: verdicts differ from expected-cost.txt"
 n=$(wc -l < "$fx/expected-cost.txt" | tr -d ' ')
 echo "ct-check: cost fixtures $n/$n"
+
+# The parser targets' step bounds: tools/ct-driver/cost-targets.txt through wire, h3 and quic. A
+# header index moves with any edit to the function, so NotCounted payloads are stripped here (the
+# fixtures keep theirs); the gate is about verdicts. Any difference fails: a bounded that became
+# none is a regression, a new bounded needs expected-cost.txt updated in the same commit.
+ct=$root/tools/ct-driver
+analyse cost-parsers wire,h3,quic "$ct/manifest.txt:$ct/cost-targets.txt" cost
+cost_no_missing "$ct/cost-targets.txt" $reports
+got=$CT_OUT/cost-parsers/verdicts.txt
+# shellcheck disable=SC2086 # $reports is a list of paths without spaces
+cat $reports | { sed -E 's/ NotCounted\([0-9]+\)$/ NotCounted/' > "$CT_OUT/cost-parsers/all.txt"; }
+cost_verdicts "$CT_OUT/cost-parsers/all.txt" > "$got"
+diff -u "$ct/expected-cost.txt" "$got" || fail "cost parsers: verdicts differ from tools/ct-driver/expected-cost.txt"
+nb=$(grep -c '^bounded ' "$got" || true)
+nt=$(grep -c '^cost-root ' "$ct/cost-targets.txt")
+echo "ct-check: cost $nb/$nt bounded"
 
 # The driver keys declassify sites by file:line, so a second call on a line would go uncounted.
 calls=$(grep -rho --include='*.rs' 'declassify(' "$root/crates/crypto/src" | wc -l)
