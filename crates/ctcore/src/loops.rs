@@ -28,7 +28,7 @@ pub struct Counted {
 
 pub enum CostWhy {
     Bounded,
-    NotCounted(usize /* header */),
+    NotCounted(usize /* a header, or the block where the region got stuck */),
     Unresolved,
     Recursion,
     CalleeNone(usize),
