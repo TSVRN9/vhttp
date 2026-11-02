@@ -20,11 +20,13 @@
 use vstd::prelude::*;
 use vstd::slice::{slice_subrange, slice_to_vec};
 
+use crate::ack::*;
 use crate::ack_track::*;
 use crate::cid::*;
 use crate::codes::*;
 use crate::crypto_stream::*;
 use crate::datagram::*;
+use crate::frame::*;
 use crate::handshake::*;
 use crate::lifecycle::*;
 use crate::path::*;
@@ -176,14 +178,12 @@ pub open spec fn tokens_covered(s: Seq<CidUpdate>, before: Seq<[u8; 16]>, after:
 /// One server connection.
 pub struct Connection {
     now: u64,
-    #[allow(dead_code)]  // Read from Task 1a-ii.
     hs_path: PathId,
     ids: HandshakeIds,
     local_tp: TransportParams,
     peer_tp: Option<TransportParams>,
     paths: Paths,
     lc: Lifecycle,
-    #[allow(dead_code)]  // Read from Task 1a-ii.
     idle: IdleTimer,
     recovery: Recovery,
     recv_i: RecvPns,
@@ -496,12 +496,24 @@ impl Connection {
     }
 
     // =========================================================================
-    // Receive (Task 1a-ii writes the body)
+    // Receive
     // =========================================================================
+
+    /// What every frame helper leaves alone: `recv_*` carries `gate_packet`'s duplicate check to
+    /// `RecvPns::on_packet`, and is P10's frame.
+    closed spec fn frames_kept(&self, o: Connection) -> bool {
+        &&& self.out_log@ == o.out_log@
+        &&& self.recv_i == o.recv_i
+        &&& self.recv_h == o.recv_h
+        &&& self.recv_1 == o.recv_1
+        &&& self.live_i == o.live_i
+        &&& self.live_h == o.live_h
+        &&& self.complete == o.complete
+        &&& self.paths.ids() == o.paths.ids()
+    }
 
     /// A datagram of `datagram_len` bytes on `path`, with its decrypted packets in order.
     #[verifier::spinoff_prover]
-    #[allow(unused_variables)]  // Task 1a-ii writes the body.
     pub fn on_datagram(
         &mut self,
         path: PathId,
@@ -521,6 +533,714 @@ impl Connection {
             self.now = now;
         }
         self.chal_used = 0;
+        if matches!(self.lc.phase(), Phase::Draining | Phase::Closed) {
+            return;
+        }
+        // At `MAX_PATHS` the datagram is dropped uncounted (§9).
+        if !self.ensure_path(path) {
+            return;
+        }
+        // §8.1: counted even if every packet is dropped.
+        self.count_recv(path, datagram_len as u64);
+        if matches!(self.lc.phase(), Phase::Closing) {
+            // §10.2.1: packets are not processed.
+            self.lc.on_recv_closing(datagram_len as u64);
+            return;
+        }
+        if packets.len() == 0 {
+            return;
+        }
+        // §12.2: the first packet's DCID, even if the gate drops that packet.
+        let first = slice_to_vec(packets[0].dcid.as_slice());
+        let now = self.now;
+        for p in it: packets
+            invariant
+                self.wf(),
+                self.out_log() == old(self).out_log(),
+                self.paths.has(path),
+                self.phase_spec() is Open,
+                forall|j: int| 0 <= j < it.seq().len() ==> plain_wf(#[trigger] it.seq()[j]@),
+        {
+            proof {
+                assert(it.seq()[it.index()] == p);
+                assert(plain_wf(it.seq()[it.index()]@));
+            }
+            // §12.2: a packet with another DCID is ignored.
+            if eq_bytes(p.dcid.as_slice(), first.as_slice()) && self.gate_packet(path, datagram_len, &p) {
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2
+                //# An
+                //# endpoint MUST generate a connection error if processing the contents
+                //# of these packets prior to discovering an error, or fully revert any
+                //# changes made during that processing.
+                if let Err(c) = self.on_packet(path, p, now, rand) {
+                    self.close_internal(c);
+                    return;
+                }
+                // CONNECTION_CLOSE, or a closed connection.
+                if !matches!(self.lc.phase(), Phase::Open) {
+                    return;
+                }
+            }
+        }
+    }
+
+    /// `path` is known, or now added; false at `MAX_PATHS`.
+    #[verifier::spinoff_prover]
+    fn ensure_path(&mut self, path: PathId) -> (ok: bool)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).out_log() == old(self).out_log(),
+            final(self).phase_spec() == old(self).phase_spec(),
+            ok ==> final(self).paths.has(path),
+    {
+        if self.paths.index(path).is_some() {
+            return true;
+        }
+        let ghost s0 = *self;
+        if !self.paths.insert(path) {
+            return false;
+        }
+        proof {
+            let log = self.out_log@;
+            s0.paths.lemma_wf();
+            self.paths.lemma_wf();
+            assert forall|q: PathId| #[trigger] self.paths.has(q) implies q == path || s0.paths.has(q) by {
+                let i = choose|i: int| 0 <= i < self.paths.ids().len() && self.paths.ids()[i] == q;
+                if i < s0.paths.ids().len() {
+                    assert(s0.paths.ids()[i] == q);
+                }
+            }
+            assert forall|q: PathId| #[trigger] s0.paths.has(q) implies self.paths.has(q) by {
+                let i = choose|i: int| 0 <= i < s0.paths.ids().len() && s0.paths.ids()[i] == q;
+                assert(self.paths.ids()[i] == q);
+            }
+            assert forall|i: int| 0 <= i < log.len() implies (#[trigger] log[i]).path != path by {
+                assert(s0.paths.index_spec(log[i].path) is Some);
+            }
+            lemma_log_sends_absent(log, path);
+            assert(self.paths.has(path)) by {
+                assert(self.paths.ids()[s0.paths.ids().len() as int] == path);
+            }
+            assert(self.wf_amp()) by {
+                assert forall|q: PathId| #[trigger] self.paths.has(q) implies amp_ok(
+                    self.paths.amp_trace(q),
+                ) && sent_entries(self.paths.amp_trace(q)) == log_sends(log, q) by {
+                    assert(path_ok(self.paths.path(q)));
+                    if q == path {
+                        assert(self.paths.amp_trace(q) == Seq::<AmpEv>::empty());
+                        assert(log_sends(log, q) =~= sent_entries(self.paths.amp_trace(q)));
+                    } else {
+                        assert(s0.paths.has(q));
+                    }
+                }
+            }
+            assert(self.wf_log_paths()) by {
+                assert forall|i: int| 0 <= i < log.len() implies #[trigger] self.paths.index_spec(
+                    log[i].path,
+                ) is Some by {
+                    assert(s0.paths.index_spec(log[i].path) is Some);
+                    assert(self.paths.has(log[i].path));
+                }
+            }
+            assert(self.wf_dcids());
+            assert(self.wf_parts()) by {
+                assert(s0.paths.has(s0.hs_path));
+            }
+        }
+        true
+    }
+
+    /// §8.1: the bytes of a datagram received on `path`.
+    #[verifier::spinoff_prover]
+    fn count_recv(&mut self, path: PathId, n: u64)
+        requires
+            old(self).wf(),
+            old(self).paths.has(path),
+        ensures
+            final(self).wf(),
+            final(self).out_log() == old(self).out_log(),
+            final(self).phase_spec() == old(self).phase_spec(),
+            final(self).paths.has(path),
+    {
+        let ghost s0 = *self;
+        self.paths.on_recv(path, n);
+        proof {
+            self.lemma_path_event(s0, path, AmpEv::Recv(n as nat));
+        }
+    }
+
+    /// A Handshake packet validates the client's address (§8.1) and ends the Initial space (RFC
+    /// 9001 §4.9.1).
+    #[verifier::spinoff_prover]
+    fn validate_hs_path(&mut self)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).out_log() == old(self).out_log(),
+            final(self).paths.ids() == old(self).paths.ids(),
+    {
+        let ghost s0 = *self;
+        self.paths.set_validated(self.hs_path);
+        proof {
+            self.lemma_path_event(s0, s0.hs_path, AmpEv::Validated);
+        }
+        self.discard(PacketKind::Initial);
+    }
+
+    /// `self` is `o` with an event other than `Sent` pushed on `id`'s trace.
+    proof fn lemma_path_event(&self, o: Connection, id: PathId, e: AmpEv)
+        requires
+            o.wf(),
+            o.paths.has(id),
+            !(e is Sent),
+            self.paths.wf(),
+            kept(o.paths, self.paths, id),
+            self.paths.amp_trace(id) == o.paths.amp_trace(id).push(e),
+            self.paths.path(id).dcid == o.paths.path(id).dcid,
+            self.paths.path(id).peer_used == o.paths.path(id).peer_used,
+            self.out_log@ == o.out_log@,
+            self.peer_cids == o.peer_cids,
+        ensures
+            self.paths.has(id),
+            self.wf_amp(),
+            self.wf_log_paths(),
+            self.wf_dcids(),
+    {
+        self.paths.lemma_wf();
+        assert(o.paths.has(id));
+        assert(self.wf_amp()) by {
+            assert forall|q: PathId| #[trigger] self.paths.has(q) implies amp_ok(
+                self.paths.amp_trace(q),
+            ) && sent_entries(self.paths.amp_trace(q)) == log_sends(self.out_log@, q) by {
+                assert(path_ok(self.paths.path(q)));
+                assert(o.paths.has(q));
+                if q == id {
+                    let t = o.paths.amp_trace(id);
+                    assert(t.push(e).drop_last() =~= t);
+                }
+            }
+        }
+        assert(self.wf_log_paths()) by {
+            assert forall|i: int| 0 <= i < self.out_log@.len() implies #[trigger] self.paths.index_spec(
+                self.out_log@[i].path,
+            ) is Some by {
+                assert(o.paths.index_spec(self.out_log@[i].path) is Some);
+            }
+        }
+        assert(self.wf_dcids()) by {
+            assert forall|q: PathId| #[trigger]
+                self.paths.has(q) implies (self.paths.path(q).dcid matches Some(c) ==> used_cid(
+                self.peer_cids.entries(),
+                c,
+            )) by {
+                assert(o.paths.has(q));
+            }
+            assert forall|q1: PathId, q2: PathId|
+                #[trigger] self.paths.has(q1) && #[trigger] self.paths.has(q2) && q1 != q2
+                    && self.paths.path(q1).dcid is Some && self.paths.path(q1).dcid
+                    == self.paths.path(q2).dcid implies self.paths.path(q1).peer_used
+                == self.paths.path(q2).peer_used by {
+                assert(o.paths.has(q1));
+                assert(o.paths.has(q2));
+            }
+            assert(o.paths.path(o.paths.active_spec()).dcid is Some);
+        }
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
+    //# Endpoints MUST discard packets that are too small to be valid QUIC
+    //# packets.
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.1
+    //# Unlike other cases where datagrams are expanded, endpoints MUST NOT
+    //# discard datagrams that appear to be too small when they contain
+    //# PATH_CHALLENGE or PATH_RESPONSE.
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
+    //# When an endpoint issues a connection ID, it MUST accept packets that
+    //# carry this connection ID for the duration of the connection or until
+    //# its peer invalidates the connection ID via a RETIRE_CONNECTION_ID
+    //# frame (Section 19.16).
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-5.7
+    //# A server MUST NOT process
+    //# incoming 1-RTT protected packets before the TLS handshake is
+    //# complete.
+    /// Whether packet `p` of a `len`-byte datagram on `path` is processed. Too small a packet is
+    /// `MIN_SHORT_PACKET` (route, 3b) or a failed decryption (3e), so it never reaches this
+    /// point; the only size rule here is §14.1's for Initial, so small PATH_* datagrams pass. Too
+    /// many PATH_CHALLENGEs drop the whole packet unacknowledged, which the peer sees as loss
+    /// (§21.9 "dropping packets", at `MAX_RESPONSES`), and no challenge is lost inside an
+    /// acknowledged packet.
+    #[verifier::spinoff_prover]
+    fn gate_packet(&self, path: PathId, len: usize, p: &PlainPacket) -> (ok: bool)
+        requires
+            self.wf(),
+            self.paths.has(path),
+        ensures
+            ok ==> !self.recv(p.kind).is_duplicate_spec(p.pn),
+            ok && p.kind is OneRtt ==> self.complete,
+    {
+        let dcid = p.dcid.as_slice();
+        let duplicate = match p.kind {
+            PacketKind::Initial => {
+                if len < MIN_INITIAL_DATAGRAM || !self.live_i || path != self.hs_path
+                    || !self.ids.initial_scid_ok(p.scid.as_slice()) || !(eq_bytes(dcid, self.ids.odcid())
+                    || self.local_cids.is_active(dcid)) {
+                    return false;
+                }
+                self.recv_i.is_duplicate(p.pn)
+            },
+            PacketKind::Handshake => {
+                if !self.live_h || path != self.hs_path || !self.local_cids.is_active(dcid) {
+                    return false;
+                }
+                self.recv_h.is_duplicate(p.pn)
+            },
+            PacketKind::OneRtt => {
+                if !self.complete || !self.local_cids.is_active(dcid) {
+                    return false;
+                }
+                self.recv_1.is_duplicate(p.pn)
+            },
+        };
+        !duplicate && count_challenges(p.frames.as_slice()) <= self.paths.response_room(path)
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.1
+    //# A packet MUST NOT be acknowledged until packet protection has been
+    //# successfully removed and all frames contained in the packet have been
+    //# processed.
+    /// One packet that passed `gate_packet`. P10: the packet number is recorded, so the packet
+    /// can be acknowledged, only after every frame returned `Ok`.
+    #[verifier::spinoff_prover]
+    fn on_packet(
+        &mut self,
+        path: PathId,
+        p: PlainPacket,
+        now: u64,
+        rand: &[u8; RAND_LEN],
+    ) -> (r: Result<(), u64>)
+        requires
+            old(self).wf(),
+            old(self).phase_spec() is Open,
+            old(self).paths.has(path),
+            plain_wf(p@),
+            !old(self).recv(p.kind).is_duplicate_spec(p.pn),
+            p.kind is OneRtt ==> old(self).complete,
+        ensures
+            final(self).wf(),
+            final(self).out_log() == old(self).out_log(),
+            final(self).paths.has(path),
+            r matches Err(c) ==> c <= VARINT_MAX,
+            r is Err ==> final(self).recv(p.kind).seen() == old(self).recv(p.kind).seen(),
+    {
+        let k = p.kind;
+        let pn = p.pn;
+        let dcid = p.dcid;
+        let frames = p.frames;
+        let eliciting = is_ack_eliciting(frames.as_slice());
+        let non_probing = has_non_probing(frames.as_slice());
+        let f = self.on_frames(k, path, dcid.as_slice(), frames, now, rand);
+        if f.is_err() {
+            return f;
+        }
+        if !matches!(self.lc.phase(), Phase::Open) {
+            return Ok(());
+        }
+        match k {
+            PacketKind::Initial => self.recv_i.on_packet(pn, eliciting, now),
+            PacketKind::Handshake => self.recv_h.on_packet(pn, eliciting, now),
+            PacketKind::OneRtt => self.recv_1.on_packet(pn, eliciting, now),
+        }
+        self.idle.on_packet_processed(now);
+        match k {
+            PacketKind::Handshake => {
+                if !matches!(self.paths.state(self.hs_path), PathState::Validated) {
+                    self.validate_hs_path();
+                }
+            },
+            PacketKind::OneRtt => {
+                self.after_one_rtt(path, dcid.as_slice(), non_probing, pn, now, rand);
+            },
+            PacketKind::Initial => {},
+        }
+        Ok(())
+    }
+
+    /// The frames of one packet, stopping at the first error or once no longer Open: in `[CC,
+    /// Stream]`, `streams` is None by the second frame.
+    #[verifier::spinoff_prover]
+    fn on_frames(
+        &mut self,
+        k: PacketKind,
+        path: PathId,
+        dcid: &[u8],
+        frames: Vec<Frame>,
+        now: u64,
+        rand: &[u8; RAND_LEN],
+    ) -> (r: Result<(), u64>)
+        requires
+            old(self).wf(),
+            old(self).phase_spec() is Open,
+            old(self).paths.has(path),
+            frames_received(frames_view(frames@), k),
+            dcid@.len() <= MAX_CID_LEN,
+            k is OneRtt ==> old(self).complete,
+        ensures
+            final(self).wf(),
+            final(self).frames_kept(*old(self)),
+            r matches Err(c) ==> c <= VARINT_MAX,
+    {
+        let ghost fs = frames@;
+        for f in it: frames
+            invariant
+                self.wf(),
+                self.frames_kept(*old(self)),
+                self.phase_spec() is Open,
+                self.paths.has(path),
+                it.seq() == fs,
+                frames_received(frames_view(fs), k),
+                dcid@.len() <= MAX_CID_LEN,
+                k is OneRtt ==> self.complete,
+        {
+            proof {
+                let i = it.index();
+                assert(fs[i] == f);
+                assert(frames_view(fs)[i] == f@);
+            }
+            let r = self.on_frame(k, path, dcid, &f, now, rand);
+            if r.is_err() {
+                return r;
+            }
+            if !matches!(self.lc.phase(), Phase::Open) {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    /// Dispatches one frame.
+    #[verifier::spinoff_prover]
+    fn on_frame(
+        &mut self,
+        k: PacketKind,
+        path: PathId,
+        dcid: &[u8],
+        f: &Frame,
+        now: u64,
+        rand: &[u8; RAND_LEN],
+    ) -> (r: Result<(), u64>)
+        requires
+            old(self).wf(),
+            old(self).phase_spec() is Open,
+            old(self).paths.has(path),
+            frame_wf(f@),
+            frame_permitted(spec_frame_type(f@), k),
+            !(f@ is HandshakeDone),
+            dcid@.len() <= MAX_CID_LEN,
+            k is OneRtt ==> old(self).complete,
+        ensures
+            final(self).wf(),
+            final(self).frames_kept(*old(self)),
+            r matches Err(c) ==> c <= VARINT_MAX,
+    {
+        // The stream family reaches only 1-RTT, so `wf`'s `complete` clause gives `streams`.
+        proof {
+            if is_stream_layer_frame(f@) {
+                if let SpecFrame::Stream { offset, fin, .. } = f@ {
+                    lemma_stream_type_bits(if offset > 0 { 4 } else { 0 }, if fin { 1 } else { 0 });
+                }
+                assert(k is OneRtt);
+            }
+        }
+        match f {
+            Frame::Padding | Frame::Ping => Ok(()),
+            // `frames_received` excludes it.
+            Frame::HandshakeDone => {
+                proof {
+                    assert(false);
+                }
+                Ok(())
+            },
+            Frame::Ack(a) => self.on_ack_frame(k, a, now),
+            Frame::Crypto { offset, data } => self.on_crypto_frame(k, *offset, data.as_slice()),
+            Frame::ConnectionClose { .. } => {
+                let pto = self.pto();
+                self.lc.enter_draining(now, pto);
+                self.streams = None;
+                Ok(())
+            },
+            Frame::ResetStream { .. }
+            | Frame::StopSending { .. }
+            | Frame::Stream { .. }
+            | Frame::MaxData(_)
+            | Frame::MaxStreamData { .. }
+            | Frame::MaxStreams { .. }
+            | Frame::DataBlocked(_)
+            | Frame::StreamDataBlocked { .. }
+            | Frame::StreamsBlocked { .. } => self.on_stream_frame(f, now),
+            Frame::NewConnectionId { .. } | Frame::RetireConnectionId(_) => self.on_cid_frame(
+                dcid,
+                f,
+                rand,
+            ),
+            Frame::PathChallenge(_) | Frame::PathResponse(_) => self.on_path_frame(path, f, now, rand),
+        }
+    }
+
+    /// An ACK frame: drops the records it acknowledges and routes their frames (§13.3).
+    #[verifier::spinoff_prover]
+    fn on_ack_frame(&mut self, k: PacketKind, a: &AckFrame, now: u64) -> (r: Result<(), u64>)
+        requires
+            old(self).wf(),
+            rfc_ack_ranges_valid(a.largest, a.first_range, a.ranges@),
+        ensures
+            final(self).wf(),
+            final(self).frames_kept(*old(self)),
+            r matches Err(c) ==> c <= VARINT_MAX,
+    {
+        let mut acked: Vec<SentPacket> = Vec::new();
+        proof {
+            lemma_unacked_len(a@, self.sent_i.inflight_spec());
+            lemma_unacked_len(a@, self.sent_h.inflight_spec());
+            lemma_unacked_len(a@, self.sent_1.inflight_spec());
+        }
+        let r = match k {
+            PacketKind::Initial => self.sent_i.on_ack(a, &mut acked),
+            PacketKind::Handshake => self.sent_h.on_ack(a, &mut acked),
+            PacketKind::OneRtt => self.sent_1.on_ack(a, &mut acked),
+        };
+        if r.is_err() {
+            return r;
+        }
+        self.recovery.on_ack_received(k, acked.len(), a.delay, now);
+        let mut i: usize = 0;
+        while i < acked.len()
+            invariant
+                i <= acked@.len(),
+                self.wf(),
+                self.frames_kept(*old(self)),
+            decreases acked@.len() - i,
+        {
+            self.on_acked_record(k, acked[i].frames.as_slice());
+            i += 1;
+        }
+        Ok(())
+    }
+
+    // ponytail: per incoming ACK at most 64 records × distinct stream runs per record × O(R) range work (R ≈ 2·64 + ~1000, 3d D4); coalescing turns a 200-frame single-stream record into one call. Cap STREAM frames per stream per packet if a split adversary still makes this hot.
+    /// The frames of one acknowledged record, each run of adjacent STREAM frames in one call.
+    #[verifier::spinoff_prover]
+    fn on_acked_record(&mut self, k: PacketKind, frames: &[Frame])
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).frames_kept(*old(self)),
+    {
+        let mut j: usize = 0;
+        while j < frames.len()
+            invariant
+                j <= frames@.len(),
+                self.wf(),
+                self.frames_kept(*old(self)),
+            decreases frames@.len() - j,
+        {
+            match stream_run(frames, j) {
+                Some((run, e)) => {
+                    self.on_acked_frame(k, &run);
+                    j = e;
+                },
+                None => {
+                    self.on_acked_frame(k, &frames[j]);
+                    j += 1;
+                },
+            }
+        }
+    }
+
+    // ponytail: post-handshake CRYPTO (NewSessionTicket) is buffered and ignored; we send none.
+    /// A CRYPTO frame.
+    #[verifier::spinoff_prover]
+    fn on_crypto_frame(&mut self, k: PacketKind, offset: u64, data: &[u8]) -> (r: Result<(), u64>)
+        requires
+            old(self).wf(),
+            offset + data@.len() <= VARINT_MAX,
+        ensures
+            final(self).wf(),
+            final(self).frames_kept(*old(self)),
+            r matches Err(c) ==> c <= VARINT_MAX,
+    {
+        match k {
+            PacketKind::Initial => self.crx_i.on_crypto(offset, data),
+            PacketKind::Handshake => self.crx_h.on_crypto(offset, data),
+            PacketKind::OneRtt => self.crx_1.on_crypto(offset, data),
+        }
+    }
+
+    /// One of the nine stream-layer frames. On `Err` the connection is already Closing with
+    /// `streams` None and that code: `Streams::on_frame`'s `Err` sets `failed()`, which `wf`
+    /// excludes, so `wf` could not otherwise hold on return. `on_datagram`'s `close_internal` is
+    /// then a no-op. (Task 1b writes the body.)
+    #[verifier::spinoff_prover]
+    #[allow(unused_variables)]  // Task 1b writes the body.
+    fn on_stream_frame(&mut self, f: &Frame, now: u64) -> (r: Result<(), u64>)
+        requires
+            old(self).wf(),
+            old(self).phase_spec() is Open,
+            old(self).streams is Some,
+            frame_wf(f@),
+            is_stream_layer_frame(f@),
+        ensures
+            final(self).wf(),
+            final(self).frames_kept(*old(self)),
+            r matches Err(c) ==> c <= VARINT_MAX,
+            r is Err ==> !(final(self).phase_spec() is Open) && final(self).streams is None,
+    {
+        Ok(())
+    }
+
+    /// NEW_CONNECTION_ID or RETIRE_CONNECTION_ID, in a packet with this DCID. (Task 1b writes the
+    /// body.)
+    #[verifier::spinoff_prover]
+    #[allow(unused_variables)]  // Task 1b writes the body.
+    fn on_cid_frame(&mut self, dcid: &[u8], f: &Frame, rand: &[u8; RAND_LEN]) -> (r: Result<(), u64>)
+        requires
+            old(self).wf(),
+            frame_wf(f@),
+            f@ is NewConnectionId || f@ is RetireConnectionId,
+            dcid@.len() <= MAX_CID_LEN,
+        ensures
+            final(self).wf(),
+            final(self).frames_kept(*old(self)),
+            r matches Err(c) ==> c <= VARINT_MAX,
+    {
+        Ok(())
+    }
+
+    /// PATH_CHALLENGE or PATH_RESPONSE, arriving on `path`. (Task 1b writes the body.)
+    #[verifier::spinoff_prover]
+    #[allow(unused_variables)]  // Task 1b writes the body.
+    fn on_path_frame(
+        &mut self,
+        path: PathId,
+        f: &Frame,
+        now: u64,
+        rand: &[u8; RAND_LEN],
+    ) -> (r: Result<(), u64>)
+        requires
+            old(self).wf(),
+            old(self).paths.has(path),
+            frame_wf(f@),
+            f@ is PathChallenge || f@ is PathResponse,
+        ensures
+            final(self).wf(),
+            final(self).frames_kept(*old(self)),
+            r matches Err(c) ==> c <= VARINT_MAX,
+    {
+        Ok(())
+    }
+
+    /// A 1-RTT packet was processed: assigns `path` a DCID and migrates to it (§9). (Task 1b
+    /// writes the body.)
+    #[verifier::spinoff_prover]
+    #[allow(unused_variables)]  // Task 1b writes the body.
+    fn after_one_rtt(
+        &mut self,
+        path: PathId,
+        dcid: &[u8],
+        non_probing: bool,
+        pn: u64,
+        now: u64,
+        rand: &[u8; RAND_LEN],
+    )
+        requires
+            old(self).wf(),
+            old(self).paths.has(path),
+            dcid@.len() <= MAX_CID_LEN,
+        ensures
+            final(self).wf(),
+            final(self).frames_kept(*old(self)),
+    {
+    }
+
+    /// §13.3: frame `f` of an acknowledged record of space `k`.
+    #[verifier::spinoff_prover]
+    fn on_acked_frame(&mut self, k: PacketKind, f: &Frame)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).frames_kept(*old(self)),
+    {
+        match f {
+            Frame::ResetStream { .. }
+            | Frame::StopSending { .. }
+            | Frame::Stream { .. }
+            | Frame::MaxData(_)
+            | Frame::MaxStreamData { .. }
+            | Frame::MaxStreams { .. }
+            | Frame::DataBlocked(_)
+            | Frame::StreamDataBlocked { .. }
+            | Frame::StreamsBlocked { .. } => {
+                if let Some(s) = &mut self.streams {
+                    s.on_frame_acked(f);
+                }
+            },
+            Frame::Crypto { offset, data } => match k {
+                PacketKind::Initial => self.ctx_i.on_data_acked(*offset, data.len() as u64, false),
+                PacketKind::Handshake => self.ctx_h.on_data_acked(*offset, data.len() as u64, false),
+                PacketKind::OneRtt => {},
+            },
+            Frame::HandshakeDone => self.hs_done = HsDone::Acked,
+            Frame::RetireConnectionId(s) => self.peer_cids.retire_acked(*s),
+            _ => {},
+        }
+    }
+
+    /// §13.3: frame `f` of a lost record of space `k`. Outdated frames are accepted: 3c's credit
+    /// `on_max` ignores decreases.
+    #[verifier::spinoff_prover]
+    #[allow(dead_code)]  // Called from Task 3.
+    fn on_lost_frame(&mut self, k: PacketKind, f: &Frame)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).frames_kept(*old(self)),
+    {
+        match f {
+            Frame::ResetStream { .. }
+            | Frame::StopSending { .. }
+            | Frame::Stream { .. }
+            | Frame::MaxData(_)
+            | Frame::MaxStreamData { .. }
+            | Frame::MaxStreams { .. }
+            | Frame::DataBlocked(_)
+            | Frame::StreamDataBlocked { .. }
+            | Frame::StreamsBlocked { .. } => {
+                if let Some(s) = &mut self.streams {
+                    s.on_frame_lost(f);
+                }
+            },
+            Frame::Crypto { offset, data } => match k {
+                PacketKind::Initial => self.ctx_i.on_data_lost(*offset, data.len() as u64, false),
+                PacketKind::Handshake => self.ctx_h.on_data_lost(*offset, data.len() as u64, false),
+                PacketKind::OneRtt => {},
+            },
+            Frame::HandshakeDone => {
+                if !matches!(self.hs_done, HsDone::Acked) {
+                    self.hs_done = HsDone::Pending;
+                }
+            },
+            Frame::NewConnectionId { seq, .. } => self.local_cids.on_frame_lost(*seq),
+            Frame::RetireConnectionId(s) => self.peer_cids.retire_lost(*s),
+            _ => {},
+        }
     }
 
     // =========================================================================
@@ -770,6 +1490,7 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
+            final(self).frames_kept(*old(self)),
     {
         if !self.complete {
             return;
@@ -785,6 +1506,7 @@ impl Connection {
                 i <= 4,
                 self.wf(),
                 self.out_log() == old(self).out_log(),
+                self.frames_kept(*old(self)),
             decreases 4 - i,
         {
             let s = slice_subrange(rand.as_slice(), 24 * i, 24 * i + 24);
@@ -1077,6 +1799,120 @@ impl Connection {
 // =============================================================================
 // Helpers
 // =============================================================================
+
+/// Nothing is logged on a path absent from the log.
+proof fn lemma_log_sends_absent(log: Seq<SpecOutDatagram>, q: PathId)
+    requires
+        forall|i: int| 0 <= i < log.len() ==> (#[trigger] log[i]).path != q,
+    ensures
+        log_sends(log, q) == Seq::<nat>::empty(),
+    decreases log.len(),
+{
+    if log.len() > 0 {
+        assert(log[log.len() - 1].path != q);
+        assert forall|i: int| 0 <= i < log.drop_last().len() implies (#[trigger] log.drop_last()[i]).path != q by {
+            assert(log.drop_last()[i] == log[i]);
+        }
+        lemma_log_sends_absent(log.drop_last(), q);
+    }
+}
+
+/// The PATH_CHALLENGE frames in `frames`.
+#[verifier::spinoff_prover]
+fn count_challenges(frames: &[Frame]) -> (r: usize) {
+    let mut n: usize = 0;
+    let mut i: usize = 0;
+    while i < frames.len()
+        invariant
+            n <= i <= frames@.len(),
+        decreases frames@.len() - i,
+    {
+        if matches!(frames[i], Frame::PathChallenge(_)) {
+            n += 1;
+        }
+        i += 1;
+    }
+    n
+}
+
+/// §9.1: some frame is not a probing frame.
+#[verifier::spinoff_prover]
+fn has_non_probing(frames: &[Frame]) -> (r: bool)
+    ensures
+        r == exists|i: int|
+            #![trigger frames@[i]]
+            0 <= i < frames@.len() && !(frames@[i] is PathChallenge || frames@[i] is PathResponse
+                || frames@[i] is NewConnectionId || frames@[i] is Padding),
+{
+    let mut i: usize = 0;
+    while i < frames.len()
+        invariant
+            i <= frames@.len(),
+            forall|j: int|
+                #![trigger frames@[j]]
+                0 <= j < i ==> frames@[j] is PathChallenge || frames@[j] is PathResponse
+                    || frames@[j] is NewConnectionId || frames@[j] is Padding,
+        decreases frames@.len() - i,
+    {
+        if !matches!(
+            frames[i],
+            Frame::PathChallenge(_) | Frame::PathResponse(_) | Frame::NewConnectionId { .. } | Frame::Padding
+        ) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// The STREAM frame covering the run of adjacent STREAM frames of one stream that starts at
+/// `frames[j]`, FIN from the last, and the index after the run; None when no frame follows on
+/// from `frames[j]`, so a lone frame costs no copy. The copy is at most one record's bytes.
+/// Public for its test only: no record exists before Task 2a-i.
+#[doc(hidden)]
+#[verifier::spinoff_prover]
+pub fn stream_run(frames: &[Frame], j: usize) -> (r: Option<(Frame, usize)>)
+    requires
+        j < frames@.len(),
+    ensures
+        r matches Some((_, e)) ==> j < e <= frames@.len(),
+{
+    let (id, off, first, mut last_fin) = match &frames[j] {
+        Frame::Stream { stream_id, offset, data, fin } => (*stream_id, *offset, data, *fin),
+        _ => return None,
+    };
+    if first.len() as u64 > u64::MAX - off {
+        return None;
+    }
+    let mut next = off + first.len() as u64;
+    let mut run: Vec<u8> = Vec::new();
+    let mut e = j + 1;
+    while e < frames.len()
+        invariant
+            j < e <= frames@.len(),
+        decreases frames@.len() - e,
+    {
+        match &frames[e] {
+            Frame::Stream { stream_id, offset, data, fin } => {
+                if *stream_id != id || *offset != next || data.len() as u64 > u64::MAX - next {
+                    break;
+                }
+                if e == j + 1 {
+                    run.extend_from_slice(first.as_slice());
+                }
+                run.extend_from_slice(data.as_slice());
+                next = next + data.len() as u64;
+                last_fin = *fin;
+            },
+            _ => break,
+        }
+        e += 1;
+    }
+    if e == j + 1 {
+        return None;
+    }
+    Some((Frame::Stream { stream_id: id, offset: off, data: run, fin: last_fin }, e))
+}
 
 /// `TransportParams` derives no `Clone`.
 fn copy_tp(t: &TransportParams) -> (r: TransportParams)
