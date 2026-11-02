@@ -31,7 +31,8 @@ done
 grep -q '^checked crypto::rsa::rsa_pss_sign_inner secret=d,msg,salt ret=' "$report" || fail "rsa_pss_sign_inner lost its secret labels"
 grep -q '^checked crypto::rsa::mod_pow_ct secret=[^ ]*\be\b' "$report" || fail "mod_pow_ct's exponent is not secret"
 grep -q '^checked crypto::rsa::modulus_bits secret= ret=' "$report" || fail "modulus_bits has a secret-labelled param"
-if cargo tree -p crypto -e normal --prefix none | grep -qE '^(rsa|sha2|crypto-bigint) '; then fail "RustCrypto in crypto's normal deps"; fi
+tree=$(cargo tree -p crypto -e normal --prefix none) || fail "cargo tree failed"
+if printf '%s\n' "$tree" | grep -qE '^(rsa|sha2|crypto-bigint) '; then fail "RustCrypto in crypto's normal deps"; fi
 g=$CT_OUT/gate
 mkdir -p "$g"
 awk '$1 == "declassify" { s = $NF; $1 = ""; $NF = ""; gsub(/^ +| +$/, ""); print $0, s }' "$report" | LC_ALL=C sort > "$g/report"

@@ -19,7 +19,7 @@ Calls I made (the user can override them):
   - The server can be configured with an RSA certificate and key. It then signs CertificateVerify with rsa_pss_rsae_sha256: RSASSA-PSS, MGF1-SHA256, salt length 32 (RFC 8446 §4.2.3).
   - rsa_pkcs1_sha256 and rsa_pss_rsae_sha256 are recognized in the client's `signature_algorithms` / `signature_algorithms_cert` when choosing which configured chain to send.
   - **Ruling:** no RSA *verification* code is written. The server verifies no peer signatures, because client certificates are declined. "Support for certificates" is met by sending chains signed with those schemes and by negotiating the codepoints. Revisit this if client authentication is ever added.
-  - RSA certificates must not be deployed before Phase 5 replaces the shim (RUSTSEC-2023-0071, Marvin timing side channel).
+  - RSA certificates must not be deployed before Phase 7's binary-level timing check and the key loader that establishes `rsa_key_wf`. Phase 5e replaced the shim (RUSTSEC-2023-0071, Marvin), but MIR-level constant time does not carry to the binary: LLVM turned a masked select into a branch on the exponent until `ct_mask` was added.
 - **"No migration" has a narrow meaning:** we send `disable_active_migration` and never initiate migration. Path validation (PATH_CHALLENGE → PATH_RESPONSE) is still implemented, because it's a MUST.
 - **ECDSA nonces are deterministic (RFC 6979, HMAC-DRBG).** Signing then doesn't depend on the RNG, and proofs reuse the HMAC proofs.
 - **Sans-IO core.** The verified code is pure state machines that take bytes, time and random values as inputs. A thin, unverified shell owns the UDP socket, clock, getrandom and timers. It starts as a blocking `std::net::UdpSocket` loop; an async (tokio) shell can come later for production. Verified code avoids async, trait objects and closures.
@@ -117,7 +117,7 @@ Parsers and serializers use `vest_lib` combinators, with round-trip and reject-m
    **Exit:** proofs verify; NIST CAVP + Wycheproof vectors pass; the RustCrypto shim and its `TRUSTED.md` entries are gone.
 6. **Loss recovery & congestion control (RFC 9002).** RTT estimation, PTO, NewReno, plus proofs of invariants such as bytes in flight ≤ cwnd.
    **Exit:** proofs verify; behavior stays stable under induced loss.
-7. **Full conformance & browsers.** h3spec, h3i, quic-interop-runner (server role), Chrome and Firefox with a P-256 certificate from a local CA. The Duvet report has no unannotated MUSTs.
+7. **Full conformance & browsers.** h3spec, h3i, quic-interop-runner (server role), Chrome and Firefox with a P-256 certificate from a local CA. The Duvet report has no unannotated MUSTs. A binary-level constant-time check of every crypto root (dudect-style timing, and an object-code gate that runs on every crypto change, since inlining moves with codegen units): until this exists, the MIR-level proof and the one-time object read in docs/crypto-binary-audit.md are all there is, and RSA certificates stay undeployed.
 8. **Verified analyses.** 8a CT checker (MIR level, crypto); 8b step bounds: 19/36 parser targets bounded (`verify.sh` prints `cost 19/36`); bounds are core steps, not time or memory, and not a DoS bound for the server (every frame, payload and field-section decoder is `none`). Design: `docs/superpowers/specs/2026-10-28-phase-8-verified-ct-cost-design.md`.
    **Exit (8a):** `verify.sh` runs `scripts/ct-check.sh` and the declassify gate, and prints `ct ok (D declassify)`.
 
