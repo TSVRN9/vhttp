@@ -4780,7 +4780,8 @@ impl Connection {
     /// moved to the taken ones. `wf` keeps the taken ones and the owed ones, in order, a subsequence
     /// of the challenges received on the path, so each echoes one challenge, once.
     pub closed spec fn responses_echoed(&self, o: Connection, d: SpecOutDatagram) -> bool {
-        forall|i: int, j: int|
+        &&& one_response_at_most(d)
+        &&& forall|i: int, j: int|
             0 <= i < d.packets.len() && 0 <= j < d.packets[i].frames.len() ==> (#[trigger] d.packets[i].frames[j] matches SpecFrame::PathResponse(
                 x,
             ) ==> {
@@ -4790,6 +4791,20 @@ impl Connection {
                 &&& x == a.responses[0]@
                 &&& b.responses == a.responses.drop_first()
                 &&& b.responses_taken == a.responses_taken.push(a.responses[0])
+            })
+    }
+
+    /// §8.2.1 at the send: every PATH_CHALLENGE in `d` carries the data `self` owed on `d`'s path,
+    /// which `next_challenge` drew.
+    pub closed spec fn challenges_recorded(&self, d: SpecOutDatagram) -> bool {
+        forall|i: int, j: int|
+            0 <= i < d.packets.len() && 0 <= j < d.packets[i].frames.len() ==> (#[trigger] d.packets[i].frames[j] matches SpecFrame::PathChallenge(
+                y,
+            ) ==> {
+                let a = self.paths.path(d.path);
+                &&& a.owed
+                &&& a.challenge is Some
+                &&& y == a.challenge.unwrap().0@
             })
     }
 
@@ -4814,6 +4829,7 @@ impl Connection {
     /// P12-P14 together, `o` the connection before the datagram and `self` after.
     closed spec fn path_rules(&self, o: Connection, d: SpecOutDatagram) -> bool {
         &&& self.responses_echoed(o, d)
+        &&& o.challenges_recorded(d)
         &&& path_expanded(d, o.budget_at(d.path))
         &&& self.dcid_unshared(d)
     }
@@ -5560,9 +5576,7 @@ impl Connection {
                 &&& a.owed ==> b.challenge is Some && b.challenge.unwrap().2 == padded
                 &&& r@.len() == (if a.responses.len() > 0 { 1int } else { 0 }) + (if a.owed { 1int } else { 0 })
                 &&& path_frames_ok(frames_view(r@))
-                &&& forall|j: int|
-                    0 <= j < r@.len() ==> (#[trigger] frames_view(r@)[j] matches SpecFrame::PathResponse(x)
-                        ==> a.responses.len() > 0 && x == a.responses[0]@)
+                &&& frames_view(r@) == path_frames_of(a)
             }),
     {
         let ghost s0 = *self;
@@ -5595,11 +5609,10 @@ impl Connection {
             proof {
                 assert(frames_view(fs@) =~= v1.push(g));
                 lemma_path_frame_push(v1, g);
-                assert(g is PathChallenge);
-                assert(frames_view(fs@)[v1.len() as int] == g);
             }
         }
         proof {
+            assert(frames_view(fs@) =~= path_frames_of(s0.paths.path(q)));
             self.lemma_path_edit(s0, q);
             self.lemma_dcids_same(s0, q);
         }
@@ -5721,7 +5734,7 @@ impl Connection {
     /// Takes the frames owed on `q`, builds their packet and commits it. `q`'s budget was checked by
     /// `choose_path`, before anything was taken.
     #[verifier::spinoff_prover]
-    fn send_path_datagram(&mut self, q: PathId, expand: bool, pn_len: u8, Ghost(o): Ghost<Connection>) -> (d: OutDatagram)
+    fn send_path_datagram(&mut self, q: PathId, expand: bool, pn_len: u8, now: u64, Ghost(o): Ghost<Connection>) -> (d: OutDatagram)
         requires
             o.wf(),
             old(self).wf(),
@@ -5797,8 +5810,12 @@ impl Connection {
         }
         let ghost c = *self;
         self.commit_datagram(q, &d);
+        // §10.1: these packets are ack-eliciting, though not recorded (E2).
+        self.idle.on_eliciting_sent(now);
         proof {
             self.lemma_one_sent(o, d@, w);
+            lemma_path_frames_of(o.paths.path(q));
+            assert(sf == path_frames_of(o.paths.path(q)));
             s1.paths.lemma_wf();
             assert(self.paths.has(q)) by {
                 assert(s1.paths.has(q));
@@ -5809,7 +5826,31 @@ impl Connection {
                 assert(d@.packets[i] == w);
                 assert(w.frames[j] == sf[j]);
             }
+            assert(o.challenges_recorded(d@)) by {
+                s0.paths.lemma_wf();
+                assert(path_ok(o.paths.path(q))) by {
+                    assert(o.paths.has(q));
+                }
+                assert forall|i: int, j: int| 0 <= i < d@.packets.len() && 0 <= j < d@.packets[i].frames.len() implies (#[trigger] d@.packets[i].frames[j] matches SpecFrame::PathChallenge(
+                    y,
+                ) ==> {
+                    let a = o.paths.path(d@.path);
+                    &&& a.owed
+                    &&& a.challenge is Some
+                    &&& y == a.challenge.unwrap().0@
+                }) by {
+                    assert(d@.packets[i] == w);
+                    assert(w.frames[j] == sf[j]);
+                }
+            }
             assert(self.responses_echoed(o, d@)) by {
+                assert forall|i1: int, j1: int, i2: int, j2: int|
+                    0 <= i1 < d@.packets.len() && 0 <= j1 < d@.packets[i1].frames.len() && 0 <= i2 < d@.packets.len() && 0 <= j2
+                        < d@.packets[i2].frames.len() && #[trigger] d@.packets[i1].frames[j1] is PathResponse
+                        && #[trigger] d@.packets[i2].frames[j2] is PathResponse implies i1 == i2 && j1 == j2 by {
+                    assert(d@.packets[i1] == w && d@.packets[i2] == w);
+                    assert(w.frames[j1] == sf[j1] && w.frames[j2] == sf[j2]);
+                }
                 assert forall|i: int, j: int| 0 <= i < d@.packets.len() && 0 <= j < d@.packets[i].frames.len() implies (#[trigger] d@.packets[i].frames[j] matches SpecFrame::PathResponse(
                     x,
                 ) ==> {
@@ -5844,10 +5885,11 @@ impl Connection {
     //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
     //# A PATH_RESPONSE frame MUST be sent on the network path where the
     //# PATH_CHALLENGE frame was received.
+    // ponytail: one datagram per owed response, outside congestion control (E2): on a validated path 62 bytes in draws 4800 out (77:1), attacker-paced; every owed response in one 1200-byte packet gives 19:1. Phase 6 decides, with E2.
     /// PATH_RESPONSE and PATH_CHALLENGE datagrams, ahead of data: one 1-RTT packet, not recorded (E2).
     /// A None with the connection still Open has left what `tx_kept` reads alone.
     #[verifier::spinoff_prover]
-    fn build_path_datagram(&mut self, Ghost(o): Ghost<Connection>) -> (r: Option<OutDatagram>)
+    fn build_path_datagram(&mut self, now: u64, Ghost(o): Ghost<Connection>) -> (r: Option<OutDatagram>)
         requires
             o.wf(),
             old(self).wf(),
@@ -5884,7 +5926,7 @@ impl Connection {
                 self.streams = None;
                 None
             },
-            Some((q, padded, Some(pn_len))) => Some(self.send_path_datagram(q, padded, pn_len, Ghost(o))),
+            Some((q, padded, Some(pn_len))) => Some(self.send_path_datagram(q, padded, pn_len, now, Ghost(o))),
         }
     }
 
@@ -5926,6 +5968,8 @@ impl Connection {
             r matches Some(d) ==> (old(self).mtu_failed_at(d@.path) ==> mtu_failed_frames(d@)),
             // P12.
             r matches Some(d) ==> final(self).responses_echoed(*old(self), d@),
+            // §8.2.1: challenge data is what was drawn for the path.
+            r matches Some(d) ==> old(self).challenges_recorded(d@),
             // P13.
             r matches Some(d) ==> path_expanded(d@, old(self).budget_at(d@.path)),
             // P14.
@@ -5979,7 +6023,7 @@ impl Connection {
             }
         }
         let now = self.now;
-        if let Some(d) = self.build_path_datagram(Ghost(o)) {
+        if let Some(d) = self.build_path_datagram(now, Ghost(o)) {
             return Some(d);
         }
         if !matches!(self.lc.phase(), Phase::Open) {
@@ -6610,6 +6654,14 @@ pub open spec fn only_path_frames(d: SpecOutDatagram) -> bool {
     forall|i: int, j: int|
         0 <= i < d.packets.len() && 0 <= j < d.packets[i].frames.len() ==> #[trigger] d.packets[i].frames[j]
             is PathResponse || d.packets[i].frames[j] is PathChallenge
+}
+
+/// `d` has at most one PATH_RESPONSE frame.
+pub open spec fn one_response_at_most(d: SpecOutDatagram) -> bool {
+    forall|i1: int, j1: int, i2: int, j2: int|
+        0 <= i1 < d.packets.len() && 0 <= j1 < d.packets[i1].frames.len() && 0 <= i2 < d.packets.len() && 0 <= j2
+            < d.packets[i2].frames.len() && #[trigger] d.packets[i1].frames[j1] is PathResponse
+            && #[trigger] d.packets[i2].frames[j2] is PathResponse ==> i1 == i2 && j1 == j2
 }
 
 /// A PATH_CHALLENGE or PATH_RESPONSE in `d`.
@@ -7274,6 +7326,40 @@ proof fn lemma_one_packet(p: SpecOutPacket, k: PacketKind)
     assert(Seq::<u64>::empty().push(p.pn) =~= seq![p.pn]);
 }
 
+/// The frames owed on a path, in the order they go: its oldest response, then its owed challenge.
+spec fn path_frames_of(a: SpecPath) -> Seq<SpecFrame> {
+    (if a.responses.len() > 0 {
+        seq![SpecFrame::PathResponse(a.responses[0]@)]
+    } else {
+        Seq::empty()
+    }) + (if a.owed {
+        seq![SpecFrame::PathChallenge(a.challenge.unwrap().0@)]
+    } else {
+        Seq::empty()
+    })
+}
+
+/// `path_frames_of`, read frame by frame.
+proof fn lemma_path_frames_of(a: SpecPath)
+    ensures
+        forall|j: int|
+            0 <= j < path_frames_of(a).len() ==> (#[trigger] path_frames_of(a)[j] matches SpecFrame::PathResponse(x)
+                ==> j == 0 && a.responses.len() > 0 && x == a.responses[0]@),
+        forall|j: int|
+            0 <= j < path_frames_of(a).len() ==> (#[trigger] path_frames_of(a)[j] matches SpecFrame::PathChallenge(y)
+                ==> a.owed && y == a.challenge.unwrap().0@),
+{
+    let f = path_frames_of(a);
+    if a.responses.len() > 0 && a.owed {
+        assert(f[0] == SpecFrame::PathResponse(a.responses[0]@));
+        assert(f[1] == SpecFrame::PathChallenge(a.challenge.unwrap().0@));
+    } else if a.responses.len() > 0 {
+        assert(f =~= seq![SpecFrame::PathResponse(a.responses[0]@)]);
+    } else if a.owed {
+        assert(f =~= seq![SpecFrame::PathChallenge(a.challenge.unwrap().0@)]);
+    }
+}
+
 /// PATH frames only, 9 bytes each.
 spec fn path_frames_ok(sf: Seq<SpecFrame>) -> bool {
     &&& frames_sendable(sf, PacketKind::OneRtt)
@@ -7339,6 +7425,12 @@ impl Connection {
             PacketKind::OneRtt => (self.crx_1.capacities(), 0),
         };
         c.0.saturating_add(c.1).saturating_add(tx)
+    }
+
+    /// Test support: when the idle timer last restarted.
+    #[doc(hidden)]
+    pub fn idle_last_for_test(&self) -> u64 {
+        self.idle.last
     }
 
     /// Test support: the amplification budget of `q`, None when absent (the only reading of a

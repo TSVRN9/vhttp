@@ -656,6 +656,7 @@ fn probe_new_cid_response() {
 fn no_fresh_cid_no_send() {
     let mut c = established();
     c.on_datagram(1, 1200, vec![one_on(2, &rnd(2)[0..8], vec![stream(0, 0, b"GET", true)])], 31, &rnd(6));
+    assert!(c.path_state(1).is_some());
     assert!(drain(&mut c, 31).iter().all(|d| d.path != 1));
     assert!(drain(&mut c, 1_000_000).iter().all(|d| d.path != 1));
     assert_eq!(c.active_path(), 0);
@@ -817,4 +818,47 @@ fn path_frame_unencodable_pn_closes_at_the_path() {
     c.skip_pns_for_test(PacketKind::OneRtt, 1 << 40);
     assert_eq!(c.poll_transmit(30), None);
     assert_eq!(c.phase(), Phase::Closed);
+}
+
+/// A peer's ACK of an unrecorded path packet: accepted, moves `largest_acked` (the next packet's
+/// PN length shows it), touches nothing else, and doesn't validate the path (§8.2.3). One past the
+/// last PN sent is still §13.1's PROTOCOL_VIOLATION.
+#[test]
+fn ack_of_path_packet() {
+    let mut c = established_quiet();
+    c.skip_pns_for_test(PacketKind::OneRtt, 1 << 10);
+    c.on_datagram(1, 1200, vec![one(1, vec![Frame::PathChallenge(D(1)), stream(0, 0, b"GET", true)])], 30, &rnd(5));
+    assert_eq!(c.active_path(), 1);
+    let v = drain(&mut c, 30);
+    let d = v.iter().find(|d| d.path == 1 && has_challenge(d)).unwrap();
+    let pn = d.packets[0].pn;
+    let last = v.iter().flat_map(|d| d.packets.iter()).map(|p| p.pn).max().unwrap();
+    assert_eq!(d.packets[0].pn_len, 2);
+    assert_ne!(c.path_state(1), Some(quic::path::PathState::Validated));
+
+    c.on_datagram(0, 1200, vec![one(2, vec![Frame::Ack(A(pn, 0, 0, vec![]))])], 31, &rnd(6));
+    assert_eq!(c.phase(), Phase::Open);
+    assert_ne!(c.path_state(1), Some(quic::path::PathState::Validated));
+
+    c.on_datagram(1, 1200, vec![one(3, vec![Frame::PathChallenge(D(2))])], 32, &rnd(7));
+    let d2 = drain(&mut c, 32);
+    let r = d2.iter().find(|d| has_response(d)).unwrap();
+    assert_eq!(r.packets[0].pn_len, 1);
+
+    let top = d2.iter().flat_map(|d| d.packets.iter()).map(|p| p.pn).max().unwrap().max(last);
+    c.on_datagram(0, 1200, vec![one(4, vec![Frame::Ack(A(top, 0, 0, vec![]))])], 33, &rnd(8));
+    assert_eq!(c.phase(), Phase::Open);
+    c.on_datagram(0, 1200, vec![one(5, vec![Frame::Ack(A(top + 1, 0, 0, vec![]))])], 34, &rnd(9));
+    assert_eq!(c.phase(), Phase::Closing);
+    assert_eq!(c.close_info(), &Some((false, 0x0a, vec![])));
+}
+
+/// §10.1: a path packet is ack-eliciting, so the first since a receive restarts the idle timer.
+#[test]
+fn idle_refreshed_by_path_send() {
+    let mut c = established();
+    c.on_datagram(0, 1200, vec![one(1, vec![Frame::PathChallenge(D(1))])], 30, &rnd(5));
+    assert_eq!(c.idle_last_for_test(), 30);
+    assert!(has_response(&c.poll_transmit(40).unwrap()));
+    assert_eq!(c.idle_last_for_test(), 40);
 }
