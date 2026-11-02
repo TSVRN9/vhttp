@@ -1746,6 +1746,7 @@ fn pull_mono2(rels: &Vec<Rel>, facts: &Vec<Fact>, m: &Mono) -> (r: Option<(Mono,
     if p1.is_none() || p2.is_none() { return None; }
     let (i1, d1) = p1.unwrap();
     let (i2, d2) = p2.unwrap();
+    // the `d1` arm: canonical order puts `Gap` last, so only `Gap·Gap` reaches it; no test does, and Task 5 emits none.
     let cr = if d1 {
         match fold1(c, atom_copy(&i2)) { Some(x) => Some(x), None => return None }
     } else if d2 {
@@ -2350,7 +2351,7 @@ fn len_charge(args: &Vec<Operand>, i: usize) -> (r: Option<Poly>)
     }
 }
 
-fn term_charge(p: &Program, t: &Term, sums: &Vec<Option<Poly>>) -> (r: Option<Poly>)
+pub fn term_charge(p: &Program, t: &Term, sums: &Vec<Option<Poly>>) -> (r: Option<Poly>)
     ensures r matches Some(ch) ==> forall|fr: Frame| #[trigger] charge_covers(*p, *t, sums@, ch, fr),
 {
     match t {
@@ -2689,7 +2690,7 @@ pub fn poly_eq(a: &Poly, b: &Poly) -> (r: bool)
 }
 
 /// A certificate's `true` is `cert_for`: every block's obligation, empty entry facts, and the
-/// entry's potential as `f`'s summary.
+/// entry's potential as `f`'s summary. Only with `check_program` `Ok`: `cert_sem_ok` has `ok_prog` as a hypothesis.
 pub fn check_cert(p: &Program, f: usize, c: &Cert, sums: &Vec<Option<Poly>>) -> (r: bool)
     ensures r ==> cert_for(*p, f as nat, *c, sums@),
 {
