@@ -11,7 +11,11 @@ done
 # Constant-time check; its crypto report is read by the declassify gate, so pin where it goes.
 export CT_TARGET_DIR="${CT_TARGET_DIR:-$root/target/ct}"
 export CT_OUT="${CT_OUT:-$CT_TARGET_DIR/out}"
-"$root/scripts/ct-check.sh"
+mkdir -p "$CT_OUT"
+"$root/scripts/ct-check.sh" > "$CT_OUT/ct-check.log" || { cat "$CT_OUT/ct-check.log"; exit 1; }
+cat "$CT_OUT/ct-check.log"
+cost=$(sed -n 's/^ct-check: cost \([0-9]*\/[0-9]*\) bounded$/\1/p' "$CT_OUT/ct-check.log")
+[ -n "$cost" ] || { echo "verify.sh: no cost line in ct-check's output" >&2; exit 1; }
 # Declassify gate: the report's `declassify <X>#<k> <file>:<line>` sites, the TRUSTED.md
 # `| ct-declassify: <X>#<k>: ... | <file>:<line> |` rows and the non-comment `declassify(` lines
 # of crates/crypto/src/ (ct.rs holds the definition) must be the same lists, duplicates included.
@@ -66,4 +70,4 @@ done
 rows=$(grep -c '^| crypto::' "$root/TRUSTED.md" || true)
 [ "$attrs" -eq "$named" ] || fail "$attrs attributes but $named name a following fn"
 [ "$attrs" -eq "$rows" ] || fail "$attrs attributes but $rows TRUSTED.md crypto rows"
-echo "verify.sh: all crates verified, duvet ok, ct ok ($d declassify), escapes accounted ($attrs)"
+echo "verify.sh: all crates verified, duvet ok, ct ok ($d declassify), cost $cost, escapes accounted ($attrs)"
