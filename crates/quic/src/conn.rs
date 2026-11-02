@@ -4733,6 +4733,7 @@ impl Connection {
         ensures
             self.path_rules(o, d),
     {
+        reveal(Connection::path_rules);
         o.paths.lemma_wf();
         assert(self.paths.has(d.path)) by {
             assert(o.paths.has(d.path));
@@ -4826,7 +4827,9 @@ impl Connection {
             )
     }
 
-    /// P12-P14 together, `o` the connection before the datagram and `self` after.
+    /// P12-P14 together, `o` the connection before the datagram and `self` after. Opaque so their
+    /// quantifiers stay out of `data_datagram`, which only passes this on.
+    #[verifier::opaque]
     closed spec fn path_rules(&self, o: Connection, d: SpecOutDatagram) -> bool {
         &&& self.responses_echoed(o, d)
         &&& o.challenges_recorded(d)
@@ -5813,6 +5816,7 @@ impl Connection {
         // §10.1: these packets are ack-eliciting, though not recorded (E2).
         self.idle.on_eliciting_sent(now);
         proof {
+            reveal(Connection::path_rules);
             self.lemma_one_sent(o, d@, w);
             lemma_path_frames_of(o.paths.path(q));
             assert(sf == path_frames_of(o.paths.path(q)));
@@ -5980,6 +5984,9 @@ impl Connection {
                     && final(self).phase_spec() is Closed,
     {
         let ghost o = *old(self);
+        proof {
+            reveal(Connection::path_rules);
+        }
         if now > self.now {
             self.now = now;
         }
