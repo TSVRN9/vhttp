@@ -595,8 +595,10 @@ The final line becomes `verify.sh: all crates verified, duvet ok, ct ok (D decla
 - `Poly { monos: Vec<Mono> }` with `Mono { coef: u64, atoms: Vec<Atom> }` (at most 2 atoms), a sum of monomials over atoms (8b preflight I1).
 - `Atom = Const(u64) | Val(local, IntTy) | Len(local) | Gap(Box<Atom>, Box<Atom>)`:
   - `Val(x, ty)`: `uval(ty, raw)` for an `Int(raw)`, i.e. the value at the width MIR compares it at; 0 for non-ints (8b preflight C2: frame ints are raw bit patterns, and `binop(Lt, ty, ..)` compares at `ty`);
-  - `Len`: the length of the `Arr` behind the local's value (through `Shr`/`Mut`); 0 otherwise;
+  - `Len`: the length of the `Arr` behind the local's value, through a `Mut`'s target and then any number of `Shr`; 0 otherwise (`parse` takes `&&[u8]`). `Rvalue::Len` reads one layer, so it is `<=` this atom, not equal;
   - `Gap(a, b)` = max(0, a − b).
+
+  An atom reads its local through `nth`, so an out-of-range local reads as `Unit`, as everywhere in `sem.rs`.
 - A function's summary is a `Poly` over its parameter atoms. Example: `huffman_decode: steps <= c0 + c1·len(input)`.
 
 **Certificates** (D9).
@@ -673,6 +675,7 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
 - **Re-baseline (8b Task 1b, before Task 2):** 2026-10-29: **23/36 predicted bounded** before the Task 2 Step 0 domain subtraction, which is not yet ruled (Task 2 records the final X′ here, before any proof). The 25 predicted `Some` (I3) less `parse_path` and `parse_new_connection_id`, which both call `copy_from_slice` ((v); the preflight named only `parse_path`). The other 23 translate with 1b's (i)–(iv), allocated ADT constants (vi) and `translate-crate vest_lib` (vii), and pass 8a typing with all-public labels. No predicted-`None` target translates.
 - **2026-11-02:** C1 is ruled option B, there is no Task 2 Step 0 any more, and 23/36 is an upper bound. Task 2 Step 4 records the final X′ below, before Tasks 3+.
 - **2026-11-02:** Final X′ (8b Task 2, before Task 3): 19/36, from release MIR (`-Zinline-mir=no`) of the 23 and their call closure (31 fns, plus vest_lib's `ParseError::{unexpected_eof, non_canonical, new}`, which do not write) under Task 3's write rule; no cost analysis has run. Lost: `h3::qpack::huffman::huffman_decode`, whose loop counters and input `Len` cross the `feed_bit` call that takes `&mut` args, so every local is `Unknown` there; and its callers `scan_string`, `decode_string`, `decode_field_line` (`CalleeNone`). `feed_bit` also writes through `&mut` but stays bounded: it has no loop and only `lookup`'s constant summary follows its writers. No other function in the closure has a `&mut`.
+- **2026-11-02:** Correction to the X′ line above (8b Task 2 fix round): 19/36 is an upper bound, from a hand read of MIR, and it subtracts write-rule losses only. That scan could not see a loss from the atom language: with `len_nat` peeling one `Shr`, `Len` read 0 on `<QuicVarInt<false> as Parser>::parse`'s `&&[u8]` input, which would have taken `parse_varint` and its 10 callers among the targets, leaving at most 8. `len_nat` now reads any number of `Shr`. Re-read under it, the length reaches a parameter `Len` in each of the 19 through the Task 3 and Task 4 rules, which are not yet proved. The inference and validator have not run, so the measured figure can be lower.
 - **The structural gap is off-progress loops** (`off += consumed` with `consumed >= 1` from a callee's postcondition). Closing it needs callee return facts. That is 8b's stretch task, behind an explicit go/no-go.
 
 ## Risks and fallbacks

@@ -3,6 +3,7 @@
 //! exec checker, label inference and the `check_program` API.
 pub mod check;
 pub mod cost;
+pub mod cost_sanity;
 pub mod ct;
 pub mod ct_lemmas;
 pub mod infer;
