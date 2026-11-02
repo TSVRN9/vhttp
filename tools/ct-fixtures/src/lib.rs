@@ -499,4 +499,48 @@ pub mod fx {
         // Unsupported: a constant `&Pair` (a pointer to non-zero-sized data)
         helper_pair(&Pair { a: 1, b: 2 })
     }
+
+    #[cfg_attr(ct_check, ct::public)]
+    pub fn pos_vec_new_pair() -> Vec<(u64, u64)> {
+        // VecNew at element (u64, u64); returned, so no drop of a Vec<(u64, u64)>
+        Vec::new()
+    }
+
+    #[cfg_attr(ct_check, ct::public(v, x))]
+    pub fn pos_vec_push_pair(v: &mut Vec<(u64, u64)>, x: u64) {
+        // VecPush at element (u64, u64), through `&mut`
+        v.push((x, x))
+    }
+
+    pub const SOME_REF: Option<&'static u8> = Some(&5);
+
+    #[cfg_attr(ct_check, ct::public)]
+    pub fn neg_const_pointer_tag() -> Option<&'static u8> {
+        // Unsupported: the niche tag of a whole-constant `Some(&_)` is a pointer (written as a
+        // named const: `Some(&5)` inline is an Aggregate around a constant `&u8` operand)
+        SOME_REF
+    }
+
+    #[repr(i8)]
+    pub enum SignedTag {
+        A(u8),
+        B(u8),
+    }
+
+    #[cfg_attr(ct_check, ct::public(x))]
+    pub fn neg_const_signed_tag(x: u8) -> SignedTag {
+        // Unsupported: a constant of a Direct-tag enum whose tag is signed
+        if x == 0 {
+            SignedTag::A(5)
+        } else {
+            SignedTag::B(7)
+        }
+    }
+
+    #[cfg_attr(ct_check, ct::public(s))]
+    pub fn neg_mut_str(s: &mut str) -> u8 {
+        // Unsupported: only shared `str` refs are the opaque `Unit`
+        let _ = &s;
+        1
+    }
 }
