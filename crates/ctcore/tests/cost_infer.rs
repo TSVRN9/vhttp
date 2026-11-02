@@ -484,23 +484,26 @@ fn none_for_coefficient_overflow() {
 fn revalidation_drops_dependent_caller() {
     let callee = body(1, vec![slice()], 2, vec![blk(vec![], intr(Intrinsic::SliceToVec, vec![cp(1)], 0, 1)), ret()]);
     let main = body(1, vec![slice()], 3, vec![blk(vec![], call(1, vec![cp(1)], 2, 1)), ret()]);
-    let p = Program { fns: vec![main, callee] };
+    let indep = body(0, vec![], 1, vec![ret()]);
+    let p = Program { fns: vec![main, callee, indep] };
+    let ic = cert(vec![bc(vec![], konst(1))]);
     // the callee's is one lower than valid, the caller's valid against the callee's summary
     let cc = cert(vec![bc(vec![], poly(vec![m1(1, len(1)), m0(1)])), bc(vec![], konst(1))]);
     let mc = cert(vec![bc(vec![], poly(vec![m1(1, len(1)), m0(3)])), bc(vec![], konst(1))]);
-    let sums = || vec![Some(copy_poly(&mc.blocks[0].pot)), Some(copy_poly(&cc.blocks[0].pot))];
+    let sums = || vec![Some(copy_poly(&mc.blocks[0].pot)), Some(copy_poly(&cc.blocks[0].pot)), Some(copy_poly(&ic.blocks[0].pot))];
     assert!(check_cert(&p, 0, &mc, &sums()));
     assert!(!check_cert(&p, 1, &cc, &sums()));
-    let certs = vec![copy_cert(&mc), copy_cert(&cc)];
+    let certs = vec![copy_cert(&mc), copy_cert(&cc), copy_cert(&ic)];
     let r = revalidate(&p, &certs, sums());
     assert!(r[0].is_none());
     assert!(r[1].is_none());
+    assert!(r[2].is_some(), "an independent fn survives a dropped callee and its caller");
     // and with the callee's one higher, both stand
     let cc2 = cert(vec![bc(vec![], poly(vec![m1(1, len(1)), m0(2)])), bc(vec![], konst(1))]);
     let mc2 = cert(vec![bc(vec![], poly(vec![m1(1, len(1)), m0(4)])), bc(vec![], konst(1))]);
-    let s2 = vec![Some(copy_poly(&mc2.blocks[0].pot)), Some(copy_poly(&cc2.blocks[0].pot))];
-    let r = revalidate(&p, &vec![mc2, cc2], s2);
-    assert!(r[0].is_some() && r[1].is_some());
+    let s2 = vec![Some(copy_poly(&mc2.blocks[0].pot)), Some(copy_poly(&cc2.blocks[0].pot)), Some(copy_poly(&ic.blocks[0].pot))];
+    let r = revalidate(&p, &vec![mc2, cc2, copy_cert(&ic)], s2);
+    assert!(r[0].is_some() && r[1].is_some() && r[2].is_some());
 }
 
 fn copy_poly(p: &Poly) -> Poly { ctcore::cost_check::poly_copy(p) }
