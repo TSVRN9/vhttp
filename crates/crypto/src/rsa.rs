@@ -213,6 +213,7 @@ fn mgf1_exec(seed: &[u8; 32], len: usize) -> (r: Vec<u8>)
 
 /// RFC 8017 §9.1.1 steps 2 and 5-12, in the order of the spec's let chain; verified against
 /// emsa_pss_encode. 2047..=4095 are the emBits of the 2048-4096-bit moduli of `rsa_key_wf`.
+/// The length of msg is public: it sets the block count of sha256's loop. Only its content is secret.
 #[allow(dead_code)] // used from Task 5, removed there.
 #[cfg_attr(ct_check, ct::secret(salt, msg), ct::public(em_bits))]
 fn emsa_pss_encode_exec(msg: &[u8], em_bits: usize, salt: &[u8]) -> (r: Vec<u8>)
@@ -299,6 +300,446 @@ fn emsa_pss_encode_exec(msg: &[u8], em_bits: usize, salt: &[u8]) -> (r: Vec<u8>)
     out
 }
 
+#[allow(unused_imports)]
+use crate::bignum::*;
+#[allow(unused_imports)]
+use crate::mont::*;
+#[allow(unused_imports)]
+use vstd::arithmetic::div_mod::*;
+#[allow(unused_imports)]
+use vstd::arithmetic::mul::*;
+#[allow(unused_imports)]
+use vstd::arithmetic::power2::*;
+
+proof fn lemma_bitlen_step(x: nat, b: nat)
+    requires b <= 1,
+    ensures bitlen(2 * x + b) == (if 2 * x + b == 0 { 0 } else { 1 + bitlen(x) }),
+{
+    assert(((2 * x + b) as nat) / 2 == x);
+}
+
+proof fn lemma_bitlen_bound(x: nat)
+    ensures x < pow2(bitlen(x)), x > 0 ==> pow2((bitlen(x) - 1) as nat) <= x,
+    decreases x,
+{
+    lemma_pow2_unfold(1);
+    lemma2_to64();
+    if x > 0 {
+        lemma_bitlen_bound(x / 2);
+        lemma_pow2_unfold(bitlen(x));
+        if x / 2 > 0 {
+            lemma_pow2_unfold((bitlen(x) - 1) as nat);
+        }
+    }
+}
+
+proof fn lemma_pow2_256(j: nat)
+    ensures pow2(8 * j) == pow(256, j),
+    decreases j,
+{
+    reveal(pow);
+    lemma2_to64();
+    if j == 0 {
+    } else {
+        lemma_pow2_256((j - 1) as nat);
+        lemma_pow2_adds(8 * (j - 1) as nat, 8);
+        assert(8 * (j - 1) as nat + 8 == 8 * j);
+        lemma_mul_is_commutative(pow(256, (j - 1) as nat), 256);
+    }
+}
+
+/// The bit length of the public modulus. Only the low 512 octets are read, which the requires
+/// makes enough. The only fn that branches on n.
+#[allow(dead_code)] // used from Task 5, removed there.
+#[verifier::spinoff_prover]
+#[cfg_attr(ct_check, ct::public(n))]
+fn modulus_bits(n: &[u8]) -> (r: usize)
+    requires
+        bitlen(os2ip(n@)) <= 4096,
+    ensures
+        r as nat == bitlen(os2ip(n@)),
+{
+    let ghost full = os2ip(n@);
+    // ct: branch on the public length of n
+    let start: usize = if n.len() > 512 { n.len() - 512 } else { 0 };
+    let ghost tail = n@.subrange(start as int, n@.len() as int);
+    proof {
+        lemma_bitlen_bound(full);
+        lemma_pow2_256(512);
+        assert(pow2(4096) == pow(256, 512));
+        if bitlen(full) < 4096 { lemma_pow2_strictly_increases(bitlen(full), 4096); }
+        if n@.len() > 512 {
+            lemma_os2ip_tail(n@, 512);
+        }
+        assert(start == 0 ==> tail =~= n@);
+        assert(os2ip(tail) == full);
+        assert(tail.take(0) =~= Seq::<u8>::empty());
+    }
+    let mut bits: usize = 0;
+    let mut j: usize = start;
+    // ct: loop on the public length of n
+    while j < n.len()
+        invariant
+            start <= j <= n@.len(),
+            n@.len() - start <= 512,
+            tail == n@.subrange(start as int, n@.len() as int),
+            bits <= 8 * (j - start),
+            bits as nat == bitlen(os2ip(tail.take(j - start))),
+        decreases n@.len() - j,
+    {
+        let byte = n[j];
+        let ghost hi = os2ip(tail.take(j - start));
+        let ghost mut ev: nat = hi;
+        proof { bv_bit_u8(byte, 0); lemma2_to64(); lemma_mul_basics(hi as int); }
+        let mut k: u8 = 0;
+        // ct: a constant count
+        while k < 8
+            invariant
+                k <= 8,
+                start <= j < n@.len(),
+                n@.len() - start <= 512,
+                tail == n@.subrange(start as int, n@.len() as int),
+                bits <= 8 * (j - start) + k,
+                ev == hi * pow2(k as nat) + ((byte as u32) >> ((8 - k) as u32)),
+                bits as nat == bitlen(ev),
+            decreases 8 - k,
+        {
+            let bit = (byte >> (7 - k)) & 1;
+            proof {
+                bv_bit_u8(byte, k);
+                lemma_pow2_unfold((k + 1) as nat);
+                lemma_prefix_step(hi as int, pow2(k as nat) as int);
+                lemma_bitlen_step(ev, bit as nat);
+            }
+            // ct: branch on the public modulus
+            if bits > 0 || bit == 1 {
+                proof {
+                    if bits == 0 && bit != 1 { assert(false); }
+                }
+                bits = bits + 1;
+            } else {
+                proof {
+                    assert(bitlen(ev) == 0);
+                    assert(ev == 0) by { if ev > 0 { assert(bitlen(ev) >= 1); } }
+                }
+            }
+            proof { ev = 2 * ev + bit as nat; }
+            k = k + 1;
+        }
+        proof {
+            let t = tail.take(j + 1 - start);
+            assert(t.drop_last() =~= tail.take(j - start));
+            assert(t.last() == byte);
+        }
+        j = j + 1;
+    }
+    proof { assert(tail.take(n@.len() - start) =~= tail); }
+    bits
+}
+
+// One always-multiply step.
+#[cfg_attr(ct_check, ct::secret(r, x, bit, m, mp), ct::public(nl))]
+fn pow_step_ct(r: &[u64; 64], x: &[u64; 64], bit: u64, m: &[u64; 64], mp: u64, nl: usize, Ghost(ri): Ghost<int>, Ghost(xd): Ghost<int>, Ghost(ev): Ghost<nat>) -> (o: [u64; 64])
+    requires
+        1 <= nl <= 64,
+        bit <= 1,
+        (m[0] as int * mp as int + 1) % 0x1_0000_0000_0000_0000 == 0,
+        limbs(m@, nl as nat) > 1,
+        (wp(nl as nat) * ri) % limbs(m@, nl as nat) == 1,
+        limbs(r@, nl as nat) < limbs(m@, nl as nat),
+        limbs(x@, nl as nat) < limbs(m@, nl as nat),
+        xd == mdec(limbs(x@, nl as nat), limbs(m@, nl as nat), ri),
+        mdec(limbs(r@, nl as nat), limbs(m@, nl as nat), ri) == pow(xd, ev) % limbs(m@, nl as nat),
+    ensures
+        limbs(o@, nl as nat) < limbs(m@, nl as nat),
+        mdec(limbs(o@, nl as nat), limbs(m@, nl as nat), ri) == pow(xd, 2 * ev + bit as nat) % limbs(m@, nl as nat),
+{
+    let ghost n = nl as nat;
+    let ghost mm = limbs(m@, n);
+    let s = mont_mul_n(r, r, m, mp, nl);
+    proof {
+        lemma_mdec_mul(limbs(s@, n), limbs(r@, n), limbs(r@, n), mm, wp(n), ri);
+        lemma_pow_step(xd, ev, mm);
+    }
+    let t = mont_mul_n(&s, x, m, mp, nl);
+    proof {
+        lemma_mdec_mul(limbs(t@, n), limbs(s@, n), limbs(x@, n), mm, wp(n), ri);
+        // xd is already reduced
+        lemma_mod_twice(limbs(x@, n) * ri, mm);
+        lemma_mul_mod_noop_right(pow(xd, 2 * ev) % mm, xd, mm);
+        lemma_mul_mod_noop_left(pow(xd, 2 * ev), xd, mm);
+    }
+    select_n(bit, &t, &s, nl)
+}
+
+proof fn lemma_prefix_step(hi: int, p: int)
+    ensures hi * (2 * p) == 2 * (hi * p),
+{
+    lemma_mul_is_associative(hi, 2, p);
+    lemma_mul_is_commutative(hi, 2);
+    lemma_mul_is_associative(2, hi, p);
+}
+
+// x^e in Montgomery form, 8k always-multiply steps: time depends on k and nl only.
+// ponytail: no CRT or window, 7 ms at 2048 bits, 52 ms at 4096; a 4-bit window saves about 37%, CRT about 75%, at the cost of a general FLT proof
+#[cfg_attr(ct_check, ct::secret(x, e, m, mp, one), ct::public(k, nl))]
+fn mod_pow_ct(x: &[u64; 64], e: &[u8], k: usize, m: &[u64; 64], mp: u64, one: &[u64; 64], nl: usize, Ghost(ri): Ghost<int>) -> (r: [u64; 64])
+    requires
+        e@.len() == k,
+        1 <= nl <= 64,
+        (m[0] as int * mp as int + 1) % 0x1_0000_0000_0000_0000 == 0,
+        limbs(m@, nl as nat) > 1,
+        (wp(nl as nat) * ri) % limbs(m@, nl as nat) == 1,
+        limbs(x@, nl as nat) < limbs(m@, nl as nat),
+        limbs(one@, nl as nat) < limbs(m@, nl as nat),
+        mdec(limbs(one@, nl as nat), limbs(m@, nl as nat), ri) == 1,
+    ensures
+        limbs(r@, nl as nat) < limbs(m@, nl as nat),
+        mdec(limbs(r@, nl as nat), limbs(m@, nl as nat), ri) == pow(mdec(limbs(x@, nl as nat), limbs(m@, nl as nat), ri), os2ip(e@)) % limbs(m@, nl as nat),
+{
+    let ghost n = nl as nat;
+    let ghost mm = limbs(m@, n);
+    let ghost xd = mdec(limbs(x@, n), mm, ri);
+    proof {
+        lemma_pow0(xd);
+        lemma_small_mod(1, mm as nat);
+        assert(e@.take(0) =~= Seq::<u8>::empty());
+    }
+    let mut r = *one;
+    let mut j: usize = 0;
+    // ct: loop on the public k
+    while j < k
+        invariant
+            e@.len() == k,
+            j <= e@.len(),
+            1 <= nl <= 64,
+            (m[0] as int * mp as int + 1) % 0x1_0000_0000_0000_0000 == 0,
+            n == nl as nat,
+            mm == limbs(m@, n),
+            mm > 1,
+            (wp(n) * ri) % mm == 1,
+            limbs(x@, n) < mm,
+            xd == mdec(limbs(x@, n), mm, ri),
+            limbs(r@, n) < mm,
+            mdec(limbs(r@, n), mm, ri) == pow(xd, os2ip(e@.take(j as int))) % mm,
+        decreases e@.len() - j,
+    {
+        let byte = e[j];
+        let ghost hi = os2ip(e@.take(j as int));
+        let ghost mut ev: nat = hi;
+        proof { bv_bit_u8(byte, 0); lemma2_to64(); }
+        let mut b: u8 = 0;
+        // ct: a constant count
+        while b < 8
+            invariant
+                b <= 8,
+                1 <= nl <= 64,
+                (m[0] as int * mp as int + 1) % 0x1_0000_0000_0000_0000 == 0,
+                n == nl as nat,
+                mm == limbs(m@, n),
+                mm > 1,
+                (wp(n) * ri) % mm == 1,
+                limbs(x@, n) < mm,
+                xd == mdec(limbs(x@, n), mm, ri),
+                limbs(r@, n) < mm,
+                ev == hi * pow2(b as nat) + ((byte as u32) >> ((8 - b) as u32)),
+                mdec(limbs(r@, n), mm, ri) == pow(xd, ev) % mm,
+            decreases 8 - b,
+        {
+            let bit = (byte >> (7 - b)) & 1;
+            proof {
+                bv_bit_u8(byte, b);
+                lemma_pow2_unfold((b + 1) as nat);
+                lemma_prefix_step(hi as int, pow2(b as nat) as int);
+            }
+            r = pow_step_ct(&r, x, bit as u64, m, mp, nl, Ghost(ri), Ghost(xd), Ghost(ev));
+            proof { ev = 2 * ev + bit as nat; }
+            b = b + 1;
+        }
+        proof {
+            let t = e@.take(j + 1);
+            assert(t.drop_last() =~= e@.take(j as int));
+            assert(t.last() == byte);
+        }
+        j = j + 1;
+    }
+    proof { assert(e@.take(e@.len() as int) =~= e@); }
+    r
+}
+
+proof fn lemma_prime_odd(p: nat, ed: nat)
+    requires is_prime(p), ed % ((p - 1) as nat) == 1,
+    ensures p % 2 == 1,
+{
+    if p == 2 {
+        assert(ed % 1 == 0) by { lemma_small_mod(0, 1); lemma_fundamental_div_mod(ed as int, 1); }
+        assert(false);
+    } else {
+        assert(1 < 2nat < p);
+        assert(p % 2nat != 0);
+    }
+}
+
+proof fn lemma_odd_mul(p: nat, q: nat)
+    requires p % 2 == 1, q % 2 == 1,
+    ensures (p * q) % 2 == 1,
+{
+    lemma_mul_mod_noop(p as int, q as int, 2);
+}
+
+proof fn lemma_wf_odd(k: RsaKeySpec)
+    requires rsa_key_wf(k),
+    ensures k.n % 2 == 1,
+{
+    lemma_prime_odd(k.p, k.e * k.d);
+    lemma_prime_odd(k.q, k.e * k.d);
+    lemma_odd_mul(k.p, k.q);
+}
+
+// (a * R) == b mod M, (R * ri) == 1 mod M gives a == (b * ri) mod M.
+proof fn lemma_cancel(a: int, b: int, rr: int, ri: int, m: int)
+    requires m > 1, (a * rr) % m == b % m, (rr * ri) % m == 1,
+    ensures a % m == (b * ri) % m,
+{
+    lemma_mul_mod_noop_left(a * rr, ri, m);
+    lemma_mul_mod_noop_left(b, ri, m);
+    lemma_mul_is_associative(a, rr, ri);
+    lemma_mul_mod_noop_right(a, rr * ri, m);
+    lemma_mul_basics(a);
+}
+
+proof fn lemma_ri(ri: int, rr: int, m: int)
+    requires m > 1, (ri * rr) % m == (1int * 1int) % m,
+    ensures (rr * ri) % m == 1,
+{
+    lemma_mul_is_commutative(ri, rr);
+    lemma_small_mod(1, m as nat);
+}
+
+proof fn lemma_to_mont(xv: int, a: int, rsq: int, rr: int, ri: int, m: int)
+    requires
+        m > 1,
+        (xv * rr) % m == (a * rsq) % m,
+        rsq == (rr * rr) % m,
+        (rr * ri) % m == 1,
+    ensures
+        mdec(xv, m, ri) == a % m,
+{
+    // a * rsq == (a * rr) * rr
+    lemma_mul_mod_noop_right(a, rr * rr, m);
+    lemma_mul_is_associative(a, rr, rr);
+    // xv == (a * rr) (mod m), by cancelling rr on both sides
+    lemma_cancel(xv, (a * rr) * rr, rr, ri, m);
+    lemma_mul_is_associative(a * rr, rr, ri);
+    lemma_mul_mod_noop_right(a * rr, rr * ri, m);
+    lemma_mul_basics(a * rr);
+    // so xv * ri == a * (rr * ri) == a
+    lemma_mul_mod_noop_left(xv, ri, m);
+    lemma_mul_mod_noop_left(a * rr, ri, m);
+    lemma_mul_is_associative(a, rr, ri);
+    lemma_mul_mod_noop_right(a, rr * ri, m);
+    lemma_mul_basics(a);
+}
+
+proof fn lemma_from_mont(s: int, r: int, rr: int, ri: int, m: int)
+    requires
+        m > 1,
+        0 <= s < m,
+        (s * rr) % m == (r * 1int) % m,
+        (rr * ri) % m == 1,
+    ensures
+        s == mdec(r, m, ri),
+{
+    lemma_mul_basics(r);
+    lemma_cancel(s, r, rr, ri, m);
+    lemma_small_mod(s as nat, m as nat);
+}
+
+proof fn lemma_odd_low(mm: int, m0: u64)
+    requires mm % 2 == 1, mm % 0x1_0000_0000_0000_0000 == m0 as int, mm >= 0,
+    ensures m0 % 2 == 1,
+{
+    lemma_mod_mod(mm, 2, 0x8000_0000_0000_0000);
+    assert(2int * 0x8000_0000_0000_0000 == 0x1_0000_0000_0000_0000);
+}
+
+proof fn lemma_rsq(nl: nat)
+    ensures pow2(128 * nl) as int == wp(nl) * wp(nl),
+{
+    lemma_wp_256(nl);
+    lemma_pow2_256(8 * nl);
+    assert(8 * (8 * nl) == 64 * nl);
+    lemma_pow2_adds(64 * nl, 64 * nl);
+    assert(64 * nl + 64 * nl == 128 * nl);
+}
+
+/// RFC 8017 §5.2.1 RSASP1, form (a): m^d mod n as k octets. nl and k come from the public length;
+/// n, d and em may be any length, with leading zeros.
+#[allow(dead_code)] // used from Task 5, removed there.
+#[verifier::spinoff_prover]
+#[cfg_attr(ct_check, ct::secret(n, d, em), ct::public(k))]
+fn rsasp1(n: &[u8], d: &[u8], em: &[u8], k: usize) -> (r: Vec<u8>)
+    requires
+        256 <= k <= 512,
+        os2ip(n@) > 1,
+        os2ip(n@) % 2 == 1,
+        os2ip(n@) < pow(256, k as nat),
+        os2ip(d@) < os2ip(n@),
+        os2ip(em@) < pow(256, k as nat),
+    ensures
+        r@ == i2osp((pow(os2ip(em@) as int, os2ip(d@)) % (os2ip(n@) as int)) as nat, k as nat),
+{
+    let nl: usize = (k + 7) / 8;
+    proof {
+        lemma_pow_increases(256, k as nat, (8 * nl) as nat);
+        lemma_wp_256(nl as nat);
+    }
+    let n_be = pad_be(n, 8 * nl);
+    let d_be = pad_be(d, k);
+    let em_be = pad_be(em, 8 * nl);
+    let m = limbs_from_be_n(n_be.as_slice(), nl);
+    let a = limbs_from_be_n(em_be.as_slice(), nl);
+    let ghost nn = nl as nat;
+    let ghost mm = limbs(m@, nn);
+    let ghost aa = os2ip(em@) as int;
+    let ghost dd = os2ip(d@);
+    let ghost rr = wp(nn);
+    proof {
+        lemma_limbs_low(m@, nn);
+        lemma_odd_low(mm, m[0]);
+    }
+    let mp = neg_inv64(m[0]);
+    let mut unit = [0u64; 64];
+    unit[0] = 1;
+    proof {
+        lemma_limbs_one(unit@, nn);
+    }
+    let _rinv = mont_mul_n(&unit, &unit, &m, mp, nl);
+    let ghost ri = limbs(_rinv@, nn);
+    proof { lemma_ri(ri, rr, mm); }
+    // ponytail: about 0.3 ms at 2048 bits; cache it in the key if signing ever matters
+    let r2 = pow2_mod(&m, nl, 128 * nl);
+    proof {
+        lemma_rsq(nn);
+        assert(limbs(r2@, nn) == (rr * rr) % mm);
+    }
+    let one = mont_mul_n(&unit, &r2, &m, mp, nl);
+    let x = mont_mul_n(&a, &r2, &m, mp, nl);
+    proof {
+        lemma_to_mont(limbs(one@, nn), 1, limbs(r2@, nn), rr, ri, mm);
+        lemma_small_mod(1, mm as nat);
+        lemma_to_mont(limbs(x@, nn), aa, limbs(r2@, nn), rr, ri, mm);
+    }
+    let rp = mod_pow_ct(&x, d_be.as_slice(), k, &m, mp, &one, nl, Ghost(ri));
+    let s = mont_mul_n(&rp, &unit, &m, mp, nl);
+    proof {
+        lemma_limbs_bound(s@, nn);
+        lemma_from_mont(limbs(s@, nn), limbs(rp@, nn), rr, ri, mm);
+        lemma_pow_mod_noop(aa, dd, mm);
+    }
+    limbs_to_be_n(&s, nl, k)
+}
+
 } // verus!
 
 #[cfg(test)]
@@ -309,7 +750,7 @@ mod vecdata;
 mod tests {
     use super::vecdata::*;
     use super::*;
-    use ::rsa::traits::PublicKeyParts;
+    use ::rsa::traits::{PrivateKeyParts, PublicKeyParts};
     use ::rsa::BoxedUint;
     use sha2::Digest;
 
@@ -386,11 +827,27 @@ mod tests {
         assert_eq!(emsa_pss_encode_exec(b"TLS 1.3, server CertificateVerify", 2051, &salt), em);
     }
 
+    // emLen = k - 1: EM has 256 octets under a 257-octet signature. RustCrypto's verify is the
+    // independent check of EM; it binds EM to the salt that DB carries, compared last.
     #[test]
     fn emsa_len_2049() {
-        let r = emsa_pss_encode_exec(b"m", 2048, &[7u8; 32]);
-        assert_eq!(r.len(), 256);
-        assert_eq!(r[255], 0xbc);
+        let p = hex("01fa9ff01c702938f8290b7fe5099537cf6c0d0b48a1f9ef02a02614387c464ab96737256ee4d1cb82c27c71f748737adb1939bd1aa6732ea3da37355f1b516b6c7052da370af35f9df697cdf0da1d140f29fd9b87bd777f21523030824f3ce0ffab10b79aeb16dba61509d65841c38f8721db01fcb63dab8c82a82312de30ca63");
+        let q = hex("cc0ecbe9727c4d3d1651a1be964f3f89e202875507f8686b1168565b262ace6724e33d24b23471ea83d13966f35c5aa8a2cdb9b556862c9f09b2c5afccec2868742a7b9b63a92e72a4145117a61fd8f33a74e2b1b32d45a08827cdc59dd8bc39c3a10fc341fd31a01b2362a0dad100c91ec4af744c23e68aba202b23da2403dd");
+        let k = ::rsa::RsaPrivateKey::from_p_q(u(&p), u(&q), BoxedUint::from(65537u32)).unwrap();
+        assert_eq!(k.n().bits(), 2049);
+        let pubk = k.to_public_key();
+        let (msg, salt) = (b"TLS 1.3, server CertificateVerify", [7u8; 32]);
+        let em = emsa_pss_encode_exec(msg, 2048, &salt);
+        assert_eq!(em.len(), 256);
+        assert_eq!(em[255], 0xbc);
+        let sig = rsasp1(&k.n().to_be_bytes(), &k.d().to_be_bytes(), &em, 257);
+        assert_eq!(sig.len(), 257);
+        pubk.verify(::rsa::Pss::<sha2::Sha256>::new_with_salt(32), &sha2::Sha256::digest(msg), &sig).unwrap();
+        assert_eq!(recover_em(&pubk, &sig, 256), em);
+        let hh: [u8; 32] = em[223..255].try_into().unwrap();
+        let mask = mgf1_exec(&hh, 223);
+        let got: Vec<u8> = em[191..223].iter().zip(&mask[191..]).map(|(a, b)| a ^ b).collect();
+        assert_eq!(got, salt);
     }
 
     #[test]
@@ -404,5 +861,133 @@ mod tests {
     #[test]
     fn mgf1_len_zero() {
         assert!(mgf1_exec(&[1u8; 32], 0).is_empty());
+    }
+
+    // The groups of the Wycheproof sig_gen file at `bits` whose hash is SHA-256.
+    fn sha256_groups(bits: usize) -> Vec<J> {
+        let j = parse_json(&data(&format!("wycheproof/rsa_pkcs1_{bits}_sig_gen_test.json")));
+        j.get("testGroups").arr().iter().filter(|g| g.get("sha").str() == "SHA-256").cloned().collect()
+    }
+
+    // The (n, d, e) of the first SHA-256 group, as the file has them: n carries a 00 prefix.
+    fn key(bits: usize) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let g = sha256_groups(bits);
+        let pk = g[0].get("privateKey");
+        (hex(pk.get("modulus").str()), hex(pk.get("privateExponent").str()), hex(pk.get("publicExponent").str()))
+    }
+
+    // RFC 8017 §9.2 EMSA-PKCS1-v1_5 with SHA-256.
+    fn pkcs1_em(msg: &[u8], k: usize) -> Vec<u8> {
+        let di = hex("3031300d060960864801650304020105000420");
+        let mut em = vec![0u8, 1];
+        em.resize(k - di.len() - 32 - 1, 0xff);
+        em.push(0);
+        em.extend_from_slice(&di);
+        em.extend_from_slice(&sha2::Sha256::digest(msg));
+        em
+    }
+
+    #[test]
+    fn wycheproof_rsasp1() {
+        let mut count = 0;
+        for bits in [2048, 3072, 4096] {
+            for g in sha256_groups(bits) {
+                let k = g.get("keySize").num() as usize / 8;
+                let pk = g.get("privateKey");
+                let (n, d) = (hex(pk.get("modulus").str()), hex(pk.get("privateExponent").str()));
+                for t in g.get("tests").arr() {
+                    let res = t.get("result").str();
+                    if res != "valid" && res != "acceptable" {
+                        continue;
+                    }
+                    let em = pkcs1_em(&hex(t.get("msg").str()), k);
+                    assert_eq!(rsasp1(&n, &d, &em, k), hex(t.get("sig").str()), "tcId {}", t.get("tcId").num());
+                    count += 1;
+                }
+            }
+        }
+        assert_eq!(count, 27);
+    }
+
+    #[test]
+    fn rsasp1_small_result() {
+        let (n, d, e) = key(2048);
+        let pubk = ::rsa::RsaPublicKey::new(u(&n), u(&e)).unwrap();
+        let s = BoxedUint::from_be_slice(&[1, 2], pubk.n_bits_precision()).unwrap();
+        let m = ::rsa::hazmat::rsa_encrypt(&pubk, &s).unwrap().to_be_bytes();
+        let mut want = vec![0u8; 254];
+        want.extend_from_slice(&[1, 2]);
+        assert_eq!(rsasp1(&n, &d, &m, 256), want);
+    }
+
+    #[test]
+    fn rsasp1_edge_messages() {
+        let (n, d, _) = key(2048);
+        let k = 256;
+        assert_eq!(n[0], 0);
+        assert_eq!(d[k - 1] & 1, 1);
+        let zero = vec![0u8; k];
+        assert_eq!(rsasp1(&n, &d, &zero, k), zero);
+        let mut one = zero.clone();
+        one[k - 1] = 1;
+        assert_eq!(rsasp1(&n, &d, &one, k), one);
+        // n is odd, so n - 1 only clears the low bit
+        let mut nm1 = n[1..].to_vec();
+        nm1[k - 1] -= 1;
+        assert_eq!(rsasp1(&n, &d, &nm1, k), nm1);
+    }
+
+    #[test]
+    fn rsasp1_d_lengths() {
+        let (n, d, _) = key(2048);
+        let k = 256;
+        let m = pkcs1_em(b"d lengths", k);
+        // the key's d, then the shorter exponent its low 156 octets make
+        for full in [&d[..], &d[100..]] {
+            let stripped: Vec<u8> = full.iter().copied().skip_while(|&b| b == 0).collect();
+            let mut prefixed = vec![0u8; 5];
+            prefixed.extend_from_slice(&stripped);
+            let mut padded = vec![0u8; k - stripped.len()];
+            padded.extend_from_slice(&stripped);
+            let want = rsasp1(&n, &stripped, &m, k);
+            assert_eq!(want.len(), k);
+            assert_eq!(rsasp1(&n, &prefixed, &m, k), want);
+            assert_eq!(rsasp1(&n, &padded, &m, k), want);
+        }
+    }
+
+    #[test]
+    fn modulus_bits_edges() {
+        let (n, _, _) = key(2048);
+        assert_eq!(modulus_bits(&n[1..]), 2048);
+        assert_eq!(modulus_bits(&n), 2048);
+        let mut long = vec![0u8; 600];
+        long.extend_from_slice(&n);
+        assert_eq!(modulus_bits(&long), 2048);
+        for (top, bits) in [(0x01u8, 2049), (0x0f, 2052)] {
+            let mut x = vec![top];
+            x.extend_from_slice(&[0u8; 256]);
+            assert_eq!(modulus_bits(&x), bits);
+        }
+        let (n4, _, _) = key(4096);
+        assert_eq!(n4.len(), 513);
+        assert_eq!(modulus_bits(&n4), 4096);
+    }
+
+    // cargo test --release -p crypto rsa_speed -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn rsa_speed() {
+        for bits in [2048, 3072, 4096] {
+            let (n, d, _) = key(bits);
+            let k = bits / 8;
+            let m = pkcs1_em(b"speed", k);
+            let first = rsasp1(&n, &d, &m, k);
+            let start = std::time::Instant::now();
+            for _ in 0..20 {
+                assert_eq!(rsasp1(&n, &d, &m, k), first);
+            }
+            println!("rsasp1 {bits}: {:.2} ms", start.elapsed().as_secs_f64() * 1e3 / 20.0);
+        }
     }
 }
