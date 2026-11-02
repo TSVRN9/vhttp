@@ -2,8 +2,8 @@
 # Constant-time checker runs: build tools/ct-driver, then analyse the fixtures under it and diff
 # their verdicts against tools/ct-fixtures/expected.txt, then run the interpreter selftest
 # (tools/ct-driver/selftest.txt) over crates/crypto and over the parser crates (wire, h3, quic),
-# then diff the fixtures' and the parser targets' step bounds against their expected-cost.txt, then check crypto's roots (all
-# must be ok) and the negative control (--cfg ct_negative; exactly its one reject). Target dirs
+# then diff the fixtures' and the parser targets' step bounds against their expected-cost.txt, then
+# check crypto's roots (all must be ok) and the negative control (--cfg ct_negative; exactly its one reject). Target dirs
 # live under CT_TARGET_DIR (default $root/target/ct), one subdir per run, except that selftest
 # shares crypto's (same flags); reports under $CT_OUT/<run>.
 set -eu
@@ -66,12 +66,19 @@ no_missing() {
     [ -z "$missing" ] || fail "roots with no verdict: $missing"
 }
 
-# cost_verdicts <report>: its lines without coefficients, a first error's text or a `CalleeNone` or
-# `Validator` index (the closure's own numbering), sorted.
+# cost_verdicts <report> [atoms]: its lines without coefficients, a first error's text or a
+# `CalleeNone` or `Validator` index (the closure's own numbering), sorted. With a second argument a
+# `bounded` line keeps its non-constant monomials' atoms (`bounded p deg=1 len(b)`), so a bound that
+# stops being in `len(..)` atoms shows as a diff.
 cost_verdicts() {
-    sed -E 's/^(bounded .* deg=[012]) steps <= .*$/\1/
+    sed -E 's/^(bounded .* deg=[012]) steps <= (.*)$/\1 \2/
             s/^(none .* (Unsupported|Unresolved)) .*$/\1/
-            s/ (CalleeNone|Validator)\([0-9]+\)$/ \1/' "$1" | LC_ALL=C sort
+            s/ (CalleeNone|Validator)\([0-9]+\)$/ \1/' "$1" |
+        awk -v atoms="${2:-}" '$1 == "bounded" { out = $1 " " $2 " " $3
+                if (atoms == "") { print out; next }
+                sub(/^bounded [^ ]+ deg=[012] ?/, ""); n = split($0, t, / \+ /); seen = ""
+                for (i = 1; i <= n; i++) { m = t[i]; sub(/^[0-9]+\*/, "", m); if (m ~ /[a-z_#]/) seen = seen " " m }
+                print out seen; next } { print }' | LC_ALL=C sort
 }
 
 # cost_no_missing <manifest> <report>..: every cost-root has a verdict line in some report. Grepped
@@ -103,7 +110,7 @@ p=$(grep -c "^pass " "$report" || true)
 echo "ct-check: selftest $p/$v"
 
 # The parser crates' vectors, under their own target dir (wire compiles with -Zalways-encode-mir).
-analyse parsers wire,h3,quic "$root/tools/ct-driver/manifest.txt" selftest
+analyse parsers wire,h3,quic "$root/tools/ct-driver/manifest.txt:$root/tools/ct-driver/manifest-parsers.txt" selftest
 # shellcheck disable=SC2086 # $reports is a list of paths without spaces
 cat $reports > "$CT_OUT/parsers/selftest.txt"
 grep -v '^pass ' "$CT_OUT/parsers/selftest.txt" >&2 && fail "selftest parsers: vectors failed (above)"
@@ -123,18 +130,23 @@ echo "ct-check: cost fixtures $n/$n"
 
 # The parser targets' step bounds: tools/ct-driver/cost-targets.txt through wire, h3 and quic. A
 # header index moves with any edit to the function, so NotCounted payloads are stripped here (the
-# fixtures keep theirs); the gate is about verdicts. Any difference fails: a bounded that became
-# none is a regression, a new bounded needs expected-cost.txt updated in the same commit.
+# fixtures keep theirs); the gate is about verdicts and the atoms of each bound. Any difference
+# fails. Re-recording expected-cost.txt cannot hide a lost bound: every `# predicted: bounded`
+# target must still be bounded, and the root count is the pre-registered 36.
 ct=$root/tools/ct-driver
-analyse cost-parsers wire,h3,quic "$ct/manifest.txt:$ct/cost-targets.txt" cost
+analyse cost-parsers wire,h3,quic "$ct/manifest.txt:$ct/manifest-parsers.txt:$ct/cost-targets.txt" cost
 cost_no_missing "$ct/cost-targets.txt" $reports
 got=$CT_OUT/cost-parsers/verdicts.txt
 # shellcheck disable=SC2086 # $reports is a list of paths without spaces
-cat $reports | { sed -E 's/ NotCounted\([0-9]+\)$/ NotCounted/' > "$CT_OUT/cost-parsers/all.txt"; }
-cost_verdicts "$CT_OUT/cost-parsers/all.txt" > "$got"
+cat $reports | sed -E 's/ NotCounted\([0-9]+\)$/ NotCounted/' > "$CT_OUT/cost-parsers/all.txt"
+cost_verdicts "$CT_OUT/cost-parsers/all.txt" atoms > "$got"
 diff -u "$ct/expected-cost.txt" "$got" || fail "cost parsers: verdicts differ from tools/ct-driver/expected-cost.txt"
+nt=$(grep -c -E '^[[:space:]]*cost-root[[:space:]]' "$ct/cost-targets.txt")
+[ "$nt" -eq 36 ] || fail "cost targets: $nt roots, the pre-registered denominator is 36"
+for p in $(sed -nE 's/^[[:space:]]*cost-root[[:space:]]+([^ ]+)[[:space:]]+# predicted: bounded.*/\1/p' "$ct/cost-targets.txt"); do
+    grep -q "^bounded $p deg=" "$got" || fail "lost a bound the targets file predicts: $p"
+done
 nb=$(grep -c '^bounded ' "$got" || true)
-nt=$(grep -c '^cost-root ' "$ct/cost-targets.txt")
 echo "ct-check: cost $nb/$nt bounded"
 
 # The driver keys declassify sites by file:line, so a second call on a line would go uncounted.

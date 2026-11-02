@@ -56,7 +56,7 @@ Its job is to make "constant-time style" a checked property of `crates/crypto`, 
    - Soundness: `analyze(p) == Some(b)` and the run terminates ⇒ `steps <= eval(b, inputs)`.
    - Only recognized counted loops are bounded, and they are inferred in verified code from MIR, because `decreases` clauses are erased.
    - Targets: wire varint, h3 frame parsing, QPACK integer/string/Huffman decode, quic frame parse.
-   - Bounds are stated in terms of input length.
+   - Bounds are stated over the parameter atoms (`len(x)`, a parameter's integer value); `scripts/ct-check.sh` pins which atoms each parser bound uses, and the 19 measured bounds use `len(..)` only.
    - A step bound is not wall-clock time and not memory. Memory relates to the known Vec-capacity gap.
 7. **Phasing.**
    - **8a:** core, semantics, proof, exec checker, driver, verify.sh integration, and a run over the 5a/5b crypto code.
@@ -599,7 +599,7 @@ The final line becomes `verify.sh: all crates verified, duvet ok, ct ok (D decla
   - `Gap(a, b)` = max(0, a − b).
 
   An atom reads its local through `nth`, so an out-of-range local reads as `Unit`, as everywhere in `sem.rs`.
-- A function's summary is a `Poly` over its parameter atoms. Example: `huffman_decode: steps <= c0 + c1·len(input)`.
+- A function's summary is a `Poly` over its parameter atoms. Example: `parse_varint: steps <= 71 + 12·len(b)`.
 
 **Certificates** (D9).
 - `Cert` = per block `{ facts: Vec<Fact>, pot: Poly }`, with `Fact = Le(Atom, Atom) | Lt(Atom, Atom)`.
@@ -677,7 +677,18 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
 - **2026-11-02:** Final X′ (8b Task 2, before Task 3): 19/36, from release MIR (`-Zinline-mir=no`) of the 23 and their call closure (31 fns, plus vest_lib's `ParseError::{unexpected_eof, non_canonical, new}`, which do not write) under Task 3's write rule; no cost analysis has run. Lost: `h3::qpack::huffman::huffman_decode`, whose loop counters and input `Len` cross the `feed_bit` call that takes `&mut` args, so every local is `Unknown` there; and its callers `scan_string`, `decode_string`, `decode_field_line` (`CalleeNone`). `feed_bit` also writes through `&mut` but stays bounded: it has no loop and only `lookup`'s constant summary follows its writers. No other function in the closure has a `&mut`.
 - **2026-11-02:** Correction to the X′ line above (8b Task 2 fix round): 19/36 is an upper bound, from a hand read of MIR, and it subtracts write-rule losses only. That scan could not see a loss from the atom language: with `len_nat` peeling one `Shr`, `Len` read 0 on `<QuicVarInt<false> as Parser>::parse`'s `&&[u8]` input, which would have taken `parse_varint` and its 10 callers among the targets, leaving at most 8. `len_nat` now reads any number of `Shr`. Re-read under it, the length reaches a parameter `Len` in each of the 19 through the Task 3 and Task 4 rules, which are not yet proved. The inference and validator have not run, so the measured figure can be lower.
 - **2026-11-02:** Correction to the X′ line above (8b Task 6 review, Task 7): `decode_field_line` is `Validator(11)`, not `CalleeNone`. Its `slice_to_vec` of a `static_entry` result field is a len-cost charge on a callee's result, which has no image at the entry, so it is lost independently of `huffman_decode`. The count stays 19/36.
-- **2026-11-02:** Measured (8b Task 7): **19/36 targets bounded**, against 27/38, 25/36 and the final X′ 19/36; the verdicts are `tools/ct-driver/expected-cost.txt`, gated by `scripts/ct-check.sh`.
+- **2026-11-02:** Measured (8b Task 7): **19/36 targets bounded**, against 27/38, 25/36 and the final X′ 19/36; the verdicts are `tools/ct-driver/expected-cost.txt`, gated by `scripts/ct-check.sh`. This is not a DoS bound for the server: each bound covers one call of one function, every top-level frame, payload and field-section decoder is `none` (`expected-cost.txt`), and header, transport-parameter and TLS parsers are not targets.
+- **2026-11-02:** Task 8: not attempted (final review ruling; go/no-go measured at eefc610). 0 of 5 off-progress candidates translate (`parse_settings`, `decode_lines`, `decode_lines_bounded`, `parse_payload`, `parse_ack`; the gate is at least 4), and ctcore verifies in 22 s (the gate is 60 s). `at_ok` would recover at most `huffman_decode`, `scan_string` and `decode_string`. The 19 bounds as measured are in the table under §8b result. The 17 `none` fall into: the four QPACK decoders (`huffman_decode` `NotCounted`, `scan_string` and `decode_string` `CalleeNone`, `decode_field_line` `Validator`), ten `Unsupported` (`Vec` drop or element types, or reaching one), three `Unresolved` on `copy_from_slice`. Only `parse_new_connection_id` and `parse_path` of the 13 translator-blocked targets were ever predicted bounded; the other 11 are pre-registered `None` for loop shape or for reaching `parse_ack`, so a translator fix moves them to `NotCounted`, which is Task 8, not to `bounded`. The first-error reason in `expected-cost.txt` hides this (`parse_frame_fields` shows `Unresolved` but also reaches `parse_ack`). Follow-ups:
+  1. `at_ok`, for `huffman_decode`, `scan_string`, `decode_string`.
+  2. Return-length facts for a len-cost charge on a callee's result, for `decode_field_line`. `at_ok` does not recover it.
+  3. `copy_from_slice`, a SPEC-CHANGE to frozen `sem.rs`, for `parse_path`, `parse_new_connection_id`, `parse_frame_fields`.
+  4. `Vec<(u64,u64)>` drop glue, a one-line whitelist change, for `parse_settings`, `parse_frame_payload`, `parse_ack`, `parse_frame*`. They then hit item 6.
+  5. `Vec<FieldLine>` and `Vec<Frame>`, for `decode_lines*`, `decode_field_section*`, `parse_payload`. This is more than the "VecNew element type" the error says: their drop glue is O(len) work, which `drop_bounded` refuses on purpose, so it needs a costed drop, not a wider whitelist.
+  6. Off-progress loops and `i < count` (Task 8 proper), for 11 targets. Items 4 and 5 are prerequisites.
+  7. A stated termination corollary. `theorem_cost` assumes the run returns; a DoS claim needs "and it does".
+  8. Discharging or instantiating the theorem, and composing per-call bounds to per-packet.
+  9. Widening the denominator: headers, transport parameters, TLS, `decode_field_line_bounded`, `quic::route`.
+  10. `push` realloc and memory, the disclosed capacity gap.
 - **The structural gap is off-progress loops** (`off += consumed` with `consumed >= 1` from a callee's postcondition). Closing it needs callee return facts. That is 8b's stretch task, behind an explicit go/no-go.
 
 ## Risks and fallbacks
@@ -707,3 +718,49 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
 **Spikes:**
 - the NI for the structured core with calls: 32 verified at rlimit 4 (0.1 suffices);
 - a 50-LOC rustc_public driver under `cargo build --release` as `RUSTC_WORKSPACE_WRAPPER` reads `ct::secret` attributes through `cfg_attr(ct_check, …)`, with Verus unaffected (34 verified).
+
+## 8b result
+
+**19 of 36 targets bounded** (2026-11-02, eefc610 plus the final-review fixes), against 27/38, 25/36 and the final X′ 19/36. Bounds are core steps, not time or memory. This is not a DoS bound for the server: each bound covers one call of one function, every top-level frame, payload and field-section decoder is `none` (`expected-cost.txt`), and header, transport-parameter and TLS parsers are not targets.
+
+| Target | original (27/38) | re-baseline (final X′) | actual | bound (steps) or reason |
+|---|---|---|---|---|
+| `wire::varint::exec_len` | Some | bounded | bounded | 9 |
+| `wire::varint::exec_min_len` | Some | bounded | bounded | 11 |
+| `wire::varint::parse_varint` | Some | bounded | bounded | 71 + 12·len(b) |
+| `h3::frame::parse_frame_header` | Some | bounded | bounded | 159 + 24·len(buf) |
+| `h3::frame::parse_exact_varint` | Some | bounded | bounded | 84 + 12·len(p) |
+| `h3::frame::settings_ok` | Some | bounded | bounded | 45·len(v) + 13·len(v)² + 38 |
+| `h3::frame::parse_settings` | None | none | none | `Unsupported`: drop of `Vec<(u64, u64)>`; then a non-unit step loop |
+| `h3::frame::parse_frame_payload` | None | none | none | `Unsupported`: reaches `parse_settings` |
+| `h3::qpack::int::parse_prefix_int` | Some | bounded | bounded | 53 + 34·len(buf) |
+| `h3::qpack::huffman::lookup` | Some | bounded | bounded | 22 |
+| `h3::qpack::huffman::feed_bit` | Some | bounded | bounded | 48 |
+| `h3::qpack::huffman::huffman_decode` | Some | none | none | `NotCounted(5)`: `recognize` rejects a loop whose body holds a `Mut`-arg call (`feed_bit`) |
+| `h3::qpack::field_section::scan_string` | Some | none | none | `CalleeNone(2)`: calls `huffman_decode` |
+| `h3::qpack::field_section::decode_string` | Some | none | none | `CalleeNone(1)`: calls `scan_string`/`huffman_decode` |
+| `h3::qpack::field_section::decode_field_line` | Some | none | none | `Validator(11)`: its own `slice_to_vec` of a `static_entry` result field, a len-cost charge on a callee's result (also calls `decode_string`) |
+| `h3::qpack::field_section::decode_lines` | None | none | none | `Unsupported`: `VecNew` element type (`Vec<FieldLine>`); then `pos += consumed` |
+| `h3::qpack::field_section::decode_lines_bounded` | None | none | none | `Unsupported`: `VecNew` element type; then `pos += consumed` |
+| `h3::qpack::field_section::decode_field_section` | None | none | none | `Unsupported`: reaches `decode_lines` |
+| `h3::qpack::field_section::decode_field_section_bounded` | None | none | none | `Unsupported`: reaches `decode_lines_bounded` |
+| `quic::frame::vint_at` | Some | bounded | bounded | 85 + 12·len(b) |
+| `quic::frame::bytes_at` | Some | bounded | bounded | 13 + len(b) |
+| `quic::frame::stream_data_at` | Some | bounded | bounded | 18 + len(b) |
+| `quic::frame::parse_reset_stream` | Some | bounded | bounded | 275 + 36·len(b) |
+| `quic::frame::parse_two_varints` | Some | bounded | bounded | 189 + 24·len(b) |
+| `quic::frame::parse_crypto` | Some | bounded | bounded | 208 + 25·len(b) |
+| `quic::frame::parse_stream` | Some | bounded | bounded | 306 + 37·len(b) |
+| `quic::frame::parse_one_varint` | Some | bounded | bounded | 108 + 12·len(b) |
+| `quic::frame::parse_new_connection_id` | Some | none | none | `Unresolved`: `copy_from_slice` |
+| `quic::frame::parse_path` | Some | none | none | `Unresolved`: `copy_from_slice` |
+| `quic::frame::parse_close` | Some | bounded | bounded | 296 + 37·len(b) |
+| `quic::frame::parse_frame_type` | Some | bounded | bounded | 101 + 12·len(b) |
+| `quic::ack::parse_ack` | None | none | none | `Unsupported`: drop of `Vec<(u64, u64)>`; then `i < count`, count a parsed varint |
+| `quic::frame::parse_frame_fields` | None | none | none | `Unresolved`: `copy_from_slice` (via `parse_new_connection_id`); also reaches `parse_ack` |
+| `quic::frame::parse_frame_body` | None | none | none | `Unsupported`: reaches `parse_ack` |
+| `quic::frame::parse_frame` | None | none | none | `Unsupported`: reaches `parse_ack` |
+| `quic::payload::parse_payload` | None | none | none | `Unsupported`: `VecNew` element type (`Vec<Frame>`); then `p += consumed` |
+| `<QuicVarInt<false>/<true> as Parser>::parse` (2 rows) | Some | not a root (I3) | not a root (I3) | counted inside `parse_varint` |
+
+Code added after pre-registration (`quic::route::route` and the rest of phase 3d) is not a target and stays out of the denominator.

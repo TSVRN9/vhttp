@@ -5,6 +5,7 @@ ok ct_fixtures::fx::pos_const_niche
 ok ct_fixtures::fx::pos_const_ref_zst
 ok ct_fixtures::fx::pos_declassified_branch
 ok ct_fixtures::fx::pos_drop_bounded
+ok ct_fixtures::fx::pos_drop_secret_option
 ok ct_fixtures::fx::pos_ghost_arg
 ok ct_fixtures::fx::pos_key_first_root
 ok ct_fixtures::fx::pos_label_line
