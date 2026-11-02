@@ -3,6 +3,8 @@ use crypto::sha256::sha256;
 use rsa::traits::{PrivateKeyParts, PublicKeyParts};
 use rsa::BoxedUint;
 
+mod vecdata;
+
 fn h(s: &str) -> Vec<u8> {
     (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap()).collect()
 }
@@ -44,12 +46,12 @@ fn check(p: &str, q: &str, bits: u32) -> Vec<u8> {
     assert_eq!(k.n().bits(), bits);
     let salt: Vec<u8> = (0..32).collect();
     let msg = b"TLS 1.3, server CertificateVerify";
-    let s = rsa_pss_sha256_sign(&ours, msg, &salt).unwrap();
+    let s = rsa_pss_sha256_sign(&ours, msg, &salt);
     assert_eq!(s.len(), ((bits + 7) / 8) as usize);
-    assert_eq!(rsa_pss_sha256_sign(&ours, msg, &salt).unwrap(), s);
+    assert_eq!(rsa_pss_sha256_sign(&ours, msg, &salt), s);
     let mut salt2 = salt.clone();
     salt2[0] ^= 1;
-    assert_ne!(rsa_pss_sha256_sign(&ours, msg, &salt2).unwrap(), s);
+    assert_ne!(rsa_pss_sha256_sign(&ours, msg, &salt2), s);
     let pubk = k.to_public_key();
     pubk.verify(rsa::Pss::<sha2::Sha256>::new_with_salt(32), &sha256(msg), &s).unwrap();
     // salt recovery from s^e mod n
@@ -105,6 +107,63 @@ fn pss_zero_padded_fields() {
     let pad = |v: &Vec<u8>| [vec![0u8; 5], v.clone()].concat();
     let padded = RsaPrivateKey { n: pad(&ours.n), e: pad(&ours.e), d: pad(&ours.d), p: pad(&ours.p), q: pad(&ours.q) };
     let salt: Vec<u8> = (0..32).collect();
-    let s = rsa_pss_sha256_sign(&ours, b"m", &salt).unwrap();
-    assert_eq!(rsa_pss_sha256_sign(&padded, b"m", &salt).unwrap(), s);
+    let s = rsa_pss_sha256_sign(&ours, b"m", &salt);
+    assert_eq!(rsa_pss_sha256_sign(&padded, b"m", &salt), s);
+}
+
+#[test]
+fn cavp_pss_3072() {
+    let u = |s: &str| BoxedUint::from_be_slice_vartime(&vecdata::hex(s));
+    let (mut nh, mut eh, mut dh) = (String::new(), String::new(), String::new());
+    let mut count = 0;
+    for r in vecdata::rsp_records(&vecdata::data("nist/SigGenPSS_186-3.txt")) {
+        if r.contains_key("n") || r.contains_key("e") {
+            // n, then e and d, each in its own blank-line record; keep the latest
+            for (k, dst) in [("n", &mut nh), ("e", &mut eh), ("d", &mut dh)] {
+                if let Some(v) = r.get(k) {
+                    *dst = v.clone();
+                }
+            }
+            continue;
+        }
+        if r.get("mod").map(|m| m == "3072") != Some(true) || r.get("SHAAlg").map(|a| a == "SHA256") != Some(true) {
+            continue;
+        }
+        let salt = vecdata::hex(&r["SaltVal"]);
+        assert_eq!(salt.len(), 32);
+        let k = rsa::RsaPrivateKey::from_components(u(&nh), u(&eh), u(&dh), vec![]).unwrap();
+        let ours = RsaPrivateKey {
+            n: min(&k.n().to_be_bytes()),
+            e: min(&k.e().to_be_bytes()),
+            d: min(&k.d().to_be_bytes()),
+            p: min(&k.primes()[0].to_be_bytes()),
+            q: min(&k.primes()[1].to_be_bytes()),
+        };
+        let s = rsa_pss_sha256_sign(&ours, &vecdata::hex(&r["Msg"]), &salt);
+        assert_eq!(s, vecdata::hex(&r["S"]), "vector {count}");
+        count += 1;
+    }
+    assert_eq!(count, 10);
+}
+
+// The first SHA-256 key of Wycheproof's 4096-bit file; p and q recovered by from_components.
+#[test]
+fn pss_4096_verifies() {
+    let j = vecdata::parse_json(&vecdata::data("wycheproof/rsa_pkcs1_4096_sig_gen_test.json"));
+    let groups = j.get("testGroups").arr();
+    let pk = groups.iter().find(|g| g.get("sha").str() == "SHA-256").unwrap().get("privateKey");
+    let u = |f: &str| BoxedUint::from_be_slice_vartime(&vecdata::hex(pk.get(f).str()));
+    let k = rsa::RsaPrivateKey::from_components(u("modulus"), u("publicExponent"), u("privateExponent"), vec![]).unwrap();
+    let ours = RsaPrivateKey {
+        n: min(&k.n().to_be_bytes()),
+        e: min(&k.e().to_be_bytes()),
+        d: min(&k.d().to_be_bytes()),
+        p: min(&k.primes()[0].to_be_bytes()),
+        q: min(&k.primes()[1].to_be_bytes()),
+    };
+    let salt = [0x5au8; 32];
+    let msg = b"TLS 1.3, server CertificateVerify";
+    let s = rsa_pss_sha256_sign(&ours, msg, &salt);
+    assert_eq!(s.len(), 512);
+    k.to_public_key().verify(rsa::Pss::<sha2::Sha256>::new_with_salt(32), &sha256(msg), &s).unwrap();
 }

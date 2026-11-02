@@ -1,5 +1,5 @@
 //! P-256 (NIST SP 800-186 §3.2.1.3) with the SEC 1 v2 group law, point encoding and ECDH:
-//! spec and exec signatures backed by the trusted shim.
+//! spec and verified exec.
 #[allow(unused_imports)]
 use crate::bytes::*;
 use vstd::prelude::*;
@@ -253,6 +253,7 @@ pub fn p256_ecdh(d: &[u8], peer: &[u8]) -> (r: Option<[u8; 32]>)
 
 // 1 <= os2ip(d) < n: the borrow of d - n, masked with d != 0.
 // ct: the result feeds only the caller's declassified (public) None outcome
+#[inline(never)]
 #[cfg_attr(ct_check, ct::secret(d))]
 pub(crate) fn scalar_in_range(d: &[u8]) -> (r: bool)
     requires

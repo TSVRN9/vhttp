@@ -132,4 +132,49 @@ pub proof fn lemma_os2ip_i2osp(x: nat, len: nat)
     }
 }
 
+/// I2OSP inverts OS2IP at the string's own length.
+pub(crate) proof fn lemma_i2osp_os2ip(s: Seq<u8>)
+    ensures
+        i2osp(os2ip(s), s.len()) == s,
+    decreases s.len(),
+{
+    if s.len() == 0 {
+        assert(i2osp(0, 0) =~= s);
+    } else {
+        let d = s.drop_last();
+        lemma_i2osp_os2ip(d);
+        let x = os2ip(s);
+        assert(x == os2ip(d) * 256 + s.last() as nat);
+        assert(x / 256 == os2ip(d) && x % 256 == s.last() as nat) by {
+            vstd::arithmetic::div_mod::lemma_fundamental_div_mod_converse(
+                x as int,
+                256,
+                os2ip(d) as int,
+                s.last() as int,
+            );
+        }
+        assert(i2osp(x, s.len()) =~= s);
+    }
+}
+
+/// A value below 256^k is held entirely in the string's low k octets.
+pub(crate) proof fn lemma_os2ip_tail(s: Seq<u8>, k: nat)
+    requires
+        k <= s.len(),
+        os2ip(s) < vstd::arithmetic::power::pow(256, k),
+    ensures
+        os2ip(s.subrange(s.len() - k, s.len() as int)) == os2ip(s),
+{
+    let a = s.subrange(0, s.len() - k);
+    let b = s.subrange(s.len() - k, s.len() as int);
+    let p = vstd::arithmetic::power::pow(256, k);
+    assert(s =~= a + b);
+    lemma_os2ip_append(a, b);
+    vstd::arithmetic::mul::lemma_mul_basics(p);
+    if os2ip(a) > 0 {
+        vstd::arithmetic::power::lemma_pow_positive(256, k);
+        vstd::arithmetic::mul::lemma_mul_inequality(1, os2ip(a) as int, p);
+    }
+}
+
 } // verus!
