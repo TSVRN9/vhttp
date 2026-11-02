@@ -913,6 +913,16 @@ pub open spec fn rpt_applied(
         )
 }
 
+/// An entry `on_new_cid` leaves: its sequence number keeps its CID and its used mark, and its CID
+/// its sequence number.
+pub open spec fn entries_survive(o: Seq<PeerEntry>, n: Seq<PeerEntry>) -> bool {
+    forall|i: int, j: int|
+        0 <= i < o.len() && 0 <= j < n.len() ==> {
+            &&& (#[trigger] o[i]).0 == (#[trigger] n[j]).0 ==> n[j].1@ == o[i].1@ && (o[i].3 ==> n[j].3)
+            &&& o[i].1@ == n[j].1@ ==> o[i].0 == n[j].0
+        }
+}
+
 pub open spec fn seq_range(a: u64, b: u64) -> Seq<u64> {
     Seq::new(
         if b > a {
@@ -1264,6 +1274,7 @@ impl PeerCids {
             final(self).retire_pending == old(self).retire_pending,
             final(self).retire_unacked == old(self).retire_unacked,
             final(self).zero_len == old(self).zero_len,
+            final(self).received@ == old(self).received@.insert(seq, (cid@, Some(token))),
             final(self).acked == old(self).acked,
     {
         let ghost e0 = self.active@;
@@ -1482,6 +1493,7 @@ impl PeerCids {
             r is Err ==> r == Err::<(), u64>(PROTOCOL_VIOLATION) || r == Err::<(), u64>(
                 CONNECTION_ID_LIMIT_ERROR,
             ),
+            r is Ok ==> entries_survive(old(self).entries(), final(self).entries()),
             (r == Err::<(), u64>(PROTOCOL_VIOLATION)) <==> (old(self).zero_len_spec()
                 || peer_clash(old(self).entries(), seq, cid@, token@)),
             (r == Err::<(), u64>(CONNECTION_ID_LIMIT_ERROR)) <==> (!old(self).zero_len_spec()
@@ -1544,6 +1556,9 @@ impl PeerCids {
             lemma_same_not_clash(self.active@, seq, cid@, token@);
         }
         let backlog = self.retire_pending.len() as u64 + self.retire_unacked.len() as u64;
+        proof {
+            lemma_entries_survive_same(self.active@);
+        }
         if same {
             if rpt <= self.largest_rpt {
                 return Ok(());
@@ -1552,6 +1567,9 @@ impl PeerCids {
                 return Err(CONNECTION_ID_LIMIT_ERROR);
             }
             self.repeat_raise(k, rpt, Ghost(seq), Ghost(cid@), Ghost(token@));
+            proof {
+                lemma_entries_survive(*old(self), *self, seq, cid@, token@);
+            }
             return Ok(());
         }
         if clash {
@@ -1603,6 +1621,13 @@ impl PeerCids {
                 peer_used(e0, s) && peer_has_seq(e3, s) implies peer_used(e3, s) by {
                 assert(peer_has_seq(e0, s));
             }
+            assert(!peer_has_seq(e0, seq)) by {
+                if peer_has_seq(e0, seq) {
+                    let x = choose|x: int| 0 <= x < e0.len() && (#[trigger] e0[x]).0 == seq;
+                    assert(same_at(e0[x], seq, cid@, token@) || clash_at(e0[x], seq, cid@, token@));
+                }
+            }
+            lemma_entries_survive(*old(self), *self, seq, cid@, token@);
         }
         Ok(())
     }
@@ -1646,6 +1671,7 @@ impl PeerCids {
             ),
             final(self).retire_unacked == old(self).retire_unacked,
             final(self).zero_len == old(self).zero_len,
+            final(self).received == old(self).received,
             peer_has_seq(final(self).active@, old(self).current) ==> final(self).current == old(
                 self).current,
             !peer_has_seq(final(self).active@, old(self).current) ==> forall|s: u64|
@@ -2045,6 +2071,11 @@ impl PeerCids {
     //# An endpoint MUST NOT check for any stateless reset tokens associated
     //# with connection IDs it has not used or for connection IDs that have
     //# been retired.
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.1
+    //# When comparing a datagram to stateless reset token values, endpoints
+    //# MUST perform the comparison without leaking information about the
+    //# value of the token.
     /// Whether `tail` (a datagram's last 16 bytes) is the reset token of an active CID we
     /// have used. Constant-time style: all 16 bytes of every candidate are XOR-accumulated
     /// with no early exit (the timing itself is unverified; TRUSTED.md).
@@ -2206,6 +2237,93 @@ impl PeerCids {
             assert(e0[j].3);
         }
         None
+    }
+}
+
+/// Unchanged entries survive.
+proof fn lemma_entries_survive_same(e: Seq<PeerEntry>)
+    requires
+        peer_sorted(e),
+        peer_distinct(e),
+    ensures
+        entries_survive(e, e),
+{
+    assert forall|i: int, j: int| 0 <= i < e.len() && 0 <= j < e.len() implies {
+        &&& (#[trigger] e[i]).0 == (#[trigger] e[j]).0 ==> e[j].1@ == e[i].1@ && (e[i].3 ==> e[j].3)
+        &&& e[i].1@ == e[j].1@ ==> e[i].0 == e[j].0
+    } by {
+        if i < j {
+            assert(e[i].0 < e[j].0);
+            assert(e[i].1@ != e[j].1@);
+        } else if j < i {
+            assert(e[j].0 < e[i].0);
+            assert(e[j].1@ != e[i].1@);
+        }
+    }
+}
+
+/// `n` is `o` after a NEW_CONNECTION_ID{seq, c, t} that did not clash: `received` carries the CIDs.
+proof fn lemma_entries_survive(o: PeerCids, n: PeerCids, seq: u64, c: Seq<u8>, t: Seq<u8>)
+    requires
+        o.wf(),
+        n.wf(),
+        !peer_clash(o.active@, seq, c, t),
+        peer_same(n.active@, seq, c, t),
+        forall|s: u64| #[trigger] peer_has_seq(n.active@, s) ==> peer_has_seq(o.active@, s) || s == seq,
+        forall|s: u64|
+            #![trigger peer_used(o.active@, s)]
+            #![trigger peer_used(n.active@, s)]
+            peer_used(o.active@, s) && peer_has_seq(n.active@, s) ==> peer_used(n.active@, s),
+        n.received@ == o.received@ || (!peer_has_seq(o.active@, seq) && exists|v: (Seq<u8>, Option<[u8; 16]>)|
+            n.received@ == #[trigger] o.received@.insert(seq, v)),
+    ensures
+        entries_survive(o.active@, n.active@),
+{
+    let e0 = o.active@;
+    let e1 = n.active@;
+    assert forall|i: int, j: int| 0 <= i < e0.len() && 0 <= j < e1.len() implies {
+        &&& (#[trigger] e0[i]).0 == (#[trigger] e1[j]).0 ==> e1[j].1@ == e0[i].1@ && (e0[i].3 ==> e1[j].3)
+        &&& e0[i].1@ == e1[j].1@ ==> e0[i].0 == e1[j].0
+    } by {
+        // The same sequence number: the same CID, through `received`.
+        assert forall|x: int, y: int|
+            0 <= x < e0.len() && 0 <= y < e1.len() && e0[x].0 == e1[y].0 implies e1[y].1@ == e0[x].1@ by {
+            assert(peer_has_seq(e0, e0[x].0));
+            assert(o.received@[e0[x].0] == (e0[x].1@, e0[x].2));
+            assert(n.received@[e1[y].0] == (e1[y].1@, e1[y].2));
+        }
+        if e0[i].0 == e1[j].0 && e0[i].3 {
+            let s = e0[i].0;
+            assert(peer_used(e0, s));
+            assert(peer_has_seq(e1, s));
+            let w = choose|w: int| 0 <= w < e1.len() && (#[trigger] e1[w]).0 == s && e1[w].3;
+            if w < j {
+                assert(e1[w].0 < e1[j].0);
+            } else if j < w {
+                assert(e1[j].0 < e1[w].0);
+            }
+        }
+        if e0[i].1@ == e1[j].1@ && e0[i].0 != e1[j].0 {
+            assert(peer_has_seq(e1, e1[j].0));
+            if peer_has_seq(e0, e1[j].0) {
+                let x = choose|x: int| 0 <= x < e0.len() && (#[trigger] e0[x]).0 == e1[j].0;
+                assert(e1[j].1@ == e0[x].1@);
+                if x < i {
+                    assert(e0[x].1@ != e0[i].1@);
+                } else if i < x {
+                    assert(e0[i].1@ != e0[x].1@);
+                }
+            } else {
+                assert(e1[j].0 == seq);
+                let w = choose|w: int| 0 <= w < e1.len() && same_at(#[trigger] e1[w], seq, c, t);
+                if w < j {
+                    assert(e1[w].0 < e1[j].0);
+                } else if j < w {
+                    assert(e1[j].0 < e1[w].0);
+                }
+                assert(clash_at(e0[i], seq, c, t));
+            }
+        }
     }
 }
 
