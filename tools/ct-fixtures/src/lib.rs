@@ -660,4 +660,10 @@ pub mod fx {
         // translates, but returning a `&mut` breaks `wf_body`: no bound without `check_program` `Ok`
         x
     }
+
+    pub fn cost_neg_not_typed_declassify(x: &mut u8) -> u8 {
+        // `Mut` locals pass wf; `Declassify` of a `Mut` operand fails `ok_intr`
+        let y = crate::ct::declassify(x);
+        *y
+    }
 }

@@ -387,6 +387,8 @@ fn selftest(krate: &str, m: &Manifest, out: &std::path::Path) -> Result<(), Stri
 /// `ctcore::cost::theorem_cost`'s statement applied to the program; no code calls that theorem.
 fn cost(krate: &str, m: &Manifest, out: &std::path::Path) -> Result<(), String> {
     let mut lines = BTreeSet::new();
+    // ponytail: one map across roots, so an ambiguous key in one root's closure can change another
+    // root's verdict (a `none` or a hard error, never a bound); a fresh map per root removes that.
     let mut by_key = HashMap::new();
     for r in crate_cost_roots(krate, m) {
         lines.insert(format!("{}\n", cost_verdict(m, r, &mut by_key)?));
@@ -555,8 +557,30 @@ fn reject_text(p: &ctcore::Program, infos: &[translate::FnInfo], rj: &ctcore::Re
 #[cfg(test)]
 mod tests {
     use super::strip_generic_args as k;
-    use super::{bind_key, pick_roots};
+    use super::{bind_key, pick_roots, poly_text};
+    use ctcore::cost::{Atom, Mono, Poly};
+    use ctcore::IntTy;
     use std::collections::HashMap;
+
+    #[test]
+    fn poly_text_names_parameters() {
+        let val = |x| Atom::Val(x, IntTy::Usize);
+        let mono = |coef, atoms| Mono { coef, atoms };
+        let gap = Atom::Gap(Box::new(Atom::Len(1)), Box::new(val(2)));
+        let poly = Poly {
+            monos: vec![
+                mono(1, vec![Atom::Len(1)]),
+                mono(13, vec![val(2), gap]),
+                mono(0, vec![val(2)]),
+                mono(3, vec![val(3)]),
+                mono(2, vec![val(9), val(0)]),
+                mono(7, vec![]),
+            ],
+        };
+        let names = ["s".to_string(), "n".to_string(), String::new()];
+        assert_eq!(poly_text(&poly, &names), "len(s) + 13*n*sat(len(s) - n) + 3*#3 + 2*_9*_0 + 7");
+        assert_eq!(poly_text(&Poly { monos: vec![] }, &names), "0");
+    }
 
     #[test]
     fn ambiguous_root_key_is_an_error() {

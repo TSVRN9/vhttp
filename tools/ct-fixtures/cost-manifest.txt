@@ -11,3 +11,4 @@ cost-root ct_fixtures::fx::cost_neg_parsed_count
 cost-root ct_fixtures::fx::cost_neg_recursion
 cost-root ct_fixtures::fx::cost_neg_while_true_break_on_data
 cost-root ct_fixtures::fx::cost_neg_not_typed
+cost-root ct_fixtures::fx::cost_neg_not_typed_declassify

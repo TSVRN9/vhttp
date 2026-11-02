@@ -5,6 +5,7 @@ bounded ct_fixtures::fx::cost_pos_loop_len deg=1
 bounded ct_fixtures::fx::cost_pos_nested deg=2
 bounded ct_fixtures::fx::cost_pos_straight deg=0
 none ct_fixtures::fx::cost_neg_not_typed NotTyped
+none ct_fixtures::fx::cost_neg_not_typed_declassify NotTyped
 none ct_fixtures::fx::cost_neg_off_progress NotCounted(1)
 none ct_fixtures::fx::cost_neg_parsed_count Validator
 none ct_fixtures::fx::cost_neg_recursion Recursion
