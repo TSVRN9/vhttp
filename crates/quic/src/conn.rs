@@ -128,6 +128,13 @@ pub open spec fn pns_ok(s: Seq<u64>, next: u64) -> bool {
     &&& forall|i: int| 0 <= i < s.len() ==> #[trigger] s[i] < next
 }
 
+/// Some active peer CID we have used is `c`. An unused one is held by no path, so `use_next()`
+/// gives a new destination its own CID, and every CID we send with has its token in
+/// `used_tokens()`.
+pub open spec fn used_cid(e: Seq<PeerEntry>, c: Seq<u8>) -> bool {
+    exists|i: int| 0 <= i < e.len() && (#[trigger] e[i]).1@ == c && e[i].3
+}
+
 /// `cid_updates` carries our CIDs only; `poll_cid_updates` adds the token updates.
 pub open spec fn cids_only(s: Seq<CidUpdate>) -> bool {
     forall|i: int| 0 <= i < s.len() ==> #[trigger] s[i] is Add || s[i] is Remove
@@ -138,6 +145,28 @@ pub open spec fn cids_only(s: Seq<CidUpdate>) -> bool {
 pub open spec fn removes_before_adds(s: Seq<CidUpdate>) -> bool {
     forall|i: int, j: int|
         0 <= i < j < s.len() && #[trigger] s[i] is AddToken ==> !(#[trigger] s[j] is RemoveToken)
+}
+
+/// Each token update in `s` is a real change from `before` to `after`.
+pub open spec fn tokens_changed(s: Seq<CidUpdate>, before: Seq<[u8; 16]>, after: Seq<[u8; 16]>) -> bool {
+    forall|i: int|
+        0 <= i < s.len() ==> match #[trigger] s[i] {
+            CidUpdate::RemoveToken(t) => before.contains(t) && !after.contains(t),
+            CidUpdate::AddToken(t) => after.contains(t) && !before.contains(t),
+            _ => true,
+        }
+}
+
+/// `s` holds a token update for every change from `before` to `after`.
+pub open spec fn tokens_covered(s: Seq<CidUpdate>, before: Seq<[u8; 16]>, after: Seq<[u8; 16]>) -> bool {
+    &&& forall|i: int|
+        0 <= i < before.len() && !after.contains(before[i]) ==> s.contains(
+            CidUpdate::RemoveToken(#[trigger] before[i]),
+        )
+    &&& forall|i: int|
+        0 <= i < after.len() && !before.contains(after[i]) ==> s.contains(
+            CidUpdate::AddToken(#[trigger] after[i]),
+        )
 }
 
 // =============================================================================
@@ -275,7 +304,11 @@ impl Connection {
         &&& self.peer_tp matches Some(t) ==> peer_tp_wf(t@)
         &&& self.complete ==> (self.peer_tp is Some && self.streams is Some) || !(
         self.lc.phase_spec() is Open)
+        &&& self.complete ==> !self.live_i && !self.live_h
         &&& self.chal_used <= 4
+        &&& self.sent_i.inflight_spec().len() + self.sent_h.inflight_spec().len()
+            + self.sent_1.inflight_spec().len() <= MAX_INFLIGHT
+        &&& self.paths.has(self.hs_path)
         &&& cids_only(self.cid_updates@)
     }
 
@@ -308,13 +341,13 @@ impl Connection {
             ) is Some
     }
 
-    /// The active path has a DCID, every DCID is still active (§5.1.2 "MUST stop using"), and
+    /// The active path has a DCID, every DCID is active (§5.1.2 "MUST stop using") and used, and
     /// §9.5: two paths share a DCID only if the peer used the same CID on both (its MAY: the
     /// peer used the same CID from a new address, NAT rebinding).
     closed spec fn wf_dcids(&self) -> bool {
         &&& self.paths.path(self.paths.active_spec()).dcid is Some
         &&& forall|q: PathId| #[trigger]
-            self.paths.has(q) ==> (self.paths.path(q).dcid matches Some(c) ==> peer_has_cid(
+            self.paths.has(q) ==> (self.paths.path(q).dcid matches Some(c) ==> used_cid(
                 self.peer_cids.entries(),
                 c,
             ))
@@ -332,6 +365,28 @@ impl Connection {
         &&& self.wf_pn()
         &&& self.wf_log_paths()
         &&& self.wf_dcids()
+    }
+
+    /// §9.5: no path holds an unused peer CID, so `use_next()` never reuses a path's CID.
+    proof fn lemma_unused_cid_unheld(&self, i: int, q: PathId)
+        requires
+            self.wf(),
+            0 <= i < self.peer_cids.entries().len(),
+            !self.peer_cids.entries()[i].3,
+            self.paths.has(q),
+        ensures
+            self.paths.path(q).dcid != Some(self.peer_cids.entries()[i].1@),
+    {
+        let e = self.peer_cids.entries();
+        self.peer_cids.lemma_wf();
+        if self.paths.path(q).dcid == Some(e[i].1@) {
+            let j = choose|j: int| 0 <= j < e.len() && (#[trigger] e[j]).1@ == e[i].1@ && e[j].3;
+            if j < i {
+                assert(e[j].1@ != e[i].1@);
+            } else {
+                assert(e[i].1@ != e[j].1@);
+            }
+        }
     }
 
     // =========================================================================
@@ -445,6 +500,7 @@ impl Connection {
     // =========================================================================
 
     /// A datagram of `datagram_len` bytes on `path`, with its decrypted packets in order.
+    #[verifier::spinoff_prover]
     #[allow(unused_variables)]  // Task 1a-ii writes the body.
     pub fn on_datagram(
         &mut self,
@@ -481,6 +537,12 @@ impl Connection {
         ensures
             final(self).wf(),
             !final(self).live(k),
+            k is Initial ==> final(self).live(PacketKind::Handshake) == old(self).live(
+                PacketKind::Handshake,
+            ),
+            k is Handshake ==> final(self).live(PacketKind::Initial) == old(self).live(
+                PacketKind::Initial,
+            ),
             final(self).out_log() == old(self).out_log(),
             final(self).paths == old(self).paths,
             final(self).lc == old(self).lc,
@@ -564,6 +626,7 @@ impl Connection {
     }
 
     /// The current 1-RTT probe timeout.
+    #[verifier::spinoff_prover]
     fn pto(&self) -> (r: u64)
         requires
             self.wf(),
@@ -666,6 +729,8 @@ impl Connection {
         if !matches!(self.lc.phase(), Phase::Open) || self.complete {
             return;
         }
+        // `streams.is_none()` is unreachable (`on_peer_params` sets both); `wf`'s `complete` clause
+        // needs it, and it costs less than one more conjunct.
         if self.peer_tp.is_none() || self.streams.is_none() {
             self.close_internal(INTERNAL_ERROR);
             return;
@@ -674,9 +739,9 @@ impl Connection {
             self.close_internal(c);
             return;
         }
-        self.complete = true;
         self.discard(PacketKind::Initial);
         self.discard(PacketKind::Handshake);
+        self.complete = true;
         self.hs_done = HsDone::Pending;
         self.spin = rand[128] & 1 == 1;
         self.issue_cids(rand);
@@ -768,18 +833,16 @@ impl Connection {
                 0 <= i < old(self).updates_spec().len() ==> #[trigger] final(out)@[old(out)@.len()
                     + i] == old(self).updates_spec()[i],
             removes_before_adds(final(out)@.skip(old(out)@.len() as int)),
-            forall|i: int|
-                0 <= i < old(self).registered().len() && !final(self).registered().contains(
-                    old(self).registered()[i],
-                ) ==> final(out)@.contains(
-                    CidUpdate::RemoveToken(#[trigger] old(self).registered()[i]),
-                ),
-            forall|i: int|
-                0 <= i < final(self).registered().len() && !old(self).registered().contains(
-                    final(self).registered()[i],
-                ) ==> final(out)@.contains(
-                    CidUpdate::AddToken(#[trigger] final(self).registered()[i]),
-                ),
+            tokens_changed(
+                final(out)@.skip(old(out)@.len() as int),
+                old(self).registered(),
+                final(self).registered(),
+            ),
+            tokens_covered(
+                final(out)@.skip(old(out)@.len() as int),
+                old(self).registered(),
+                final(self).registered(),
+            ),
     {
         let ghost n0 = out@.len() as int;
         let ghost updates = self.cid_updates@;
@@ -837,12 +900,36 @@ impl Connection {
                 assert(s1[n0 + i] == s0[n0 + i]);
                 assert(s2[n0 + i] == s1[n0 + i]);
             }
-            assert forall|i: int| 0 <= i < regs.len() && !used@.contains(regs[i]) implies s2.contains(
+            assert forall|i: int| 0 <= i < s.len() implies match #[trigger] s[i] {
+                CidUpdate::RemoveToken(t) => regs.contains(t) && !used@.contains(t),
+                CidUpdate::AddToken(t) => used@.contains(t) && !regs.contains(t),
+                _ => true,
+            } by {
+                let a = n0 + i;
+                assert(s[i] == s2[a]);
+                if a < s1.len() {
+                    assert(s2[a] == s1[a]);
+                    if a < s0.len() {
+                        assert(s1[a] == s0[a]);
+                        assert(s0[a] == updates[a - n0]);
+                        assert(updates[a - n0] is Add || updates[a - n0] is Remove);
+                    }
+                }
+            }
+            assert forall|i: int| 0 <= i < regs.len() && !used@.contains(regs[i]) implies s.contains(
                 CidUpdate::RemoveToken(#[trigger] regs[i]),
             ) by {
                 let w = choose|w: int|
-                    0 <= w < s1.len() && s1[w] == CidUpdate::RemoveToken(regs[i]);
+                    s0.len() <= w < s1.len() && #[trigger] s1[w] == CidUpdate::RemoveToken(regs[i]);
                 assert(s2[w] == s1[w]);
+                assert(s[w - n0] == s2[w]);
+            }
+            assert forall|i: int| 0 <= i < used@.len() && !regs.contains(used@[i]) implies s.contains(
+                CidUpdate::AddToken(#[trigger] used@[i]),
+            ) by {
+                let w = choose|w: int|
+                    s1.len() <= w < s2.len() && #[trigger] s2[w] == CidUpdate::AddToken(used@[i]);
+                assert(s[w - n0] == s2[w]);
             }
         }
     }
@@ -1025,6 +1112,7 @@ fn copy_opt(o: &Option<Vec<u8>>) -> (r: Option<Vec<u8>>)
     }
 }
 
+#[verifier::spinoff_prover]
 fn has_token(v: &Vec<[u8; 16]>, t: &[u8; 16]) -> (r: bool)
     ensures
         r == v@.contains(*t),
@@ -1049,17 +1137,20 @@ fn has_token(v: &Vec<[u8; 16]>, t: &[u8; 16]) -> (r: bool)
     false
 }
 
-/// A `RemoveToken` for every token of `reg` that `used` lacks.
+/// A `RemoveToken` for every token of `reg` that `used` lacks, and for no other.
+#[verifier::spinoff_prover]
 fn push_removes(reg: &Vec<[u8; 16]>, used: &Vec<[u8; 16]>, out: &mut Vec<CidUpdate>)
     ensures
         final(out)@.len() >= old(out)@.len(),
         forall|i: int| 0 <= i < old(out)@.len() ==> #[trigger] final(out)@[i] == old(out)@[i],
         forall|i: int|
-            old(out)@.len() <= i < final(out)@.len() ==> #[trigger] final(out)@[i] is RemoveToken,
+            old(out)@.len() <= i < final(out)@.len() ==> (
+            #[trigger] final(out)@[i] matches CidUpdate::RemoveToken(t) && reg@.contains(t)
+                && !used@.contains(t)),
         forall|i: int|
-            0 <= i < reg@.len() && !used@.contains(reg@[i]) ==> final(out)@.contains(
-                CidUpdate::RemoveToken(#[trigger] reg@[i]),
-            ),
+            0 <= i < reg@.len() && !used@.contains(reg@[i]) ==> exists|w: int|
+                old(out)@.len() <= w < final(out)@.len() && #[trigger] final(out)@[w]
+                    == CidUpdate::RemoveToken(#[trigger] reg@[i]),
 {
     let ghost s0 = out@;
     let mut i: usize = 0;
@@ -1068,27 +1159,45 @@ fn push_removes(reg: &Vec<[u8; 16]>, used: &Vec<[u8; 16]>, out: &mut Vec<CidUpda
             i <= reg@.len(),
             out@.len() >= s0.len(),
             forall|k: int| 0 <= k < s0.len() ==> #[trigger] out@[k] == s0[k],
-            forall|k: int| s0.len() <= k < out@.len() ==> #[trigger] out@[k] is RemoveToken,
             forall|k: int|
-                0 <= k < i && !used@.contains(reg@[k]) ==> out@.contains(
-                    CidUpdate::RemoveToken(#[trigger] reg@[k]),
-                ),
+                s0.len() <= k < out@.len() ==> (#[trigger] out@[k] matches CidUpdate::RemoveToken(t)
+                    && reg@.contains(t) && !used@.contains(t)),
+            forall|k: int|
+                0 <= k < i && !used@.contains(reg@[k]) ==> exists|w: int|
+                    s0.len() <= w < out@.len() && #[trigger] out@[w] == CidUpdate::RemoveToken(
+                        #[trigger] reg@[k],
+                    ),
         decreases reg@.len() - i,
     {
         let t = reg[i];
+        proof {
+            assert(reg@[i as int] == t);
+        }
         if !has_token(used, &t) {
             let ghost o = out@;
             out.push(CidUpdate::RemoveToken(t));
             proof {
                 assert(out@[o.len() as int] == CidUpdate::RemoveToken(t));
+                assert forall|k: int| s0.len() <= k < out@.len() implies (
+                #[trigger] out@[k] matches CidUpdate::RemoveToken(x) && reg@.contains(x)
+                    && !used@.contains(x)) by {
+                    if k < o.len() {
+                        assert(out@[k] == o[k]);
+                    }
+                }
                 assert forall|k: int|
-                    0 <= k < i + 1 && !used@.contains(reg@[k]) implies out@.contains(
-                    CidUpdate::RemoveToken(#[trigger] reg@[k]),
-                ) by {
+                    0 <= k < i + 1 && !used@.contains(reg@[k]) implies exists|w: int|
+                    s0.len() <= w < out@.len() && #[trigger] out@[w] == CidUpdate::RemoveToken(
+                        #[trigger] reg@[k],
+                    ) by {
                     if k < i {
                         let w = choose|w: int|
-                            0 <= w < o.len() && o[w] == CidUpdate::RemoveToken(reg@[k]);
+                            s0.len() <= w < o.len() && #[trigger] o[w] == CidUpdate::RemoveToken(
+                                reg@[k],
+                            );
                         assert(out@[w] == o[w]);
+                    } else {
+                        assert(out@[o.len() as int] == CidUpdate::RemoveToken(reg@[k]));
                     }
                 }
             }
@@ -1097,17 +1206,20 @@ fn push_removes(reg: &Vec<[u8; 16]>, used: &Vec<[u8; 16]>, out: &mut Vec<CidUpda
     }
 }
 
-/// An `AddToken` for every token of `used` that `reg` lacks.
+/// An `AddToken` for every token of `used` that `reg` lacks, and for no other.
+#[verifier::spinoff_prover]
 fn push_adds(reg: &Vec<[u8; 16]>, used: &Vec<[u8; 16]>, out: &mut Vec<CidUpdate>)
     ensures
         final(out)@.len() >= old(out)@.len(),
         forall|i: int| 0 <= i < old(out)@.len() ==> #[trigger] final(out)@[i] == old(out)@[i],
         forall|i: int|
-            old(out)@.len() <= i < final(out)@.len() ==> #[trigger] final(out)@[i] is AddToken,
+            old(out)@.len() <= i < final(out)@.len() ==> (
+            #[trigger] final(out)@[i] matches CidUpdate::AddToken(t) && used@.contains(t)
+                && !reg@.contains(t)),
         forall|i: int|
-            0 <= i < used@.len() && !reg@.contains(used@[i]) ==> final(out)@.contains(
-                CidUpdate::AddToken(#[trigger] used@[i]),
-            ),
+            0 <= i < used@.len() && !reg@.contains(used@[i]) ==> exists|w: int|
+                old(out)@.len() <= w < final(out)@.len() && #[trigger] final(out)@[w]
+                    == CidUpdate::AddToken(#[trigger] used@[i]),
 {
     let ghost s0 = out@;
     let mut i: usize = 0;
@@ -1116,27 +1228,45 @@ fn push_adds(reg: &Vec<[u8; 16]>, used: &Vec<[u8; 16]>, out: &mut Vec<CidUpdate>
             i <= used@.len(),
             out@.len() >= s0.len(),
             forall|k: int| 0 <= k < s0.len() ==> #[trigger] out@[k] == s0[k],
-            forall|k: int| s0.len() <= k < out@.len() ==> #[trigger] out@[k] is AddToken,
             forall|k: int|
-                0 <= k < i && !reg@.contains(used@[k]) ==> out@.contains(
-                    CidUpdate::AddToken(#[trigger] used@[k]),
-                ),
+                s0.len() <= k < out@.len() ==> (#[trigger] out@[k] matches CidUpdate::AddToken(t)
+                    && used@.contains(t) && !reg@.contains(t)),
+            forall|k: int|
+                0 <= k < i && !reg@.contains(used@[k]) ==> exists|w: int|
+                    s0.len() <= w < out@.len() && #[trigger] out@[w] == CidUpdate::AddToken(
+                        #[trigger] used@[k],
+                    ),
         decreases used@.len() - i,
     {
         let t = used[i];
+        proof {
+            assert(used@[i as int] == t);
+        }
         if !has_token(reg, &t) {
             let ghost o = out@;
             out.push(CidUpdate::AddToken(t));
             proof {
                 assert(out@[o.len() as int] == CidUpdate::AddToken(t));
+                assert forall|k: int| s0.len() <= k < out@.len() implies (
+                #[trigger] out@[k] matches CidUpdate::AddToken(x) && used@.contains(x)
+                    && !reg@.contains(x)) by {
+                    if k < o.len() {
+                        assert(out@[k] == o[k]);
+                    }
+                }
                 assert forall|k: int|
-                    0 <= k < i + 1 && !reg@.contains(used@[k]) implies out@.contains(
-                    CidUpdate::AddToken(#[trigger] used@[k]),
-                ) by {
+                    0 <= k < i + 1 && !reg@.contains(used@[k]) implies exists|w: int|
+                    s0.len() <= w < out@.len() && #[trigger] out@[w] == CidUpdate::AddToken(
+                        #[trigger] used@[k],
+                    ) by {
                     if k < i {
                         let w = choose|w: int|
-                            0 <= w < o.len() && o[w] == CidUpdate::AddToken(used@[k]);
+                            s0.len() <= w < o.len() && #[trigger] o[w] == CidUpdate::AddToken(
+                                used@[k],
+                            );
                         assert(out@[w] == o[w]);
+                    } else {
+                        assert(out@[o.len() as int] == CidUpdate::AddToken(used@[k]));
                     }
                 }
             }

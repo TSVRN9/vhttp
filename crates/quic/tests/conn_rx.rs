@@ -142,6 +142,37 @@ fn tls_calls_after_close() {
     assert_eq!(c.close_info(), &Some((false, 0x08, vec![])));
 }
 
+#[test]
+fn tls_alert_closes() {
+    let mut c = conn();
+    c.on_tls_alert(0x78, 1);
+    assert_eq!(c.phase(), Phase::Closing);
+    assert_eq!(c.close_info(), &Some((false, 0x178, vec![])));
+    assert!(!c.streams_live());
+}
+
+#[test]
+fn complete_without_peer_params() {
+    let mut c = conn();
+    c.on_handshake_complete(b"h3", 1, &rnd(2));
+    assert_eq!(c.phase(), Phase::Closing);
+    assert_eq!(c.close_info(), &Some((false, 0x01, vec![])));
+    assert!(!c.handshake_complete());
+}
+
+#[test]
+fn crypto_write_gated() {
+    let mut c = conn();
+    c.crypto_write(PacketKind::Handshake, &[1; 10]);
+    assert!(c.crypto_capacity(PacketKind::Handshake) > 0);
+    let mut c = established_rx();
+    c.crypto_write(PacketKind::Initial, &[1; 10]);
+    assert_eq!(c.crypto_capacity(PacketKind::Initial), 0);
+    let mut c = peer_params_failed();
+    c.crypto_write(PacketKind::Handshake, &[1; 10]);
+    assert_eq!(c.crypto_capacity(PacketKind::Handshake), 0);
+}
+
 // The handshake path of `established_with`, which later tasks build on. Peer limit 4 and our cap
 // of 4 active CIDs mean three more CIDs, from the first three slices of `rnd(2)`.
 #[test]
