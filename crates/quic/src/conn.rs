@@ -2199,6 +2199,20 @@ impl Connection {
         Ok(())
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
+    //# This requirement MUST NOT be enforced by the endpoint that initiates
+    //# path validation, as that would enable an attack on migration; see
+    //# Section 9.3.3.
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.1
+    //# To ensure that the path MTU is large enough, the endpoint
+    //# MUST perform a second path validation by sending a PATH_CHALLENGE
+    //# frame in a datagram of at least 1200 bytes.
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.3
+    //# However, the endpoint MUST initiate
+    //# another path validation with an expanded datagram to verify that the
+    //# path supports the required MTU.
     /// PATH_RESPONSE: §9.4's congestion reset only for a newly validated address (not an MTU probe's
     /// answer, nor §9.3.3's recheck of the old path), then an MTU probe if the path needs one.
     #[verifier::spinoff_prover]
@@ -2264,6 +2278,10 @@ impl Connection {
         r
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.1
+    //# The endpoint MUST use unpredictable data in every PATH_CHALLENGE
+    //# frame so that it can associate the peer's response with the
+    //# corresponding PATH_CHALLENGE.
     /// The next unused challenge slice of `rand`: never reused within a call, since `on_response`
     /// ignores the arrival path (§8.2.2) and distinct data is what ties a response to its path
     /// (§8.2.1). None once all four are used.
@@ -3253,6 +3271,7 @@ impl Connection {
         &&& out_packet_wf(p, self.sent(k).largest_acked_spec())
         &&& out_packet_len(p) <= room + self.header_bytes_spec(k) + p.pn_len + AEAD_TAG_LEN + 3
         &&& ack_ok(p.frames, self.recv(k))
+        &&& no_path_frames(p.frames)
     }
 
     fn sent_ref(&self, k: PacketKind) -> (r: &SentPackets)
@@ -4276,6 +4295,7 @@ impl Connection {
             final(self).out_log() == old(self).out_log().push(d@),
             final(self).sends_only_logged(*old(self)),
             final(self).lc == old(self).lc,
+            final(self).paths_charged(*old(self), q),
     {
         let ghost s0 = *self;
         let n = datagram_len(d);
@@ -4287,6 +4307,16 @@ impl Connection {
             lemma_pn_step(s0.out_log@, d@, PacketKind::Handshake, s0.sent(PacketKind::Handshake).next_pn_spec());
             lemma_pn_step(s0.out_log@, d@, PacketKind::OneRtt, s0.sent(PacketKind::OneRtt).next_pn_spec());
         }
+    }
+
+    /// `self`'s paths are `o`'s with `q` charged for a datagram: its budget and trace, nothing else.
+    closed spec fn paths_charged(&self, o: Connection, q: PathId) -> bool {
+        &&& kept(o.paths, self.paths, q)
+        &&& self.paths.path(q).dcid == o.paths.path(q).dcid
+        &&& self.paths.path(q).peer_used == o.paths.path(q).peer_used
+        &&& self.paths.path(q).responses == o.paths.path(q).responses
+        &&& self.paths.path(q).responses_taken == o.paths.path(q).responses_taken
+        &&& self.paths.path(q).challenge == o.paths.path(q).challenge
     }
 
     /// Only the path's budget and the log differ.
@@ -4387,6 +4417,8 @@ impl Connection {
         &&& out_packet_wf(p, self.sent(p.kind).largest_acked_spec())
         &&& self.sent(p.kind).next_pn_spec() <= p.pn
         &&& p.dcid == self.tx_dcid()
+        &&& p.kind is OneRtt ==> self.complete
+        &&& no_path_frames(p.frames)
         &&& forall|j: int|
             0 <= j < p.frames.len() ==> (#[trigger] p.frames[j] matches SpecFrame::Ack(a) ==> forall|pn: u64|
                 #[trigger] ack_contains(a, pn) ==> self.recv(p.kind).seen().contains(pn))
@@ -4485,6 +4517,7 @@ impl Connection {
             p.dcid == c.space_dcid(p.kind),
             out_packet_wf(p, c.sent(p.kind).largest_acked_spec()),
             ack_ok(p.frames, c.recv(p.kind)),
+            no_path_frames(p.frames),
             self.paths == c.paths,
             self.ids == c.ids,
             self.lc == c.lc,
@@ -4642,10 +4675,16 @@ impl Connection {
             forall|j: PacketKind| #[trigger] self.sent(j) == c.sent(j),
             forall|j: PacketKind| #[trigger] self.recv(j) == c.recv(j),
             self.complete == c.complete,
+            o.wf(),
+            self.wf(),
+            d.path == o.paths.active_spec(),
+            self.paths_charged(c, d.path),
         ensures
             transmit_ok(o, *self, d),
             same_dcid(d),
+            self.path_rules(o, d),
     {
+        self.lemma_built_rules(c, o, d);
         assert forall|i: int| 0 <= i < d.packets.len() implies out_packet_wf(
             #[trigger] d.packets[i],
             self.sent(d.packets[i].kind).largest_acked_spec(),
@@ -4683,9 +4722,100 @@ impl Connection {
         }
     }
 
+    /// P12-P14 of a datagram from the data or close builders: on the active path, no PATH frame.
+    proof fn lemma_built_rules(&self, c: Connection, o: Connection, d: SpecOutDatagram)
+        requires
+            c.built_ok(o, d.packets),
+            o.wf(),
+            self.wf(),
+            d.path == o.paths.active_spec(),
+            self.paths_charged(c, d.path),
+        ensures
+            self.path_rules(o, d),
+    {
+        o.paths.lemma_wf();
+        assert(self.paths.has(d.path)) by {
+            assert(o.paths.has(d.path));
+        }
+        assert forall|i: int, j: int|
+            0 <= i < d.packets.len() && 0 <= j < d.packets[i].frames.len() implies !(#[trigger] d.packets[i].frames[j]
+            is PathChallenge) && !(d.packets[i].frames[j] is PathResponse) by {
+            assert(o.packet_built(d.packets[i]));
+        }
+        assert(self.dcid_unshared(d)) by {
+            assert(o.paths.path(d.path).dcid is Some);
+            assert forall|i: int| 0 <= i < d.packets.len() && #[trigger] d.packets[i].kind is OneRtt implies self.dcid_held(
+                d.path,
+                d.packets[i].dcid,
+            ) by {
+                assert(o.packet_built(d.packets[i]));
+                assert(self.paths.path(d.path).dcid == o.paths.path(d.path).dcid);
+                self.lemma_held(d.path, d.packets[i].dcid);
+            }
+        }
+    }
+
+    /// §9.5 for a path holding `c`: the pair conjunct of `wf_dcids`.
+    proof fn lemma_held(&self, q: PathId, c: Seq<u8>)
+        requires
+            self.wf(),
+            self.paths.has(q),
+            self.paths.path(q).dcid == Some(c),
+        ensures
+            self.dcid_held(q, c),
+    {
+    }
+
     /// Whether `paths.mtu_failed` holds for `q`.
     pub closed spec fn mtu_failed_at(&self, q: PathId) -> bool {
         self.paths.mtu_failed_spec(q)
+    }
+
+    /// How many bytes path `q` may be sent.
+    pub closed spec fn budget_at(&self, q: PathId) -> u64 {
+        self.paths.budget_spec(q)
+    }
+
+    /// P12 (§8.2.2): every PATH_RESPONSE in `d` is the oldest response `o` owed on `d`'s path, now
+    /// moved to the taken ones. `wf` keeps the taken ones and the owed ones, in order, a subsequence
+    /// of the challenges received on the path, so each echoes one challenge, once.
+    pub closed spec fn responses_echoed(&self, o: Connection, d: SpecOutDatagram) -> bool {
+        forall|i: int, j: int|
+            0 <= i < d.packets.len() && 0 <= j < d.packets[i].frames.len() ==> (#[trigger] d.packets[i].frames[j] matches SpecFrame::PathResponse(
+                x,
+            ) ==> {
+                let a = o.paths.path(d.path);
+                let b = self.paths.path(d.path);
+                &&& a.responses.len() > 0
+                &&& x == a.responses[0]@
+                &&& b.responses == a.responses.drop_first()
+                &&& b.responses_taken == a.responses_taken.push(a.responses[0])
+            })
+    }
+
+    /// Path `q` holds DCID `c`, and any other path holding `c` has the `peer_used` `q` has.
+    closed spec fn dcid_held(&self, q: PathId, c: Seq<u8>) -> bool {
+        &&& self.paths.path(q).dcid == Some(c)
+        &&& forall|r: PathId|
+            #[trigger] self.paths.has(r) && r != q && self.paths.path(r).dcid == Some(c)
+                ==> self.paths.path(r).peer_used == self.paths.path(q).peer_used
+    }
+
+    /// P14 (§9.5), per state, at this send: a 1-RTT packet of `d` goes under the DCID `d`'s path
+    /// holds, shared only as the NAT-rebinding MAY allows.
+    pub closed spec fn dcid_unshared(&self, d: SpecOutDatagram) -> bool {
+        forall|i: int|
+            0 <= i < d.packets.len() && #[trigger] d.packets[i].kind is OneRtt ==> self.dcid_held(
+                d.path,
+                d.packets[i].dcid,
+            )
+    }
+
+    /// P12-P14 together, `o` the connection before the datagram and `self` after.
+    closed spec fn path_rules(&self, o: Connection, d: SpecOutDatagram) -> bool {
+        &&& self.responses_echoed(o, d)
+        &&& path_expanded(d, o.budget_at(d.path))
+        &&& self.dcid_unshared(d)
     }
 
     /// `self` is `o` after a close of `n` bytes, sent as `o`'s closing state allowed: the first
@@ -4831,6 +4961,42 @@ impl Connection {
         }
     }
 
+    /// Pads the packets built so far to 1200 bytes.
+    #[verifier::spinoff_prover]
+    fn pad_built(&self, d: &mut OutDatagram, Ghost(o): Ghost<Connection>)
+        requires
+            self.built_ok(o, old(d)@.packets),
+            1 <= old(d)@.packets.len() <= 3,
+            out_datagram_sized(old(d)@),
+            out_datagram_len(old(d)@) <= MIN_INITIAL_DATAGRAM,
+            polled_placed(self.polled@, old(d)@),
+        ensures
+            final(d)@.path == old(d)@.path,
+            final(d)@.packets.len() == old(d)@.packets.len(),
+            self.built_ok(o, final(d)@.packets),
+            out_datagram_sized(final(d)@),
+            out_datagram_len(final(d)@) == MIN_INITIAL_DATAGRAM,
+            polled_placed(self.polled@, final(d)@),
+            has_eliciting_initial(final(d)@.packets) == has_eliciting_initial(old(d)@.packets),
+    {
+        let ghost s = d@.packets;
+        let ghost placed = self.polled@;
+        pad_datagram(d, MIN_INITIAL_DATAGRAM);
+        proof {
+            let s2 = d@.packets;
+            let i = choose|i: int|
+                #![trigger s2[i]]
+                0 <= i < s.len() && s2 == s.update(i, padded(s[i], (s2[i].padding - s[i].padding) as nat))
+                    && s2[i].padding >= s[i].padding;
+            self.lemma_built_padded(o, s, s2, i, (s2[i].padding - s[i].padding) as nat);
+            assert forall|m: int| 0 <= m < placed.len() implies frame_in_datagram(d@, #[trigger] placed[m]) by {
+                let (x, y) = choose|x: int, y: int|
+                    0 <= x < s.len() && 0 <= y < s[x].frames.len() && #[trigger] s[x].frames[y] == placed[m];
+                assert(s2[x].frames[y] == s[x].frames[y]);
+            }
+        }
+    }
+
     /// The ordinary datagram of the Open state: a packet of each space with something due.
     #[verifier::spinoff_prover]
     fn data_datagram(&mut self, now: u64, Ghost(o): Ghost<Connection>) -> (r: Option<OutDatagram>)
@@ -4854,6 +5020,7 @@ impl Connection {
                 &&& initial_padded(d@)
                 &&& same_dcid(d@)
                 &&& !o.mtu_failed_at(d@.path)
+                &&& final(self).path_rules(o, d@)
             },
     {
         // ponytail: one datagram per call (the shell loops), one CRYPTO frame per space per packet.
@@ -4920,22 +5087,7 @@ impl Connection {
         //# size of 1200 bytes by adding PADDING frames to the Initial packet or
         //# by coalescing the Initial packet; see Section 12.2.
         if pad {
-            let ghost s = d@.packets;
-            let ghost placed = self.polled@;
-            pad_datagram(&mut d, MIN_INITIAL_DATAGRAM);
-            proof {
-                let s2 = d@.packets;
-                let i = choose|i: int|
-                    #![trigger s2[i]]
-                    0 <= i < s.len() && s2 == s.update(i, padded(s[i], (s2[i].padding - s[i].padding) as nat))
-                        && s2[i].padding >= s[i].padding;
-                self.lemma_built_padded(o, s, s2, i, (s2[i].padding - s[i].padding) as nat);
-                assert forall|m: int| 0 <= m < placed.len() implies frame_in_datagram(d@, #[trigger] placed[m]) by {
-                    let (x, y) = choose|x: int, y: int|
-                        0 <= x < s.len() && 0 <= y < s[x].frames.len() && #[trigger] s[x].frames[y] == placed[m];
-                    assert(s2[x].frames[y] == s[x].frames[y]);
-                }
-            }
+            self.pad_built(&mut d, Ghost(o));
         }
         proof {
             self.lemma_built_fresh(o, d@.packets);
@@ -4950,9 +5102,9 @@ impl Connection {
         Some(d)
     }
 
-    /// The packet number length a close in space `k` takes; None if the space cannot number one.
+    /// The packet number length the next packet of space `k` takes; None if the space cannot number one.
     #[verifier::spinoff_prover]
-    fn close_pn_len(&self, k: PacketKind) -> (r: Option<u8>)
+    fn next_pn_len(&self, k: PacketKind) -> (r: Option<u8>)
         requires
             self.wf(),
         ensures
@@ -5091,7 +5243,7 @@ impl Connection {
             decreases spaces@.len() - j,
         {
             let k = spaces[j];
-            let n = match self.close_pn_len(k) {
+            let n = match self.next_pn_len(k) {
                 Some(n) => n,
                 None => return None,
             };
@@ -5169,6 +5321,10 @@ impl Connection {
                     ==> i == 0 && ack_full(a, c.recv(k))) by {
                     assert(i == 0);
                 }
+                assert forall|i: int| 0 <= i < v.frames.len() implies !(#[trigger] v.frames[i] is PathChallenge) && !(
+                v.frames[i] is PathResponse) by {
+                    assert(i == 0);
+                }
                 self.lemma_built_push(c, o, s.take(j as int), v);
                 assert(s.take(j as int + 1) =~= s.take(j as int).push(v));
                 assert forall|i: int| j + 1 <= i < s.len() implies self.sent(#[trigger] spaces@[i]).next_pn_spec()
@@ -5210,6 +5366,7 @@ impl Connection {
                 &&& only_close(d@)
                 &&& same_dcid(d@)
                 &&& final(self).close_sent(o, out_datagram_len(d@))
+                &&& final(self).path_rules(o, d@)
             },
     {
         proof {
@@ -5289,10 +5446,408 @@ impl Connection {
         Some(d)
     }
 
-    /// PATH_RESPONSE and PATH_CHALLENGE datagrams (§8.2.2: never delayed). Task 2b writes the body;
-    /// a None with the connection still Open must leave what `tx_kept` reads alone.
+    /// The length of the 1-RTT packet of PATH frames owed on `q`, with packet number length `n`.
+    closed spec fn path_packet_len(&self, q: PathId, n: nat) -> nat {
+        let p = self.paths.path(q);
+        (1 + p.dcid->0.len() + n + 9 * ((if p.responses.len() > 0 {
+            1int
+        } else {
+            0
+        }) + (if p.owed {
+            1int
+        } else {
+            0
+        })) + AEAD_TAG_LEN) as nat
+    }
+
+    /// The first path in table order with a PATH frame owed, a DCID to send it under, and room for it:
+    /// the path, whether to expand to 1200, and the packet number length, which is None if the next
+    /// packet number cannot be encoded. Skipped paths keep what they are owed.
     #[verifier::spinoff_prover]
-    fn build_path_datagram(&mut self, _now: u64, Ghost(o): Ghost<Connection>) -> (r: Option<OutDatagram>)
+    fn choose_path(&self) -> (r: Option<(PathId, bool, Option<u8>)>)
+        requires
+            self.wf(),
+        ensures
+            r matches Some((q, padded, Some(n))) ==> {
+                &&& self.paths.has(q)
+                &&& self.paths.path(q).dcid is Some
+                &&& self.paths.path(q).responses.len() > 0 || self.paths.path(q).owed
+                &&& self.sent(PacketKind::OneRtt).next_pn_spec() < PN_MAX
+                &&& min_pn_len(
+                    self.sent(PacketKind::OneRtt).next_pn_spec(),
+                    self.sent(PacketKind::OneRtt).largest_acked_spec(),
+                    n as nat,
+                )
+                &&& padded == (self.paths.budget_spec(q) >= 1200)
+                &&& !padded ==> self.path_packet_len(q, n as nat) <= self.paths.budget_spec(q)
+                &&& self.paths.mtu_failed_spec(q) ==> padded
+            },
+    {
+        let n = self.paths.len();
+        let mut i: usize = 0;
+        while i < n
+            invariant
+                self.wf(),
+                n == self.paths.ids().len(),
+                i <= n,
+            decreases n - i,
+        {
+            let q = self.path_at(i);
+            i += 1;
+            let resp = self.paths.has_response(q);
+            let chal = self.paths.challenge_owed(q);
+            // §9.5: no DCID, nothing sent; there is no fallback to another CID.
+            let dlen = match self.paths.dcid(q) {
+                Some(c) => c.len(),
+                None => continue,
+            };
+            if !resp && !chal {
+                continue;
+            }
+            let pn_len = match self.next_pn_len(PacketKind::OneRtt) {
+                Some(l) => l,
+                None => return Some((q, false, None)),
+            };
+            proof {
+                self.paths.lemma_wf();
+                assert(path_ok(self.paths.path(q)));
+            }
+            let b = self.paths.budget(q);
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.1
+            //# An endpoint MUST expand datagrams that contain a PATH_CHALLENGE frame
+            //# to at least the smallest allowed maximum datagram size of 1200 bytes,
+            //# unless the anti-amplification limit for the path does not permit
+            //# sending a datagram of this size.
+            //
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
+            //# An endpoint MUST expand datagrams that contain a PATH_RESPONSE frame
+            //# to at least the smallest allowed maximum datagram size of 1200 bytes.
+            //
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
+            //# However, an endpoint MUST NOT expand the
+            //# datagram containing the PATH_RESPONSE if the resulting data exceeds
+            //# the anti-amplification limit.
+            let padded = b >= MIN_INITIAL_DATAGRAM as u64;
+            let frames: usize = (if resp { 1 } else { 0 }) + (if chal { 1 } else { 0 });
+            let len = 1 + dlen + pn_len as usize + 9 * frames + AEAD_TAG_LEN;
+            // P17: a failed path is Validated, so `padded` holds there short of 2^64 bytes sent. Nothing
+            // in `wf` says so, hence the guard.
+            if padded || (len as u64 <= b && !self.paths.mtu_failed(q)) {
+                return Some((q, padded, Some(pn_len)));
+            }
+        }
+        None
+    }
+
+    /// The frames owed on `q`: its oldest response and its owed challenge, taken.
+    #[verifier::spinoff_prover]
+    fn take_path_frames(&mut self, q: PathId, padded: bool) -> (r: Vec<Frame>)
+        requires
+            old(self).wf(),
+            old(self).paths.has(q),
+        ensures
+            final(self).wf(),
+            *final(self) == (Connection { paths: final(self).paths, ..*old(self) }),
+            kept(old(self).paths, final(self).paths, q),
+            ({
+                let a = old(self).paths.path(q);
+                let b = final(self).paths.path(q);
+                &&& b.dcid == a.dcid
+                &&& b.peer_used == a.peer_used
+                &&& b.budget == a.budget
+                &&& a.responses.len() > 0 ==> b.responses == a.responses.drop_first() && b.responses_taken
+                    == a.responses_taken.push(a.responses[0])
+                &&& a.owed ==> b.challenge is Some && b.challenge.unwrap().2 == padded
+                &&& r@.len() == (if a.responses.len() > 0 { 1int } else { 0 }) + (if a.owed { 1int } else { 0 })
+                &&& path_frames_ok(frames_view(r@))
+                &&& forall|j: int|
+                    0 <= j < r@.len() ==> (#[trigger] frames_view(r@)[j] matches SpecFrame::PathResponse(x)
+                        ==> a.responses.len() > 0 && x == a.responses[0]@)
+            }),
+    {
+        let ghost s0 = *self;
+        let mut fs: Vec<Frame> = Vec::new();
+        proof {
+            assert(frames_view(fs@) =~= Seq::<SpecFrame>::empty());
+        }
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
+        //# On receiving a PATH_CHALLENGE frame, an endpoint MUST respond by
+        //# echoing the data contained in the PATH_CHALLENGE frame in a
+        //# PATH_RESPONSE frame.
+        //
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
+        //# An endpoint MUST NOT send more than one PATH_RESPONSE frame in
+        //# response to one PATH_CHALLENGE frame; see Section 13.3.
+        if let Some(x) = self.paths.take_response(q) {
+            let f = Frame::PathResponse(x);
+            let ghost g = f@;
+            fs.push(f);
+            proof {
+                assert(frames_view(fs@) =~= Seq::<SpecFrame>::empty().push(g));
+                lemma_path_frame_push(Seq::<SpecFrame>::empty(), g);
+            }
+        }
+        let ghost v1 = frames_view(fs@);
+        if let Some(y) = self.paths.take_challenge(q, padded) {
+            let f = Frame::PathChallenge(y);
+            let ghost g = f@;
+            fs.push(f);
+            proof {
+                assert(frames_view(fs@) =~= v1.push(g));
+                lemma_path_frame_push(v1, g);
+                assert(g is PathChallenge);
+                assert(frames_view(fs@)[v1.len() as int] == g);
+            }
+        }
+        proof {
+            self.lemma_path_edit(s0, q);
+            self.lemma_dcids_same(s0, q);
+        }
+        fs
+    }
+
+    /// The 1-RTT packet of `fs` on `q`, under `q`'s DCID. Its packet number is not taken yet.
+    #[verifier::spinoff_prover]
+    fn path_packet(&self, q: PathId, fs: Vec<Frame>, pn_len: u8) -> (p: OutPacket)
+        requires
+            self.wf(),
+            self.paths.has(q),
+            self.paths.path(q).dcid is Some,
+            1 <= fs@.len() <= 2,
+            path_frames_ok(frames_view(fs@)),
+            min_pn_len(self.sent(PacketKind::OneRtt).next_pn_spec(), self.sent(PacketKind::OneRtt).largest_acked_spec(), pn_len as nat),
+        ensures
+            p@.kind is OneRtt,
+            p@.pn == self.sent(PacketKind::OneRtt).next_pn_spec(),
+            Some(p@.dcid) == self.paths.path(q).dcid,
+            p@.frames == frames_view(fs@),
+            p@.pn_len == pn_len,
+            p@.padding == 0,
+            out_packet_wf(p@, self.sent(PacketKind::OneRtt).largest_acked_spec()),
+            out_packet_len(p@) == 1 + p@.dcid.len() + pn_len + 9 * fs@.len() + AEAD_TAG_LEN,
+    {
+        proof {
+            self.paths.lemma_wf();
+            assert(path_ok(self.paths.path(q)));
+            self.sent(PacketKind::OneRtt).lemma_wf();
+        }
+        let dcid = match self.paths.dcid(q) {
+            Some(d) => slice_to_vec(d),
+            None => {
+                proof {
+                    assert(false);
+                }
+                Vec::new()
+            },
+        };
+        let ghost frames = frames_view(fs@);
+        let p = OutPacket {
+            kind: PacketKind::OneRtt,
+            dcid,
+            scid: Vec::new(),
+            pn: self.sent_1.next_pn(),
+            pn_len,
+            frames: fs,
+            padding: 0,
+            spin: self.spin,
+        };
+        proof {
+            assert(p@.frames == frames);
+        }
+        p
+    }
+
+    /// The one packet `p` of `d`, numbered `o`'s next, is fresh once `self` has taken its number.
+    proof fn lemma_one_fresh(&self, o: Connection, d: SpecOutDatagram, p: SpecOutPacket)
+        requires
+            o.wf(),
+            d.packets == seq![p],
+            p.kind is OneRtt,
+            p.pn == o.sent_1.next_pn_spec(),
+            self.sent_1.next_pn_spec() == p.pn + 1,
+            self.out_log@ == o.out_log@,
+        ensures
+            forall|k: PacketKind|
+                #[trigger] pns_fresh(log_pns(self.out_log@, k), packets_pns(d.packets, k), self.sent(k).next_pn_spec()),
+    {
+        let s = d.packets;
+        assert(o.wf_pn());
+        assert forall|k: PacketKind|
+            #[trigger] pns_fresh(log_pns(self.out_log@, k), packets_pns(s, k), self.sent(k).next_pn_spec()) by {
+            let l = log_pns(self.out_log@, k);
+            let b = packets_pns(s, k);
+            lemma_one_packet(p, k);
+            if k is OneRtt {
+                assert(pns_ok(l, o.sent_1.next_pn_spec()));
+                assert forall|i: int, j: int| 0 <= i < l.len() && 0 <= j < b.len() implies #[trigger] l[i] < #[trigger] b[j] by {
+                    assert(b[j] == p.pn);
+                    assert(l[i] < o.sent_1.next_pn_spec());
+                }
+            }
+        }
+    }
+
+    /// `transmit_ok` and the shape of a one-packet datagram of PATH frames.
+    proof fn lemma_one_sent(&self, o: Connection, d: SpecOutDatagram, p: SpecOutPacket)
+        requires
+            d.packets == seq![p],
+            out_datagram_len(d) <= MAX_DATAGRAM,
+            p.kind is OneRtt,
+            p.pn == o.sent_1.next_pn_spec(),
+            out_packet_wf(p, o.sent_1.largest_acked_spec()),
+            forall|j: int|
+                0 <= j < p.frames.len() ==> #[trigger] p.frames[j] is PathResponse || p.frames[j] is PathChallenge,
+            self.sent_1.next_pn_spec() == p.pn + 1,
+            self.sent_1.largest_acked_spec() == o.sent_1.largest_acked_spec(),
+        ensures
+            transmit_ok(o, *self, d),
+            same_dcid(d),
+            initial_padded(d),
+    {
+        let s = d.packets;
+        assert(forall|i: int| 0 <= i < s.len() ==> i == 0 && #[trigger] s[i] == p);
+        assert forall|k: PacketKind| #[trigger] pns_ok(packets_pns(s, k), self.sent(k).next_pn_spec()) by {
+            lemma_one_packet(p, k);
+        }
+        if has_eliciting_initial(s) {
+            let (a, b) = choose|a: int, b: int|
+                0 <= a < s.len() && s[a].kind is Initial && 0 <= b < s[a].frames.len() && ack_eliciting(
+                    spec_frame_type(#[trigger] s[a].frames[b]),
+                );
+            assert(s[a] == p);
+        }
+    }
+
+    /// Takes the frames owed on `q`, builds their packet and commits it. `q`'s budget was checked by
+    /// `choose_path`, before anything was taken.
+    #[verifier::spinoff_prover]
+    fn send_path_datagram(&mut self, q: PathId, expand: bool, pn_len: u8, Ghost(o): Ghost<Connection>) -> (d: OutDatagram)
+        requires
+            o.wf(),
+            old(self).wf(),
+            old(self).polled@.len() == 0,
+            old(self).tx_kept(o),
+            old(self).paths.has(q),
+            old(self).paths.path(q).dcid is Some,
+            old(self).paths.path(q).responses.len() > 0 || old(self).paths.path(q).owed,
+            old(self).sent(PacketKind::OneRtt).next_pn_spec() < PN_MAX,
+            min_pn_len(
+                old(self).sent(PacketKind::OneRtt).next_pn_spec(),
+                old(self).sent(PacketKind::OneRtt).largest_acked_spec(),
+                pn_len as nat,
+            ),
+            expand == (old(self).paths.budget_spec(q) >= 1200),
+            !expand ==> old(self).path_packet_len(q, pn_len as nat) <= old(self).paths.budget_spec(q),
+            old(self).paths.mtu_failed_spec(q) ==> expand,
+        ensures
+            final(self).wf(),
+            final(self).polled@.len() == 0,
+            final(self).out_log() == old(self).out_log().push(d@),
+            d@.path == q,
+            transmit_ok(o, *final(self), d@),
+            initial_padded(d@),
+            same_dcid(d@),
+            o.mtu_failed_at(q) ==> mtu_failed_frames(d@) && out_datagram_len(d@) == 1200,
+            final(self).path_rules(o, d@),
+            only_path_frames(d@),
+            // §8.2.3: only a sent challenge's real size can validate the MTU.
+            o.paths.path(q).owed ==> final(self).paths.path(q).challenge is Some
+                && final(self).paths.path(q).challenge.unwrap().2 == (out_datagram_len(d@) == 1200),
+    {
+        let ghost s0 = *self;
+        let fs = self.take_path_frames(q, expand);
+        let ghost sf = frames_view(fs@);
+        let ghost s1 = *self;
+        let p = self.path_packet(q, fs, pn_len);
+        let ghost v = p@;
+        let mut ps: Vec<OutPacket> = Vec::new();
+        ps.push(p);
+        let mut d = OutDatagram { path: q, packets: ps };
+        proof {
+            assert(d@.packets =~= seq![v]);
+            lemma_one_packet(v, v.kind);
+        }
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.3
+        //# However, the endpoint MUST initiate
+        //# another path validation with an expanded datagram to verify that the
+        //# path supports the required MTU.
+        if expand {
+            pad_datagram(&mut d, MIN_INITIAL_DATAGRAM);
+        }
+        let ghost w = d@.packets[0];
+        proof {
+            assert(d@.packets =~= seq![w]);
+            let la = s1.sent_1.largest_acked_spec();
+            if expand {
+                let i = choose|i: int|
+                    #![trigger d@.packets[i]]
+                    0 <= i < seq![v].len() && d@.packets == seq![v].update(
+                        i,
+                        padded(seq![v][i], (d@.packets[i].padding - seq![v][i].padding) as nat),
+                    ) && d@.packets[i].padding >= seq![v][i].padding;
+                assert(i == 0);
+                assert(seq![v][0] == v);
+                assert(out_packet_wf(seq![v][0], la));
+                assert(out_packet_wf(d@.packets[0], la));
+            }
+        }
+        self.commit_pn(PacketKind::OneRtt);
+        proof {
+            self.lemma_one_fresh(s1, d@, w);
+        }
+        let ghost c = *self;
+        self.commit_datagram(q, &d);
+        proof {
+            self.lemma_one_sent(o, d@, w);
+            s1.paths.lemma_wf();
+            assert(self.paths.has(q)) by {
+                assert(s1.paths.has(q));
+            }
+            self.lemma_held(q, w.dcid);
+            assert forall|i: int, j: int| 0 <= i < d@.packets.len() && 0 <= j < d@.packets[i].frames.len() implies #[trigger] d@.packets[i].frames[j]
+                is PathResponse || d@.packets[i].frames[j] is PathChallenge by {
+                assert(d@.packets[i] == w);
+                assert(w.frames[j] == sf[j]);
+            }
+            assert(self.responses_echoed(o, d@)) by {
+                assert forall|i: int, j: int| 0 <= i < d@.packets.len() && 0 <= j < d@.packets[i].frames.len() implies (#[trigger] d@.packets[i].frames[j] matches SpecFrame::PathResponse(
+                    x,
+                ) ==> {
+                    let a = o.paths.path(d@.path);
+                    let b = self.paths.path(d@.path);
+                    &&& a.responses.len() > 0
+                    &&& x == a.responses[0]@
+                    &&& b.responses == a.responses.drop_first()
+                    &&& b.responses_taken == a.responses_taken.push(a.responses[0])
+                }) by {
+                    assert(d@.packets[i] == w);
+                    assert(w.frames[j] == sf[j]);
+                }
+            }
+            assert(self.dcid_unshared(d@)) by {
+                assert forall|i: int| 0 <= i < d@.packets.len() && #[trigger] d@.packets[i].kind is OneRtt implies self.dcid_held(
+                    d@.path,
+                    d@.packets[i].dcid,
+                ) by {
+                    assert(d@.packets[i] == w);
+                }
+            }
+        }
+        d
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
+    //# An endpoint MUST NOT delay transmission of a
+    //# packet containing a PATH_RESPONSE frame unless constrained by
+    //# congestion control.
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
+    //# A PATH_RESPONSE frame MUST be sent on the network path where the
+    //# PATH_CHALLENGE frame was received.
+    /// PATH_RESPONSE and PATH_CHALLENGE datagrams, ahead of data: one 1-RTT packet, not recorded (E2).
+    /// A None with the connection still Open has left what `tx_kept` reads alone.
+    #[verifier::spinoff_prover]
+    fn build_path_datagram(&mut self, Ghost(o): Ghost<Connection>) -> (r: Option<OutDatagram>)
         requires
             o.wf(),
             old(self).wf(),
@@ -5311,10 +5866,26 @@ impl Connection {
                 &&& transmit_ok(o, *final(self), d@)
                 &&& initial_padded(d@)
                 &&& same_dcid(d@)
-                &&& o.mtu_failed_at(d@.path) ==> mtu_failed_frames(d@)
+                &&& o.mtu_failed_at(d@.path) ==> mtu_failed_frames(d@) && out_datagram_len(d@) == 1200
+                &&& final(self).path_rules(o, d@)
+                &&& only_path_frames(d@)
+                &&& o.paths.path(d@.path).owed ==> final(self).paths.path(d@.path).challenge is Some
+                    && final(self).paths.path(d@.path).challenge.unwrap().2 == (out_datagram_len(d@) == 1200)
             },
     {
-        None
+        // PATH frames arrive only in 1-RTT.
+        if !self.complete {
+            return None;
+        }
+        match self.choose_path() {
+            None => None,
+            Some((_, _, None)) => {
+                self.lc.close_silently();
+                self.streams = None;
+                None
+            },
+            Some((q, padded, Some(pn_len))) => Some(self.send_path_datagram(q, padded, pn_len, Ghost(o))),
+        }
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-8
@@ -5353,6 +5924,12 @@ impl Connection {
             r matches Some(d) ==> same_dcid(d@),
             // P17.
             r matches Some(d) ==> (old(self).mtu_failed_at(d@.path) ==> mtu_failed_frames(d@)),
+            // P12.
+            r matches Some(d) ==> final(self).responses_echoed(*old(self), d@),
+            // P13.
+            r matches Some(d) ==> path_expanded(d@, old(self).budget_at(d@.path)),
+            // P14.
+            r matches Some(d) ==> final(self).dcid_unshared(d@),
             // §12.3.
             old(self).phase_spec() is Open ==> forall|k: PacketKind|
                 #[trigger] old(self).live(k) && old(self).sent(k).next_pn_spec() == PN_MAX ==> r is None
@@ -5402,7 +5979,7 @@ impl Connection {
             }
         }
         let now = self.now;
-        if let Some(d) = self.build_path_datagram(now, Ghost(o)) {
+        if let Some(d) = self.build_path_datagram(Ghost(o)) {
             return Some(d);
         }
         if !matches!(self.lc.phase(), Phase::Open) {
@@ -6028,6 +6605,26 @@ pub open spec fn mtu_failed_frames(d: SpecOutDatagram) -> bool {
         }
 }
 
+/// `d`'s frames are all PATH_CHALLENGE or PATH_RESPONSE; its padding is not a frame here.
+pub open spec fn only_path_frames(d: SpecOutDatagram) -> bool {
+    forall|i: int, j: int|
+        0 <= i < d.packets.len() && 0 <= j < d.packets[i].frames.len() ==> #[trigger] d.packets[i].frames[j]
+            is PathResponse || d.packets[i].frames[j] is PathChallenge
+}
+
+/// A PATH_CHALLENGE or PATH_RESPONSE in `d`.
+pub open spec fn carries_path_frame(d: SpecOutDatagram) -> bool {
+    exists|i: int, j: int|
+        0 <= i < d.packets.len() && 0 <= j < d.packets[i].frames.len() && (#[trigger] d.packets[i].frames[j]
+            is PathChallenge || d.packets[i].frames[j] is PathResponse)
+}
+
+/// P13 (§8.2.1, §8.2.2): such a datagram is 1200 bytes, unless the path's budget, `budget` before
+/// this send, was under that.
+pub open spec fn path_expanded(d: SpecOutDatagram, budget: u64) -> bool {
+    carries_path_frame(d) ==> out_datagram_len(d) == 1200 || budget < 1200
+}
+
 /// P8: every frame in `polled` is in `d`.
 pub open spec fn polled_placed(polled: Seq<SpecFrame>, d: SpecOutDatagram) -> bool {
     forall|i: int| 0 <= i < polled.len() ==> frame_in_datagram(d, #[trigger] polled[i])
@@ -6053,8 +6650,14 @@ spec fn min_pn_len(pn: u64, la: Option<u64>, n: nat) -> bool {
 spec fn tx_frames(sf: Seq<SpecFrame>, k: PacketKind, base: int, left: nat, room: nat) -> bool {
     &&& 0 <= base <= sf.len()
     &&& frames_sendable(sf, k)
+    &&& no_path_frames(sf)
     &&& forall|i: int| base <= i < sf.len() ==> ack_eliciting(spec_frame_type(#[trigger] sf[i]))
     &&& spec_frames_bytes(sf).len() + left <= room
+}
+
+/// No PATH_CHALLENGE or PATH_RESPONSE: `build_path_datagram` is their only sender.
+spec fn no_path_frames(sf: Seq<SpecFrame>) -> bool {
+    forall|i: int| 0 <= i < sf.len() ==> !(#[trigger] sf[i] is PathChallenge) && !(sf[i] is PathResponse)
 }
 
 spec fn extends(a: Seq<SpecFrame>, b: Seq<SpecFrame>) -> bool {
@@ -6170,6 +6773,7 @@ proof fn lemma_tx_push(sf: Seq<SpecFrame>, f: SpecFrame, k: PacketKind, base: in
         frame_wf(f),
         frame_permitted(spec_frame_type(f), k),
         ack_eliciting(spec_frame_type(f)),
+        !(f is PathChallenge) && !(f is PathResponse),
         left2 + spec_frame_bytes(f).len() <= left,
     ensures
         tx_frames(sf.push(f), k, base, left2, room),
@@ -6181,6 +6785,11 @@ proof fn lemma_tx_push(sf: Seq<SpecFrame>, f: SpecFrame, k: PacketKind, base: in
         spec_frame_type(s2[i]),
         k,
     ) by {
+        if i < sf.len() {
+            assert(s2[i] == sf[i]);
+        }
+    }
+    assert forall|i: int| 0 <= i < s2.len() implies !(#[trigger] s2[i] is PathChallenge) && !(s2[i] is PathResponse) by {
         if i < sf.len() {
             assert(s2[i] == sf[i]);
         }
@@ -6259,6 +6868,14 @@ proof fn lemma_polled(s0: Streams, out0: Seq<Frame>, out1: Seq<Frame>, base: int
             assert(v1[i] == v0[i]);
         } else {
             assert(v1[i] == vn[i - n]);
+        }
+    }
+    assert forall|i: int| 0 <= i < v1.len() implies !(#[trigger] v1[i] is PathChallenge) && !(v1[i] is PathResponse) by {
+        if i < n {
+            assert(v1[i] == v0[i]);
+        } else {
+            assert(v1[i] == vn[i - n]);
+            assert(polled_rule(s0, new[i - n]@));
         }
     }
     assert forall|i: int| base <= i < v1.len() implies ack_eliciting(spec_frame_type(#[trigger] v1[i])) by {
@@ -6616,6 +7233,7 @@ fn try_place(
         frame_wf(f@),
         frame_permitted(spec_frame_type(f@), k),
         ack_eliciting(spec_frame_type(f@)),
+        !(f@ is PathChallenge) && !(f@ is PathResponse),
     ensures
         tx_frames(frames_view(final(fs)@), k, base, *final(left) as nat, room),
         extends(frames_view(old(fs)@), frames_view(final(fs)@)),
@@ -6636,6 +7254,63 @@ fn try_place(
         lemma_tx_push(sf, g, k, base, left0, room, *left as nat);
     }
     true
+}
+
+/// A datagram of the one packet `p`.
+proof fn lemma_one_packet(p: SpecOutPacket, k: PacketKind)
+    ensures
+        packets_len(seq![p]) == out_packet_len(p),
+        packets_pns(seq![p], k) == if k == p.kind {
+            seq![p.pn]
+        } else {
+            Seq::<u64>::empty()
+        },
+{
+    let s = seq![p];
+    assert(s.drop_last() =~= Seq::<SpecOutPacket>::empty());
+    assert(s.last() == p);
+    assert(packets_len(s.drop_last()) == 0);
+    assert(packets_pns(s.drop_last(), k) == Seq::<u64>::empty());
+    assert(Seq::<u64>::empty().push(p.pn) =~= seq![p.pn]);
+}
+
+/// PATH frames only, 9 bytes each.
+spec fn path_frames_ok(sf: Seq<SpecFrame>) -> bool {
+    &&& frames_sendable(sf, PacketKind::OneRtt)
+    &&& spec_frames_bytes(sf).len() == 9 * sf.len()
+    &&& forall|j: int| 0 <= j < sf.len() ==> #[trigger] sf[j] is PathResponse || sf[j] is PathChallenge
+}
+
+proof fn lemma_path_frame_push(sf: Seq<SpecFrame>, f: SpecFrame)
+    requires
+        path_frames_ok(sf),
+        f is PathChallenge || f is PathResponse,
+        frame_wf(f),
+    ensures
+        path_frames_ok(sf.push(f)),
+{
+    lemma_frames_bytes_push(sf, f);
+    lemma_path_frame_len(f);
+    let s2 = sf.push(f);
+    assert forall|j: int| 0 <= j < s2.len() implies frame_wf(#[trigger] s2[j]) && frame_permitted(
+        spec_frame_type(s2[j]),
+        PacketKind::OneRtt,
+    ) && (s2[j] is PathResponse || s2[j] is PathChallenge) by {
+        if j < sf.len() {
+            assert(s2[j] == sf[j]);
+        }
+    }
+}
+
+/// A PATH_CHALLENGE or PATH_RESPONSE is 9 bytes.
+proof fn lemma_path_frame_len(f: SpecFrame)
+    requires
+        frame_wf(f),
+        f is PathChallenge || f is PathResponse,
+    ensures
+        spec_frame_bytes(f).len() == 9,
+{
+    theorem_serialize_matches_rfc(spec_frame_type(f));
 }
 
 /// `spec_frame_bytes` of a CRYPTO frame.
