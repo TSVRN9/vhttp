@@ -43,7 +43,7 @@
     - `fn after_one_rtt(..)`, `fn assign_dcid(..)`, `fn migrate(..)`, `fn repair_pairs(..)`, `fn rewrite_stale(..)` (1b);
     - `fn on_acked_frame(&mut self, k, f: &Frame)`, `fn on_lost_frame(&mut self, k, f: &Frame)` (1a-ii); `fn discard(&mut self, k)`, `fn close_internal(&mut self, code)` (1a-i).
   - **Transmit:**
-    - `fn build_close(&mut self, now) -> Option<OutDatagram>` (2a-ii);
+    - `fn build_close(&mut self) -> Option<OutDatagram>` (2a-ii);
     - `fn build_path_datagram(&mut self, now) -> Option<OutDatagram>` (contract 2a-ii, body and strengthened ensures 2b; 3d2 preflight M11);
     - `fn build_space_packet(..)` = `collect_frames(..)` (frame sources only) then `commit_space_packet(..)` (PN, ACK and record commits) (2a-i);
     - `fn commit_datagram(&mut self, q: PathId, d: &OutDatagram)` (2a-i), the only place that calls `paths.on_sent` and pushes `out_log`.
@@ -495,7 +495,7 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
     now = max(self.now, now)
     match lc.phase():
       Draining | Closed => return None                                        // §10.2.2
-      Closing => return build_close(now)                                      // §10.2.1, §10.2.3
+      Closing => return build_close()                                         // §10.2.1, §10.2.3
     if some live k has sent(k).next_pn() >= PN_MAX { lc.close_silently(); streams = None; return None }   // §12.3; nothing polled yet (3d2 preflight M9)
     if let Some(d) = build_path_datagram(now) { return Some(d) }              // §8.2.2: never delayed (Task 2b body; stub None here)
     q = paths.active()
@@ -516,7 +516,7 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
   - **`fn build_path_datagram(&mut self, now) -> Option<OutDatagram>`**: contract here (`wf`; `r is Some(d) ==>` the commit facts of `commit_datagram`), body `None`. Task 2b writes the body and **strengthens these ensures** with what P12–P14 and P17's path-datagram case need (3d2 preflight M11).
   - **`build_close`**:
     - on `paths.active()`, `d = OutDatagram{path, packets}` with one packet per `k` in `close_spaces(complete, live_i, live_h, complete)` and frames `[close_frame(app, code, reason, k)]`;
-    - each packet takes a fresh `sent(k).take_pn()`, and None closes silently and returns None (preflight M11);
+    - numbers are peeked and committed once the datagram will go, and None closes silently and returns None (preflight M11);
     - `n = datagram_len(&d)`; if `n <= paths.budget(active) && lc.may_send_close(n)` → `commit_datagram`, `lc.on_close_sent(n)`, return it; else None.
     - Ensures `n <= MAX_DATAGRAM`: at most 2 packets, reason at most 64 bytes.
   - **`#[doc(hidden)] pub fn skip_pns_for_test(&mut self, k: PacketKind, next: u64)`** (3d2 preflight M9: `SentPackets::new_at` is otherwise unreachable through `Connection`), inside `verus!` so it adds no escape: requires `old.wf()`, `old.sent(k).next_pn() <= next <= PN_MAX`, `old.sent(k).inflight_len() == 0`; body `sent(k) = SentPackets::new_at(next)`; ensures `wf()` (`wf_pn` holds because `next` only grows).
@@ -596,13 +596,13 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
 - Produces:
   - **`build_path_datagram` body** (only when `complete`; PATH frames arrive only in 1-RTT):
     1. **Choose the path.** Iterate *every* path `q` in table order via `len`/`id_at` (preflight M22; 3d2 preflight I1). Skip `q` unless `has_response(q) || challenge_owed(q)` and `paths.dcid(q) is Some` (preflight I1: no fallback; §9.5).
-    2. **Build the packet.** One OneRtt packet with frames `[PathResponse(r)?, PathChallenge(c)?]` and dcid `paths.dcid(q)`. Its PN is `pn = sent_1.take_pn()`; None closes silently and returns None (preflight M11). Then `add_sample_padding`.
-    3. **Size it.**
-       - If `paths.budget(q) >= 1200`: `pad_datagram(&mut d, 1200)` on `d = OutDatagram{path: q, packets: vec![p]}`, `padded = true` (§8.2.1, §8.2.2 expand). An `mtu_failed` path is Validated, so its budget is unlimited and this branch always applies (3d2 preflight I6: settles residual N3).
-       - Else: send unpadded only if `datagram_len <= paths.budget(q)` (§8.2.2 "MUST NOT expand … exceeds").
-       - Otherwise try the next path, leaving `q`'s frames owed.
-    4. **Commit.** `take_response`/`take_challenge(q, padded)`; `recv_1` is untouched; the packet is **not recorded** (E2); `commit_datagram(q, ..)`.
-  - `poll_transmit` is unchanged: its stub call now has a body.
+    2. **Measure the packet, taking nothing.** It will be one OneRtt packet with `PathResponse` if `has_response(q)` and `PathChallenge` if `challenge_owed(q)`, each 9 bytes, on dcid `paths.dcid(q)`. The PN length is `close_pn_len(OneRtt)`, renamed `next_pn_len`; None closes silently (`lc.close_silently()`, `streams = None`) and returns None (preflight M11).
+    3. **Decide the size.**
+       - If `paths.budget(q) >= 1200`: `padded = true` (§8.2.1, §8.2.2 expand). An `mtu_failed` path is Validated, so its budget is unlimited and this branch always applies (3d2 preflight I6: settles residual N3).
+       - Else: send unpadded only if the measured length `<= paths.budget(q)` (§8.2.2 "MUST NOT expand … exceeds").
+       - Otherwise try the next path. Nothing on `self` has changed, so `q`'s frames stay owed, no PN is burned, and `r is None && Open ==> tx_kept(o)` holds when no path fits.
+    4. **Build and commit, only for the datagram that goes**, in this order: `take_response(q)` and `take_challenge(q, padded)`; the packet with those frames and `pn = sent_1.next_pn()`, then `add_sample_padding`, then `pad_datagram(&mut d, 1200)` if `padded`; `commit_pn(OneRtt)`; `commit_datagram(q, &d)`. `recv_1` is untouched and the packet is **not recorded** (E2). `make_packet` and `packet_built` pin the DCID to the active path, so this packet has its own builder, and `transmit_ok` and `pns_fresh` come from a one-packet lemma (`lemma_packets_pns_one` and `lemma_packets_len_one`, deleted in 2a-ii, are the starting point). If relating the measured length to `datagram_len` proves harder than it looks, add read-only `Paths::peek_response` and `peek_challenge` to path.rs and build before deciding; report it if so, since path.rs holds `Paths::on_timeout`, which fails at rlimit 3.
+  - `poll_transmit`'s body is unchanged: its stub call now has a body. P12 and P13 also cover `data_datagram`'s datagrams, so show that they carry no PathChallenge or PathResponse frame. `data_datagram` is the tightest function in conn.rs (passes at rlimit 3, fails at 2): if it tips, move the padding block into a helper.
   - **`build_path_datagram`'s ensures, strengthened here** (3d2 preflight M11: 2a-ii's contract is the base, not final): every frame is `PathResponse`, `PathChallenge` or `Padding`; each `PathResponse(x)` was taken from `d.path`'s responses; `padded` or the budget was below 1200; `paths.dcid(d.path)` is the packet's DCID; and `paths.mtu_failed(d.path) ==> out_datagram_len(d@) == 1200` (P17's path-datagram case, 2a-ii).
   - **Proof obligations added to `poll_transmit`'s ensures:**
     - **P12 (§8.2.2):** every `PathResponse(x)` in a datagram for path `q` was taken from `q`'s responses (it echoes a challenge received on `q`, at most once).
@@ -624,6 +624,7 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
   - **`stale_cid_not_used`** (preflight I2): `nat_rebinding` up to its first polls, then `on_datagram(1, 100, vec![one(2, [NewConnectionId{1, 1, D(0xd1), [0xe1; 16]}])], 31, &rnd(6))` → every later datagram's 1-RTT dcid is `D(0xd1)`, never C1.
   - **`path_cap`:** on path 4, `on_datagram(4, 1200, vec![one(5, [PathChallenge(D(4))])], ..)` → nothing on path 4 is ever polled.
   - **`response_on_other_path_validates`** (Task 1b review M3, §8.2.2): a challenge sent on path 1 and its PATH_RESPONSE arriving on path 0 still validates path 1.
+  - **`refused_path_burns_no_pn`:** `established()`; `on_datagram(1, 10, vec![one(1, [PathChallenge(D(3))])], 30, ..)` (a 30-byte budget, under the 35-byte response); `on_datagram(1, 50, vec![], 31, ..)`; `drain`: the PATH_RESPONSE goes out exactly once, and the PNs of all drained 1-RTT packets are consecutive.
   - **`second_migration_keeps_challenge`** (Task 1b review M3, §9.3 "not already underway"): migrate to path 1, poll its challenge, migrate away and back before the response → no new challenge data on path 1; the first challenge's response still validates it.
 - [ ] **Step 2:** the new tests fail.
 - [ ] **Step 3: Implement.** Duvet-cite:
@@ -634,7 +635,8 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
   - always pad path datagrams to 1200 (fails `commit_datagram`'s requires);
   - `build_path_datagram` stops at the first candidate path (fails `nat_rebinding` when path 0's frame is blocked; a test mutation);
   - take the response from path 0 for a datagram on path 1 (fails P12);
-  - fall back to `peer_cids.current()` when `paths.dcid(q)` is None (fails P14).
+  - fall back to `peer_cids.current()` when `paths.dcid(q)` is None (fails P14);
+  - `commit_pn` at step 2 (fails `build_path_datagram`'s `tx_kept` clause).
 - [ ] **Step 5:** Four checks, evidence, quote check; MUST coverage for `8.2.1,8.2.2,8.2.3`.
 - [ ] **Step 6: Commits:**
   - `feat(quic): verified path datagrams — responses on the arrival path, challenge expansion within the amplification limit (RFC 9000 §8.2.1-8.2.2)`;
@@ -797,6 +799,7 @@ The 3d2 preflight (2026-10-29) found conflicts in some of these; each such bulle
   - **Per-datagram cost (I3):** `route` costs at most `MAX_TABLE` (512) CID comparisons plus, for a datagram of at least 21 bytes matching no CID, `MAX_TOKENS` (816) constant-time 16-byte token comparisons; about 100 connections (`MAX_CONNS` = 102) is the ceiling this linear scan is sized for. A random-keyed SipHash index for CIDs and tokens (a token lookup compares CT against one bucket only) replaces it before production; a sorted Vec is not acceptable (it leaks token order, §10.3.1).
 - **3e:** `protect(p: &OutPacket, keys, out)` writes exactly `out_packet_len(p@)` bytes, including `p.padding` zero bytes and `p.spin` for short headers; datagrams are the packets concatenated. On receive: `unprotect` uses `largest = conn.largest_pn(kind)` and `dcid_len = LOCAL_CID_LEN`; call `conn.on_reset_candidate(last16, now)` when the first packet fails to decrypt; always call `on_datagram` with the UDP payload length, even with no surviving packet; every `PlainPacket` passed must satisfy `plain_wf` (from `parse_payload`'s ensures). `RAND_LEN` is 129. **Pass at most one 1-RTT packet per datagram to `on_datagram`** (QUIC short headers have no length, so parsing gives this; its contract allows more): `next_challenge` has 4 slices per call, and only this keeps them from running out before `migrate`'s challenges, which have no retry (Task 1b review M4). The harness's "A.2 → one reply ≤ 3600" is `harness_mirror`'s 47-byte ACK-only Initial.
   - **What 3e Task 5 consumes from `poll_transmit`** (preflight I6): `Connection::out_log()` (closed spec fn); `poll_transmit` ensures that `out_log()` is pushed with exactly the returned datagram (unchanged on None); P7 on the result (`out_packet_wf` for every packet); P16 `out_datagram_len(d@) <= MAX_DATAGRAM`. 3e's Decision 14 fallback is therefore not needed.
+  - **§12.2 order (Task 2a-ii review M6):** datagrams are written in `packets` order; a 1-RTT packet is always alone because `complete ==> !live_i && !live_h`; state this if 3e needs it as a proof fact.
   - The 3e draft's cross-references move: `Connection` is this plan's Tasks 1a-i–3; `PathId` is 3d Task 6 (`datagram.rs`); `MAX_PATHS` is 3d Task 8 (`path.rs`); the test helpers are in `tests/conn_rx.rs`. 3e Task 6 and Phase 8a Task 10 both edit verify.sh's success line, so the second to land merges the two (preflight M21).
 - **Phase 4:** drives `crypto_read`/`crypto_write`/`on_peer_params` (requires `peer_tp_wf`, via `theorem_peer_tp_wf`)/`on_handshake_complete(alpn)`/`on_tls_alert` and serializes `local_params()`; RFC 9001 A.2's ClientHello fails §7.3 against A.2's own header; key discard follows `discard`. The 3e shell switches from `Connection` to `H3Server` here.
 - **Phase 6:** `SentPacket.size` and `on_packet_sent`'s size understate padded Initials: 2a-ii pads after `commit_space_packet`, and nothing reads the size today (2a-i review M5). Replace `Recovery`'s bodies and the PTO step (E8: today's placeholder marks the space lost on PTO, against RFC 9002 §6.2 "PTO expiry MUST NOT mark prior unacked packets lost" — a Phase 6 row); keep `can_send` as the gate in `build_space_packet` and `MAX_INFLIGHT` as a memory cap; feed RTT samples from `on_ack_received`. Phase 6 may extend the `Recovery` signatures (send times, sizes); the placeholder's counts don't carry what RFC 9002 needs (preflight M7).
