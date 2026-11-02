@@ -16,7 +16,7 @@ verus! {
 
 /// The packet types whose payloads carry frames. 0-RTT is absent: a server discards 0-RTT
 /// packets before reading their payload.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PacketKind {
     Initial,
     Handshake,
