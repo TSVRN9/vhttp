@@ -4,6 +4,7 @@
 pub mod check;
 pub mod cost;
 pub mod cost_sanity;
+pub mod cost_sym;
 pub mod ct;
 pub mod ct_lemmas;
 pub mod infer;
