@@ -38,6 +38,10 @@ crypto::hkdf::hkdf_expand 077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec84
 # GCM spec test case 2 open: valid tag => Some(P), last tag byte flipped => None (crates/crypto/tests/aes_gcm.rs)
 crypto::gcm::aes128_gcm_open 00000000000000000000000000000000 000000000000000000000000 - 0388dace60b6a392f328c2b971b2fe78ab6e47d42cec13bdf53a67b21257bddf => Some(00000000000000000000000000000000)
 crypto::gcm::aes128_gcm_open 00000000000000000000000000000000 000000000000000000000000 - 0388dace60b6a392f328c2b971b2fe78ab6e47d42cec13bdf53a67b21257bdde => None
+# Montgomery -m^-1 mod 2^64 for m = 1 (neg_inv64_kat in crates/crypto/src/bignum.rs)
+crypto::bignum::neg_inv64 0x1u64 => 0xffffffffffffffffu64
+# Bit length of n, top octet 0x01 then 0xff (modulus_bits_edges in crates/crypto/src/rsa.rs)
+crypto::rsa::modulus_bits 01ff => 0x9usize
 
 # ---- parser crates (8b): translator coverage for the cost targets
 # RFC 9000 A.1: 0x9d.. is a 4-byte varint (rfc_a1_samples in crates/wire/tests/varint.rs)
