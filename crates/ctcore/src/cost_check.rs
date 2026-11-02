@@ -1116,7 +1116,7 @@ proof fn lemma_scale_one(c: nat, x: nat)
 proof fn lemma_scale_add(c: nat, x: nat, y: nat)
     ensures c * (x + y) == c * x + c * y,
 {
-    assert(c * (x + y) == c * x + c * y) by (nonlinear_arith);
+    vstd::arithmetic::mul::lemma_mul_is_distributive_add(c as int, x as int, y as int);
 }
 
 proof fn lemma_product_le(a: nat, a2: nat, b: nat, b2: nat)
@@ -1140,7 +1140,7 @@ proof fn lemma_mono_credit(g1: nat, g: nat, u1: nat, u: nat)
 proof fn lemma_assoc(c: nat, k: nat, x: nat)
     ensures (c * k) * x == c * (k * x),
 {
-    assert((c * k) * x == c * (k * x)) by (nonlinear_arith);
+    vstd::arithmetic::mul::lemma_mul_is_associative(c as int, k as int, x as int);
 }
 
 proof fn lemma_comm(x: nat, y: nat)
