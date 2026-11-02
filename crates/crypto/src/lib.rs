@@ -8,6 +8,8 @@ global size_of usize == 8;
 } // verus!
 
 pub mod aes;
+#[allow(dead_code)] // used from Task 4
+mod bignum;
 pub mod bytes;
 pub(crate) mod ct;
 #[cfg(ct_negative)]
