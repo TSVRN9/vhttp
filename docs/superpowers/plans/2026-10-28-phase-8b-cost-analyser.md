@@ -530,7 +530,7 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
     - **Headers.** A loop's header has `P·Gap(bound, Val(counter, ty)) + P + rest`, with `rest` the monomial-wise maximum of its exits' pots. Find `P` by a first backward pass over the body with the header's pot seeded as `rest` and the increment earning no credit: `P` is the header's result minus `rest`. Then run the pass again with the real header pot; the increment's credit pays the `+ P` back. Nesting comes out by itself, because the inner `Gap` pulls to `bound` where its counter is set. Do inner loops first. These two results pass `check_cert`. `parse_prefix_int`: `P = 34`, `rest = 7`, header `34·Gap(V3, V13) + 41`, entry `34·Len2 + 55`. `settings_ok`, with `A = Gap(V2, V3)` and `I = Gap(V2, V10)`: inner `P = 13`, outer `P = 13·V2 + 27`, outer header `13·V2·A + 27·A + 13·V2 + 30`, inner header `13·I + 13·V2·A + 27·A + 18`, outer increment `13·V2·A + 27·A + 5`, entry `13·Len1·Len1 + 40·Len1 + 33`. Do not emit `Gap·Gap`.
     - **Raising.** `bound_post` keeps a monomial whose image's atoms are already in `b`'s pot or its credits, and raises it under the edge's first `Le(t, u)` or `Lt(t, u)` otherwise. So raise only when needed: pull without raising first. If a predecessor's `pull_post` returns `None` on an atom `t` (`parse`'s `_8`, a call result), mark `t` and redo the backward pass, replacing `t` by `u` at the block whose edge has `Le(t, u)`, so that block's pot doesn't read `t`. Raising everything is wrong: `settings_ok`'s inner exit has `Le(V2, V10)`, and `V2` must stay.
     - **Reasons.** `pull_post`'s `None` doesn't say why. Your own degree over 2 is `DegreeCap`, your own failed `checked_*` is `Overflow`, a `pull_post` `None` is `Validator(b)`.
-  - Writers lose every local: a loop whose body holds a `Mut`-arg call or `VecPush` has no counter left, as X′ predicts. The expectation for the four Task 2 losses is exact: `huffman_decode` is `NotCounted(<header>)`, because `recognize` rejects any loop whose body holds a `Mut`-arg call (`block_writer`); `scan_string`, `decode_string` and `decode_field_line` are `CalleeNone(<fn index>)`. A `Validator(..)` for `huffman_decode` would be a mismatch to explain, not the predicted verdict.
+  - Writers lose every local: a loop whose body holds a `Mut`-arg call or `VecPush` has no counter left, as X′ predicts. The expectation for the four Task 2 losses, as measured by the Task 6 review's dry run: `huffman_decode` is `NotCounted(<header>)`, because `recognize` rejects any loop whose body holds a `Mut`-arg call (`block_writer`); `scan_string` and `decode_string` are `CalleeNone(<fn index>)`; `decode_field_line` is `Validator(<block>)`, at its `slice_to_vec` of a `static_entry` result field, a len-cost charge on a callee's result. So it is lost independently of `huffman_decode`, and the spec's X′ line, which names it `CalleeNone`, gets a dated correction appended and is not edited. A `Validator(..)` for `huffman_decode` would be a mismatch to explain, not the predicted verdict.
   - Its exec code under `verus!` still carries Verus's overflow and bounds obligations, which is the GC's "memory safety" (M9). Budget for them and for the hand copies (M18).
 - **The API** (`lib.rs`, verified, like `check_program`; M9): `pub fn analyze(p: &Program) -> (r: (Vec<Option<Poly>>, Vec<Cert>, Vec<CostWhy>))`.
   - `ensures r.0@.len() == p.fns@.len() && r.1@.len() == p.fns@.len() && forall|g: int| 0 <= g < r.0@.len() && r.0@[g] is Some ==> cert_for(*p, g as nat, r.1@[g], r.0@)`.
@@ -595,13 +595,14 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
   - `cost_neg_while_true_break_on_data`
   - `cost_neg_not_typed`: must translate cleanly and then fail `check_program`, expected `none .. NotTyped`. The candidate is `fn(x: &mut u8) -> &mut u8`, since `wf_body` forbids `Mut` in local 0. Step 1 confirms it.
     This fixture shows an ill-typed program gets `none <root> NotTyped` and no bound, because `check_cert`'s `true` says nothing without `check_program` `Ok` (M6).
+  - `cost_neg_not_typed_declassify`: `declassify` of a `&mut`. It passes `check_wf` and fails `check_prog`, so it is the fixture that shows the typing half of the gate; with `check_program` skipped, or reduced to `check_wf`, it becomes `bounded`.
   - Expected verdicts, which Step 1 confirms and does not just record: `cost_neg_off_progress`: `NotCounted(<header>)`. `cost_neg_while_true_break_on_data`: `NotCounted(<header>)`, because there is no `counter < bound` test. `cost_neg_parsed_count`: `Validator(<block>)`, not `NotCounted`: the loop is counted, but the bound is a havocked read that `pull_post` cannot carry to the entry (the shape of `none_for_unknown_bound`). `cost_neg_recursion`: `Recursion`. `cost_neg_not_typed`: `NotTyped`.
   - These are not `root`s, so the 58 check verdicts don't change.
 - **`expected-cost.txt`** lines are `bounded <path> deg=<d>` or `none <path> <Why>`. Coefficients are not pinned. Pin `CalleeNone(g)` and `Validator(b)` payloads only where a fixture needs them. The payload is a fn or block index in the closure's own numbering, so it moves when the closure changes.
 - **`ct-check.sh`** (M14):
   - `analyse()` gains a mode-to-filename map (`check` gives `report-`, `selftest` gives `selftest-`, `cost` gives `cost-`).
   - The fixtures' cost run passes `tools/ct-fixtures/manifest.txt:tools/ct-fixtures/cost-manifest.txt` as `CT_MANIFEST`.
-  - It prints `ct-check: cost fixtures 11/11`.
+  - It prints `ct-check: cost fixtures 12/12`.
   - The Task 6 report gives the added cold and warm ct-check time.
 
 - [ ] **Step 1:** Implement the cost mode and fixtures. The diff is empty.
@@ -633,11 +634,12 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
   - a `bounded` that becomes `none` is a failure;
   - a new `bounded` is a failure until `expected-cost.txt` is updated in the same commit, with the bound in the report;
   - it prints `ct-check: cost X/36 bounded`.
+  - Run `cost_no_missing tools/ct-driver/cost-targets.txt $reports` over all three reports. Compare `cat $reports` through `cost_verdicts` with `NotCounted` payloads also stripped (`sed -E 's/ NotCounted\([0-9]+\)$/ NotCounted/'`), and write `expected-cost.txt` in that form. A header index moves with any edit to the function, and the gate is about verdicts; the fixtures keep theirs pinned because their bodies are small and the index is what tells a header from a stuck block.
 - **`verify.sh`'s final line** becomes `verify.sh: all crates verified, duvet ok, ct ok (10 declassify), cost X/Y, escapes accounted (1)`. X/Y is read from ct-check's `cost X/Y bounded` line (M11).
-- **TRUSTED.md** gains the spec's cost-model row, verbatim, with the entry-premise sentence from §Cost analyser and "of a returning run; aborts and panics are outside".
+- **TRUSTED.md** gains the spec's cost-model row, verbatim, with the entry-premise sentence from §Cost analyser and "of a returning run; aborts and panics are outside", and these sentences: "`theorem_cost` assumes the run returns and does not state that it does, so a run that does not return is outside it too. No code instantiates the theorem: a `bounded` line is the composition of `check_program`'s and `analyze`'s ensures, joined by the order of calls in `cost_verdict`, and its text comes from `poly_text` and `atom_text`, all in `tools/ct-driver/src/main.rs`, unverified. In a printed bound, `x` is parameter `x`'s integer value at the width MIR compares it; `len(x)` is the length of the array behind parameter `x` at entry, through a `&mut` and any number of `&`; `#k` is unnamed parameter local `k`, and `_k` is a non-parameter local, which reads 0 at entry. A bound is about the MIR of the analysis build (`-Zinline-mir=no`, `--cfg ct_check`), not the shipped build's. Each `intr` line used by a cost root also asserts that the fn's work is the intrinsic's step cost."
 - **The design spec's Phase 8 entry** gains the measured coverage `X/Y` and one line: "bounds are core steps, not time or memory".
 
-- [ ] **Step 0: Census rerun** (M17). `phase-3d` has merged to main (510aac3), so rerun Task 1's census and dry run on the rebased branch first. Task 1's census output was lost to a reboot, and this run regenerates it under `<scratch>`. Record any change.
+- [ ] **Step 0: Merge main, then census rerun** (M17). `git merge main` into `phase-8b` (510aac3 at this writing; a merge, not a rebase, because the ledger and reviews cite this branch's commit ids). Main changed no crate but `quic`, so the frozen-file diff stays empty and `ct-baseline` stays valid. Rerun Task 1's census and dry run on the merged tree under `<scratch>`; Task 1's census output was lost to a reboot, and this regenerates it. The Task 6 review's scratch run found the 36 verdicts byte-identical across this merge and no new `intr` line; record any change. The target list stays 36: code added since the pre-registration (`quic::route::route` and the rest of phase 3d) is named in the report and stays out of the denominator. Before `phase-8b` merges to main, merge main again if it has moved and rerun ct-check. A diff against `expected-cost.txt` is reported, not silently re-recorded.
 - [ ] **Step 1:** Run over the targets and write `expected-cost.txt` from the result.
 - [ ] **Step 2: Coverage report.**
   - A table of the 36 targets, plus the two dropped QuicVarInt rows marked `not a root (I3)`. Columns:
@@ -646,7 +648,7 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
     - `actual`;
     - the bound (for bounded) or the `CostWhy`/translation error (for none);
     - a one-line explanation for each miss against either prediction.
-  - The expectation for the four Task 2 losses is exact: `huffman_decode` is `NotCounted(<header>)`, because `recognize` rejects any loop whose body holds a `Mut`-arg call (`block_writer`); `scan_string`, `decode_string` and `decode_field_line` are `CalleeNone(<fn index>)`. A `Validator(..)` for `huffman_decode` would be a mismatch to explain, not the predicted verdict.
+  - The expectation for the four Task 2 losses, as measured by the Task 6 review's dry run: `huffman_decode` is `NotCounted(<header>)`, because `recognize` rejects any loop whose body holds a `Mut`-arg call (`block_writer`); `scan_string` and `decode_string` are `CalleeNone(<fn index>)`; `decode_field_line` is `Validator(<block>)`, at its `slice_to_vec` of a `static_entry` result field, a len-cost charge on a callee's result. So it is lost independently of `huffman_decode`, and the spec's X′ line, which names it `CalleeNone`, gets a dated correction appended and is not edited. A `Validator(..)` for `huffman_decode` would be a mismatch to explain, not the predicted verdict.
   - `CalleeNone(g)` and `Validator(b)` payloads are printed as found. They are indices in the closure's own numbering, so a change is not a regression.
   - The headline: **X of 36 targets bounded**, against 27/38, 25/36 and X′/36.
 - [ ] **Step 3: Real-code mutation** (in a scratch copy made by `git archive`, never the worktree). In `h3::frame::settings_ok`, change the inner `j += 1` to `j += 0`. `settings_ok` must become `none`. (`huffman_decode` is expected `none` already under Task 3's write rule, so it can't serve.)
@@ -657,7 +659,7 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
 
 ### Task 8 (stretch; controller go/no-go): off-progress loops via callee return facts
 
-**Also on the go/no-go list: `at_ok`.** A second frame hypothesis beside `plc` (every `Mut` target's root is a slot or a `RefMut` root) would make an address-taken write rule sound and recover `huffman_decode`, `scan_string`, `decode_string` and `decode_field_line`. Estimate: one spec fn, one syntactic set, about five lemmas. `theorem_cost`'s statement does not change; `cert_sem_ok` only gains a hypothesis, so Tasks 2-4's proofs stay valid inputs. Decide from Task 7's measured blockers.
+**Also on the go/no-go list: `at_ok`.** A second frame hypothesis beside `plc` (every `Mut` target's root is a slot or a `RefMut` root) would make an address-taken write rule sound and recover at most `huffman_decode`, `scan_string` and `decode_string` (`decode_field_line` also needs a bound on a callee result's length; Task 6 review). Estimate: one spec fn, one syntactic set, about five lemmas. `theorem_cost`'s statement does not change; `cert_sem_ok` only gains a hypothesis, so Tasks 2-4's proofs stay valid inputs. Decide from Task 7's measured blockers.
 
 **Go only if** all of these hold (M10):
 - Tasks 1–7 are reviewed and approved;
@@ -688,7 +690,7 @@ Otherwise record `not attempted` with those numbers. Under the post-1b translato
   - `selftest parsers K/K`;
   - `crypto ok (84 fns, 10 roots, 10 declassify)`;
   - `negative control rejected`;
-  - `cost fixtures 11/11`;
+  - `cost fixtures 12/12`;
   - `cost X/36 bounded`, matching `expected-cost.txt`.
 
   `verify.sh` ends with `cost X/36, escapes accounted (1)`.
