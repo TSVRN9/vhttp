@@ -38,9 +38,16 @@ pub open spec fn val_nat(ty: IntTy, v: Val) -> nat {
     match v { Val::Int(x) => uval(ty, x) as nat, _ => 0 }
 }
 
-/// The length of the `Arr` behind `v`, through one `Shr`/`Mut`; 0 otherwise.
+/// The length of the `Arr` at the end of any number of `Shr`; 0 otherwise.
+pub open spec fn shr_len(v: Val) -> nat
+    decreases v,
+{
+    match v { Val::Shr(b) => shr_len(*b), Val::Arr(s) => s.len(), _ => 0 }
+}
+
+/// The length behind `v`: through a `Mut`'s target, then any number of `Shr`. `parse` takes `&&[u8]`.
 pub open spec fn len_nat(fr: Frame, v: Val) -> nat {
-    elems(fr, v).len()
+    match v { Val::Mut(l) => shr_len(read_loc(fr, l)), _ => shr_len(v) }
 }
 
 pub open spec fn gap(a: nat, b: nat) -> nat {
@@ -52,8 +59,8 @@ pub open spec fn atom_val(fr: Frame, a: Atom) -> nat
 {
     match a {
         Atom::Const(c) => c as nat,
-        Atom::Val(x, ty) => val_nat(ty, fr.locals[x as int]),
-        Atom::Len(x) => len_nat(fr, fr.locals[x as int]),
+        Atom::Val(x, ty) => val_nat(ty, nth(fr.locals, x as nat)),
+        Atom::Len(x) => len_nat(fr, nth(fr.locals, x as nat)),
         Atom::Gap(x, y) => gap(atom_val(fr, *x), atom_val(fr, *y)),
     }
 }
@@ -377,6 +384,28 @@ pub proof fn lemma_elems_len_ok(fr: Frame, v: Val)
     assert(len_ok(t));
     if let Val::Arr(s) = t {
         assert forall|i: int| 0 <= i < s.len() implies len_ok(#[trigger] s[i]) by {}
+    }
+}
+
+pub proof fn lemma_shr_len_ok(v: Val)
+    requires len_ok(v),
+    ensures shr_len(v) <= USIZE_MAX,
+    decreases v,
+{
+    if let Val::Shr(b) = v { lemma_shr_len_ok(*b); }
+}
+
+/// What `Rvalue::Len` and the len-cost intrinsics read is at most `len_nat`.
+pub proof fn lemma_elems_le_len_nat(fr: Frame, v: Val)
+    ensures elems(fr, v).len() <= len_nat(fr, v),
+{
+    if let Val::Shr(b) = v {
+        assert(shr_len(v) == shr_len(*b));
+        if let Val::Arr(s) = *b { assert(shr_len(*b) == s.len()); }
+    } else if let Val::Arr(s) = v {
+        assert(shr_len(v) == s.len());
+    } else if let Val::Mut(l) = v {
+        if let Val::Arr(s) = read_loc(fr, l) { assert(shr_len(read_loc(fr, l)) == s.len()); }
     }
 }
 
@@ -725,6 +754,17 @@ proof fn lemma_block_step(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
     assert(block_step_ok(p, f, b, certs[f as int], sums, fr));
 }
 
+/// What a `Return` block owes.
+proof fn lemma_return_pays(p: Program, f: nat, b: nat, c: Cert, sums: Seq<Option<Poly>>, fr: Frame)
+    requires
+        block_step_ok(p, f, b, c, sums, fr),
+        p.fns@[f as int].blocks@[b as int].term is Return,
+    ensures poly_val(fr, c.blocks@[b as int].pot) >= p.fns@[f as int].blocks@[b as int].stmts@.len() + 1,
+{
+    hide(exec_stmts);
+    hide(poly_val);
+}
+
 /// A `Return` block's steps are its statements and terminator.
 proof fn cost_return(p: Program, f: nat, b: nat, c: Cert, sums: Seq<Option<Poly>>, fr: Frame, fuel: nat)
     requires
@@ -733,6 +773,7 @@ proof fn cost_return(p: Program, f: nat, b: nat, c: Cert, sums: Seq<Option<Poly>
         run_from(p, f, b, fr, fuel) is Some,
     ensures run_from(p, f, b, fr, fuel).unwrap().2 <= poly_val(fr, c.blocks@[b as int].pot),
 {
+    lemma_return_pays(p, f, b, c, sums, fr);
 }
 
 /// `Goto`, `Switch` and a passing `Assert`: pay `n1` and continue at `b2` in `f1`.
@@ -878,6 +919,12 @@ pub proof fn cost_from(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Seq<O
     ensures run_from(p, f, b, fr, fuel).unwrap().2 <= poly_val(fr, certs[f as int].blocks@[b as int].pot),
     decreases fuel, 2nat,
 {
+    hide(run_from);
+    hide(exec_stmts);
+    hide(ok_prog);
+    hide(block_step_ok);
+    hide(poly_val);
+    assert(b < p.fns@[f as int].blocks@.len()) by { reveal(run_from); }
     lemma_block_step(p, ls, certs, sums, f, b, fr);
     lemma_plc_block(p, ls, f, b, fr);
     lemma_exec_stmts_len_ok(p.fns@[f as int].blocks@[b as int].stmts@, 0, fr);
