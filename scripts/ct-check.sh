@@ -77,7 +77,7 @@ cost_verdicts() {
 # cost_no_missing <manifest> <report>..: every cost-root has a verdict line in some report. Grepped
 # whole, because a path may hold spaces (`<a::B as a::C>::f`).
 cost_no_missing() {
-    sed -nE 's/^cost-root +//; T; s/[[:space:]]+#.*$//; p' "$1" > "$CT_OUT/cost-roots.txt"
+    sed -nE 's/^[[:space:]]*cost-root[[:space:]]+//; T; s/[[:space:]]+#.*$//; p' "$1" > "$CT_OUT/cost-roots.txt"
     shift
     while IFS= read -r p; do
         grep -qF -e "bounded $p deg=" -e "none $p " "$@" || fail "cost-root with no verdict: $p"
