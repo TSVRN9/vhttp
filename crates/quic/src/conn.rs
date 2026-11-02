@@ -502,6 +502,12 @@ impl Connection {
     /// What every frame helper leaves alone: `recv_*` carries `gate_packet`'s duplicate check to
     /// `RecvPns::on_packet`, and is P10's frame.
     closed spec fn frames_kept(&self, o: Connection) -> bool {
+        &&& self.rx_kept(o)
+        &&& self.paths.ids() == o.paths.ids()
+    }
+
+    /// `frames_kept` less `paths.ids()`: also what admitting a new path leaves alone.
+    closed spec fn rx_kept(&self, o: Connection) -> bool {
         &&& self.out_log@ == o.out_log@
         &&& self.recv_i == o.recv_i
         &&& self.recv_h == o.recv_h
@@ -509,7 +515,40 @@ impl Connection {
         &&& self.live_i == o.live_i
         &&& self.live_h == o.live_h
         &&& self.complete == o.complete
-        &&& self.paths.ids() == o.paths.ids()
+    }
+
+    /// What `gate_packet` accepts. Biconditional, so what is absent is proved absent: no size rule
+    /// on 1-RTT (§8.2.1's MUST NOT). An absent path has all its response room.
+    closed spec fn gate_spec(&self, path: PathId, len: usize, p: &PlainPacket) -> bool {
+        &&& match p.kind {
+            PacketKind::Initial => len >= MIN_INITIAL_DATAGRAM && self.live_i && path == self.hs_path
+                && p.scid@ == self.ids@.client_scid && (p.dcid@ == self.ids@.odcid || local_has_cid(
+                self.local_cids.active_spec(),
+                p.dcid@,
+            )),
+            PacketKind::Handshake => self.live_h && path == self.hs_path && local_has_cid(
+                self.local_cids.active_spec(),
+                p.dcid@,
+            ),
+            PacketKind::OneRtt => self.complete && local_has_cid(
+                self.local_cids.active_spec(),
+                p.dcid@,
+            ),
+        }
+        &&& !self.recv(p.kind).is_duplicate_spec(p.pn)
+        &&& count_ch(p.frames@) <= if self.paths.has(path) {
+            MAX_RESPONSES - self.paths.path(path).responses.len()
+        } else {
+            MAX_RESPONSES as int
+        }
+    }
+
+    /// §13.3 routing: only the matching CRYPTO send buffer and, for the stream family, `streams`
+    /// change.
+    closed spec fn routing_kept(&self, n: Connection, k: PacketKind, f: SpecFrame) -> bool {
+        &&& !(f is Crypto && k is Initial) ==> n.ctx_i == self.ctx_i
+        &&& !(f is Crypto && k is Handshake) ==> n.ctx_h == self.ctx_h
+        &&& !is_stream_layer_frame(f) ==> n.streams == self.streams
     }
 
     /// A datagram of `datagram_len` bytes on `path`, with its decrypted packets in order.
@@ -536,15 +575,19 @@ impl Connection {
         if matches!(self.lc.phase(), Phase::Draining | Phase::Closed) {
             return;
         }
-        // At `MAX_PATHS` the datagram is dropped uncounted (§9).
-        if !self.ensure_path(path) {
-            return;
+        // A path is added only by a packet that passes the gate: slots never free, and a garbage or
+        // replayed datagram from a spoofed address must not take one. Nothing is ever sent to an
+        // absent path, so §8.1 loses nothing by not counting its datagrams.
+        let mut known = self.paths.index(path).is_some();
+        if known {
+            // §8.1: counted even if every packet is dropped.
+            self.count_recv(path, datagram_len as u64);
         }
-        // §8.1: counted even if every packet is dropped.
-        self.count_recv(path, datagram_len as u64);
         if matches!(self.lc.phase(), Phase::Closing) {
             // §10.2.1: packets are not processed.
-            self.lc.on_recv_closing(datagram_len as u64);
+            if known {
+                self.lc.on_recv_closing(datagram_len as u64);
+            }
             return;
         }
         if packets.len() == 0 {
@@ -557,7 +600,7 @@ impl Connection {
             invariant
                 self.wf(),
                 self.out_log() == old(self).out_log(),
-                self.paths.has(path),
+                known ==> self.paths.has(path),
                 self.phase_spec() is Open,
                 forall|j: int| 0 <= j < it.seq().len() ==> plain_wf(#[trigger] it.seq()[j]@),
         {
@@ -567,6 +610,15 @@ impl Connection {
             }
             // §12.2: a packet with another DCID is ignored.
             if eq_bytes(p.dcid.as_slice(), first.as_slice()) && self.gate_packet(path, datagram_len, &p) {
+                if !known {
+                    // §9: at `MAX_PATHS` the datagram is dropped uncounted.
+                    if !self.ensure_path(path) {
+                        return;
+                    }
+                    // §8.1: the whole datagram, including packets the gate already dropped.
+                    self.count_recv(path, datagram_len as u64);
+                    known = true;
+                }
                 //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2
                 //# An
                 //# endpoint MUST generate a connection error if processing the contents
@@ -593,6 +645,7 @@ impl Connection {
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
             final(self).phase_spec() == old(self).phase_spec(),
+            final(self).rx_kept(*old(self)),
             ok ==> final(self).paths.has(path),
     {
         if self.paths.index(path).is_some() {
@@ -662,7 +715,11 @@ impl Connection {
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
             final(self).phase_spec() == old(self).phase_spec(),
+            final(self).rx_kept(*old(self)),
             final(self).paths.has(path),
+            final(self).paths.amp_trace(path) == old(self).paths.amp_trace(path).push(
+                AmpEv::Recv(n as nat),
+            ),
     {
         let ghost s0 = *self;
         self.paths.on_recv(path, n);
@@ -779,10 +836,8 @@ impl Connection {
     fn gate_packet(&self, path: PathId, len: usize, p: &PlainPacket) -> (ok: bool)
         requires
             self.wf(),
-            self.paths.has(path),
         ensures
-            ok ==> !self.recv(p.kind).is_duplicate_spec(p.pn),
-            ok && p.kind is OneRtt ==> self.complete,
+            ok == self.gate_spec(path, len, p),
     {
         let dcid = p.dcid.as_slice();
         let duplicate = match p.kind {
@@ -807,7 +862,11 @@ impl Connection {
                 self.recv_1.is_duplicate(p.pn)
             },
         };
-        !duplicate && count_challenges(p.frames.as_slice()) <= self.paths.response_room(path)
+        let room = match self.paths.index(path) {
+            Some(_) => self.paths.response_room(path),
+            None => MAX_RESPONSES,
+        };
+        !duplicate && count_challenges(p.frames.as_slice()) <= room
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-13.1
@@ -1176,6 +1235,17 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).frames_kept(*old(self)),
+            final(self).hs_done == (if f@ is HandshakeDone {
+                HsDone::Acked
+            } else {
+                old(self).hs_done
+            }),
+            !(f@ is RetireConnectionId) ==> final(self).peer_cids == old(self).peer_cids,
+            f@ is RetireConnectionId ==> final(self).peer_cids.retire_pending_spec() == old(
+                self,
+            ).peer_cids.retire_pending_spec(),
+            final(self).local_cids == old(self).local_cids,
+            old(self).routing_kept(*final(self), k, f@),
     {
         match f {
             Frame::ResetStream { .. }
@@ -1212,6 +1282,27 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).frames_kept(*old(self)),
+            final(self).hs_done == (if f@ is HandshakeDone && !(old(self).hs_done is Acked) {
+                HsDone::Pending
+            } else {
+                old(self).hs_done
+            }),
+            !(f@ is RetireConnectionId) ==> final(self).peer_cids == old(self).peer_cids,
+            f@ matches SpecFrame::RetireConnectionId(s) ==> old(self).peer_cids.retire_unacked_spec().contains(
+                s,
+            ) ==> final(self).peer_cids.retire_pending_spec() == old(
+                self,
+            ).peer_cids.retire_pending_spec().push(s),
+            !(f@ is NewConnectionId) ==> final(self).local_cids == old(self).local_cids,
+            f@ matches SpecFrame::NewConnectionId { seq, .. } ==> final(self).local_cids.pending_spec()
+                == if seq != 0 && local_has_seq(old(self).local_cids.active_spec(), seq) && !old(
+                self,
+            ).local_cids.pending_spec().contains(seq) {
+                old(self).local_cids.pending_spec().push(seq)
+            } else {
+                old(self).local_cids.pending_spec()
+            },
+            old(self).routing_kept(*final(self), k, f@),
     {
         match f {
             Frame::ResetStream { .. }
@@ -1817,20 +1908,45 @@ proof fn lemma_log_sends_absent(log: Seq<SpecOutDatagram>, q: PathId)
     }
 }
 
+/// The PATH_CHALLENGE frames of `s`.
+closed spec fn count_ch(s: Seq<Frame>) -> nat
+    decreases s.len(),
+{
+    if s.len() == 0 {
+        0
+    } else {
+        count_ch(s.drop_last()) + if s.last() is PathChallenge {
+            1nat
+        } else {
+            0
+        }
+    }
+}
+
 /// The PATH_CHALLENGE frames in `frames`.
 #[verifier::spinoff_prover]
-fn count_challenges(frames: &[Frame]) -> (r: usize) {
+fn count_challenges(frames: &[Frame]) -> (r: usize)
+    ensures
+        r == count_ch(frames@),
+{
     let mut n: usize = 0;
     let mut i: usize = 0;
     while i < frames.len()
         invariant
             n <= i <= frames@.len(),
+            n == count_ch(frames@.take(i as int)),
         decreases frames@.len() - i,
     {
+        proof {
+            assert(frames@.take(i + 1).drop_last() =~= frames@.take(i as int));
+        }
         if matches!(frames[i], Frame::PathChallenge(_)) {
             n += 1;
         }
         i += 1;
+    }
+    proof {
+        assert(frames@.take(i as int) =~= frames@);
     }
     n
 }
@@ -2124,5 +2240,12 @@ impl Connection {
             PacketKind::OneRtt => (self.crx_1.capacities(), 0),
         };
         c.0.saturating_add(c.1).saturating_add(tx)
+    }
+
+    /// Test support: the amplification budget of `q`, None when absent (the only reading of a
+    /// path's receive count before `poll_transmit` exists).
+    #[doc(hidden)]
+    pub fn path_budget(&self, q: PathId) -> Option<u64> {
+        self.paths.index(q).map(|_| self.paths.budget(q))
     }
 }

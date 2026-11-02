@@ -12,8 +12,10 @@ use crate::lifecycle::*;
 
 verus! {
 
-// ponytail: paths never evicted; datagrams from a 5th distinct path are dropped uncounted; evict a
-// non-active unvalidated path when long-lived rebinding matters.
+// ponytail: paths never evicted. `Connection` adds a path only for a packet that passes its gate, so
+// spoofed garbage and replays take no slot, but an on-path attacker racing first copies of authentic
+// packets from other addresses still can, and then a 5th distinct path is dropped uncounted. Evict
+// a non-active unvalidated path to close it (one with logged sends conflicts with `wf_amp`).
 pub const MAX_PATHS: usize = 4;
 
 //= https://www.rfc-editor.org/rfc/rfc9000#section-21.9

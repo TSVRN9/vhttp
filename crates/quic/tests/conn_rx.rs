@@ -323,3 +323,56 @@ fn stream_run_coalesces() {
     assert_eq!(run, s(4, 0, &[1, 2], false));
     assert_eq!(e, 2);
 }
+
+#[test]
+fn spoofed_datagrams_take_no_slot() {
+    let mut c = established_rx();
+    for q in 1..=3 {
+        c.on_datagram(q, 40, vec![], 11, &rnd(3));
+        assert_eq!(c.path_state(q), None);
+    }
+    c.on_datagram(9, 40, vec![one(0, vec![Frame::Ping])], 12, &rnd(3));
+    assert_eq!(c.largest_pn(PacketKind::OneRtt), Some(0));
+    assert!(c.path_state(9).is_some());
+}
+
+#[test]
+fn replay_takes_no_slot() {
+    let mut c = established_rx();
+    c.on_datagram(0, 40, vec![one(0, vec![Frame::Ping])], 11, &rnd(3));
+    c.on_datagram(1, 40, vec![one(0, vec![Frame::Ping])], 12, &rnd(3));
+    assert_eq!(c.path_state(1), None);
+    assert_eq!(c.path_budget(1), None);
+}
+
+#[test]
+fn accepted_datagram_counted_once() {
+    let mut c = established_rx();
+    c.on_datagram(0, 40, vec![one(0, vec![Frame::Ping])], 11, &rnd(3));
+    // A replay ahead of two fresh packets: the whole datagram counts, once.
+    let d = vec![one(0, vec![Frame::Ping]), one(1, vec![Frame::Ping]), one(2, vec![Frame::Ping])];
+    c.on_datagram(7, 100, d, 12, &rnd(3));
+    assert_eq!(c.largest_pn(PacketKind::OneRtt), Some(2));
+    assert_eq!(c.path_budget(7), Some(300));
+    // Known now, so a datagram with no accepted packet counts.
+    c.on_datagram(7, 40, vec![], 13, &rnd(3));
+    assert_eq!(c.path_budget(7), Some(420));
+}
+
+#[test]
+fn closing_unknown_path_uncounted() {
+    let mut c = peer_params_failed();
+    c.on_datagram(5, 1200, vec![], 2, &rnd(3));
+    assert_eq!(c.path_state(5), None);
+}
+
+#[test]
+fn fifth_path_dropped() {
+    let mut c = established_rx();
+    for q in 1..=3u8 {
+        c.on_datagram(q as u64, 40, vec![one(q as u64, vec![Frame::Ping])], 11, &rnd(3));
+    }
+    c.on_datagram(4, 40, vec![one(4, vec![Frame::Ping])], 12, &rnd(3));
+    assert_eq!(c.largest_pn(PacketKind::OneRtt), Some(3));
+    assert_eq!(c.path_state(4), None);
+}
