@@ -164,10 +164,33 @@ pub open spec fn cert_sem_ok(p: Program, f: nat, c: Cert, sums: Seq<Option<Poly>
             ==> block_step_ok(p, f, b, c, sums, fr)
 }
 
+/// The views agree: `Vec` has no extensional `==`, and `poly_val` reads views only.
+pub open spec fn poly_same(a: Poly, b: Poly) -> bool {
+    &&& a.monos@.len() == b.monos@.len()
+    &&& forall|i: int| 0 <= i < a.monos@.len() ==> #[trigger] mono_view_eq(a.monos@[i], b.monos@[i])
+}
+
+pub open spec fn mono_view_eq(a: Mono, b: Mono) -> bool { a.coef == b.coef && a.atoms@ == b.atoms@ }
+
 pub open spec fn cert_for(p: Program, f: nat, c: Cert, sums: Seq<Option<Poly>>) -> bool {
     &&& cert_sem_ok(p, f, c, sums)
     &&& c.blocks@[0].facts@.len() == 0
-    &&& sums[f as int] == Some(c.blocks@[0].pot)
+    &&& sums[f as int] is Some
+    &&& poly_same(sums[f as int].unwrap(), c.blocks@[0].pot)
+}
+
+proof fn lemma_monos_view(fr: Frame, a: Seq<Mono>, b: Seq<Mono>)
+    requires a.len() == b.len(), forall|i: int| 0 <= i < a.len() ==> #[trigger] mono_view_eq(a[i], b[i]),
+    ensures monos_val(fr, a) == monos_val(fr, b),
+    decreases a.len(),
+{
+    if a.len() > 0 {
+        assert(mono_view_eq(a[0], b[0]));
+        assert forall|i: int| 0 <= i < a.drop_first().len() implies #[trigger] mono_view_eq(a.drop_first()[i], b.drop_first()[i]) by {
+            assert(mono_view_eq(a[i + 1], b[i + 1]));
+        }
+        lemma_monos_view(fr, a.drop_first(), b.drop_first());
+    }
 }
 
 // ------------------------------------------------------------------ gap
@@ -734,10 +757,13 @@ proof fn lemma_entry_cert(p: Program, certs: Seq<Cert>, sums: Seq<Option<Poly>>,
     requires all_cert_for(p, certs, sums), g < p.fns@.len(), sums[g as int] is Some,
     ensures
         certs[g as int].blocks@[0].facts@.len() == 0,
-        sums[g as int] == Some(certs[g as int].blocks@[0].pot),
+        forall|fr: Frame| #[trigger] poly_val(fr, sums[g as int].unwrap()) == poly_val(fr, certs[g as int].blocks@[0].pot),
 {
     reveal(all_cert_for);
     assert(cert_for(p, g, certs[g as int], sums));
+    assert forall|fr: Frame| #[trigger] poly_val(fr, sums[g as int].unwrap()) == poly_val(fr, certs[g as int].blocks@[0].pot) by {
+        lemma_monos_view(fr, sums[g as int].unwrap().monos@, certs[g as int].blocks@[0].pot.monos@);
+    }
 }
 
 /// `cert_sem_ok` at a live block.

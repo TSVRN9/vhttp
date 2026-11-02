@@ -96,16 +96,14 @@ fn atoms_copy(a: &Vec<Atom>) -> (r: Vec<Atom>)
     r
 }
 
-/// The views agree: `Vec` has no extensional `==` in this toolchain, and every reader goes through `@`.
-pub open spec fn mono_same(a: Mono, b: Mono) -> bool { a.coef == b.coef && a.atoms@ == b.atoms@ }
-
+/// `Vec` has no extensional `==` in this toolchain, and every reader goes through `@`.
 pub open spec fn monos_same(a: Seq<Mono>, b: Seq<Mono>) -> bool {
-    a.len() == b.len() && forall|i: int| 0 <= i < a.len() ==> #[trigger] mono_same(a[i], b[i])
+    a.len() == b.len() && forall|i: int| 0 <= i < a.len() ==> #[trigger] mono_view_eq(a[i], b[i])
 }
 
-/// `*m`, up to `Vec` identity (`mono_same`).
+/// `*m`, up to `Vec` identity (`mono_view_eq`).
 pub fn mono_copy(m: &Mono) -> (r: Mono)
-    ensures mono_same(r, *m),
+    ensures mono_view_eq(r, *m),
 {
     Mono { coef: m.coef, atoms: atoms_copy(&m.atoms) }
 }
@@ -117,7 +115,7 @@ pub fn poly_copy(p: &Poly) -> (r: Poly)
     let mut out: Vec<Mono> = Vec::new();
     let mut i: usize = 0;
     while i < p.monos.len()
-        invariant i <= p.monos@.len(), out@.len() == i, forall|j: int| 0 <= j < i ==> #[trigger] mono_same(out@[j], p.monos@[j]),
+        invariant i <= p.monos@.len(), out@.len() == i, forall|j: int| 0 <= j < i ==> #[trigger] mono_view_eq(out@[j], p.monos@[j]),
         decreases p.monos.len() - i,
     {
         out.push(mono_copy(&p.monos[i]));
@@ -1090,9 +1088,9 @@ proof fn lemma_monos_same(fr: Frame, a: Seq<Mono>, b: Seq<Mono>)
     decreases a.len(),
 {
     if a.len() > 0 {
-        assert(mono_same(a[0], b[0]));
-        assert forall|i: int| 0 <= i < a.drop_first().len() implies #[trigger] mono_same(a.drop_first()[i], b.drop_first()[i]) by {
-            assert(mono_same(a[i + 1], b[i + 1]));
+        assert(mono_view_eq(a[0], b[0]));
+        assert forall|i: int| 0 <= i < a.drop_first().len() implies #[trigger] mono_view_eq(a.drop_first()[i], b.drop_first()[i]) by {
+            assert(mono_view_eq(a[i + 1], b[i + 1]));
         }
         lemma_monos_same(fr, a.drop_first(), b.drop_first());
     }
@@ -2674,14 +2672,14 @@ fn check_abort(p: &Program, f: usize, b: usize, c: &Cert, sums: &Vec<Option<Poly
 
 /// Equal coefficients and atom lists, monomial by monomial.
 pub fn poly_eq(a: &Poly, b: &Poly) -> (r: bool)
-    ensures r ==> monos_same(a.monos@, b.monos@),
+    ensures r ==> poly_same(*a, *b),
 {
     if a.monos.len() != b.monos.len() { return false; }
     let mut i: usize = 0;
     while i < a.monos.len()
         invariant
             i <= a.monos@.len(), a.monos@.len() == b.monos@.len(),
-            forall|j: int| 0 <= j < i ==> #[trigger] mono_same(a.monos@[j], b.monos@[j]),
+            forall|j: int| 0 <= j < i ==> #[trigger] mono_view_eq(a.monos@[j], b.monos@[j]),
         decreases a.monos.len() - i,
     {
         if a.monos[i].coef != b.monos[i].coef || !atoms_eq(&a.monos[i].atoms, &b.monos[i].atoms) { return false; }
@@ -2690,14 +2688,10 @@ pub fn poly_eq(a: &Poly, b: &Poly) -> (r: bool)
     true
 }
 
-/// All of `cert_for` but its last conjunct's `Vec` identity, which no exec comparison can establish: see Task 4's report.
-pub fn check_cert_parts(p: &Program, f: usize, c: &Cert, sums: &Vec<Option<Poly>>) -> (r: bool)
-    ensures r ==> ({
-        &&& cert_sem_ok(*p, f as nat, *c, sums@)
-        &&& c.blocks@[0].facts@.len() == 0
-        &&& sums@[f as int] is Some
-        &&& monos_same(sums@[f as int].unwrap().monos@, c.blocks@[0].pot.monos@)
-    }),
+/// A certificate's `true` is `cert_for`: every block's obligation, empty entry facts, and the
+/// entry's potential as `f`'s summary.
+pub fn check_cert(p: &Program, f: usize, c: &Cert, sums: &Vec<Option<Poly>>) -> (r: bool)
+    ensures r ==> cert_for(*p, f as nat, *c, sums@),
 {
     if f >= p.fns.len() || f >= sums.len() || c.blocks.len() != p.fns[f].blocks.len() || c.blocks.len() == 0 { return false; }
     if c.blocks[0].facts.len() != 0 { return false; }
@@ -2710,7 +2704,7 @@ pub fn check_cert_parts(p: &Program, f: usize, c: &Cert, sums: &Vec<Option<Poly>
         invariant
             b <= c.blocks@.len(), c.blocks@.len() == p.fns@[f as int].blocks@.len(), f < p.fns@.len(), f < sums@.len(),
             c.blocks@.len() > 0, c.blocks@[0].facts@.len() == 0, sums@[f as int] is Some,
-            monos_same(sums@[f as int].unwrap().monos@, c.blocks@[0].pot.monos@),
+            poly_same(sums@[f as int].unwrap(), c.blocks@[0].pot),
             forall|i: nat| i < b ==> #[trigger] block_checked(*p, f as nat, i, *c, sums@),
         decreases c.blocks.len() - b,
     {
