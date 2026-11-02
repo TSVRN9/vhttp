@@ -2122,6 +2122,10 @@ proof fn lemma_update(
         ) && resets[t[k].id] == c.0) && (resets.contains_key(t[k].id) ==> p.reset_spec() is Some))
     } by {
         assert(a[k].id == t[k].id);
+        if k != i {
+            assert(t[k] == a[k]);
+            assert(t[k].id != id);
+        }
     }
     assert forall|y: u64| #[trigger] rtr.contains_key(y) == s0.ids.peer_created(y) by {
         assert(rtr.contains_key(y) == s0.rtr@.contains_key(y));
