@@ -6,13 +6,13 @@
 - **The deliverable is the coverage number**: bounded targets out of all targets. It is reported against three predictions:
   - the spec's original pre-registration, 27 of 38;
   - the same after the preflight's I3 ruling (two QuicVarInt rows are not cost roots), 25 of 36;
-  - the Task 1b re-baseline X′ of 36, recorded in the spec before Task 2 starts.
+  - the final re-baseline X′ of 36, which Task 2 records in the spec before Tasks 3+ start, so it stays pre-registered relative to the proofs. Task 1b's 23/36 is its upper bound.
 - A step bound is **not** wall-clock time and **not** memory (spec §Cost analyser).
 
 **Spec:** `docs/superpowers/specs/2026-10-28-phase-8-verified-ct-cost-design.md`, §Cost analyser and D8/D9, as amended by the preflight rulings. 8a's plan, `docs/superpowers/plans/2026-10-28-phase-8a-ct-checker.md`, fixed the shared interfaces this plan consumes:
 - `ctcore::syntax::*`;
 - `sem.rs`'s `run_fn`/`run_from`/`exec_stmts`/`exec_intr`/`call_enter`/`call_leave`/`init_entry`/`len_ok`/`uval`, with steps in `Res`;
-- `ct.rs`'s `wf`, `check::check_wf` and `infer::callee_order`;
+- `ct.rs`'s `wf`, `ok_prog`, `plc` and `no_mut`, `ct_lemmas.rs`'s `lemma_plc_*`, `check_program`, `check::check_wf` and `infer::callee_order`;
 - the driver's `translate_closure()` and its manifest (preflight). `translate_closure` is label-free; 8a's check mode applies the root-label rule separately.
 
 **Branch:** `phase-8b`, cut from `main` at 6641fa2 (8a merged). The escape count stays at main's value, **1**.
@@ -51,7 +51,7 @@ The 8b modules:
 - **Toolchain.**
   - The pinned 1.98.1 from `rust-toolchain.toml`.
   - `export PATH=$HOME/.local/opt/verus/0.2026.10.04.426d8b0/verus-x86-linux:$PATH`.
-  - `RUSTC_BOOTSTRAP=1` only inside `scripts/ct-check.sh`. **[8b] Exemption:** scratch census, dry-run and MIR-dump runs under the scratchpad (Task 1, Task 1b Step 6, the Task 7 Step 0 rerun) may set it by hand. So may the driver builds for them, which also need `RUSTFLAGS="-L $(rustc --print sysroot)/lib"`. Nothing they produce is committed except as recorded text.
+  - `RUSTC_BOOTSTRAP=1` only inside `scripts/ct-check.sh`. **[8b] Exemption:** scratch census, dry-run and MIR-dump runs under the scratchpad (Task 1, Task 1b Step 6, Task 2 Step 4, the Task 7 Step 0 rerun) may set it by hand. So may the driver builds for them, which also need `RUSTFLAGS="-L $(rustc --print sysroot)/lib"`. Nothing they produce is committed except as recorded text.
 - **Verus usage.**
   - `cd crates/ctcore && cargo verus verify -- --rlimit 4`, narrowing with `--verify-only-module`/`--verify-function`.
   - **On a fresh target dir, first run without `--rlimit`** (vstd fails at 4).
@@ -79,7 +79,7 @@ The 8b modules:
   2. `cargo build && cargo test && cargo build --release`: 0 warnings.
   3. `scripts/verify.sh` prints its success line with main's escape count (**[8b]** from Task 7, with `cost X/Y`).
   4. `scripts/ct-check.sh` exits 0 with the summary the task names.
-- **Evidence run.** `CARGO_TARGET_DIR` and `CT_TARGET_DIR` under `/tmp/claude-1000/-home-tavern-Projects-rust-web-server/19d690a3-7cab-4802-bc1f-9aa0173a905e/scratchpad/` (`vt-8b-tN`, `ct-8b-tN`), absolute. `rm -rf` both after. The tmpfs is 16 GB shared.
+- **Evidence run.** `CARGO_TARGET_DIR` and `CT_TARGET_DIR` under `<scratch>/` (`vt-8b-tN`, `ct-8b-tN`), absolute. `rm -rf` both after. `<scratch>` is `/home/tavern/Projects/rust/web-server/.worktrees` (git-excluded), and "the scratchpad" in this plan means the same directory.
 - **Proof-time budget.** Report the five slowest functions. No function may exceed 10 s. ctcore's total must stay under 90 s **[8b: was 60 s; Task 1 records the baseline]**.
 - **Mutations** fail on a named postcondition or expected line, never on rlimit. Revert immediately.
 - **Never weaken a test**, and never flip an expected verdict to pass a run. A bounded target turning `None` is a regression; stop and report it. **[8b]** `tools/ct-fixtures/expected.txt`'s 44 lines are append-only.
@@ -94,16 +94,16 @@ The 8b modules:
 
 ## Review Focus
 
-1. **The statement is the amended spec's.** `theorem_cost` matches the spec text as amended by the preflight rulings (I1, C2): the `cert_for` premise, the `certs`/`sums` length premises, `vals_len_ok`, `poly_val`, the typed `Val(local, IntTy)` atom. `cert_for` requires entry facts to be empty and `sums[f] == Some(pot[0])`. `cert_sem_ok` quantifies over **all** frames satisfying the facts and `frame_len_ok`, and over **all** callee outcomes within the summary (dst and `&mut` targets havocked). Under C1 option A it has no extra frame invariant.
-2. **There is no unchecked route to `Some`.** `analyze`'s ensures comes from `check_cert` on the final vector. `loops.rs` output never reaches the report without it.
+1. **The statement is the amended spec's.** `theorem_cost` matches the spec text as amended by the preflight rulings (I1, C2) and C1 option B: `ok_prog(p, ls)`, `entry_plc`, the `cert_for` premise, the `certs`/`sums` length premises, `vals_len_ok`, `poly_val`, the typed `Val(local, IntTy)` atom. `cert_for` requires entry facts to be empty and `sums[f] == Some(pot[0])`. `cert_sem_ok` quantifies over **all** `ls` with `ok_prog`, **all** frames satisfying `plc`, the facts and `frame_len_ok`, and **all** callee outcomes within the summary (dst and `&mut` targets havocked).
+2. **There is no unchecked route to `Some`.** `analyze`'s ensures comes from `check_cert` on the final vector. `loops.rs` output never reaches the report without it. A `bounded` line also needs the driver's `check_program` `Ok`, which supplies `ok_prog`.
 3. **Honesty of the number.**
    - The coverage line equals `expected-cost.txt`.
-   - The Task 7 report shows the result against 27/38, 25/36 and the Task 1b re-baseline X′/36, which was committed before Task 2.
+   - The Task 7 report shows the result against 27/38, 25/36 and the final X′/36, which Task 2 committed before Tasks 3+.
    - Every divergence from the pre-registered table is explained.
    - Every `None` has a reason.
 4. **Non-vacuity.**
    - Task 2's proof mutations fail.
-   - Task 3's unknown-provenance mutation fails.
+   - Task 3's write-rule mutations fail.
    - Tampered certificates are rejected (Task 4).
    - Negative cost fixtures stay `None`.
    - A seeded unbounded loop in a real target is `None` (Task 7).
@@ -245,7 +245,7 @@ The 8b modules:
   - (v): `copy_from_slice` is unmapped.
 - [ ] **Step 6: Re-baseline before Task 2.**
   - Rerun Task 1's dry run with the 1b driver.
-  - X′ = the targets the spec predicts `Some`, minus the two I3 rows, minus every target that still fails translation (parse_path included, by (v)), minus every target whose loop or call blocks the C1-A domain can't keep. The domain is as ruled at Task 2 Step 0: for example, a call that passes a parameter directly makes every local Unknown. So that ruling must be recorded in `progress.md` before this step.
+  - X′ = the targets the spec predicts `Some`, minus the two I3 rows, minus every target that still fails translation (parse_path included, by (v)). This is an upper bound: Task 2 Step 4 subtracts what Task 3's domain can't keep.
   - Append one dated line under the spec's pre-registered table, `Re-baseline (8b Task 1b, before Task 2): X′/36 predicted bounded`, with the targets that changed and why. **Never edit the table rows or the 27/38 line.**
   - **Stop rule:** stop for a ruling if more than 5 targets the spec predicts `Some` (excluding `parse_path`) still fail translation, or if any failure is outside I4's classes.
 - [ ] **Step 7: Run the four checks and the evidence run.**
@@ -257,9 +257,9 @@ The 8b modules:
 
 **Files:**
 - Create: `crates/ctcore/src/cost.rs`
-- Modify: `crates/ctcore/src/lib.rs` (`pub mod cost;`)
+- Modify: `crates/ctcore/src/lib.rs` (`pub mod cost;`); the spec's §Cost analyser (the final X′ line only, Step 4)
 
-**Consumes:** `sem.rs` (`run_from`, `exec_stmts`, `exec_intr`, `call_enter`, `call_leave`, `init_entry`, `len_ok`, `uval`) and `ct.rs` (`wf`).
+**Consumes:** `sem.rs` (`run_from`, `exec_stmts`, `exec_intr`, `call_enter`, `call_leave`, `init_entry`, `len_ok`, `uval`), `ct.rs` (`ok_prog`, `plc`, `no_mut`) and `ct_lemmas.rs` (`lemma_plc_stmt`, `lemma_plc_intr`, `lemma_plc_call_leave`, `lemma_call_enter_frames`, `lemma_agree_refl`, `lemma_entry_agree`, `lemma_shape_refl`).
 
 **Interfaces (produces):**
 - **Exec types**, used by the spec through `@`:
@@ -277,7 +277,8 @@ The 8b modules:
   - `mono_val(fr, m) -> nat`, `poly_val(fr: Frame, p: Poly) -> nat`;
   - `fact_holds(fr, f) -> bool`, `facts_hold(fr, fs: Seq<Fact>) -> bool`;
   - `frame_len_ok(fr: Frame) -> bool`: `len_ok` of every local and slot;
-  - `vals_len_ok(vs: Seq<Val>) -> bool`: `forall|i| 0 <= i < vs.len() ==> len_ok(vs[i])` (I1).
+  - `vals_len_ok(vs: Seq<Val>) -> bool`: `forall|i| 0 <= i < vs.len() ==> len_ok(vs[i])` (I1);
+  - `entry_plc(p: Program, f: nat, args: Seq<Val>, slots: Seq<Val>) -> bool`: `args.len() == nargs`, `slots.len() == nargs`, `no_mut(args[j])` for every `j` whose parameter local `1 + j` is not `Mut`-typed, and `no_mut(slots[j])` for every `j`. These are `args_agree`'s facts for one run.
 - **Block and certificate conditions:**
   - `block_step_ok(p: Program, f: nat, b: nat, c: Cert, sums: Seq<Option<Poly>>, fr: Frame) -> bool`, per the spec §Cost analyser. Its parts:
     - `k = stmts.len()`, `fr1 = exec_stmts(..).0`;
@@ -286,46 +287,59 @@ The 8b modules:
     - `Abort`: true;
     - `Call(Intr)`: on `Some((fr2, _, extra))`, the next block's facts at `fr2` and `>= k + 1 + extra + pot_next(fr2)`;
     - `Call(Fn(g))`: `sums[g] is Some`, and `forall|out: Frame, n: nat| frame_len_ok(out) && n <= poly_val(call_enter(..).0, sums[g].unwrap())` ⇒ next facts at `fr2 = call_leave(fr1, out, wb, dst).0` and `>= k + 1 + n + pot_next(fr2)`.
-  - `cert_sem_ok(p, f, c, sums) -> bool`: `c.blocks@.len() == nblocks(f)`, and for all b and fr, `facts_hold(fr, c.blocks@[b].facts@) && frame_len_ok(fr) ==> block_step_ok(p, f, b, c, sums, fr)`. There is no other frame hypothesis (C1 option A).
+  - `cert_sem_ok(p, f, c, sums) -> bool`: `c.blocks@.len() == nblocks(f)`, and for all `ls`, b and fr, `ok_prog(p, ls) && plc(p, ls, f, fr) && facts_hold(fr, c.blocks@[b].facts@) && frame_len_ok(fr) ==> block_step_ok(p, f, b, c, sums, fr)`.
+    - **`ls` is quantified, not fixed to all-public.** `check_program`'s `ensures` gives `ok_prog` for the labels it returns and says nothing about their values, and no cost proof reads a label. So `cert_for`, `check_cert` and `analyze` keep their signatures, and `theorem_cost` takes `ls` as a parameter.
+    - `ok_prog` is in the hypothesis because 8a's single-frame lemmas (`lemma_eval_op_plc`, `lemma_place_plc`) need `ok_op`/`ok_place`.
+    - `block_step_ok` takes no `ls`, and its `Call(Fn)` `out` quantifier stays without `plc`: Task 3's rule doesn't need it. `cost_from` gets the real `out`'s `plc` from `lemma_plc_reachable`.
   - `cert_for(p, f, c, sums) -> bool`: `cert_sem_ok` ∧ `c.blocks@[0].facts@.len() == 0` ∧ `sums[f] == Some(c.blocks@[0].pot)`.
 - **Lemmas:**
   - `proof fn lemma_run_len_ok(p, f, b, fr, fuel)`: `frame_len_ok(fr)` and `run_from(..) is Some` imply `frame_len_ok(final)`.
   - `proof fn lemma_exec_stmts_len_ok(..)`, `proof fn lemma_intr_len_ok(..)`.
   - `proof fn lemma_init_entry_len_ok(p, f, args, slots)`: `vals_len_ok(args) && vals_len_ok(slots) ==> frame_len_ok(init_entry(p, f, args, slots))`.
   - `proof fn lemma_gap_dec(a: nat, x: nat)`: `x < a ==> gap(a, x) == gap(a, x + 1) + 1`. Tasks 3 and 4 consume it.
-  - `proof fn cost_from(p, certs, sums, f, b, fr, fuel)`, `decreases fuel`:
-    - requires `wf(p)`, all-`cert_for` (as in the theorem), `sums[f] is Some`, `facts_hold(fr, certs[f].blocks@[b].facts@)`, `frame_len_ok(fr)` and `run_from(p, f, b, fr, fuel) is Some`;
+  - `proof fn lemma_entry_plc(p, ls, f, args, slots)`: `f < p.fns@.len() && entry_plc(p, f, args, slots) ==> plc(p, ls, f, init_entry(p, f, args, slots))`, through `lemma_entry_agree(p, ls, f, args, args, slots, slots)` and `lemma_shape_refl`.
+  - `proof fn lemma_plc_stmts(p, ls, f, ss, k, fr)`: folds `lemma_plc_stmt` over `exec_stmts`.
+  - `lemma_plc_reachable`, the run-level composition, in `cost.rs`. Its other parts: `lemma_plc_intr`; the callee entry from `lemma_call_enter_frames` with `fr1 == fr2` and `lemma_agree_refl`; `lemma_plc_call_leave`.
+
+    ```rust
+    pub proof fn lemma_plc_reachable(p: Program, ls: Seq<FnLab>, f: nat, b: nat, fr: Frame, fuel: nat)
+        requires ok_prog(p, ls), f < p.fns@.len(), plc(p, ls, f, fr), run_from(p, f, b, fr, fuel) is Some,
+        ensures plc(p, ls, f, run_from(p, f, b, fr, fuel).unwrap().0),
+        decreases fuel,
+    ```
+  - `proof fn cost_from(p, ls, certs, sums, f, b, fr, fuel)`, `decreases fuel`:
+    - requires `ok_prog(p, ls)`, all-`cert_for` (as in the theorem), `sums[f] is Some`, `plc(p, ls, f, fr)`, `facts_hold(fr, certs[f].blocks@[b].facts@)`, `frame_len_ok(fr)` and `run_from(p, f, b, fr, fuel) is Some`;
     - ensures `steps <= poly_val(fr, certs[f].blocks@[b].pot)`.
-- **The theorem**, the amended spec's statement (I1):
+- **The theorem**, the amended spec's statement (I1, C1 option B):
 
 ```rust
-pub proof fn theorem_cost(p: Program, certs: Seq<Cert>, sums: Seq<Option<Poly>>, f: nat,
+pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Seq<Option<Poly>>, f: nat,
                           args: Seq<Val>, slots: Seq<Val>, fuel: nat, b: Poly)
     requires
-        wf(p), f < p.fns@.len(), certs.len() == p.fns@.len(), sums.len() == p.fns@.len(),
+        ok_prog(p, ls), f < p.fns@.len(), certs.len() == p.fns@.len(), sums.len() == p.fns@.len(),
         sums[f as int] == Some(b),
         forall|g: int| 0 <= g < p.fns@.len() && sums[g] is Some ==> cert_for(p, g as nat, certs[g], sums),
-        vals_len_ok(args), vals_len_ok(slots),
+        entry_plc(p, f, args, slots), vals_len_ok(args), vals_len_ok(slots),
         run_fn(p, f, init_entry(p, f, args, slots), fuel) is Some,
     ensures
         run_fn(p, f, init_entry(p, f, args, slots), fuel).unwrap().2
             <= poly_val(init_entry(p, f, args, slots), b),
 ```
 
-- [ ] **Step 0: C1-A ruling check, before any spec fn is written.** C1 option A keeps `cert_sem_ok`'s frames untyped. In such a frame any local, a parameter included, may hold a top-level `Mut(Local(i))`, whatever its declared type. This has two consequences:
-  - `len_nat` follows `Mut`, so `Len(x)` changes whenever x's target is written, a plain `z = ..` assignment included, while x's own value is unchanged;
-  - `write_back` follows every `Mut`-valued call argument, not just `&mut`-typed ones.
-
-  If `progress.md` has no ruling on these two points (keep `len_nat` through `Mut`, or read through `Shr` only), stop and ask before writing `len_nat`. The choice is frozen with `cost.rs`.
 - [ ] **Step 1:** Write the spec fns. `lemma_run_len_ok` comes first, since it relies on 8a's overflow-gives-`None` rule for push/extend/to_vec (`grow`, `SliceToVec`; sem.rs:405-411, 455-458). If that rule is missing from 8a's `sem.rs`, stop: that's a SPEC-CHANGE to 8a.
-- [ ] **Step 2:** Prove `lemma_gap_dec`, `lemma_init_entry_len_ok`, `cost_from` (one case lemma per terminator kind, plus the dispatcher) and `theorem_cost`.
+- [ ] **Step 2:** Prove `lemma_gap_dec`, `lemma_init_entry_len_ok`, `lemma_entry_plc`, `lemma_plc_stmts`, `lemma_plc_reachable`, `cost_from` (one case lemma per terminator kind, plus the dispatcher) and `theorem_cost`.
 - [ ] **Step 3: Proof mutations**, each failing a named lemma:
   - `block_step_ok`'s `Return` requires `>= k` instead of `>= k + 1`;
   - the `Call(Fn)` case drops `n`;
   - `cert_for` drops `facts@.len() == 0`, so `theorem_cost` can't discharge the entry facts;
-  - `gap(a, b)` defined as `a`, which fails `lemma_gap_dec` (M4).
-- [ ] **Step 4: Run the four checks and the evidence run.** The cost spec freeze starts after this commit.
-- [ ] **Step 5: Commit:** `feat(ctcore): step-bound certificates and theorem_cost (steps <= summary(inputs))`
+  - `gap(a, b)` defined as `a`, which fails `lemma_gap_dec` (M4);
+  - `cost_from` drops `plc` from its `requires`, so its body can't instantiate `cert_sem_ok`. Dropping `plc` from `cert_sem_ok` itself only strengthens the premise and fails nothing here; Task 3's `lemma_sym_block_sound` is what needs it.
+- [ ] **Step 4: Final X′, before Tasks 3+.**
+  - The spec's 23/36 is an upper bound. Dump the MIR of the 23 targets (Task 1 Step 4's command) and apply Task 3's write rule: subtract a target whose potential or facts need a non-`Mut`-typed local's atom across a writer, then subtract its callers (`CalleeNone`).
+  - Expected about 19, from a scan of wire, h3 and quic MIR at the 2026-11-02 amendment. `huffman_decode` takes its `&mut`s in bb6 and calls `feed_bit` in bb8, so its counters don't survive, which loses it, `scan_string`, `decode_string` and `decode_field_line`. vest_lib was not dumped, so include it here.
+  - Append one dated line after the spec's re-baseline line, `Final X′ (8b Task 2, before Task 3): X′/36`, naming each target lost and why. **Never edit the table rows, the 27/38 line or the 23/36 line.**
+- [ ] **Step 5: Run the four checks and the evidence run.** The cost spec freeze starts after this commit.
+- [ ] **Step 6: Commit:** `feat(ctcore): step-bound certificates and theorem_cost (steps <= summary(inputs))`
 
 ---
 
@@ -335,24 +349,22 @@ pub proof fn theorem_cost(p: Program, certs: Seq<Cert>, sums: Seq<Option<Poly>>,
 - Create: `crates/ctcore/src/cost_sym.rs`
 - Modify: `crates/ctcore/src/lib.rs` (`pub mod cost_sym;` only) (I5)
 
-**Consumes:** `cost.rs` (Task 2), `sem.rs`.
+**Consumes:** `cost.rs` (Task 2), `sem.rs`, `ct.rs` (`plc`, `mut_op`), `ct_lemmas.rs` (`lemma_eval_op_plc`, `lemma_place_plc`, `lemma_read_loc_mut`).
 
 **Interfaces (produces):**
 - **Types** (exec, used by the spec):
   - `pub enum Rel { Same, ValEq(Atom, u64 /* + k */), ValLe(Atom), LenEq(Atom), LenLe(Atom), Unknown }`: each local's post-state value in terms of pre-state atoms;
-  - `pub enum Prov { Local(usize), NoMut, Unknown }`: what a local's value may point to, from its in-block definition (C1 option A);
   - `pub struct Eff { pub rel: Vec<Rel>, pub edge: Vec<(usize /* succ block */, Vec<Fact> /* post-state facts on that edge */)> }`.
 - **Spec:**
-  - `pub open spec fn prov(blk: Block, k: nat, x: nat) -> Prov` gives the provenance of local x's value before statement k of blk:
-    - `Local(z)` if x's last in-block assignment is `RefMut(Place { local: z, proj: [] })`, or a `Use(Copy)` of such a local. `place_walk` with an empty projection targets exactly `Local(z)`, whatever the frame;
-    - `NoMut` if it is an rvalue whose top-level value is never `Mut`: `Bin`, `Un`, `Cast`, `Len`, `Discr`, `RefShr`, `Aggregate`, `Repeat`, or `Use(Const | Lit)`;
-    - `Unknown` otherwise. That includes every parameter and every local not assigned in the block, because frames are untyped and a declared type proves nothing.
-  - **Writer operands**:
-    - the base local of an assigned place whose projection contains `Deref`;
-    - arg 0 of `VecPush`/`VecSet`/`VecExtendFromSlice`;
-    - every arg of `Call(Fn)`;
-    - a `Call` dst that is not a bare local.
-  - `pub open spec fn rel_sound(rel: Rel, x: nat, pre: Frame, post: Frame) -> bool`.
+  - **What `plc` proves.** A `Mut` sits only at the top of a `Mut`-typed local; every other local and every slot is `no_mut`; a target's root is a slot or **any** non-`Mut`-typed local. It does not limit targets to `RefMut` roots: `locals[1] = Mut(Local(2))`, with local 2 a never-borrowed counter, satisfies `plc`, and `cert_sem_ok` ranges over all `plc` frames. So no address-taken set is sound here.
+  - `pub open spec fn writer_place(b: Body, pl: Place) -> bool`: `b.locals@[pl.local] is Mut`, `pl.proj@.len() > 0` and `pl.proj@[0] is Deref`.
+  - **Writers**, all syntactic:
+    - a `writer_place` assigned by `Assign`, `SetDiscr` or a `Call` dst;
+    - a `mut_op` arg 0 of `VecPush`/`VecSet`/`VecExtendFromSlice`;
+    - a `mut_op` arg of `Call(Fn)`.
+
+    Any other operand is `no_mut` (`lemma_eval_op_plc`), so `grow` and `write_back` do nothing for it.
+  - `pub open spec fn rel_sound(rel: Rel, x: nat, pre: Frame, post: Frame) -> bool`. `Same` means the value **and** `len_nat` are unchanged, so Task 4's rewrites need no `plc`.
   - `pub open spec fn eff_sound(e: Eff, pre: Frame, post: Frame, succ: nat) -> bool`: every `rel` is sound, and the edge facts for `succ` hold at `post`.
 - **Transfer:** `pub open spec fn sym_block(b: Body, blk: Block, facts: Seq<Fact>) -> Eff`, recognizing exactly:
   - `x = Copy(y)` (int, same `IntTy`), giving `ValEq(Val(y, ty), 0)`;
@@ -365,11 +377,8 @@ pub proof fn theorem_cost(p: Program, certs: Seq<Cert>, sums: Seq<Option<Poly>>,
   - `x = RefShr(y)`/`VecAsSlice(y)`, giving `LenEq(Len(y))`;
   - `SliceSubrange(r, ..)`, giving `LenLe(Len(r))`;
   - `SliceToVec(r)`, giving `LenEq(Len(r))`;
-  - **Writes through `Mut`** (C1 option A, replacing `mut_taken`):
-    - a writer operand with provenance `Local(z)` writes only z, which becomes `Unknown`;
-    - a call argument with provenance `NoMut` writes nothing (no write-back);
-    - a writer operand with provenance `Unknown` makes **every** local `Unknown`.
-  - **Len after writes:** after any write-through, push or call, the `Len` of every `Mut`-typed local becomes `Unknown`, even when its `Rel` is `Same`. Task 2 Step 0 records the ruling on locals that hold a `Mut` without being `Mut`-typed;
+  - **Writes through `Mut`** (C1 option B): a writer makes **every** local `Unknown`, because it may target any non-`Mut`-typed local and a `Mut`-typed local's `Len` reads through its target. Put a `ponytail:` comment on this: it loses counters across any `&mut` call, and the upgrade is a frame invariant limiting targets to `RefMut` roots;
+  - **Direct writes:** a non-writer place writes only its root local. If that root is not `Mut`-typed, every `Mut`-typed local also becomes `Unknown`, since it may target that root;
   - every other assignment to x gives `Unknown`;
   - untouched locals give `Same`.
   - **Edge facts** (unsigned compares only, C2):
@@ -377,24 +386,25 @@ pub proof fn theorem_cost(p: Program, certs: Seq<Cert>, sums: Seq<Option<Poly>>,
     - `Gt`/`Ge`/`Le` likewise;
     - the `Assert(Lt(..), true, b)` success edge gives `Lt`.
 - **Lemmas:**
-  - `proof fn lemma_sym_block_sound(p, f, b, blk, facts, fr)`: requires `facts_hold(fr, facts)` and `frame_len_ok(fr)`. It ensures `eff_sound(sym_block(..), fr, post, succ)` for the successor the terminator actually takes, with `post` the **successor frame** (I2):
+  - `proof fn lemma_sym_block_sound(p, ls, f, b, blk, facts, fr)`: requires `ok_prog(p, ls)`, `plc(p, ls, f, fr)`, `facts_hold(fr, facts)` and `frame_len_ok(fr)`. It ensures `eff_sound(sym_block(..), fr, post, succ)` for the successor the terminator actually takes, with `post` the **successor frame** (I2):
     - `fr1 = exec_stmts(..).0` for `Goto`/`Switch`/`Assert`;
     - `exec_intr(k, fr1, ..).0` for `Call(Intr)`;
     - for every `out` with `frame_len_ok(out)`, `call_leave(fr1, out, wb, dst).0` for `Call(Fn)`.
   - **Per-pattern lemmas:**
     - `lemma_rel_copy`, `lemma_rel_const`, `lemma_rel_len`, `lemma_rel_shr`, `lemma_rel_subrange`, `lemma_edge_lt`;
     - `lemma_rel_inc`: the no-wrap argument, from the `Lt` fact, the width bound and `lemma_gap_dec`;
-    - `lemma_prov_local`: a `Local(z)` writer changes only z.
+    - `lemma_nonwriter_root(p, ls, f, fr, pl)`: under `plc` and `ok_place`, a non-`writer_place`'s `place_loc`, if any, is rooted at `pl.local`.
 
 - [ ] **Step 1:** Write `lemma_rel_inc` first, as the bounded probe. If it needs `nonlinear_arith` with more than one product, or rlimit > 4 after one split, stop and report.
-- [ ] **Step 2:** Write `lemma_prov_local`, the remaining lemmas and `lemma_sym_block_sound`. Use per-statement and per-intrinsic helper lemmas from the start, not one big match (8a lesson).
+- [ ] **Step 2:** Write `lemma_nonwriter_root`, the remaining lemmas and `lemma_sym_block_sound`. Use per-statement and per-intrinsic helper lemmas from the start, not one big match (8a lesson).
 - [ ] **Step 3: Mutations**, each failing a named lemma:
   - the increment rule without the `Lt` pre-fact (`lemma_rel_inc`);
   - `SliceSubrange` as `LenEq` (`lemma_rel_subrange`);
-  - an `Unknown`-provenance writer that keeps other locals `Same` (`lemma_sym_block_sound`) (C1);
+  - a writer that keeps a never-borrowed non-`Mut`-typed local `Same`, i.e. the address-taken rule (`lemma_sym_block_sound`) (C1);
+  - a writer, or a direct write to a non-`Mut`-typed local, that keeps a `Mut`-typed local `Same` (`lemma_sym_block_sound`) (C1);
   - `lemma_sym_block_sound` stated at `exec_stmts(..).0` for `Call(Intr)`, which fails on the `VecLen` dst (I2).
 - [ ] **Step 4: Run the four checks and the evidence run.**
-- [ ] **Step 5: Commit:** `feat(ctcore): sound abstract block effect for cost certificates (counter increment, lengths, Mut provenance, edge facts)`
+- [ ] **Step 5: Commit:** `feat(ctcore): sound abstract block effect for cost certificates (counter increment, lengths, Mut writes, edge facts)`
 
 ---
 
@@ -415,7 +425,7 @@ pub proof fn theorem_cost(p: Program, certs: Seq<Cert>, sums: Seq<Option<Poly>>,
 - **Rewrites:**
   - `rewrite_pre(p: &Poly, e: &Eff, facts: &Vec<Fact>) -> (r: Option<Poly>)` ensures `r matches Some(q) ==> forall|pre, post, s| facts_hold(pre, facts@) && eff_sound(*e, pre, post, s) ==> poly_val(pre, p) >= poly_val(post, q)`. Here `post` is the successor frame (I2). It rewrites pre-atoms into post-atoms:
     - a `Gap(A, Val(i, ty))` with `ValEq(Val(i, ty), 1)` and a pre-fact `Lt(Val(i, ty), A)` becomes `Gap(A, Val(i, ty))′ + 1`, expanded (`lemma_gap_dec`);
-    - `Same` atoms are kept, except `Len` atoms Task 3 marks `Unknown`;
+    - `Same` atoms are kept, `Len` included (Task 3's `rel_sound`);
     - monomials over `Unknown` atoms are dropped (sound for the LHS).
   - `bound_post(p: &Poly, e: &Eff, post_facts: &Vec<Fact>) -> (r: Option<Poly>)` ensures `r matches Some(q) ==> forall|fr| facts_hold(fr, post_facts@) ==> poly_val(fr, q) >= poly_val(fr, p)`. It applies the upper-bound rewrites: `Le`/`Lt` facts, `Gap(a, x) <= a`, and `LenLe`. It returns `None` if an `Unknown` atom remains.
   - `instantiate(sum: &Poly, p: &Program, g: usize, args: &Vec<Operand>) -> (r: Option<Poly>)` ensures `r matches Some(q) ==> forall|fr| poly_val(fr, q) >= poly_val(call_enter(*p, g as nat, fr, args@).0, sum@)` (M3). It substitutes callee param atoms with arg atoms:
@@ -425,7 +435,7 @@ pub proof fn theorem_cost(p: Program, certs: Seq<Cert>, sums: Seq<Option<Poly>>,
     - anything else gives `None`.
 - **Facts:** `facts_imply(have: &Vec<Fact>, need: &Vec<Fact>) -> (r: bool)` ensures `r ==> forall|fr| facts_hold(fr, have@) ==> facts_hold(fr, need@)`. Syntactic: each needed fact appears, or follows by `Lt ⇒ Le`.
 - **Blocks and certificates:**
-  - `check_cost_block(p: &Program, f: usize, b: usize, c: &Cert, sums: &Vec<Option<Poly>>) -> (r: bool)` ensures `r ==> forall|fr| facts_hold(fr, c.blocks@[b].facts@) && frame_len_ok(fr) ==> block_step_ok(*p, f as nat, b as nat, *c, sums@, fr)`. It is named `check_cost_block`, not `check_block`, because `lib.rs` glob-imports `check::*` (M2);
+  - `check_cost_block(p: &Program, f: usize, b: usize, c: &Cert, sums: &Vec<Option<Poly>>) -> (r: bool)` ensures `r ==> forall|ls, fr| ok_prog(*p, ls) && plc(*p, ls, f as nat, fr) && facts_hold(fr, c.blocks@[b].facts@) && frame_len_ok(fr) ==> block_step_ok(*p, f as nat, b as nat, *c, sums@, fr)`. It is named `check_cost_block`, not `check_block`, because `lib.rs` glob-imports `check::*` (M2);
   - `check_cert(p: &Program, f: usize, c: &Cert, sums: &Vec<Option<Poly>>) -> (r: bool)` ensures `r ==> cert_for(*p, f as nat, *c, sums@)`.
 - **`tests/cost_check.rs`**, hand-built core programs with hand-written certificates:
   - `accepts_straight_line_const`
@@ -470,7 +480,7 @@ pub proof fn theorem_cost(p: Program, certs: Seq<Cert>, sums: Seq<Option<Poly>>,
 - **Loops** (`loops.rs`):
   - `pub struct Counted { pub header: usize, pub body: Vec<bool>, pub counter: usize, pub ty: IntTy, pub bound: Atom, pub test_block: usize, pub inc_block: usize }`;
   - `pub fn recognize(b: &Body, lp: &Vec<bool>, header: usize) -> Option<Counted>`, by the spec's counted-loop definition, unsigned counters only (C2);
-  - `pub enum CostWhy { Bounded, NotCounted(usize /* header */), Unresolved, Recursion, CalleeNone(usize), DegreeCap, Overflow, Validator(usize /* block */), NotWf }` (M15).
+  - `pub enum CostWhy { Bounded, NotCounted(usize /* header */), Unresolved, Recursion, CalleeNone(usize), DegreeCap, Overflow, Validator(usize /* block */), NotWf, NotTyped }` (M15). Only the driver builds `NotTyped` (Task 6); `analyze` never returns it.
 - **Certificates** (`loops.rs`): `pub fn build_cert(p: &Program, f: usize, sums: &Vec<Option<Poly>>) -> Result<Cert, CostWhy>`.
   - Block costs are local.
   - Loop potentials: `Gap(bound, Val(counter, ty)) × (per-iteration cost)` plus the exit continuation. Nested loops multiply, up to degree 2.
@@ -512,15 +522,18 @@ pub proof fn theorem_cost(p: Program, certs: Seq<Cert>, sums: Seq<Option<Poly>>,
   - `scripts/ct-check.sh`.
 - Create: `tools/ct-fixtures/cost-manifest.txt` (the fixtures' `cost-root` lines; I6), `tools/ct-fixtures/expected-cost.txt`
 
-**Consumes:** `ctcore::analyze`, 8a's `translate_closure()` (preflight), Task 1b's `analyse()` crate list.
+**Consumes:** `ctcore::analyze`, `ctcore::check_program`, 8a's `translate_closure()` (preflight), Task 1b's `analyse()` crate list.
 
 **Interfaces (produces):**
 - **Cost mode** translates from the `cost-root` lines. It reads no labels. `translate_closure` applies no label rule, so 8a's root-label rule, which runs in check mode only, doesn't apply here (preflight).
-  - It keeps only cost roots whose crate prefix is the crate being compiled, through a `crate_cost_roots` twin of `crate_roots`. It analyses each root's closure as its own `Program`, as in 8a. A crate with no cost root writes an empty file. A cost root matching no monomorphic fn stays a hard error.
+  - It keeps only cost roots whose crate prefix is the crate being compiled, through a `crate_cost_roots` twin of `crate_roots`. It analyses each root's closure as its own `Program`, as in 8a. A crate with no cost root writes an empty file.
+  - **Typing first (C1 option B).** Before `analyze`, it calls `check_program(&p, &vec![None; n])`: no declared secrets, so all-public labels. `Ok(ls)` supplies `theorem_cost`'s `ok_prog(p, ls)`. The driver prints a `Recursion` reject itself, as `none <def-path> Recursion`, without calling `analyze`. Any other reject, `NotWf` included, is `none <def-path> NotTyped`. A cost root matching no monomorphic fn stays a hard error.
   - ct-check.sh fails if any `cost-root` got no verdict line in any crate.
+- **Entry premises.** No code calls `theorem_cost`: it stays at `ctcore::cost::theorem_cost`, and a `bounded` line means its statement applied to the program. `entry_plc` and `vals_len_ok` are about the Rust caller's values. As with `theorem_ct`'s `args_agree`, nothing discharges them mechanically; `wf_local_ty` shows a non-`&mut` parameter's type and a `&mut` pointee's type have no `Mut`, and the argument rests on that. The TRUSTED cost-model row says so (Task 7).
 - **It calls `analyze` and writes `cost-<crate>.txt`**, one line per cost root:
   - `bounded <def-path> deg=<0|1|2> steps <= <poly in source param names>`;
   - `none <def-path> <CostWhy>`, from `analyze`;
+  - `none <def-path> NotTyped` or `none <def-path> Recursion`, when `check_program` rejects (above);
   - or `none <def-path> Unsupported|Unresolved <first error>`, when `translate_closure` fails (M15).
 - **Cost fixtures**, in `lib.rs` as plain Rust (`cost_pos_*` must be `bounded`; `cost_neg_*` must be `none`). Loops are `while` loops, because `for`/Range calls `Iterator::next`, which is Unresolved. Vecs and slices are of `u8` only, or a Task 1b pair (M16).
   - `cost_pos_straight` (deg 0)
@@ -533,12 +546,13 @@ pub proof fn theorem_cost(p: Program, certs: Seq<Cert>, sums: Seq<Option<Poly>>,
   - `cost_neg_parsed_count`: a loop bound read from input bytes
   - `cost_neg_recursion`
   - `cost_neg_while_true_break_on_data`
-  - These are not `root`s, so the 49 check verdicts don't change.
+  - `cost_neg_not_typed`: must translate cleanly and then fail `check_program`, expected `none .. NotTyped`. The candidate is `fn(x: &mut u8) -> &mut u8`, since `wf_body` forbids `Mut` in local 0. Step 1 confirms it.
+  - These are not `root`s, so the 58 check verdicts don't change.
 - **`expected-cost.txt`** lines are `bounded <path> deg=<d>` or `none <path> <Why>`. Coefficients are not pinned.
 - **`ct-check.sh`** (M14):
   - `analyse()` gains a mode-to-filename map (`check` gives `report-`, `selftest` gives `selftest-`, `cost` gives `cost-`).
   - The fixtures' cost run passes `tools/ct-fixtures/manifest.txt:tools/ct-fixtures/cost-manifest.txt` as `CT_MANIFEST`.
-  - It prints `ct-check: cost fixtures 10/10`.
+  - It prints `ct-check: cost fixtures 11/11`.
   - The Task 6 report gives the added cold and warm ct-check time.
 
 - [ ] **Step 1:** Implement the cost mode and fixtures. The diff is empty.
@@ -546,6 +560,7 @@ pub proof fn theorem_cost(p: Program, certs: Seq<Cert>, sums: Seq<Option<Poly>>,
   - Expect `cost_neg_off_progress`, `cost_neg_parsed_count` and `cost_neg_while_true_break_on_data` to become `bounded`, which the diff catches.
   - `cost_neg_recursion` stays `none Recursion`.
   - Record which lines changed. Revert.
+  - Separately, skip the `check_program` call: `cost_neg_not_typed` becomes `none .. NotWf`, which the diff catches. Map every reject to `NotTyped`: `cost_neg_recursion` becomes `none .. NotTyped`, which the diff catches. Revert both.
 - [ ] **Step 3: Run the four checks and the evidence run.**
 - [ ] **Step 4: Commit:** `feat(ct-driver): cost mode — step-bound report for cost roots; cost fixtures`
 
@@ -555,14 +570,14 @@ pub proof fn theorem_cost(p: Program, certs: Seq<Cert>, sums: Seq<Option<Poly>>,
 
 **Files:**
 - Create:
-  - `tools/ct-driver/cost-targets.txt`: the `cost-root` lines for the 36 targets, each followed by `# predicted: bounded|none (<why>)`. The prediction is the Task 1b re-baseline's, and it also names the original 27/38 row;
+  - `tools/ct-driver/cost-targets.txt`: the `cost-root` lines for the 36 targets, each followed by `# predicted: bounded|none (<why>)`. The prediction is Task 2's final X′, and it also names the original 27/38 row;
   - `tools/ct-driver/expected-cost.txt` (M13).
 - Modify:
   - `tools/ct-driver/manifest.txt`: only `intr` lines a Step 0 rerun finds beyond Task 1b's, and only mappings to 8a's existing intrinsics;
   - `tools/ct-driver/selftest.txt`: one vector per such new `intr` line (M12);
   - `scripts/ct-check.sh`, `scripts/verify.sh`, `TRUSTED.md`, `docs/superpowers/specs/2026-10-27-verified-http3-design.md`.
 
-**Consumes:** Task 6, the Task 1b re-baseline.
+**Consumes:** Task 6, Task 2's final X′.
 
 **Interfaces (produces):**
 - **`ct-check.sh` cost run:** `CT_MODE=cost CT_CRATES=wire,h3,quic`, through `analyse()`'s crate list, with `CT_MANIFEST=tools/ct-driver/manifest.txt:tools/ct-driver/cost-targets.txt`. Then it compares with `expected-cost.txt`:
@@ -570,20 +585,20 @@ pub proof fn theorem_cost(p: Program, certs: Seq<Cert>, sums: Seq<Option<Poly>>,
   - a new `bounded` is a failure until `expected-cost.txt` is updated in the same commit, with the bound in the report;
   - it prints `ct-check: cost X/36 bounded`.
 - **`verify.sh`'s final line** becomes `verify.sh: all crates verified, duvet ok, ct ok (10 declassify), cost X/Y, escapes accounted (1)`. X/Y is read from ct-check's `cost X/Y bounded` line (M11).
-- **TRUSTED.md** gains the spec's cost-model row, verbatim.
+- **TRUSTED.md** gains the spec's cost-model row, verbatim, with the entry-premise sentence from §Cost analyser.
 - **The design spec's Phase 8 entry** gains the measured coverage `X/Y` and one line: "bounds are core steps, not time or memory".
 
-- [ ] **Step 0: 3d check** (M17). If `phase-3d` has merged to main, rerun Task 1's census and dry run on the rebased branch first. Record any change.
+- [ ] **Step 0: Census rerun** (M17). `phase-3d` has merged to main (510aac3), so rerun Task 1's census and dry run on the rebased branch first. Task 1's census output was lost to a reboot, and this run regenerates it under `<scratch>`. Record any change.
 - [ ] **Step 1:** Run over the targets and write `expected-cost.txt` from the result.
 - [ ] **Step 2: Coverage report.**
   - A table of the 36 targets, plus the two dropped QuicVarInt rows marked `not a root (I3)`. Columns:
     - `original` (27/38 table);
-    - `re-baseline` (Task 1b);
+    - `re-baseline` (Task 2's final X′);
     - `actual`;
     - the bound (for bounded) or the `CostWhy`/translation error (for none);
     - a one-line explanation for each miss against either prediction.
   - The headline: **X of 36 targets bounded**, against 27/38, 25/36 and X′/36.
-- [ ] **Step 3: Real-code mutation** (in a scratch copy made by `git archive`, never the worktree). In `huffman_decode`, change `j += 1` to `j += 0`. `huffman_decode` must become `none`.
+- [ ] **Step 3: Real-code mutation** (in a scratch copy made by `git archive`, never the worktree). In `h3::frame::settings_ok`, change the inner `j += 1` to `j += 0`. `settings_ok` must become `none`. (`huffman_decode` is expected `none` already under Task 3's write rule, so it can't serve.)
 - [ ] **Step 4:** Edit verify.sh, TRUSTED.md and the design spec. Run the four checks and the evidence run.
 - [ ] **Step 5: Commit:** `feat: verified step bounds for X/36 parser targets (wire, h3/QPACK, quic); cost gate in verify.sh`
 
@@ -615,17 +630,17 @@ Otherwise record `not attempted` with those numbers. Under the post-1b translato
 - `theorem_cost` verifies at `--rlimit 4` with its statement equal to the amended spec's, and the Task 2 mutations each fail on a named lemma.
 - `check_cert ==> cert_for` and `analyze`'s ensures verify. The Task 4 tamper tests and the Task 5 dropped-caller test pass.
 - `ct-check.sh` prints:
-  - `fixtures 49/49`;
+  - `fixtures 58/58`;
   - `selftest 15/15`;
   - `selftest parsers K/K`;
   - `crypto ok (84 fns, 10 roots, 10 declassify)`;
   - `negative control rejected`;
-  - `cost fixtures 10/10`;
+  - `cost fixtures 11/11`;
   - `cost X/36 bounded`, matching `expected-cost.txt`.
 
   `verify.sh` ends with `cost X/36, escapes accounted (1)`.
 - Crypto's ct-check reports are byte-identical to main's.
-- The Task 7 coverage table is in the phase summary, with original, re-baseline and actual, and every `none` explained.
+- The Task 7 coverage table is in the phase summary, with original, re-baseline and actual, and every `none` explained. X′ = 23/36 was an upper bound; Task 2 recorded the final X′ before Tasks 3+. The original 27/38 pre-registration stands, and the result is reported against both.
 - TRUSTED.md has the cost-model row and the Task 1b front-end notes. The design spec carries `X/Y` and the steps-not-time-or-memory line.
 - `git diff main -- crates/ctcore/src/{syntax,sem,ct,ct_lemmas,ni,check,infer,sem_sanity}.rs` is empty.
 - `phase-8b` is merged into `main`. Task 8 is recorded as done or `not attempted`, with the go/no-go numbers.
@@ -645,11 +660,11 @@ Otherwise record `not attempted` with those numbers. Under the post-1b translato
   - Task 5 re-validates the final vector.
 - **Honesty:**
   - The predictions are pre-registered in the spec, and the 27/38 rows are never edited.
-  - The I3 denominator (36) and the Task 1b re-baseline are recorded before any proof work, and the report compares against all three.
+  - The I3 denominator (36) and Task 1b's upper bound are recorded before any proof work, the final X′ before Tasks 3+, and the report compares against all three.
   - The coverage regression gate is in verify.sh.
   - A seeded unbounded loop must come out `none`.
 - **Translator changes are bounded:** Task 1b is the only task that touches `translate.rs`. Each mapping is justified by `sem.rs`'s element-agnostic intrinsics or by Drop being `Goto`. Each has a mutation, and crypto's output is byte-identical.
 - **Not probed by the planner:**
   - the degree-2 dominance proofs;
   - the counter-increment no-wrap lemma (Task 3 Step 1 is its bounded probe);
-  - the coverage cost of C1-A's untyped-frame provenance (Task 2 Step 0).
+  - the coverage cost of Task 3's write rule beyond the `huffman_decode` family (Task 2 Step 4 measures it).

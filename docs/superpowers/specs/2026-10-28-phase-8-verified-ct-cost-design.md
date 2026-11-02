@@ -602,18 +602,19 @@ The final line becomes `verify.sh: all crates verified, duvet ok, ct ok (D decla
 **Certificates** (D9).
 - `Cert` = per block `{ facts: Vec<Fact>, pot: Poly }`, with `Fact = Le(Atom, Atom) | Lt(Atom, Atom)`.
 - **`cert_sem_ok(p, f, cert, sums)` is semantic.** For every frame satisfying block b's facts, executing b leads to a successor b′ whose facts hold, with `pot_b(fr) >= cost(b, fr) + pot_b′(fr′)`. A return needs `pot_b(fr) >= cost(b)`. A call needs `cost` to include `1 + eval(sums[g], callee entry atoms)`, for *any* callee result within that bound (dst and `&mut` targets are havocked).
-- `cert_sem_ok`'s frames are untyped: its only hypotheses are the block's facts and `frame_len_ok` (every local's and slot's `len_ok`). There is no frame or typing invariant (8b preflight C1, option A).
+- `cert_sem_ok`'s hypotheses are, for all `ls`, `ok_prog(p, ls)` and `plc(p, ls, f, fr)`, plus the block's facts and `frame_len_ok` (every local's and slot's `len_ok`) (8b C1, option B). `ls` stays inside the quantifier because no cost proof reads a label, so `cert_for` and `check_cert` take no labels. `lemma_plc_reachable` composes 8a's per-construct `plc` lemmas into a run-level one.
 - **Entry facts must be empty.** The summary is `pot[0]`. `cert_for(p, f, cert, sums)` = `cert_sem_ok` ∧ empty entry facts ∧ `sums[f] == Some(pot[0])`.
 
-**Theorem** (the controller's soundness statement, as amended by the 8b preflight rulings I1 and C2):
+**Theorem** (the controller's soundness statement, as amended by the 8b preflight rulings I1 and C2 and by C1 option B):
 
 ```rust
-pub proof fn theorem_cost(p: Program, certs: Seq<Cert>, sums: Seq<Option<Poly>>, f: nat,
+pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Seq<Option<Poly>>, f: nat,
                           args: Seq<Val>, slots: Seq<Val>, fuel: nat, b: Poly)
     requires
-        wf(p), f < p.fns@.len(), certs.len() == p.fns@.len(), sums.len() == p.fns@.len(),
+        ok_prog(p, ls), f < p.fns@.len(), certs.len() == p.fns@.len(), sums.len() == p.fns@.len(),
         sums[f as int] == Some(b),
         forall|g: int| 0 <= g < p.fns@.len() && sums[g] is Some ==> cert_for(p, g as nat, certs[g], sums),
+        entry_plc(p, f, args, slots),                                // entry frame satisfies plc
         vals_len_ok(args), vals_len_ok(slots),                       // all lengths <= usize::MAX
         run_fn(p, f, init_entry(p, f, args, slots), fuel) is Some,
     ensures
@@ -623,11 +624,13 @@ pub proof fn theorem_cost(p: Program, certs: Seq<Cert>, sums: Seq<Option<Poly>>,
 
 - `vals_len_ok(vs)` = `forall|i| 0 <= i < vs.len() ==> len_ok(vs[i])`. It gives `frame_len_ok(init_entry(..))`.
 - `poly_val(fr, p)` evaluates `p` with each atom read in `fr`.
+- `entry_plc(p, f, args, slots)` = `args.len() == nargs`, `slots.len() == nargs`, `no_mut` on every slot and on every arg whose parameter is not `Mut`-typed. It gives `plc` of `init_entry(..)` for any `ls`.
+- **Discharging the premises.** The cost driver runs `check_program` with no declared secrets, so all-public labels; its `Ok(ls)` gives `ok_prog(p, ls)`, a recursion reject gives `none <root> Recursion`, and any other reject gives `none <root> NotTyped`. `entry_plc` and `vals_len_ok` concern the Rust caller's values. As with `theorem_ct`'s `args_agree`, they are not discharged mechanically: `wf_local_ty` shows that a non-`&mut` parameter's type and a `&mut` pointee's type contain no `Mut`, and the claim rests on that.
 - The 8a-era statement had a `cert_sem_ok` premise, which never links `sums[f]` to `pot[0]`. It also had `eval_poly(b, fr)`. Both are superseded (I1).
 
 - **The validator** is `pub fn check_cert(p: &Program, f: usize, c: &Cert, sums: &Vec<Option<Poly>>) -> (r: bool) ensures r ==> cert_for(*p, f as nat, *c, sums@)`. It is sound and incomplete.
   - It works by symbolic execution of each block over a small abstract domain: unchanged, `+1`, constant, copy-of, `Len`-alias, unknown. Each block's effect is stated against the successor frame, including the terminator's own writes: an intrinsic's dst, or a call's write-back and dst (I2).
-  - **`Mut` provenance (C1, option A).** A temp made in the block by `RefMut` of a bare local z targets exactly z, whatever the frame. A write-through, push/set/extend or call argument with that provenance writes only z. A writer of unknown provenance makes every local unknown. That includes a parameter, or a `Mut` from a havocked call dst. After any write-through, push or call, the `Len` of every `Mut`-typed local is unknown.
+  - **Writes through `Mut` (C1, option B).** Under `plc` only a `Mut`-typed local holds a `Mut`, so the only writers are a `Deref`-first place on such a local and a `Mut`-typed operand passed to push/set/extend or a call. A target's root may be any non-`Mut`-typed local, not just one that was `RefMut`-borrowed, so a writer makes every local unknown. A direct write to a non-`Mut`-typed local also makes every `Mut`-typed local unknown, since its `Len` reads through its target.
   - The `+1` and edge-fact rules are unsigned-only (C2).
   - It then checks inequalities as monomial-wise coefficient dominance, after the pre→post atom rewrites (counter decrement under a `Lt` fact, upper bounds from `Le` facts, `Gap(a, x) <= a`).
 - **The inference** (`loops.rs`, exec, no proof): dominator tree → back edges → natural loops → counted-loop recognition → potentials, with summaries bottom-up and `None` for recursive SCCs. A loop is *counted* when:
@@ -668,6 +671,7 @@ pub proof fn theorem_cost(p: Program, certs: Seq<Cert>, sums: Seq<Option<Poly>>,
 
   (v) `copy_from_slice` stays unmapped (a new intrinsic would be a SPEC-CHANGE to 8a), so `parse_path` and its callers are `None`.
 - **Re-baseline (8b Task 1b, before Task 2):** 2026-10-29: **23/36 predicted bounded** before the Task 2 Step 0 domain subtraction, which is not yet ruled (Task 2 records the final X′ here, before any proof). The 25 predicted `Some` (I3) less `parse_path` and `parse_new_connection_id`, which both call `copy_from_slice` ((v); the preflight named only `parse_path`). The other 23 translate with 1b's (i)–(iv), allocated ADT constants (vi) and `translate-crate vest_lib` (vii), and pass 8a typing with all-public labels. No predicted-`None` target translates.
+- **2026-11-02:** C1 is ruled option B, there is no Task 2 Step 0 any more, and 23/36 is an upper bound. Task 2 Step 4 records the final X′ below, before Tasks 3+.
 - **The structural gap is off-progress loops** (`off += consumed` with `consumed >= 1` from a callee's postcondition). Closing it needs callee return facts. That is 8b's stretch task, behind an explicit go/no-go.
 
 ## Risks and fallbacks
