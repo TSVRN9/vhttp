@@ -2411,7 +2411,7 @@ pub open spec fn polled_rule(s: Streams, f: SpecFrame) -> bool {
         SpecFrame::ResetStream { stream_id, error_code, .. } => s.reset_code(stream_id) == Some(
             error_code,
         ),
-        _ => true,
+        _ => is_stream_layer_frame(f),
     }
 }
 
@@ -2479,7 +2479,7 @@ proof fn lemma_vlen_mono(a: u64, b: u64)
 {
 }
 
-proof fn lemma_frames_bytes_push(fs: Seq<SpecFrame>, f: SpecFrame)
+pub proof fn lemma_frames_bytes_push(fs: Seq<SpecFrame>, f: SpecFrame)
     ensures
         spec_frames_bytes(fs.push(f)).len() == spec_frames_bytes(fs).len() + spec_frame_bytes(
             f,
