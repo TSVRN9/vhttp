@@ -173,6 +173,8 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
 
 ### Task 1a-ii: the handshake-space receive path (`Connection::on_datagram`, `quic::conn`) (preflight: Task 1 split, I7; 3d2 preflight sizing)
 
+**From the 1a-i re-review:** `on_ack_frame` re-proves the in-flight conjunct in `wf_parts`, which needs a small `unacked_of` length lemma in sent.rs (owned by this task). `poll_cid_updates` already ensures `tokens_changed` and `tokens_covered`; keep them.
+
 **Files:**
 - Modify: `crates/quic/src/conn.rs`
 - Test: `crates/quic/tests/conn_rx.rs` (append)
@@ -267,6 +269,8 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
 ---
 
 ### Task 1b: stream, CID and path frames, migration, reset detection (`quic::conn`) (preflight: Task 1 split, I7)
+
+**From the 1a-i re-review:** `lemma_unused_cid_unheld` requires the full `wf()`, so call it on a ghost snapshot taken before `use_next`, with the index from `use_next`'s ensures; that serves `assign_dcid` (and Task 3 step 5). It can't serve `rewrite_stale`, which runs while `wf_dcids` is deliberately broken: state a weaker private predicate there (no unused entry's CID is held by a path). `on_new_cid`'s new ensures must say a surviving seq keeps both its CID and its used flag.
 
 > **Binding carry-over from 3d Task 4 (controller, 2026-10-29):** folded into `on_cid_frame`'s stale-DCID rewrite below, which now runs after every successful `on_new_cid` (3d2 preflight I3, C1(b)); its connection-level test is `rpt_switch_to_used_cid` (the twin of `tests/cid.rs`'s `retire_of_used_non_current`, 3d2 preflight M10).
 
