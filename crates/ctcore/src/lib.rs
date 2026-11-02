@@ -2,6 +2,7 @@
 //! with leakage events and step counts; the CT typing and its value/place lemmas; the verified
 //! exec checker, label inference and the `check_program` API.
 pub mod check;
+pub mod cost;
 pub mod ct;
 pub mod ct_lemmas;
 pub mod infer;
