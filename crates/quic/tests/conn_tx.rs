@@ -504,3 +504,317 @@ fn pn_max_closes_with_no_budget() {
     assert_eq!(c.poll_transmit(0), None);
     assert_eq!(c.phase(), Phase::Closed);
 }
+
+// Task 2b: path datagrams.
+
+fn frames_on(d: &OutDatagram) -> Vec<&Frame> {
+    d.packets.iter().flat_map(|p| p.frames.iter()).collect()
+}
+
+fn has_frame(d: &OutDatagram, f: &Frame) -> bool {
+    frames_on(d).iter().any(|g| *g == f)
+}
+
+fn has_response(d: &OutDatagram) -> bool {
+    frames_on(d).iter().any(|g| matches!(g, Frame::PathResponse(_)))
+}
+
+fn has_challenge(d: &OutDatagram) -> bool {
+    frames_on(d).iter().any(|g| matches!(g, Frame::PathChallenge(_)))
+}
+
+fn slice8(r: &[u8; 129], at: usize) -> [u8; 8] {
+    let mut x = [0u8; 8];
+    x.copy_from_slice(&r[at..at + 8]);
+    x
+}
+
+fn new_cid_d1(seq: u64, rpt: u64) -> Frame {
+    Frame::NewConnectionId { seq, retire_prior_to: rpt, cid: D(0xd1).to_vec(), reset_token: [0xe1; 16] }
+}
+
+/// `established()`, then a non-probing packet from path 1, and the polls that follow it.
+fn rebound() -> (Connection, Vec<OutDatagram>) {
+    let mut c = established();
+    c.on_datagram(1, 100, vec![one(1, vec![stream(0, 0, b"GET", true)])], 30, &rnd(5));
+    let v = drain(&mut c, 30);
+    (c, v)
+}
+
+#[test]
+fn path_response_echo() {
+    let mut c = established();
+    c.on_datagram(0, 100, vec![one(1, vec![Frame::PathChallenge(D(1))])], 30, &rnd(5));
+    let d = c.poll_transmit(30).unwrap();
+    assert_eq!(d.path, 0);
+    assert!(has_frame(&d, &Frame::PathResponse(D(1))));
+    assert_eq!(datagram_len(&d), 1200);
+    assert!(!drain(&mut c, 30).iter().any(has_response));
+    assert!(!drain(&mut c, 1_000_000).iter().any(has_response));
+}
+
+#[test]
+fn probing_does_not_migrate() {
+    let mut c = established();
+    c.on_datagram(1, 1200, vec![one(1, vec![Frame::PathChallenge(D(2))])], 30, &rnd(5));
+    let d = c.poll_transmit(30).unwrap();
+    assert_eq!(d.path, 1);
+    assert!(has_frame(&d, &Frame::PathResponse(D(2))));
+    assert_eq!(datagram_len(&d), 1200);
+    assert_eq!(c.active_path(), 0);
+    c.stream_write(3, b"data", false).unwrap();
+    let d = c.poll_transmit(31).unwrap();
+    assert_eq!(d.path, 0);
+    assert!(frames_on(&d).iter().any(|f| matches!(f, Frame::Stream { .. })));
+}
+
+#[test]
+fn response_not_expanded_past_amp() {
+    let mut c = established();
+    c.on_datagram(1, 50, vec![one(1, vec![Frame::PathChallenge(D(3))])], 30, &rnd(5));
+    let d = c.poll_transmit(30).unwrap();
+    assert_eq!(d.path, 1);
+    assert_eq!(d.packets.len(), 1);
+    let pn = d.packets[0].pn;
+    assert_eq!(
+        d.packets,
+        vec![OutPacket {
+            kind: PacketKind::OneRtt,
+            dcid: C1.to_vec(),
+            scid: vec![],
+            pn,
+            pn_len: 1,
+            frames: vec![Frame::PathResponse(D(3))],
+            padding: 0,
+            spin: false,
+        }]
+    );
+    assert_eq!(datagram_len(&d), 35);
+    assert_eq!(c.path_budget(1), Some(150 - 35));
+}
+
+#[test]
+fn nat_rebinding() {
+    let (mut c, v) = rebound();
+    assert_eq!(c.active_path(), 1);
+    let r5 = rnd(5);
+    let on1: Vec<&OutDatagram> = v.iter().filter(|d| d.path == 1).collect();
+    let chal1: Vec<&&OutDatagram> =
+        on1.iter().filter(|d| has_frame(d, &Frame::PathChallenge(slice8(&r5, 96)))).collect();
+    assert_eq!(chal1.len(), 1);
+    assert!(datagram_len(chal1[0]) < 1200);
+    assert!(on1.iter().map(|d| datagram_len(d)).sum::<usize>() <= 300);
+    let chal0: Vec<&OutDatagram> =
+        v.iter().filter(|d| d.path == 0 && has_frame(d, &Frame::PathChallenge(slice8(&r5, 104)))).collect();
+    assert_eq!(chal0.len(), 1);
+    assert_eq!(datagram_len(chal0[0]), 1200);
+
+    c.on_datagram(1, 1200, vec![one(2, vec![Frame::PathResponse(slice8(&r5, 96))])], 40, &rnd(6));
+    let d = c.poll_transmit(40).unwrap();
+    assert_eq!(d.path, 1);
+    assert!(has_frame(&d, &Frame::PathChallenge(slice8(&rnd(6), 96))));
+    assert_eq!(datagram_len(&d), 1200);
+
+    // The expanded probe's answer settles the MTU: no third challenge.
+    drain(&mut c, 40);
+    c.on_datagram(1, 1200, vec![one(3, vec![Frame::PathResponse(slice8(&rnd(6), 96))])], 40, &rnd(7));
+    assert!(!drain(&mut c, 40).iter().any(has_challenge));
+    c.stream_write(3, b"data", false).unwrap();
+    let d = c.poll_transmit(41).unwrap();
+    assert_eq!(d.path, 1);
+    assert_eq!(d.packets[0].dcid, C1.to_vec());
+}
+
+#[test]
+fn fresh_cid_for_new_dcid() {
+    let mut c = established();
+    c.on_datagram(0, 1200, vec![one(1, vec![new_cid_d1(1, 0)])], 30, &rnd(5));
+    drain(&mut c, 30);
+    c.on_datagram(1, 1200, vec![one_on(2, &rnd(2)[0..8], vec![stream(0, 0, b"GET", true)])], 31, &rnd(6));
+    let v = drain(&mut c, 31);
+    assert!(v.iter().any(|d| d.path == 1));
+    assert!(v.iter().any(|d| d.path == 0));
+    for d in &v {
+        let want = if d.path == 1 { D(0xd1) } else { C1 };
+        assert!(d.packets.iter().all(|p| p.dcid == want.to_vec()));
+    }
+}
+
+#[test]
+fn probe_new_cid_response() {
+    let mut c = established();
+    c.on_datagram(0, 1200, vec![one(1, vec![new_cid_d1(1, 0)])], 30, &rnd(5));
+    drain(&mut c, 30);
+    c.on_datagram(1, 1200, vec![one_on(2, &rnd(2)[0..8], vec![Frame::PathChallenge(D(5))])], 31, &rnd(6));
+    let v = drain(&mut c, 31);
+    let d = v.iter().find(|d| d.path == 1).unwrap();
+    assert!(has_frame(d, &Frame::PathResponse(D(5))));
+    assert_eq!(d.packets[0].dcid, D(0xd1).to_vec());
+}
+
+#[test]
+fn no_fresh_cid_no_send() {
+    let mut c = established();
+    c.on_datagram(1, 1200, vec![one_on(2, &rnd(2)[0..8], vec![stream(0, 0, b"GET", true)])], 31, &rnd(6));
+    assert!(drain(&mut c, 31).iter().all(|d| d.path != 1));
+    assert!(drain(&mut c, 1_000_000).iter().all(|d| d.path != 1));
+    assert_eq!(c.active_path(), 0);
+}
+
+#[test]
+fn no_fresh_cid_owed_probe_never_answered() {
+    let mut c = established();
+    c.on_datagram(1, 1200, vec![one_on(2, &rnd(2)[0..8], vec![Frame::PathChallenge(D(5))])], 31, &rnd(6));
+    assert!(c.response_owed(1));
+    assert!(drain(&mut c, 31).iter().all(|d| d.path != 1));
+    assert!(c.response_owed(1));
+}
+
+#[test]
+fn stale_cid_not_used() {
+    let (mut c, _) = rebound();
+    c.on_datagram(1, 100, vec![one(2, vec![new_cid_d1(1, 1)])], 31, &rnd(6));
+    c.stream_write(3, b"data", false).unwrap();
+    let v = drain(&mut c, 31);
+    assert!(!v.is_empty());
+    for d in &v {
+        for p in &d.packets {
+            assert_ne!(p.dcid, C1.to_vec());
+            assert_eq!(p.dcid, D(0xd1).to_vec());
+        }
+    }
+}
+
+#[test]
+fn path_cap() {
+    let mut c = established();
+    for q in 1..=3u8 {
+        c.on_datagram(q as u64, 1200, vec![one(q as u64, vec![Frame::Ping])], 30, &rnd(3));
+    }
+    drain(&mut c, 30);
+    c.on_datagram(4, 1200, vec![one(5, vec![Frame::PathChallenge(D(4))])], 31, &rnd(3));
+    assert!(drain(&mut c, 31).iter().all(|d| d.path != 4));
+    assert!(drain(&mut c, 1_000_000).iter().all(|d| d.path != 4));
+}
+
+#[test]
+fn response_on_other_path_validates() {
+    let (mut c, _) = rebound();
+    assert_ne!(c.path_state(1), Some(quic::path::PathState::Validated));
+    c.on_datagram(0, 100, vec![one(2, vec![Frame::PathResponse(slice8(&rnd(5), 96))])], 31, &rnd(6));
+    assert_eq!(c.path_state(1), Some(quic::path::PathState::Validated));
+}
+
+#[test]
+fn refused_path_burns_no_pn() {
+    let mut c = established_with(ptp());
+    let before = drain(&mut c, 10);
+    let first = before.iter().flat_map(|d| d.packets.iter()).map(|p| p.pn).max().unwrap() + 1;
+    c.on_datagram(1, 10, vec![one(1, vec![Frame::PathChallenge(D(3))])], 30, &rnd(5));
+    let mut v = drain(&mut c, 30);
+    assert!(!v.iter().any(has_response));
+    assert_eq!(c.poll_transmit(30), None);
+    assert!(c.response_owed(1));
+    c.on_datagram(1, 50, vec![], 31, &rnd(5));
+    v.extend(drain(&mut c, 31));
+    assert_eq!(v.iter().filter(|d| has_frame(d, &Frame::PathResponse(D(3)))).count(), 1);
+    let pns: Vec<u64> = v.iter().flat_map(|d| d.packets.iter()).map(|p| p.pn).collect();
+    let want: Vec<u64> = (first..first + pns.len() as u64).collect();
+    assert_eq!(pns, want);
+}
+
+/// A refused path doesn't hold up one later in the table that fits.
+#[test]
+fn refused_path_skipped() {
+    let mut c = established();
+    c.on_datagram(1, 10, vec![one(1, vec![Frame::PathChallenge(D(3))])], 30, &rnd(5));
+    c.on_datagram(2, 1200, vec![one(2, vec![Frame::PathChallenge(D(4))])], 30, &rnd(5));
+    let d = c.poll_transmit(30).unwrap();
+    assert_eq!(d.path, 2);
+    assert!(has_frame(&d, &Frame::PathResponse(D(4))));
+    assert!(c.response_owed(1));
+}
+
+#[test]
+fn second_migration_keeps_challenge() {
+    let (mut c, _) = rebound();
+    let r5 = rnd(5);
+    c.on_datagram(0, 1200, vec![one(2, vec![Frame::Ping])], 31, &rnd(6));
+    assert_eq!(c.active_path(), 0);
+    drain(&mut c, 31);
+    c.on_datagram(1, 1200, vec![one(3, vec![Frame::Ping])], 32, &rnd(7));
+    assert_eq!(c.active_path(), 1);
+    assert!(!drain(&mut c, 32).iter().any(|d| d.path == 1 && has_challenge(d)));
+    c.on_datagram(1, 100, vec![one(4, vec![Frame::PathResponse(slice8(&r5, 96))])], 33, &rnd(8));
+    assert_eq!(c.path_state(1), Some(quic::path::PathState::Validated));
+}
+
+/// P12's "at most once": a second copy of a challenge gets its own echo, the first gets one.
+#[test]
+fn responses_one_per_challenge() {
+    let mut c = established();
+    c.on_datagram(
+        0,
+        1200,
+        vec![one(1, vec![Frame::PathChallenge(D(1)), Frame::PathChallenge(D(2)), Frame::PathChallenge(D(1))])],
+        30,
+        &rnd(5),
+    );
+    let v = drain(&mut c, 30);
+    let got: Vec<&Frame> =
+        v.iter().flat_map(frames_on).filter(|f| matches!(f, Frame::PathResponse(_))).collect();
+    assert_eq!(
+        got,
+        vec![&Frame::PathResponse(D(1)), &Frame::PathResponse(D(2)), &Frame::PathResponse(D(1))]
+    );
+}
+
+/// Each path packet takes its own packet number.
+#[test]
+fn path_packets_take_fresh_pns() {
+    let mut c = established();
+    c.on_datagram(0, 1200, vec![one(1, vec![Frame::PathChallenge(D(1)), Frame::PathChallenge(D(2))])], 30, &rnd(5));
+    let v = drain(&mut c, 30);
+    assert!(v.len() >= 2);
+    let pns: Vec<u64> = v.iter().flat_map(|d| d.packets.iter()).map(|p| p.pn).collect();
+    assert!(pns.windows(2).all(|w| w[0] + 1 == w[1]));
+}
+
+/// A response and a challenge together are measured together: 44 bytes don't go in a 39-byte budget.
+#[test]
+fn both_frames_measured() {
+    let mut c = established();
+    let f = vec![Frame::PathChallenge(D(3)), stream(0, 0, b"GET", true)];
+    c.on_datagram(1, 13, vec![one(1, f)], 30, &rnd(5));
+    assert_eq!(c.active_path(), 1);
+    assert!(drain(&mut c, 30).iter().all(|d| d.path != 1));
+    assert_eq!(c.path_budget(1), Some(39));
+    c.on_datagram(1, 50, vec![], 31, &rnd(5));
+    let v = drain(&mut c, 31);
+    let d = v.iter().find(|d| d.path == 1).unwrap();
+    assert!(has_frame(d, &Frame::PathResponse(D(3))));
+    assert!(has_challenge(d));
+    assert_eq!(datagram_len(d), 44);
+}
+
+/// An owed PATH frame with a packet number that can't be encoded ends the connection, sending nothing.
+#[test]
+fn path_frame_unencodable_pn_closes() {
+    let mut c = established_quiet();
+    c.on_datagram(0, 1200, vec![one(1, vec![Frame::PathChallenge(D(1))])], 30, &rnd(5));
+    c.skip_pns_for_test(PacketKind::OneRtt, 1 << 40);
+    assert_eq!(c.poll_transmit(30), None);
+    assert_eq!(c.phase(), Phase::Closed);
+    assert!(!c.streams_live());
+}
+
+/// The close is at the path frame: a tiny active-path budget means `data_datagram` never gets to it.
+#[test]
+fn path_frame_unencodable_pn_closes_at_the_path() {
+    let mut c = established_quiet();
+    c.on_datagram(1, 1, vec![one(1, vec![stream(0, 0, b"GET", true)])], 30, &rnd(5));
+    assert_eq!(c.active_path(), 1);
+    c.skip_pns_for_test(PacketKind::OneRtt, 1 << 40);
+    assert_eq!(c.poll_transmit(30), None);
+    assert_eq!(c.phase(), Phase::Closed);
+}
