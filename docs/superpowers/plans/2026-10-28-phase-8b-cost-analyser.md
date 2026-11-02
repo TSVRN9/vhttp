@@ -256,8 +256,8 @@ The 8b modules:
 ### Task 2: Cost spec and `theorem_cost` (semantic certificates)
 
 **Files:**
-- Create: `crates/ctcore/src/cost.rs`
-- Modify: `crates/ctcore/src/lib.rs` (`pub mod cost;`); the spec's §Cost analyser (the final X′ line only, Step 4)
+- Create: `crates/ctcore/src/cost.rs`, `crates/ctcore/src/cost_sanity.rs` (counted-loop certificates and `theorem_cost` end to end, the phase's non-vacuity evidence; it stays green)
+- Modify: `crates/ctcore/src/lib.rs` (`pub mod cost;`, `pub mod cost_sanity;`); the spec's §Cost analyser (§Bounds' `Len` and `nth` reads; the final X′ line and its correction, Step 4)
 
 **Consumes:** `sem.rs` (`run_from`, `exec_stmts`, `exec_intr`, `call_enter`, `call_leave`, `init_entry`, `len_ok`, `uval`), `ct.rs` (`ok_prog`, `plc`, `no_mut`) and `ct_lemmas.rs` (`lemma_plc_stmt`, `lemma_plc_intr`, `lemma_plc_call_leave`, `lemma_call_enter_frames`, `lemma_agree_refl`, `lemma_entry_agree`, `lemma_shape_refl`).
 
@@ -271,9 +271,10 @@ The 8b modules:
   - `pub struct Cert { pub blocks: Vec<BlockCert> }`.
 - **Spec values** (`pub open spec fn`):
   - `val_nat(ty: IntTy, v: Val) -> nat`: `Int(x)` gives `uval(ty, x)`; anything else gives 0 (C2);
-  - `len_nat(fr: Frame, v: Val) -> nat`: the length of the `Arr` reached through `Shr`/`Mut`; 0 otherwise;
+  - `shr_len(v: Val) -> nat` (`decreases v`): the length of the `Arr` at the end of any number of `Shr`; 0 otherwise;
+  - `len_nat(fr: Frame, v: Val) -> nat`: `shr_len(read_loc(fr, l))` for a `Mut(l)`, else `shr_len(v)`;
   - `gap(a: nat, b: nat) -> nat`: `if a >= b { a - b } else { 0 }`;
-  - `atom_val(fr: Frame, a: Atom) -> nat` (`decreases a`). `Val(x, ty)` is `val_nat(ty, fr.locals[x])`, and `Gap(a, b)` is `gap(atom_val(a), atom_val(b))`;
+  - `atom_val(fr: Frame, a: Atom) -> nat` (`decreases a`). `Val(x, ty)` is `val_nat(ty, nth(fr.locals, x))`, `Len(x)` is `len_nat(fr, nth(fr.locals, x))`, and `Gap(a, b)` is `gap(atom_val(a), atom_val(b))`;
   - `mono_val(fr, m) -> nat`, `poly_val(fr: Frame, p: Poly) -> nat`;
   - `fact_holds(fr, f) -> bool`, `facts_hold(fr, fs: Seq<Fact>) -> bool`;
   - `frame_len_ok(fr: Frame) -> bool`: `len_ok` of every local and slot;
@@ -297,6 +298,7 @@ The 8b modules:
   - `proof fn lemma_exec_stmts_len_ok(..)`, `proof fn lemma_intr_len_ok(..)`.
   - `proof fn lemma_init_entry_len_ok(p, f, args, slots)`: `vals_len_ok(args) && vals_len_ok(slots) ==> frame_len_ok(init_entry(p, f, args, slots))`.
   - `proof fn lemma_gap_dec(a: nat, x: nat)`: `x < a ==> gap(a, x) == gap(a, x + 1) + 1`. Tasks 3 and 4 consume it.
+  - `proof fn lemma_shr_len_ok(v)`: `len_ok(v) ==> shr_len(v) <= USIZE_MAX`; `proof fn lemma_elems_le_len_nat(fr, v)`: `elems(fr, v).len() <= len_nat(fr, v)`. Task 3 consumes them.
   - `proof fn lemma_entry_plc(p, ls, f, args, slots)`: `f < p.fns@.len() && entry_plc(p, f, args, slots) ==> plc(p, ls, f, init_entry(p, f, args, slots))`, through `lemma_entry_agree(p, ls, f, args, args, slots, slots)` and `lemma_shape_refl`.
   - `proof fn lemma_plc_stmts(p, ls, f, ss, k, fr)`: folds `lemma_plc_stmt` over `exec_stmts`.
   - `lemma_plc_reachable`, the run-level composition, in `cost.rs`. Its other parts: `lemma_plc_intr`; the callee entry from `lemma_call_enter_frames` with `fr1 == fr2` and `lemma_agree_refl`; `lemma_plc_call_leave`.
@@ -333,6 +335,7 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
   - the `Call(Fn)` case drops `n`;
   - `cert_for` drops `facts@.len() == 0`, so `theorem_cost` can't discharge the entry facts;
   - `gap(a, b)` defined as `a`, which fails `lemma_gap_dec` (M4);
+  - `len_nat` as `elems(fr, v).len()`, one layer, which fails `sanity_len_double_ref` and `lemma_b0_double_ref`;
   - `cost_from` drops `plc` from its `requires`, so its body can't instantiate `cert_sem_ok`. Dropping `plc` from `cert_sem_ok` itself only strengthens the premise and fails nothing here; Task 3's `lemma_sym_block_sound` is what needs it.
 - [ ] **Step 4: Final X′, before Tasks 3+.**
   - The spec's 23/36 is an upper bound. Dump the MIR of the 23 targets (Task 1 Step 4's command) and apply Task 3's write rule: subtract a target whose potential or facts need a non-`Mut`-typed local's atom across a writer, then subtract its callers (`CalleeNone`).
@@ -373,10 +376,12 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
     - a `Const` ≤ `max(ty)`;
     - a `Val(_, ty)` of the same `IntTy`;
     - a `Len` with `ty == Usize`;
-  - `x = Len(pl)`/`VecLen`, giving `ValEq(Len(root), 0)`, **only for** `pl.proj` ∈ {`[]`, `[Deref]`} (M8: `eval_rv`'s `Len` is `elems(read_place)`, which differs under field projections);
+  - `x = Len(y)`/`VecLen(y)`, `y` an empty-projection local, giving `ValLe(Len(y))`, since `eval_rv`'s `Len` reads one layer and the atom reads all (`lemma_elems_le_len_nat`). Any other projection gives `Unknown` (M8);
   - `x = RefShr(y)`/`VecAsSlice(y)`, giving `LenEq(Len(y))`;
+  - `x = copy (*y)`, giving `LenLe(Len(y))`;
   - `SliceSubrange(r, ..)`, giving `LenLe(Len(r))`;
-  - `SliceToVec(r)`, giving `LenEq(Len(r))`;
+  - `SliceToVec(r)`, giving `LenLe(Len(r))`;
+  - **In-block composition:** a rule's atom is rewritten through the rel so far, so every rel lands on pre-state atoms: `_3 = copy (*_2); _4 = Len(_3)` gives `_4` `ValLe(Len(2))`;
   - **Writes through `Mut`** (C1 option B): a writer makes **every** local `Unknown`, because it may target any non-`Mut`-typed local and a `Mut`-typed local's `Len` reads through its target. Put a `ponytail:` comment on this: it loses counters across any `&mut` call, and the upgrade is a frame invariant limiting targets to `RefMut` roots;
   - **Direct writes:** a non-writer place writes only its root local. If that root is not `Mut`-typed, every `Mut`-typed local also becomes `Unknown`, since it may target that root;
   - every other assignment to x gives `Unknown`;
@@ -391,7 +396,7 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
     - `exec_intr(k, fr1, ..).0` for `Call(Intr)`;
     - for every `out` with `frame_len_ok(out)`, `call_leave(fr1, out, wb, dst).0` for `Call(Fn)`.
   - **Per-pattern lemmas:**
-    - `lemma_rel_copy`, `lemma_rel_const`, `lemma_rel_len`, `lemma_rel_shr`, `lemma_rel_subrange`, `lemma_edge_lt`;
+    - `lemma_rel_copy`, `lemma_rel_const`, `lemma_rel_len`, `lemma_rel_shr`, `lemma_rel_deref`, `lemma_rel_subrange`, `lemma_edge_lt`;
     - `lemma_rel_inc`: the no-wrap argument, from the `Lt` fact, the width bound and `lemma_gap_dec`;
     - `lemma_nonwriter_root(p, ls, f, fr, pl)`: under `plc` and `ok_place`, a non-`writer_place`'s `place_loc`, if any, is rooted at `pl.local`.
 
@@ -400,6 +405,7 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
 - [ ] **Step 3: Mutations**, each failing a named lemma:
   - the increment rule without the `Lt` pre-fact (`lemma_rel_inc`);
   - `SliceSubrange` as `LenEq` (`lemma_rel_subrange`);
+  - `x = Len(y)` as `ValEq(Len(y), 0)`, false on `Shr(Shr(Arr))` (`lemma_rel_len`);
   - a writer that keeps a never-borrowed non-`Mut`-typed local `Same`, i.e. the address-taken rule (`lemma_sym_block_sound`) (C1);
   - a writer, or a direct write to a non-`Mut`-typed local, that keeps a `Mut`-typed local `Same` (`lemma_sym_block_sound`) (C1);
   - `lemma_sym_block_sound` stated at `exec_stmts(..).0` for `Call(Intr)`, which fails on the `VecLen` dst (I2).
@@ -426,10 +432,12 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
   - `rewrite_pre(p: &Poly, e: &Eff, facts: &Vec<Fact>) -> (r: Option<Poly>)` ensures `r matches Some(q) ==> forall|pre, post, s| facts_hold(pre, facts@) && eff_sound(*e, pre, post, s) ==> poly_val(pre, p) >= poly_val(post, q)`. Here `post` is the successor frame (I2). It rewrites pre-atoms into post-atoms:
     - a `Gap(A, Val(i, ty))` with `ValEq(Val(i, ty), 1)` and a pre-fact `Lt(Val(i, ty), A)` becomes `Gap(A, Val(i, ty))′ + 1`, expanded (`lemma_gap_dec`);
     - `Same` atoms are kept, `Len` included (Task 3's `rel_sound`);
+    - a pre-atom `A` becomes the post-atom of a local `x` whose rel is `ValEq(A, 0)`, `ValLe(A)`, `LenEq(A)` or `LenLe(A)`; a coefficient may be split between such locals and `Same`;
     - monomials over `Unknown` atoms are dropped (sound for the LHS).
-  - `bound_post(p: &Poly, e: &Eff, post_facts: &Vec<Fact>) -> (r: Option<Poly>)` ensures `r matches Some(q) ==> forall|fr| facts_hold(fr, post_facts@) ==> poly_val(fr, q) >= poly_val(fr, p)`. It applies the upper-bound rewrites: `Le`/`Lt` facts, `Gap(a, x) <= a`, and `LenLe`. It returns `None` if an `Unknown` atom remains.
+  - `bound_post(p: &Poly, e: &Eff, post_facts: &Vec<Fact>) -> (r: Option<Poly>)` ensures `r matches Some(q) ==> forall|fr| facts_hold(fr, post_facts@) ==> poly_val(fr, q) >= poly_val(fr, p)`. It applies the upper-bound rewrites: `Le`/`Lt` facts and `Gap(a, x) <= a`. It returns `None` if an `Unknown` atom remains.
   - `instantiate(sum: &Poly, p: &Program, g: usize, args: &Vec<Operand>) -> (r: Option<Poly>)` ensures `r matches Some(q) ==> forall|fr| poly_val(fr, q) >= poly_val(call_enter(*p, g as nat, fr, args@).0, sum@)` (M3). It substitutes callee param atoms with arg atoms:
-    - `Copy(Place { local, proj: [] })` maps `Val(j, ty)` to `Val(local, ty)`, with matching `IntTy` (C2);
+    - `Copy(Place { local, proj: [] })` maps `Val(j, ty)` to `Val(local, ty)`, with matching `IntTy` (C2), and `Len(j)` to `Len(local)`;
+    - `Gap(a, b)` maps by recursion on `a` and `b`;
     - `Const(ty, n)` maps to `Const(uval(ty, n))` when it fits u64;
     - callee non-param atoms map to `Const(0)`, since those locals are `Unit` at entry;
     - anything else gives `None`.
@@ -444,6 +452,7 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
   - `accepts_nested_quadratic`
   - `accepts_mid_body_exit`
   - `accepts_call_with_summary`
+  - `accepts_double_ref_len`: `_3 = copy (*_2); _4 = Len(_3)` over a counted loop, paid by `Len(2)`, and a caller's `_3 = &_1` passing its `Len(1)`
   - `rejects_pot_too_small_by_one`
   - `rejects_missing_lt_fact`
   - `rejects_wrong_successor_facts`
@@ -585,7 +594,7 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
   - a new `bounded` is a failure until `expected-cost.txt` is updated in the same commit, with the bound in the report;
   - it prints `ct-check: cost X/36 bounded`.
 - **`verify.sh`'s final line** becomes `verify.sh: all crates verified, duvet ok, ct ok (10 declassify), cost X/Y, escapes accounted (1)`. X/Y is read from ct-check's `cost X/Y bounded` line (M11).
-- **TRUSTED.md** gains the spec's cost-model row, verbatim, with the entry-premise sentence from §Cost analyser.
+- **TRUSTED.md** gains the spec's cost-model row, verbatim, with the entry-premise sentence from §Cost analyser and "of a returning run; aborts and panics are outside".
 - **The design spec's Phase 8 entry** gains the measured coverage `X/Y` and one line: "bounds are core steps, not time or memory".
 
 - [ ] **Step 0: Census rerun** (M17). `phase-3d` has merged to main (510aac3), so rerun Task 1's census and dry run on the rebased branch first. Task 1's census output was lost to a reboot, and this run regenerates it under `<scratch>`. Record any change.
