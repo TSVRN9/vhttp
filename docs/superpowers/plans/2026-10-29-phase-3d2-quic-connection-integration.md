@@ -100,14 +100,14 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
     - `chal_used: usize`: challenge slices of `rand` used in this call, reset to 0 by every pub fn that takes `rand` (preflight M9);
     - ghost `out_log: Seq<SpecOutDatagram>`.
   - **`wf()`** (closed) is the conjunction of named closed sub-predicates (preflight I7). It is frozen here: Tasks 1a-ii–3 keep every sub-predicate unchanged. Each helper's contract names the sub-predicates it re-proves; the rest it ensures by "those fields unchanged".
-    - **`wf_parts()`:** every component's `wf()`; `local_tp_ok(local_tp@)` and `server_tp_wf(local_tp@)`; `peer_tp is Some(t) ==> peer_tp_wf(t@)`; `complete ==> peer_tp is Some && streams is Some || lc.phase() != Open`; `chal_used <= 4`.
+    - **`wf_parts()`:** every component's `wf()`; `local_tp_ok(local_tp@)` and `server_tp_wf(local_tp@)`; `peer_tp is Some(t) ==> peer_tp_wf(t@)`; `complete ==> peer_tp is Some && streams is Some || lc.phase() != Open`; `complete ==> !live_i && !live_h`; `chal_used <= 4`; `sent_i` + `sent_h` + `sent_1` in-flight records `<= MAX_INFLIGHT`; `paths.has(hs_path)`; `recv(k).kind_spec() == k`; `cids_only(cid_updates@)` (fix round 1 and its review).
     - **`wf_streams()` (P11):** `streams is Some(s) ==> s.wf() && !s.failed() && lc.phase() is Open`; `lc.phase() !is Open ==> streams is None` (dropped on close: frees the buffers, and `Streams` is never called after an `Err`).
     - **`wf_amp()` (P1, §8.1, per path):** for every path `q`, `amp_ok(paths.amp_trace(q))`, and the `Sent` entries of `paths.amp_trace(q)` are exactly `out_datagram_len(d)` for the elements `d` of `out_log` with `d.path == q`, in order. Tasks 1a-i and 1a-ii push none.
     - **`wf_pn()` (P4, §12.3):** within each space, the PNs across `out_log` are strictly increasing and `< sent(k).next_pn()`.
     - **`wf_log_paths()`:** every `d` in `out_log` has `paths.index(d.path) is Some`. This is what lets `Paths::insert` add an id whose filtered log is empty.
     - **`wf_dcids()` (preflight I1, I2; 3d2 preflight C1):**
       - `paths.dcid(paths.active()) is Some`. There is no `hs_path` clause: `hs_path` may lose its DCID like any other path (C1(a));
-      - every `paths.dcid(q) is Some(c)` has `c` active in `peer_cids` (§5.1.2 "MUST stop using");
+      - every `paths.dcid(q) is Some(c)` has `c` active and used in `peer_cids` (`used_cid`; §5.1.2 "MUST stop using"; fix round 1: `lemma_unused_cid_unheld` gives "a `use_next()` CID is held by no path");
       - **§9.5 pairs:** for all `q1 != q2` in `paths` (at most `MAX_PATHS`), `paths.dcid(q1) is Some && paths.dcid(q1) == paths.dcid(q2) ==> paths.peer_used(q1) == paths.peer_used(q2)`. This is §9.5's "MUST NOT reuse a connection ID when sending to more than one destination address" plus its MAY (the peer used the same CID from a new address, NAT rebinding). Task 1b keeps it across `set_peer_used` with the `on_packet` repair step and across `on_new_cid` with the stale-DCID rewrite.
   - **`pub closed spec fn out_log(&self) -> Seq<SpecOutDatagram>`** (preflight I6: 3e Task 5's accessor).
   - **Clock rule (preflight M12):** every pub fn that takes `now` starts with `self.now = max(self.now, now)`.
@@ -126,7 +126,7 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
     - `pub fn crypto_read(&mut self, level: PacketKind, out: &mut Vec<u8>)` reads `crx(level)`.
     - `pub fn crypto_write(&mut self, level: PacketKind, data: &[u8])`: requires `level !is OneRtt`; ignored unless the space is live (`ctx(level).write(data, false)`).
     - **`pub fn on_peer_params(&mut self, tp: &TransportParams, now: u64)`**: requires `peer_tp_wf(tp@)`. A no-op unless Open and `peer_tp is None` (preflight M13). `ids.check_peer_tp(tp)` failing → `close_internal(TRANSPORT_PARAMETER_ERROR)`. Else `peer_tp = Some(tp.clone())` and `streams = Some(Streams::new(&local_tp, tp))` (preconditions from `lemma_local_tp_streams` and `lemma_peer_tp_stream_ok`).
-    - **`pub fn on_handshake_complete(&mut self, alpn: &[u8], now: u64, rand: &[u8; RAND_LEN])`**: a no-op unless Open and `!complete` (preflight M13). `peer_tp` None → `close_internal(INTERNAL_ERROR)`. `check_alpn` failing → `close_internal(code)`. Else: `complete = true`; `discard(Initial)` and `discard(Handshake)` (whichever is live); `hs_done = Pending`; `spin = rand[128] & 1 == 1`; `issue_cids(rand)`. After this no long-header packet is built.
+    - **`pub fn on_handshake_complete(&mut self, alpn: &[u8], now: u64, rand: &[u8; RAND_LEN])`**: a no-op unless Open and `!complete` (preflight M13). `peer_tp` or `streams` None → `close_internal(INTERNAL_ERROR)`. `check_alpn` failing → `close_internal(code)`. Else: `discard(Initial)` and `discard(Handshake)` (each a no-op if already gone); `complete = true`; `hs_done = Pending`; `spin = rand[128] & 1 == 1`; `issue_cids(rand)`. After this no long-header packet is built.
     - `pub fn on_tls_alert(&mut self, alert: u8, now: u64)` → `close_internal(CRYPTO_ERROR_BASE + alert)` (RFC 9001 §4.8).
   - **`pub fn poll_stream_events(&mut self, out: &mut Vec<StreamEvent>)`** moves `events` into `out` (in order, no data copies) and leaves `events` empty.
     - **Caller obligation, stated in the module doc (preflight M24):** drain this after every `on_datagram`. `events` is bounded only by the caller draining it. `H3Server::pump` discharges this; 3e drives `Connection` before any stream exists.
@@ -208,7 +208,7 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
     - any kind: more `PathChallenge` frames in `p.frames` than `paths.response_room(path)` (3d final review M2). The whole packet is dropped and never acknowledged, so the peer sees ordinary loss (§21.9 MAY "dropping packets", cited at `MAX_RESPONSES`) and no challenge is silently lost inside an acknowledged packet. Pinned by `challenge_flood_dropped` below (3d2 preflight M10: it passes once the gate exists).
     No size check applies to 1-RTT, so small PATH_* datagrams are never discarded (§8.2.1 req).
   - **`fn on_packet(&mut self, path, p: PlainPacket, now, rand) -> (r: Result<(), u64>)`**:
-    - `for f in p.frames { on_frame(k, path, &p.dcid, f, now, rand)? }`.
+    - `for f in p.frames { on_frame(k, path, &p.dcid, f, now, rand)?; if lc.phase() !is Open { break } }` (fix round 1, M3: in `[CC, Stream]`, `streams` is None by the second frame).
     - Then, if still Open: `recv(k).on_packet(p.pn, is_ack_eliciting(&frames), now)` (**P10**, §13.1: only after every frame returned `Ok`).
     - `idle.on_packet_processed(now)`. (Task 1b inserts `set_peer_used` and the C1 repair step here; nothing in this task reads `peer_used`, so `wf_dcids` is kept by "paths' DCIDs and `peer_used` unchanged" plus `insert` adding a path with DCID None.)
     - If `k is Handshake` and `hs_path` is not Validated: `paths.set_validated(hs_path)` and `discard(Initial)` (§8.1; RFC 9001 §4.9.1).
@@ -221,6 +221,7 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
     - `ConnectionClose{..}` → `lc.enter_draining(now, pto())`; `streams = None`; Ok.
     - `HandshakeDone` cannot occur (`frames_received` excludes it).
   - **Declared here, bodied in Task 1b:** `on_stream_frame`, `on_cid_frame`, `on_path_frame` and `after_one_rtt(path, dcid, non_probing, pn, now, rand)` (no `old_used` parameter: its body never read it; 3d2 preflight M7). This task gives them their final `requires`/`ensures` over the `wf` sub-predicates only and stub bodies (`Ok(())` / no-op). Task 1b replaces the bodies and adds the behavioural ensures listed there.
+  - **`on_stream_frame`'s `Err` arm (binding, fix round 1 M3):** `Streams::on_frame`'s `Err` sets `failed()`, which breaks `wf_streams`, and `close_internal` requires `wf`. So the helper snapshots `pto()` before the call, and on `Err(c)` calls `lc.enter_closing(now, pto, false, c, ..)`, sets `streams = None`, and returns `Err(c)` with `wf` intact. `on_datagram`'s later `close_internal(c)` is then a no-op: the first error wins.
   - **`fn on_acked_frame(&mut self, k, f: &Frame)` / `fn on_lost_frame(&mut self, k, f: &Frame)`** (the §13.3 routing, one arm per retransmittable frame; Task 3's PTO step also calls `on_lost_frame`):
     - stream family → `streams.on_frame_acked`/`on_frame_lost` if `streams` is Some (RESET_STREAM resent unchanged inside 3c);
     - `Crypto` → `ctx(k).on_data_acked`/`on_data_lost(offset, len, false)`;
@@ -254,7 +255,7 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
   - RFC 9001 §5.7 at the OneRtt gate: a comment citation if that row is Phase 4 and already cited, else Duvet.
 - [ ] **Step 4: Mutations:**
   - call `recv(k).on_packet` before the frame loop (fails P10's ensures);
-  - `gate_packet` accepts 1-RTT before `complete` (fails `on_stream_frame`'s `streams is Some` precondition).
+  - `gate_packet` accepts 1-RTT before `complete` (fails `on_stream_frame`'s `streams is Some` precondition; this holds only if `on_stream_frame`'s guard is on `Open`, from `wf`'s `complete` clause, not a runtime `streams.is_some()`, fix round 1 M3).
   Test-only mutation (reported in Task 2a-ii, whose `amp_limit` catches it): skip `paths.on_recv` when every packet is dropped.
   Review check (no test pins it; 3d2 preflight M3): the STREAM-run coalescing in `on_ack_frame` makes one `on_frame_acked` call per run.
 - [ ] **Step 5:** Four checks, evidence, quote check; MUST coverage for `5.2,11.1,13.1,10.3,5.1.1`.
@@ -272,6 +273,7 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
 **Files:**
 - Modify:
   - `crates/quic/src/conn.rs`;
+  - `crates/quic/src/cid.rs` (fix round 1 I1): `on_new_cid` also ensures a surviving seq keeps its CID (the body keeps entries; `received` is the natural carrier), so `rewrite_stale` carries "used" (`wf_dcids`) across a non-stale path;
   - `crates/quic/src/path.rs` (3d2 preflight I1): `pub fn len(&self) -> (r: usize)` with `r == self.ids().len()`, and `pub fn id_at(&self, i: usize) -> (r: PathId)` requiring `i < self.ids().len()` with `r == self.ids()[i]`. Read-only, so `Paths::wf` and every existing ensures are untouched. Tasks 2b and 3 consume them.
 - Test: `crates/quic/tests/conn_rx.rs` (append)
 
@@ -285,7 +287,7 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
   - `CidTable::{new, apply}` (test only).
 - Produces (bodies for 1a-ii's declarations, plus new fns):
   - **`on_packet` addition (3d2 preflight C1(c)):** after `idle.on_packet_processed(now)`: `paths.set_peer_used(path, &p.dcid)`, then **`fn repair_pairs(&mut self, path)`** (`#[verifier::spinoff_prover]`): for each other path `q` (via `len`/`id_at`, at most `MAX_PATHS`) with `paths.dcid(q) is Some && paths.dcid(q) == paths.dcid(path)` and `paths.peer_used(q) != paths.peer_used(path)`, clear the non-active member's DCID: `set_dcid(q, None)` if `path == paths.active()`, else `set_dcid(path, None)`. `assign_dcid` re-assigns a cleared path later (`after_one_rtt`). Ensures `wf_dcids()`, so the §9.5 pair conjunct holds after every receive (the peer rotating CIDs on one member of a NAT-rebinding pair splits the pair).
-  - **`on_stream_frame`:** the nine stream-layer frames → `streams.on_frame(&f, &mut events)?`. `streams` is Some: 1-RTT packets pass `gate_packet` only after completion, which requires `peer_tp`. `frame_wf` and `is_stream_layer_frame` hold.
+  - **`on_stream_frame`:** the nine stream-layer frames → `streams.on_frame(&f, &mut events)`, with the `Err` arm bound in Task 1a-ii. `streams` is Some: 1-RTT packets pass `gate_packet` only after completion, which requires `peer_tp`. `frame_wf` and `is_stream_layer_frame` hold.
   - **`on_cid_frame`:**
     - **`NewConnectionId{seq, retire_prior_to, cid, reset_token}`** → `peer_cids.on_new_cid(.., local_tp.active_connection_id_limit)?`, then, **after every `Ok`** (3d Task 4 binding; 3d2 preflight I3: a used non-current CID can be retired while `current()` stays put, so "`current()` changed" is not the trigger), **`fn rewrite_stale(&mut self)`** (`#[verifier::spinoff_prover]`; preflight I2, 3d2 preflight C1(b)). A path is stale when `paths.dcid(q) is Some(c)` and `!peer_cids.is_active(c)`. With `a = paths.active()` and `old_a = paths.dcid(a)` (cloned):
       1. **The active path first**, if stale: `cur = peer_cids.current()`.
@@ -421,7 +423,7 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
       ```
       **§13.2.1 proof obligation (3d Task 2 binding):** before `on_ack_sent` (which takes no frame and clears `unreported()`), assert via `lemma_unreported_acked` that the ACK in `p` covers `old.recv(k).unreported()`. §13.2.1 is marked ✅ (Task 2a-ii) only with this discharged.
     - `room'` is `room` minus the ACK's bytes. `record(p)` keeps only retransmittable frames (D5). `local_mad_us = ms_to_us(local_tp.max_ack_delay)`.
-  - **`commit_datagram(q, d: &OutDatagram)`**: requires `out_datagram_len(d@) <= paths.budget(q)` and `<= MAX_DATAGRAM`; `paths.on_sent(q, datagram_len(d))`; ghost `out_log.push(d@)`. Re-proves `wf_amp` and `wf_log_paths`. The only place that calls `paths.on_sent` and pushes `out_log`.
+  - **`commit_datagram(q, d: &OutDatagram)`**: requires `out_datagram_len(d@) <= paths.budget(q)` and `<= MAX_DATAGRAM`; and that `d`'s PNs per space are increasing and above every logged PN (snapshot before `commit_space_packet` raises `next_pn`); `paths.on_sent(q, datagram_len(d))`; ghost `out_log.push(d@)`. Re-proves `wf_amp`, `wf_pn` and `wf_log_paths` (fix round 1 M4). The only place that calls `paths.on_sent` and pushes `out_log`.
   - **`pub fn poll_transmit(&mut self, now: u64) -> (r: Option<OutDatagram>)`**, requires/ensures `wf()`. The ensures stated here are kept by Task 2a-ii's body:
     - `final.out_log() == match r { Some(d) => old.out_log().push(d@), None => old.out_log() }` (preflight I6; 3e Task 5's input);
     - **P7 on the result:** `r is Some(d) ==>` every packet `p` of `d` satisfies `out_packet_wf(p, final.sent(p.kind).largest_acked())`;
@@ -634,7 +636,7 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
 - Consumes: Tasks 1a-i–2b; `Lifecycle::{on_timeout, deadline, close_silently}`; `IdleTimer::deadline`; `effective_idle_us`; `RecvPns::ack_deadline`; `Recovery::{pto_deadline, on_packets_lost, on_pto_fired, on_path_validated}`; `SentPackets::{drain_inflight, last_sent_time}`; `Paths::{on_timeout, deadline, last_validated, set_active, mtu_failed, state, dcid, set_dcid, needs_mtu_probe, start_challenge}` and Task 1b's `Paths::{len, id_at}`; `PeerCids::use_next`.
 - Produces:
   - **`pub fn next_timeout(&self) -> Option<u64>`**: the minimum of the Closing/Draining deadline; and, if Open: `idle.deadline(eff)` with `eff = effective_idle_us(local.max_idle_timeout, peer.max_idle_timeout, pto())` when Some; each live space's `ack_deadline(local_mad_us)`; each live space's `recovery.pto_deadline(k, sent(k).last_sent_time(), peer_mad_us, amp_blocked)` with `amp_blocked = paths.state(hs_path) != Validated && paths.budget(hs_path) == 0`; `paths.deadline(pto())`, the same value the next `on_timeout` snapshots as `pto0`.
-  - **`pub fn on_timeout(&mut self, now: u64, rand: &[u8; RAND_LEN])`**. At entry: the clock rule, `chal_used = 0`, and **`let pto0 = self.pto()`** (3d2 preflight I4: step 3's `on_pto_fired` doubles `pto_us`, so a later `pto()` would hide a challenge that expired at `now`). Then, in order:
+  - **`pub fn on_timeout(&mut self, now: u64, rand: &[u8; RAND_LEN])`**. At entry: the clock rule, `chal_used = 0`, and **`let pto0 = self.pto()`** (3d2 preflight I4: step 3's `on_pto_fired` doubles `pto_us`, so a later `pto()` would hide a challenge that expired at `now`). Ensures `wf()` and `out_log` unchanged (3e; fix round 1 M4). Then, in order:
     1. `lc.on_timeout(now)`; then `if lc.phase() !is Open { streams = None }` (3d2 preflight M4: `Lifecycle::on_timeout` has no "Open stays Open" ensures, and `wf_streams` needs this; the 3d T7 frame-condition binding);
     2. Open and the idle deadline passed → `lc.close_silently()`, `streams = None` (§10.1);
     3. Open: for the first live space whose PTO deadline passed: `sent(k).drain_inflight(&mut lost)`; `recovery.on_packets_lost(k, lost.len(), now)` (§13.3 congestion action, D6); `on_lost_frame(k, f)` for every frame; `recovery.on_pto_fired()`; `probe(k) = true` (E8);
