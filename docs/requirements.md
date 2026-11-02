@@ -256,7 +256,7 @@ Total keyword count: 44 across 22 sections.
 | 9.4 | Loss detection and congestion control | 3 | yes | 3 | Reset CC/RTT on new path (unless port-only change); hooks into phase 6 recovery. |
 | 9.5 | Privacy implications of connection migration | 2 | partial | 3 | Rows below. ✅ 3d: crates/quic/src/conn.rs |
 | 9.5 (req) | Do not reuse CID from more than one local address | 1 | no | Declined (optional: connection migration) | Applies when initiating/probing. |
-| 9.5 (req) | Do not reuse CID when sending to more than one destination address | 1 | yes | 3 | Applies when responding to a migrated peer. ✅ 3d: crates/quic/src/conn.rs |
+| 9.5 (req) | Do not reuse CID when sending to more than one destination address | 1 | yes | 3 | Applies when responding to a migrated peer. Proved per state (`wf_dcids`: at each send, a path sharing the CID has the same `peer_used`), not as a theorem over send history (TRUSTED.md); where only sharing could keep a path sending, the connection closes silently. ✅ 3d: crates/quic/src/conn.rs |
 | 9.6.1 | Communicating a preferred address | 1 | no | N/A (client-only) | Client keeps using original address; we never advertise preferred_address. |
 | 9.6.2 | Migration to a preferred address | 4 | no | Declined (optional: connection migration) | Client-only MUSTs are the rows below; server MUSTs apply only when advertising preferred_address, which we do not. |
 | 9.6.2 (req) | Client validates the preferred address before migrating | 1 | no | N/A (client-only) | "A client that migrates to a preferred address MUST validate the address it chooses before migrating" |

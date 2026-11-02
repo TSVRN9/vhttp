@@ -563,9 +563,9 @@ fn stale_dcid_rewritten() {
 }
 
 #[test]
-fn stale_active_clears_every_holder() {
+fn stale_active_no_spare_closes_silently() {
     // Paths 1 and 2 share D1 (the peer uses one CID on both). Path 0 is active again when an exact
-    // repeat retires C1, with no unused CID left: it takes D1, and both other holders lose it.
+    // repeat retires C1, with no unused CID left: D1 cannot go to a second destination.
     let mut c = established_rx();
     c.on_datagram(0, 100, vec![one(0, vec![ncid(1, 0, 0xd1)])], 30, &rnd(3));
     c.on_datagram(1, 100, vec![one_on(1, &r2(), vec![Frame::PathChallenge(D(5))])], 30, &rnd(3));
@@ -576,9 +576,56 @@ fn stale_active_clears_every_holder() {
     c.on_datagram(0, 100, vec![one(4, vec![Frame::Ping])], 30, &rnd(3));
     assert_eq!(c.active_path(), 0);
     c.on_datagram(0, 100, vec![one(5, vec![ncid(1, 1, 0xd1)])], 31, &rnd(3));
+    assert!(c.is_closed());
+    assert!(!c.streams_live());
+    assert!(c.close_info().is_none());
+}
+
+#[test]
+fn repeat_raise_no_holder_stays_open() {
+    // The same exact repeat, but nothing else holds D1: the active path just takes it.
+    let mut c = established_rx();
+    c.on_datagram(0, 100, vec![one(0, vec![ncid(1, 0, 0xd1)])], 30, &rnd(3));
+    c.on_datagram(0, 100, vec![one(1, vec![ncid(1, 1, 0xd1)])], 31, &rnd(3));
+    assert_eq!(c.phase(), Phase::Open);
     assert_eq!(c.path_dcid(0), Some(D(0xd1).to_vec()));
+}
+
+#[test]
+fn owed_response_gets_late_cid() {
+    // A full response queue drops the retransmitted probe at the gate, so the CID has to arrive
+    // without one.
+    let mut c = established_rx();
+    for pn in 0..4 {
+        c.on_datagram(1, 100, vec![one_on(pn, &r2(), vec![Frame::PathChallenge(D(pn as u8))])], 30, &rnd(3));
+    }
     assert_eq!(c.path_dcid(1), None);
-    assert_eq!(c.path_dcid(2), None);
+    c.on_datagram(0, 100, vec![one(4, vec![ncid(1, 0, 0xd1)])], 31, &rnd(3));
+    assert_eq!(c.path_dcid(1), Some(D(0xd1).to_vec()));
+    c.on_datagram(1, 100, vec![one_on(5, &r2(), vec![Frame::PathChallenge(D(9))])], 32, &rnd(3));
+    assert_eq!(c.largest_pn(PacketKind::OneRtt), Some(4));
+}
+
+#[test]
+fn owed_challenge_gets_late_cid() {
+    // Migrated to and away from path 1, then split from path 0 with its challenge still owed.
+    let mut c = established_rx();
+    c.on_datagram(1, 100, vec![one(0, vec![Frame::Ping])], 30, &rnd(3));
+    assert!(c.challenge_owed(1));
+    c.on_datagram(0, 100, vec![one(1, vec![Frame::Ping])], 30, &rnd(3));
+    c.on_datagram(1, 100, vec![one_on(2, &r2(), vec![Frame::Padding])], 30, &rnd(3));
+    assert_eq!(c.path_dcid(1), None);
+    c.on_datagram(0, 100, vec![one(3, vec![ncid(1, 0, 0xd1)])], 31, &rnd(3));
+    assert_eq!(c.path_dcid(1), Some(D(0xd1).to_vec()));
+}
+
+#[test]
+fn rebound_probe_keeps_spare_cid() {
+    // M1: the same CID from a new address shares the active DCID; the spare stays unused.
+    let mut c = established_rx();
+    c.on_datagram(0, 100, vec![one(0, vec![ncid(1, 0, 0xd1)])], 30, &rnd(3));
+    c.on_datagram(1, 100, vec![one(1, vec![Frame::PathChallenge(D(5))])], 31, &rnd(3));
+    assert_eq!(c.path_dcid(1), Some(C1.to_vec()));
 }
 
 #[test]
