@@ -45,9 +45,10 @@ pub struct Path {
     challenge_owed: bool,
     /// A challenge in a datagram of at least 1200 bytes was answered.
     mtu_ok: bool,
-    /// An MTU probe (a challenge on a Validated path whose MTU is not confirmed) expired:
-    /// the path cannot carry 1200-byte datagrams (§14.2), so only probes and
-    /// CONNECTION_CLOSE may be sent on it.
+    /// A challenge expired on a Validated path whose MTU is not confirmed. That is any such
+    /// challenge, including §9.3.3's old-path challenge in 3d2's `migrate`, not only an MTU
+    /// probe: the path cannot be shown to carry 1200-byte datagrams (§14.2), so only probes
+    /// and CONNECTION_CLOSE may be sent on it.
     mtu_failed: bool,
     /// PATH_RESPONSE data owed, oldest first.
     responses: Vec<[u8; 8]>,
@@ -270,7 +271,7 @@ pub struct Paths {
     prev_validated: Option<PathId>,
 }
 
-/// `b` differs from `a` at most on path `id` and `last_validated`.
+/// `b` differs from `a` at most on path `id`, `last_validated` and `prev_validated`.
 pub open spec fn kept(a: Paths, b: Paths, id: PathId) -> bool {
     &&& b.ids() == a.ids()
     &&& b.active_spec() == a.active_spec()
