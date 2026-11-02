@@ -244,19 +244,19 @@ Total keyword count: 44 across 22 sections.
 | 8.2.2 (req) | Do not expand PATH_RESPONSE past anti-amplification limit | 1 | yes | 3 |  |
 | 8.2.2 (req) | At most one PATH_RESPONSE per PATH_CHALLENGE | 1 | yes | 3 | See 13.3. |
 | 8.2.3 | Successful path validation | 1 | yes | 3 | Re-validate with expanded datagram if MTU not yet confirmed. 3d: path.rs (`needs_mtu_probe`) (closed in 3d2 Task 2b) |
-| 9 | Connection migration | 5 | partial | 3 | Rows below. |
+| 9 | Connection migration | 5 | partial | 3 | Rows below. ✅ 3d: crates/quic/src/conn.rs |
 | 9 (req) | MUST NOT initiate migration before handshake confirmed | 1 | no | Declined (optional: connection migration) | We never initiate migration. |
 | 9 (req) | disable_active_migration: no sends from different local address | 1 | no | Declined (optional: connection migration) | Parameter is server-sent; we never change local address. |
-| 9 (req) | Peer violating disable_active_migration: drop without Stateless Reset or validate path | 1 | yes | 3 | We advertise disable_active_migration; choose drop or validate. |
-| 9 (req) | Path validation on any peer address change unless previously validated | 1 | yes | 3 | Includes NAT rebinding. |
+| 9 (req) | Peer violating disable_active_migration: drop without Stateless Reset or validate path | 1 | yes | 3 | We advertise disable_active_migration; choose drop or validate. ✅ 3d: crates/quic/src/conn.rs |
+| 9 (req) | Path validation on any peer address change unless previously validated | 1 | yes | 3 | Includes NAT rebinding. ✅ 3d: crates/quic/src/conn.rs |
 | 9 (req) | Client discards packets from unknown server address | 1 | no | N/A (client-only) |  |
-| 9.3 | Responding to connection migration | 3 | yes | 3 | If we permit migration: send to new address and validate; protect against attacks while unvalidated. |
+| 9.3 | Responding to connection migration | 3 | yes | 3 | If we permit migration: send to new address and validate; protect against attacks while unvalidated. ✅ 3d: crates/quic/src/conn.rs |
 | 9.3.2 | On-path address spoofing | 2 | yes | 3 | Revert to last validated address on failure; close silently if no such state. |
-| 9.3.3 | Off-path packet forwarding | 1 | yes | 3 | Validate previous path with PATH_CHALLENGE on apparent migration. |
+| 9.3.3 | Off-path packet forwarding | 1 | yes | 3 | Validate previous path with PATH_CHALLENGE on apparent migration. ✅ 3d: crates/quic/src/conn.rs |
 | 9.4 | Loss detection and congestion control | 3 | yes | 3 | Reset CC/RTT on new path (unless port-only change); hooks into phase 6 recovery. |
-| 9.5 | Privacy implications of connection migration | 2 | partial | 3 | Rows below. |
+| 9.5 | Privacy implications of connection migration | 2 | partial | 3 | Rows below. ✅ 3d: crates/quic/src/conn.rs |
 | 9.5 (req) | Do not reuse CID from more than one local address | 1 | no | Declined (optional: connection migration) | Applies when initiating/probing. |
-| 9.5 (req) | Do not reuse CID when sending to more than one destination address | 1 | yes | 3 | Applies when responding to a migrated peer. |
+| 9.5 (req) | Do not reuse CID when sending to more than one destination address | 1 | yes | 3 | Applies when responding to a migrated peer. ✅ 3d: crates/quic/src/conn.rs |
 | 9.6.1 | Communicating a preferred address | 1 | no | N/A (client-only) | Client keeps using original address; we never advertise preferred_address. |
 | 9.6.2 | Migration to a preferred address | 4 | no | Declined (optional: connection migration) | Client-only MUSTs are the rows below; server MUSTs apply only when advertising preferred_address, which we do not. |
 | 9.6.2 (req) | Client validates the preferred address before migrating | 1 | no | N/A (client-only) | "A client that migrates to a preferred address MUST validate the address it chooses before migrating" |
@@ -269,7 +269,7 @@ Total keyword count: 44 across 22 sections.
 | 10.2.2 | Draining connection state | 2 | yes | 3 | No packets sent while draining. |
 | 10.2.3 | Immediate close during the handshake | 3 | yes | 3 | 1-RTT CONNECTION_CLOSE once confirmed; 0x1d to 0x1c replacement; clear reason phrase. ✅ 3d: crates/quic/src/lifecycle.rs |
 | 10.3 | Stateless reset | 5 | yes | 3 | CONNECTION_CLOSE if able; reset < 3x trigger; discard too-small packets; short header; any packet ending in valid token is a reset. Sending rows (short header, < 3x trigger) vacuous: we never send a Stateless Reset (sending is a MAY); Duvet exceptions in crates/quic/src/stateless.rs. ✅ 3d: crates/quic/src/conn.rs |
-| 10.3.1 | Detecting a stateless reset | 4 | yes | 3 | Constant-time token comparison; only for used, unretired CIDs; enter draining. |
+| 10.3.1 | Detecting a stateless reset | 4 | yes | 3 | Constant-time token comparison; only for used, unretired CIDs; enter draining. ✅ 3d: crates/quic/src/conn.rs |
 | 10.3.2 | Calculating a stateless reset token | 5 | yes | 3 | Hard to guess; unique per CID; CID length handling; no CID reuse across static-key nodes. static-key MUSTs: exception (no static key, tokens are fresh randomness). ✅ 3d: crates/quic/src/cid.rs |
 | 10.3.3 | Looping | 1 | yes | 3 | Reset must be smaller than trigger. ✅ 3b: exception — we never send a Stateless Reset (stateless.rs) |
 | 11 | Error handling | 1 | yes | 3 | No stateless reset if connection state exists. ✅ 3d: exception — no stateless reset is ever sent |
