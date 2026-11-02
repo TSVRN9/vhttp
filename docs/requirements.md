@@ -251,9 +251,9 @@ Total keyword count: 44 across 22 sections.
 | 9 (req) | Path validation on any peer address change unless previously validated | 1 | yes | 3 | Includes NAT rebinding. ✅ 3d: crates/quic/src/conn.rs |
 | 9 (req) | Client discards packets from unknown server address | 1 | no | N/A (client-only) |  |
 | 9.3 | Responding to connection migration | 3 | yes | 3 | If we permit migration: send to new address and validate; protect against attacks while unvalidated. ✅ 3d: crates/quic/src/conn.rs |
-| 9.3.2 | On-path address spoofing | 2 | yes | 3 | Revert to last validated address on failure; close silently if no such state. |
+| 9.3.2 | On-path address spoofing | 2 | yes | 3 | Revert to last validated address on failure; close silently if no such state. ✅ 3d: crates/quic/src/conn.rs + path.rs |
 | 9.3.3 | Off-path packet forwarding | 1 | yes | 3 | Validate previous path with PATH_CHALLENGE on apparent migration. ✅ 3d: crates/quic/src/conn.rs |
-| 9.4 | Loss detection and congestion control | 3 | yes | 3 | Reset CC/RTT on new path (unless port-only change); hooks into phase 6 recovery. |
+| 9.4 | Loss detection and congestion control | 3 | yes | 3 | Reset CC/RTT on new path (unless port-only change); hooks into phase 6 recovery. Port-only MAY not used; RTT/CC reset is Recovery::on_path_validated (placeholder until Phase 6). ✅ 3d: crates/quic/src/conn.rs + path.rs |
 | 9.5 | Privacy implications of connection migration | 2 | partial | 3 | Rows below. ✅ 3d: crates/quic/src/conn.rs |
 | 9.5 (req) | Do not reuse CID from more than one local address | 1 | no | Declined (optional: connection migration) | Applies when initiating/probing. |
 | 9.5 (req) | Do not reuse CID when sending to more than one destination address | 1 | yes | 3 | Applies when responding to a migrated peer. Proved per state (`wf_dcids`: at each send, a path sharing the CID has the same `peer_used`), not as a theorem over send history (TRUSTED.md); where only sharing could keep a path sending, the connection closes silently. ✅ 3d: crates/quic/src/conn.rs |
@@ -285,7 +285,7 @@ Total keyword count: 44 across 22 sections.
 | 13.2.3 | Managing ACK ranges | 2 | yes | 3 | Retain ranges; retain largest PN. ✅ 3d: crates/quic/src/ack_track.rs |
 | 13.2.5 | Measuring and reporting host delay | 1 | yes | 3 | Exclude delays not under endpoint control. ✅ 3d: crates/quic/src/ack_track.rs |
 | 13.2.6 | ACK frames and packet protection | 3 | yes | 3 | Same-space ACK; 0-RTT-ack rule vacuous (we reject 0-RTT). ✅ 3d: crates/quic/src/conn.rs |
-| 13.3 | Retransmission of information | 4 | yes | 3 | RESET_STREAM unchanged; HANDSHAKE_DONE retransmitted; accept outdated frames; congestion action on loss. 3c: crates/quic/src/streams.rs (stream-family retransmission: RESET_STREAM resent unchanged, the current credit value resent, no STREAM after a reset; closed in 3d). 3d: recovery.rs (AIMD congestion action; closed in 3d2 Task 3) |
+| 13.3 | Retransmission of information | 4 | yes | 3 | RESET_STREAM unchanged; HANDSHAKE_DONE retransmitted; accept outdated frames; congestion action on loss. ✅ 3d: crates/quic/src/conn.rs (retransmission routing) + recovery.rs (AIMD placeholder congestion action, Phase 6 replaces) |
 | 13.4.1 | Reporting ECN counts | 1 | yes | 3 | Provide ECN feedback if accessible; needs IP_RECVTOS in shell (otherwise relies on "if accessible"). ✅ 3d: exception — ECN not accessible, no ECT set (ack_track.rs ecn: None) |
 | 13.4.2.1 | Receiving ACK frames with ECN counts | 1 | yes | 3 | Only if we send ECT; vacuous otherwise. ✅ 3d: exception — ECN not accessible, no ECT set (ack_track.rs ecn: None) |
 | 13.4.2.2 | ECN validation outcomes | 2 | yes | 3 | Only if we send ECT; vacuous otherwise. ✅ 3d: exception — ECN not accessible, no ECT set (ack_track.rs ecn: None) |
@@ -295,7 +295,7 @@ Total keyword count: 44 across 22 sections.
 | 14.1 (req) | Server expands ack-eliciting Initial datagrams to 1200 | 1 | yes | 3 | ✅ 3d: crates/quic/src/conn.rs |
 | 14.1 (req) | Server discards Initial in datagram < 1200 bytes | 1 | yes | 3 | "A server MUST discard an Initial packet that is carried in a UDP datagram with a payload that is smaller than ... 1200 bytes." Do not close the connection (see 14). ✅ 3d: crates/quic/src/conn.rs |
 | 14.1 (req) | Server limits bytes sent before address validation | 1 | yes | 3 | See 8.1 3x row. ✅ 3d: crates/quic/src/conn.rs |
-| 14.2 | Path maximum transmission unit | 1 | yes | 3 | Cease sending if PMTU < 1200 (except probes/CONNECTION_CLOSE). 3d: path.rs (`mtu_failed`), datagram.rs MAX_DATAGRAM (closed in 3d2 Task 3) |
+| 14.2 | Path maximum transmission unit | 1 | yes | 3 | Cease sending if PMTU < 1200 (except probes/CONNECTION_CLOSE). ✅ 3d: crates/quic/src/conn.rs (P17 send gate) + path.rs (mtu_failed) |
 | 14.2.1 | Handling of ICMP messages by PMTUD | 3 | yes | 3 | Only if shell processes ICMP; vacuous otherwise. |
 | 17.1 | Packet number encoding and decoding | 2 | yes | 3 | Full PN before first ACK; size covers > 2x range. ✅ 3b: crates/quic/src/pn.rs; A.2 pseudocode under-sizes at exact powers of two; §17.1 prose used. Decoding is A.3 (`decode_pn`, result <= PN_MAX); `theorem_pn_len_decodes` proves a `pn_len_ok` length decodes back at a receiver that has seen the acknowledged packet; `pn_encode_len` None (more than 2^31 unacked) is a 3d internal limit |
 | 17.2 | Long header packets | 7 | yes | 3 | Fixed bit; CID length <= 20 (drop); reserved bits PROTOCOL_VIOLATION. 3b codec: crates/quic/src/header.rs (closed in 3e) |
