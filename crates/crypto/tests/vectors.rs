@@ -62,7 +62,7 @@ fn sources_match() {
     }
     present.remove("SOURCES.txt");
     assert_eq!(listed, present);
-    assert_eq!(listed.len(), 18);
+    assert_eq!(listed.len(), 19);
 }
 
 fn sha_file(rel: &str, want: usize) {
