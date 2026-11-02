@@ -1379,6 +1379,9 @@ impl RecvStream {
         self.final_size = fs;
         self.trace = Ghost(t2);
         self.emitted = Ghost(s2.events);
+        proof {
+            assert(self.wf());
+        }
         Ok(n_new)
     }
 
