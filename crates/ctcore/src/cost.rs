@@ -613,7 +613,7 @@ proof fn lemma_call_leave_len_ok(fr: Frame, out: Frame, wb: Seq<Option<Loc>>, ds
     lemma_assign_len_ok(write_back(fr, out.slots, wb), dst, nth(out.locals, 0));
 }
 
-/// A terminating run keeps every length within usize::MAX.
+/// A returning run keeps every length within usize::MAX.
 pub proof fn lemma_run_len_ok(p: Program, f: nat, b: nat, fr: Frame, fuel: nat)
     requires frame_len_ok(fr), run_from(p, f, b, fr, fuel) is Some,
     ensures frame_len_ok(run_from(p, f, b, fr, fuel).unwrap().0),
