@@ -828,6 +828,7 @@ fn ex_switch_edge(cmp: &Option<Cmp>, op: &Operand, ts: &Vec<(u128, usize)>, o: u
     (t, fs)
 }
 
+#[allow(unused_variables)]
 fn ex_switch_edges(cmp: &Option<Cmp>, ghost_rels: Ghost<Seq<Rel>>, op: &Operand, ts: &Vec<(u128, usize)>, o: usize, cy: &Vec<Fact>) -> (out: Vec<(usize, Vec<Fact>)>)
     ensures ({
         let want = switch_edges(SymSt { rels: ghost_rels@, cmp: *cmp }, *op, ts@, o, cy@);
@@ -1455,6 +1456,7 @@ proof fn lemma_rel_sound_at(rels: Seq<Rel>, x: usize, pre: Frame, post: Frame)
     assert(rel_sound(rels[x as int], (x as int) as nat, pre, post));
 }
 
+#[allow(unused_variables)]
 fn pull_val(rels: &Vec<Rel>, facts: &Vec<Fact>, x: usize, ty: &IntTy) -> (r: Option<Atom>)
     ensures r matches Some(img) ==> atom_up(rels@, facts@, Atom::Val(x, *ty), img, false),
 {
@@ -1479,6 +1481,7 @@ fn pull_val(rels: &Vec<Rel>, facts: &Vec<Fact>, x: usize, ty: &IntTy) -> (r: Opt
     r
 }
 
+#[allow(unused_variables)]
 fn pull_len(rels: &Vec<Rel>, facts: &Vec<Fact>, x: usize) -> (r: Option<Atom>)
     ensures r matches Some(img) ==> atom_up(rels@, facts@, Atom::Len(x), img, false),
 {
@@ -1502,6 +1505,7 @@ fn pull_len(rels: &Vec<Rel>, facts: &Vec<Fact>, x: usize) -> (r: Option<Atom>)
 }
 
 /// The image of a `Gap`'s subtrahend, where the two values are equal.
+#[allow(unused_variables)]
 fn pull_exact(rels: &Vec<Rel>, facts: &Vec<Fact>, b: &Atom) -> (r: Option<Atom>)
     ensures r matches Some(img) ==> atom_exact(rels@, facts@, *b, img),
 {
@@ -1565,6 +1569,7 @@ fn has_lt(facts: &Vec<Fact>, lhs: &Atom, rhs: &Atom) -> (r: bool)
 }
 
 /// `b` is a counter this block increments: `Val(i, ty)` with rel `ValEq(Val(i, ty), 1)`.
+#[allow(unused_variables)]
 fn inc_counter(rels: &Vec<Rel>, b: &Atom) -> (r: bool)
     ensures r ==> b is Val && (b->Val_0 as nat) < rels@.len()
         && rels@[b->Val_0 as int] == Rel::ValEq(*b, 1),
@@ -1578,6 +1583,7 @@ fn inc_counter(rels: &Vec<Rel>, b: &Atom) -> (r: bool)
     }
 }
 
+#[allow(unused_variables)]
 fn pull_gap(rels: &Vec<Rel>, facts: &Vec<Fact>, a: &Atom, a1: Atom, b: &Atom) -> (r: (Atom, bool))
     requires atom_up(rels@, facts@, *a, a1, false),
     ensures atom_up(rels@, facts@, Atom::Gap(Box::new(*a), Box::new(*b)), r.0, r.1),
@@ -1620,6 +1626,7 @@ fn pull_gap(rels: &Vec<Rel>, facts: &Vec<Fact>, a: &Atom, a1: Atom, b: &Atom) ->
 }
 
 /// The image of a post-atom at the block's start, and whether it is a decrement.
+#[allow(unused_variables)]
 fn pull_atom(rels: &Vec<Rel>, facts: &Vec<Fact>, a: &Atom) -> (r: Option<(Atom, bool)>)
     ensures r matches Some((img, d)) ==> atom_up(rels@, facts@, *a, img, d),
     decreases a,
@@ -2078,6 +2085,7 @@ pub open spec fn inst_eq(p: Program, g: nat, args: Seq<Operand>, a: Atom, img: A
     forall|fr: Frame| #[trigger] atom_val(fr, img) == atom_val(enter_frame(p, g, fr, args), a)
 }
 
+#[allow(unused_variables)]
 fn inst_val(p: &Program, g: usize, args: &Vec<Operand>, j: usize, ty: &IntTy) -> (r: Option<Atom>)
     requires g < p.fns@.len(),
     ensures r matches Some(img) ==> inst_eq(*p, g as nat, args@, Atom::Val(j, *ty), img),
@@ -2122,6 +2130,7 @@ fn inst_val(p: &Program, g: usize, args: &Vec<Operand>, j: usize, ty: &IntTy) ->
     }
 }
 
+#[allow(unused_variables)]
 fn inst_len(p: &Program, g: usize, args: &Vec<Operand>, j: usize) -> (r: Option<Atom>)
     requires g < p.fns@.len(),
     ensures r matches Some(img) ==> inst_eq(*p, g as nat, args@, Atom::Len(j), img),
@@ -2653,6 +2662,7 @@ pub fn check_cost_block(p: &Program, f: usize, b: usize, c: &Cert, sums: &Vec<Op
     true
 }
 
+#[allow(unused_variables)]
 fn check_abort(p: &Program, f: usize, b: usize, c: &Cert, sums: &Vec<Option<Poly>>) -> (r: bool)
     requires f < p.fns@.len(), b < p.fns@[f as int].blocks@.len(), p.fns@[f as int].blocks@[b as int].term is Abort,
     ensures r, block_checked(*p, f as nat, b as nat, *c, sums@),
