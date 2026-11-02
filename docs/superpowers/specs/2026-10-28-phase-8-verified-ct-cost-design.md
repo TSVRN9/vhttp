@@ -140,7 +140,7 @@ Its job is to make "constant-time style" a checked property of `crates/crypto`, 
 
 **D9. 8b certifies bounds instead of proving an analysis.**
 - An exec inference in `ctcore` produces, per function, a certificate: per-block facts plus a potential polynomial. It does this with dominators, natural loops, counted-loop recognition and callee summaries.
-- A verified validator checks the certificate. It is incomplete but sound: `check_cert(..) == true ==> cert_for(..)`, where `cert_for` is `cert_sem_ok` plus empty entry facts and `sums[f] == Some(pot[0])` (8b preflight I1).
+- A verified validator checks the certificate. It is incomplete but sound: `check_cert(..) == true ==> cert_for(..)`, where `cert_for` is `cert_sem_ok` plus empty entry facts and `sums[f]` being `Some` of a polynomial `poly_same` as `pot[0]` (8b preflight I1, Task 4 SPEC-CHANGE).
 - A separate theorem turns `cert_for` for every summarised fn into the step bound by fuel induction.
 - The inference has no correctness proof and needs none.
 - Soundness doesn't need an acyclic call graph either. The inference simply returns `None` for recursive SCCs.
@@ -605,7 +605,7 @@ The final line becomes `verify.sh: all crates verified, duvet ok, ct ok (D decla
 - `Cert` = per block `{ facts: Vec<Fact>, pot: Poly }`, with `Fact = Le(Atom, Atom) | Lt(Atom, Atom)`.
 - **`cert_sem_ok(p, f, cert, sums)` is semantic.** For every frame satisfying block b's facts, executing b leads to a successor b′ whose facts hold, with `pot_b(fr) >= cost(b, fr) + pot_b′(fr′)`. A return needs `pot_b(fr) >= cost(b)`. A call needs `cost` to include `1 + eval(sums[g], callee entry atoms)`, for *any* callee result within that bound (dst and `&mut` targets are havocked).
 - `cert_sem_ok`'s hypotheses are, for all `ls`, `ok_prog(p, ls)` and `plc(p, ls, f, fr)`, plus the block's facts and `frame_len_ok` (every local's and slot's `len_ok`) (8b C1, option B). `ls` stays inside the quantifier because no cost proof reads a label, so `cert_for` and `check_cert` take no labels. `lemma_plc_reachable` composes 8a's per-construct `plc` lemmas into a run-level one.
-- **Entry facts must be empty.** The summary is `pot[0]`. `cert_for(p, f, cert, sums)` = `cert_sem_ok` ∧ empty entry facts ∧ `sums[f] == Some(pot[0])`.
+- **Entry facts must be empty.** The summary is `pot[0]`. `cert_for(p, f, cert, sums)` = `cert_sem_ok` ∧ empty entry facts ∧ `sums[f] is Some` ∧ `poly_same(sums[f].unwrap(), pot[0])`. `poly_same` compares coefficients and atom views, because `Vec` has no extensional `==` in this toolchain and `poly_val` reads views only (Task 4 SPEC-CHANGE).
 
 **Theorem** (the controller's soundness statement, as amended by the 8b preflight rulings I1 and C2 and by C1 option B):
 

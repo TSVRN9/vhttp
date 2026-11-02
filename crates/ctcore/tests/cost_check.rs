@@ -1,5 +1,5 @@
 use ctcore::cost::*;
-use ctcore::cost_check::{check_cert_parts as check, check_cost_block};
+use ctcore::cost_check::check_cost_block;
 use ctcore::*;
 
 const U: IntTy = IntTy::Usize;
@@ -52,8 +52,11 @@ fn copy_poly(p: &Poly) -> Poly {
 
 /// Every fn of `p` checks against its own certificate's entry potential.
 fn all_ok(p: &Program, certs: &[Cert]) -> bool {
+    // `theorem_cost` speaks only of typed programs: an ill-typed one would prove nothing here
+    let decl: Vec<Option<Vec<bool>>> = p.fns.iter().map(|_| None).collect();
+    assert!(check_program(p, &decl).is_ok(), "ill-typed test program");
     let sums: Vec<Option<Poly>> = certs.iter().map(|ct| Some(pot0(ct))).collect();
-    (0..certs.len()).all(|f| check(p, f, &certs[f], &sums))
+    (0..certs.len()).all(|f| check_cert(p, f, &certs[f], &sums))
 }
 fn one_ok(b: Body, ct: Cert) -> bool { all_ok(&Program { fns: vec![b] }, &[ct]) }
 
@@ -240,8 +243,9 @@ fn accepts_len_cost_intrinsic() {
     assert!(one_ok(b, ct));
 }
 
-fn len_callee() -> (Body, Cert) {
-    let b = body(1, vec![slice()], 2, vec![blk(vec![], intr(Intrinsic::SliceToVec, vec![cp(1)], 0, 1)), ret()]);
+fn len_callee() -> (Body, Cert) { len_callee_of(slice()) }
+fn len_callee_of(param: Ty) -> (Body, Cert) {
+    let b = body(1, vec![param], 2, vec![blk(vec![], intr(Intrinsic::SliceToVec, vec![cp(1)], 0, 1)), ret()]);
     (b, cert(vec![bc(vec![], poly(vec![m1(1, len(1)), m0(2)])), bc(vec![], konst(1))]))
 }
 
@@ -318,15 +322,15 @@ fn rejects_summary_mismatch() {
     let b = || body(0, vec![], 1, vec![ret()]);
     let p = Program { fns: vec![b()] };
     let ct = cert(vec![bc(vec![], konst(2))]);
-    assert!(check(&p, 0, &ct, &vec![Some(konst(2))]));
-    assert!(!check(&p, 0, &ct, &vec![Some(konst(3))]));
-    assert!(!check(&p, 0, &ct, &vec![None]));
-    assert!(!check(&p, 0, &ct, &vec![]));
+    assert!(check_cert(&p, 0, &ct, &vec![Some(konst(2))]));
+    assert!(!check_cert(&p, 0, &ct, &vec![Some(konst(3))]));
+    assert!(!check_cert(&p, 0, &ct, &vec![None]));
+    assert!(!check_cert(&p, 0, &ct, &vec![]));
     // a callee with no summary fails its caller's block
     let main = body(0, vec![], 2, vec![blk(vec![], call(1, vec![], 1, 1)), ret()]);
     let p2 = Program { fns: vec![main, b()] };
     let mc = cert(vec![bc(vec![], konst(9)), bc(vec![], konst(1))]);
-    assert!(!check(&p2, 0, &mc, &vec![Some(konst(9)), None]));
+    assert!(!check_cert(&p2, 0, &mc, &vec![Some(konst(9)), None]));
 }
 
 #[test]
@@ -352,7 +356,7 @@ fn rejects_signed_counter() {
     // neither the test's edge nor the increment rule speaks for a signed counter
     assert!(!check_cost_block(&p, 0, 1, &ct, &sums));
     assert!(!check_cost_block(&p, 0, 2, &ct, &sums));
-    assert!(!check(&p, 0, &ct, &sums));
+    assert!(!check_cert(&p, 0, &ct, &sums));
 }
 
 #[test]
@@ -361,4 +365,75 @@ fn rejects_non_canonical_pot() {
     let b = body(1, vec![slice()], 3, vec![blk(vec![], Term::Goto(1)), ret()]);
     let bad = cert(vec![bc(vec![], poly(vec![a(), m0(2)])), bc(vec![], konst(1))]);
     assert!(!one_ok(b, bad));
+}
+
+// ------------------------------------------------------------------ `&mut` and the writer rule
+
+fn mut_vec() -> Ty { Ty::Mut(Box::new(Ty::Vec(Box::new(Ty::Int(IntTy::U8))))) }
+fn deref1() -> Place { Place { local: 1, proj: vec![Proj::Deref] } }
+fn one_atom_next(next: Mono, entry: Vec<Mono>) -> Cert {
+    cert(vec![bc(vec![], poly(entry)), bc(vec![], poly(vec![next, m0(1)]))])
+}
+
+/// `_3 = g(_1)`, `g` charging `Len(1)`, with a `Len(1) + 2` summary read through the arg.
+fn call_on_arg(param: fn() -> Ty, next: Mono, mut entry: Vec<Mono>) -> bool {
+    let param2 = param();
+    let param = param();
+    let main = body(2, vec![param, usz()], 4, vec![blk(vec![], call(1, vec![cp(1)], 3, 1)), ret()]);
+    let (g, gc) = len_callee_of(param2);
+    entry.push(m1(1, len(1)));
+    assert!(entry.len() == 3);
+    all_ok(&Program { fns: vec![main, g] }, &[one_atom_next(next, entry), gc])
+}
+
+#[test]
+fn accepts_mut_arg_charge_read_before_the_call() {
+    // the summary's `Len(1)` crosses the call through the callee's slot; nothing after the call reads an atom
+    assert!(call_on_arg(mut_vec, m0(0), vec![m0(4), m0(0)]));
+    assert!(!call_on_arg(mut_vec, m0(0), vec![m0(3), m0(0)]));
+}
+
+#[test]
+fn writer_call_loses_every_local() {
+    // a `Mut` arg may write any non-`Mut` local, so `_2` is lost; a shared arg keeps it
+    assert!(call_on_arg(slice, m1(1, v(2)), vec![m1(1, v(2)), m0(4)]));
+    assert!(!call_on_arg(mut_vec, m1(1, v(2)), vec![m1(1, v(2)), m0(4)]));
+    assert!(!call_on_arg(mut_vec, m1(1, len(1)), vec![m1(1, len(1)), m0(4)]));
+}
+
+fn push_prog(arg: Ty) -> Body {
+    body(2, vec![arg, usz()], 4, vec![blk(vec![], intr(Intrinsic::VecPush, vec![cp(1), cp(2)], 3, 1)), ret()])
+}
+
+#[test]
+fn writer_intrinsic_loses_every_local() {
+    assert!(one_ok(push_prog(mut_vec()), one_atom_next(m0(0), vec![m0(2)])));
+    assert!(!one_ok(push_prog(mut_vec()), one_atom_next(m1(1, v(2)), vec![m1(1, v(2)), m0(2)])));
+    assert!(!one_ok(push_prog(mut_vec()), one_atom_next(m1(1, len(1)), vec![m1(1, len(1)), m0(2)])));
+    assert!(one_ok(push_prog(slice()), one_atom_next(m1(1, v(2)), vec![m1(1, v(2)), m0(2)])));
+}
+
+fn deref_write_prog() -> Body {
+    body(2, vec![mut_vec(), usz()], 3, vec![
+        blk(vec![Stmt::Assign(deref1(), Rvalue::Use(k(0)))], Term::Goto(1)),
+        ret(),
+    ])
+}
+
+#[test]
+fn writer_statement_loses_every_local() {
+    assert!(one_ok(deref_write_prog(), one_atom_next(m0(0), vec![m0(3)])));
+    assert!(!one_ok(deref_write_prog(), one_atom_next(m1(1, v(2)), vec![m1(1, v(2)), m0(3)])));
+}
+
+/// `_2 = 0`: a `Mut` local may target `_2`, so a direct write loses what it reads too.
+fn direct_write_prog(param: Ty) -> Body {
+    body(2, vec![param, usz()], 3, vec![blk(vec![set(2, 0)], Term::Goto(1)), ret()])
+}
+
+#[test]
+fn direct_write_loses_mut_locals() {
+    let next = || m1(1, len(1));
+    assert!(one_ok(direct_write_prog(slice()), one_atom_next(next(), vec![next(), m0(3)])));
+    assert!(!one_ok(direct_write_prog(mut_vec()), one_atom_next(next(), vec![next(), m0(3)])));
 }

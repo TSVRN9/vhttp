@@ -94,7 +94,7 @@ The 8b modules:
 
 ## Review Focus
 
-1. **The statement is the amended spec's.** `theorem_cost` matches the spec text as amended by the preflight rulings (I1, C2) and C1 option B: `ok_prog(p, ls)`, `entry_plc`, the `cert_for` premise, the `certs`/`sums` length premises, `vals_len_ok`, `poly_val`, the typed `Val(local, IntTy)` atom. `cert_for` requires entry facts to be empty and `sums[f] == Some(pot[0])`. `cert_sem_ok` quantifies over **all** `ls` with `ok_prog`, **all** frames satisfying `plc`, the facts and `frame_len_ok`, and **all** callee outcomes within the summary (dst and `&mut` targets havocked).
+1. **The statement is the amended spec's.** `theorem_cost` matches the spec text as amended by the preflight rulings (I1, C2) and C1 option B: `ok_prog(p, ls)`, `entry_plc`, the `cert_for` premise, the `certs`/`sums` length premises, `vals_len_ok`, `poly_val`, the typed `Val(local, IntTy)` atom. `cert_for` requires entry facts to be empty, `sums[f]` to be `Some` and `poly_same(sums[f].unwrap(), pot[0])`. `cert_sem_ok` quantifies over **all** `ls` with `ok_prog`, **all** frames satisfying `plc`, the facts and `frame_len_ok`, and **all** callee outcomes within the summary (dst and `&mut` targets havocked).
 2. **There is no unchecked route to `Some`.** `analyze`'s ensures comes from `check_cert` on the final vector. `loops.rs` output never reaches the report without it. A `bounded` line also needs the driver's `check_program` `Ok`, which supplies `ok_prog`.
 3. **Honesty of the number.**
    - The coverage line equals `expected-cost.txt`.
@@ -292,7 +292,7 @@ The 8b modules:
     - **`ls` is quantified, not fixed to all-public.** `check_program`'s `ensures` gives `ok_prog` for the labels it returns and says nothing about their values, and no cost proof reads a label. So `cert_for`, `check_cert` and `analyze` keep their signatures, and `theorem_cost` takes `ls` as a parameter.
     - `ok_prog` is in the hypothesis because 8a's single-frame lemmas (`lemma_eval_op_plc`, `lemma_place_plc`) need `ok_op`/`ok_place`.
     - `block_step_ok` takes no `ls`, and its `Call(Fn)` `out` quantifier stays without `plc`: Task 3's rule doesn't need it. `cost_from` gets the real `out`'s `plc` from `lemma_plc_reachable`.
-  - `cert_for(p, f, c, sums) -> bool`: `cert_sem_ok` ∧ `c.blocks@[0].facts@.len() == 0` ∧ `sums[f] == Some(c.blocks@[0].pot)`.
+  - `cert_for(p, f, c, sums) -> bool`: `cert_sem_ok` ∧ `c.blocks@[0].facts@.len() == 0` ∧ `sums[f] is Some` ∧ `poly_same(sums[f].unwrap(), c.blocks@[0].pot)`. `poly_same` compares coefficients and atom views: `Vec` has no extensional `==`, so no exec check can establish `sums[f] == Some(..)` (Task 4 SPEC-CHANGE).
 - **Lemmas:**
   - `proof fn lemma_run_len_ok(p, f, b, fr, fuel)`: `frame_len_ok(fr)` and `run_from(..) is Some` imply `frame_len_ok(final)`.
   - `proof fn lemma_exec_stmts_len_ok(..)`, `proof fn lemma_intr_len_ok(..)`.

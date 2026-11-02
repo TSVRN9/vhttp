@@ -14,6 +14,7 @@ pub mod sem;
 pub mod sem_sanity;
 pub mod syntax;
 
+pub use cost_check::check_cert;
 pub use syntax::*;
 
 use check::*;
