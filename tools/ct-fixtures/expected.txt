@@ -15,13 +15,17 @@ ok ct_fixtures::fx::pos_public_loop_over_secret_array
 ok ct_fixtures::fx::pos_str_unit
 ok ct_fixtures::fx::pos_u128_mul_mask
 ok ct_fixtures::fx::pos_vec_elem_pair
+ok ct_fixtures::fx::pos_vec_new_pair
+ok ct_fixtures::fx::pos_vec_push_pair
 reject ct_fixtures::fx::W::g Root
 reject ct_fixtures::fx::neg_ambiguous_callee Unsupported
 reject ct_fixtures::fx::neg_ambiguous_generic Unsupported
 reject ct_fixtures::fx::neg_box Unsupported
 reject ct_fixtures::fx::neg_char Unsupported
 reject ct_fixtures::fx::neg_closure_call Unsupported
+reject ct_fixtures::fx::neg_const_pointer_tag Unsupported
 reject ct_fixtures::fx::neg_const_ref_non_zst Unsupported
+reject ct_fixtures::fx::neg_const_signed_tag Unsupported
 reject ct_fixtures::fx::neg_drop_non_vec Unsupported
 reject ct_fixtures::fx::neg_drop_user_impl Unsupported
 reject ct_fixtures::fx::neg_duplicate_param_name Attr
@@ -35,6 +39,7 @@ reject ct_fixtures::fx::neg_key_second_root Unsupported
 reject ct_fixtures::fx::neg_label_line_missing_param Attr
 reject ct_fixtures::fx::neg_missing_param_name Attr
 reject ct_fixtures::fx::neg_mut_param_label ArgLabel,MutLabel
+reject ct_fixtures::fx::neg_mut_str Unsupported
 reject ct_fixtures::fx::neg_raw_pointer Unsupported
 reject ct_fixtures::fx::neg_root_without_label Root
 reject ct_fixtures::fx::neg_secret_and_and SecretSwitch

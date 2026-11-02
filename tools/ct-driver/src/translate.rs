@@ -80,7 +80,7 @@ pub fn translate_closure(
         Ok(v) => v[0],
         Err(msg) => return Err(vec![TrErr::Root { path: r, msg }]),
     };
-    let mut tr = Tr { m, krate, index: HashMap::new(), order: vec![inst], by_key, errs: Vec::new(), drop_impls: HashMap::new() };
+    let mut tr = Tr { m, krate, index: HashMap::new(), order: vec![inst], by_key, errs: Vec::new(), drop_impls: Vec::new() };
     tr.index.insert(inst, 0);
     if bind_key(tr.by_key, root, key_id(&tr.krate, m, &inst)).is_err() {
         return Err(vec![TrErr::Root { path: r, msg: "ambiguous key: another root's closure reached a different fn under it".into() }]);
@@ -110,8 +110,9 @@ struct Tr<'m> {
     order: Vec<Instance>,
     by_key: &'m mut HashMap<String, KeyId>,
     errs: Vec<TrErr>,
-    /// Per crate, the ADTs with their own `impl Drop` (coherence puts it in the ADT's crate).
-    drop_impls: HashMap<String, Vec<AdtDef>>,
+    /// Per crate id (names can repeat across a build; `CrateNum` has no `Hash`), the ADTs with
+    /// their own `impl Drop` (coherence puts it in the ADT's crate).
+    drop_impls: Vec<(rustc_public::CrateNum, Vec<AdtDef>)>,
 }
 
 /// One body being translated. `residue`: the fn-pointer-typed temporaries, which may only hold
@@ -277,21 +278,25 @@ impl Tr<'_> {
     /// Whether `def` has its own `impl Drop`, from its crate's trait impls.
     fn own_drop(&mut self, def: AdtDef) -> bool {
         let k = def.krate();
-        let impls = self.drop_impls.entry(k.name.clone()).or_insert_with(|| {
-            k.trait_impls()
-                .iter()
-                .filter_map(|i| {
-                    let tr = i.trait_impl().value;
-                    // by defining crate, not by printed path (`std::ops::Drop` re-exports it)
-                    let drop = tr.def_id.krate().name == "core" && tr.def_id.name().ends_with("::Drop");
-                    match tr.self_ty().kind().rigid() {
-                        Some(RigidTy::Adt(d, _)) if drop => Some(*d),
-                        _ => None,
-                    }
-                })
-                .collect()
-        });
-        impls.contains(&def)
+        if let Some((_, impls)) = self.drop_impls.iter().find(|(id, _)| *id == k.id) {
+            return impls.contains(&def);
+        }
+        let impls: Vec<AdtDef> = k
+            .trait_impls()
+            .iter()
+            .filter_map(|i| {
+                let tr = i.trait_impl().value;
+                // by defining crate, not by printed path (`std::ops::Drop` re-exports it)
+                let drop = tr.def_id.krate().name == "core" && tr.def_id.name().ends_with("::Drop");
+                match tr.self_ty().kind().rigid() {
+                    Some(RigidTy::Adt(d, _)) if drop => Some(*d),
+                    _ => None,
+                }
+            })
+            .collect();
+        let own = impls.contains(&def);
+        self.drop_impls.push((k.id, impls));
+        own
     }
 
     /// The callee lookup order: an `intr` line; else an internal fn; else `Unresolved`.
@@ -701,9 +706,10 @@ impl Cx<'_> {
     /// intrinsics (`elem_ok`) and `ty` for `Wrapping(op, ty)`.
     // ponytail: admitted (intrinsic, element) pairs are u8 for every Vec/slice row, plus
     // `(u64, u64)` for VecLen/VecIndex/VecPush/VecNew (the 8b census); widen per pair when a
-    // checked crate needs another (sem.rs's Vec rows are element-agnostic). SliceToVec,
-    // VecExtendFromSlice and ArrayAsSlice stay u8: their per-element cost of 1 is honest only for
-    // a bitwise copy, not a deep Clone.
+    // checked crate needs another (sem.rs's Vec rows are element-agnostic). SliceToVec
+    // and VecExtendFromSlice stay u8: their per-element cost of 1 is honest only for a bitwise
+    // copy, not a deep Clone. ArrayAsSlice costs 0 and stays u8 because no target reaches another
+    // element.
     fn intr_types(&self, k: &c::Intrinsic, args: &[Operand], dst: &Place) -> Result<(), TrErr> {
         use c::Intrinsic as I;
         let a = args.iter().map(|o| self.op_ty(o)).collect::<Result<Vec<_>, _>>()?;

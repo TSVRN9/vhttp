@@ -141,7 +141,8 @@ fn main() {
 /// of the metadata unless they are generic or small enough to inline (`body=no`). The flag changes
 /// which MIR is available, never what it is. No `translate-crate` line names crypto, so its builds
 /// are unchanged. A dependency outside `CT_CRATES` (vest_lib) is compiled as is: a body it did not
-/// encode fails translation as `no MIR body`.
+/// encode is a leaf, since `is_internal` requires `has_body()`, and fails translation as
+/// `Unresolved`.
 fn encode_mir(m: &Manifest, krate: &str) -> bool {
     m.translate_crates.iter().any(|c| c == krate)
 }
