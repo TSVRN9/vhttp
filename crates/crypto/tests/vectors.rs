@@ -6,6 +6,7 @@ use crypto::hmac::hmac_sha256;
 use crypto::p256::{p256_ecdh, p256_public_key};
 use crypto::sha256::sha256;
 use vecdata::*;
+use std::collections::BTreeSet;
 
 fn cat(parts: &[&[u8]]) -> Vec<u8> {
     parts.concat()
@@ -38,15 +39,30 @@ fn wp(rel: &str) -> Vec<(J, J)> {
 #[test]
 fn sources_match() {
     let text = data("SOURCES.txt");
-    let mut n = 0;
+    let root = format!("{}/tests/data", env!("CARGO_MANIFEST_DIR"));
+    let mut listed = BTreeSet::new();
     for line in text.lines().filter(|l| !l.starts_with('#') && !l.is_empty()) {
         let f: Vec<&str> = line.split_whitespace().collect();
         assert_eq!(f.len(), 4, "{line}");
-        let bytes = std::fs::read(format!("{}/tests/data/{}", env!("CARGO_MANIFEST_DIR"), f[1])).unwrap();
+        let bytes = std::fs::read(format!("{root}/{}", f[1])).unwrap();
         assert_eq!(hx(&sha256(&bytes)), f[0], "{}", f[1]);
-        n += 1;
+        assert!(listed.insert(f[1].to_string()), "listed twice: {}", f[1]);
     }
-    assert_eq!(n, 18);
+    let mut present = BTreeSet::new();
+    let mut dirs = vec![root.clone()];
+    while let Some(d) = dirs.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                dirs.push(p.to_str().unwrap().to_string());
+            } else {
+                present.insert(p.strip_prefix(&root).unwrap().to_str().unwrap().to_string());
+            }
+        }
+    }
+    present.remove("SOURCES.txt");
+    assert_eq!(listed, present);
+    assert_eq!(listed.len(), 18);
 }
 
 fn sha_file(rel: &str, want: usize) {

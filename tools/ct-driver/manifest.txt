@@ -15,6 +15,8 @@ root crypto::hkdf::hkdf_expand
 root crypto::p256::p256_public_key
 root crypto::p256::p256_ecdh
 root crypto::ecdsa::p256_ecdsa_sign
+# RSA (5e)
+root crypto::rsa::rsa_pss_sign_inner
 
 # Intrinsics: every non-crypto key of `CT_MODE=census` over the roots above (census-crypto.txt),
 # each asserting that the std/vstd fn behaves as its core intrinsic. Never guessed.

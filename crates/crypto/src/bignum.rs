@@ -1185,6 +1185,7 @@ mod tests {
 
     #[test]
     fn neg_inv64_kat() {
+        assert_eq!(neg_inv64(1), u64::MAX);
         let mut s = 0x9e37_79b9_7f4a_7c15u64;
         let mut ms = vec![1, 3, u64::MAX];
         ms.extend((0..1000).map(|_| xorshift(&mut s) | 1));

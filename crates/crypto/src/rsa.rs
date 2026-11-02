@@ -978,6 +978,7 @@ mod tests {
 
     #[test]
     fn modulus_bits_edges() {
+        assert_eq!(modulus_bits(&[0x01, 0xff]), 9);
         let (n, _, _) = key(2048);
         assert_eq!(modulus_bits(&n[1..]), 2048);
         assert_eq!(modulus_bits(&n), 2048);

@@ -561,7 +561,7 @@ pub(crate) fn sha256_cat(prefix: &[u8], msg: &[u8]) -> (r: [u8; 32])
     // Keeps Z3 from unfolding the 64-round sha256_compress body, which only compress's ensures needs.
     hide(sha256_compress);
     // Likewise sha256_pad's Seq concatenations: the lemmas state what the body needs. Without this the
-    // query cost swings past --rlimit 4 when an unrelated change reorders the crate's axioms.
+    // query cost swings past --rlimit 4 when an unrelated change reorders the crate's SMT context.
     hide(sha256_pad);
     let ghost m = prefix@ + msg@;
     let ghost pad = sha256_pad(m);

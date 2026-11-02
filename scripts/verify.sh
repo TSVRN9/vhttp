@@ -28,6 +28,10 @@ report=$CT_OUT/crypto/report-crypto.txt
 for f in fe_from_be sec1_decode_exec; do
     grep -q "^checked crypto::p256::$f secret= ret=" "$report" || fail "crypto::p256::$f has a secret-labelled param (its ct-declassify row says none)"
 done
+grep -q '^checked crypto::rsa::rsa_pss_sign_inner secret=d,msg,salt ret=' "$report" || fail "rsa_pss_sign_inner lost its secret labels"
+grep -q '^checked crypto::rsa::mod_pow_ct secret=[^ ]*\be\b' "$report" || fail "mod_pow_ct's exponent is not secret"
+grep -q '^checked crypto::rsa::modulus_bits secret= ret=' "$report" || fail "modulus_bits has a secret-labelled param"
+if cargo tree -p crypto -e normal --prefix none | grep -qE '^(rsa|sha2|crypto-bigint) '; then fail "RustCrypto in crypto's normal deps"; fi
 g=$CT_OUT/gate
 mkdir -p "$g"
 awk '$1 == "declassify" { s = $NF; $1 = ""; $NF = ""; gsub(/^ +| +$/, ""); print $0, s }' "$report" | LC_ALL=C sort > "$g/report"
@@ -49,7 +53,7 @@ diff "$g/report-sites" "$g/source" >&2 || fail "report sites and declassify( lin
 # TRUSTED.md, and the attribute count must equal the number of `| crypto::` rows.
 gate=escape
 rc=0
-hits=$(grep -rnE 'admit[[:space:]]*\(|assume[[:space:]]*\(|external_body|assume_specification|verifier[[:space:]]*(::|\()[[:space:]]*external|\baxiom\b' "$root/crates" --include='*.rs') || rc=$?
+hits=$(grep -rnE 'admit[[:space:]]*\(|assume[[:space:]]*\(|external_body|assume_specification|external_type_specification|external_trait_specification|verifier[[:space:]]*(::|\()[[:space:]]*external|\baxiom\b' "$root/crates" --include='*.rs') || rc=$?
 [ "$rc" -le 1 ] || fail "grep failed (rc=$rc)"
 # Escapes split across lines (e.g. `assume` newline `(`), which the line-based grep misses.
 ml=$(grep -rlPz '\b(admit|assume)\s*\(' "$root/crates" --include='*.rs') && fail "escape across lines in: $ml"
