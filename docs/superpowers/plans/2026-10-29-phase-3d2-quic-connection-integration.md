@@ -27,7 +27,7 @@
 - **E6. The adapter defers, then refuses** (obligation 2). Unaccepted output bytes wait in a FIFO with an offset (no tail copies). `send_response` returns `Err(SendError::Busy)` *without calling h3* while anything is deferred, so h3 never commits a response we can't buffer, and deferred memory is at most one response plus h3's own control writes. `// ponytail: one deferred response per connection; per-stream queues if head-of-line blocking matters.`
 - **E7. Abort signal = `AppEvent::Aborted(id)` on every client-bidi `StreamEvent::Reset`** (2b obligation 4). Over-reporting after a completed request is harmless.
 - **E8. The PTO placeholder declares the space's in-flight records lost** (controller ruling #14 on the 2026-10-28 draft). This conflicts with RFC 9002 §6.2 "PTO expiry MUST NOT mark prior unacked packets lost", a Phase 6 row; Phase 6 replaces it with probe sending. Recorded here and in the Phase 6 binding note.
-- **E9. Long-header packets from a non-handshake path are dropped** (a client can't migrate before confirmation, §9); a 5th distinct path is dropped uncounted (`MAX_PATHS`).
+- **E9. Long-header packets from a non-handshake path are dropped** (a client can't migrate before confirmation, §9); an unknown path is added only when a packet on it passes `gate_packet` (1a-ii fix round 1), so spoofed garbage and replays take no slot, and its datagrams with no accepted packet are dropped uncounted, since nothing is ever sent to it; an accepted packet on a 5th distinct path is dropped uncounted (`MAX_PATHS`). Residual: racing first copies of authentic packets can still take slots (paths never evict; `path.rs` ponytail). Close before production.
 
 ## Global Constraints
 
@@ -193,16 +193,17 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
     ```
     now = max(self.now, now); chal_used = 0                            // (preflight M9, M12)
     match lc.phase(): Draining | Closed => return
-    if paths.index(path) is None && !paths.insert(path) { return }      // MAX_PATHS: drop uncounted (§9 drop branch)
-    paths.on_recv(path, len)                                            // §8.1: counted even if every packet is dropped
-    if lc.phase() is Closing { lc.on_recv_closing(len); return }        // §10.2.1; packets not processed
+    known = paths.index(path) is Some                                   // fix round 1: unknown paths take no slot yet
+    if known { paths.on_recv(path, len) }                               // §8.1: counted even if every packet is dropped
+    if lc.phase() is Closing { if known { lc.on_recv_closing(len) }; return }   // §10.2.1; packets not processed
     for p in packets (in order, moved by value; supported, probe 2026-10-29):
       if p.dcid != packets[0].dcid { continue }                         // §12.2 SHOULD ignore
       if !gate_packet(path, len, &p) { continue }
+      if !known { if !paths.insert(path) { return }; paths.on_recv(path, len); known = true }   // MAX_PATHS: drop uncounted (§9 drop branch)
       if let Err(c) = on_packet(path, p, now, rand) { close_internal(c); return }
       if lc.phase() !is Open { return }                                 // CONNECTION_CLOSE or reset → draining
     ```
-  - **`fn gate_packet(&self, path, len, p: &PlainPacket) -> (ok: bool)`** (3d2 preflight M7: no `first_dcid` parameter; `on_datagram` already applies §12.2) drops the packet (returns false) when:
+  - **`fn gate_packet(&self, path, len, p: &PlainPacket) -> (ok: bool)`** (3d2 preflight M7: no `first_dcid` parameter; `on_datagram` already applies §12.2) ensures `ok == gate_spec(path, len, p)`, a biconditional (fix round 1 I2), with an absent path having room `MAX_RESPONSES`. It drops the packet (returns false) when:
     - Initial: `len < 1200` (§14.1), `!live_i`, `path != hs_path`, `!ids.initial_scid_ok(&p.scid)` (§7.2), or `!(p.dcid == ids.odcid() || local_cids.is_active(&p.dcid))`;
     - Handshake: `!live_h`, `path != hs_path`, or `!local_cids.is_active(&p.dcid)`;
     - OneRtt: `!complete` (RFC 9001 §5.7, the 4b note) or `!local_cids.is_active(&p.dcid)` (§5.1.1 accept until retired);
@@ -257,8 +258,8 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
   - RFC 9001 §5.7 at the OneRtt gate: a comment citation if that row is Phase 4 and already cited, else Duvet.
 - [ ] **Step 4: Mutations:**
   - call `recv(k).on_packet` before the frame loop (fails P10's ensures);
-  - `gate_packet` accepts 1-RTT before `complete` (fails `on_stream_frame`'s `streams is Some` precondition; this holds only if `on_stream_frame`'s guard is on `Open`, from `wf`'s `complete` clause, not a runtime `streams.is_some()`, fix round 1 M3).
-  Test-only mutation (reported in Task 2a-ii, whose `amp_limit` catches it): skip `paths.on_recv` when every packet is dropped.
+  - `gate_packet` accepts 1-RTT before `complete` (fails first at `gate_packet`'s `ok == gate_spec` ensures; with the gate's contract and the chain's `complete` requires also removed, at `on_stream_frame`'s `streams is Some` precondition; this holds only if `on_stream_frame`'s guard is on `Open`, from `wf`'s `complete` clause, not a runtime `streams.is_some()`, fix round 1 M3).
+  Test-only mutation (reported in Task 2a-ii, whose `amp_limit` catches it): skip `paths.on_recv` on a known path when every packet is dropped.
   Review check (no test pins it; 3d2 preflight M3): the STREAM-run coalescing in `on_ack_frame` makes one `on_frame_acked` call per run.
 - [ ] **Step 5:** Four checks, evidence, quote check; MUST coverage for `5.2,11.1,13.1,10.3,5.1.1`.
 - [ ] **Step 6: Commits:**
@@ -291,9 +292,10 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
   - `CidTable::{new, apply}` (test only).
 - Produces (bodies for 1a-ii's declarations, plus new fns):
   - **`on_packet` addition (3d2 preflight C1(c)):** after `idle.on_packet_processed(now)`: `paths.set_peer_used(path, &p.dcid)`, then **`fn repair_pairs(&mut self, path)`** (`#[verifier::spinoff_prover]`): for each other path `q` (via `len`/`id_at`, at most `MAX_PATHS`) with `paths.dcid(q) is Some && paths.dcid(q) == paths.dcid(path)` and `paths.peer_used(q) != paths.peer_used(path)`, clear the non-active member's DCID: `set_dcid(q, None)` if `path == paths.active()`, else `set_dcid(path, None)`. `assign_dcid` re-assigns a cleared path later (`after_one_rtt`). Ensures `wf_dcids()`, so the §9.5 pair conjunct holds after every receive (the peer rotating CIDs on one member of a NAT-rebinding pair splits the pair).
+  - **Binding from 1a-ii's review:** the stubs' `frames_kept` and `Err` code `<= VARINT_MAX` stay in their ensures. `Streams::on_frame`'s code bound needs a small induction over `rfc_recv`'s `err` (text in the 1a-ii report).
   - **`on_stream_frame`:** the nine stream-layer frames → `streams.on_frame(&f, &mut events)`, with the `Err` arm bound in Task 1a-ii. `streams` is Some: 1-RTT packets pass `gate_packet` only after completion, which requires `peer_tp`. `frame_wf` and `is_stream_layer_frame` hold.
   - **`on_cid_frame`:**
-    - **`NewConnectionId{seq, retire_prior_to, cid, reset_token}`** → `peer_cids.on_new_cid(.., local_tp.active_connection_id_limit)?`, then, **after every `Ok`** (3d Task 4 binding; 3d2 preflight I3: a used non-current CID can be retired while `current()` stays put, so "`current()` changed" is not the trigger), **`fn rewrite_stale(&mut self)`** (`#[verifier::spinoff_prover]`; preflight I2, 3d2 preflight C1(b)). A path is stale when `paths.dcid(q) is Some(c)` and `!peer_cids.is_active(c)`. With `a = paths.active()` and `old_a = paths.dcid(a)` (cloned):
+    - **`NewConnectionId{seq, retire_prior_to, cid, reset_token}`** → `peer_cids.on_new_cid(.., local_tp.active_connection_id_limit)?`, then, **after every `Ok`** (3d Task 4 binding; 3d2 preflight I3: a used non-current CID can be retired while `current()` stays put, so "`current()` changed" is not the trigger), **`fn rewrite_stale(&mut self, rand)`** (`#[verifier::spinoff_prover]`; preflight I2, 3d2 preflight C1(b)). A path is stale when `paths.dcid(q) is Some(c)` and `!peer_cids.is_active(c)`. With `a = paths.active()` and `old_a = paths.dcid(a)` (cloned):
       1. **The active path first**, if stale: `cur = peer_cids.current()`.
          - If some other path `h` holds `cur` with `peer_used(h) != peer_used(a)`: `a` gets `use_next()` if Some; if None, `a` gets `cur` and `h` gets None.
          - Otherwise `a` gets `cur`.
@@ -302,16 +304,16 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
       `hs_path` gets no special case: after completion no long-header packet is built, and `wf_dcids` no longer requires its DCID (C1(a)). Ensures `wf_dcids()` (at most 4 `is_active` checks).
     - **`RetireConnectionId(s)`** → `local_cids.on_retire(s, dcid)?`. On `Some(c)`: push `Remove(c)` and call `issue_cids(rand)` (§5.1.1 SHOULD replace).
   - **`on_path_frame`:**
-    - **`PathChallenge(d)`** → `paths.on_challenge(path, d)`, then `assign_dcid(path)` (preflight I1).
+    - **`PathChallenge(d)`** → `paths.on_challenge(path, d)`, then `assign_dcid(path, rand)` (preflight I1).
     - **`PathResponse(d)`** → snapshot which paths are Validated (via `len`/`id_at`, at most `MAX_PATHS`), then if `let Some(q) = paths.on_response(d)`: `recovery.on_path_validated()` (§9.4) **only if `q` was not Validated before** (3d2 preflight M5: an MTU-probe answer or the §9.3.3 old-path recheck is not a new address, and must not reset cwnd and PTO). Then, if `paths.needs_mtu_probe(q)` and `next_challenge(rand)` is `Some(c)`: `paths.start_challenge(q, c, now)` (E3; Task 3 step 5 retries it when `next_challenge` is None, 3d2 preflight M6).
-  - **`fn assign_dcid(&mut self, q)`** (preflight I1). Only when `paths.dcid(q) is None`:
+  - **`fn assign_dcid(&mut self, q, rand)`** (both redraw `spin` from `rand`; 1a-ii review M2) (preflight I1). Only when `paths.dcid(q) is None`:
     - if `paths.peer_used(q) == paths.peer_used(paths.active())` → `set_dcid(q, paths.dcid(active))` (§9.5 MAY, NAT rebinding);
     - else, if `peer_cids.has_unused()` → `set_dcid(q, peer_cids.use_next())` and redraw `spin` (E4);
     - else leave it None: nothing is sent to `q` (§9.5).
     `// ponytail: one spin bit per connection, so a redraw for a new path's CID also flips the active path's bit (§17.4 is RECOMMENDED); per-path spin if spin-bit observers ever matter.` (3d2 preflight M14; no test checks a redraw.)
   - **`fn next_challenge(&mut self, rand) -> Option<[u8; 8]>`** (preflight M9): `rand[96 + 8·chal_used .. 104 + 8·chal_used]` and `chal_used += 1`, or None once `chal_used == 4`. Challenge data is therefore never reused within a call. `on_response` ignores the arrival path (§8.2.2), so distinct data is what ties a response to its path (§8.2.1).
   - **`after_one_rtt(path, dcid, non_probing, pn, now, rand)`** (no `old_used`: 3d2 preflight M7):
-    - if `path != paths.active()`: `assign_dcid(path)`;
+    - if `path != paths.active()`: `assign_dcid(path, rand)`;
     - if `non_probing && path != paths.active() && pn == recv_1.largest()`: `migrate(path, now, rand)`.
   - **`fn migrate(&mut self, path, now, rand)`** (body):
     ```
@@ -366,6 +368,7 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
   - §9.3.3 (at `migrate`);
   - §9.5: the destination MUST at `wf_dcids`' pair conjunct, `repair_pairs`, `rewrite_stale`, `assign_dcid` and `migrate`; the local-address MUST with the never-initiate reason.
 - [ ] **Step 4: Mutations:**
+  - Re-run (1a-ii review M3, M4): remove the room check from `gate_packet`: fails its `ok == gate_spec` ensures, and with `on_path_frame`'s body `challenge_flood_dropped`'s `response_owed` assertion must now bite. The 1-RTT-before-`complete` mutation fails first at that same ensures, not at `on_stream_frame`.
   - `migrate` without the `dcid(path) is None` return (fails `wf_dcids`: `set_active` would make a path with no DCID active, before the §9.5 ensures is reached; 3d2 preflight M15);
   - `assign_dcid` uses `current()` when `peer_used` differs (fails `wf_dcids`' pair conjunct);
   - `on_cid_frame` skips the stale-DCID rewrite (fails `wf_dcids`);
@@ -457,6 +460,7 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
     - `poll_cid_updates` = `[Add(S1), Add(L0), Remove(S1), Add(rnd(2)[0..8]), Add(rnd(2)[24..32]), Add(rnd(2)[48..56])]`.
   - **`ack_only_not_recorded`:** `established()` (1 record in flight); 100 × `on_datagram(0, 50, vec![one(n, [Ping]), ..])`, each followed by polling → `sent_inflight_len(OneRtt) == 1` throughout.
   - **`draining_silent_tx`:** `established()`, `one(0, [CC(false, 0, [])])` → `poll_transmit(20) == None`.
+  - **`acked_stream_not_resent`** (1a-ii review M1: `s.on_frame_lost` in `on_acked_frame`'s stream arm passes verification): `established()`, `stream_write`, poll, an authentic `Ack` of that packet; the next poll holds no STREAM frame.
 - [ ] **Step 2:** the tests fail.
 - [ ] **Step 3: Implement.** Duvet-cite (the rows close in Task 2a-ii, whose `duvet_q` run covers these sections):
   - §13.2.6 and §17.2.3: the same-space MUSTs at the ACK placement; "New packet numbers MUST be used" at `take_pn`'s call in `commit_space_packet`;
@@ -540,7 +544,8 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
     - `established()`, `close(0x0a, false, b"", 20)`;
     - one 30-byte OneRtt datagram `[CC(false, 0x0a, [])]`, then `None`;
     - `on_datagram(0, 9, vec![], 21, ..)` → `None`;
-    - `on_datagram(0, 9, vec![], 22, ..)` → `Some` (same frames, next PN), then `None`.
+    - `on_datagram(0, 9, vec![], 22, ..)` → `Some` (same frames, next PN), then `None`;
+    - `on_datagram(5, 1200, vec![], 23, ..)` → `None` (1a-ii fix round 1: an unknown path adds no closing budget; no earlier test can read it).
   - **`pn_max_closes_silently`** (§12.3 2⁶²−1; 3d2 preflight M9):
     - `established()`; `on_datagram(0, 50, vec![one(0, [Ack(A(0, 0, 0, []))])], 20, ..)` and poll until None, so `sent_inflight_len(OneRtt) == 0`;
     - `skip_pns_for_test(OneRtt, PN_MAX)`; `poll_transmit(21) == None`;
@@ -657,6 +662,8 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
   - **`close_deadline`:** `conn()`, `on_peer_params(&ptp() with initial_source_connection_id None, 1)`, poll until None; `next_timeout() == Some(3_072_001)` (1 + 3·1_024_000; `on_peer_params` set `now = 1` by the clock rule, preflight M12); `on_timeout(3_072_001, ..)` → `is_closed()`.
   - **`draining_deadline`:** `established()`, `one(0, [CC(false, 0, [])])` at 20 → `next_timeout() == Some(3_072_020)`; `on_timeout(3_072_020, ..)` → `is_closed()`.
   - **`idle_timeout`:** `established()`, `on_timeout(30_000_010, ..)` → `is_closed()`, `poll_transmit == None`.
+  - **`idle_refreshed_by_packet`** (1a-ii review M5: removing `idle.on_packet_processed` otherwise passes everything): `established()`, `one(0, [Ping])` at 20_000_000, `on_timeout(30_000_010, ..)` → `phase() == Open`.
+  - **`acked_crypto_not_resent`** (1a-ii review M1: the CRYPTO ack/lost swap passes verification): `conn()`, `crypto_write(Initial, ..)`, poll, an `ini` acknowledging that packet; fire the PTO; the following polls hold no CRYPTO frame at those offsets. The same for an acked STREAM frame after a PTO.
   - **`pto_requeue_crypto`:** `conn()`, poll; `crypto_write(Initial, &[0xaa; 100])`; `poll_transmit(0)` = Initial pn 1 `[Crypto{0, [0xaa; 100]}]`, 1200 bytes; `next_timeout() == Some(999_000)`; `on_timeout(999_000, ..)` → the poll = Initial pn 2 with the same CRYPTO frame, 1200; `next_timeout() == Some(2_997_000)`.
   - **`handshake_done_retransmitted`:** as Task 2a-i's `handshake_done_and_cids` up to its first poll; `next_timeout() == Some(1_024_010)`; `on_timeout(1_024_010, ..)` → the poll = pn 1 with the same four frames; `on_datagram(0, 50, vec![one(0, [Ack(A(1, 0, 0, []))])], 1_024_020, ..)` → the poll is `None` and `next_timeout()` has no PTO term (it equals the idle deadline).
   - **`pto_halves_cwnd`** (preflight M15):
