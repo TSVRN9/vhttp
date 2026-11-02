@@ -121,7 +121,7 @@ pub proof fn lemma_decode_pn_bound(largest: Option<u64>, truncated: u64, pn_len:
             win > 0,
             e >= 0,
     ;
-    // Two steps: as one query this sat at the edge of the rlimit, and an unrelated change tipped it.
+    // Two steps: the single query flips past the rlimit when pn_encode_len gains its first outside caller.
     assert(q < m) by (nonlinear_arith)
         requires
             q * win < m * win,

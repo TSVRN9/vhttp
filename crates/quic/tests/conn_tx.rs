@@ -104,9 +104,19 @@ fn established_rx() -> Connection {
     established_with(ptp())
 }
 
+/// Polls until None; a frame left due forever fails here rather than hanging the suite.
+fn drain(c: &mut Connection, now: u64) -> Vec<OutDatagram> {
+    let mut v = Vec::new();
+    while let Some(d) = c.poll_transmit(now) {
+        v.push(d);
+        assert!(v.len() <= 1024, "poll_transmit never returned None");
+    }
+    v
+}
+
 fn established_tx_with(p: TransportParams) -> Connection {
     let mut c = established_with(p);
-    while c.poll_transmit(10).is_some() {}
+    drain(&mut c, 10);
     c
 }
 
@@ -180,7 +190,7 @@ fn ack_only_not_recorded() {
     let mut acks = 0;
     for n in 0..100 {
         c.on_datagram(0, 50, vec![one(n, vec![Frame::Ping])], 50, &rnd(3));
-        while let Some(d) = c.poll_transmit(50) {
+        for d in drain(&mut c, 50) {
             assert!(matches!(d.packets[0].frames[0], Frame::Ack(_)));
             assert_eq!(d.packets[0].frames.len(), 1);
             acks += 1;
@@ -208,7 +218,29 @@ fn acked_stream_not_resent() {
     let pn = d.packets[0].pn;
     assert!(d.packets[0].frames.contains(&stream(0, 0, b"ok", true)));
     c.on_datagram(0, 50, vec![one(1, vec![Frame::Ack(A(pn, 0, 0, vec![]))])], 31, &rnd(3));
-    while let Some(d) = c.poll_transmit(31) {
+    for d in drain(&mut c, 31) {
         assert!(!d.packets[0].frames.iter().any(|f| matches!(f, Frame::Stream { .. })));
     }
+}
+
+#[test]
+fn ack_timer() {
+    let mut c = established();
+    c.on_datagram(0, 50, vec![one(0, vec![Frame::Ping])], 100, &rnd(3));
+    assert_eq!(c.poll_transmit(100), None);
+    assert_eq!(c.poll_transmit(100 + 24_999), None);
+    let d = c.poll_transmit(100 + 25_000).unwrap();
+    assert_eq!(d.packets.len(), 1);
+    assert_eq!(d.packets[0].frames.len(), 1);
+    assert!(matches!(d.packets[0].frames[0], Frame::Ack(_)));
+}
+
+#[test]
+fn retire_cid_sent_once() {
+    let mut c = established();
+    let f = Frame::NewConnectionId { seq: 1, retire_prior_to: 1, cid: D(0xd1).to_vec(), reset_token: [0xe1; 16] };
+    c.on_datagram(0, 50, vec![one(0, vec![f])], 30, &rnd(3));
+    let sent = drain(&mut c, 30);
+    let n = sent.iter().flat_map(|d| &d.packets).flat_map(|p| &p.frames).filter(|f| **f == Frame::RetireConnectionId(0)).count();
+    assert_eq!(n, 1);
 }
