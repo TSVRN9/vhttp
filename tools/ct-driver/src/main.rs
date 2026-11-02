@@ -4,7 +4,7 @@
 //!
 //! Environment: `CT_CRATES` (comma-separated crate names), `CT_MANIFEST` (colon-separated manifest
 //! paths), `CT_OUT` (report dir, created if missing), `CT_MODE` = `check` (default) | `census` |
-//! `selftest` (with `CT_SELFTEST` = the vector file, see `selftest`).
+//! `selftest` (with `CT_SELFTEST` = the vector file, see `selftest`) | `cost` (see `cost`).
 //!
 //! Check mode writes `$CT_OUT/report-<crate>.txt` with one verdict per manifest root of the crate
 //! (`root <path> ok`, or one `reject <path> <Kind> <site> ..` line per kind and site), and for ok
@@ -76,6 +76,7 @@ enum Mode {
     Check,
     Census,
     Selftest,
+    Cost,
 }
 
 fn env_list(var: &str, sep: char) -> Vec<String> {
@@ -102,7 +103,8 @@ fn main() {
         Err(_) | Ok("check") => Mode::Check,
         Ok("census") => Mode::Census,
         Ok("selftest") => Mode::Selftest,
-        Ok(other) => die(&format!("unknown CT_MODE {other:?} (check | census | selftest)")),
+        Ok("cost") => Mode::Cost,
+        Ok(other) => die(&format!("unknown CT_MODE {other:?} (check | census | selftest | cost)")),
     };
     let paths: Vec<PathBuf> = env_list("CT_MANIFEST", ':').into_iter().map(PathBuf::from).collect();
     if paths.is_empty() {
@@ -114,11 +116,15 @@ fn main() {
     for f in ["-Zinline-mir=no", "--cfg", "ct_check", "-Zcrate-attr=feature(register_tool)", "-Zcrate-attr=register_tool(ct)"] {
         args.push(f.to_string());
     }
+    if encode_mir(&m, &krate) {
+        args.push("-Zalways-encode-mir".into());
+    }
     let res = run!(&args, || {
         let r = match mode {
             Mode::Census => roots(&krate, &m).and_then(|roots| census(&krate, &m, &roots, &out)),
             Mode::Check => check(&krate, &m, &out),
             Mode::Selftest => selftest(&krate, &m, &out),
+            Mode::Cost => cost(&krate, &m, &out),
         };
         match r {
             Ok(()) => ControlFlow::Continue(()),
@@ -131,6 +137,17 @@ fn main() {
         Err(CompilerError::Interrupted(e)) => die(&e),
         Err(CompilerError::Failed) => exit(1),
     }
+}
+
+/// Whether an analysed crate's compile adds `-Zalways-encode-mir`: a `translate-crate` line names
+/// it, so the crates analysed after it may translate its bodies, which rustc otherwise leaves out
+/// of the metadata unless they are generic or small enough to inline (`body=no`). The flag changes
+/// which MIR is available, never what it is. No `translate-crate` line names crypto, so its builds
+/// are unchanged. A dependency outside `CT_CRATES` (vest_lib) is compiled as is: a body it did not
+/// encode is a leaf, since `is_internal` requires `has_body()`, and fails translation as
+/// `Unresolved`.
+fn encode_mir(m: &Manifest, krate: &str) -> bool {
+    m.translate_crates.iter().any(|c| c == krate)
 }
 
 /// The manifest roots of crate `krate`, as instances of its local fn items. Errors: no root for
@@ -149,6 +166,12 @@ fn crate_roots<'m>(krate: &str, m: &'m Manifest) -> Result<Vec<&'m String>, Stri
         return Err(format!("no manifest root for analysed crate {krate}"));
     }
     Ok(want)
+}
+
+/// The manifest cost roots whose crate prefix is `krate`; none is fine (an empty cost file).
+fn crate_cost_roots<'m>(krate: &str, m: &'m Manifest) -> Vec<&'m String> {
+    let prefix = format!("{krate}::");
+    m.cost_roots.iter().filter(|r| r.starts_with(&prefix)).collect()
 }
 
 /// The local fn items by key: `Some` instance when monomorphic; generic items (never roots) are
@@ -334,7 +357,9 @@ fn selftest(krate: &str, m: &Manifest, out: &std::path::Path) -> Result<(), Stri
     let mut lines = String::new();
     let mut by_key = HashMap::new();
     for (n, line) in text.lines().enumerate() {
-        let toks: Vec<&str> = line.split_whitespace().take_while(|t| !t.starts_with('#')).collect();
+        // a comment starts at a `#` token other than a `#k(..)` enum value
+        let comment = |t: &&str| t.starts_with('#') && !t[1..].starts_with(|ch: char| ch.is_ascii_digit());
+        let toks: Vec<&str> = line.split_whitespace().take_while(|t| !comment(t)).collect();
         let Some((&path, rest)) = toks.split_first() else { continue };
         if !path.starts_with(&prefix) {
             continue;
@@ -354,6 +379,101 @@ fn selftest(krate: &str, m: &Manifest, out: &std::path::Path) -> Result<(), Stri
     }
     let f = out.join(format!("selftest-{krate}.txt"));
     std::fs::write(&f, lines).map_err(|e| format!("{}: {e}", f.display()))
+}
+
+/// Cost mode: per `cost-root` of `krate`, its own closure and `Program`, and one line of
+/// `cost-<krate>.txt`, sorted (empty for a crate with no cost root):
+/// `bounded <path> deg=<d> steps <= <poly>`, or `none <path> <why>`. `bounded` means
+/// `ctcore::cost::theorem_cost`'s statement applied to the program; no code calls that theorem.
+fn cost(krate: &str, m: &Manifest, out: &std::path::Path) -> Result<(), String> {
+    let mut lines = BTreeSet::new();
+    // ponytail: one map across roots, so an ambiguous key in one root's closure can change another
+    // root's verdict (a `none` or a hard error, never a bound); a fresh map per root removes that.
+    let mut by_key = HashMap::new();
+    for r in crate_cost_roots(krate, m) {
+        lines.insert(format!("{}\n", cost_verdict(m, r, &mut by_key)?));
+    }
+    let file = out.join(format!("cost-{krate}.txt"));
+    std::fs::write(&file, lines.into_iter().collect::<String>()).map_err(|e| format!("{}: {e}", file.display()))
+}
+
+/// One cost root's line. `check_program` gates `analyze`: `check_cert`'s `true` says nothing about
+/// an ill-typed program, and `Ok` is what supplies `theorem_cost`'s `ok_prog`. No secrets are
+/// declared, so all labels are public. `Err` is a hard error: no fn for the root, or an ambiguous key.
+fn cost_verdict(m: &Manifest, r: &str, by_key: &mut HashMap<String, KeyId>) -> Result<String, String> {
+    use ctcore::loops::CostWhy;
+    use translate::TrErr;
+    let (p, infos) = match translate::translate_closure(m, r, by_key) {
+        Ok(x) => x,
+        Err(es) => {
+            if let Some(e) = es.iter().find(|e| matches!(e, TrErr::Root { .. })) {
+                return Err(tr_text(e));
+            }
+            return Ok(format!("none {r} {}", tr_text(&es[0]).replace('\n', " ")));
+        }
+    };
+    if let Err(rs) = ctcore::check_program(&p, &vec![None; p.fns.len()]) {
+        let recursion = rs.iter().any(|rj| matches!(rj.kind, ctcore::RejectKind::Recursion));
+        return Ok(format!("none {r} {}", if recursion { "Recursion" } else { "NotTyped" }));
+    }
+    let (sums, _, whys) = ctcore::analyze(&p);
+    if let Some(Some(poly)) = sums.first() {
+        let names = &infos[0].param_names;
+        let deg = poly.monos.iter().filter(|x| x.coef != 0).map(|x| x.atoms.len()).max().unwrap_or(0);
+        return Ok(format!("bounded {r} deg={deg} steps <= {}", poly_text(poly, names)));
+    }
+    let why = match whys.first() {
+        Some(CostWhy::NotCounted(h)) => format!("NotCounted({h})"),
+        Some(CostWhy::CalleeNone(g)) => format!("CalleeNone({g})"),
+        Some(CostWhy::Validator(b)) => format!("Validator({b})"),
+        Some(CostWhy::Unresolved) => "Unresolved".into(),
+        Some(CostWhy::Recursion) => "Recursion".into(),
+        Some(CostWhy::DegreeCap) => "DegreeCap".into(),
+        Some(CostWhy::Overflow) => "Overflow".into(),
+        Some(CostWhy::NotWf) => "NotWf".into(),
+        Some(CostWhy::NotTyped) => "NotTyped".into(),
+        Some(CostWhy::Bounded) | None => return Err(format!("{r}: analyze gave no summary and no reason")),
+    };
+    Ok(format!("none {r} {why}"))
+}
+
+/// A summary in the root's source parameter names: `13*len(s)*len(s) + 40*len(s) + 33`.
+fn poly_text(poly: &ctcore::cost::Poly, names: &[String]) -> String {
+    let monos: Vec<String> = poly
+        .monos
+        .iter()
+        .filter(|x| x.coef != 0)
+        .map(|x| {
+            let atoms = x.atoms.iter().map(|a| atom_text(a, names));
+            if x.coef == 1 && !x.atoms.is_empty() {
+                atoms.collect::<Vec<_>>().join("*")
+            } else {
+                std::iter::once(x.coef.to_string()).chain(atoms).collect::<Vec<_>>().join("*")
+            }
+        })
+        .collect();
+    if monos.is_empty() {
+        "0".into()
+    } else {
+        monos.join(" + ")
+    }
+}
+
+/// `Val` is the parameter's name, `Len` is `len(name)`, `Gap` is `sat(a - b)`, the saturating
+/// difference. Local `x` is parameter `x - 1`; `#x` is an unnamed one, `_x` is not a parameter.
+fn atom_text(a: &ctcore::cost::Atom, names: &[String]) -> String {
+    use ctcore::cost::Atom;
+    let local = |x: usize| match x.checked_sub(1).and_then(|j| names.get(j)) {
+        Some(n) if !n.is_empty() => n.clone(),
+        Some(_) => format!("#{x}"),
+        None => format!("_{x}"),
+    };
+    match a {
+        Atom::Const(c) => c.to_string(),
+        Atom::Val(x, _) => local(*x),
+        Atom::Len(x) => format!("len({})", local(*x)),
+        Atom::Gap(x, y) => format!("sat({} - {})", atom_text(x, names), atom_text(y, names)),
+    }
 }
 
 fn tr_text(e: &translate::TrErr) -> String {
@@ -437,8 +557,30 @@ fn reject_text(p: &ctcore::Program, infos: &[translate::FnInfo], rj: &ctcore::Re
 #[cfg(test)]
 mod tests {
     use super::strip_generic_args as k;
-    use super::{bind_key, pick_roots};
+    use super::{bind_key, pick_roots, poly_text};
+    use ctcore::cost::{Atom, Mono, Poly};
+    use ctcore::IntTy;
     use std::collections::HashMap;
+
+    #[test]
+    fn poly_text_names_parameters() {
+        let val = |x| Atom::Val(x, IntTy::Usize);
+        let mono = |coef, atoms| Mono { coef, atoms };
+        let gap = Atom::Gap(Box::new(Atom::Len(1)), Box::new(val(2)));
+        let poly = Poly {
+            monos: vec![
+                mono(1, vec![Atom::Len(1)]),
+                mono(13, vec![val(2), gap]),
+                mono(0, vec![val(2)]),
+                mono(3, vec![val(3)]),
+                mono(2, vec![val(9), val(0)]),
+                mono(7, vec![]),
+            ],
+        };
+        let names = ["s".to_string(), "n".to_string(), String::new()];
+        assert_eq!(poly_text(&poly, &names), "len(s) + 13*n*sat(len(s) - n) + 3*#3 + 2*_9*_0 + 7");
+        assert_eq!(poly_text(&Poly { monos: vec![] }, &names), "0");
+    }
 
     #[test]
     fn ambiguous_root_key_is_an_error() {
