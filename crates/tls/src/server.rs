@@ -1501,7 +1501,7 @@ impl<'a> ServerHandshake<'a> {
                 Ok(()) => {},
                 Err(e) => {
                     proof {
-                        // The RSA shim's internal_error, where the spec has a flight: the spec drain
+                        // build_flight's Err where the spec has a flight, which its ensures still allows for RSA keys: the spec drain
                         // stops there (nothing is expected at Initial any more), so `res` is Ok.
                         if let Ok((s2, evs)) = spec_step(cfg, tp, s1, m@, rand@) {
                             assert(level is Initial);

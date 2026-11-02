@@ -1,5 +1,5 @@
 //! P-256 (NIST SP 800-186 §3.2.1.3) with the SEC 1 v2 group law, point encoding and ECDH:
-//! spec and exec signatures backed by the trusted shim.
+//! spec and verified exec.
 #[allow(unused_imports)]
 use crate::bytes::*;
 use vstd::prelude::*;
