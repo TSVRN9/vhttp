@@ -564,6 +564,7 @@ impl LocalCids {
     /// `packet_dcid`. A sequence number above every one sent, or one naming `packet_dcid`
     /// itself, is PROTOCOL_VIOLATION. Otherwise an active CID is retired and returned (the
     /// caller unroutes it and may issue a replacement); retiring twice is harmless.
+    #[verifier::spinoff_prover]
     pub fn on_retire(&mut self, seq: u64, packet_dcid: &[u8]) -> (r: Result<Option<[u8; 8]>, u64>)
         requires
             old(self).wf(),
