@@ -2284,4 +2284,439 @@ pub fn instantiate(sum: &Poly, p: &Program, g: usize, args: &Vec<Operand>) -> (r
     Some(q)
 }
 
+// ------------------------------------------------------------------ charges
+
+/// What the terminator owes beyond its own step, at the frame after the statements.
+pub open spec fn charge_covers(p: Program, t: Term, sums: Seq<Option<Poly>>, charge: Poly, fr1: Frame) -> bool {
+    match t {
+        Term::Call(Callee::Intr(i), args, _, _) => intr_cost(i, fr1, args@) <= poly_val(fr1, charge),
+        Term::Call(Callee::Fn(g), args, _, _) =>
+            sums[g as int] is Some && poly_val(call_enter(p, g as nat, fr1, args@).0, sums[g as int].unwrap()) <= poly_val(fr1, charge),
+        _ => true,
+    }
+}
+
+fn empty_poly() -> (r: Poly)
+    ensures forall|fr: Frame| #[trigger] poly_val(fr, r) == 0,
+{
+    let r = Poly { monos: Vec::new() };
+    proof {
+        assert forall|fr: Frame| #[trigger] poly_val(fr, r) == 0 by {
+            lemma_monos_empty(fr, r.monos@);
+        }
+    }
+    r
+}
+
+/// `Len(y)` for an operand reading local `y`: a len-cost intrinsic's cost.
+fn len_charge(args: &Vec<Operand>, i: usize) -> (r: Option<Poly>)
+    ensures r matches Some(ch) ==> forall|fr: Frame| #[trigger] poly_val(fr, ch) >= elems(fr, nth(op_vals(fr, args@), i as nat)).len(),
+{
+    if i >= args.len() { return None; }
+    match &args[i] {
+        Operand::Copy(q) => if q.proj.len() == 0 {
+            let y = q.local;
+            let mut atoms: Vec<Atom> = Vec::new();
+            atoms.push(Atom::Len(y));
+            let m = Mono { coef: 1, atoms };
+            let mut monos: Vec<Mono> = Vec::new();
+            monos.push(m);
+            let ch = Poly { monos };
+            proof {
+                assert forall|fr: Frame| #[trigger] poly_val(fr, ch) >= elems(fr, nth(op_vals(fr, args@), i as nat)).len() by {
+                    lemma_read_empty(fr, *q);
+                    let v = nth(fr.locals, y as nat);
+                    assert(nth(op_vals(fr, args@), i as nat) == v);
+                    lemma_elems_le_len_nat(fr, v);
+                    lemma_atoms1(fr, m.atoms@);
+                    assert(ch.monos@ =~= Seq::<Mono>::empty().push(m));
+                    lemma_monos_empty(fr, Seq::<Mono>::empty());
+                    lemma_monos_push(fr, Seq::<Mono>::empty(), m);
+                    assert(atom_val(fr, m.atoms@[0]) == len_nat(fr, v));
+                }
+            }
+            Some(ch)
+        } else {
+            None
+        },
+        _ => None,
+    }
+}
+
+fn term_charge(p: &Program, t: &Term, sums: &Vec<Option<Poly>>) -> (r: Option<Poly>)
+    ensures r matches Some(ch) ==> forall|fr: Frame| #[trigger] charge_covers(*p, *t, sums@, ch, fr),
+{
+    match t {
+        Term::Call(Callee::Fn(g), args, _, _) => {
+            if *g >= sums.len() { return None; }
+            match &sums[*g] {
+                Some(sum) => {
+                    let r = instantiate(sum, p, *g, args);
+                    proof {
+                        if r is Some {
+                            let ch = r.unwrap();
+                            assert forall|fr: Frame| #[trigger] charge_covers(*p, *t, sums@, ch, fr) by {
+                                assert(poly_val(fr, ch) >= poly_val(call_enter(*p, *g as nat, fr, args@).0, *sum));
+                            }
+                        }
+                    }
+                    r
+                },
+                None => None,
+            }
+        },
+        Term::Call(Callee::Intr(k), args, _, _) => match k {
+            Intrinsic::SliceToVec => {
+                let r = len_charge(args, 0);
+                proof {
+                    if r is Some {
+                        let ch = r.unwrap();
+                        assert forall|fr: Frame| #[trigger] charge_covers(*p, *t, sums@, ch, fr) by {
+                            assert(poly_val(fr, ch) >= elems(fr, nth(op_vals(fr, args@), 0)).len());
+                        }
+                    }
+                }
+                r
+            },
+            Intrinsic::VecExtendFromSlice => {
+                let r = len_charge(args, 1);
+                proof {
+                    if r is Some {
+                        let ch = r.unwrap();
+                        assert forall|fr: Frame| #[trigger] charge_covers(*p, *t, sums@, ch, fr) by {
+                            assert(poly_val(fr, ch) >= elems(fr, nth(op_vals(fr, args@), 1)).len());
+                        }
+                    }
+                }
+                r
+            },
+            _ => {
+                let ch = empty_poly();
+                proof {
+                    assert forall|fr: Frame| #[trigger] charge_covers(*p, *t, sums@, ch, fr) by {
+                        assert(poly_val(fr, ch) == 0);
+                    }
+                }
+                Some(ch)
+            },
+        },
+        _ => {
+            let ch = empty_poly();
+            proof {
+                assert forall|fr: Frame| #[trigger] charge_covers(*p, *t, sums@, ch, fr) by {}
+            }
+            Some(ch)
+        },
+    }
+}
+
+// ------------------------------------------------------------------ edges
+
+/// Edge `j`'s successor exists, its facts follow, and `pot` pays `k1`, the charge and its potential.
+pub open spec fn edge_ok(c: Cert, e: SymEff, facts: Seq<Fact>, pot: Poly, upc: Poly, crc: Poly, k1: nat, j: int) -> bool {
+    let t = e.edge[j].0;
+    &&& (t as nat) < c.blocks@.len()
+    &&& forall|pre: Frame, post: Frame, s: nat| facts_hold(pre, facts) && #[trigger] eff_sound(e, pre, post, s) && facts_hold(post, e.edge[j].1)
+        ==> facts_hold(post, c.blocks@[t as int].facts@)
+            && poly_val(pre, pot) + poly_val(pre, crc) >= k1 + poly_val(post, c.blocks@[t as int].pot) + poly_val(pre, upc)
+}
+
+fn check_edge(c: &Cert, e: &Eff, facts: &Vec<Fact>, pot: &Poly, upc: &Poly, crc: &Poly, k1: u64, i: usize) -> (r: bool)
+    requires i < e.edge@.len(),
+    ensures r ==> edge_ok(*c, eff_view(*e), facts@, *pot, *upc, *crc, k1 as nat, i as int),
+{
+    let t = e.edge[i].0;
+    let post_facts = &e.edge[i].1;
+    if t >= c.blocks.len() { return false; }
+    let s = &c.blocks[t];
+    if !facts_imply(post_facts, &s.facts) { return false; }
+    let need = match bound_post(&s.pot, pot, e, facts, post_facts) { Some(n) => n, None => return false };
+    let (up, cr) = match pull_post(&need, e, facts) { Some(x) => x, None => return false };
+    let l1 = match poly_add(pot, &cr) { Some(x) => x, None => return false };
+    let lhs = match poly_add(&l1, crc) { Some(x) => x, None => return false };
+    let rhs = match poly_add(&up, upc) { Some(x) => x, None => return false };
+    if !poly_dominates(&lhs, &rhs, k1) { return false; }
+    proof {
+        let ev = eff_view(*e);
+        assert(ev.edge[i as int] == (t, post_facts@));
+        assert forall|pre: Frame, post: Frame, n: nat| facts_hold(pre, facts@) && #[trigger] eff_sound(ev, pre, post, n) && facts_hold(post, ev.edge[i as int].1)
+            implies facts_hold(post, c.blocks@[t as int].facts@)
+                && poly_val(pre, *pot) + poly_val(pre, *crc) >= k1 as nat + poly_val(post, c.blocks@[t as int].pot) + poly_val(pre, *upc) by {
+            assert(facts_hold(post, post_facts@));
+            assert(poly_val(post, need) >= poly_val(post, s.pot));
+            assert(poly_val(post, need) + poly_val(pre, cr) <= poly_val(pre, up));
+            assert(poly_val(pre, lhs) >= poly_val(pre, rhs) + k1);
+            assert(poly_val(pre, lhs) == poly_val(pre, l1) + poly_val(pre, *crc));
+            assert(poly_val(pre, l1) == poly_val(pre, *pot) + poly_val(pre, cr));
+            assert(poly_val(pre, rhs) == poly_val(pre, up) + poly_val(pre, *upc));
+        }
+    }
+    true
+}
+
+pub open spec fn edges_ok(c: Cert, e: SymEff, facts: Seq<Fact>, pot: Poly, upc: Poly, crc: Poly, k1: nat) -> bool {
+    forall|j: int| 0 <= j < e.edge.len() ==> #[trigger] edge_ok(c, e, facts, pot, upc, crc, k1, j)
+}
+
+fn check_edges(c: &Cert, e: &Eff, facts: &Vec<Fact>, pot: &Poly, upc: &Poly, crc: &Poly, k1: u64) -> (r: bool)
+    ensures r ==> edges_ok(*c, eff_view(*e), facts@, *pot, *upc, *crc, k1 as nat),
+{
+    let mut i: usize = 0;
+    while i < e.edge.len()
+        invariant i <= e.edge@.len(), forall|j: int| 0 <= j < i ==> #[trigger] edge_ok(*c, eff_view(*e), facts@, *pot, *upc, *crc, k1 as nat, j),
+        decreases e.edge.len() - i,
+    {
+        if !check_edge(c, e, facts, pot, upc, crc, k1, i) { return false; }
+        i += 1;
+    }
+    true
+}
+
+/// The edge taken pays. The charge is any value `crc` and `upc` cover.
+proof fn lemma_edge_taken(c: Cert, e: SymEff, facts: Seq<Fact>, pot: Poly, upc: Poly, crc: Poly, k1: nat, pre: Frame, post: Frame, t: usize, i: int, chg: nat)
+    requires
+        edges_ok(c, e, facts, pot, upc, crc, k1), facts_hold(pre, facts), eff_sound(e, pre, post, t as nat),
+        0 <= i < e.edge.len(), e.edge[i].0 == t, chg + poly_val(pre, crc) <= poly_val(pre, upc),
+    ensures
+        facts_hold(post, c.blocks@[t as int].facts@),
+        poly_val(pre, pot) >= k1 + chg + poly_val(post, c.blocks@[t as int].pot),
+{
+    assert(edge_ok(c, e, facts, pot, upc, crc, k1, i));
+    assert(e.edge[i].0 as nat == t as nat);
+    assert(facts_hold(post, e.edge[i].1));
+}
+
+proof fn lemma_switch_index(ts: Seq<(u128, usize)>, k: nat, v: u128, o: usize) -> (i: int)
+    requires k <= ts.len(),
+    ensures k <= i <= ts.len(), switch_target(ts, k, v, o) == (if i < ts.len() { ts[i].1 } else { o }),
+    decreases ts.len() - k,
+{
+    if k == ts.len() { k as int } else if ts[k as int].0 == v { k as int } else { lemma_switch_index(ts, k + 1, v, o) }
+}
+
+// ------------------------------------------------------------------ one block, by terminator
+
+/// What `check_cost_block` establishes, at one frame.
+pub open spec fn block_premises(p: Program, f: nat, b: nat, c: Cert, sums: Seq<Option<Poly>>, fr: Frame, upc: Poly, crc: Poly, charge: Poly) -> bool {
+    let blk = p.fns@[f as int].blocks@[b as int];
+    let facts = c.blocks@[b as int].facts@;
+    let fr1 = exec_stmts(blk.stmts@, 0, fr).0;
+    &&& edges_ok(c, sym_block(p.fns@[f as int], blk, facts), facts, c.blocks@[b as int].pot, upc, crc, blk.stmts@.len() + 1)
+    &&& poly_val(fr1, charge) + poly_val(fr, crc) <= poly_val(fr, upc)
+    &&& charge_covers(p, blk.term, sums, charge, fr1)
+    &&& blk.term is Return ==> poly_val(fr, c.blocks@[b as int].pot) >= blk.stmts@.len() + 1
+}
+
+proof fn lemma_block_call(p: Program, ls: Seq<FnLab>, f: nat, b: nat, c: Cert, sums: Seq<Option<Poly>>, fr: Frame, upc: Poly, crc: Poly, charge: Poly)
+    requires
+        ok_prog(p, ls), f < p.fns@.len(), b < p.fns@[f as int].blocks@.len(), plc(p, ls, f, fr),
+        facts_hold(fr, c.blocks@[b as int].facts@), frame_len_ok(fr),
+        block_premises(p, f, b, c, sums, fr, upc, crc, charge),
+        p.fns@[f as int].blocks@[b as int].term matches Term::Call(Callee::Fn(_), _, _, _),
+    ensures block_step_ok(p, f, b, c, sums, fr),
+{
+    let blk = p.fns@[f as int].blocks@[b as int];
+    let facts = c.blocks@[b as int].facts@;
+    let k = blk.stmts@.len();
+    let fr1 = exec_stmts(blk.stmts@, 0, fr).0;
+    let e = sym_block(p.fns@[f as int], blk, facts);
+    let pot = poly_val(fr, c.blocks@[b as int].pot);
+    if let Term::Call(Callee::Fn(g), args, dst, next) = blk.term {
+        let (cf, wb, _) = call_enter(p, g as nat, fr1, args@);
+        lemma_sym_block_sound(p, ls, f, b, blk, facts, fr);
+        assert forall|out: Frame, n: nat| frame_len_ok(out) && n <= poly_val(cf, sums[g as int].unwrap())
+            implies #[trigger] call_out_ok(c, next as nat, pot, k, fr1, wb, dst, out, n) by {
+            let post = call_leave(fr1, out, wb, dst).0;
+            assert(eff_sound(e, fr, post, next as nat));
+            assert(e.edge[0] == (next, carry(e.rel, facts)));
+            lemma_edge_taken(c, e, facts, c.blocks@[b as int].pot, upc, crc, k + 1, fr, post, next, 0, poly_val(fr1, charge));
+        }
+    }
+}
+
+proof fn lemma_block_intr(p: Program, ls: Seq<FnLab>, f: nat, b: nat, c: Cert, sums: Seq<Option<Poly>>, fr: Frame, upc: Poly, crc: Poly, charge: Poly)
+    requires
+        ok_prog(p, ls), f < p.fns@.len(), b < p.fns@[f as int].blocks@.len(), plc(p, ls, f, fr),
+        facts_hold(fr, c.blocks@[b as int].facts@), frame_len_ok(fr),
+        block_premises(p, f, b, c, sums, fr, upc, crc, charge),
+        p.fns@[f as int].blocks@[b as int].term matches Term::Call(Callee::Intr(_), _, _, _),
+    ensures block_step_ok(p, f, b, c, sums, fr),
+{
+    let blk = p.fns@[f as int].blocks@[b as int];
+    let facts = c.blocks@[b as int].facts@;
+    let fr1 = exec_stmts(blk.stmts@, 0, fr).0;
+    let e = sym_block(p.fns@[f as int], blk, facts);
+    if let Term::Call(Callee::Intr(i), args, dst, next) = blk.term {
+        if let Some((fr2, _, extra)) = exec_intr(i, fr1, args@, dst) {
+            lemma_sym_block_sound(p, ls, f, b, blk, facts, fr);
+            assert(eff_sound(e, fr, fr2, next as nat));
+            assert(e.edge[0] == (next, carry(e.rel, facts)));
+            lemma_edge_taken(c, e, facts, c.blocks@[b as int].pot, upc, crc, blk.stmts@.len() + 1, fr, fr2, next, 0, poly_val(fr1, charge));
+        }
+    }
+}
+
+proof fn lemma_block_jump(p: Program, ls: Seq<FnLab>, f: nat, b: nat, c: Cert, sums: Seq<Option<Poly>>, fr: Frame, upc: Poly, crc: Poly, charge: Poly)
+    requires
+        ok_prog(p, ls), f < p.fns@.len(), b < p.fns@[f as int].blocks@.len(), plc(p, ls, f, fr),
+        facts_hold(fr, c.blocks@[b as int].facts@), frame_len_ok(fr),
+        block_premises(p, f, b, c, sums, fr, upc, crc, charge),
+        !(p.fns@[f as int].blocks@[b as int].term is Call),
+    ensures block_step_ok(p, f, b, c, sums, fr),
+{
+    let blk = p.fns@[f as int].blocks@[b as int];
+    let facts = c.blocks@[b as int].facts@;
+    let k1 = blk.stmts@.len() + 1;
+    let fr1 = exec_stmts(blk.stmts@, 0, fr).0;
+    let e = sym_block(p.fns@[f as int], blk, facts);
+    let chg = poly_val(fr1, charge);
+    let pot = c.blocks@[b as int].pot;
+    lemma_sym_block_sound(p, ls, f, b, blk, facts, fr);
+    match blk.term {
+        Term::Goto(b2) => {
+            assert(e.edge[0] == (b2, carry(e.rel, facts)));
+            lemma_edge_taken(c, e, facts, pot, upc, crc, k1, fr, fr1, b2, 0, chg);
+        },
+        Term::Switch(op, ts, o) => {
+            let t = switch_target(ts@, 0, as_int(eval_op(fr1, op).0), o);
+            let i = lemma_switch_index(ts@, 0, as_int(eval_op(fr1, op).0), o);
+            assert(e.edge[i].0 == t);
+            lemma_edge_taken(c, e, facts, pot, upc, crc, k1, fr, fr1, t, i, chg);
+        },
+        Term::Assert(op, expected, b2) => if (as_int(eval_op(fr1, op).0) != 0) == expected {
+            assert(e.edge[0].0 == b2);
+            lemma_edge_taken(c, e, facts, pot, upc, crc, k1, fr, fr1, b2, 0, chg);
+        },
+        _ => {},
+    }
+}
+
+/// The per-frame premises give the obligation, one case lemma per kind of terminator.
+proof fn lemma_block_ok(p: Program, ls: Seq<FnLab>, f: nat, b: nat, c: Cert, sums: Seq<Option<Poly>>, fr: Frame, upc: Poly, crc: Poly, charge: Poly)
+    requires
+        ok_prog(p, ls), f < p.fns@.len(), b < p.fns@[f as int].blocks@.len(), plc(p, ls, f, fr),
+        facts_hold(fr, c.blocks@[b as int].facts@), frame_len_ok(fr),
+        block_premises(p, f, b, c, sums, fr, upc, crc, charge),
+    ensures block_step_ok(p, f, b, c, sums, fr),
+{
+    match p.fns@[f as int].blocks@[b as int].term {
+        Term::Call(Callee::Fn(_), _, _, _) => lemma_block_call(p, ls, f, b, c, sums, fr, upc, crc, charge),
+        Term::Call(Callee::Intr(_), _, _, _) => lemma_block_intr(p, ls, f, b, c, sums, fr, upc, crc, charge),
+        _ => lemma_block_jump(p, ls, f, b, c, sums, fr, upc, crc, charge),
+    }
+}
+
+pub open spec fn block_checked(p: Program, f: nat, b: nat, c: Cert, sums: Seq<Option<Poly>>) -> bool {
+    forall|ls: Seq<FnLab>, fr: Frame| #![trigger plc(p, ls, f, fr), block_step_ok(p, f, b, c, sums, fr)]
+        ok_prog(p, ls) && plc(p, ls, f, fr) && facts_hold(fr, c.blocks@[b as int].facts@) && frame_len_ok(fr)
+            ==> block_step_ok(p, f, b, c, sums, fr)
+}
+
+/// `Return`'s and `Abort`'s obligation, and every other terminator's through its edges.
+pub fn check_cost_block(p: &Program, f: usize, b: usize, c: &Cert, sums: &Vec<Option<Poly>>) -> (r: bool)
+    ensures r ==> block_checked(*p, f as nat, b as nat, *c, sums@),
+{
+    if f >= p.fns.len() { return false; }
+    let body = &p.fns[f];
+    if b >= body.blocks.len() || c.blocks.len() != body.blocks.len() { return false; }
+    let blk = &body.blocks[b];
+    let facts = &c.blocks[b].facts;
+    let pot = &c.blocks[b].pot;
+    let k = blk.stmts.len() as u64;
+    if k == u64::MAX { return false; }
+    let k1 = k + 1;
+    if let Term::Abort = &blk.term {
+        return check_abort(p, f, b, c, sums);
+    }
+    let none = empty_poly();
+    if let Term::Return = &blk.term {
+        if !poly_dominates(pot, &none, k1) { return false; }
+    }
+    let e = exec_sym_block(body, blk, facts);
+    let es = exec_sym_stmts(body, &blk.stmts, facts);
+    let charge = match term_charge(p, &blk.term, sums) { Some(x) => x, None => return false };
+    let (upc, crc) = match pull_post(&charge, &es, facts) { Some(x) => x, None => return false };
+    if !check_edges(c, &e, facts, pot, &upc, &crc, k1) { return false; }
+    proof {
+        assert forall|ls: Seq<FnLab>, fr: Frame| #![trigger plc(*p, ls, f as nat, fr), block_step_ok(*p, f as nat, b as nat, *c, sums@, fr)]
+            ok_prog(*p, ls) && plc(*p, ls, f as nat, fr) && facts_hold(fr, c.blocks@[b as int].facts@) && frame_len_ok(fr)
+                implies block_step_ok(*p, f as nat, b as nat, *c, sums@, fr) by {
+            lemma_sym_stmts_sound(*p, ls, f as nat, b as nat, *blk, facts@, fr);
+            let fr1 = exec_stmts(blk.stmts@, 0, fr).0;
+            assert(eff_sound(eff_view(es), fr, fr1, 0));
+            assert(poly_val(fr1, charge) + poly_val(fr, crc) <= poly_val(fr, upc));
+            assert(charge_covers(*p, blk.term, sums@, charge, fr1));
+            if blk.term is Return { assert(poly_val(fr, *pot) >= poly_val(fr, none) + k1); }
+            lemma_block_ok(*p, ls, f as nat, b as nat, *c, sums@, fr, upc, crc, charge);
+        }
+    }
+    true
+}
+
+fn check_abort(p: &Program, f: usize, b: usize, c: &Cert, sums: &Vec<Option<Poly>>) -> (r: bool)
+    requires f < p.fns@.len(), b < p.fns@[f as int].blocks@.len(), p.fns@[f as int].blocks@[b as int].term is Abort,
+    ensures r, block_checked(*p, f as nat, b as nat, *c, sums@),
+{
+    true
+}
+
+// ------------------------------------------------------------------ certificates
+
+/// Equal coefficients and atom lists, monomial by monomial.
+pub fn poly_eq(a: &Poly, b: &Poly) -> (r: bool)
+    ensures r ==> monos_same(a.monos@, b.monos@),
+{
+    if a.monos.len() != b.monos.len() { return false; }
+    let mut i: usize = 0;
+    while i < a.monos.len()
+        invariant
+            i <= a.monos@.len(), a.monos@.len() == b.monos@.len(),
+            forall|j: int| 0 <= j < i ==> #[trigger] mono_same(a.monos@[j], b.monos@[j]),
+        decreases a.monos.len() - i,
+    {
+        if a.monos[i].coef != b.monos[i].coef || !atoms_eq(&a.monos[i].atoms, &b.monos[i].atoms) { return false; }
+        i += 1;
+    }
+    true
+}
+
+/// All of `cert_for` but its last conjunct's `Vec` identity, which no exec comparison can establish: see Task 4's report.
+pub fn check_cert_parts(p: &Program, f: usize, c: &Cert, sums: &Vec<Option<Poly>>) -> (r: bool)
+    ensures r ==> ({
+        &&& cert_sem_ok(*p, f as nat, *c, sums@)
+        &&& c.blocks@[0].facts@.len() == 0
+        &&& sums@[f as int] is Some
+        &&& monos_same(sums@[f as int].unwrap().monos@, c.blocks@[0].pot.monos@)
+    }),
+{
+    if f >= p.fns.len() || f >= sums.len() || c.blocks.len() != p.fns[f].blocks.len() || c.blocks.len() == 0 { return false; }
+    if c.blocks[0].facts.len() != 0 { return false; }
+    match &sums[f] {
+        Some(s) => if !poly_eq(s, &c.blocks[0].pot) { return false; },
+        None => return false,
+    }
+    let mut b: usize = 0;
+    while b < c.blocks.len()
+        invariant
+            b <= c.blocks@.len(), c.blocks@.len() == p.fns@[f as int].blocks@.len(), f < p.fns@.len(), f < sums@.len(),
+            c.blocks@.len() > 0, c.blocks@[0].facts@.len() == 0, sums@[f as int] is Some,
+            monos_same(sums@[f as int].unwrap().monos@, c.blocks@[0].pot.monos@),
+            forall|i: nat| i < b ==> #[trigger] block_checked(*p, f as nat, i, *c, sums@),
+        decreases c.blocks.len() - b,
+    {
+        if !poly_canonical(&c.blocks[b].pot) || !check_cost_block(p, f, b, c, sums) { return false; }
+        b += 1;
+    }
+    proof {
+        let (pp, ff, cc, ss) = (*p, f as nat, *c, sums@);
+        assert forall|ls: Seq<FnLab>, i: nat, fr: Frame| #![trigger plc(pp, ls, ff, fr), block_step_ok(pp, ff, i, cc, ss, fr)]
+            i < cc.blocks@.len() && ok_prog(pp, ls) && plc(pp, ls, ff, fr)
+                && facts_hold(fr, cc.blocks@[i as int].facts@) && frame_len_ok(fr)
+                implies block_step_ok(pp, ff, i, cc, ss, fr) by {
+            assert(block_checked(pp, ff, i, cc, ss));
+        }
+    }
+    true
+}
+
 } // verus!
