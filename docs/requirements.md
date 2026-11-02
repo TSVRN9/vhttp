@@ -230,20 +230,20 @@ Total keyword count: 44 across 22 sections.
 | 8.1.3 (req) | NEW_TOKEN unlinkability and uniqueness | 2 | no | Declined (optional: NEW_TOKEN issuance) | We do not send NEW_TOKEN. |
 | 8.1.3 (req) | Server MUST attempt to validate a token in Initial | 1 | yes | 3 | We issue no tokens, so any token fails validation; must still handle without erroring (invalid NEW_TOKEN token: proceed as unvalidated; Retry-style invalid: INVALID_TOKEN). ✅ 3d: crates/quic/src/handshake.rs |
 | 8.1.4 | Address validation token integrity | 5 | no | Declined (optional: Retry) | Applies to tokens we issue; none issued. Anti-amplification still applies via 8.1. |
-| 8.2.1 | Initiating path validation | 4 | yes | 3 | Server initiates validation of a peer's new address (not migration). 3d: path.rs (closed in 3d2 Task 2b) |
-| 8.2.1 (req) | Unpredictable PATH_CHALLENGE data | 1 | yes | 3 | RNG from shell. 3d: path.rs (closed in 3d2 Task 2b) |
-| 8.2.1 (req) | Expand PATH_CHALLENGE datagrams to 1200 unless anti-amplification forbids | 1 | yes | 3 | Padding rule. 3d: path.rs (closed in 3d2 Task 2b) |
-| 8.2.1 (req) | Second validation with 1200-byte datagram for MTU | 1 | yes | 3 | If first validation used a smaller datagram. 3d: path.rs (closed in 3d2 Task 2b) |
+| 8.2.1 | Initiating path validation | 4 | yes | 3 | Server initiates validation of a peer's new address (not migration). ✅ 3d: crates/quic/src/conn.rs + path.rs |
+| 8.2.1 (req) | Unpredictable PATH_CHALLENGE data | 1 | yes | 3 | RNG from shell. ✅ 3d: crates/quic/src/conn.rs + path.rs |
+| 8.2.1 (req) | Expand PATH_CHALLENGE datagrams to 1200 unless anti-amplification forbids | 1 | yes | 3 | Padding rule. ✅ 3d: crates/quic/src/conn.rs + path.rs |
+| 8.2.1 (req) | Second validation with 1200-byte datagram for MTU | 1 | yes | 3 | If first validation used a smaller datagram. ✅ 3d: crates/quic/src/conn.rs + path.rs |
 | 8.2.1 (req) | Do NOT discard small datagrams carrying PATH_CHALLENGE/PATH_RESPONSE | 1 | yes | 3 | Exception to the 14.1 discard rule (Initial-only), watch interaction. ✅ 3d: crates/quic/src/conn.rs |
-| 8.2.2 | Path validation responses | 7 | yes | 3 | Each requirement has its own row. |
-| 8.2.2 (req) | Echo PATH_CHALLENGE data in PATH_RESPONSE | 1 | yes | 3 | "MUST respond by echoing the data contained in the PATH_CHALLENGE frame in a PATH_RESPONSE frame." Required even though we decline initiating migration. |
-| 8.2.2 (req) | Do not delay PATH_RESPONSE packet except for congestion control | 1 | yes | 3 |  |
-| 8.2.2 (req) | PATH_RESPONSE sent on the path the PATH_CHALLENGE arrived on | 1 | yes | 3 |  |
-| 8.2.2 (req) | Initiator MUST NOT enforce same-path for responses | 1 | yes | 3 | Applies when we initiate validation (9.3.3 attack). |
-| 8.2.2 (req) | Expand PATH_RESPONSE datagram to 1200 | 1 | yes | 3 |  |
-| 8.2.2 (req) | Do not expand PATH_RESPONSE past anti-amplification limit | 1 | yes | 3 |  |
-| 8.2.2 (req) | At most one PATH_RESPONSE per PATH_CHALLENGE | 1 | yes | 3 | See 13.3. |
-| 8.2.3 | Successful path validation | 1 | yes | 3 | Re-validate with expanded datagram if MTU not yet confirmed. 3d: path.rs (`needs_mtu_probe`) (closed in 3d2 Task 2b) |
+| 8.2.2 | Path validation responses | 7 | yes | 3 | Each requirement has its own row. ✅ 3d: crates/quic/src/conn.rs + path.rs |
+| 8.2.2 (req) | Echo PATH_CHALLENGE data in PATH_RESPONSE | 1 | yes | 3 | "MUST respond by echoing the data contained in the PATH_CHALLENGE frame in a PATH_RESPONSE frame." Required even though we decline initiating migration. ✅ 3d: crates/quic/src/conn.rs + path.rs |
+| 8.2.2 (req) | Do not delay PATH_RESPONSE packet except for congestion control | 1 | yes | 3 | ✅ 3d: crates/quic/src/conn.rs + path.rs |
+| 8.2.2 (req) | PATH_RESPONSE sent on the path the PATH_CHALLENGE arrived on | 1 | yes | 3 | ✅ 3d: crates/quic/src/conn.rs + path.rs |
+| 8.2.2 (req) | Initiator MUST NOT enforce same-path for responses | 1 | yes | 3 | Applies when we initiate validation (9.3.3 attack). ✅ 3d: crates/quic/src/conn.rs + path.rs |
+| 8.2.2 (req) | Expand PATH_RESPONSE datagram to 1200 | 1 | yes | 3 | ✅ 3d: crates/quic/src/conn.rs + path.rs |
+| 8.2.2 (req) | Do not expand PATH_RESPONSE past anti-amplification limit | 1 | yes | 3 | ✅ 3d: crates/quic/src/conn.rs + path.rs |
+| 8.2.2 (req) | At most one PATH_RESPONSE per PATH_CHALLENGE | 1 | yes | 3 | See 13.3. ✅ 3d: crates/quic/src/conn.rs + path.rs |
+| 8.2.3 | Successful path validation | 1 | yes | 3 | Re-validate with expanded datagram if MTU not yet confirmed. ✅ 3d: crates/quic/src/conn.rs + path.rs |
 | 9 | Connection migration | 5 | partial | 3 | Rows below. ✅ 3d: crates/quic/src/conn.rs |
 | 9 (req) | MUST NOT initiate migration before handshake confirmed | 1 | no | Declined (optional: connection migration) | We never initiate migration. |
 | 9 (req) | disable_active_migration: no sends from different local address | 1 | no | Declined (optional: connection migration) | Parameter is server-sent; we never change local address. |
