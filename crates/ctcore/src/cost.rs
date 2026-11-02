@@ -1,5 +1,5 @@
 //! Step-bound certificates (Phase 8b; the spec part is frozen from the end of Task 2): bounds over
-//! frame atoms, the per-block obligation `block_step_ok`, and `theorem_cost`: a terminating run
+//! frame atoms, the per-block obligation `block_step_ok`, and `theorem_cost`: a returning run
 //! takes at most `summary(inputs)` steps. Validity of a certificate is semantic here; the verified
 //! validator in `cost_check` establishes it.
 #[allow(unused_imports)]
@@ -957,7 +957,7 @@ pub proof fn cost_from(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Seq<O
     cost_block(p, ls, certs, sums, f, b, fr, fuel);
 }
 
-/// A terminating run takes at most `summary(inputs)` steps.
+/// A returning run takes at most `summary(inputs)` steps.
 pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Seq<Option<Poly>>, f: nat,
                           args: Seq<Val>, slots: Seq<Val>, fuel: nat, b: Poly)
     requires

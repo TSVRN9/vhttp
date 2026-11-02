@@ -65,6 +65,7 @@ root ct_fixtures::fx::pos_str_unit
 root ct_fixtures::fx::neg_str_len
 root ct_fixtures::fx::pos_vec_elem_pair
 root ct_fixtures::fx::pos_drop_bounded
+root ct_fixtures::fx::pos_drop_secret_option
 root ct_fixtures::fx::neg_drop_user_impl
 root ct_fixtures::fx::pos_const_direct_tag
 root ct_fixtures::fx::pos_const_niche

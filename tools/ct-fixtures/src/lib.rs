@@ -432,6 +432,13 @@ pub mod fx {
         1
     }
 
+    #[cfg_attr(ct_check, ct::secret(k))]
+    pub fn pos_drop_secret_option(k: Option<Vec<u8>>) -> u8 {
+        // drop glue branches on the variant of a secret: ok under D7, pinned here
+        let _ = &k;
+        1
+    }
+
     pub struct WithDrop {
         pub v: Vec<u8>,
     }
