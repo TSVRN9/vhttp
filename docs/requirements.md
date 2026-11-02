@@ -190,11 +190,11 @@ Total keyword count: 44 across 22 sections.
 | 5.1 (req) | Same CID not issued twice on a connection | 1 | yes | 3 | "the same connection ID MUST NOT be issued more than once on the same connection". ✅ 3d: crates/quic/src/cid.rs |
 | 5.1.1 | Issuing connection IDs | 4 | yes | 3 | See req rows below. ✅ 3d: crates/quic/src/cid.rs |
 | 5.1.1 (req) | Sequence number increases by 1 | 1 | yes | 3 | "The sequence number on each newly issued connection ID MUST increase by 1." ✅ 3d: crates/quic/src/cid.rs |
-| 5.1.1 (req) | Accept issued CID until retired | 1 | yes | 3 | Must accept packets with an issued CID for the connection lifetime or until RETIRE_CONNECTION_ID. 3d: cid.rs (`is_active` until retired), route.rs (per-connection table cap, so every issued CID can be registered) (closed in 3d2 Task 1a) |
+| 5.1.1 (req) | Accept issued CID until retired | 1 | yes | 3 | Must accept packets with an issued CID for the connection lifetime or until RETIRE_CONNECTION_ID. ✅ 3d: crates/quic/src/conn.rs + cid.rs + route.rs |
 | 5.1.1 (req) | Do not exceed peer's active_connection_id_limit | 1 | yes | 3 | "MUST NOT provide more connection IDs than the peer's limit." ✅ 3d: crates/quic/src/cid.rs |
 | 5.1.1 (req) | CONNECTION_ID_LIMIT_ERROR on excess active CIDs | 1 | yes | 3 | If active CIDs exceed our advertised active_connection_id_limit after processing NEW_CONNECTION_ID, close with CONNECTION_ID_LIMIT_ERROR. ✅ 3d: crates/quic/src/cid.rs |
 | 5.1.2 | Consuming and retiring connection IDs | 2 | yes | 3 | Retire CIDs below increased Retire Prior To before activating new one; never forget a CID without retiring it. ✅ 3d: crates/quic/src/cid.rs |
-| 5.2 | Matching packets to connections | 1 | yes | 3 | Error on bad packet content or fully revert changes. |
+| 5.2 | Matching packets to connections | 1 | yes | 3 | Error on bad packet content or fully revert changes. ✅ 3d: crates/quic/src/conn.rs |
 | 5.2.1 | Client packet handling | 1 | no | N/A (client-only) | Client discards packets with a different version. |
 | 5.2.2 | Server packet handling | 2 | yes | 3 | Drop smaller-than-1200 packets with unsupported version (no VN); drop all other unmatched packets. ✅ 3d: crates/quic/src/route.rs |
 | 5.2.3 | Considerations for simple load balancers | 1 | yes | 3 | Conditional on simple LB deployment; avoid stateless reset oracle (see 21.11). ✅ 3d: route.rs (exception: never sends resets, no static key) |
@@ -234,7 +234,7 @@ Total keyword count: 44 across 22 sections.
 | 8.2.1 (req) | Unpredictable PATH_CHALLENGE data | 1 | yes | 3 | RNG from shell. 3d: path.rs (closed in 3d2 Task 2b) |
 | 8.2.1 (req) | Expand PATH_CHALLENGE datagrams to 1200 unless anti-amplification forbids | 1 | yes | 3 | Padding rule. 3d: path.rs (closed in 3d2 Task 2b) |
 | 8.2.1 (req) | Second validation with 1200-byte datagram for MTU | 1 | yes | 3 | If first validation used a smaller datagram. 3d: path.rs (closed in 3d2 Task 2b) |
-| 8.2.1 (req) | Do NOT discard small datagrams carrying PATH_CHALLENGE/PATH_RESPONSE | 1 | yes | 3 | Exception to the 14.1 discard rule (Initial-only), watch interaction. |
+| 8.2.1 (req) | Do NOT discard small datagrams carrying PATH_CHALLENGE/PATH_RESPONSE | 1 | yes | 3 | Exception to the 14.1 discard rule (Initial-only), watch interaction. ✅ 3d: crates/quic/src/conn.rs |
 | 8.2.2 | Path validation responses | 7 | yes | 3 | Each requirement has its own row. |
 | 8.2.2 (req) | Echo PATH_CHALLENGE data in PATH_RESPONSE | 1 | yes | 3 | "MUST respond by echoing the data contained in the PATH_CHALLENGE frame in a PATH_RESPONSE frame." Required even though we decline initiating migration. |
 | 8.2.2 (req) | Do not delay PATH_RESPONSE packet except for congestion control | 1 | yes | 3 |  |
@@ -268,19 +268,19 @@ Total keyword count: 44 across 22 sections.
 | 10.2.1 | Closing connection state | 2 | yes | 3 | Limit closing-state sends to 3x received / unvalidated address. |
 | 10.2.2 | Draining connection state | 2 | yes | 3 | No packets sent while draining. |
 | 10.2.3 | Immediate close during the handshake | 3 | yes | 3 | 1-RTT CONNECTION_CLOSE once confirmed; 0x1d to 0x1c replacement; clear reason phrase. ✅ 3d: crates/quic/src/lifecycle.rs |
-| 10.3 | Stateless reset | 5 | yes | 3 | CONNECTION_CLOSE if able; reset < 3x trigger; discard too-small packets; short header; any packet ending in valid token is a reset. Sending rows (short header, < 3x trigger) vacuous: we never send a Stateless Reset (sending is a MAY); Duvet exceptions in crates/quic/src/stateless.rs. Receive side (discard too small, token match) closed in 3d |
+| 10.3 | Stateless reset | 5 | yes | 3 | CONNECTION_CLOSE if able; reset < 3x trigger; discard too-small packets; short header; any packet ending in valid token is a reset. Sending rows (short header, < 3x trigger) vacuous: we never send a Stateless Reset (sending is a MAY); Duvet exceptions in crates/quic/src/stateless.rs. ✅ 3d: crates/quic/src/conn.rs |
 | 10.3.1 | Detecting a stateless reset | 4 | yes | 3 | Constant-time token comparison; only for used, unretired CIDs; enter draining. |
 | 10.3.2 | Calculating a stateless reset token | 5 | yes | 3 | Hard to guess; unique per CID; CID length handling; no CID reuse across static-key nodes. static-key MUSTs: exception (no static key, tokens are fresh randomness). ✅ 3d: crates/quic/src/cid.rs |
 | 10.3.3 | Looping | 1 | yes | 3 | Reset must be smaller than trigger. ✅ 3b: exception — we never send a Stateless Reset (stateless.rs) |
 | 11 | Error handling | 1 | yes | 3 | No stateless reset if connection state exists. ✅ 3d: exception — no stateless reset is ever sent |
-| 11.1 | Connection errors | 1 | yes | 3 | Fatal errors via CONNECTION_CLOSE. |
+| 11.1 | Connection errors | 1 | yes | 3 | Fatal errors via CONNECTION_CLOSE. ✅ 3d: crates/quic/src/conn.rs |
 | 11.2 | Stream errors | 1 | yes | 3 | RESET_STREAM only instigated by the application (HTTP/3 layer). ✅ 3c: crates/quic/src/streams.rs |
 | 12.2 | Coalescing packets | 4 | yes | 3 | Process coalesced packets; same CID within datagram; ack separately. |
 | 12.3 | Packet numbers | 5 | yes | 3 | Monotonic, never reused, 2^62-1 limit closes silently, duplicate suppression after decryption. 3d: ack_track.rs (ACK scheduling / duplicate suppression), sent.rs (PN allocation) (closed in 3d2 Task 2a) |
 | 12.4 | Frames and frame types | 5 | yes | 3 | Rows for frame-type encoding below; no-frame packet and disallowed frame are PROTOCOL_VIOLATION; unknown frame FRAME_ENCODING_ERROR. ✅ 3b: crates/quic/src/payload.rs |
 | 12.4 (req) | Frame type MUST use shortest possible encoding | 1 | yes | 3 | "a frame type MUST use the shortest possible encoding"; sender must emit minimal type varint; receiver should reject non-minimal (relies on phase 1 minimal-encoding decision for varint). ✅ 3b: crates/quic/src/frame.rs |
 | 12.5 | Frames and number spaces | 2 | yes | 3 | Frame/space restrictions (0x1d only in application space). ✅ 3b: crates/quic/src/payload.rs |
-| 13.1 | Packet processing | 1 | yes | 3 | ACK only after decryption and full frame processing. |
+| 13.1 | Packet processing | 1 | yes | 3 | ACK only after decryption and full frame processing. ✅ 3d: crates/quic/src/conn.rs |
 | 13.2.1 | Sending ACK frames | 5 | yes | 3 | Immediate ACK for Initial/Handshake; max_ack_delay; one ACK-only packet per ack-eliciting; no feedback loops. 3d: ack_track.rs (ACK scheduling / duplicate suppression; closed in 3d2 Task 2a) |
 | 13.2.3 | Managing ACK ranges | 2 | yes | 3 | Retain ranges; retain largest PN. ✅ 3d: crates/quic/src/ack_track.rs |
 | 13.2.5 | Measuring and reporting host delay | 1 | yes | 3 | Exclude delays not under endpoint control. ✅ 3d: crates/quic/src/ack_track.rs |
