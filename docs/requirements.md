@@ -216,10 +216,10 @@ Total keyword count: 44 across 22 sections.
 | 7.4.1 (req) | Server MUST reject 0-RTT if restored values unsupported | 1 | yes | 3 | Refusal path: we always reject 0-RTT. ✅ 3d: crates/quic/src/handshake.rs (exception: we never accept 0-RTT; no PacketKind, 3e drops, no early_data) |
 | 7.4.2 | New transport parameters | 1 | yes | 3 | Ignore unknown transport parameters. ✅ 3b: crates/quic/src/tp.rs |
 | 7.5 | Cryptographic message buffering | 3 | yes | 3 | Buffer >= 4096 bytes out-of-order CRYPTO; CRYPTO_BUFFER_EXCEEDED; ACK packets whose CRYPTO was discarded. ✅ 3c: crates/quic/src/crypto_stream.rs |
-| 8 | Address validation | 1 | yes | 3 | 3x limit before validation; see 8.1 row. |
-| 8.1 | Address validation during connection establishment | 5 | partial | 3 | Server rows below; 3 client-only MUSTs. |
-| 8.1 (req) | Anti-amplification: send at most 3x bytes received before validation | 1 | yes | 3 | "Prior to validating the client address, servers MUST NOT send more than three times as many bytes as the number of bytes they have received." |
-| 8.1 (req) | Count payload bytes of datagrams attributable to one connection | 1 | yes | 3 | Servers MUST count all payload bytes received in datagrams uniquely attributed to a single connection. |
+| 8 | Address validation | 1 | yes | 3 | 3x limit before validation; see 8.1 row. ✅ 3d: crates/quic/src/conn.rs |
+| 8.1 | Address validation during connection establishment | 5 | partial | 3 | Server rows below; 3 client-only MUSTs. ✅ 3d: crates/quic/src/conn.rs |
+| 8.1 (req) | Anti-amplification: send at most 3x bytes received before validation | 1 | yes | 3 | "Prior to validating the client address, servers MUST NOT send more than three times as many bytes as the number of bytes they have received." ✅ 3d: crates/quic/src/conn.rs |
+| 8.1 (req) | Count payload bytes of datagrams attributable to one connection | 1 | yes | 3 | Servers MUST count all payload bytes received in datagrams uniquely attributed to a single connection. ✅ 3d: crates/quic/src/conn.rs |
 | 8.1 (req) | Client pads Initial datagrams to 1200 | 1 | no | N/A (client-only) | Client behavior. |
 | 8.1 (req) | Client sends packet on PTO to avoid deadlock | 1 | no | N/A (client-only) | Client behavior. |
 | 8.1 (req) | Client Initial >= 1200 bytes if no Handshake keys, else Handshake packet | 1 | no | N/A (client-only) | Client behavior. |
@@ -265,8 +265,8 @@ Total keyword count: 44 across 22 sections.
 | 9.6.3 (req) | Client abandons original-address validation once the preferred address validates | 1 | no | N/A (client-only) | "the client MUST abandon validation of the original address and migrate to using the server's preferred address" |
 | 9.7 | Use of IPv6 flow label and migration | 1 | yes | 3 | Conditional on setting IPv6 flow labels; shell leaves kernel default. |
 | 10.1 | Idle timeout | 1 | yes | 3 | Idle timeout at least 3x PTO. ✅ 3d: crates/quic/src/lifecycle.rs |
-| 10.2.1 | Closing connection state | 2 | yes | 3 | Limit closing-state sends to 3x received / unvalidated address. |
-| 10.2.2 | Draining connection state | 2 | yes | 3 | No packets sent while draining. |
+| 10.2.1 | Closing connection state | 2 | yes | 3 | Limit closing-state sends to 3x received / unvalidated address. ✅ 3d: crates/quic/src/conn.rs |
+| 10.2.2 | Draining connection state | 2 | yes | 3 | No packets sent while draining. ✅ 3d: crates/quic/src/conn.rs |
 | 10.2.3 | Immediate close during the handshake | 3 | yes | 3 | 1-RTT CONNECTION_CLOSE once confirmed; 0x1d to 0x1c replacement; clear reason phrase. ✅ 3d: crates/quic/src/lifecycle.rs |
 | 10.3 | Stateless reset | 5 | yes | 3 | CONNECTION_CLOSE if able; reset < 3x trigger; discard too-small packets; short header; any packet ending in valid token is a reset. Sending rows (short header, < 3x trigger) vacuous: we never send a Stateless Reset (sending is a MAY); Duvet exceptions in crates/quic/src/stateless.rs. ✅ 3d: crates/quic/src/conn.rs |
 | 10.3.1 | Detecting a stateless reset | 4 | yes | 3 | Constant-time token comparison; only for used, unretired CIDs; enter draining. ✅ 3d: crates/quic/src/conn.rs |
@@ -275,26 +275,26 @@ Total keyword count: 44 across 22 sections.
 | 11 | Error handling | 1 | yes | 3 | No stateless reset if connection state exists. ✅ 3d: exception — no stateless reset is ever sent |
 | 11.1 | Connection errors | 1 | yes | 3 | Fatal errors via CONNECTION_CLOSE. ✅ 3d: crates/quic/src/conn.rs |
 | 11.2 | Stream errors | 1 | yes | 3 | RESET_STREAM only instigated by the application (HTTP/3 layer). ✅ 3c: crates/quic/src/streams.rs |
-| 12.2 | Coalescing packets | 4 | yes | 3 | Process coalesced packets; same CID within datagram; ack separately. |
-| 12.3 | Packet numbers | 5 | yes | 3 | Monotonic, never reused, 2^62-1 limit closes silently, duplicate suppression after decryption. 3d: ack_track.rs (ACK scheduling / duplicate suppression), sent.rs (PN allocation) (closed in 3d2 Task 2a) |
+| 12.2 | Coalescing packets | 4 | yes | 3 | Process coalesced packets; same CID within datagram; ack separately. ✅ 3d: crates/quic/src/conn.rs |
+| 12.3 | Packet numbers | 5 | yes | 3 | Monotonic, never reused, 2^62-1 limit closes silently, duplicate suppression after decryption. ✅ 3d: conn.rs + sent.rs/ack_track.rs |
 | 12.4 | Frames and frame types | 5 | yes | 3 | Rows for frame-type encoding below; no-frame packet and disallowed frame are PROTOCOL_VIOLATION; unknown frame FRAME_ENCODING_ERROR. ✅ 3b: crates/quic/src/payload.rs |
 | 12.4 (req) | Frame type MUST use shortest possible encoding | 1 | yes | 3 | "a frame type MUST use the shortest possible encoding"; sender must emit minimal type varint; receiver should reject non-minimal (relies on phase 1 minimal-encoding decision for varint). ✅ 3b: crates/quic/src/frame.rs |
 | 12.5 | Frames and number spaces | 2 | yes | 3 | Frame/space restrictions (0x1d only in application space). ✅ 3b: crates/quic/src/payload.rs |
 | 13.1 | Packet processing | 1 | yes | 3 | ACK only after decryption and full frame processing. ✅ 3d: crates/quic/src/conn.rs |
-| 13.2.1 | Sending ACK frames | 5 | yes | 3 | Immediate ACK for Initial/Handshake; max_ack_delay; one ACK-only packet per ack-eliciting; no feedback loops. 3d: ack_track.rs (ACK scheduling / duplicate suppression; closed in 3d2 Task 2a) |
+| 13.2.1 | Sending ACK frames | 5 | yes | 3 | Immediate ACK for Initial/Handshake; max_ack_delay; one ACK-only packet per ack-eliciting; no feedback loops. ✅ 3d: conn.rs + sent.rs/ack_track.rs |
 | 13.2.3 | Managing ACK ranges | 2 | yes | 3 | Retain ranges; retain largest PN. ✅ 3d: crates/quic/src/ack_track.rs |
 | 13.2.5 | Measuring and reporting host delay | 1 | yes | 3 | Exclude delays not under endpoint control. ✅ 3d: crates/quic/src/ack_track.rs |
-| 13.2.6 | ACK frames and packet protection | 3 | yes | 3 | Same-space ACK; 0-RTT-ack rule vacuous (we reject 0-RTT). |
+| 13.2.6 | ACK frames and packet protection | 3 | yes | 3 | Same-space ACK; 0-RTT-ack rule vacuous (we reject 0-RTT). ✅ 3d: crates/quic/src/conn.rs |
 | 13.3 | Retransmission of information | 4 | yes | 3 | RESET_STREAM unchanged; HANDSHAKE_DONE retransmitted; accept outdated frames; congestion action on loss. 3c: crates/quic/src/streams.rs (stream-family retransmission: RESET_STREAM resent unchanged, the current credit value resent, no STREAM after a reset; closed in 3d). 3d: recovery.rs (AIMD congestion action; closed in 3d2 Task 3) |
 | 13.4.1 | Reporting ECN counts | 1 | yes | 3 | Provide ECN feedback if accessible; needs IP_RECVTOS in shell (otherwise relies on "if accessible"). ✅ 3d: exception — ECN not accessible, no ECT set (ack_track.rs ecn: None) |
 | 13.4.2.1 | Receiving ACK frames with ECN counts | 1 | yes | 3 | Only if we send ECT; vacuous otherwise. ✅ 3d: exception — ECN not accessible, no ECT set (ack_track.rs ecn: None) |
 | 13.4.2.2 | ECN validation outcomes | 2 | yes | 3 | Only if we send ECT; vacuous otherwise. ✅ 3d: exception — ECN not accessible, no ECT set (ack_track.rs ecn: None) |
 | 14 | Datagram size | 4 | yes | 3 | 1200-byte minimum path; no IP fragmentation; DF where possible; never close on bad-size datagram. |
-| 14.1 | Initial datagram size | 4 | partial | 3 | Server rows below; client padding is client-only. |
+| 14.1 | Initial datagram size | 4 | partial | 3 | Server rows below; client padding is client-only. ✅ 3d: crates/quic/src/conn.rs |
 | 14.1 (req) | Client expands Initial datagrams to 1200 | 1 | no | N/A (client-only) |  |
-| 14.1 (req) | Server expands ack-eliciting Initial datagrams to 1200 | 1 | yes | 3 |  |
-| 14.1 (req) | Server discards Initial in datagram < 1200 bytes | 1 | yes | 3 | "A server MUST discard an Initial packet that is carried in a UDP datagram with a payload that is smaller than ... 1200 bytes." Do not close the connection (see 14). |
-| 14.1 (req) | Server limits bytes sent before address validation | 1 | yes | 3 | See 8.1 3x row. |
+| 14.1 (req) | Server expands ack-eliciting Initial datagrams to 1200 | 1 | yes | 3 | ✅ 3d: crates/quic/src/conn.rs |
+| 14.1 (req) | Server discards Initial in datagram < 1200 bytes | 1 | yes | 3 | "A server MUST discard an Initial packet that is carried in a UDP datagram with a payload that is smaller than ... 1200 bytes." Do not close the connection (see 14). ✅ 3d: crates/quic/src/conn.rs |
+| 14.1 (req) | Server limits bytes sent before address validation | 1 | yes | 3 | See 8.1 3x row. ✅ 3d: crates/quic/src/conn.rs |
 | 14.2 | Path maximum transmission unit | 1 | yes | 3 | Cease sending if PMTU < 1200 (except probes/CONNECTION_CLOSE). 3d: path.rs (`mtu_failed`), datagram.rs MAX_DATAGRAM (closed in 3d2 Task 3) |
 | 14.2.1 | Handling of ICMP messages by PMTUD | 3 | yes | 3 | Only if shell processes ICMP; vacuous otherwise. |
 | 17.1 | Packet number encoding and decoding | 2 | yes | 3 | Full PN before first ACK; size covers > 2x range. ✅ 3b: crates/quic/src/pn.rs; A.2 pseudocode under-sizes at exact powers of two; §17.1 prose used. Decoding is A.3 (`decode_pn`, result <= PN_MAX); `theorem_pn_len_decodes` proves a `pn_len_ok` length decodes back at a receiver that has seen the acknowledged packet; `pn_encode_len` None (more than 2^31 unacked) is a 3d internal limit |
@@ -303,9 +303,9 @@ Total keyword count: 44 across 22 sections.
 | 17.2.1 (req) | Client ignores Unused field | 1 | no | N/A (client-only) |  |
 | 17.2.1 (req) | VN: Version 0, CIDs echoed, no version-specific CID influence, one VN per datagram | 5 | yes | 3 | Includes DCID from client SCID, SCID from client DCID, at most one VN per datagram. ✅ 3b: crates/quic/src/stateless.rs (caller binding: 3d route) |
 | 17.2.2 | Initial packet | 2 | partial | 3 | Server sends Token Length 0 (no tokens issued); client discard is client-only. ✅ 3b: crates/quic/src/header.rs (server Token Length 0) |
-| 17.2.3 | 0-RTT | 3 | partial | 3 | Two client-only MUSTs; ack-in-1-RTT rule applies. |
+| 17.2.3 | 0-RTT | 3 | partial | 3 | Two client-only MUSTs; ack-in-1-RTT rule applies. ✅ 3d: crates/quic/src/conn.rs |
 | 17.2.3 (req) | New PNs; client stops 0-RTT once 1-RTT processed | 2 | no | N/A (client-only) |  |
-| 17.2.3 (req) | ACK for a 1-RTT packet MUST be in a 1-RTT packet | 1 | yes | 3 |  |
+| 17.2.3 (req) | ACK for a 1-RTT packet MUST be in a 1-RTT packet | 1 | yes | 3 | ✅ 3d: crates/quic/src/conn.rs |
 | 17.2.4 | Handshake packet | 1 | yes | 3 | Handshake packet with disallowed frames is PROTOCOL_VIOLATION. ✅ 3b: crates/quic/src/payload.rs |
 | 17.2.5 | Retry packet | 1 | no | N/A (client-only) | Client ignores Unused bits. |
 | 17.2.5.1 | Sending a Retry packet | 4 | no | Declined (optional: Retry) | Server MUSTs (SCID differs, at most one Retry) not applicable; 2 client rows client-only. |
@@ -351,7 +351,7 @@ Total keyword count: 44 across 22 sections.
 | 19.16 (req) | Sequence MUST NOT refer to the packet's own DCID | 1 | yes | 3 | ✅ 3d: crates/quic/src/cid.rs |
 | 19.16 (req) | Zero-length-CID provider receiving RETIRE_CONNECTION_ID is PROTOCOL_VIOLATION | 1 | yes | 3 | exception: LOCAL_CID_LEN = 8. ✅ 3d: crates/quic/src/cid.rs |
 | 19.17 | PATH_CHALLENGE frames | 1 | yes | 3 | Recipient MUST generate PATH_RESPONSE with same data (see 8.2.2 rows). Owed responses capped at MAX_RESPONSES (4) per path; further challenges are dropped until responses go out (the peer retransmits). ✅ 3d: crates/quic/src/path.rs |
-| 19.20 | HANDSHAKE_DONE frames | 2 | yes | 3 | Server sends only after handshake complete; receipt is PROTOCOL_VIOLATION. 3b codec: crates/quic/src/frame.rs (closed in 3d) |
+| 19.20 | HANDSHAKE_DONE frames | 2 | yes | 3 | Server sends only after handshake complete; receipt is PROTOCOL_VIOLATION. ✅ 3d: crates/quic/src/conn.rs |
 | 19.21 | Extension frames | 3 | no | Declined (optional: HTTP/3 extensions) | Applies only to endpoints using extension frames; unknown frame handling is in 12.4. |
 | 21.5 | Request forgery attacks | 1 | no | N/A (binds spec authors) | Requirement on future extensions, not an endpoint. |
 | 21.5.3 | Request forgery with preferred addresses | 1 | no | N/A (client-only) | Client must not send non-probing frames to unvalidated preferred address. |
