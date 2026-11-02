@@ -432,7 +432,7 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
 **Consumes:** Tasks 2 and 3. From `cost_sym.rs`: `Rel`, `Eff`, `SymEff`, `eff_view`, `eff_sound`, `sym_block`, `sym_stmts`, `sym_block_sound`, `lemma_sym_block_sound`, `lemma_sym_stmts_sound`. `sym_block` and `sym_stmts` are spec fns over `Seq` and return a `SymEff`; `eff_view(e: Eff) -> SymEff` bridges. Both lemmas have the signature `(p, ls, f: nat, b: nat, blk, facts, fr)`, with `b` the block index, and require `ok_prog(p, ls)`, `f < p.fns@.len()`, `b < p.fns@[f as int].blocks@.len()`, `blk == p.fns@[f as int].blocks@[b as int]`, `plc(p, ls, f, fr)`, `facts_hold(fr, facts)`, `frame_len_ok(fr)`. From `check.rs`: `is_mut_op`.
 
 **Interfaces (produces):** all `pub fn`, each with the stated `ensures`.
-- **Hand copies** (M18; ctcore's types derive nothing): `atom_copy(a: &Atom) -> (r: Atom) ensures r == *a`, plus the same for `IntTy`, `Mono`, `Poly` and `Fact`. Budget for them, and for the overflow and bounds obligations of every exec fn here. Also `rel_clone(r: &Rel) -> (s: Rel) ensures s == *r` and `binop_clone(o: &BinOp) -> (s: BinOp) ensures s == *o`. Not `rel_copy`: `cost_sym::rel_copy` is a spec fn.
+- **Hand copies** (M18; ctcore's types derive nothing): `atom_copy(a: &Atom) -> (r: Atom) ensures r == *a`, plus the same for `IntTy` (`int_ty_copy`) and `Fact`. `mono_copy` and `poly_copy` ensure `mono_view_eq` and `monos_same`, not `==`: `Vec` has no extensional `==`. Budget for them, and for the overflow and bounds obligations of every exec fn here. Also `rel_clone(r: &Rel) -> (s: Rel) ensures s == *r` and `binop_clone(o: &BinOp) -> (s: BinOp) ensures s == *o`. Not `rel_copy`: `cost_sym::rel_copy` is a spec fn.
 - **Effect builders**, the exec twins of Task 3's spec:
   - `exec_sym_stmts(b: &Body, stmts: &Vec<Stmt>, facts: &Vec<Fact>) -> (r: Eff) ensures eff_view(r) == sym_stmts(*b, stmts@, facts@)`;
   - `exec_sym_block(b: &Body, blk: &Block, facts: &Vec<Fact>) -> (r: Eff) ensures eff_view(r) == sym_block(*b, *blk, facts@)`.
@@ -507,7 +507,7 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
 
 **Files:**
 - Create: `crates/ctcore/src/loops.rs`, `crates/ctcore/tests/cost_infer.rs`
-- Modify: `crates/ctcore/src/lib.rs` (`pub mod loops;` and `analyze`)
+- Modify: `crates/ctcore/src/lib.rs` (`pub mod loops;` and `analyze`). `Poly` and `Cert` live in `cost`, `use cost::{Cert, Poly}` by name, no glob (M2).
 
 **Consumes:** Task 4, `check::check_wf`, `infer::callee_order`.
 
@@ -522,14 +522,21 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
   - `pub enum CostWhy { Bounded, NotCounted(usize /* header */), Unresolved, Recursion, CalleeNone(usize), DegreeCap, Overflow, Validator(usize /* block */), NotWf, NotTyped }` (M15). Only the driver builds `NotTyped` (Task 6); `analyze` never returns it.
 - **Certificates** (`loops.rs`): `pub fn build_cert(p: &Program, f: usize, sums: &Vec<Option<Poly>>) -> Result<Cert, CostWhy>`.
   - Block costs are local.
-  - Loop potentials: `Gap(bound, Val(counter, ty)) × (per-iteration cost)` plus the exit continuation. Nested loops multiply, up to degree 2.
-  - Facts: `Lt(Val(counter, ty), bound)` on the loop's body blocks. Header facts are empty: `Le(counter, bound)` is false at `parse`'s entry (`_13 = 1`, `_8` havocked). `recognize` sees a counter through a temp copy (`_15 = copy _13`). A loop whose per-iteration cost is `P` has `P·Gap + P + rest` at the header, and its body blocks spend the `+ P` before the increment pays it back (`cost_sanity`'s `4·Gap + 3`, `4·Gap + 1`). Carry `Le` facts from dominating length checks (`if len > b.len() - off { return }`).
+  - **What `check_cert` checks, from `ctcore::cost_check`.** It is syntactic, so take forms from its own functions: `exec_sym_block`, `exec_sym_stmts`, `pull_post`, `bound_post`, `instantiate`, `term_charge`, `atom_lt`, `atom_copy`, `fact_copy`, `poly_copy`. Don't modify `cost_check.rs`.
+    - **Pots.** Atoms in a monomial are non-decreasing under `atom_lt` (`Const < Val < Len < Gap`), at most 2, else `check_cert` is false. No `Const` atom in a monomial: fold it into `coef`, because the left side is not normalised. `pull_post`'s output is already folded and sorted. Omit zero-coefficient monomials. Duplicates and monomial order don't matter; `poly_add` concatenates and never returns `None`.
+    - **`Gap`.** `Gap(a, b)` keeps `b` only if `b`'s rel is `Same`, a plain copy (`LenEq` for a `Len`) or the increment. Otherwise, including `b = Const(c)` and a counter just initialised, it pulls to `a`'s image.
+    - **Facts first, forward.** A block's facts must each appear on every incoming edge, as `exec_sym_block`'s `edge[i].1` gives them, with only `Lt ⇒ Le` as inference. Entry facts are empty. So derive facts from those edges, not by hand: `Lt(Val(counter, ty), bound)` is the test edge's, with `bound` and the temp copy as `cmp_atom` normalises them, and it holds from the test to the increment, not after it. An outer loop's `Lt` is carried through the inner loop. The header has no `Lt`: `Le(counter, bound)` is false at `parse`'s entry (`_13 = 1`, `_8` havocked).
+    - **Pots second, backward**, in postorder with back edges cut: every successor before its predecessors. At block `b` with `k` statements, `e = exec_sym_block`, `es = exec_sym_stmts`, charge `(upc, crc) = pull_post(term_charge(..), es, facts)`; for each edge to `s`, `(up, cr) = pull_post(pot_s, e, facts)`. Then `pot_b` is the monomial-wise maximum over edges of `up + upc + (k + 1) - cr - crc`, each coefficient floored at 0. `Return`: `k + 1`. `Abort`: an empty pot and no facts.
+    - **Headers.** A loop's header has `P·Gap(bound, Val(counter, ty)) + P + rest`, with `rest` the monomial-wise maximum of its exits' pots. Find `P` by a first backward pass over the body with the header's pot seeded as `rest` and the increment earning no credit: `P` is the header's result minus `rest`. Then run the pass again with the real header pot; the increment's credit pays the `+ P` back. Nesting comes out by itself, because the inner `Gap` pulls to `bound` where its counter is set. Do inner loops first. These two results pass `check_cert`. `parse_prefix_int`: `P = 34`, `rest = 7`, header `34·Gap(V3, V13) + 41`, entry `34·Len2 + 55`. `settings_ok`, with `A = Gap(V2, V3)` and `I = Gap(V2, V10)`: inner `P = 13`, outer `P = 13·V2 + 27`, outer header `13·V2·A + 27·A + 13·V2 + 30`, inner header `13·I + 13·V2·A + 27·A + 18`, outer increment `13·V2·A + 27·A + 5`, entry `13·Len1·Len1 + 40·Len1 + 33`. Do not emit `Gap·Gap`.
+    - **Raising.** `bound_post` keeps a monomial whose image's atoms are already in `b`'s pot or its credits, and raises it under the edge's first `Le(t, u)` or `Lt(t, u)` otherwise. So raise only when needed: pull without raising first. If a predecessor's `pull_post` returns `None` on an atom `t` (`parse`'s `_8`, a call result), mark `t` and redo the backward pass, replacing `t` by `u` at the block whose edge has `Le(t, u)`, so that block's pot doesn't read `t`. Raising everything is wrong: `settings_ok`'s inner exit has `Le(V2, V10)`, and `V2` must stay.
+    - **Reasons.** `pull_post`'s `None` doesn't say why. Your own degree over 2 is `DegreeCap`, your own failed `checked_*` is `Overflow`, a `pull_post` `None` is `Validator(b)`.
+  - Writers lose every local: a loop whose body holds a `Mut`-arg call or `VecPush` has no counter left, and comes out `Validator(..)` or `NotCounted(..)`, as X′ predicts.
   - Its exec code under `verus!` still carries Verus's overflow and bounds obligations, which is the GC's "memory safety" (M9). Budget for them and for the hand copies (M18).
 - **The API** (`lib.rs`, verified, like `check_program`; M9): `pub fn analyze(p: &Program) -> (r: (Vec<Option<Poly>>, Vec<Cert>, Vec<CostWhy>))`.
   - `ensures r.0@.len() == p.fns@.len() && r.1@.len() == p.fns@.len() && forall|g: int| 0 <= g < r.0@.len() && r.0@[g] is Some ==> cert_for(*p, g as nat, r.1@[g], r.0@)`.
   - It runs `check::check_wf` first: a non-wf program gives all-`None` with `NotWf`.
   - It works bottom-up in `infer::callee_order`. Recursion (`Err`) gives `None` with `Recursion`.
-  - Then it re-validates every `Some` with `check_cert` against the current vector, sets failures to `None`, and repeats until a pass changes nothing. That loop is `decreases` the number of `Some`s.
+  - Then `pub fn revalidate(p: &Program, certs: &Vec<Cert>, sums: Vec<Option<Poly>>) -> (r: Vec<Option<Poly>>)`, requiring both lengths to equal `p.fns@.len()`, ensures `r@.len() == p.fns@.len()` and `forall|g: int| 0 <= g < r@.len() && r@[g] is Some ==> cert_for(*p, g as nat, certs@[g], r@)`. Each pass runs `check_cert` on every `Some` and sets failures to `None`; an unchanged pass returns. Decrease a pass counter starting at `n`, and return all-`None` if it runs out: the proof needs no count of `Some`s, and its only invariant is `!changed ==> forall|j: int| 0 <= j < g && sums@[j] is Some ==> cert_for(*p, j as nat, certs@[j], sums@)`. A summary is `Some(poly_copy(&cert.blocks[0].pot))`; `check_cert` compares by `poly_eq`, so the copy needs no proof. A `None` entry's cert is `Cert { blocks: Vec::new() }`. For `Validator(b)`, the first `b` with `!check_cost_block(p, g, b, &certs[g], &sums)`, or 0 if there is none. `analyze`'s `Some` says nothing without `check_program` `Ok`; the driver supplies that (Task 6).
   - `theorem_cost` is never re-exported (E0432). It stays at `ctcore::cost::theorem_cost`.
 - **`tests/cost_infer.rs`:**
   - `infers_counted_const`
@@ -542,7 +549,7 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
   - `none_for_recursion`
   - `none_for_unknown_bound`
   - `none_for_not_wf`
-  - `revalidation_drops_dependent_caller`: a callee forced to `None` makes its caller `None`.
+  - `revalidation_drops_dependent_caller`: calls `revalidate` directly with hand-built certs where the callee's is one lower than valid and the caller's is valid against the callee's summary. Both come back `None`.
 
 - [ ] **Step 1:** Write the dominators, loops and recognizer (with plain unit tests), then `build_cert` and `analyze`.
 - [ ] **Step 2:** All tests pass. `analyze`'s ensures verifies.
@@ -587,6 +594,7 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
   - `cost_neg_recursion`
   - `cost_neg_while_true_break_on_data`
   - `cost_neg_not_typed`: must translate cleanly and then fail `check_program`, expected `none .. NotTyped`. The candidate is `fn(x: &mut u8) -> &mut u8`, since `wf_body` forbids `Mut` in local 0. Step 1 confirms it.
+    This fixture shows an ill-typed program gets `none <root> NotTyped` and no bound, because `check_cert`'s `true` says nothing without `check_program` `Ok` (M6).
   - These are not `root`s, so the 58 check verdicts don't change.
 - **`expected-cost.txt`** lines are `bounded <path> deg=<d>` or `none <path> <Why>`. Coefficients are not pinned.
 - **`ct-check.sh`** (M14):
