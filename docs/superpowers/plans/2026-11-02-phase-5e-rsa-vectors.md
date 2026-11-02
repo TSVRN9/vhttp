@@ -267,6 +267,8 @@ Probed in preflight: 12 fns verify at `--rlimit 4` with no splitting (over `Seq`
 
 ### Task 6: RSA under the CT checker; phase exit
 
+**From the Task 1 review (M3):** TRUSTED's vector rows state what isn't run: ECDSA, 310 of 484 Wycheproof rows, and the CAVP SigGen file uses injected k (RFC 6979 has separate vectors); AES-GCM, 249 of 316 Wycheproof rows and the CAVP files outside Taglen 128 / IVlen 96 (375 of 7875 used per file); HKDF, 3 oversize rows. Also make `sources_match` require the listed set to equal the files present (M1).
+
 **From the crypto binary audit (.superpowers/archive/crypto-binary-audit.md, in the main checkout):**
 - The object read must use what `cargo build --release` ships: the crate's rlib (5 codegen units today). `cargo rustc ... --emit=obj` gives 1 codegen unit and different inlining, so it isn't the shipped code. Read both, and repeat C1's check on the rlib.
 - `#[inline(never)]` on `p256::scalar_in_range`, so a rejected key's branch reveals only the declassified bit (the audit's F1, tested: no proof impact). Update TRUSTED.md citations after p256.rs:257.
