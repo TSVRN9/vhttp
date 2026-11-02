@@ -1,5 +1,5 @@
 //! RSASSA-PSS-SHA256 signing (RFC 8017 §8.1.1; rsa_pss_rsae_sha256 is RFC 8446 §4.2.3, salt length
-//! 32, MGF1-SHA256): spec and an exec signature backed by the trusted shim. Signing only: no RSA
+//! 32, MGF1-SHA256): spec and verified exec. Signing only: no RSA
 //! verification code exists.
 #[allow(unused_imports)]
 use crate::bytes::*;
@@ -111,9 +111,8 @@ pub open spec fn emsa_pss_encode(msg: Seq<u8>, em_bits: nat, salt: Seq<u8>) -> S
 
 /// RFC 8017 §8.1.1 RSASSA-PSS-SIGN.
 /// - Step 1: EM = EMSA-PSS-ENCODE(M, modBits - 1), modBits = bitlen(n).
-/// - Step 2a: m = OS2IP(EM). Step 2b: s = RSASP1(K, m) = m^d mod n (RFC 8017 §5.2.1, form (a);
-///   the shim's CRT form (b) agrees for a well-formed key). m < 2^(modBits - 1) <= n, so
-///   RSASP1's "message representative out of range" cannot occur.
+/// - Step 2a: m = OS2IP(EM). Step 2b: s = RSASP1(K, m) = m^d mod n (RFC 8017 §5.2.1, form (a)).
+///   m < 2^(modBits - 1) <= n, so RSASP1's "message representative out of range" cannot occur.
 /// - Step 2c: S = I2OSP(s, k), k = ceil(modBits / 8).
 pub open spec fn spec_rsassa_pss_sign(k: RsaKeySpec, msg: Seq<u8>, salt: Seq<u8>) -> Seq<u8> {
     let mod_bits = bitlen(k.n);
@@ -122,22 +121,47 @@ pub open spec fn spec_rsassa_pss_sign(k: RsaKeySpec, msg: Seq<u8>, salt: Seq<u8>
     i2osp(s, (mod_bits + 7) / 8)
 }
 
-/// Trusted shim: the body is RustCrypto rsa; the ensures is the trusted statement.
-/// - The ensures is one-directional: the shim returns None, where the spec has a signature, when
-///   RustCrypto rejects a key that `rsa_key_wf` allows: e >= 2^33 (`RsaPublicKey::MAX_PUB_EXPONENT`).
-///   No other None is known; RustCrypto's CRT fault check cannot fail for a well-formed key.
-/// - Primality in `rsa_key_wf` can be established by no verified code; it flows up to the
-///   trusted shell's key loading.
-#[verifier::external_body]
-pub fn rsa_pss_sha256_sign(key: &RsaPrivateKey, msg: &[u8], salt: &[u8]) -> (r: Option<Vec<u8>>)
+/// RFC 8017 §8.1.1 with the public n and secret d apart, because ct labels are per parameter.
+/// Primality in `rsa_key_wf` can be established by no verified code; it flows up to the trusted
+/// shell's key loading.
+#[cfg_attr(ct_check, ct::secret(d, salt, msg), ct::public(n))]
+pub(crate) fn rsa_pss_sign_inner(n: &[u8], d: &[u8], msg: &[u8], salt: &[u8], Ghost(ks): Ghost<RsaKeySpec>) -> (r: Vec<u8>)
+    requires
+        rsa_key_wf(ks),
+        ks.n == os2ip(n@),
+        ks.d == os2ip(d@),
+        msg@.len() <= MAX_INPUT_LEN,
+        salt@.len() == 32,
+    ensures
+        r@ == spec_rsassa_pss_sign(ks, msg@, salt@),
+{
+    let bits = modulus_bits(n);
+    let em = emsa_pss_encode_exec(msg, bits - 1, salt);
+    let k: usize = (bits + 7) / 8;
+    proof {
+        lemma_wf_odd(ks);
+        lemma_bitlen_bound(ks.n);
+        lemma_pow2_256(k as nat);
+        assert(8 * k >= bits);
+        if (8 * k) > bits { lemma_pow2_strictly_increases(bits as nat, (8 * k) as nat); }
+        lemma_os2ip_bound(em@);
+        assert(em@.len() <= k);
+        if (em@.len() < k) { lemma_pow_increases(256, em@.len(), k as nat); }
+    }
+    rsasp1(n, d, em.as_slice(), k)
+}
+
+/// Total: under `rsa_key_wf` the spec has no error case. Only projects the key's fields; e, p and
+/// q are not read.
+pub fn rsa_pss_sha256_sign(key: &RsaPrivateKey, msg: &[u8], salt: &[u8]) -> (r: Vec<u8>)
     requires
         rsa_key_wf(key@),
         msg@.len() <= MAX_INPUT_LEN,
         salt@.len() == 32,
     ensures
-        r matches Some(s) ==> s@ == spec_rsassa_pss_sign(key@, msg@, salt@),
+        r@ == spec_rsassa_pss_sign(key@, msg@, salt@),
 {
-    crate::shim::rsa_pss_sign(&key.n, &key.e, &key.d, &key.p, &key.q, msg, salt)
+    rsa_pss_sign_inner(key.n.as_slice(), key.d.as_slice(), msg, salt, Ghost(key@))
 }
 
 proof fn lemma_mgf1_blocks_len(seed: Seq<u8>, n: nat)
@@ -160,7 +184,6 @@ proof fn lemma_mgf1_len(seed: Seq<u8>, len: nat)
 }
 
 /// RFC 8017 Appendix B.2.1; verified against mgf1_sha256. 512 is the largest emLen we sign with.
-#[allow(dead_code)] // used from Task 5, removed there.
 #[cfg_attr(ct_check, ct::secret(seed), ct::public(len))]
 fn mgf1_exec(seed: &[u8; 32], len: usize) -> (r: Vec<u8>)
     requires
@@ -214,7 +237,6 @@ fn mgf1_exec(seed: &[u8; 32], len: usize) -> (r: Vec<u8>)
 /// RFC 8017 §9.1.1 steps 2 and 5-12, in the order of the spec's let chain; verified against
 /// emsa_pss_encode. 2047..=4095 are the emBits of the 2048-4096-bit moduli of `rsa_key_wf`.
 /// The length of msg is public: it sets the block count of sha256's loop. Only its content is secret.
-#[allow(dead_code)] // used from Task 5, removed there.
 #[cfg_attr(ct_check, ct::secret(salt, msg), ct::public(em_bits))]
 fn emsa_pss_encode_exec(msg: &[u8], em_bits: usize, salt: &[u8]) -> (r: Vec<u8>)
     requires
@@ -350,7 +372,6 @@ proof fn lemma_pow2_256(j: nat)
 
 /// The bit length of the public modulus. Only the low 512 octets are read, which the requires
 /// makes enough. The only fn that branches on n.
-#[allow(dead_code)] // used from Task 5, removed there.
 #[verifier::spinoff_prover]
 #[cfg_attr(ct_check, ct::public(n))]
 fn modulus_bits(n: &[u8]) -> (r: usize)
@@ -673,9 +694,8 @@ proof fn lemma_rsq(nl: nat)
     assert(64 * nl + 64 * nl == 128 * nl);
 }
 
-/// RFC 8017 §5.2.1 RSASP1, form (a): m^d mod n as k octets. nl and k come from the public length;
-/// n, d and em may be any length, with leading zeros.
-#[allow(dead_code)] // used from Task 5, removed there.
+/// RFC 8017 §5.2.1 RSASP1, form (a): m^d mod n as k octets.
+/// nl comes from the public k. n, d and em may be any length, with leading zeros; their lengths are public: pad_be's copy depends on them. The exponent loop runs 8k bits whatever d's length.
 #[verifier::spinoff_prover]
 #[cfg_attr(ct_check, ct::secret(n, d, em), ct::public(k))]
 fn rsasp1(n: &[u8], d: &[u8], em: &[u8], k: usize) -> (r: Vec<u8>)
@@ -974,7 +994,7 @@ mod tests {
         assert_eq!(modulus_bits(&n4), 4096);
     }
 
-    // cargo test --release -p crypto rsa_speed -- --ignored --nocapture
+    // cargo test --release -p crypto rsa_speed -- --ignored --nocapture; on a hybrid CPU pin to a P-core (taskset -c 0 on this machine): cores differ by 1.8x
     #[test]
     #[ignore]
     fn rsa_speed() {

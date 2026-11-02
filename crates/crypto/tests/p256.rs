@@ -84,7 +84,7 @@ fn p256_constants_match_rustcrypto() {
     assert_eq!(p256_public_key(&one).unwrap().to_vec(), g);
 }
 
-// RustCrypto reference, called the way the removed shim called it.
+// RustCrypto reference, called directly.
 fn rc_public_key(d: &[u8]) -> Option<Vec<u8>> {
     let d: [u8; 32] = d.try_into().unwrap();
     let sk = p256::SecretKey::from_bytes((&d).into()).ok()?;

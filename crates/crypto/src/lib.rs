@@ -8,7 +8,6 @@ global size_of usize == 8;
 } // verus!
 
 pub mod aes;
-#[allow(dead_code)] // used from Task 4
 mod bignum;
 pub mod bytes;
 pub(crate) mod ct;
@@ -23,4 +22,3 @@ pub mod p256;
 pub mod rsa;
 pub mod sha256;
 mod p256_group;
-mod shim;
