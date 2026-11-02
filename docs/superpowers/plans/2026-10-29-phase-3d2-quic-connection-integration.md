@@ -150,7 +150,7 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
   - **Packets:** `ini(pn, f)` = `PlainPacket{Initial, S1, C1, [], pn, f}`; `ini2` is the same with dcid `L0`; `hs(pn, f)` = `{Handshake, L0, C1, [], pn, f}`; `one(pn, f)` = `{OneRtt, L0, [], [], pn, f}`; `one_on(pn, dcid, f)`.
   - **`conn()`:** `accept(&ini(2, [Crypto{0, [1; 100]}]), 1200, 0, 0, &rnd(1), &ltp()).unwrap()`, then `on_datagram(0, 1200, vec![that packet], 0, &rnd(1))` (a no-op body until Task 1a-ii).
   - **`established_with(p: TransportParams)`** (preflight M16): `conn()`, then `on_datagram(0, 1200, vec![hs(0, [Ping])], 10, &rnd(9))`, `on_peer_params(&p, 10)`, `on_handshake_complete(b"h3", 10, &rnd(2))`. This does no polling.
-  - **`established_rx()`** = `established_with(ptp())`. Task 2a-i defines `established()` = `established_rx()` followed by `poll_transmit(10)` until None, and `established_tx_with(p)` the same way (in `tests/conn_tx.rs`, which Tasks 2a-ii and 2b append to; Tasks 3 and 4 copy them).
+  - **`established_rx()`** = `established_with(ptp())`. Task 2a-i defines `established()` = `established_rx()` followed by `poll_transmit(10)` until None, and `established_tx_with(p)` the same way (in `tests/conn_tx.rs`, which Tasks 2a-ii and 2b append to; Tasks 3 and 4 copy them). Also there, **`drain(c, now) -> Vec<OutDatagram>`**: polls until None, panicking past 1024 datagrams (2a-i review M1).
 
   The tests:
   - **`accept_rules`:** `None` for:
@@ -503,6 +503,7 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
     for k in [Initial, Handshake, OneRtt] where live(k):
       room = budget - datagram_len(&d) - header_bytes(k) - pn_len - AEAD_TAG_LEN - 3; skip k on underflow
       if let Some((p, eliciting, ack_only)) = build_space_packet(k, room, can_pad, now) { d.packets.push(p) }
+      if lc.phase() !is Open { return None }                                  // pn_encode_len None closed silently (2a-i review M3): an earlier space's packet is recorded and unsent, harmless once Closed; OneRtt runs last, so no polled frame is at risk
     if d.packets is empty { return None }
     if some Initial in d is ack-eliciting { pad_datagram(&mut d, MIN_INITIAL_DATAGRAM) }   // §14.1; can_pad held; the target is exactly 1200 = MAX_DATAGRAM (M1)
     commit_datagram(q, &d); Some(d)
@@ -525,7 +526,8 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
     - **P17 (§14.2 send gate; 3d final review I2; 3d2 preflight I6):** a returned datagram on a path `q` with `paths.mtu_failed(q)` carries only `PathChallenge`, `PathResponse` and `Padding` frames (from `build_path_datagram`) or `ConnectionClose` frames (from `build_close`), and a `PathResponse` there is in a 1200-byte datagram. Here it follows from the guard plus `build_path_datagram`'s stub; Task 2b's strengthened ensures carry it for path datagrams (`mtu_failed ⇒ Validated ⇒` unlimited budget, so the builder always pads to 1200). `mtu_failed` is set only inside Task 3's `on_timeout`.
     - **§12.3 (3d2 preflight M9):** `old.phase() is Open` and some live space has `old.sent(k).next_pn() == PN_MAX` ⇒ `r is None` and `final.phase() is Closed`.
 
-- [ ] **Step 1: Failing tests** (append to `tests/conn_tx.rs`):
+- [ ] **Step 1: Failing tests** (append to `tests/conn_tx.rs`; "poll until None" is `drain`):
+  - **`pn_unencodable_closes_silently`** (2a-i review M3): `pn_max_closes_silently`'s setup, then `skip_pns_for_test(OneRtt, 1 << 40)` → `poll_transmit == None`, `phase() == Closed`, `streams_live() == false`.
   - **`harness_mirror`:** `conn()`; `poll_transmit(0) == Some(OutDatagram{0, [OutPacket{Initial, C1, L0, 0, 1, [Ack(A(2, 0, 0, []))], 0, false}]})`, `datagram_len` 47 (ACK-only, not padded); then `None`; `sent_inflight_len(Initial) == 0` (ACK-only packets are not recorded).
   - **`amp_limit`:**
     - `conn()`, `crypto_write(Initial, &[0xaa; 5000])`;
@@ -580,6 +582,8 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
 ---
 
 ### Task 2b: path datagrams (`build_path_datagram`, P12–P14) (preflight: Task 2 split, I7)
+
+"Poll until None" in this task's tests is `drain` (2a-i review M1).
 
 **Files:**
 - Modify: `crates/quic/src/conn.rs`
@@ -639,6 +643,8 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
 
 ### Task 3: Timers (`Connection::{next_timeout, on_timeout}`)
 
+"Poll until None" in this task's tests is `drain` (2a-i review M1).
+
 **Files:**
 - Modify:
   - `crates/quic/src/conn.rs`;
@@ -668,6 +674,8 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
   - **`draining_deadline`:** `established()`, `one(0, [CC(false, 0, [])])` at 20 → `next_timeout() == Some(3_072_020)`; `on_timeout(3_072_020, ..)` → `is_closed()`.
   - **`idle_timeout`:** `established()`, `on_timeout(30_000_010, ..)` → `is_closed()`, `poll_transmit == None`.
   - **`idle_refreshed_by_packet`** (1a-ii review M5: removing `idle.on_packet_processed` otherwise passes everything): `established()`, `one(0, [Ping])` at 20_000_000, `on_timeout(30_000_010, ..)` → `phase() == Open`.
+  - **`idle_refreshed_by_send`** (2a-i review M4: removing `idle.on_eliciting_sent` otherwise passes everything; §10.1's sending-side restart): `established()`, `one(0, [Stream{0, 0, b"GET", true}])` at 1_000_000, `stream_write(0, b"ok", true)`, `poll_transmit(20_000_000)` is `Some`; `on_timeout(31_000_010, ..)` (past the receive's deadline) → `phase() == Open`.
+  - **PING probe** (2a-i review M4: `probe_1` not cleared verifies): reach a probe with nothing to retransmit and assert one `Ping` goes and `probe_1` clears; if E8 makes that unreachable, say so in the report.
   - **`acked_crypto_not_resent`** (1a-ii review M1: the CRYPTO ack/lost swap passes verification): `conn()`, `crypto_write(Initial, ..)`, poll, an `ini` acknowledging that packet; fire the PTO; the following polls hold no CRYPTO frame at those offsets. The same for an acked STREAM frame after a PTO.
   - **`pto_requeue_crypto`:** `conn()`, poll; `crypto_write(Initial, &[0xaa; 100])`; `poll_transmit(0)` = Initial pn 1 `[Crypto{0, [0xaa; 100]}]`, 1200 bytes; `next_timeout() == Some(999_000)`; `on_timeout(999_000, ..)` → the poll = Initial pn 2 with the same CRYPTO frame, 1200; `next_timeout() == Some(2_997_000)`.
   - **`handshake_done_retransmitted`:** as Task 2a-i's `handshake_done_and_cids` up to its first poll; `next_timeout() == Some(1_024_010)`; `on_timeout(1_024_010, ..)` → the poll = pn 1 with the same four frames; `on_datagram(0, 50, vec![one(0, [Ack(A(1, 0, 0, []))])], 1_024_020, ..)` → the poll is `None` and `next_timeout()` has no PTO term (it equals the idle deadline).
@@ -789,7 +797,7 @@ The 3d2 preflight (2026-10-29) found conflicts in some of these; each such bulle
   - **What 3e Task 5 consumes from `poll_transmit`** (preflight I6): `Connection::out_log()` (closed spec fn); `poll_transmit` ensures that `out_log()` is pushed with exactly the returned datagram (unchanged on None); P7 on the result (`out_packet_wf` for every packet); P16 `out_datagram_len(d@) <= MAX_DATAGRAM`. 3e's Decision 14 fallback is therefore not needed.
   - The 3e draft's cross-references move: `Connection` is this plan's Tasks 1a-i–3; `PathId` is 3d Task 6 (`datagram.rs`); `MAX_PATHS` is 3d Task 8 (`path.rs`); the test helpers are in `tests/conn_rx.rs`. 3e Task 6 and Phase 8a Task 10 both edit verify.sh's success line, so the second to land merges the two (preflight M21).
 - **Phase 4:** drives `crypto_read`/`crypto_write`/`on_peer_params` (requires `peer_tp_wf`, via `theorem_peer_tp_wf`)/`on_handshake_complete(alpn)`/`on_tls_alert` and serializes `local_params()`; RFC 9001 A.2's ClientHello fails §7.3 against A.2's own header; key discard follows `discard`. The 3e shell switches from `Connection` to `H3Server` here.
-- **Phase 6:** replace `Recovery`'s bodies and the PTO step (E8: today's placeholder marks the space lost on PTO, against RFC 9002 §6.2 "PTO expiry MUST NOT mark prior unacked packets lost" — a Phase 6 row); keep `can_send` as the gate in `build_space_packet` and `MAX_INFLIGHT` as a memory cap; feed RTT samples from `on_ack_received`. Phase 6 may extend the `Recovery` signatures (send times, sizes); the placeholder's counts don't carry what RFC 9002 needs (preflight M7).
+- **Phase 6:** `SentPacket.size` and `on_packet_sent`'s size understate padded Initials: 2a-ii pads after `commit_space_packet`, and nothing reads the size today (2a-i review M5). Replace `Recovery`'s bodies and the PTO step (E8: today's placeholder marks the space lost on PTO, against RFC 9002 §6.2 "PTO expiry MUST NOT mark prior unacked packets lost" — a Phase 6 row); keep `can_send` as the gate in `build_space_packet` and `MAX_INFLIGHT` as a memory cap; feed RTT samples from `on_ack_received`. Phase 6 may extend the `Recovery` signatures (send times, sizes); the placeholder's counts don't carry what RFC 9002 needs (preflight M7).
 
 ## Exit criteria (Phase 3d2)
 
