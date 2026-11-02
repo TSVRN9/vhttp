@@ -764,6 +764,116 @@ pub proof fn theorem_server_tp_roundtrip(p: SpecTp)
 }
 
 // =============================================================================
+// A client's parameters, as parsed (3d D7)
+// =============================================================================
+
+/// What `rfc_transport_params(_, true)` guarantees of every `Ok`: each integer a varint and
+/// within its §18.2 bounds, no server-only parameter, and a CID of at most 20 bytes.
+pub open spec fn peer_tp_wf(t: SpecTp) -> bool {
+    &&& t.max_idle_timeout <= VARINT_MAX
+    &&& t.max_udp_payload_size <= VARINT_MAX
+    &&& t.initial_max_data <= VARINT_MAX
+    &&& t.initial_max_stream_data_bidi_local <= VARINT_MAX
+    &&& t.initial_max_stream_data_bidi_remote <= VARINT_MAX
+    &&& t.initial_max_stream_data_uni <= VARINT_MAX
+    &&& t.initial_max_streams_bidi <= VARINT_MAX
+    &&& t.initial_max_streams_uni <= VARINT_MAX
+    &&& t.ack_delay_exponent <= VARINT_MAX
+    &&& t.max_ack_delay <= VARINT_MAX
+    &&& t.active_connection_id_limit <= VARINT_MAX
+    &&& t.max_udp_payload_size >= 1200
+    &&& t.ack_delay_exponent <= 20
+    &&& t.max_ack_delay < MAX_ACK_DELAY_LIMIT
+    &&& t.active_connection_id_limit >= 2
+    &&& t.initial_max_streams_bidi <= MAX_STREAMS_LIMIT
+    &&& t.initial_max_streams_uni <= MAX_STREAMS_LIMIT
+    &&& t.original_destination_connection_id is None
+    &&& t.stateless_reset_token is None
+    &&& t.initial_source_connection_id matches Some(c) ==> c.len() <= MAX_CID_LEN
+}
+
+/// A decoded varint is at most `VARINT_MAX`.
+proof fn lemma_decode_le_max(b: Seq<u8>)
+    ensures
+        rfc_varint_decode(b) matches Some((_, x)) ==> x <= VARINT_MAX,
+{
+    theorem_matches_rfc(b);
+    lemma_parse_bound::<false>(b);
+}
+
+/// Setting a valid integer keeps `peer_tp_wf`.
+proof fn lemma_set_int_wf(t: SpecTp, id: u64, x: u64)
+    requires
+        peer_tp_wf(t),
+        is_int_tp(id),
+        x <= VARINT_MAX,
+        tp_int_valid(id, x),
+    ensures
+        peer_tp_wf(spec_set_int(t, id, x)),
+{
+}
+
+/// One parameter from a client keeps `peer_tp_wf`.
+proof fn lemma_tp_apply_wf(id: u64, v: Seq<u8>, t: SpecTp, seen: u32)
+    requires
+        peer_tp_wf(t),
+    ensures
+        rfc_tp_apply(id, v, true, t, seen) matches Some((t2, _)) ==> peer_tp_wf(t2),
+{
+    hide(spec_set_int);
+    hide(tp_int_valid);
+    lemma_decode_le_max(v);
+    if is_int_tp(id) {
+        if let Some((_, x)) = rfc_varint_decode(v) {
+            if tp_int_valid(id, x) {
+                lemma_set_int_wf(t, id, x);
+            }
+        }
+    }
+}
+
+/// The parameters from offset `p` on, from a client, keep `peer_tp_wf`.
+proof fn lemma_tp_from_wf(b: Seq<u8>, p: int, t: SpecTp, seen: u32)
+    requires
+        peer_tp_wf(t),
+    ensures
+        rfc_tp_from(b, p, true, t, seen) matches Ok(t2) ==> peer_tp_wf(t2),
+    decreases (if p < b.len() {
+        b.len() - p
+    } else {
+        0
+    }),
+{
+    hide(rfc_tp_apply);
+    hide(rfc_varint_decode);
+    hide(peer_tp_wf);
+    if p < b.len() {
+        lemma_decode_len_bounds(b.skip(p));
+        if let Some((id, q)) = rfc_vint(b, p) {
+            lemma_decode_len_bounds(b.skip(q));
+            if let Some((len, r)) = rfc_vint(b, q) {
+                if let Some((v, s)) = rfc_bytes(b, r, len as int) {
+                    if let Some((t2, seen2)) = rfc_tp_apply(id, v, true, t, seen) {
+                        lemma_tp_apply_wf(id, v, t, seen);
+                        lemma_tp_from_wf(b, s, t2, seen2);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Every client transport parameters extension that parses is `peer_tp_wf`, whatever its
+/// bytes.
+pub proof fn theorem_peer_tp_wf(b: Seq<u8>)
+    ensures
+        rfc_transport_params(b, true) matches Ok(t) ==> peer_tp_wf(t),
+{
+    assert(MAX_ACK_DELAY_LIMIT == 0x4000 && MAX_STREAMS_LIMIT == 0x1000_0000_0000_0000) by (bit_vector);
+    lemma_tp_from_wf(b, 0, spec_default_tp(), 0);
+}
+
+// =============================================================================
 // Executable code
 // =============================================================================
 

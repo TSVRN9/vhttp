@@ -52,6 +52,10 @@ pub open spec fn peer_id_allowed(id: u64, max_streams: u64) -> bool {
     id / 4 < max_streams
 }
 
+// ponytail: RFC 9114 opens at most control + QPACK encoder + QPACK decoder; h3 opens only stream 3 today. Raise with an extension that opens more.
+/// The most unidirectional streams we open.
+pub const MAX_OWN_UNI: u64 = 3;
+
 /// What a peer stream ID did: name a stream already open, or open `count` new streams of its
 /// type, the lowest being `first`.
 #[derive(Debug, PartialEq, Eq)]
@@ -81,6 +85,7 @@ impl StreamIds {
         &&& self.peer_bidi.consumed_spec() <= self.peer_bidi_next <= self.peer_bidi.limit_spec()
         &&& self.peer_uni.consumed_spec() <= self.peer_uni_next <= self.peer_uni.limit_spec()
         &&& self.local_uni.max_spec() <= MAX_STREAMS_LIMIT
+        &&& self.local_uni.used_spec() <= MAX_OWN_UNI
     }
 
     /// The per-direction part of the invariant that `lemma_wf` exports.
@@ -157,6 +162,7 @@ impl StreamIds {
             self.local_uni_limit_spec() == self.local_uni_spec().max_spec(),
             self.local_uni_limit_spec() <= MAX_STREAMS_LIMIT,
             self.local_uni_spec().used_spec() <= self.local_uni_limit_spec(),
+            self.local_uni_spec().used_spec() <= MAX_OWN_UNI,
             forall|id: u64| #[trigger]
                 self.peer_created_spec(id) == (if id % 4 == 0 {
                     id / 4 < self.peer_opened_spec(true)
@@ -438,7 +444,7 @@ impl StreamIds {
         ensures
             final(self).wf(),
             ok == (id == 4 * old(self).local_uni_spec().used_spec() + 3
-                && old(self).local_uni_spec().available_spec() > 0),
+                && old(self).local_uni_spec().available_spec() > 0 && id / 4 < MAX_OWN_UNI),
             ok ==> final(self).local_uni_spec().used_spec() == old(self).local_uni_spec().used_spec()
                 + 1 && final(self).local_uni_limit() == old(self).local_uni_limit(),
             !ok ==> *final(self) == *old(self),
@@ -454,7 +460,8 @@ impl StreamIds {
         proof {
             self.local_uni.lemma_wf();
         }
-        if id % 4 == 3 && id / 4 == self.local_uni.used() && self.local_uni.available() > 0 {
+        if id % 4 == 3 && id / 4 == self.local_uni.used() && self.local_uni.available() > 0 && id
+            / 4 < MAX_OWN_UNI {
             self.local_uni.consume(1);
             true
         } else {
