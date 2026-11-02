@@ -121,12 +121,15 @@ pub proof fn lemma_decode_pn_bound(largest: Option<u64>, truncated: u64, pn_len:
             win > 0,
             e >= 0,
     ;
-    assert(q * win <= pow2(62) - win) by (nonlinear_arith)
+    // Two steps: as one query this sat at the edge of the rlimit, and an unrelated change tipped it.
+    assert(q < m) by (nonlinear_arith)
         requires
-            q * win <= e,
-            e < m * win,
-            m * win == pow2(62),
-            q >= 0,
+            q * win < m * win,
+            win > 0,
+    ;
+    assert(q * win + win <= m * win) by (nonlinear_arith)
+        requires
+            q + 1 <= m,
             win > 0,
     ;
 }

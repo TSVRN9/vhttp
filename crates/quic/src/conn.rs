@@ -31,6 +31,7 @@ use crate::handshake::*;
 use crate::lifecycle::*;
 use crate::path::*;
 use crate::payload::*;
+use crate::pn::*;
 use crate::recovery::*;
 use crate::recv_stream::*;
 use crate::route::*;
@@ -208,21 +209,19 @@ pub struct Connection {
     peer_cids: PeerCids,
     cid_updates: Vec<CidUpdate>,
     tokens_registered: Vec<[u8; 16]>,
-    #[allow(dead_code)]  // Read from Task 2a-i.
     hs_done: HsDone,
-    #[allow(dead_code)]  // Read from Task 2a-i.
     probe_i: bool,
-    #[allow(dead_code)]  // Read from Task 2a-i.
     probe_h: bool,
-    #[allow(dead_code)]  // Read from Task 2a-i.
     probe_1: bool,
-    #[allow(dead_code)]  // Read from Task 2a-i.
     spin: bool,
     /// Challenge slices of `rand` used in this call; every pub fn that takes `rand` resets it.
     chal_used: usize,
     /// Only `wf` and `out_log()` read it, which a plain `cargo build` erases.
     #[allow(dead_code)]
     out_log: Ghost<Seq<SpecOutDatagram>>,
+    /// The frames the latest `poll_transmit` took from `Streams::poll_frames` (P8).
+    #[allow(dead_code)]
+    polled: Ghost<Seq<SpecFrame>>,
 }
 
 impl Connection {
@@ -474,6 +473,7 @@ impl Connection {
             spin: false,
             chal_used: 0,
             out_log: Ghost(Seq::empty()),
+            polled: Ghost(Seq::empty()),
         };
         proof {
             let ghost e = c.peer_cids.entries();
@@ -2546,6 +2546,18 @@ impl Connection {
         }
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+    //# The content of a RESET_STREAM frame MUST NOT change when it is
+    //# sent again.
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+    //# The HANDSHAKE_DONE frame MUST be retransmitted until it is
+    //# acknowledged.
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+    //# A receiver MUST accept packets containing an
+    //# outdated frame, such as a MAX_DATA frame carrying a smaller maximum
+    //# data value than one found in an older packet.
     /// §13.3: frame `f` of a lost record of space `k`. Outdated frames are accepted: 3c's credit
     /// `on_max` ignores decreases.
     #[verifier::spinoff_prover]
@@ -3140,6 +3152,1182 @@ impl Connection {
     }
 
     // =========================================================================
+    // Transmit
+    // =========================================================================
+
+    /// The frames the latest `poll_transmit` took from `Streams::poll_frames`: each counts as sent,
+    /// so each is in the datagram it returned (P8).
+    pub closed spec fn polled(&self) -> Seq<SpecFrame> {
+        self.polled@
+    }
+
+    /// The ack-eliciting packets in flight, across the spaces.
+    closed spec fn inflight_total(&self) -> int {
+        (self.sent_i.inflight_spec().len() + self.sent_h.inflight_spec().len()
+            + self.sent_1.inflight_spec().len()) as int
+    }
+
+    closed spec fn active_dcid_spec(&self) -> Seq<u8> {
+        self.paths.path(self.paths.active_spec()).dcid->0
+    }
+
+    /// The Destination Connection ID of a packet of space `k`.
+    closed spec fn space_dcid(&self, k: PacketKind) -> Seq<u8> {
+        match k {
+            PacketKind::OneRtt => self.active_dcid_spec(),
+            _ => self.ids@.client_scid,
+        }
+    }
+
+    /// A packet's bytes before its packet number. A long header reserves a 2-byte Length.
+    closed spec fn header_bytes_spec(&self, k: PacketKind) -> nat {
+        match k {
+            PacketKind::OneRtt => (1 + self.active_dcid_spec().len()) as nat,
+            PacketKind::Initial => (7 + self.ids@.client_scid.len() + LOCAL_CID_LEN + 1 + 2) as nat,
+            PacketKind::Handshake => (7 + self.ids@.client_scid.len() + LOCAL_CID_LEN + 2) as nat,
+        }
+    }
+
+    /// What collecting frames leaves alone: all of `wf` but the frame sources.
+    closed spec fn tx_kept(&self, o: Connection) -> bool {
+        &&& self.hs_path == o.hs_path
+        &&& self.ids == o.ids
+        &&& self.local_tp == o.local_tp
+        &&& self.peer_tp == o.peer_tp
+        &&& self.paths == o.paths
+        &&& self.lc == o.lc
+        &&& self.recovery == o.recovery
+        &&& self.recv_i == o.recv_i
+        &&& self.recv_h == o.recv_h
+        &&& self.recv_1 == o.recv_1
+        &&& self.sent_i == o.sent_i
+        &&& self.sent_h == o.sent_h
+        &&& self.sent_1 == o.sent_1
+        &&& self.live_i == o.live_i
+        &&& self.live_h == o.live_h
+        &&& self.complete == o.complete
+        &&& self.crx_i == o.crx_i
+        &&& self.crx_h == o.crx_h
+        &&& self.crx_1 == o.crx_1
+        &&& self.peer_cids.entries() == o.peer_cids.entries()
+        &&& self.cid_updates == o.cid_updates
+        &&& self.chal_used == o.chal_used
+        &&& self.out_log@ == o.out_log@
+    }
+
+    /// A packet of space `k` that fits `room`, from `collect_frames` on state `self`.
+    closed spec fn packet_ok(&self, p: SpecOutPacket, k: PacketKind, room: nat) -> bool {
+        &&& p.kind == k
+        &&& p.pn == self.sent(k).next_pn_spec()
+        &&& p.dcid == self.space_dcid(k)
+        &&& out_packet_wf(p, self.sent(k).largest_acked_spec())
+        &&& out_packet_len(p) <= room + self.header_bytes_spec(k) + p.pn_len + AEAD_TAG_LEN + 3
+        &&& ack_ok(p.frames, self.recv(k))
+    }
+
+    fn sent_ref(&self, k: PacketKind) -> (r: &SentPackets)
+        ensures
+            *r == self.sent(k),
+    {
+        match k {
+            PacketKind::Initial => &self.sent_i,
+            PacketKind::Handshake => &self.sent_h,
+            PacketKind::OneRtt => &self.sent_1,
+        }
+    }
+
+    fn recv_ref(&self, k: PacketKind) -> (r: &RecvPns)
+        ensures
+            *r == self.recv(k),
+    {
+        match k {
+            PacketKind::Initial => &self.recv_i,
+            PacketKind::Handshake => &self.recv_h,
+            PacketKind::OneRtt => &self.recv_1,
+        }
+    }
+
+    /// `header_bytes_spec`.
+    #[verifier::spinoff_prover]
+    fn header_bytes(&self, k: PacketKind) -> (n: usize)
+        requires
+            self.wf(),
+        ensures
+            n == self.header_bytes_spec(k),
+            n <= 40,
+    {
+        proof {
+            self.paths.lemma_wf();
+            assert(path_ok(self.paths.path(self.paths.active_spec())));
+        }
+        match k {
+            PacketKind::OneRtt => match self.paths.dcid(self.paths.active()) {
+                Some(d) => 1 + d.len(),
+                None => {
+                    proof {
+                        assert(false);
+                    }
+                    0
+                },
+            },
+            PacketKind::Initial => 7 + self.ids.client_scid().len() + LOCAL_CID_LEN + 1 + 2,
+            PacketKind::Handshake => 7 + self.ids.client_scid().len() + LOCAL_CID_LEN + 2,
+        }
+    }
+
+    /// The frame room a packet of space `k` has in `left` bytes of datagram; None on underflow. An
+    /// unencodable packet number takes the longest encoding here: `collect_frames` closes on it.
+    #[verifier::spinoff_prover]
+    fn room_for(&self, k: PacketKind, left: usize) -> (r: Option<usize>)
+        requires
+            self.wf(),
+            left <= MAX_DATAGRAM,
+        ensures
+            r matches Some(room) ==> room <= MAX_DATAGRAM && forall|n: nat|
+                #[trigger] min_pn_len(self.sent(k).next_pn_spec(), self.sent(k).largest_acked_spec(), n) ==> room
+                    + self.header_bytes_spec(k) + n + AEAD_TAG_LEN + 3 <= left,
+    {
+        proof {
+            self.sent(k).lemma_wf();
+        }
+        let pn_len = match pn_encode_len(self.sent_ref(k).next_pn(), self.sent_ref(k).largest_acked()) {
+            Some(n) => n as usize,
+            None => 4,
+        };
+        let need = self.header_bytes(k) + pn_len + AEAD_TAG_LEN + 3;
+        if left < need {
+            return None;
+        }
+        Some(left - need)
+    }
+
+    /// The ACK for space `k`, if one goes in this packet: only with room for every remembered range
+    /// (3d Task 2 binding), so it reports every ack-eliciting packet number not yet reported.
+    #[verifier::spinoff_prover]
+    fn start_frames(&self, k: PacketKind, room: usize, now: u64) -> (r: (Vec<Frame>, usize))
+        requires
+            self.wf(),
+        ensures
+            tx_frames(frames_view(r.0@), k, r.0@.len() as int, r.1 as nat, room as nat),
+            r.0@.len() <= 1,
+            ack_ok(frames_view(r.0@), self.recv(k)),
+            r.0@.len() == 1 ==> frames_view(r.0@)[0] is Ack,
+            forall|i: int|
+                0 <= i < r.0@.len() ==> !ack_eliciting(
+                    spec_frame_type(#[trigger] frames_view(r.0@)[i]),
+                ),
+    {
+        let mut fs: Vec<Frame> = Vec::new();
+        proof {
+            assert(frames_view(fs@) =~= Seq::<SpecFrame>::empty());
+        }
+        // ponytail: no ACK goes on a path with under ~560 bytes of budget until the budget grows (amplification credit or validation); a partial-ACK path if that ever stalls a handshake.
+        if !self.recv_ref(k).has_new() || room < FULL_ACK_LEN {
+            return (fs, room);
+        }
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.6
+        //# ACK frames MUST only be carried in a packet that has the same packet
+        //# number space as the packet being acknowledged; see Section 12.1.
+        //
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.6
+        //# For
+        //# instance, packets that are protected with 1-RTT keys MUST be
+        //# acknowledged in packets that are also protected with 1-RTT keys.
+        //
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.3
+        //# An acknowledgment for a 1-RTT
+        //# packet MUST be carried in a 1-RTT packet.
+        match self.recv_ref(k).build_ack(now, self.local_tp.ack_delay_exponent, room) {
+            None => (fs, room),
+            Some(a) => {
+                let ghost g = a@;
+                let ghost rc = self.recv(k);
+                let f = Frame::Ack(a);
+                let n = frame_len(&f);
+                let ghost sf = f@;
+                fs.push(f);
+                proof {
+                    let d = if rc.kind_spec() is OneRtt {
+                        ack_delay_field(now, rc.largest_time_spec(), self.local_tp@.ack_delay_exponent)
+                    } else {
+                        0
+                    };
+                    rc.lemma_wf();
+                    assert(g == rc.ack_candidate(g.ranges.len() as nat, d));
+                    assert(ack_full(g, rc));
+                    assert(frames_view(fs@) =~= seq![sf]);
+                    lemma_frames_bytes_push(Seq::<SpecFrame>::empty(), sf);
+                    assert(seq![sf] =~= Seq::<SpecFrame>::empty().push(sf));
+                }
+                (fs, room - n)
+            },
+        }
+    }
+
+    /// One CRYPTO frame, sized for its offset, which is the one `poll_data` uses next. Not a loop on
+    /// `next_off`: it can stay Some while `poll_data` sends nothing (`next_off`'s doc).
+    #[verifier::spinoff_prover]
+    fn crypto_frame(
+        &mut self,
+        k: PacketKind,
+        left: &mut usize,
+        fs: &mut Vec<Frame>,
+        Ghost(base): Ghost<int>,
+        Ghost(room): Ghost<nat>,
+    )
+        requires
+            old(self).wf(),
+            !(k is OneRtt),
+            room <= MAX_DATAGRAM,
+            tx_frames(frames_view(old(fs)@), k, base, *old(left) as nat, room),
+        ensures
+            final(self).wf(),
+            final(self).tx_kept(*old(self)),
+            final(self).streams == old(self).streams,
+            final(self).polled == old(self).polled,
+            tx_frames(frames_view(final(fs)@), k, base, *final(left) as nat, room),
+            extends(frames_view(old(fs)@), frames_view(final(fs)@)),
+    {
+        proof {
+            self.ctx_i.lemma_wf();
+            self.ctx_h.lemma_wf();
+        }
+        let next = match k {
+            PacketKind::Initial => self.ctx_i.next_off(),
+            _ => self.ctx_h.next_off(),
+        };
+        let off = match next {
+            Some(o) => o,
+            None => return,
+        };
+        let head = 1 + varint_len(off) + 2;
+        if *left <= head {
+            return;
+        }
+        let max_len = *left - head;
+        let chunk = match k {
+            PacketKind::Initial => self.ctx_i.poll_data(max_len as u64, VARINT_MAX),
+            _ => self.ctx_h.poll_data(max_len as u64, VARINT_MAX),
+        };
+        if let Some(c) = chunk {
+            let n = head - 2 + varint_len(c.data.len() as u64) + c.data.len();
+            let ghost sf0 = frames_view(fs@);
+            let ghost left0 = *left as nat;
+            let ghost g = SpecFrame::Crypto { offset: c.off, data: c.data@ };
+            proof {
+                lemma_crypto_len(c.off, c.data@);
+            }
+            fs.push(Frame::Crypto { offset: c.off, data: c.data });
+            *left = *left - n;
+            proof {
+                assert(frames_view(fs@) =~= sf0.push(g));
+                lemma_tx_push(sf0, g, k, base, left0, room, *left as nat);
+            }
+        }
+    }
+
+    /// HANDSHAKE_DONE, then the CIDs we owe the peer and the retirements we owe it. Sent is set here,
+    /// with the frame: an ACK-only packet can go out while the frame waits for congestion window.
+    #[verifier::spinoff_prover]
+    fn control_frames(
+        &mut self,
+        left: &mut usize,
+        fs: &mut Vec<Frame>,
+        Ghost(base): Ghost<int>,
+        Ghost(room): Ghost<nat>,
+    )
+        requires
+            old(self).wf(),
+            tx_frames(frames_view(old(fs)@), PacketKind::OneRtt, base, *old(left) as nat, room),
+        ensures
+            final(self).wf(),
+            final(self).tx_kept(*old(self)),
+            final(self).streams == old(self).streams,
+            final(self).polled == old(self).polled,
+            tx_frames(frames_view(final(fs)@), PacketKind::OneRtt, base, *final(left) as nat, room),
+            extends(frames_view(old(fs)@), frames_view(final(fs)@)),
+    {
+        let ghost k = PacketKind::OneRtt;
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.20
+        //# Servers MUST
+        //# NOT send a HANDSHAKE_DONE frame before completing the handshake.
+        // P9: this is 1-RTT, so `complete`; the long-header spaces do not permit the frame.
+        if matches!(self.hs_done, HsDone::Pending) {
+            if try_place(Frame::HandshakeDone, left, fs, Ghost(k), Ghost(base), Ghost(room)) {
+                self.hs_done = HsDone::Sent;
+            }
+        }
+        self.new_cid_frames(left, fs, Ghost(base), Ghost(room));
+        self.retire_cid_frames(left, fs, Ghost(base), Ghost(room));
+    }
+
+    /// Each NEW_CONNECTION_ID that fits, stopping at the first that does not.
+    #[verifier::spinoff_prover]
+    fn new_cid_frames(
+        &mut self,
+        left: &mut usize,
+        fs: &mut Vec<Frame>,
+        Ghost(base): Ghost<int>,
+        Ghost(room): Ghost<nat>,
+    )
+        requires
+            old(self).wf(),
+            tx_frames(frames_view(old(fs)@), PacketKind::OneRtt, base, *old(left) as nat, room),
+        ensures
+            final(self).wf(),
+            final(self).tx_kept(*old(self)),
+            final(self).streams == old(self).streams,
+            final(self).polled == old(self).polled,
+            tx_frames(frames_view(final(fs)@), PacketKind::OneRtt, base, *final(left) as nat, room),
+            extends(frames_view(old(fs)@), frames_view(final(fs)@)),
+    {
+        let ghost s0 = *self;
+        let ghost sf0 = frames_view(fs@);
+        loop
+            invariant
+                self.wf(),
+                self.tx_kept(s0),
+                self.streams == s0.streams,
+                self.polled == s0.polled,
+                tx_frames(frames_view(fs@), PacketKind::OneRtt, base, *left as nat, room),
+                extends(sf0, frames_view(fs@)),
+            decreases self.local_cids.pending_spec().len(),
+        {
+            let f = match self.local_cids.pending_frame() {
+                Some(f) => f,
+                None => break,
+            };
+            proof {
+                assert(f@ is NewConnectionId);
+            }
+            if !try_place(f, left, fs, Ghost(PacketKind::OneRtt), Ghost(base), Ghost(room)) {
+                break;
+            }
+            self.local_cids.commit_pending();
+        }
+    }
+
+    /// Each RETIRE_CONNECTION_ID that fits, stopping at the first that does not.
+    #[verifier::spinoff_prover]
+    fn retire_cid_frames(
+        &mut self,
+        left: &mut usize,
+        fs: &mut Vec<Frame>,
+        Ghost(base): Ghost<int>,
+        Ghost(room): Ghost<nat>,
+    )
+        requires
+            old(self).wf(),
+            tx_frames(frames_view(old(fs)@), PacketKind::OneRtt, base, *old(left) as nat, room),
+        ensures
+            final(self).wf(),
+            final(self).tx_kept(*old(self)),
+            final(self).streams == old(self).streams,
+            final(self).polled == old(self).polled,
+            tx_frames(frames_view(final(fs)@), PacketKind::OneRtt, base, *final(left) as nat, room),
+            extends(frames_view(old(fs)@), frames_view(final(fs)@)),
+    {
+        let ghost s0 = *self;
+        let ghost sf0 = frames_view(fs@);
+        loop
+            invariant
+                self.wf(),
+                self.tx_kept(s0),
+                self.streams == s0.streams,
+                self.polled == s0.polled,
+                tx_frames(frames_view(fs@), PacketKind::OneRtt, base, *left as nat, room),
+                extends(sf0, frames_view(fs@)),
+            decreases self.peer_cids.retire_pending_spec().len(),
+        {
+            let f = match self.peer_cids.pending_retire() {
+                Some(f) => f,
+                None => break,
+            };
+            if !try_place(f, left, fs, Ghost(PacketKind::OneRtt), Ghost(base), Ghost(room)) {
+                break;
+            }
+            self.peer_cids.commit_retire();
+        }
+    }
+
+    /// Everything `Streams::poll_frames` has that fits `left`. Each frame it returns counts as sent:
+    /// `polled` records them for P8.
+    #[verifier::spinoff_prover]
+    fn stream_frames(
+        &mut self,
+        left: usize,
+        fs: &mut Vec<Frame>,
+        Ghost(base): Ghost<int>,
+        Ghost(room): Ghost<nat>,
+    )
+        requires
+            old(self).wf(),
+            old(self).polled@.len() == 0,
+            tx_frames(frames_view(old(fs)@), PacketKind::OneRtt, base, left as nat, room),
+        ensures
+            final(self).wf(),
+            final(self).tx_kept(*old(self)),
+            tx_frames(frames_view(final(fs)@), PacketKind::OneRtt, base, 0, room),
+            extends(frames_view(old(fs)@), frames_view(final(fs)@)),
+            final(self).polled@ == frames_view(final(fs)@).skip(old(fs)@.len() as int),
+            final(fs)@.len() == old(fs)@.len() ==> final(fs)@ == old(fs)@,
+    {
+        let ghost s0 = self.streams->0;
+        let ghost out0 = fs@;
+        match &mut self.streams {
+            Some(s) => {
+                s.poll_frames(left, fs);
+                proof {
+                    lemma_polled(s0, out0, fs@, base, left as nat, room);
+                }
+            },
+            None => {
+                proof {
+                    assert(frames_view(fs@).skip(out0.len() as int) =~= Seq::<SpecFrame>::empty());
+                }
+            },
+        }
+        self.polled = Ghost(frames_view(fs@).skip(out0.len() as int));
+    }
+
+    /// The frames after the ACK, in a packet of space `k`: the ACK, if any, is all of `old(fs)`.
+    #[verifier::spinoff_prover]
+    fn collect_others(
+        &mut self,
+        k: PacketKind,
+        left: usize,
+        fs: &mut Vec<Frame>,
+        Ghost(room): Ghost<nat>,
+    )
+        requires
+            old(self).wf(),
+            old(self).polled@.len() == 0,
+            room <= MAX_DATAGRAM,
+            tx_frames(frames_view(old(fs)@), k, old(fs)@.len() as int, left as nat, room),
+        ensures
+            final(self).wf(),
+            final(self).tx_kept(*old(self)),
+            tx_frames(frames_view(final(fs)@), k, old(fs)@.len() as int, 0, room),
+            extends(frames_view(old(fs)@), frames_view(final(fs)@)),
+            in_tail(final(self).polled@, frames_view(final(fs)@), old(fs)@.len() as int),
+            !(k is OneRtt) ==> final(self).polled == old(self).polled,
+    {
+        let n = fs.len();
+        let ghost base = n as int;
+        let mut left = left;
+        match k {
+            PacketKind::OneRtt => {
+                self.control_frames(&mut left, fs, Ghost(base), Ghost(room));
+                let ghost mid = fs@;
+                self.stream_frames(left, fs, Ghost(base), Ghost(room));
+                proof {
+                    lemma_in_tail(frames_view(fs@), mid.len() as int, base);
+                    assert(fs@.len() == n ==> fs@ == mid);
+                }
+            },
+            _ => {
+                self.crypto_frame(k, &mut left, fs, Ghost(base), Ghost(room));
+                proof {
+                    assert(self.polled@ =~= Seq::<SpecFrame>::empty());
+                }
+            },
+        }
+        // Nothing ack-eliciting was appended, so `left` still counts.
+        if fs.len() == n && self.probe(k) {
+            let _ = try_place(Frame::Ping, &mut left, fs, Ghost(k), Ghost(base), Ghost(room));
+        }
+    }
+
+    fn probe(&self, k: PacketKind) -> (r: bool) {
+        match k {
+            PacketKind::Initial => self.probe_i,
+            PacketKind::Handshake => self.probe_h,
+            PacketKind::OneRtt => self.probe_1,
+        }
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+    //# An endpoint MUST acknowledge all ack-eliciting Initial and Handshake
+    //# packets immediately and all ack-eliciting 0-RTT and 1-RTT packets
+    //# within its advertised max_ack_delay, with the following exception.
+    /// An ACK-only packet may go, and its ACK is due: a packet that elicits no ACK gets none alone.
+    #[verifier::spinoff_prover]
+    fn ack_due(&self, k: PacketKind, now: u64) -> (r: bool)
+        requires
+            self.wf(),
+        ensures
+            r ==> self.recv(k).ack_only_allowed(),
+    {
+        if !self.recv_ref(k).ack_only_allowed() {
+            return false;
+        }
+        match self.recv_ref(k).ack_deadline(ms_to_us(self.local_tp.max_ack_delay)) {
+            Some(d) => d <= now,
+            None => false,
+        }
+    }
+
+    /// The packet with these frames and packet number length, before the commit.
+    #[verifier::spinoff_prover]
+    fn make_packet(
+        &self,
+        k: PacketKind,
+        fs: Vec<Frame>,
+        pn_len: u8,
+        Ghost(base): Ghost<int>,
+        Ghost(room): Ghost<nat>,
+    ) -> (p: OutPacket)
+        requires
+            self.wf(),
+            fs@.len() >= 1,
+            room <= MAX_DATAGRAM,
+            tx_frames(frames_view(fs@), k, base, 0, room),
+            min_pn_len(self.sent(k).next_pn_spec(), self.sent(k).largest_acked_spec(), pn_len as nat),
+        ensures
+            p@.kind == k,
+            p@.pn == self.sent(k).next_pn_spec(),
+            p@.dcid == self.space_dcid(k),
+            p@.frames == frames_view(fs@),
+            out_packet_wf(p@, self.sent(k).largest_acked_spec()),
+            out_packet_len(p@) <= room + self.header_bytes_spec(k) + p@.pn_len + AEAD_TAG_LEN + 3,
+    {
+        proof {
+            self.paths.lemma_wf();
+            assert(path_ok(self.paths.path(self.paths.active_spec())));
+        }
+        let ghost frames = frames_view(fs@);
+        let (dcid, scid, spin) = match k {
+            PacketKind::OneRtt => {
+                let d = match self.paths.dcid(self.paths.active()) {
+                    Some(d) => slice_to_vec(d),
+                    None => {
+                        proof {
+                            assert(false);
+                        }
+                        Vec::new()
+                    },
+                };
+                (d, Vec::new(), self.spin)
+            },
+            _ => {
+                let l = self.ids.local_scid();
+                (slice_to_vec(self.ids.client_scid()), slice_to_vec(l.as_slice()), false)
+            },
+        };
+        let mut p = OutPacket {
+            kind: k,
+            dcid,
+            scid,
+            pn: self.sent_ref(k).next_pn(),
+            pn_len,
+            frames: fs,
+            padding: 0,
+            spin,
+        };
+        proof {
+            assert(p@.frames == frames);
+        }
+        add_sample_padding(&mut p);
+        proof {
+            lemma_room(p@, room, self.header_bytes_spec(k));
+        }
+        p
+    }
+
+    /// The frames of the next packet of space `k`, taken from their sources; None if nothing is due.
+    /// `room` is for the frames alone (`room_for`).
+    #[verifier::spinoff_prover]
+    fn collect_frames(
+        &mut self,
+        k: PacketKind,
+        room: usize,
+        can_pad: bool,
+        now: u64,
+    ) -> (r: Option<(OutPacket, bool, bool)>)
+        requires
+            old(self).wf(),
+            old(self).phase_spec() is Open,
+            old(self).live(k),
+            old(self).polled@.len() == 0,
+            room <= MAX_DATAGRAM,
+        ensures
+            final(self).wf(),
+            final(self).out_log() == old(self).out_log(),
+            final(self).phase_spec() is Open ==> final(self).tx_kept(*old(self)),
+            r is None ==> final(self).polled@.len() == 0,
+            !(k is OneRtt) ==> final(self).polled == old(self).polled,
+            r matches Some((p, eliciting, ack_only)) ==> {
+                &&& final(self).phase_spec() is Open
+                &&& old(self).packet_ok(p@, k, room as nat)
+                &&& eliciting == exists|i: int|
+                    0 <= i < p@.frames.len() && ack_eliciting(spec_frame_type(#[trigger] p@.frames[i]))
+                &&& ack_only == !eliciting
+                &&& ack_only ==> old(self).recv(k).ack_only_allowed() && p@.frames[0] is Ack
+                &&& eliciting ==> old(self).inflight_total() < MAX_INFLIGHT
+                &&& polled_in_packet(final(self).polled@, p@)
+            },
+    {
+        proof {
+            self.sent(k).lemma_wf();
+        }
+        let pn_len = match pn_encode_len(self.sent_ref(k).next_pn(), self.sent_ref(k).largest_acked()) {
+            Some(n) => n,
+            None => {
+                self.lc.close_silently();
+                self.streams = None;
+                return None;
+            },
+        };
+        let (mut fs, left) = self.start_frames(k, room, now);
+        let n = fs.len();
+        let ghost s0 = *self;
+        let ghost sf0 = frames_view(fs@);
+        // §14.1: an Initial with ack-eliciting frames is padded to 1200, which `can_pad` allows.
+        let total = self.sent_i.inflight_len() as u64 + self.sent_h.inflight_len() as u64
+            + self.sent_1.inflight_len() as u64;
+        let may_elicit = !(matches!(k, PacketKind::Initial) && !can_pad) && self.recovery.can_send(total);
+        if may_elicit {
+            self.collect_others(k, left, &mut fs, Ghost(room as nat));
+        }
+        let eliciting = is_ack_eliciting(fs.as_slice());
+        proof {
+            lemma_eliciting(fs@, n as int);
+            lemma_ack_ok_extends(sf0, frames_view(fs@), s0.recv(k), k, room as nat);
+            lemma_polled_empty(self.polled@, frames_view(fs@), n as int);
+        }
+        if !eliciting && !(n == 1 && self.ack_due(k, now)) {
+            return None;
+        }
+        let p = self.make_packet(k, fs, pn_len, Ghost(n as int), Ghost(room as nat));
+        Some((p, eliciting, !eliciting))
+    }
+
+    /// The next packet of space `k` is sent: the one after takes a larger number.
+    #[verifier::spinoff_prover]
+    fn commit_pn(&mut self, k: PacketKind)
+        requires
+            old(self).wf(),
+            old(self).sent(k).next_pn_spec() < PN_MAX,
+        ensures
+            final(self).wf(),
+            final(self).sent_kept(*old(self), k),
+            final(self).seen_kept(*old(self)),
+            final(self).recv(k) == old(self).recv(k),
+            final(self).sent(k).next_pn_spec() == old(self).sent(k).next_pn_spec() + 1,
+            final(self).sent(k).inflight_spec() == old(self).sent(k).inflight_spec(),
+            final(self).inflight_total() == old(self).inflight_total(),
+    {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.3
+        //# New packet numbers MUST be used for any new packets that are sent; as
+        //# described in Section 17.2.5.3, reusing packet numbers could
+        //# compromise packet protection.
+        let _ = match k {
+            PacketKind::Initial => self.sent_i.take_pn(),
+            PacketKind::Handshake => self.sent_h.take_pn(),
+            PacketKind::OneRtt => self.sent_1.take_pn(),
+        };
+    }
+
+    /// An ACK frame went in a packet of space `k`.
+    #[verifier::spinoff_prover]
+    fn commit_ack(&mut self, k: PacketKind, ack_only: bool)
+        requires
+            old(self).wf(),
+            ack_only ==> old(self).recv(k).ack_only_allowed(),
+        ensures
+            final(self).wf(),
+            final(self).sends_kept(*old(self)),
+            final(self).seen_kept(*old(self)),
+            final(self).recv(k).unreported() == Set::<u64>::empty(),
+    {
+        match k {
+            PacketKind::Initial => self.recv_i.on_ack_sent(ack_only),
+            PacketKind::Handshake => self.recv_h.on_ack_sent(ack_only),
+            PacketKind::OneRtt => self.recv_1.on_ack_sent(ack_only),
+        }
+    }
+
+    /// Records ack-eliciting packet `p`, sent at `now`, keeping its retransmittable frames (3d D5).
+    #[verifier::spinoff_prover]
+    fn commit_record(&mut self, k: PacketKind, p: &OutPacket, now: u64)
+        requires
+            old(self).wf(),
+            out_packet_sized(p@),
+            p@.pn + 1 == old(self).sent(k).next_pn_spec(),
+            !has_pn(old(self).sent(k).inflight_spec(), p@.pn),
+            old(self).inflight_total() < MAX_INFLIGHT,
+        ensures
+            final(self).wf(),
+            final(self).seen_kept(*old(self)),
+            final(self).recv(k) == old(self).recv(k),
+            final(self).sent_kept(*old(self), k),
+            final(self).sent(k).next_pn_spec() == old(self).sent(k).next_pn_spec(),
+    {
+        let size = packet_len(p);
+        let rec = SentPacket {
+            pn: p.pn,
+            time: now,
+            size: size as u64,
+            ack_eliciting: true,
+            frames: record_frames(p.frames.as_slice()),
+        };
+        match k {
+            PacketKind::Initial => {
+                self.sent_i.on_sent(rec);
+                self.probe_i = false;
+            },
+            PacketKind::Handshake => {
+                self.sent_h.on_sent(rec);
+                self.probe_h = false;
+            },
+            PacketKind::OneRtt => {
+                self.sent_1.on_sent(rec);
+                self.probe_1 = false;
+            },
+        }
+        self.recovery.on_packet_sent(k, p.pn, size as u64, now);
+        self.idle.on_eliciting_sent(now);
+    }
+
+    /// Every other space's records and packet numbers, every `largest_acked`, and what
+    /// `poll_transmit` may not move.
+    closed spec fn sent_kept(&self, o: Connection, k: PacketKind) -> bool {
+        &&& self.sends_kept_but(o)
+        &&& !(k is Initial) ==> self.sent_i.next_pn_spec() == o.sent_i.next_pn_spec()
+            && self.sent_i.inflight_spec() == o.sent_i.inflight_spec()
+        &&& !(k is Handshake) ==> self.sent_h.next_pn_spec() == o.sent_h.next_pn_spec()
+            && self.sent_h.inflight_spec() == o.sent_h.inflight_spec()
+        &&& !(k is OneRtt) ==> self.sent_1.next_pn_spec() == o.sent_1.next_pn_spec()
+            && self.sent_1.inflight_spec() == o.sent_1.inflight_spec()
+        &&& self.sent_i.largest_acked_spec() == o.sent_i.largest_acked_spec()
+        &&& self.sent_h.largest_acked_spec() == o.sent_h.largest_acked_spec()
+        &&& self.sent_1.largest_acked_spec() == o.sent_1.largest_acked_spec()
+    }
+
+    /// `sent_kept` as `sent(j)`.
+    proof fn lemma_sent_kept(&self, o: Connection, k: PacketKind)
+        requires
+            self.sent_kept(o, k),
+        ensures
+            forall|j: PacketKind| j != k ==> #[trigger] self.sent(j).next_pn_spec() == o.sent(j).next_pn_spec(),
+            forall|j: PacketKind| #[trigger] self.sent(j).largest_acked_spec() == o.sent(j).largest_acked_spec(),
+    {
+        assert forall|j: PacketKind| j != k implies #[trigger] self.sent(j).next_pn_spec() == o.sent(j).next_pn_spec() by {
+            match j {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
+        assert forall|j: PacketKind| #[trigger] self.sent(j).largest_acked_spec() == o.sent(j).largest_acked_spec() by {
+            match j {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
+    }
+
+    /// Every space has seen the same packet numbers.
+    closed spec fn seen_kept(&self, o: Connection) -> bool {
+        &&& self.recv_i.seen() == o.recv_i.seen()
+        &&& self.recv_h.seen() == o.recv_h.seen()
+        &&& self.recv_1.seen() == o.recv_1.seen()
+    }
+
+    proof fn lemma_seen_kept(&self, o: Connection)
+        requires
+            self.seen_kept(o),
+        ensures
+            forall|j: PacketKind| #[trigger] self.recv(j).seen() == o.recv(j).seen(),
+    {
+        assert forall|j: PacketKind| #[trigger] self.recv(j).seen() == o.recv(j).seen() by {
+            match j {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
+    }
+
+    closed spec fn sends_kept_but(&self, o: Connection) -> bool {
+        &&& self.out_log@ == o.out_log@
+        &&& self.paths == o.paths
+        &&& self.lc == o.lc
+        &&& self.complete == o.complete
+        &&& self.streams == o.streams
+        &&& self.polled == o.polled
+    }
+
+    /// `sends_kept_but`, and every `sent`.
+    closed spec fn sends_kept(&self, o: Connection) -> bool {
+        &&& self.sends_kept_but(o)
+        &&& self.sent_i == o.sent_i
+        &&& self.sent_h == o.sent_h
+        &&& self.sent_1 == o.sent_1
+    }
+
+    /// Commits `p`, from `collect_frames`: its packet number, its ACK and its record.
+    #[verifier::spinoff_prover]
+    fn commit_space_packet(&mut self, k: PacketKind, p: &OutPacket, eliciting: bool, ack_only: bool, now: u64)
+        requires
+            old(self).wf(),
+            p@.kind == k,
+            p@.pn == old(self).sent(k).next_pn_spec(),
+            p@.pn < PN_MAX,
+            out_packet_sized(p@),
+            ack_ok(p@.frames, old(self).recv(k)),
+            ack_only ==> old(self).recv(k).ack_only_allowed() && p@.frames[0] is Ack,
+            eliciting ==> old(self).inflight_total() < MAX_INFLIGHT,
+        ensures
+            final(self).wf(),
+            final(self).sent_kept(*old(self), k),
+            final(self).sent(k).next_pn_spec() == p@.pn + 1,
+            final(self).seen_kept(*old(self)),
+            p@.frames[0] matches SpecFrame::Ack(a) ==> forall|u: u64|
+                #[trigger] old(self).recv(k).unreported().contains(u) ==> ack_contains(a, u),
+            p@.frames[0] is Ack ==> final(self).recv(k).unreported() == Set::<u64>::empty(),
+    {
+        let ghost s0 = *self;
+        proof {
+            lemma_not_inflight(s0.sent(k));
+        }
+        self.commit_pn(k);
+        if matches!(p.frames[0], Frame::Ack(_)) {
+            proof {
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+                //# Every packet SHOULD be acknowledged at least once, and ack-eliciting
+                //# packets MUST be acknowledged at least once within the maximum delay
+                //# an endpoint communicated using the max_ack_delay transport parameter;
+                //# see Section 18.2.
+                lemma_ack_reports(p@.frames[0]->Ack_0, s0.recv(k));
+                assert(self.recv(k) == s0.recv(k));
+            }
+            self.commit_ack(k, ack_only);
+        }
+        if eliciting {
+            self.commit_record(k, p, now);
+        }
+    }
+
+    /// The next packet of space `k`, its frames taken and its packet number, ACK and record
+    /// committed; the caller commits the datagram.
+    #[verifier::spinoff_prover]
+    fn build_space_packet(
+        &mut self,
+        k: PacketKind,
+        room: usize,
+        can_pad: bool,
+        now: u64,
+    ) -> (r: Option<(OutPacket, bool, bool)>)
+        requires
+            old(self).wf(),
+            old(self).phase_spec() is Open,
+            old(self).live(k),
+            old(self).polled@.len() == 0,
+            old(self).sent(k).next_pn_spec() < PN_MAX,
+            room <= MAX_DATAGRAM,
+        ensures
+            final(self).wf(),
+            final(self).out_log() == old(self).out_log(),
+            r is None ==> final(self).polled@.len() == 0,
+            r is None && final(self).phase_spec() is Open ==> final(self).tx_kept(*old(self)),
+            !(k is OneRtt) ==> final(self).polled == old(self).polled,
+            r matches Some((p, _, _)) ==> {
+                &&& old(self).packet_ok(p@, k, room as nat)
+                &&& polled_in_packet(final(self).polled@, p@)
+                &&& final(self).sent(k).next_pn_spec() == p@.pn + 1
+                &&& final(self).paths == old(self).paths
+                &&& final(self).lc == old(self).lc
+                &&& final(self).complete == old(self).complete
+                &&& forall|j: PacketKind| j != k ==> #[trigger] final(self).sent(j).next_pn_spec()
+                    == old(self).sent(j).next_pn_spec()
+                &&& forall|j: PacketKind| #[trigger] final(self).sent(j).largest_acked_spec()
+                    == old(self).sent(j).largest_acked_spec()
+                &&& forall|j: PacketKind| #[trigger] final(self).recv(j).seen() == old(self).recv(j).seen()
+            },
+    {
+        let ghost s0 = *self;
+        let (p, eliciting, ack_only) = match self.collect_frames(k, room, can_pad, now) {
+            Some(x) => x,
+            None => return None,
+        };
+        proof {
+            assert(self.recv(k) == s0.recv(k));
+            assert(self.sent(k) == s0.sent(k));
+            assert(self.inflight_total() == s0.inflight_total());
+        }
+        let ghost s1 = *self;
+        self.commit_space_packet(k, &p, eliciting, ack_only, now);
+        proof {
+            self.lemma_sent_kept(s1, k);
+            assert(self.seen_kept(s0));
+            self.lemma_seen_kept(s0);
+            assert(s1.sent_i == s0.sent_i && s1.sent_h == s0.sent_h && s1.sent_1 == s0.sent_1);
+            assert forall|j: PacketKind| #[trigger] s1.sent(j) == s0.sent(j) by {
+                match j {
+                    PacketKind::Initial => {},
+                    PacketKind::Handshake => {},
+                    PacketKind::OneRtt => {},
+                }
+            }
+        }
+        Some((p, eliciting, ack_only))
+    }
+
+    /// `d` went out on `q`: the only `Paths::on_sent` and the only log push, so the budget's `Sent`
+    /// entries are exactly the log (P1). The caller snapshots `next_pn` before committing `d`'s
+    /// packets, which puts their numbers above every logged one.
+    #[verifier::spinoff_prover]
+    fn commit_datagram(&mut self, q: PathId, d: &OutDatagram)
+        requires
+            old(self).wf(),
+            old(self).paths.has(q),
+            d@.path == q,
+            out_datagram_sized(d@),
+            out_datagram_len(d@) <= old(self).paths.budget_spec(q),
+            out_datagram_len(d@) <= MAX_DATAGRAM,
+            forall|k: PacketKind|
+                #[trigger] pns_fresh(
+                    log_pns(old(self).out_log@, k),
+                    packets_pns(d@.packets, k),
+                    old(self).sent(k).next_pn_spec(),
+                ),
+        ensures
+            final(self).wf(),
+            final(self).out_log() == old(self).out_log().push(d@),
+            final(self).sends_only_logged(*old(self)),
+    {
+        let ghost s0 = *self;
+        let n = datagram_len(d);
+        self.paths.on_sent(q, n as u64);
+        self.out_log = Ghost(self.out_log@.push(d@));
+        proof {
+            self.lemma_committed(s0, q, d@);
+            lemma_pn_step(s0.out_log@, d@, PacketKind::Initial, s0.sent(PacketKind::Initial).next_pn_spec());
+            lemma_pn_step(s0.out_log@, d@, PacketKind::Handshake, s0.sent(PacketKind::Handshake).next_pn_spec());
+            lemma_pn_step(s0.out_log@, d@, PacketKind::OneRtt, s0.sent(PacketKind::OneRtt).next_pn_spec());
+        }
+    }
+
+    /// Only the path's budget and the log differ.
+    closed spec fn sends_only_logged(&self, o: Connection) -> bool {
+        &&& self.sent_i == o.sent_i
+        &&& self.sent_h == o.sent_h
+        &&& self.sent_1 == o.sent_1
+        &&& self.recv_i == o.recv_i
+        &&& self.recv_h == o.recv_h
+        &&& self.recv_1 == o.recv_1
+        &&& self.polled == o.polled
+        &&& self.complete == o.complete
+    }
+
+    proof fn lemma_only_logged(&self, o: Connection)
+        requires
+            self.sends_only_logged(o),
+        ensures
+            forall|j: PacketKind| #[trigger] self.sent(j) == o.sent(j),
+            forall|j: PacketKind| #[trigger] self.recv(j) == o.recv(j),
+    {
+        assert forall|j: PacketKind| #[trigger] self.sent(j) == o.sent(j) by {
+            match j {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
+        assert forall|j: PacketKind| #[trigger] self.recv(j) == o.recv(j) by {
+            match j {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
+    }
+
+    /// `self` is `o` with one datagram logged and counted on its path.
+    proof fn lemma_committed(&self, o: Connection, q: PathId, d: SpecOutDatagram)
+        requires
+            o.wf(),
+            o.paths.has(q),
+            d.path == q,
+            self.paths.wf(),
+            kept(o.paths, self.paths, q),
+            self.paths.amp_trace(q) == o.paths.amp_trace(q).push(AmpEv::Sent(out_datagram_len(d))),
+            amp_ok(self.paths.amp_trace(q)),
+            self.paths.path(q).dcid == o.paths.path(q).dcid,
+            self.paths.path(q).peer_used == o.paths.path(q).peer_used,
+            self.out_log@ == o.out_log@.push(d),
+            self.peer_cids == o.peer_cids,
+        ensures
+            self.wf_amp(),
+            self.wf_log_paths(),
+            self.wf_dcids(),
+    {
+        let log = o.out_log@;
+        let t = o.paths.amp_trace(q);
+        assert(t.push(AmpEv::Sent(out_datagram_len(d))).drop_last() =~= t);
+        assert(self.out_log@.drop_last() =~= log);
+        self.paths.lemma_wf();
+        assert(o.paths.has(q));
+        assert(self.wf_amp()) by {
+            assert forall|r: PathId| #[trigger] self.paths.has(r) implies amp_ok(
+                self.paths.amp_trace(r),
+            ) && sent_entries(self.paths.amp_trace(r)) == log_sends(self.out_log@, r) by {
+                assert(path_ok(self.paths.path(r)));
+                assert(o.paths.has(r));
+            }
+        }
+        assert(self.wf_log_paths()) by {
+            assert forall|i: int| 0 <= i < self.out_log@.len() implies #[trigger] self.paths.index_spec(
+                self.out_log@[i].path,
+            ) is Some by {
+                if i < log.len() {
+                    assert(self.out_log@[i] == log[i]);
+                    assert(o.paths.index_spec(log[i].path) is Some);
+                } else {
+                    assert(self.out_log@[i] == d);
+                    assert(self.paths.has(q));
+                }
+            }
+        }
+        self.lemma_dcids_same(o, q);
+    }
+
+    /// One datagram, or None. Provisional: 1-RTT only (Task 2a-ii adds Closing, path datagrams and
+    /// the long-header spaces); its ensures stay.
+    #[verifier::spinoff_prover]
+    pub fn poll_transmit(&mut self, now: u64) -> (r: Option<OutDatagram>)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).out_log() == match r {
+                Some(d) => old(self).out_log().push(d@),
+                None => old(self).out_log(),
+            },
+            r matches Some(d) ==> transmit_ok(*old(self), *final(self), d@),
+            final(self).polled().len() > 0 ==> r is Some,
+            r matches Some(d) ==> polled_placed(final(self).polled(), d@),
+            final(self).sent(PacketKind::Initial).inflight_spec().len() + final(self).sent(
+                PacketKind::Handshake,
+            ).inflight_spec().len() + final(self).sent(PacketKind::OneRtt).inflight_spec().len()
+                <= MAX_INFLIGHT,
+    {
+        if now > self.now {
+            self.now = now;
+        }
+        self.polled = Ghost(Seq::empty());
+        if !matches!(self.lc.phase(), Phase::Open) || !self.complete {
+            return None;
+        }
+        if self.sent_1.next_pn() >= PN_MAX {
+            self.lc.close_silently();
+            self.streams = None;
+            return None;
+        }
+        let ghost s0 = *self;
+        let q = self.paths.active();
+        proof {
+            self.paths.lemma_wf();
+        }
+        let b = self.paths.budget(q);
+        let budget = if b > MAX_DATAGRAM as u64 {
+            MAX_DATAGRAM
+        } else {
+            b as usize
+        };
+        let room = match self.room_for(PacketKind::OneRtt, budget) {
+            Some(r) => r,
+            None => return None,
+        };
+        let now = self.now;
+        let can_pad = budget >= MIN_INITIAL_DATAGRAM;
+        let (p, _, _) = match self.build_space_packet(PacketKind::OneRtt, room, can_pad, now) {
+            Some(x) => x,
+            None => return None,
+        };
+        let ghost p_view = p@;
+        let mut packets: Vec<OutPacket> = Vec::new();
+        packets.push(p);
+        let d = OutDatagram { path: q, packets };
+        let ghost p0 = p_view;
+        proof {
+            assert(d@.packets =~= seq![p0]);
+            self.lemma_one_packet(s0, p0, d@, room as nat, budget as nat);
+        }
+        let ghost s1 = *self;
+        self.commit_datagram(q, &d);
+        proof {
+            self.lemma_only_logged(s1);
+            lemma_one_packet_ok(s0, *self, p0, d@, room as nat);
+            lemma_polled_placed(self.polled@, p0, d@);
+        }
+        Some(d)
+    }
+
+    /// `s0`'s packet `p`, built on the way to `self`, makes a datagram `commit_datagram` accepts.
+    proof fn lemma_one_packet(&self, s0: Connection, p: SpecOutPacket, d: SpecOutDatagram, room: nat, budget: nat)
+        requires
+            s0.wf(),
+            d.path == s0.paths.active_spec(),
+            d.packets == seq![p],
+            s0.packet_ok(p, PacketKind::OneRtt, room),
+            forall|n: nat|
+                #[trigger] min_pn_len(
+                    s0.sent(PacketKind::OneRtt).next_pn_spec(),
+                    s0.sent(PacketKind::OneRtt).largest_acked_spec(),
+                    n,
+                ) ==> room + s0.header_bytes_spec(PacketKind::OneRtt) + n + AEAD_TAG_LEN + 3 <= budget,
+            budget <= MAX_DATAGRAM,
+            budget <= s0.paths.budget_spec(d.path),
+            self.paths == s0.paths,
+            self.out_log@ == s0.out_log@,
+            self.sent(PacketKind::OneRtt).next_pn_spec() == p.pn + 1,
+            forall|j: PacketKind| j != PacketKind::OneRtt ==> #[trigger] self.sent(j).next_pn_spec()
+                == s0.sent(j).next_pn_spec(),
+        ensures
+            self.paths.has(d.path),
+            out_datagram_sized(d),
+            out_datagram_len(d) <= self.paths.budget_spec(d.path),
+            out_datagram_len(d) <= MAX_DATAGRAM,
+            forall|k: PacketKind|
+                #[trigger] pns_fresh(
+                    log_pns(self.out_log@, k),
+                    packets_pns(d.packets, k),
+                    self.sent(k).next_pn_spec(),
+                ),
+    {
+        s0.paths.lemma_wf();
+        assert(d.packets[0] == p);
+        assert(min_pn_len(
+            s0.sent(PacketKind::OneRtt).next_pn_spec(),
+            s0.sent(PacketKind::OneRtt).largest_acked_spec(),
+            p.pn_len as nat,
+        ));
+        lemma_packets_len_one(p);
+        assert forall|i: int| 0 <= i < d.packets.len() implies out_packet_sized(#[trigger] d.packets[i]) by {
+            assert(i == 0);
+        }
+        assert(s0.wf_pn());
+        assert forall|k: PacketKind|
+            #[trigger] pns_fresh(log_pns(self.out_log@, k), packets_pns(d.packets, k), self.sent(k).next_pn_spec()) by {
+            lemma_packets_pns_one(p, k);
+            if k is OneRtt {
+                let s = packets_pns(d.packets, k);
+                let l = log_pns(self.out_log@, k);
+                assert(s == seq![p.pn]);
+                assert(pns_ok(l, s0.sent_1.next_pn_spec()));
+                assert forall|i: int, j: int| 0 <= i < l.len() && 0 <= j < s.len() implies #[trigger] l[i]
+                    < #[trigger] s[j] by {
+                    assert(l[i] < s0.sent_1.next_pn_spec());
+                    assert(s[j] == p.pn);
+                }
+            }
+        }
+    }
+
+    // =========================================================================
     // Getters
     // =========================================================================
 
@@ -3654,6 +4842,620 @@ fn push_adds(reg: &Vec<[u8; 16]>, used: &Vec<[u8; 16]>, out: &mut Vec<CidUpdate>
             }
         }
         i += 1;
+    }
+}
+
+// =============================================================================
+// Transmit: what the frame helpers and the commit say
+// =============================================================================
+
+/// What `poll_transmit` guarantees of a datagram it returns, `o` the connection before it and `c`
+/// after.
+pub open spec fn transmit_ok(o: Connection, c: Connection, d: SpecOutDatagram) -> bool {
+    // P16.
+    &&& out_datagram_len(d) <= MAX_DATAGRAM
+    // P7.
+    &&& forall|i: int|
+        0 <= i < d.packets.len() ==> out_packet_wf(
+            #[trigger] d.packets[i],
+            c.sent(d.packets[i].kind).largest_acked_spec(),
+        )
+    // P4: fresh packet numbers, strictly increasing per space.
+    &&& forall|i: int|
+        0 <= i < d.packets.len() ==> o.sent((#[trigger] d.packets[i]).kind).next_pn_spec()
+            <= d.packets[i].pn
+    &&& forall|k: PacketKind| #[trigger] pns_ok(packets_pns(d.packets, k), c.sent(k).next_pn_spec())
+    // P5.
+    &&& forall|i: int, j: int|
+        0 <= i < d.packets.len() && 0 <= j < d.packets[i].frames.len() ==> (
+        #[trigger] d.packets[i].frames[j] matches SpecFrame::Ack(a) ==> forall|pn: u64|
+            #[trigger] ack_contains(a, pn) ==> c.recv(d.packets[i].kind).seen().contains(pn))
+    // P9.
+    &&& forall|i: int, j: int|
+        0 <= i < d.packets.len() && 0 <= j < d.packets[i].frames.len() && #[trigger] d.packets[i].frames[j]
+            is HandshakeDone ==> c.live(PacketKind::OneRtt)
+}
+
+/// P8: every frame in `polled` is in `d`.
+pub open spec fn polled_placed(polled: Seq<SpecFrame>, d: SpecOutDatagram) -> bool {
+    forall|i: int| 0 <= i < polled.len() ==> frame_in_datagram(d, #[trigger] polled[i])
+}
+
+pub open spec fn frame_in_datagram(d: SpecOutDatagram, f: SpecFrame) -> bool {
+    exists|m: int, n: int|
+        0 <= m < d.packets.len() && 0 <= n < d.packets[m].frames.len() && #[trigger] d.packets[m].frames[n] == f
+}
+
+spec fn polled_in_packet(polled: Seq<SpecFrame>, p: SpecOutPacket) -> bool {
+    in_tail(polled, p.frames, 0)
+}
+
+/// `n` is `pn_encode_len`'s answer.
+spec fn min_pn_len(pn: u64, la: Option<u64>, n: nat) -> bool {
+    &&& pn_len_ok(pn, la, n)
+    &&& forall|m: nat| 1 <= m < n ==> !pn_len_ok(pn, la, m)
+}
+
+/// The frames so far: sendable in space `k`, ack-eliciting from `base` on, and with `left` bytes
+/// still within `room`.
+spec fn tx_frames(sf: Seq<SpecFrame>, k: PacketKind, base: int, left: nat, room: nat) -> bool {
+    &&& 0 <= base <= sf.len()
+    &&& frames_sendable(sf, k)
+    &&& forall|i: int| base <= i < sf.len() ==> ack_eliciting(spec_frame_type(#[trigger] sf[i]))
+    &&& spec_frames_bytes(sf).len() + left <= room
+}
+
+spec fn extends(a: Seq<SpecFrame>, b: Seq<SpecFrame>) -> bool {
+    &&& a.len() <= b.len()
+    &&& forall|i: int| 0 <= i < a.len() ==> #[trigger] b[i] == a[i]
+}
+
+/// `f` is in `sf`, from `base` on.
+spec fn frame_from(sf: Seq<SpecFrame>, f: SpecFrame, base: int) -> bool {
+    exists|j: int| base <= j < sf.len() && #[trigger] sf[j] == f
+}
+
+spec fn in_tail(polled: Seq<SpecFrame>, sf: Seq<SpecFrame>, base: int) -> bool {
+    forall|i: int| 0 <= i < polled.len() ==> frame_from(sf, #[trigger] polled[i], base)
+}
+
+/// `a` is the frame for every range `r` remembers, and reports only what it has seen.
+spec fn ack_full(a: SpecAck, r: RecvPns) -> bool {
+    &&& a.ranges.len() + 1 == r.range_count()
+    &&& exists|d: u64| a == #[trigger] r.ack_candidate(a.ranges.len() as nat, d)
+    &&& forall|pn: u64| #[trigger] ack_contains(a, pn) ==> r.seen().contains(pn)
+}
+
+/// An ACK comes first and only first, and is `ack_full`.
+spec fn ack_ok(sf: Seq<SpecFrame>, r: RecvPns) -> bool {
+    forall|i: int|
+        0 <= i < sf.len() ==> (#[trigger] sf[i] matches SpecFrame::Ack(a) ==> i == 0 && ack_full(a, r))
+}
+
+/// `s` is `pns_ok`, and above everything in `log`.
+pub open spec fn pns_fresh(log: Seq<u64>, s: Seq<u64>, next: u64) -> bool {
+    &&& pns_ok(s, next)
+    &&& forall|i: int, j: int| 0 <= i < log.len() && 0 <= j < s.len() ==> #[trigger] log[i] < #[trigger] s[j]
+}
+
+/// A record keeps these (3d D5).
+pub open spec fn retransmittable(f: SpecFrame) -> bool {
+    !(f is Padding || f is Ping || f is Ack || f is ConnectionClose || f is PathChallenge
+        || f is PathResponse)
+}
+
+/// The room arithmetic: a packet whose frames fit `room`, with sample padding, against `hdr` bytes
+/// of header (`header_bytes_spec`, whose 2-byte Length bounds the real one).
+proof fn lemma_room(p: SpecOutPacket, room: nat, hdr: nat)
+    requires
+        out_packet_sized(p),
+        frames_len(p) <= room,
+        p.padding <= 3,
+        hdr == match p.kind {
+            PacketKind::OneRtt => 1 + p.dcid.len(),
+            PacketKind::Initial => 7 + p.dcid.len() + p.scid.len() + 1 + 2,
+            PacketKind::Handshake => 7 + p.dcid.len() + p.scid.len() + 2,
+        },
+    ensures
+        out_packet_len(p) <= room + hdr + p.pn_len + AEAD_TAG_LEN + 3,
+{
+}
+
+proof fn lemma_tx_push(sf: Seq<SpecFrame>, f: SpecFrame, k: PacketKind, base: int, left: nat, room: nat, left2: nat)
+    requires
+        tx_frames(sf, k, base, left, room),
+        frame_wf(f),
+        frame_permitted(spec_frame_type(f), k),
+        ack_eliciting(spec_frame_type(f)),
+        left2 + spec_frame_bytes(f).len() <= left,
+    ensures
+        tx_frames(sf.push(f), k, base, left2, room),
+        extends(sf, sf.push(f)),
+{
+    lemma_frames_bytes_push(sf, f);
+    let s2 = sf.push(f);
+    assert forall|i: int| 0 <= i < s2.len() implies frame_wf(#[trigger] s2[i]) && frame_permitted(
+        spec_frame_type(s2[i]),
+        k,
+    ) by {
+        if i < sf.len() {
+            assert(s2[i] == sf[i]);
+        }
+    }
+    assert forall|i: int| base <= i < s2.len() implies ack_eliciting(spec_frame_type(#[trigger] s2[i])) by {
+        if i < sf.len() {
+            assert(s2[i] == sf[i]);
+        }
+    }
+}
+
+proof fn lemma_frames_bytes_append(a: Seq<SpecFrame>, b: Seq<SpecFrame>)
+    ensures
+        spec_frames_bytes(a + b).len() == spec_frames_bytes(a).len() + spec_frames_bytes(b).len(),
+    decreases b.len(),
+{
+    if b.len() == 0 {
+        assert(a + b =~= a);
+    } else {
+        let l = b.last();
+        let d = b.drop_last();
+        assert(a + b =~= (a + d).push(l));
+        assert(b =~= d.push(l));
+        lemma_frames_bytes_push(a + d, l);
+        lemma_frames_bytes_push(d, l);
+        lemma_frames_bytes_append(a, d);
+    }
+}
+
+/// A frame `poll_frames` returned elicits an ACK.
+proof fn lemma_polled_eliciting(s: Streams, f: SpecFrame)
+    requires
+        polled_rule(s, f),
+    ensures
+        ack_eliciting(spec_frame_type(f)),
+{
+    if let SpecFrame::Stream { offset, fin, .. } = f {
+        lemma_stream_type_bits(if offset > 0 { 4 } else { 0 }, if fin { 1 } else { 0 });
+    }
+}
+
+/// `tx_frames` after `poll_frames`, which appended `out1.skip(out0.len())`.
+proof fn lemma_polled(s0: Streams, out0: Seq<Frame>, out1: Seq<Frame>, base: int, left: nat, room: nat)
+    requires
+        tx_frames(frames_view(out0), PacketKind::OneRtt, base, left, room),
+        ({
+            let new = out1.skip(out0.len() as int);
+            &&& out1.len() >= out0.len()
+            &&& out1.subrange(0, out0.len() as int) == out0
+            &&& frames_sendable(frames_view(new), PacketKind::OneRtt)
+            &&& spec_frames_bytes(frames_view(new)).len() <= left
+            &&& forall|k: int| 0 <= k < new.len() ==> polled_rule(s0, (#[trigger] new[k])@)
+        }),
+    ensures
+        tx_frames(frames_view(out1), PacketKind::OneRtt, base, 0, room),
+        extends(frames_view(out0), frames_view(out1)),
+        out1.len() == out0.len() ==> out1 == out0,
+{
+    let n = out0.len() as int;
+    let new = out1.skip(n);
+    let v0 = frames_view(out0);
+    let v1 = frames_view(out1);
+    let vn = frames_view(new);
+    assert(out1 =~= out0 + new) by {
+        assert forall|i: int| 0 <= i < n implies out1[i] == out0[i] by {
+            assert(out1.subrange(0, n)[i] == out1[i]);
+        }
+    }
+    assert(v1 =~= v0 + vn);
+    lemma_frames_bytes_append(v0, vn);
+    assert forall|i: int| 0 <= i < v1.len() implies frame_wf(#[trigger] v1[i]) && frame_permitted(
+        spec_frame_type(v1[i]),
+        PacketKind::OneRtt,
+    ) by {
+        if i < n {
+            assert(v1[i] == v0[i]);
+        } else {
+            assert(v1[i] == vn[i - n]);
+        }
+    }
+    assert forall|i: int| base <= i < v1.len() implies ack_eliciting(spec_frame_type(#[trigger] v1[i])) by {
+        if i < n {
+            assert(v1[i] == v0[i]);
+        } else {
+            assert(v1[i] == vn[i - n]);
+            assert(polled_rule(s0, new[i - n]@));
+            lemma_polled_eliciting(s0, v1[i]);
+        }
+    }
+    assert forall|i: int| 0 <= i < v0.len() implies #[trigger] v1[i] == v0[i] by {}
+}
+
+proof fn lemma_in_tail(sf: Seq<SpecFrame>, mid: int, base: int)
+    requires
+        0 <= mid,
+        base <= mid <= sf.len(),
+    ensures
+        in_tail(sf.skip(mid), sf, base),
+{
+    let t = sf.skip(mid);
+    assert forall|i: int| 0 <= i < t.len() implies frame_from(sf, #[trigger] t[i], base) by {
+        assert(sf[mid + i] == t[i]);
+    }
+}
+
+/// With nothing past `n`, nothing was polled.
+proof fn lemma_polled_empty(polled: Seq<SpecFrame>, sf: Seq<SpecFrame>, n: int)
+    requires
+        in_tail(polled, sf, n),
+    ensures
+        sf.len() as int <= n ==> polled.len() == 0,
+{
+    if sf.len() as int <= n && polled.len() > 0 {
+        let _ = polled[0];
+    }
+}
+
+/// `is_ack_eliciting`'s answer, for frames with an ACK before `n` and only ack-eliciting ones after.
+proof fn lemma_eliciting(fs: Seq<Frame>, n: int)
+    requires
+        0 <= n <= fs.len(),
+        forall|i: int| 0 <= i < n ==> !ack_eliciting(spec_frame_type(#[trigger] frames_view(fs)[i])),
+        forall|i: int| n <= i < fs.len() ==> ack_eliciting(spec_frame_type(#[trigger] frames_view(fs)[i])),
+    ensures
+        (exists|i: int| 0 <= i < fs.len() && ack_eliciting(spec_frame_type(#[trigger] fs[i]@))) == (fs.len() > n),
+        (exists|i: int|
+            0 <= i < frames_view(fs).len() && ack_eliciting(spec_frame_type(#[trigger] frames_view(fs)[i])))
+            == (fs.len() > n),
+{
+    let v = frames_view(fs);
+    if fs.len() > n {
+        assert(v[n] == fs[n]@);
+        assert(ack_eliciting(spec_frame_type(fs[n]@)));
+        assert(ack_eliciting(spec_frame_type(v[n])));
+    } else {
+        assert forall|i: int| 0 <= i < fs.len() implies !ack_eliciting(spec_frame_type(#[trigger] fs[i]@)) by {
+            assert(v[i] == fs[i]@);
+        }
+    }
+}
+
+proof fn lemma_ack_ok_extends(a: Seq<SpecFrame>, b: Seq<SpecFrame>, r: RecvPns, k: PacketKind, room: nat)
+    requires
+        ack_ok(a, r),
+        extends(a, b),
+        tx_frames(b, k, a.len() as int, 0, room),
+    ensures
+        ack_ok(b, r),
+{
+    assert forall|i: int| 0 <= i < b.len() implies (#[trigger] b[i] matches SpecFrame::Ack(x) ==> i == 0
+        && ack_full(x, r)) by {
+        if i >= a.len() {
+            assert(ack_eliciting(spec_frame_type(b[i])));
+        } else {
+            assert(b[i] == a[i]);
+        }
+    }
+}
+
+/// §13.2.1: the full frame reports every ack-eliciting packet number not yet reported.
+proof fn lemma_ack_reports(a: SpecAck, r: RecvPns)
+    requires
+        r.wf(),
+        ack_full(a, r),
+    ensures
+        forall|u: u64| #[trigger] r.unreported().contains(u) ==> ack_contains(a, u),
+{
+    assert forall|u: u64| #[trigger] r.unreported().contains(u) implies ack_contains(a, u) by {
+        let d = choose|d: u64| a == #[trigger] r.ack_candidate(a.ranges.len() as nat, d);
+        r.lemma_unreported_acked(u, d);
+        assert((r.range_count() - 1) as nat == a.ranges.len() as nat);
+    }
+}
+
+proof fn lemma_not_inflight(s: SentPackets)
+    requires
+        s.wf(),
+    ensures
+        !has_pn(s.inflight_spec(), s.next_pn_spec()),
+{
+    s.lemma_wf();
+    if has_pn(s.inflight_spec(), s.next_pn_spec()) {
+        let i = choose|i: int| 0 <= i < s.inflight_spec().len() && (#[trigger] s.inflight_spec()[i]).pn == s.next_pn_spec();
+        assert(s.inflight_spec()[i].pn < s.next_pn_spec());
+    }
+}
+
+/// A datagram with one packet.
+proof fn lemma_packets_pns_one(p: SpecOutPacket, k: PacketKind)
+    ensures
+        packets_pns(seq![p], k) == if p.kind == k {
+            seq![p.pn]
+        } else {
+            Seq::<u64>::empty()
+        },
+{
+    let s = seq![p];
+    let e = Seq::<SpecOutPacket>::empty();
+    assert(s.drop_last() =~= e);
+    assert(s.last() == p);
+    assert(packets_pns(e, k) =~= Seq::<u64>::empty());
+    if p.kind == k {
+        assert(Seq::<u64>::empty().push(p.pn) =~= seq![p.pn]);
+    }
+}
+
+proof fn lemma_packets_len_one(p: SpecOutPacket)
+    ensures
+        packets_len(seq![p]) == out_packet_len(p),
+{
+    let s = seq![p];
+    let e = Seq::<SpecOutPacket>::empty();
+    assert(s.drop_last() =~= e);
+    assert(s.last() == p);
+    assert(packets_len(e) == 0);
+}
+
+/// `log + d` is still `pns_ok`, for `d` above everything logged.
+proof fn lemma_pn_step(log: Seq<SpecOutDatagram>, d: SpecOutDatagram, k: PacketKind, next: u64)
+    requires
+        pns_ok(log_pns(log, k), next),
+        pns_fresh(log_pns(log, k), packets_pns(d.packets, k), next),
+    ensures
+        pns_ok(log_pns(log.push(d), k), next),
+{
+    let l = log.push(d);
+    assert(l.drop_last() =~= log);
+    assert(l.last() == d);
+    let a = log_pns(log, k);
+    let b = packets_pns(d.packets, k);
+    let c = a + b;
+    assert(log_pns(l, k) == c);
+    assert forall|i: int, j: int| 0 <= i < j < c.len() implies #[trigger] c[i] < #[trigger] c[j] by {
+        if j < a.len() {
+            assert(c[i] == a[i] && c[j] == a[j]);
+        } else if i < a.len() {
+            assert(c[i] == a[i] && c[j] == b[j - a.len()]);
+        } else {
+            assert(c[i] == b[i - a.len()] && c[j] == b[j - a.len()]);
+        }
+    }
+    assert forall|i: int| 0 <= i < c.len() implies #[trigger] c[i] < next by {
+        if i < a.len() {
+            assert(c[i] == a[i]);
+        } else {
+            assert(c[i] == b[i - a.len()]);
+        }
+    }
+}
+
+/// Copies a retransmittable frame; None for any other.
+#[verifier::spinoff_prover]
+fn copy_frame(f: &Frame) -> (r: Option<Frame>)
+    ensures
+        (r is Some) == retransmittable(f@),
+        r matches Some(c) ==> c@ == f@,
+{
+    match f {
+        Frame::Padding | Frame::Ping | Frame::Ack(_) | Frame::ConnectionClose { .. }
+        | Frame::PathChallenge(_) | Frame::PathResponse(_) => None,
+        Frame::ResetStream { stream_id, error_code, final_size } => Some(
+            Frame::ResetStream { stream_id: *stream_id, error_code: *error_code, final_size: *final_size },
+        ),
+        Frame::StopSending { stream_id, error_code } => Some(
+            Frame::StopSending { stream_id: *stream_id, error_code: *error_code },
+        ),
+        Frame::Crypto { offset, data } => Some(
+            Frame::Crypto { offset: *offset, data: slice_to_vec(data.as_slice()) },
+        ),
+        Frame::Stream { stream_id, offset, data, fin } => Some(
+            Frame::Stream { stream_id: *stream_id, offset: *offset, data: slice_to_vec(data.as_slice()), fin: *fin },
+        ),
+        Frame::MaxData(v) => Some(Frame::MaxData(*v)),
+        Frame::MaxStreamData { stream_id, max } => Some(
+            Frame::MaxStreamData { stream_id: *stream_id, max: *max },
+        ),
+        Frame::MaxStreams { bidi, max } => Some(Frame::MaxStreams { bidi: *bidi, max: *max }),
+        Frame::DataBlocked(v) => Some(Frame::DataBlocked(*v)),
+        Frame::StreamDataBlocked { stream_id, max } => Some(
+            Frame::StreamDataBlocked { stream_id: *stream_id, max: *max },
+        ),
+        Frame::StreamsBlocked { bidi, max } => Some(Frame::StreamsBlocked { bidi: *bidi, max: *max }),
+        Frame::NewConnectionId { seq, retire_prior_to, cid, reset_token } => Some(
+            Frame::NewConnectionId {
+                seq: *seq,
+                retire_prior_to: *retire_prior_to,
+                cid: slice_to_vec(cid.as_slice()),
+                reset_token: *reset_token,
+            },
+        ),
+        Frame::RetireConnectionId(v) => Some(Frame::RetireConnectionId(*v)),
+        Frame::HandshakeDone => Some(Frame::HandshakeDone),
+    }
+}
+
+/// The retransmittable frames of `frames`, for a record. The copy is one packet's bytes.
+#[verifier::spinoff_prover]
+fn record_frames(frames: &[Frame]) -> (r: Vec<Frame>)
+    ensures
+        forall|i: int|
+            0 <= i < r@.len() ==> retransmittable(#[trigger] r@[i]@) && frame_from(
+                frames_view(frames@),
+                r@[i]@,
+                0,
+            ),
+        forall|j: int|
+            0 <= j < frames@.len() && retransmittable(#[trigger] frames@[j]@) ==> frame_from(
+                frames_view(r@),
+                frames@[j]@,
+                0,
+            ),
+{
+    let ghost fv = frames_view(frames@);
+    let mut r: Vec<Frame> = Vec::new();
+    let mut j: usize = 0;
+    while j < frames.len()
+        invariant
+            j <= frames@.len(),
+            fv == frames_view(frames@),
+            forall|i: int|
+                0 <= i < r@.len() ==> retransmittable(#[trigger] r@[i]@) && frame_from(fv, r@[i]@, 0),
+            forall|m: int|
+                0 <= m < j && retransmittable(#[trigger] frames@[m]@) ==> frame_from(
+                    frames_view(r@),
+                    frames@[m]@,
+                    0,
+                ),
+        decreases frames@.len() - j,
+    {
+        if let Some(c) = copy_frame(&frames[j]) {
+            let ghost r0 = r@;
+            r.push(c);
+            proof {
+                let n = r0.len() as int;
+                let v = frames_view(r@);
+                assert(fv[j as int] == frames@[j as int]@);
+                assert(v[n] == frames@[j as int]@);
+                assert forall|i: int| 0 <= i < r@.len() implies retransmittable(#[trigger] r@[i]@) && frame_from(
+                    fv,
+                    r@[i]@,
+                    0,
+                ) by {
+                    if i < n {
+                        assert(r@[i] == r0[i]);
+                    }
+                }
+                assert forall|m: int| 0 <= m < j + 1 && retransmittable(#[trigger] frames@[m]@) implies frame_from(
+                    v,
+                    frames@[m]@,
+                    0,
+                ) by {
+                    if m < j {
+                        let w = choose|w: int| 0 <= w < frames_view(r0).len() && #[trigger] frames_view(r0)[w] == frames@[m]@;
+                        assert(v[w] == r0[w]@);
+                        assert(frames_view(r0)[w] == r0[w]@);
+                    }
+                }
+            }
+        }
+        j += 1;
+    }
+    r
+}
+
+// ponytail: measures a frame by serializing it into a scratch buffer, one small frame per call; a per-variant frame_len if 3e profiles this as hot.
+/// The frame's encoded length.
+fn frame_len(f: &Frame) -> (n: usize)
+    requires
+        frame_wf(f@),
+    ensures
+        n == spec_frame_bytes(f@).len(),
+{
+    let mut buf: Vec<u8> = Vec::new();
+    serialize_frame(f, &mut buf);
+    assert(buf@ =~= spec_frame_bytes(f@));
+    buf.len()
+}
+
+/// Appends `f` if its encoding fits.
+#[verifier::spinoff_prover]
+fn try_place(
+    f: Frame,
+    left: &mut usize,
+    fs: &mut Vec<Frame>,
+    Ghost(k): Ghost<PacketKind>,
+    Ghost(base): Ghost<int>,
+    Ghost(room): Ghost<nat>,
+) -> (placed: bool)
+    requires
+        tx_frames(frames_view(old(fs)@), k, base, *old(left) as nat, room),
+        frame_wf(f@),
+        frame_permitted(spec_frame_type(f@), k),
+        ack_eliciting(spec_frame_type(f@)),
+    ensures
+        tx_frames(frames_view(final(fs)@), k, base, *final(left) as nat, room),
+        extends(frames_view(old(fs)@), frames_view(final(fs)@)),
+        !placed ==> final(fs)@ == old(fs)@ && *final(left) == *old(left),
+        placed ==> final(fs)@.len() == old(fs)@.len() + 1,
+{
+    let n = frame_len(&f);
+    if n > *left {
+        return false;
+    }
+    let ghost sf = frames_view(fs@);
+    let ghost left0 = *left as nat;
+    let ghost g = f@;
+    fs.push(f);
+    *left = *left - n;
+    proof {
+        assert(frames_view(fs@) =~= sf.push(g));
+        lemma_tx_push(sf, g, k, base, left0, room, *left as nat);
+    }
+    true
+}
+
+/// `spec_frame_bytes` of a CRYPTO frame.
+proof fn lemma_crypto_len(off: u64, d: Seq<u8>)
+    requires
+        off + d.len() <= VARINT_MAX,
+    ensures
+        spec_frame_bytes(SpecFrame::Crypto { offset: off, data: d }).len() == 1 + rfc_varint_min_len(off)
+            + rfc_varint_min_len(d.len() as u64) + d.len(),
+{
+    theorem_serialize_matches_rfc(FRAME_CRYPTO);
+    theorem_serialize_matches_rfc(off);
+    theorem_serialize_matches_rfc(d.len() as u64);
+}
+
+proof fn lemma_polled_placed(polled: Seq<SpecFrame>, p: SpecOutPacket, d: SpecOutDatagram)
+    requires
+        d.packets == seq![p],
+        polled_in_packet(polled, p),
+    ensures
+        polled_placed(polled, d),
+{
+    assert forall|i: int| 0 <= i < polled.len() implies frame_in_datagram(d, #[trigger] polled[i]) by {
+        assert(frame_from(p.frames, polled[i], 0));
+        let n = choose|n: int| 0 <= n < p.frames.len() && #[trigger] p.frames[n] == polled[i];
+        assert(d.packets[0] == p);
+        assert(d.packets[0].frames[n] == polled[i]);
+    }
+}
+
+/// `transmit_ok` for one packet, `o` the state it was built from and `c` after its commit.
+proof fn lemma_one_packet_ok(o: Connection, c: Connection, p: SpecOutPacket, d: SpecOutDatagram, room: nat)
+    requires
+        d.packets == seq![p],
+        p.kind is OneRtt,
+        o.packet_ok(p, PacketKind::OneRtt, room),
+        out_datagram_len(d) <= MAX_DATAGRAM,
+        c.live(PacketKind::OneRtt),
+        c.sent(PacketKind::OneRtt).next_pn_spec() == p.pn + 1,
+        forall|j: PacketKind| #[trigger] c.sent(j).largest_acked_spec() == o.sent(j).largest_acked_spec(),
+        forall|j: PacketKind| #[trigger] c.recv(j).seen() == o.recv(j).seen(),
+    ensures
+        transmit_ok(o, c, d),
+{
+    assert forall|i: int| 0 <= i < d.packets.len() implies out_packet_wf(
+        #[trigger] d.packets[i],
+        c.sent(d.packets[i].kind).largest_acked_spec(),
+    ) by {
+        assert(d.packets[i] == p);
+    }
+    assert forall|i: int| 0 <= i < d.packets.len() implies o.sent((#[trigger] d.packets[i]).kind).next_pn_spec()
+        <= d.packets[i].pn by {
+        assert(d.packets[i] == p);
+    }
+    assert forall|k: PacketKind| #[trigger] pns_ok(packets_pns(d.packets, k), c.sent(k).next_pn_spec()) by {
+        lemma_packets_pns_one(p, k);
+        if k is OneRtt {
+            assert(packets_pns(d.packets, k)[0] == p.pn);
+        }
+    }
+    assert forall|i: int, j: int| 0 <= i < d.packets.len() && 0 <= j < d.packets[i].frames.len() implies (
+    #[trigger] d.packets[i].frames[j] matches SpecFrame::Ack(a) ==> forall|pn: u64|
+        #[trigger] ack_contains(a, pn) ==> c.recv(d.packets[i].kind).seen().contains(pn)) by {
+        assert(d.packets[i] == p);
+        assert(p.frames[j] == d.packets[i].frames[j]);
     }
 }
 
