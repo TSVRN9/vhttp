@@ -367,8 +367,14 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
     - a `mut_op` arg of `Call(Fn)`.
 
     Any other operand is `no_mut` (`lemma_eval_op_plc`), so `grow` and `write_back` do nothing for it.
-  - `pub open spec fn rel_sound(rel: Rel, x: nat, pre: Frame, post: Frame) -> bool`. `Same` means the value **and** `len_nat` are unchanged, so Task 4's rewrites need no `plc`.
+  - `pub open spec fn rel_sound(rel: Rel, x: nat, pre: Frame, post: Frame) -> bool`. `Same` means the value **and** `len_nat` are unchanged, so Task 4's rewrites need no `plc`. With `v`, `w` the local's value in `pre`, `post`:
+    - `Same`: `w == v` and `len_nat(post, w) == len_nat(pre, v)`.
+    - `ValEq(Val(y, ty), k)`: `val_nat(ty, w) == atom_val(pre, Val(y, ty)) + k`. At `ty` only.
+    - `ValEq(Const(c), 0)`: for every `ty2`, `val_nat(ty2, w) <= c`. The `Const` rule gives `Unknown` unless `n == uval(ty, n)`.
+    - `ValLe(A)`: for every `ty2`, `val_nat(ty2, w) <= atom_val(pre, A)`.
+    - `LenEq(A)`, `LenLe(A)`: `len_nat(post, w)` `==`, `<=` `atom_val(pre, A)`.
   - `pub open spec fn eff_sound(e: Eff, pre: Frame, post: Frame, succ: nat) -> bool`: every `rel` is sound, and the edge facts for `succ` hold at `post`.
+- **Transfer:** `pub open spec fn sym_stmts(b: Body, stmts: Seq<Stmt>, facts: Seq<Fact>) -> Eff`: the rels from the block's start to `exec_stmts(..).0`, with an empty `edge`. `sym_block` extends it with the terminator. Lemma: `lemma_sym_stmts_sound`, same `requires` as `lemma_sym_block_sound`, ensuring `forall|s| eff_sound(sym_stmts(..), fr, exec_stmts(blk.stmts@, 0, fr).0, s)`.
 - **Transfer:** `pub open spec fn sym_block(b: Body, blk: Block, facts: Seq<Fact>) -> Eff`, recognizing exactly:
   - `x = Copy(y)` (int, same `IntTy`), giving `ValEq(Val(y, ty), 0)`;
   - `x = Const(ty, n)`, giving `ValEq(Const(uval(ty, n)), 0)`. If `uval(ty, n) > u64::MAX`, it gives `Unknown` (M8);
@@ -381,7 +387,7 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
   - `x = copy (*y)`, giving `LenLe(Len(y))`;
   - `SliceSubrange(r, ..)`, giving `LenLe(Len(r))`;
   - `SliceToVec(r)`, giving `LenLe(Len(r))`;
-  - **In-block composition:** a rule's atom is rewritten through the rel so far, so every rel lands on pre-state atoms: `_3 = copy (*_2); _4 = Len(_3)` gives `_4` `ValLe(Len(2))`;
+  - **In-block composition:** a rule's atom is rewritten through the rel so far, so every rel lands on pre-state atoms: `_3 = copy (*_2); _4 = Len(_3)` gives `_4` `ValLe(Len(2))`. An operand whose rel so far is `Unknown` gives `Unknown`;
   - **Writes through `Mut`** (C1 option B): a writer makes **every** local `Unknown`, because it may target any non-`Mut`-typed local and a `Mut`-typed local's `Len` reads through its target. Put a `ponytail:` comment on this: it loses counters across any `&mut` call, and the upgrade is a frame invariant limiting targets to `RefMut` roots;
   - **Direct writes:** a non-writer place writes only its root local. If that root is not `Mut`-typed, every `Mut`-typed local also becomes `Unknown`, since it may target that root;
   - every other assignment to x gives `Unknown`;
@@ -389,7 +395,9 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
   - **Edge facts** (unsigned compares only, C2):
     - `Switch(Copy(c))` where c was set in this block by `Bin(Lt, ty, a, b)` and is unchanged afterwards: `Lt(a', b')` on the non-zero target and `Le(b', a')` on the zero target, with a′, b′ the atoms of the operands' post values at `ty`;
     - `Gt`/`Ge`/`Le` likewise;
-    - the `Assert(Lt(..), true, b)` success edge gives `Lt`.
+    - the `Assert(Lt(..), true, b)` success edge gives `Lt`;
+    - an operand `Copy(z)` whose rel is `ValEq(Val(y, ty), 0)`, with `y` `Same` at the end of the block, gives the atom `Val(y, ty)`, so `_15 = copy _13; Lt(_15, _8)` gives `Lt(Val(13), Val(8))`. An operand `Const(ty, n)` gives `Const(uval(ty, n))` if it fits u64;
+    - **Carry:** on every edge, every pre-fact whose atoms read only `Same` locals.
 - **Lemmas:**
   - `proof fn lemma_sym_block_sound(p, ls, f, b, blk, facts, fr)`: requires `ok_prog(p, ls)`, `plc(p, ls, f, fr)`, `facts_hold(fr, facts)` and `frame_len_ok(fr)`. It ensures `eff_sound(sym_block(..), fr, post, succ)` for the successor the terminator actually takes, with `post` the **successor frame** (I2):
     - `fr1 = exec_stmts(..).0` for `Goto`/`Switch`/`Assert`;
@@ -408,7 +416,8 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
   - `x = Len(y)` as `ValEq(Len(y), 0)`, false on `Shr(Shr(Arr))` (`lemma_rel_len`);
   - a writer that keeps a never-borrowed non-`Mut`-typed local `Same`, i.e. the address-taken rule (`lemma_sym_block_sound`) (C1);
   - a writer, or a direct write to a non-`Mut`-typed local, that keeps a `Mut`-typed local `Same` (`lemma_sym_block_sound`) (C1);
-  - `lemma_sym_block_sound` stated at `exec_stmts(..).0` for `Call(Intr)`, which fails on the `VecLen` dst (I2).
+  - `lemma_sym_block_sound` stated at `exec_stmts(..).0` for `Call(Intr)`, which fails on the `VecLen` dst (I2);
+  - carry keeps a fact over a non-`Same` local (`lemma_sym_block_sound`).
 - [ ] **Step 4: Run the four checks and the evidence run.**
 - [ ] **Step 5: Commit:** `feat(ctcore): sound abstract block effect for cost certificates (counter increment, lengths, Mut writes, edge facts)`
 
@@ -420,37 +429,50 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
 - Create: `crates/ctcore/src/cost_check.rs`, `crates/ctcore/tests/cost_check.rs`
 - Modify: `crates/ctcore/src/lib.rs`: `pub mod cost_check;` and the explicit `pub use cost_check::check_cert;`, with no glob (I5, M2)
 
-**Consumes:** Tasks 2 and 3.
+**Consumes:** Tasks 2 and 3 (`sym_block`, `sym_stmts`, `lemma_sym_block_sound`, `lemma_sym_stmts_sound`).
 
 **Interfaces (produces):** all `pub fn`, each with the stated `ensures`.
 - **Hand copies** (M18; ctcore's types derive nothing): `atom_copy(a: &Atom) -> (r: Atom) ensures r == *a`, plus the same for `IntTy`, `Mono`, `Poly` and `Fact`. Budget for them, and for the overflow and bounds obligations of every exec fn here.
-- **Atom order:** `atom_lt(a: &Atom, b: &Atom) -> (r: bool)`, a total strict order with its spec twin `spec_atom_lt`.
+- **Atom order:** `atom_lt(a: &Atom, b: &Atom) -> (r: bool)`, a total order with its spec twin `spec_atom_lt`. Canonical means non-decreasing under `atom_lt`; `Len(1)·Len(1)` is legal.
 - **Polynomial operations:**
   - `poly_add(a: &Poly, b: &Poly) -> (r: Option<Poly>)` ensures `r matches Some(q) ==> forall fr. poly_val(fr, q@) == poly_val(fr, a@) + poly_val(fr, b@)`;
   - `poly_dominates(lhs: &Poly, rhs: &Poly, extra: u64) -> (r: bool)` ensures `r ==> forall|fr| poly_val(fr, lhs) >= poly_val(fr, rhs) + extra`. It works by syntactic monomial matching on canonical atom lists with coefficient ≥, with `extra` taken from the constant monomial.
 - **Rewrites:**
-  - `rewrite_pre(p: &Poly, e: &Eff, facts: &Vec<Fact>) -> (r: Option<Poly>)` ensures `r matches Some(q) ==> forall|pre, post, s| facts_hold(pre, facts@) && eff_sound(*e, pre, post, s) ==> poly_val(pre, p) >= poly_val(post, q)`. Here `post` is the successor frame (I2). It rewrites pre-atoms into post-atoms:
-    - a `Gap(A, Val(i, ty))` with `ValEq(Val(i, ty), 1)` and a pre-fact `Lt(Val(i, ty), A)` becomes `Gap(A, Val(i, ty))′ + 1`, expanded (`lemma_gap_dec`);
-    - `Same` atoms are kept, `Len` included (Task 3's `rel_sound`);
-    - a pre-atom `A` becomes the post-atom of a local `x` whose rel is `ValEq(A, 0)`, `ValLe(A)`, `LenEq(A)` or `LenLe(A)`; a coefficient may be split between such locals and `Same`;
-    - monomials over `Unknown` atoms are dropped (sound for the LHS).
-  - `bound_post(p: &Poly, e: &Eff, post_facts: &Vec<Fact>) -> (r: Option<Poly>)` ensures `r matches Some(q) ==> forall|fr| facts_hold(fr, post_facts@) ==> poly_val(fr, q) >= poly_val(fr, p)`. It applies the upper-bound rewrites: `Le`/`Lt` facts and `Gap(a, x) <= a`. It returns `None` if an `Unknown` atom remains.
+  - `pull_post(q: &Poly, e: &Eff, facts: &Vec<Fact>) -> (r: Option<(Poly, Poly)>)` ensures `r matches Some((up, credit)) ==> forall|pre, post, s| facts_hold(pre, facts@) && eff_sound(*e, pre, post, s) ==> poly_val(post, q@) + poly_val(pre, credit@) <= poly_val(pre, up@)`. It maps post-atoms to pre-atoms, each by its local's one rel:
+    - `Const(c)` to itself;
+    - `Val(x, ty)`: `Same` to itself; `ValEq(Val(y, ty), 0)` to `Val(y, ty)`, same `ty`; `ValEq(Const(c), 0)` to `Const(c)`; `ValLe(A)` to `A`; anything else `None`;
+    - `Len(x)`: `Same` to itself; `LenEq(A)` or `LenLe(A)` to `A`; anything else `None`;
+    - `Gap(a, b)`, with `a'` the map of `a` (`None` if none):
+      - `b` a `Val` or `Len` that is `Same`, `ValEq(Val(y, ty), 0)` at `b`'s `ty`, or `LenEq(A)`: `Gap(a', B)`, with `B` its image;
+      - `b = Val(i, ty)` with rel `ValEq(Val(i, ty), 1)`: `Gap(a', Val(i, ty))`, a **decrement** if `facts` has `Lt(Val(i, ty), a')` (`lemma_gap_dec`);
+      - any other `b`, including `Const`, `Unknown`, `ValLe`, `LenLe` and nested `Gap`: `a'`, since `Gap(a, x) <= a`.
+
+    A monomial `c·a1·a2` maps atom by atom, sorted non-decreasing, with `Const` atoms folded into `coef` (checked; overflow gives `None`). Its first decrement atom adds `c` times the other atom's image to `credit` (`c` alone for one atom), since `g'·u' + u <= g·u` when `g' + 1 <= g` and `u' <= u`. Further decrements in the monomial earn nothing.
+  - `bound_post(p: &Poly, pot: &Poly, e: &Eff, pre_facts: &Vec<Fact>, post_facts: &Vec<Fact>) -> (r: Option<Poly>)` ensures `r matches Some(q) ==> forall|fr| facts_hold(fr, post_facts@) ==> poly_val(fr, q) >= poly_val(fr, p)`. Let `budget` be `pot` plus the credits of those monomials of `p` that `pull_post` maps. A monomial whose image's atoms appear in `budget` is kept. Any other has each top-level atom and each `Gap` minuend `t` replaced by `u`, for the first `Le(t, u)` or `Lt(t, u)` in `post_facts`; this is one pass, not repeated. The order of `post_facts` comes from the certificate's block facts, so the result is determined.
   - `instantiate(sum: &Poly, p: &Program, g: usize, args: &Vec<Operand>) -> (r: Option<Poly>)` ensures `r matches Some(q) ==> forall|fr| poly_val(fr, q) >= poly_val(call_enter(*p, g as nat, fr, args@).0, sum@)` (M3). It substitutes callee param atoms with arg atoms:
     - `Copy(Place { local, proj: [] })` maps `Val(j, ty)` to `Val(local, ty)`, with matching `IntTy` (C2), and `Len(j)` to `Len(local)`;
     - `Gap(a, b)` maps by recursion on `a` and `b`;
-    - `Const(ty, n)` maps to `Const(uval(ty, n))` when it fits u64;
+    - `Const(ty, n)` maps to `Const(uval(ty, n))` when it fits u64, and only if the atom's `ty` equals the operand's;
     - callee non-param atoms map to `Const(0)`, since those locals are `Unit` at entry;
-    - anything else gives `None`.
+    - anything else gives `None`, per atom: an arg no atom reads may be anything;
+    - the result is re-sorted and folded as in `pull_post`.
 - **Facts:** `facts_imply(have: &Vec<Fact>, need: &Vec<Fact>) -> (r: bool)` ensures `r ==> forall|fr| facts_hold(fr, have@) ==> facts_hold(fr, need@)`. Syntactic: each needed fact appears, or follows by `Lt ⇒ Le`.
 - **Blocks and certificates:**
   - `check_cost_block(p: &Program, f: usize, b: usize, c: &Cert, sums: &Vec<Option<Poly>>) -> (r: bool)` ensures `r ==> forall|ls, fr| ok_prog(*p, ls) && plc(*p, ls, f as nat, fr) && facts_hold(fr, c.blocks@[b].facts@) && frame_len_ok(fr) ==> block_step_ok(*p, f as nat, b as nat, *c, sums@, fr)`. It is named `check_cost_block`, not `check_block`, because `lib.rs` glob-imports `check::*` (M2);
+  - `check_cost_block`, for a block with `k` statements, `e = sym_block(..)`, `es = sym_stmts(..)`:
+    - **Each edge** the terminator can take to `s` (every `Switch` target, `Assert`'s success edge, `Goto`, `next`), with `post_facts` the edge's facts from `e`: `facts_imply(post_facts, s's facts)`, `need = bound_post(pot_s, pot_b, e, facts, post_facts)`, `(up, cr) = pull_post(need, e, facts)`.
+    - **Charge**, at the frame after the statements: `Call(Fn(g))` is `instantiate(sums[g], ..)`, with `sums[g]` `Some` or the block fails. `SliceToVec(Copy(y))` and `VecExtendFromSlice(_, Copy(y))`, with `y` an empty-projection local, are `Len(y)` (`lemma_elems_le_len_nat`), and any other operand fails the block. Other intrinsics are 0. `(upc, crc) = pull_post(charge, es, facts)`.
+    - **Check:** `poly_dominates(pot_b + cr + crc, up + upc, k + 1)`, with `+` as checked `poly_add`.
+    - `Return`: `poly_dominates(pot_b, empty, k + 1)`. `Abort`: true.
   - `check_cert(p: &Program, f: usize, c: &Cert, sums: &Vec<Option<Poly>>) -> (r: bool)` ensures `r ==> cert_for(*p, f as nat, *c, sums@)`.
 - **`tests/cost_check.rs`**, hand-built core programs with hand-written certificates:
   - `accepts_straight_line_const`
   - `accepts_counted_loop_const_bound`
   - `accepts_counted_loop_len_bound`
   - `accepts_nested_quadratic`
-  - `accepts_mid_body_exit`
+  - `accepts_mid_body_exit`: `parse_prefix_int`'s shape, counter from 1, temp-copy test, increment two blocks later, empty header facts
+  - `accepts_len_cost_intrinsic`: `bytes_at`'s tail, `Len(1) + 3` through `Len(12) + 2`
+  - `accepts_arg_is_dst`: `_3 = &_1; _3 = g(_3)`
   - `accepts_call_with_summary`
   - `accepts_double_ref_len`: `_3 = copy (*_2); _4 = Len(_3)` over a counted loop, paid by `Len(2)`, and a caller's `_3 = &_1` passing its `Len(1)`
   - `rejects_pot_too_small_by_one`
@@ -466,7 +488,8 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
 - [ ] **Step 3:** All tests pass.
 - [ ] **Step 4: Exec mutations**, each failing a named `ensures`:
   - `poly_dominates` ignores `extra`;
-  - `rewrite_pre` keeps `Unknown` monomials as `Same`;
+  - `pull_post` maps an `Unknown` atom as `Same`;
+  - `pull_post` earns credit without the `Lt` fact;
   - `check_cost_block` skips the successor-facts check.
 - [ ] **Step 5: Run the four checks and the evidence run.**
 - [ ] **Step 6: Commit:** `feat(ctcore): verified cost-certificate validator (check_cert ==> cert_for)`
@@ -493,7 +516,7 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
 - **Certificates** (`loops.rs`): `pub fn build_cert(p: &Program, f: usize, sums: &Vec<Option<Poly>>) -> Result<Cert, CostWhy>`.
   - Block costs are local.
   - Loop potentials: `Gap(bound, Val(counter, ty)) × (per-iteration cost)` plus the exit continuation. Nested loops multiply, up to degree 2.
-  - Facts: `Lt(Val(counter, ty), bound)` on the loop's body blocks and `Le(Val(counter, ty), bound)` at the header. Carry `Le` facts from dominating length checks (`if len > b.len() - off { return }`).
+  - Facts: `Lt(Val(counter, ty), bound)` on the loop's body blocks. Header facts are empty: `Le(counter, bound)` is false at `parse`'s entry (`_13 = 1`, `_8` havocked). `recognize` sees a counter through a temp copy (`_15 = copy _13`). A loop whose per-iteration cost is `P` has `P·Gap + P + rest` at the header, and its body blocks spend the `+ P` before the increment pays it back (`cost_sanity`'s `4·Gap + 3`, `4·Gap + 1`). Carry `Le` facts from dominating length checks (`if len > b.len() - off { return }`).
   - Its exec code under `verus!` still carries Verus's overflow and bounds obligations, which is the GC's "memory safety" (M9). Budget for them and for the hand copies (M18).
 - **The API** (`lib.rs`, verified, like `check_program`; M9): `pub fn analyze(p: &Program) -> (r: (Vec<Option<Poly>>, Vec<Cert>, Vec<CostWhy>))`.
   - `ensures r.0@.len() == p.fns@.len() && r.1@.len() == p.fns@.len() && forall|g: int| 0 <= g < r.0@.len() && r.0@[g] is Some ==> cert_for(*p, g as nat, r.1@[g], r.0@)`.
@@ -506,6 +529,7 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
   - `infers_counted_len`
   - `infers_nested_quadratic`
   - `infers_mid_body_exit`
+  - `infers_counter_from_one`
   - `infers_call_chain`
   - `none_for_off_progress_loop`
   - `none_for_recursion`
