@@ -1,5 +1,138 @@
 # Binary constant-time audit of crates/crypto (main at e6c1c00)
 
+**Status at 8b32220.** The body below is the audit of e6c1c00, unedited. Since then the shim is deleted (F2 and G1 are obsolete; the "Phase 5" deployment line it quotes is superseded by TRUSTED's RSA row). F1 is closed by `#[inline(never)]` on `scalar_in_range`. The shipped rlib is now 2 units; 7 of the 30 functions changed and were re-read, the other 23 have the same opcodes. The RSA read is the next section.
+
+## RSA object read (Phase 5e, source 8b32220)
+
+The object code of `crates/crypto` at 8b32220, rustc 1.98.1 / x86-64-unknown-linux-gnu, as a plain workspace build ships it. **Result: no secret-dependent branch or index in anything read, and `ct_mask` stays a real call. Without it, the branches on the exponent bit and the final subtraction return.**
+
+This is evidence about this source and build only. Any edit to `crates/crypto`, the toolchain or the profile can move inlining, and `verify.sh` re-checks none of it. It is not a dudect result: no timing was measured. Registers feeding jumps were traced by loop shape and flag producer, not by whole-function dataflow.
+
+### Recipe
+
+```sh
+git checkout 8b32220   # or any commit with the same crates/crypto non-test source, toolchain and profile
+T=<fresh absolute dir>; A=<empty dir>
+cargo build --release --target-dir "$T"
+cd "$A" && ar x "$T/release/libcrypto.rlib"
+ar t "$T/release/libcrypto.rlib" | grep -c 'rcgu\.o$'   # 2
+for m in $(ar t "$T/release/libcrypto.rlib" | grep 'rcgu\.o$'); do
+    objdump -dr --no-show-raw-insn -C "$m"
+done | grep -v 'file format' | sed -E 's/\.llvm\.[0-9]+//g' | md5sum
+# a247bd0fc9216f57f9ba2fe5fc376e88
+```
+
+Then the same read on `cargo rustc --release -p crypto --lib -- --emit=obj` (1 unit, different inlining, so a second data point and not the shipped code). A checkout at another path, and a second fresh build, gave 2 units and the same opcodes.
+
+### Exponent bit, shipped rlib
+
+`mod_pow_ct`, `pow_step_ct` and `select_n` are inlined into `rsa_pss_sha256_sign`. The byte is loaded at a public index, then only shifted into `ct_mask`, at 8 sites, each a relocation. Nothing tests it.
+
+```
+9dc: mov 0x8(%rsp),%rdi ; 9e1: shr $0x7,%edi ; 9e4: call 9e9 <c::rsa::rsa_pss_sha256_sign+0x9e9> ; 9e5: PLT32 c::bignum::ct_mask-0x4
+b43: shr $0x6,%edi ; b46: and $0x1,%edi ; b49: call b4e <c::rsa::rsa_pss_sha256_sign+0xb4e> ; b4a: PLT32 c::bignum::ct_mask-0x4
+cb3: shr $0x5,%edi ; cb6: and $0x1,%edi ; cb9: call cbe <c::rsa::rsa_pss_sha256_sign+0xcbe> ; cba: PLT32 c::bignum::ct_mask-0x4
+e23: shr $0x4,%edi ; e26: and $0x1,%edi ; e29: call e2e <c::rsa::rsa_pss_sha256_sign+0xe2e> ; e2a: PLT32 c::bignum::ct_mask-0x4
+f93: shr $0x3,%edi ; f96: and $0x1,%edi ; f99: call f9e <c::rsa::rsa_pss_sha256_sign+0xf9e> ; f9a: PLT32 c::bignum::ct_mask-0x4
+1106: and $0x1,%al ; 1108: movzbl %al,%edi ; 110b: call 1110 <c::rsa::rsa_pss_sha256_sign+0x1110> ; 110c: PLT32 c::bignum::ct_mask-0x4
+1275: and $0x1,%al ; 1277: movzbl %al,%edi ; 127a: call 127f <c::rsa::rsa_pss_sha256_sign+0x127f> ; 127b: PLT32 c::bignum::ct_mask-0x4
+13de: mov 0x8(%rsp),%rdi ; 13e3: and $0x1,%edi ; 13e6: call 13eb <c::rsa::rsa_pss_sha256_sign+0x13eb> ; 13e7: PLT32 c::bignum::ct_mask-0x4
+```
+
+`ct_mask` itself:
+
+```
+<c::bignum::ct_mask>:
+ 0: mov %rdi,%rax
+ 3: neg %rax
+ 6: ret
+```
+
+### Final subtraction, shipped rlib
+
+In `cond_sub` the borrow reaches `ct_mask` with no jump, and the copy is `pand/por` and `and/or`:
+
+```
+ a2: xor %edi,%edi
+ a4: cmp %r13,(%r14,%rbx,8)
+ a8: sbb %rdi,%rdi
+ ab: inc %rdi
+ ae: xor $0x1,%rdi
+ b2: call b7 <c::bignum::cond_sub+0xb7>
+ b3: PLT32 c::bignum::ct_mask-0x4
+ b7: mov %rax,%r12
+```
+
+### Jump classes, shipped rlib
+
+| Function | Jumps | Classes |
+|---|---|---|
+| `rsa_pss_sha256_sign` | 90, 20 cmov | `nl` and 0x40 bounds, exponent loop counter on `k`, `d`-length bound, allocation failure, capacity, length-driven MGF1 and PS loops, drop paths. 18 cmovs are `modulus_bits` over public `n`, 2 are `nl` loop bounds |
+| `cond_sub` | 8 | `nl` and the 0x40 bound |
+| `select_n` | 5 | `nl` and the 0x40 bound; 1 `ct_mask` relocation |
+| `mont_mul_n` | 11 | Counters and bounds. Carries go through `setb`, never a jump |
+| `pow2_mod` | 10 | Counters on `nl` and bits |
+| `pad_be` | 9 | Lengths, capacity, allocation. No byte of `d` decides anything |
+| `limbs_from_be_n` | 11 | Bounds and lengths |
+| `limbs_to_be_n` | 25 | Bounds, lengths, allocation |
+
+The one variable shift in the signer (`shl %cl,%dl` at 0x600) takes `%cl` from the public bit length. The signer was read whole to its 750th line and from the loop exit on; between those, every jump with its flag producer.
+
+In the 1-unit `--emit=obj` the verdict is the same: 127 signer jumps of the same classes, the bit from `bt %rax,%rcx; setb` with the loop index in `%rax`, and `cond_sub` as `cmp %r13,(%r14,%rbx,8); sbb %rdi,%rdi; inc %rdi; xor $0x1,%rdi; call ct_mask`. `test $0x80,%al` in the signer and `inc %rax; je` in `cond_sub` appear 0 times in both builds.
+
+### Non-RSA symbols re-read
+
+An opcode comparison with a rebuilt e6c1c00 (5 units) over the 30 functions gives 23 the same (their text also matches once addresses and relocations are stripped, so the body's reading carries), and these 7 different. `scalar_in_range` is a new symbol.
+
+| Symbol | Instructions, e6c1c00 -> now | Jumps now | Verdict |
+|---|---|---|---|
+| `p256_ecdsa_sign` | 1408 -> 1259 | 29 (was 31) | Clean. `test %al; je` after each `scalar_in_range` call (`#1`, `#2`); `or`s of r and s, `je` (`#3`, `#4`); the rest HMAC pad counters and 32-byte copy bounds |
+| `p256_public_key` | 366 -> 287 | 1 (was 2) | Clean. `call scalar_in_range; test %al,%al; je` |
+| `p256_ecdh` | 435 -> 355 | 11 (was 12) | Clean. One branch on the range bit; peer length and tag; coordinate range and on-curve limb compares on public peer data; q.inf |
+| `aes128_gcm_seal` | 96 -> 94 | 4 | Clean. Length overflow, allocation, capacity |
+| `hkdf_expand` | 257 -> 202 | 12 | Clean. Length and block counter; cmovs are min(32, rest) |
+| `sha256` | 6 -> 11 | 0 | Clean. Thin wrapper |
+| `sha256_cat` | 172 -> 171 | 9 | Clean. Lengths only |
+| `scalar_in_range` | new | 0 | Clean, closes F1: `setne %cl; test %rdx,%rdx; sete %al; and %cl,%al` |
+
+### Control
+
+`select_n` and `cond_sub` with inline `0u64.wrapping_sub` in place of `ct_mask`, in a scratch copy. The branches return in both builds, so the read can tell the two apart. The signer goes from 90 jumps (127 in `--emit=obj`) to 142, and `cond_sub` from 8 to 12. The edit also moves the workspace rlib from 2 units to 1, which is why a read is bound to its source.
+
+Workspace rlib:
+
+```
+ 12e2: movzbl 0x58(%rsp),%eax
+ 12e7: mov 0x18(%rsp),%ecx
+ 12eb: shl %cl,%al
+ 12ed: test $0x80,%al
+ 12ef: je 1300 <c::rsa::rsa_pss_sha256_sign+0x1300>
+ a6: cmp %r13,%rbp
+ a9: sbb %r12,%r12
+ ac: mov %r12,%rax
+ af: inc %rax
+ b2: je e5 <c::bignum::cond_sub+0xe5>
+```
+
+`--emit=obj`:
+
+```
+ 12e2: movzbl 0x58(%rsp),%eax
+ 12e7: mov 0x18(%rsp),%ecx
+ 12eb: shl %cl,%al
+ 12ed: test $0x80,%al
+ 12ef: je 1300 <c::rsa::rsa_pss_sha256_sign+0x1300>
+ b8: cmp %r13,%rbp
+ bb: sbb %r12,%r12
+ be: mov %r12,%rax
+ c1: inc %rax
+ c4: je f7 <c::bignum::cond_sub+0xf7>
+```
+
+---
+
+## Audit of e6c1c00
+
 Date: 2026-11-02. Toolchain: rustc 1.98.1 / LLVM 22.1.8, x86-64-unknown-linux-gnu, no `target-cpu`, no `.cargo/config`.
 
 ## Result
