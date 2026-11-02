@@ -618,9 +618,8 @@ fn four_cid_conn() -> Connection {
 
 /// Path 1's challenge is owed when a retirement clears its only CID: nothing can send it, so it
 /// adds no timer. The connection does not spin, the active path is unaffected, and once a CID
-/// comes back the challenge goes with its old start time and expires at once.
-#[test]
-fn owed_challenge_cleared_dcid() {
+/// comes back the challenge goes. Returns at that send, with its time.
+fn owed_challenge_sent_late() -> (Connection, u64) {
     let mut c = four_cid_conn();
     c.on_datagram(0, 1200, vec![one(1, vec![new_cid(1, 0, 0xd1), new_cid(2, 0, 0xd2)])], 20, &rnd(5));
     drain(&mut c, 20);
@@ -645,18 +644,33 @@ fn owed_challenge_cleared_dcid() {
     let v = settle(&mut c, t);
     assert!(v.iter().all(|d| d.path != 1));
 
-    // A CID for path 1: its challenge goes out now, and its old start time is past.
+    // A CID for path 1: its challenge goes out now.
     c.on_datagram(0, 1200, vec![one_on(5, &L0, vec![new_cid(4, 2, 0xd4)])], t + 1, &rnd(10));
     assert_eq!(c.path_dcid(1), Some(D(0xd4).to_vec()));
     let v = drain(&mut c, t + 1);
     assert!(v.iter().any(|d| d.path == 1 && has_challenge(d)));
     assert!(!c.challenge_owed(1));
+    (c, t + 1)
+}
+
+#[test]
+fn owed_challenge_cleared_dcid() {
+    let (mut c, sent) = owed_challenge_sent_late();
     // The PTO doubled at `t`: 3·2·PTO from the send.
-    let e = t + 1 + 6 * PTO;
+    let e = sent + 6 * PTO;
     c.on_timeout(e, &rnd(11));
     assert_eq!(c.path_state(1), Some(quic::path::PathState::Unvalidated));
     assert_eq!(c.active_path(), 0);
     settle(&mut c, e);
+}
+
+/// §8.2.4's timer starts at the send: a start time from when the challenge was drawn would expire
+/// it here, before the peer has had its 3·PTO.
+#[test]
+fn challenge_clock_starts_at_send() {
+    let (mut c, _) = owed_challenge_sent_late();
+    c.on_timeout(30 + 6 * PTO, &rnd(11));
+    assert_eq!(c.path_state(1), Some(quic::path::PathState::Validating));
 }
 
 // =============================================================================
@@ -685,6 +699,23 @@ fn ack_placed_within_small_budget() {
     let v = drain(&mut c, 25_030);
     assert!(v.iter().any(|d| d.path == 1 && has_ack(d)));
     assert!(c.path_budget(1).unwrap() < 522);
+}
+
+/// An ACK reports every remembered range or does not go: here one range would fit and all do not.
+#[test]
+fn ack_is_full_or_withheld() {
+    let mut c = established();
+    for n in (1..=41).step_by(2) {
+        c.on_datagram(0, 1200, vec![one(n, vec![Frame::Ping])], 20, &rnd(3));
+        drain(&mut c, 20);
+    }
+    drain(&mut c, 25_020);
+    let t = 25_030;
+    c.on_datagram(1, 30, vec![one(43, vec![stream(0, 0, b"GET", true)])], t, &rnd(5));
+    let v = settle(&mut c, t + 25_000);
+    assert!(v.iter().any(|d| d.path == 1 && has_challenge(d)));
+    assert!(!v.iter().any(has_ack));
+    assert!(c.path_budget(1).unwrap() >= 40);
 }
 
 /// The ACK that cannot be placed keeps no deadline, and the peer cannot repeat the stall.
