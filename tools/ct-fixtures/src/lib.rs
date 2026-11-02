@@ -1,7 +1,8 @@
 //! Constant-time checker fixtures, built only by `scripts/ct-check.sh` under ct-driver. Every
-//! `fx::` fn below except the `helper_*` ones is a root in `manifest.txt`. Positive controls
-//! must get `ok`; each negative control must be rejected with its stated kind (the comment
-//! after it) among the reported kinds. `expected.txt` holds the verdicts.
+//! `fx::` fn below except the `helper_*` and `cost_*` ones is a root in `manifest.txt`. Positive
+//! controls must get `ok`; each negative control must be rejected with its stated kind (the comment
+//! after it) among the reported kinds. `expected.txt` holds the verdicts. The `cost_*` fns are the
+//! `cost-root`s of `cost-manifest.txt`, with verdicts in `expected-cost.txt`.
 
 /// The shims at the paths the manifest loader accepts: `<crate>::ct::declassify` and `ct_fixtures::ct::ghost_fallback`.
 pub mod ct {
@@ -542,5 +543,121 @@ pub mod fx {
         // Unsupported: only shared `str` refs are the opaque `Unit`
         let _ = &s;
         1
+    }
+
+    // ------------------------------------------------------------------ cost fixtures
+
+    pub fn helper_cost_xor(s: &[u8]) -> u8 {
+        let n = s.len();
+        let mut acc = 0u8;
+        let mut i = 0usize;
+        while i < n {
+            acc ^= s[i];
+            i += 1;
+        }
+        acc
+    }
+
+    pub fn cost_pos_straight(a: u64, b: u64) -> u64 {
+        (a ^ b) & 0xff
+    }
+
+    pub fn cost_pos_loop_const(k: &[u8; 16]) -> u8 {
+        let mut acc = 0u8;
+        let mut i = 0usize;
+        while i < 16 {
+            acc ^= k[i];
+            i += 1;
+        }
+        acc
+    }
+
+    pub fn cost_pos_loop_len(s: &[u8]) -> u8 {
+        let n = s.len();
+        let mut acc = 0u8;
+        let mut i = 0usize;
+        while i < n {
+            acc ^= s[i];
+            i += 1;
+        }
+        acc
+    }
+
+    pub fn cost_pos_nested(s: &[u8]) -> u8 {
+        let n = s.len();
+        let mut acc = 0u8;
+        let mut i = 0usize;
+        while i < n {
+            let mut j = 0usize;
+            while j < n {
+                acc ^= s[j];
+                j += 1;
+            }
+            i += 1;
+        }
+        acc
+    }
+
+    pub fn cost_pos_early_exit(s: &[u8], x: u8) -> usize {
+        let n = s.len();
+        let mut i = 0usize;
+        while i < n {
+            if s[i] == x {
+                return i;
+            }
+            i += 1;
+        }
+        n
+    }
+
+    pub fn cost_pos_call(s: &[u8]) -> u8 {
+        helper_cost_xor(s) ^ 1
+    }
+
+    pub fn cost_neg_off_progress(s: &[u8]) -> usize {
+        // the counter advances by data, not by 1
+        let n = s.len();
+        let mut off = 0usize;
+        while off < n {
+            off = off + s[off] as usize + 1;
+        }
+        off
+    }
+
+    pub fn cost_neg_parsed_count(s: &[u8; 16]) -> u8 {
+        // a counted loop whose bound is an input byte
+        let n = s[0] as usize;
+        let mut acc = 0u8;
+        let mut i = 0usize;
+        while i < n {
+            acc ^= 1;
+            i += 1;
+        }
+        acc
+    }
+
+    pub fn cost_neg_recursion(n: u64) -> u64 {
+        if n == 0 {
+            0
+        } else {
+            cost_neg_recursion(n - 1)
+        }
+    }
+
+    pub fn cost_neg_while_true_break_on_data(s: &[u8; 16]) -> u8 {
+        // no counter: the only exit tests a byte, and the index is a fresh temp each time round
+        let mut a = 0u8;
+        loop {
+            let b = s[(a & 15) as usize];
+            if b == 0 {
+                return a;
+            }
+            a = b;
+        }
+    }
+
+    pub fn cost_neg_not_typed(x: &mut u8) -> &mut u8 {
+        // translates, but returning a `&mut` breaks `wf_body`: no bound without `check_program` `Ok`
+        x
     }
 }

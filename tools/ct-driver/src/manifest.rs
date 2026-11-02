@@ -5,6 +5,7 @@
 //!
 //! ```text
 //! root <path>                          CT root; must resolve in its crate
+//! cost-root <path>                     step-bound root (`CT_MODE=cost`); must resolve in its crate
 //! intr <path> <Intrinsic>              e.g. `VecPush`; `Wrapping` takes `<BinOp> <IntTy>`
 //! label <path> secret(a,b) public(c)   labels for bodies that can't carry attributes
 //! translate-crate <crate>              foreign crate whose bodies may be translated
@@ -29,6 +30,7 @@ use std::path::PathBuf;
 #[derive(Default)]
 pub struct Manifest {
     pub roots: Vec<String>,
+    pub cost_roots: Vec<String>,
     pub intr: Vec<(String, Intrinsic)>,
     pub labels: Vec<(String, Vec<String>, Vec<String>)>,
     pub translate_crates: Vec<String>,
@@ -62,6 +64,16 @@ fn parse(m: &mut Manifest, file: &str, text: &str, crates: &[String]) -> Result<
                     return Err(err("duplicate root"));
                 }
                 m.roots.push(path);
+            }
+            "cost-root" => {
+                if rest.is_empty() {
+                    return Err(err("malformed cost-root line"));
+                }
+                let path = rest.join(" ");
+                if m.cost_roots.contains(&path) {
+                    return Err(err("duplicate cost-root"));
+                }
+                m.cost_roots.push(path);
             }
             "intr" => {
                 let (path, k) = intr(rest).ok_or_else(|| err("malformed intr line"))?;
@@ -230,6 +242,7 @@ mod tests {
     fn parses_every_kind() {
         let m = p("# header\n\
                    root crypto::aes::aes128_encrypt_block   # trailing comment\n\
+                   cost-root <a::B as a::C>::parse   # predicted: bounded\n\
                    intr std::vec::Vec::push VecPush\n\
                    intr std::array::<impl [u8; 16]>::as_slice ArrayAsSlice\n\
                    intr core::num::<impl u32>::wrapping_add Wrapping Add U32\n\
@@ -240,6 +253,7 @@ mod tests {
                    \n")
         .unwrap();
         assert_eq!(m.roots, ["crypto::aes::aes128_encrypt_block"]);
+        assert_eq!(m.cost_roots, ["<a::B as a::C>::parse"]);
         assert_eq!(m.intr.len(), 4);
         assert!(m.intr[0].0 == "std::vec::Vec::push" && matches!(m.intr[0].1, Intrinsic::VecPush));
         assert!(m.intr[1].0 == "std::array::<impl [u8; 16]>::as_slice" && matches!(m.intr[1].1, Intrinsic::ArrayAsSlice));
@@ -261,6 +275,8 @@ mod tests {
         for (text, what) in [
             ("\nexclude crypto::x\n", "unknown kind"),
             ("\nroot\n", "malformed"),
+            ("\ncost-root\n", "malformed"),
+            ("\ncost-root crypto::a\ncost-root crypto::a\n", "duplicate"),
             ("\nintr std::vec::Vec::push\n", "malformed"),
             ("\nintr std::vec::Vec::push VecPop\n", "malformed"),
             ("\nintr core::num::<impl u32>::wrapping_add Wrapping Add\n", "malformed"),
