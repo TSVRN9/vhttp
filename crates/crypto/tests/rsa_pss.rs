@@ -3,6 +3,8 @@ use crypto::sha256::sha256;
 use rsa::traits::{PrivateKeyParts, PublicKeyParts};
 use rsa::BoxedUint;
 
+mod vecdata;
+
 fn h(s: &str) -> Vec<u8> {
     (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap()).collect()
 }
@@ -107,4 +109,39 @@ fn pss_zero_padded_fields() {
     let salt: Vec<u8> = (0..32).collect();
     let s = rsa_pss_sha256_sign(&ours, b"m", &salt).unwrap();
     assert_eq!(rsa_pss_sha256_sign(&padded, b"m", &salt).unwrap(), s);
+}
+
+#[test]
+fn cavp_pss_3072() {
+    let u = |s: &str| BoxedUint::from_be_slice_vartime(&vecdata::hex(s));
+    let (mut nh, mut eh, mut dh) = (String::new(), String::new(), String::new());
+    let mut count = 0;
+    for r in vecdata::rsp_records(&vecdata::data("nist/SigGenPSS_186-3.txt")) {
+        if r.contains_key("n") || r.contains_key("e") {
+            // n, then e and d, each in its own blank-line record; keep the latest
+            for (k, dst) in [("n", &mut nh), ("e", &mut eh), ("d", &mut dh)] {
+                if let Some(v) = r.get(k) {
+                    *dst = v.clone();
+                }
+            }
+            continue;
+        }
+        if r.get("mod").map(|m| m == "3072") != Some(true) || r.get("SHAAlg").map(|a| a == "SHA256") != Some(true) {
+            continue;
+        }
+        let salt = vecdata::hex(&r["SaltVal"]);
+        assert_eq!(salt.len(), 32);
+        let k = rsa::RsaPrivateKey::from_components(u(&nh), u(&eh), u(&dh), vec![]).unwrap();
+        let ours = RsaPrivateKey {
+            n: min(&k.n().to_be_bytes()),
+            e: min(&k.e().to_be_bytes()),
+            d: min(&k.d().to_be_bytes()),
+            p: min(&k.primes()[0].to_be_bytes()),
+            q: min(&k.primes()[1].to_be_bytes()),
+        };
+        let s = rsa_pss_sha256_sign(&ours, &vecdata::hex(&r["Msg"]), &salt).unwrap();
+        assert_eq!(s, vecdata::hex(&r["S"]), "vector {count}");
+        count += 1;
+    }
+    assert_eq!(count, 10);
 }
