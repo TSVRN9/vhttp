@@ -118,7 +118,7 @@ Parsers and serializers use `vest_lib` combinators, with round-trip and reject-m
 6. **Loss recovery & congestion control (RFC 9002).** RTT estimation, PTO, NewReno, plus proofs of invariants such as bytes in flight ≤ cwnd.
    **Exit:** proofs verify; behavior stays stable under induced loss.
 7. **Full conformance & browsers.** h3spec, h3i, quic-interop-runner (server role), Chrome and Firefox with a P-256 certificate from a local CA. The Duvet report has no unannotated MUSTs.
-8. **Verified analyses.** 8a CT checker (MIR level, crypto); 8b step bounds for parsers (attempt). Design: `docs/superpowers/specs/2026-10-28-phase-8-verified-ct-cost-design.md`.
+8. **Verified analyses.** 8a CT checker (MIR level, crypto); 8b step bounds for parsers: 19/36 targets bounded, measured against the pre-registered 27/38, 25/36 and X′ = 19/36 (`verify.sh` prints `cost 19/36`); bounds are core steps, not time or memory. Design: `docs/superpowers/specs/2026-10-28-phase-8-verified-ct-cost-design.md`.
    **Exit (8a):** `verify.sh` runs `scripts/ct-check.sh` and the declassify gate, and prints `ct ok (D declassify)`.
 
 ## Verification (whole project)
