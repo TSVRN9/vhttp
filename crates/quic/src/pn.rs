@@ -212,6 +212,7 @@ pub fn pn_encode_len(full: u64, largest_acked: Option<u64>) -> (r: Option<u8>)
         r matches Some(n) ==> pn_len_ok(full, largest_acked, n as nat) && forall|m: nat|
             1 <= m < n ==> !pn_len_ok(full, largest_acked, m),
         r is None ==> !pn_len_ok(full, largest_acked, 4),
+        r is None ==> forall|m: nat| 1 <= m <= 4 ==> !pn_len_ok(full, largest_acked, m),
 {
     let mut n: u8 = 1;
     while n <= 4

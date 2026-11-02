@@ -536,17 +536,22 @@ fn mtu_probe_failure_moves_off() {
     let v = drain(&mut c, t);
     assert!(v.iter().any(|d| d.path == 0 && has_stream(d)));
     assert!(!v.iter().any(|d| d.path == 1 && has_stream(d)));
-    // Step 6: `needs_mtu_probe` holds again, and a probe is what §14.2 still allows there.
-    let probes: Vec<&OutDatagram> = v.iter().filter(|d| d.path == 1).collect();
-    assert_eq!(probes.len(), 1);
-    assert!(has_frame(probes[0], &Frame::PathChallenge(slice8(&rnd(7), 96))));
-    assert_eq!(datagram_len(probes[0]), 1200);
+    assert!(!v.iter().any(|d| d.path == 1));
 
+    // The peer sends from there: one probe, §14.2's only traffic, and it stays off the path.
     c.on_datagram(1, 1200, vec![one(3, vec![Frame::Ping])], t + 1, &rnd(8));
     assert_eq!(c.active_path(), 0);
     c.stream_write(3, b"more", false).unwrap();
     let v = drain(&mut c, t + 1);
     assert!(!v.iter().any(|d| d.path == 1 && has_stream(d)));
+    let probes: Vec<&OutDatagram> = v.iter().filter(|d| d.path == 1).collect();
+    assert_eq!(probes.len(), 1);
+    assert!(has_frame(probes[0], &Frame::PathChallenge(slice8(&rnd(8), 96))));
+    assert_eq!(datagram_len(probes[0]), 1200);
+    // Its answer restores the path, and the peer's next packet migrates back.
+    c.on_datagram(1, 1200, vec![one(4, vec![Frame::PathResponse(slice8(&rnd(8), 96))])], t + 2, &rnd(9));
+    c.on_datagram(1, 1200, vec![one(5, vec![Frame::Ping])], t + 3, &rnd(9));
+    assert_eq!(c.active_path(), 1);
 }
 
 #[test]
@@ -646,12 +651,116 @@ fn owed_challenge_cleared_dcid() {
     let v = drain(&mut c, t + 1);
     assert!(v.iter().any(|d| d.path == 1 && has_challenge(d)));
     assert!(!c.challenge_owed(1));
-    // The PTO doubled at `t`: the old start time gives 30 + 3·2·PTO, a new one would be later.
-    let e = 30 + 6 * PTO;
+    // The PTO doubled at `t`: 3·2·PTO from the send.
+    let e = t + 1 + 6 * PTO;
     c.on_timeout(e, &rnd(11));
     assert_eq!(c.path_state(1), Some(quic::path::PathState::Unvalidated));
     assert_eq!(c.active_path(), 0);
     settle(&mut c, e);
+}
+
+// =============================================================================
+// `next_timeout` is later than `now` once settled (3d2 Task 3 review I1, I2)
+// =============================================================================
+
+fn has_ack(d: &OutDatagram) -> bool {
+    frames_on(d).iter().any(|f| matches!(f, Frame::Ack(_)))
+}
+
+/// A rebind on so small a datagram that its challenge spends the budget: no ACK can follow.
+fn ack_stalled() -> (Connection, u64) {
+    let mut c = established();
+    c.on_datagram(1, 15, vec![one(1, vec![stream(0, 0, b"GET", true)])], 30, &rnd(5));
+    let v = drain(&mut c, 30);
+    assert!(v.iter().any(|d| d.path == 1 && has_challenge(d)));
+    assert!(!v.iter().any(has_ack));
+    assert!(c.path_budget(1).unwrap() < 30);
+    (c, 30)
+}
+
+/// §13.2.1: one range fits a small budget, and it goes (review M3).
+#[test]
+fn ack_placed_within_small_budget() {
+    let (mut c, _) = rebound();
+    let v = drain(&mut c, 25_030);
+    assert!(v.iter().any(|d| d.path == 1 && has_ack(d)));
+    assert!(c.path_budget(1).unwrap() < 522);
+}
+
+/// The ACK that cannot be placed keeps no deadline, and the peer cannot repeat the stall.
+#[test]
+fn ack_stalled_by_budget_no_wake_loop() {
+    let (mut c, t0) = ack_stalled();
+    assert!(!settle(&mut c, t0 + 25_000).iter().any(has_ack));
+    let t = 30 + 3 * PTO;
+    c.on_timeout(t, &rnd(7));
+    assert_eq!(c.active_path(), 0);
+    settle(&mut c, t);
+    c.on_datagram(1, 1, vec![one(2, vec![Frame::Ping])], t + 1, &rnd(8));
+    assert_eq!(c.active_path(), 1);
+    settle(&mut c, t + 1 + 25_000);
+}
+
+/// A late wake finds two spaces' PTOs passed: both fire, so nothing is left at or before `now`.
+#[test]
+fn two_spaces_late_wake() {
+    let mut c = conn();
+    c.crypto_write(PacketKind::Initial, &[0xaa; 100]);
+    c.crypto_write(PacketKind::Handshake, &[0xbb; 100]);
+    drain(&mut c, 0);
+    assert!(c.sent_inflight_len(PacketKind::Initial) > 0);
+    assert!(c.sent_inflight_len(PacketKind::Handshake) > 0);
+    let now = 5_000_000;
+    c.on_timeout(now, &rnd(3));
+    assert_eq!(c.sent_inflight_len(PacketKind::Initial), 0);
+    assert_eq!(c.sent_inflight_len(PacketKind::Handshake), 0);
+    settle(&mut c, now);
+}
+
+/// The deadline holds wherever the ACK can go: budget arrives past it, and it goes at once.
+#[test]
+fn ack_after_budget() {
+    let (mut c, t0) = ack_stalled();
+    let t = t0 + 25_000;
+    settle(&mut c, t);
+    c.on_datagram(1, 200, vec![one(2, vec![Frame::Padding])], t + 1, &rnd(7));
+    assert!(settle(&mut c, t + 1).iter().any(|d| d.path == 1 && has_ack(d)));
+}
+
+/// Validation lifts the budget.
+#[test]
+fn ack_after_validation() {
+    let (mut c, t0) = ack_stalled();
+    settle(&mut c, t0);
+    c.on_datagram(1, 25, vec![one(2, vec![Frame::PathResponse(slice8(&rnd(5), 96))])], t0 + 1, &rnd(7));
+    assert!(settle(&mut c, t0 + 1).iter().any(|d| d.path == 1 && has_ack(d)));
+}
+
+/// A revert makes the ACK sendable on the fallback path in the same wake.
+#[test]
+fn ack_after_revert() {
+    let (mut c, t0) = ack_stalled();
+    settle(&mut c, t0);
+    let t = 30 + 3 * PTO;
+    c.on_timeout(t, &rnd(7));
+    assert_eq!(c.active_path(), 0);
+    assert!(settle(&mut c, t).iter().any(|d| d.path == 0 && has_ack(d)));
+}
+
+/// Review I5: a closed connection registers no new CIDs.
+#[test]
+fn closed_issues_no_cids() {
+    let mut c = conn();
+    c.on_peer_params(&ptp(), 10);
+    c.on_handshake_complete(b"h3", 10, &[7u8; 129]);
+    drain(&mut c, 10);
+    let mut u = Vec::new();
+    c.poll_cid_updates(&mut u);
+    c.on_timeout(40_000_000, &rnd(3));
+    assert!(c.is_closed());
+    let mut u = Vec::new();
+    c.poll_cid_updates(&mut u);
+    assert!(u.iter().all(|x| !matches!(x, quic::route::CidUpdate::Add(_))));
 }
 
 // =============================================================================
