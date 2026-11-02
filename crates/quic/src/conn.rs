@@ -219,7 +219,6 @@ pub struct Connection {
     #[allow(dead_code)]  // Read from Task 2a-i.
     spin: bool,
     /// Challenge slices of `rand` used in this call; every pub fn that takes `rand` resets it.
-    #[allow(dead_code)]  // Read from Task 1b.
     chal_used: usize,
     /// Only `wf` and `out_log()` read it, which a plain `cargo build` erases.
     #[allow(dead_code)]
@@ -341,6 +340,9 @@ impl Connection {
             ) is Some
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.5
+    //# Similarly, an endpoint MUST NOT reuse a connection ID when sending to
+    //# more than one destination address.
     /// The active path has a DCID, every DCID is active (§5.1.2 "MUST stop using") and used, and
     /// §9.5: two paths share a DCID only if the peer used the same CID on both (its MAY: the
     /// peer used the same CID from a new address, NAT rebinding).
@@ -766,18 +768,34 @@ impl Connection {
             self.wf_log_paths(),
             self.wf_dcids(),
     {
-        self.paths.lemma_wf();
+        let t = o.paths.amp_trace(id);
+        assert(t.push(e).drop_last() =~= t);
         assert(o.paths.has(id));
+        self.lemma_path_edit(o, id);
+        self.lemma_dcids_same(o, id);
+    }
+
+    /// `self` is `o` with path `id` edited, its sends unchanged.
+    proof fn lemma_path_edit(&self, o: Connection, id: PathId)
+        requires
+            o.wf_amp(),
+            o.wf_log_paths(),
+            o.paths.wf(),
+            self.paths.wf(),
+            kept(o.paths, self.paths, id),
+            sent_entries(self.paths.amp_trace(id)) == sent_entries(o.paths.amp_trace(id)),
+            self.out_log@ == o.out_log@,
+        ensures
+            self.wf_amp(),
+            self.wf_log_paths(),
+    {
+        self.paths.lemma_wf();
         assert(self.wf_amp()) by {
             assert forall|q: PathId| #[trigger] self.paths.has(q) implies amp_ok(
                 self.paths.amp_trace(q),
             ) && sent_entries(self.paths.amp_trace(q)) == log_sends(self.out_log@, q) by {
                 assert(path_ok(self.paths.path(q)));
                 assert(o.paths.has(q));
-                if q == id {
-                    let t = o.paths.amp_trace(id);
-                    assert(t.push(e).drop_last() =~= t);
-                }
             }
         }
         assert(self.wf_log_paths()) by {
@@ -787,6 +805,20 @@ impl Connection {
                 assert(o.paths.index_spec(self.out_log@[i].path) is Some);
             }
         }
+    }
+
+    /// `self` is `o` with path `id` edited, its DCID and `peer_used` unchanged.
+    proof fn lemma_dcids_same(&self, o: Connection, id: PathId)
+        requires
+            o.wf_dcids(),
+            kept(o.paths, self.paths, id),
+            self.paths.path(id).dcid == o.paths.path(id).dcid,
+            self.paths.path(id).peer_used == o.paths.path(id).peer_used,
+            self.peer_cids == o.peer_cids,
+        ensures
+            self.paths.has(id) == o.paths.has(id),
+            self.wf_dcids(),
+    {
         assert(self.wf_dcids()) by {
             assert forall|q: PathId| #[trigger]
                 self.paths.has(q) implies (self.paths.path(q).dcid matches Some(c) ==> used_cid(
@@ -916,6 +948,7 @@ impl Connection {
             PacketKind::OneRtt => self.recv_1.on_packet(pn, eliciting, now),
         }
         self.idle.on_packet_processed(now);
+        self.note_peer_used(path, dcid.as_slice());
         match k {
             PacketKind::Handshake => {
                 if !matches!(self.paths.state(self.hs_path), PathState::Validated) {
@@ -923,7 +956,7 @@ impl Connection {
                 }
             },
             PacketKind::OneRtt => {
-                self.after_one_rtt(path, dcid.as_slice(), non_probing, pn, now, rand);
+                self.after_one_rtt(path, non_probing, pn, now, rand);
             },
             PacketKind::Initial => {},
         }
@@ -1144,9 +1177,8 @@ impl Connection {
     /// One of the nine stream-layer frames. On `Err` the connection is already Closing with
     /// `streams` None and that code: `Streams::on_frame`'s `Err` sets `failed()`, which `wf`
     /// excludes, so `wf` could not otherwise hold on return. `on_datagram`'s `close_internal` is
-    /// then a no-op. (Task 1b writes the body.)
+    /// then a no-op.
     #[verifier::spinoff_prover]
-    #[allow(unused_variables)]  // Task 1b writes the body.
     fn on_stream_frame(&mut self, f: &Frame, now: u64) -> (r: Result<(), u64>)
         requires
             old(self).wf(),
@@ -1160,13 +1192,27 @@ impl Connection {
             r matches Err(c) ==> c <= VARINT_MAX,
             r is Err ==> !(final(self).phase_spec() is Open) && final(self).streams is None,
     {
+        // Before `Streams::on_frame`: after its `Err`, `wf` no longer holds.
+        let pto = self.pto();
+        let ghost s0 = self.streams->0;
+        let r = match &mut self.streams {
+            Some(s) => s.on_frame(f, &mut self.events),
+            None => Ok(()),
+        };
+        if let Err(c) = r {
+            proof {
+                lemma_frame_err(s0, f@, r);
+            }
+            let none: Vec<u8> = Vec::new();
+            self.lc.enter_closing(now, pto, false, c, none.as_slice());
+            self.streams = None;
+            return Err(c);
+        }
         Ok(())
     }
 
-    /// NEW_CONNECTION_ID or RETIRE_CONNECTION_ID, in a packet with this DCID. (Task 1b writes the
-    /// body.)
+    /// NEW_CONNECTION_ID or RETIRE_CONNECTION_ID, in a packet with this DCID.
     #[verifier::spinoff_prover]
-    #[allow(unused_variables)]  // Task 1b writes the body.
     fn on_cid_frame(&mut self, dcid: &[u8], f: &Frame, rand: &[u8; RAND_LEN]) -> (r: Result<(), u64>)
         requires
             old(self).wf(),
@@ -1178,12 +1224,832 @@ impl Connection {
             final(self).frames_kept(*old(self)),
             r matches Err(c) ==> c <= VARINT_MAX,
     {
-        Ok(())
+        match f {
+            Frame::NewConnectionId { seq, retire_prior_to, cid, reset_token } => {
+                let ghost s0 = *self;
+                let limit = self.local_tp.active_connection_id_limit;
+                let r = self.peer_cids.on_new_cid(
+                    *seq,
+                    *retire_prior_to,
+                    cid.as_slice(),
+                    *reset_token,
+                    limit,
+                );
+                if let Err(c) = r {
+                    return Err(c);
+                }
+                proof {
+                    self.lemma_after_new_cid(s0);
+                }
+                self.rewrite_stale(rand);
+                Ok(())
+            },
+            Frame::RetireConnectionId(s) => match self.local_cids.on_retire(*s, dcid) {
+                Err(c) => Err(c),
+                Ok(None) => Ok(()),
+                Ok(Some(c)) => {
+                    self.cid_updates.push(CidUpdate::Remove(slice_to_vec(c.as_slice())));
+                    proof {
+                        assert(cids_only(self.cid_updates@));
+                    }
+                    // §5.1.1 SHOULD replace.
+                    self.issue_cids(rand);
+                    Ok(())
+                },
+            },
+            _ => Ok(()),
+        }
     }
 
-    /// PATH_CHALLENGE or PATH_RESPONSE, arriving on `path`. (Task 1b writes the body.)
+    /// `self` is `o` with `on_new_cid` applied: only stale paths can break `wf_dcids`.
+    proof fn lemma_after_new_cid(&self, o: Connection)
+        requires
+            o.wf(),
+            self.peer_cids.wf(),
+            entries_survive(o.peer_cids.entries(), self.peer_cids.entries()),
+            self.paths == o.paths,
+            self.out_log@ == o.out_log@,
+            self.wf_parts(),
+            self.wf_streams(),
+            self.wf_pn(),
+        ensures
+            self.wf_rest(),
+            self.dcids_weak(),
+    {
+        let e0 = o.peer_cids.entries();
+        let e1 = self.peer_cids.entries();
+        assert forall|q: PathId, i: int|
+            #[trigger] self.paths.has(q) && 0 <= i < e1.len() && !(#[trigger] e1[i]).3 implies self.paths.path(q).dcid
+            != Some(e1[i].1@) by {
+            if self.paths.path(q).dcid == Some(e1[i].1@) {
+                assert(o.paths.has(q));
+                let k = choose|k: int| 0 <= k < e0.len() && (#[trigger] e0[k]).1@ == e1[i].1@ && e0[k].3;
+                assert(e0[k].1@ == e1[i].1@ ==> e0[k].0 == e1[i].0);
+            }
+        }
+        assert forall|q1: PathId, q2: PathId| #[trigger] self.paths.has(q1) && #[trigger] self.paths.has(q2) implies self.pair_ok(q1, q2) by {
+            if q1 != q2 {
+                assert(o.paths.has(q1));
+                assert(o.paths.has(q2));
+            }
+        }
+        assert(o.paths.path(o.paths.active_spec()).dcid is Some);
+    }
+
+    // =========================================================================
+    // The peer's connection IDs on the paths (§9.5)
+    // =========================================================================
+
+    /// `wf` without `wf_dcids`.
+    closed spec fn wf_rest(&self) -> bool {
+        &&& self.wf_parts()
+        &&& self.wf_streams()
+        &&& self.wf_amp()
+        &&& self.wf_pn()
+        &&& self.wf_log_paths()
+    }
+
+    /// No path holds an unused peer CID, so `use_next()` gives a path a CID of its own. It holds
+    /// while a path still holds a retired CID, when `wf_dcids` does not.
+    closed spec fn unused_unheld(&self) -> bool {
+        forall|q: PathId, i: int|
+            #[trigger] self.paths.has(q) && 0 <= i < self.peer_cids.entries().len()
+                && !(#[trigger] self.peer_cids.entries()[i]).3 ==> self.paths.path(q).dcid != Some(
+                self.peer_cids.entries()[i].1@,
+            )
+    }
+
+    /// §9.5 for two paths.
+    closed spec fn pair_ok(&self, q1: PathId, q2: PathId) -> bool {
+        self.paths.path(q1).dcid is Some && self.paths.path(q1).dcid == self.paths.path(q2).dcid
+            ==> self.paths.path(q1).peer_used == self.paths.path(q2).peer_used
+    }
+
+    closed spec fn pairs_except(&self, x: PathId) -> bool {
+        forall|q1: PathId, q2: PathId|
+            #[trigger] self.paths.has(q1) && #[trigger] self.paths.has(q2) && q1 != x && q2 != x
+                ==> self.pair_ok(q1, q2)
+    }
+
+    /// `wf_dcids` but for "every DCID is active".
+    closed spec fn dcids_weak(&self) -> bool {
+        &&& self.paths.path(self.paths.active_spec()).dcid is Some
+        &&& self.unused_unheld()
+        &&& forall|q1: PathId, q2: PathId|
+            #[trigger] self.paths.has(q1) && #[trigger] self.paths.has(q2) ==> self.pair_ok(q1, q2)
+    }
+
+    /// `q` holds no retired CID.
+    closed spec fn not_stale(&self, q: PathId) -> bool {
+        self.paths.path(q).dcid matches Some(c) ==> peer_has_cid(self.peer_cids.entries(), c)
+    }
+
+    proof fn lemma_weak_of_wf(&self)
+        requires
+            self.wf(),
+        ensures
+            self.dcids_weak(),
+            forall|q: PathId| #[trigger] self.paths.has(q) ==> self.not_stale(q),
+    {
+        let e = self.peer_cids.entries();
+        assert forall|q: PathId, i: int|
+            #[trigger] self.paths.has(q) && 0 <= i < e.len() && !(#[trigger] e[i]).3 implies self.paths.path(q).dcid
+            != Some(e[i].1@) by {
+            self.lemma_unused_cid_unheld(i, q);
+        }
+        assert forall|q1: PathId, q2: PathId| #[trigger] self.paths.has(q1) && #[trigger] self.paths.has(q2) implies self.pair_ok(q1, q2) by {}
+        assert forall|q: PathId| #[trigger] self.paths.has(q) implies self.not_stale(q) by {
+            if let Some(c) = self.paths.path(q).dcid {
+                let i = choose|i: int| 0 <= i < e.len() && (#[trigger] e[i]).1@ == c && e[i].3;
+                assert(e[i].1@ == c);
+            }
+        }
+    }
+
+    proof fn lemma_wf_of_weak(&self)
+        requires
+            self.dcids_weak(),
+            forall|q: PathId| #[trigger] self.paths.has(q) ==> self.not_stale(q),
+        ensures
+            self.wf_dcids(),
+    {
+        let e = self.peer_cids.entries();
+        assert forall|q: PathId| #[trigger] self.paths.has(q) implies (self.paths.path(q).dcid matches Some(c)
+            ==> used_cid(e, c)) by {
+            if let Some(c) = self.paths.path(q).dcid {
+                assert(self.not_stale(q));
+                let i = choose|i: int| 0 <= i < e.len() && (#[trigger] e[i]).1@ == c;
+                assert(e[i].3);
+            }
+        }
+        assert forall|q1: PathId, q2: PathId|
+            #[trigger] self.paths.has(q1) && #[trigger] self.paths.has(q2) && q1 != q2
+                && self.paths.path(q1).dcid is Some && self.paths.path(q1).dcid == self.paths.path(
+                q2,
+            ).dcid implies self.paths.path(q1).peer_used == self.paths.path(q2).peer_used by {
+            assert(self.pair_ok(q1, q2));
+        }
+    }
+
+    /// One edit of path `q`'s DCID keeps `unused_unheld`, if the new DCID is not an unused CID.
+    proof fn lemma_unheld_edit(&self, o: Connection, q: PathId)
+        requires
+            o.unused_unheld(),
+            kept(o.paths, self.paths, q),
+            self.peer_cids == o.peer_cids,
+            forall|i: int|
+                0 <= i < self.peer_cids.entries().len() && !(#[trigger] self.peer_cids.entries()[i]).3
+                    ==> self.paths.path(q).dcid != Some(self.peer_cids.entries()[i].1@),
+        ensures
+            self.unused_unheld(),
+    {
+        let e = self.peer_cids.entries();
+        assert forall|r: PathId, i: int|
+            #[trigger] self.paths.has(r) && 0 <= i < e.len() && !(#[trigger] e[i]).3 implies self.paths.path(r).dcid
+            != Some(e[i].1@) by {
+            if r != q {
+                assert(o.paths.has(r));
+            }
+        }
+    }
+
+    /// `Paths::set_dcid`, keeping everything but `wf_dcids`.
     #[verifier::spinoff_prover]
-    #[allow(unused_variables)]  // Task 1b writes the body.
+    fn put_dcid(&mut self, q: PathId, d: Option<&[u8]>)
+        requires
+            old(self).wf_rest(),
+            old(self).paths.has(q),
+            d matches Some(c) ==> c@.len() <= MAX_CID_LEN,
+        ensures
+            final(self).wf_rest(),
+            final(self).frames_kept(*old(self)),
+            final(self).peer_cids == old(self).peer_cids,
+            kept(old(self).paths, final(self).paths, q),
+            final(self).paths.path(q) == (SpecPath {
+                dcid: opt_slice_view(d),
+                ..old(self).paths.path(q)
+            }),
+    {
+        let ghost s0 = *self;
+        self.paths.set_dcid(q, d);
+        proof {
+            self.lemma_path_edit(s0, q);
+        }
+    }
+
+    /// §9.5: `q` takes `d`, which is no unused CID, and which any other path holds only if the peer
+    /// used one CID on both (its MAY: the peer used the same CID from a new address).
+    #[verifier::spinoff_prover]
+    fn hold_dcid(&mut self, q: PathId, d: Option<&[u8]>)
+        requires
+            old(self).wf_rest(),
+            old(self).dcids_weak(),
+            old(self).paths.has(q),
+            q == old(self).paths.active_spec() ==> d is Some,
+            d matches Some(c) ==> {
+                &&& c@.len() <= MAX_CID_LEN
+                &&& forall|i: int|
+                    0 <= i < old(self).peer_cids.entries().len() && !(
+                    #[trigger] old(self).peer_cids.entries()[i]).3 ==> old(
+                        self,
+                    ).peer_cids.entries()[i].1@ != c@
+                &&& forall|r: PathId|
+                    #[trigger] old(self).paths.has(r) && r != q && old(self).paths.path(r).dcid == Some(
+                        c@,
+                    ) ==> old(self).paths.path(r).peer_used == old(self).paths.path(q).peer_used
+            },
+        ensures
+            final(self).wf_rest(),
+            final(self).dcids_weak(),
+            final(self).frames_kept(*old(self)),
+            final(self).peer_cids == old(self).peer_cids,
+            kept(old(self).paths, final(self).paths, q),
+            final(self).paths.path(q).dcid == opt_slice_view(d),
+    {
+        let ghost s0 = *self;
+        self.put_dcid(q, d);
+        proof {
+            self.lemma_unheld_edit(s0, q);
+            assert forall|q1: PathId, q2: PathId| #[trigger] self.paths.has(q1) && #[trigger] self.paths.has(q2) implies self.pair_ok(q1, q2) by {
+                assert(s0.paths.has(q1));
+                assert(s0.paths.has(q2));
+                assert(s0.pair_ok(q1, q2));
+            }
+        }
+    }
+
+    /// `self` is `o` with `use_next`'s mark on `c`: no path holds `c`, and CIDs stay active.
+    proof fn lemma_marked(&self, o: Connection, c: Seq<u8>)
+        requires
+            o.peer_cids.wf(),
+            self.peer_cids.wf(),
+            o.unused_unheld(),
+            self.paths == o.paths,
+            exists|i: int|
+                0 <= i < o.peer_cids.entries().len() && !(#[trigger] o.peer_cids.entries()[i]).3 && c
+                    == o.peer_cids.entries()[i].1@ && self.peer_cids.entries() == o.peer_cids.entries().update(
+                    i,
+                    (
+                        o.peer_cids.entries()[i].0,
+                        o.peer_cids.entries()[i].1,
+                        o.peer_cids.entries()[i].2,
+                        true,
+                    ),
+                ),
+        ensures
+            self.unused_unheld(),
+            c.len() <= MAX_CID_LEN,
+            forall|r: PathId| #[trigger] o.paths.has(r) ==> o.paths.path(r).dcid != Some(c),
+            forall|i: int|
+                0 <= i < self.peer_cids.entries().len() && !(#[trigger] self.peer_cids.entries()[i]).3
+                    ==> self.peer_cids.entries()[i].1@ != c,
+            forall|x: Seq<u8>| #[trigger]
+                peer_has_cid(self.peer_cids.entries(), x) == peer_has_cid(o.peer_cids.entries(), x),
+    {
+        let e0 = o.peer_cids.entries();
+        let e1 = self.peer_cids.entries();
+        let w = choose|w: int|
+            0 <= w < e0.len() && !(#[trigger] e0[w]).3 && c == e0[w].1@ && e1 == e0.update(
+                w,
+                (e0[w].0, e0[w].1, e0[w].2, true),
+            );
+        o.peer_cids.lemma_wf();
+        assert(e0[w].1@.len() <= MAX_CID_LEN);
+        assert forall|r: PathId| #[trigger] o.paths.has(r) implies o.paths.path(r).dcid != Some(c) by {
+            assert(!e0[w].3);
+        }
+        assert forall|q: PathId, i: int|
+            #[trigger] self.paths.has(q) && 0 <= i < e1.len() && !(#[trigger] e1[i]).3 implies self.paths.path(q).dcid
+            != Some(e1[i].1@) by {
+            assert(i != w);
+            assert(e1[i] == e0[i]);
+            assert(!e0[i].3);
+        }
+        assert forall|i: int| 0 <= i < e1.len() && !(#[trigger] e1[i]).3 implies e1[i].1@ != c by {
+            assert(i != w);
+            assert(e1[i] == e0[i]);
+            if i < w {
+                assert(e0[i].1@ != e0[w].1@);
+            } else {
+                assert(e0[w].1@ != e0[i].1@);
+            }
+        }
+        assert forall|x: Seq<u8>| #[trigger] peer_has_cid(e1, x) == peer_has_cid(e0, x) by {
+            if peer_has_cid(e1, x) {
+                let i = choose|i: int| 0 <= i < e1.len() && (#[trigger] e1[i]).1@ == x;
+                assert(e0[i].1@ == x);
+            }
+            if peer_has_cid(e0, x) {
+                let i = choose|i: int| 0 <= i < e0.len() && (#[trigger] e0[i]).1@ == x;
+                assert(e1[i].1@ == x);
+            }
+        }
+    }
+
+    /// `q` takes an unused CID, its own; false, with nothing changed, if there is none.
+    #[verifier::spinoff_prover]
+    fn fresh_dcid(&mut self, q: PathId) -> (r: bool)
+        requires
+            old(self).wf_rest(),
+            old(self).dcids_weak(),
+            old(self).paths.has(q),
+        ensures
+            final(self).wf_rest(),
+            final(self).dcids_weak(),
+            final(self).frames_kept(*old(self)),
+            kept(old(self).paths, final(self).paths, q),
+            forall|x: Seq<u8>| #[trigger]
+                peer_has_cid(final(self).peer_cids.entries(), x) == peer_has_cid(
+                    old(self).peer_cids.entries(),
+                    x,
+                ),
+            r ==> final(self).not_stale(q) && final(self).paths.path(q).dcid is Some,
+            !r ==> final(self).paths == old(self).paths && final(self).peer_cids == old(self).peer_cids,
+    {
+        let ghost s0 = *self;
+        match self.peer_cids.use_next() {
+            None => false,
+            Some(c) => {
+                proof {
+                    self.lemma_marked(s0, c@);
+                }
+                self.hold_dcid(q, Some(c.as_slice()));
+                true
+            },
+        }
+    }
+
+    // ponytail: one spin bit per connection, so a redraw for a new path's CID also flips the active path's bit (§17.4 is RECOMMENDED); per-path spin if spin-bit observers ever matter.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.5
+    //# Similarly, an endpoint MUST NOT reuse a connection ID when sending to
+    //# more than one destination address.
+    /// Gives `q`, if it has none, the active path's DCID if the peer used one CID on both (§9.5
+    /// MAY, NAT rebinding), else an unused CID. With neither it stays None: nothing is sent to `q`.
+    #[verifier::spinoff_prover]
+    fn assign_dcid(&mut self, q: PathId, rand: &[u8; RAND_LEN])
+        requires
+            old(self).wf(),
+            old(self).paths.has(q),
+        ensures
+            final(self).wf(),
+            final(self).frames_kept(*old(self)),
+            final(self).paths.active_spec() == old(self).paths.active_spec(),
+    {
+        if self.paths.dcid(q).is_some() {
+            return;
+        }
+        let ghost s0 = *self;
+        proof {
+            s0.lemma_weak_of_wf();
+            s0.paths.lemma_wf();
+        }
+        let a = self.paths.active();
+        if opt_eq(self.paths.peer_used(q), self.paths.peer_used(a)) {
+            let d = self.active_dcid(a);
+            self.hold_dcid(q, Some(d.as_slice()));
+            proof {
+                assert(s0.not_stale(a));
+            }
+        } else if self.fresh_dcid(q) {
+            self.spin = rand[128] & 1 == 1;
+        }
+        proof {
+            assert forall|r: PathId| #[trigger] self.paths.has(r) implies self.not_stale(r) by {
+                assert(s0.paths.has(r));
+                assert(s0.not_stale(r));
+            }
+            self.lemma_wf_of_weak();
+        }
+    }
+
+    /// A copy of the DCID of the active path `a`, to hand to another path: no unused CID, and
+    /// §9.5's pair rule makes every holder agree with `a`.
+    #[verifier::spinoff_prover]
+    fn active_dcid(&self, a: PathId) -> (d: Vec<u8>)
+        requires
+            self.wf_rest(),
+            self.dcids_weak(),
+            a == self.paths.active_spec(),
+        ensures
+            self.paths.path(a).dcid == Some(d@),
+            d@.len() <= MAX_CID_LEN,
+            forall|i: int|
+                0 <= i < self.peer_cids.entries().len() && !(#[trigger] self.peer_cids.entries()[i]).3
+                    ==> self.peer_cids.entries()[i].1@ != d@,
+            forall|r: PathId|
+                #[trigger] self.paths.has(r) && self.paths.path(r).dcid == Some(d@)
+                    ==> self.paths.path(r).peer_used == self.paths.path(a).peer_used,
+    {
+        proof {
+            self.paths.lemma_wf();
+        }
+        let d = match self.paths.dcid(a) {
+            Some(x) => slice_to_vec(x),
+            None => Vec::new(),
+        };
+        proof {
+            assert(path_ok(self.paths.path(a)));
+            assert forall|r: PathId| #[trigger]
+                self.paths.has(r) && self.paths.path(r).dcid == Some(d@) implies self.paths.path(r).peer_used
+                == self.paths.path(a).peer_used by {
+                assert(self.pair_ok(r, a));
+            }
+        }
+        d
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.5
+    //# Similarly, an endpoint MUST NOT reuse a connection ID when sending to
+    //# more than one destination address.
+    /// Only pairs with `path` can break §9.5; each is split by clearing its non-active member,
+    /// which `assign_dcid` re-assigns later. At most `MAX_PATHS` steps.
+    #[verifier::spinoff_prover]
+    fn repair_pairs(&mut self, path: PathId)
+        requires
+            old(self).wf_rest(),
+            old(self).paths.path(old(self).paths.active_spec()).dcid is Some,
+            old(self).unused_unheld(),
+            old(self).pairs_except(path),
+            old(self).paths.has(path),
+        ensures
+            final(self).wf_rest(),
+            final(self).dcids_weak(),
+            final(self).frames_kept(*old(self)),
+            final(self).peer_cids == old(self).peer_cids,
+            final(self).paths.active_spec() == old(self).paths.active_spec(),
+            path == old(self).paths.active_spec() ==> final(self).paths.path(path).dcid == old(
+                self,
+            ).paths.path(path).dcid,
+            forall|q: PathId| #[trigger]
+                old(self).not_stale(q) && old(self).paths.has(q) ==> final(self).not_stale(q),
+    {
+        let n = self.paths.len();
+        let ghost ids = self.paths.ids();
+        let mut i: usize = 0;
+        while i < n
+            invariant
+                n == ids.len(),
+                i <= n,
+                self.wf_rest(),
+                self.paths.ids() == ids,
+                self.paths.has(path),
+                self.frames_kept(*old(self)),
+                self.peer_cids == old(self).peer_cids,
+                self.paths.active_spec() == old(self).paths.active_spec(),
+                self.paths.path(self.paths.active_spec()).dcid is Some,
+                self.unused_unheld(),
+                self.pairs_except(path),
+                path == self.paths.active_spec() ==> self.paths.path(path).dcid == old(
+                    self,
+                ).paths.path(path).dcid,
+                forall|k: int| 0 <= k < i ==> self.pair_ok(#[trigger] ids[k], path),
+                forall|q: PathId| #[trigger]
+                    old(self).not_stale(q) && old(self).paths.has(q) ==> self.not_stale(q),
+            decreases n - i,
+        {
+            let q = self.path_at(i);
+            if self.pair_conflict(q, path) {
+                self.split_pair(q, path, Ghost(i as int));
+            }
+            i += 1;
+        }
+        proof {
+            assert forall|q1: PathId, q2: PathId| #[trigger] self.paths.has(q1) && #[trigger] self.paths.has(q2) implies self.pair_ok(q1, q2) by {
+                if q1 == path && q2 != path {
+                    let k = choose|k: int| 0 <= k < ids.len() && ids[k] == q2;
+                    assert(self.pair_ok(ids[k], path));
+                } else if q2 == path && q1 != path {
+                    let k = choose|k: int| 0 <= k < ids.len() && ids[k] == q1;
+                    assert(self.pair_ok(ids[k], path));
+                }
+            }
+        }
+    }
+
+    /// One step of `repair_pairs`: the conflict between `q` and `path` goes, by clearing the
+    /// non-active member.
+    #[verifier::spinoff_prover]
+    fn split_pair(&mut self, q: PathId, path: PathId, Ghost(i): Ghost<int>)
+        requires
+            old(self).wf_rest(),
+            old(self).paths.has(q),
+            old(self).paths.has(path),
+            old(self).paths.path(old(self).paths.active_spec()).dcid is Some,
+            old(self).unused_unheld(),
+            old(self).pairs_except(path),
+            !old(self).pair_ok(q, path),
+            old(self).paths.ids()[i] == q,
+            0 <= i < old(self).paths.ids().len(),
+        ensures
+            final(self).wf_rest(),
+            final(self).frames_kept(*old(self)),
+            final(self).peer_cids == old(self).peer_cids,
+            final(self).paths.active_spec() == old(self).paths.active_spec(),
+            final(self).paths.path(final(self).paths.active_spec()).dcid is Some,
+            final(self).unused_unheld(),
+            final(self).pairs_except(path),
+            final(self).pair_ok(q, path),
+            path == old(self).paths.active_spec() ==> final(self).paths.path(path).dcid == old(
+                self,
+            ).paths.path(path).dcid,
+            forall|r: PathId| #[trigger]
+                old(self).pair_ok(r, path) ==> final(self).pair_ok(r, path),
+            forall|r: PathId| #[trigger]
+                old(self).not_stale(r) ==> final(self).not_stale(r),
+    {
+        let ghost s0 = *self;
+        let x = if path == self.paths.active() {
+            q
+        } else {
+            path
+        };
+        self.put_dcid(x, None);
+        proof {
+            self.lemma_unheld_edit(s0, x);
+            assert forall|q1: PathId, q2: PathId|
+                #[trigger] self.paths.has(q1) && #[trigger] self.paths.has(q2) && q1 != path && q2 != path implies self.pair_ok(q1, q2) by {
+                assert(s0.paths.has(q1));
+                assert(s0.paths.has(q2));
+                assert(s0.pair_ok(q1, q2));
+            }
+        }
+    }
+
+    /// Entry `i` of the path table.
+    fn path_at(&self, i: usize) -> (q: PathId)
+        requires
+            i < self.paths.ids().len(),
+        ensures
+            q == self.paths.ids()[i as int],
+            self.paths.has(q),
+    {
+        let q = self.paths.id_at(i);
+        proof {
+            assert(self.paths.ids()[i as int] == q);
+        }
+        q
+    }
+
+    /// `q1` and `q2` share a DCID though the peer used different CIDs on them.
+    #[verifier::spinoff_prover]
+    fn pair_conflict(&self, q1: PathId, q2: PathId) -> (r: bool)
+        requires
+            self.paths.wf(),
+            self.paths.has(q1),
+            self.paths.has(q2),
+        ensures
+            r == !self.pair_ok(q1, q2),
+    {
+        self.paths.dcid(q1).is_some() && opt_eq(self.paths.dcid(q1), self.paths.dcid(q2)) && !opt_eq(
+            self.paths.peer_used(q1),
+            self.paths.peer_used(q2),
+        )
+    }
+
+    /// Whether `q` holds a retired CID.
+    #[verifier::spinoff_prover]
+    fn is_stale(&self, q: PathId) -> (r: bool)
+        requires
+            self.paths.wf(),
+            self.paths.has(q),
+        ensures
+            r == !self.not_stale(q),
+    {
+        match self.paths.dcid(q) {
+            Some(c) => !self.peer_cids.is_active(c),
+            None => false,
+        }
+    }
+
+    /// §9.5: the peer used `path`'s DCID `dcid` on this packet: records it, and splits any pair it
+    /// breaks (the peer rotating CIDs on one member of a NAT-rebinding pair).
+    #[verifier::spinoff_prover]
+    fn note_peer_used(&mut self, path: PathId, dcid: &[u8])
+        requires
+            old(self).wf(),
+            old(self).paths.has(path),
+            dcid@.len() <= MAX_CID_LEN,
+        ensures
+            final(self).wf(),
+            final(self).frames_kept(*old(self)),
+    {
+        let ghost s0 = *self;
+        proof {
+            s0.lemma_weak_of_wf();
+        }
+        self.paths.set_peer_used(path, dcid);
+        proof {
+            self.lemma_path_edit(s0, path);
+            self.lemma_unheld_edit(s0, path);
+            assert forall|q1: PathId, q2: PathId|
+                #[trigger] self.paths.has(q1) && #[trigger] self.paths.has(q2) && q1 != path && q2 != path implies self.pair_ok(q1, q2) by {
+                assert(s0.paths.has(q1));
+                assert(s0.paths.has(q2));
+                assert(s0.pair_ok(q1, q2));
+            }
+            assert forall|q: PathId| #[trigger] s0.paths.has(q) implies self.not_stale(q) by {
+                assert(s0.not_stale(q));
+            }
+        }
+        self.repair_pairs(path);
+        proof {
+            assert forall|q: PathId| #[trigger] self.paths.has(q) implies self.not_stale(q) by {
+                assert(s0.paths.has(q));
+                assert(s0.not_stale(q));
+            }
+            self.lemma_wf_of_weak();
+        }
+    }
+
+    /// Some path other than `a` holds `cur` under another peer CID than `a` does.
+    #[verifier::spinoff_prover]
+    fn cur_taken(&self, a: PathId, cur: &[u8]) -> (r: bool)
+        requires
+            self.paths.wf(),
+            self.paths.has(a),
+    {
+        let n = self.paths.len();
+        let mut i: usize = 0;
+        while i < n
+            invariant
+                self.paths.wf(),
+                self.paths.has(a),
+                n == self.paths.ids().len(),
+                i <= n,
+            decreases n - i,
+        {
+            let q = self.path_at(i);
+            if q != a && opt_eq(self.paths.dcid(q), Some(cur)) && !opt_eq(
+                self.paths.peer_used(q),
+                self.paths.peer_used(a),
+            ) {
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
+
+    /// The active path holds a retired CID: it takes `current()` unless another path holds that
+    /// under another peer CID; then an unused CID, or with none `current()` anyway, and whichever
+    /// paths hold it under another peer CID lose it.
+    #[verifier::spinoff_prover]
+    fn rewrite_active(&mut self, a: PathId)
+        requires
+            old(self).wf_rest(),
+            old(self).dcids_weak(),
+            a == old(self).paths.active_spec(),
+        ensures
+            final(self).wf_rest(),
+            final(self).dcids_weak(),
+            final(self).frames_kept(*old(self)),
+            final(self).paths.active_spec() == a,
+            final(self).not_stale(a),
+    {
+        proof {
+            self.paths.lemma_wf();
+            self.peer_cids.lemma_wf();
+        }
+        let cur = slice_to_vec(self.peer_cids.current());
+        if self.cur_taken(a, cur.as_slice()) && self.fresh_dcid(a) {
+            return;
+        }
+        let ghost s0 = *self;
+        proof {
+            let e = self.peer_cids.entries();
+            let w = choose|w: int|
+                0 <= w < e.len() && (#[trigger] e[w]).0 == self.peer_cids.current_spec() && e[w].3
+                    && cur@ == e[w].1@;
+            assert(cur@.len() <= MAX_CID_LEN);
+            assert forall|i: int| 0 <= i < e.len() && !(#[trigger] e[i]).3 implies e[i].1@ != cur@ by {
+                if i < w {
+                    assert(e[i].1@ != e[w].1@);
+                } else if w < i {
+                    assert(e[w].1@ != e[i].1@);
+                }
+            }
+        }
+        self.put_dcid(a, Some(cur.as_slice()));
+        proof {
+            self.lemma_unheld_edit(s0, a);
+            assert forall|q1: PathId, q2: PathId|
+                #[trigger] self.paths.has(q1) && #[trigger] self.paths.has(q2) && q1 != a && q2 != a implies self.pair_ok(q1, q2) by {
+                assert(s0.paths.has(q1));
+                assert(s0.paths.has(q2));
+                assert(s0.pair_ok(q1, q2));
+            }
+        }
+        self.repair_pairs(a);
+        proof {
+            assert(peer_has_cid(self.peer_cids.entries(), cur@));
+        }
+    }
+
+    /// A path other than the active `a`: if it holds a retired CID it takes `a`'s when the peer
+    /// used one CID on both, else an unused CID, else none.
+    #[verifier::spinoff_prover]
+    fn rewrite_path(&mut self, q: PathId, a: PathId)
+        requires
+            old(self).wf_rest(),
+            old(self).dcids_weak(),
+            old(self).paths.has(q),
+            a == old(self).paths.active_spec(),
+            old(self).not_stale(a),
+        ensures
+            final(self).wf_rest(),
+            final(self).dcids_weak(),
+            final(self).frames_kept(*old(self)),
+            kept(old(self).paths, final(self).paths, q),
+            final(self).not_stale(q),
+            forall|x: Seq<u8>| #[trigger]
+                peer_has_cid(final(self).peer_cids.entries(), x) == peer_has_cid(
+                    old(self).peer_cids.entries(),
+                    x,
+                ),
+    {
+        if !self.is_stale(q) {
+            return;
+        }
+        proof {
+            self.paths.lemma_wf();
+        }
+        if opt_eq(self.paths.peer_used(q), self.paths.peer_used(a)) {
+            let d = self.active_dcid(a);
+            self.hold_dcid(q, Some(d.as_slice()));
+        } else if !self.fresh_dcid(q) {
+            self.hold_dcid(q, None);
+        }
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.5
+    //# Similarly, an endpoint MUST NOT reuse a connection ID when sending to
+    //# more than one destination address.
+    /// After `on_new_cid`: every path holding a retired CID (§5.1.2 "MUST stop using") gets another,
+    /// the active path first. Runs after every `Ok`: a used non-current CID can be retired while
+    /// `current()` stays put.
+    #[verifier::spinoff_prover]
+    fn rewrite_stale(&mut self, rand: &[u8; RAND_LEN])
+        requires
+            old(self).wf_rest(),
+            old(self).dcids_weak(),
+        ensures
+            final(self).wf(),
+            final(self).frames_kept(*old(self)),
+    {
+        proof {
+            self.paths.lemma_wf();
+        }
+        let a = self.paths.active();
+        let moved = self.is_stale(a);
+        if moved {
+            self.rewrite_active(a);
+        }
+        let n = self.paths.len();
+        let ghost ids = self.paths.ids();
+        let mut i: usize = 0;
+        while i < n
+            invariant
+                n == ids.len(),
+                i <= n,
+                self.paths.ids() == ids,
+                self.wf_rest(),
+                self.dcids_weak(),
+                self.frames_kept(*old(self)),
+                a == self.paths.active_spec(),
+                self.not_stale(a),
+                forall|k: int| 0 <= k < i ==> self.not_stale(#[trigger] ids[k]),
+            decreases n - i,
+        {
+            let q = self.path_at(i);
+            let ghost s1 = *self;
+            self.rewrite_path(q, a);
+            proof {
+                assert forall|k: int| 0 <= k < i + 1 implies self.not_stale(#[trigger] ids[k]) by {
+                    if k < i && ids[k] != q {
+                        assert(s1.not_stale(ids[k]));
+                    }
+                }
+                if a != q {
+                    assert(s1.not_stale(a));
+                }
+            }
+            i += 1;
+        }
+        // E4: a new CID on the active path redraws the spin bit.
+        if moved {
+            self.spin = rand[128] & 1 == 1;
+        }
+        proof {
+            assert forall|q: PathId| #[trigger] self.paths.has(q) implies self.not_stale(q) by {
+                let k = choose|k: int| 0 <= k < ids.len() && ids[k] == q;
+                assert(self.not_stale(ids[k]));
+            }
+            self.lemma_wf_of_weak();
+        }
+    }
+
+    /// PATH_CHALLENGE or PATH_RESPONSE, arriving on `path`.
+    #[verifier::spinoff_prover]
     fn on_path_frame(
         &mut self,
         path: PathId,
@@ -1201,17 +2067,145 @@ impl Connection {
             final(self).frames_kept(*old(self)),
             r matches Err(c) ==> c <= VARINT_MAX,
     {
+        match f {
+            Frame::PathChallenge(d) => {
+                let ghost s0 = *self;
+                self.paths.on_challenge(path, *d);
+                proof {
+                    self.lemma_path_edit(s0, path);
+                    self.lemma_dcids_same(s0, path);
+                }
+                self.assign_dcid(path, rand);
+            },
+            Frame::PathResponse(d) => self.on_path_response(*d, now, rand),
+            _ => {},
+        }
         Ok(())
     }
 
-    /// A 1-RTT packet was processed: assigns `path` a DCID and migrates to it (§9). (Task 1b
-    /// writes the body.)
+    /// PATH_RESPONSE: §9.4's congestion reset only for a newly validated address (not an MTU probe's
+    /// answer, nor §9.3.3's recheck of the old path), then an MTU probe if the path needs one.
     #[verifier::spinoff_prover]
-    #[allow(unused_variables)]  // Task 1b writes the body.
+    fn on_path_response(&mut self, data: [u8; 8], now: u64, rand: &[u8; RAND_LEN])
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).frames_kept(*old(self)),
+            final(self).recovery != old(self).recovery ==> exists|q: PathId|
+                #[trigger] old(self).paths.has(q) && answers(old(self).paths.path(q), data) && !(old(
+                    self,
+                ).paths.state_spec(q) is Validated),
+    {
+        let was = self.validated_paths();
+        let ghost s0 = *self;
+        if let Some(q) = self.paths.on_response(data) {
+            proof {
+                self.lemma_path_event(s0, q, AmpEv::Validated);
+            }
+            if let Some(i) = self.paths.index(q) {
+                if !was[i] {
+                    self.recovery.on_path_validated();
+                    proof {
+                        assert(s0.paths.ids()[i as int] == q);
+                        assert(s0.paths.has(q));
+                    }
+                }
+            }
+            if self.paths.needs_mtu_probe(q) {
+                self.challenge_path(q, now, rand);
+            }
+        }
+    }
+
+    /// Which paths are Validated, by entry (at most `MAX_PATHS`).
+    #[verifier::spinoff_prover]
+    fn validated_paths(&self) -> (r: Vec<bool>)
+        requires
+            self.wf(),
+        ensures
+            r@.len() == self.paths.ids().len(),
+            forall|k: int|
+                0 <= k < r@.len() ==> r@[k] == (self.paths.state_spec(self.paths.ids()[k]) is Validated),
+    {
+        let n = self.paths.len();
+        let mut r: Vec<bool> = Vec::new();
+        let mut i: usize = 0;
+        while i < n
+            invariant
+                self.wf(),
+                n == self.paths.ids().len(),
+                i <= n,
+                r@.len() == i,
+                forall|k: int|
+                    0 <= k < i ==> r@[k] == (self.paths.state_spec(self.paths.ids()[k]) is Validated),
+            decreases n - i,
+        {
+            let q = self.path_at(i);
+            r.push(matches!(self.paths.state(q), PathState::Validated));
+            i += 1;
+        }
+        r
+    }
+
+    /// The next unused challenge slice of `rand`: never reused within a call, since `on_response`
+    /// ignores the arrival path (§8.2.2) and distinct data is what ties a response to its path
+    /// (§8.2.1). None once all four are used.
+    #[verifier::spinoff_prover]
+    fn next_challenge(&mut self, rand: &[u8; RAND_LEN]) -> (r: Option<[u8; 8]>)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).frames_kept(*old(self)),
+            final(self).paths == old(self).paths,
+            final(self).recovery == old(self).recovery,
+            r is None <==> old(self).chal_used == 4,
+            r matches Some(c) ==> {
+                &&& final(self).chal_used == old(self).chal_used + 1
+                &&& c@ == rand@.subrange(
+                    96 + 8 * old(self).chal_used as int,
+                    104 + 8 * old(self).chal_used as int,
+                )
+            },
+    {
+        if self.chal_used == 4 {
+            return None;
+        }
+        let at = 96 + 8 * self.chal_used;
+        let mut c = [0u8; 8];
+        c.copy_from_slice(slice_subrange(rand.as_slice(), at, at + 8));
+        self.chal_used = self.chal_used + 1;
+        Some(c)
+    }
+
+    /// Starts a challenge on `q` from the next slice of `rand`, if one is left.
+    #[verifier::spinoff_prover]
+    fn challenge_path(&mut self, q: PathId, now: u64, rand: &[u8; RAND_LEN])
+        requires
+            old(self).wf(),
+            old(self).paths.has(q),
+        ensures
+            final(self).wf(),
+            final(self).frames_kept(*old(self)),
+            final(self).paths.active_spec() == old(self).paths.active_spec(),
+            final(self).recovery == old(self).recovery,
+    {
+        if let Some(c) = self.next_challenge(rand) {
+            let ghost s0 = *self;
+            self.paths.start_challenge(q, c, now);
+            proof {
+                self.lemma_path_edit(s0, q);
+                self.lemma_dcids_same(s0, q);
+            }
+        }
+    }
+
+    /// A 1-RTT packet was processed: assigns `path` a DCID and migrates to it (§9).
+    #[verifier::spinoff_prover]
     fn after_one_rtt(
         &mut self,
         path: PathId,
-        dcid: &[u8],
         non_probing: bool,
         pn: u64,
         now: u64,
@@ -1220,11 +2214,176 @@ impl Connection {
         requires
             old(self).wf(),
             old(self).paths.has(path),
-            dcid@.len() <= MAX_CID_LEN,
         ensures
             final(self).wf(),
             final(self).frames_kept(*old(self)),
     {
+        if path == self.paths.active() {
+            return;
+        }
+        self.assign_dcid(path, rand);
+        if non_probing {
+            if let Some(l) = self.recv_1.largest() {
+                if l == pn {
+                    self.migrate(path, now, rand);
+                }
+            }
+        }
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9
+    //# If the peer
+    //# violates this requirement, the endpoint MUST either drop the incoming
+    //# packets on that path without generating a Stateless Reset or proceed
+    //# with path validation and allow the peer to migrate.
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9
+    //# An endpoint MUST
+    //# perform path validation (Section 8.2) if it detects any change to a
+    //# peer's address, unless it has previously validated that address.
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9
+    //= type=exception
+    //= reason=We never initiate migration and never send from another local address.
+    //# An endpoint MUST NOT initiate
+    //# connection migration before the handshake is confirmed, as defined in
+    //# Section 4.1.2 of [QUIC-TLS].
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9
+    //= type=exception
+    //= reason=We never initiate migration and never send from another local address.
+    //# If the peer sent the disable_active_migration transport parameter, an
+    //# endpoint also MUST NOT send packets (including probing packets; see
+    //# Section 9.1) from a different local address to the address the peer
+    //# used during the handshake, unless the endpoint has acted on a
+    //# preferred_address transport parameter from the peer.
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9
+    //= type=exception
+    //= reason=client-only
+    //# If a client receives
+    //# packets from an unknown server address, the client MUST discard these
+    //# packets.
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3
+    //# If the recipient permits the migration, it MUST send subsequent
+    //# packets to the new peer address and MUST initiate path validation
+    //# (Section 8.2) to verify the peer's ownership of the address if
+    //# validation is not already underway.
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3
+    //# An endpoint MAY send data to an unvalidated peer address, but it MUST
+    //# protect against potential attacks as described in Sections 9.3.1 and
+    //# 9.3.2.
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3.3
+    //# In response to an apparent migration, endpoints MUST validate the
+    //# previously active path using a PATH_CHALLENGE frame.
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.5
+    //= type=exception
+    //= reason=We never initiate migration and never send from another local address.
+    //# An endpoint MUST NOT reuse a connection ID when sending from more
+    //# than one local address -- for example, when initiating connection
+    //# migration as described in Section 9.2 or when probing a new network
+    //# path as described in Section 9.1.
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.5
+    //# Similarly, an endpoint MUST NOT reuse a connection ID when sending to
+    //# more than one destination address.
+    /// The peer moved to `path`. Changes no DCID and no `peer_used`, so §9.5 at the new address
+    /// follows from `wf_dcids`' pair conjunct.
+    #[verifier::spinoff_prover]
+    fn migrate(&mut self, path: PathId, now: u64, rand: &[u8; RAND_LEN])
+        requires
+            old(self).wf(),
+            old(self).paths.has(path),
+        ensures
+            final(self).wf(),
+            final(self).frames_kept(*old(self)),
+            final(self).paths.path(path).dcid is Some ==> forall|q: PathId|
+                #[trigger] final(self).paths.has(q) && q != path && final(self).paths.path(q).dcid
+                    == final(self).paths.path(path).dcid ==> final(self).paths.path(q).peer_used
+                    == final(self).paths.path(path).peer_used,
+    {
+        // §9.5: no fresh CID for a second destination.
+        if self.paths.dcid(path).is_none() {
+            return;
+        }
+        // §14.2: never make a failed-MTU path active (3d final review I2).
+        if self.paths.mtu_failed(path) {
+            return;
+        }
+        let old_path = self.paths.active();
+        let ghost s0 = *self;
+        self.paths.set_active(path);
+        proof {
+            self.lemma_active_set(s0, path);
+        }
+        // §9, §9.3: not if validation is already underway (preflight M9).
+        if matches!(self.paths.state(path), PathState::Unvalidated) {
+            self.challenge_path(path, now, rand);
+        }
+        proof {
+            s0.paths.lemma_wf();
+            assert(self.paths.has(old_path)) by {
+                assert(s0.paths.has(old_path));
+            }
+        }
+        if matches!(self.paths.state(old_path), PathState::Validated) {
+            self.challenge_path(old_path, now, rand);
+        }
+        proof {
+            assert(self.paths.has(path));
+            assert forall|q: PathId|
+                #[trigger] self.paths.has(q) && q != path && self.paths.path(q).dcid
+                    == self.paths.path(path).dcid && self.paths.path(path).dcid is Some implies self.paths.path(q).peer_used
+                == self.paths.path(path).peer_used by {
+                assert(self.paths.has(path));
+            }
+        }
+    }
+
+    /// `self` is `o` with path `path`, which holds a DCID, made active.
+    proof fn lemma_active_set(&self, o: Connection, path: PathId)
+        requires
+            o.wf(),
+            o.paths.path(path).dcid is Some,
+            self.paths.wf(),
+            self.paths.active_spec() == path,
+            self.paths.ids() == o.paths.ids(),
+            forall|q: PathId| #[trigger] self.paths.path(q) == o.paths.path(q),
+            self.out_log@ == o.out_log@,
+            self.peer_cids == o.peer_cids,
+            self.wf_parts(),
+            self.wf_streams(),
+            self.wf_pn(),
+        ensures
+            self.wf_amp(),
+            self.wf_log_paths(),
+            self.wf_dcids(),
+    {
+        assert forall|q: PathId| #[trigger] self.paths.has(q) implies amp_ok(self.paths.amp_trace(q))
+            && sent_entries(self.paths.amp_trace(q)) == log_sends(self.out_log@, q) by {
+            assert(o.paths.has(q));
+        }
+        assert forall|i: int| 0 <= i < self.out_log@.len() implies #[trigger] self.paths.index_spec(
+            self.out_log@[i].path,
+        ) is Some by {
+            assert(o.paths.index_spec(self.out_log@[i].path) is Some);
+        }
+        assert forall|q: PathId| #[trigger] self.paths.has(q) implies (self.paths.path(q).dcid matches Some(c)
+            ==> used_cid(self.peer_cids.entries(), c)) by {
+            assert(o.paths.has(q));
+        }
+        assert forall|q1: PathId, q2: PathId|
+            #[trigger] self.paths.has(q1) && #[trigger] self.paths.has(q2) && q1 != q2
+                && self.paths.path(q1).dcid is Some && self.paths.path(q1).dcid == self.paths.path(
+                q2,
+            ).dcid implies self.paths.path(q1).peer_used == self.paths.path(q2).peer_used by {
+            assert(o.paths.has(q1));
+            assert(o.paths.has(q2));
+        }
     }
 
     /// §13.3: frame `f` of an acknowledged record of space `k`.
@@ -1612,6 +2771,116 @@ impl Connection {
     }
 
     // =========================================================================
+    // Application side
+    // =========================================================================
+
+    /// How many more bytes `stream_write` accepts, over all streams.
+    pub closed spec fn send_room_spec(&self) -> int {
+        match self.streams {
+            Some(s) => MAX_SEND_BUFFER - s.tx_buffered(),
+            None => 0,
+        }
+    }
+
+    /// Whether `id`'s sending part has its FIN written.
+    pub closed spec fn fin_written(&self, id: u64) -> bool {
+        self.streams matches Some(s) && s.tx_part(id) matches Some(p) && p.fin_written_spec()
+    }
+
+    /// Queues as much of `data` as the send buffer takes, with the FIN only if all of it fits;
+    /// `Ok(0)` with nothing changed when none of it does. `Err` unless Open with streams, or for a
+    /// stream that cannot be written.
+    #[verifier::spinoff_prover]
+    pub fn stream_write(&mut self, id: u64, data: &[u8], fin: bool) -> (r: Result<usize, ()>)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).out_log() == old(self).out_log(),
+            r matches Ok(n) ==> n <= data@.len() && (n < data@.len() ==> n == old(self).send_room_spec()),
+            r matches Ok(n) ==> (n > 0 || data@.len() == 0 && fin) ==> final(self).fin_written(id) == (fin && n
+                == data@.len()),
+    {
+        match &mut self.streams {
+            Some(s) => {
+                let room = s.send_room();
+                let n = if data.len() as u64 > room {
+                    room as usize
+                } else {
+                    data.len()
+                };
+                if n == 0 && !(fin && data.len() == 0) {
+                    return Ok(0);
+                }
+                match s.write(id, slice_subrange(data, 0, n), fin && n == data.len()) {
+                    Ok(()) => Ok(n),
+                    Err(()) => Err(()),
+                }
+            },
+            None => Err(()),
+        }
+    }
+
+    /// The application abandons sending on `id` (RESET_STREAM).
+    #[verifier::spinoff_prover]
+    pub fn stream_reset(&mut self, id: u64, code: u64)
+        requires
+            old(self).wf(),
+            code <= VARINT_MAX,
+        ensures
+            final(self).wf(),
+            final(self).out_log() == old(self).out_log(),
+    {
+        if let Some(s) = &mut self.streams {
+            s.reset(id, code);
+        }
+    }
+
+    /// The application stops reading `id` (STOP_SENDING).
+    #[verifier::spinoff_prover]
+    pub fn stream_stop_sending(&mut self, id: u64, code: u64)
+        requires
+            old(self).wf(),
+            code <= VARINT_MAX,
+        ensures
+            final(self).wf(),
+            final(self).out_log() == old(self).out_log(),
+    {
+        if let Some(s) = &mut self.streams {
+            s.stop_sending(id, code);
+        }
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.1
+    //# However, the comparison MUST be performed
+    //# when the first packet in an incoming datagram either cannot be
+    //# associated with a connection or cannot be decrypted.
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.1
+    //# If the last 16 bytes of the datagram are identical in value to a
+    //# stateless reset token, the endpoint MUST enter the draining period
+    //# and not send any further packets on this connection.
+    /// A datagram's last 16 bytes, when its first packet will not decrypt or the shell routed it as
+    /// a reset: a match with a used, active CID's token ends the connection (§10.3.1).
+    #[verifier::spinoff_prover]
+    pub fn on_reset_candidate(&mut self, tail: &[u8; 16], now: u64)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).out_log() == old(self).out_log(),
+    {
+        if now > self.now {
+            self.now = now;
+        }
+        if self.peer_cids.matches_reset(tail) {
+            let pto = self.pto();
+            self.lc.enter_draining(self.now, pto);
+            self.streams = None;
+        }
+    }
+
+    // =========================================================================
     // Polling
     // =========================================================================
 
@@ -1890,6 +3159,44 @@ impl Connection {
 // =============================================================================
 // Helpers
 // =============================================================================
+
+/// Whether two optional byte strings are equal.
+fn opt_eq(a: Option<&[u8]>, b: Option<&[u8]>) -> (r: bool)
+    ensures
+        r == (opt_slice_view(a) == opt_slice_view(b)),
+{
+    match (a, b) {
+        (Some(x), Some(y)) => eq_bytes(x, y),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// A stream's receiving part fails only with constant codes.
+proof fn lemma_recv_err(id: u64, window: u64, t: Seq<SpecRecvIn>)
+    ensures
+        rfc_recv(id, window, t).err matches Some(c) ==> c <= VARINT_MAX,
+    decreases t.len(),
+{
+    if t.len() > 0 {
+        lemma_recv_err(id, window, t.drop_last());
+    }
+}
+
+/// `Streams::on_frame`'s error codes are in range.
+proof fn lemma_frame_err(s0: Streams, f: SpecFrame, r: Result<(), u64>)
+    requires
+        r == match rfc_stream_frame_check(s0.ids_spec(), f) {
+            Some(c) => Err(c),
+            None => rx_outcome(s0, f),
+        },
+    ensures
+        r matches Err(c) ==> c <= VARINT_MAX,
+{
+    if let (Some(id), Some(i)) = (frame_stream_id(f), frame_recv_in(f)) {
+        lemma_recv_err(id, s0.rx_window(id), s0.rx_trace(id).push(i));
+    }
+}
 
 /// Nothing is logged on a path absent from the log.
 proof fn lemma_log_sends_absent(log: Seq<SpecOutDatagram>, q: PathId)

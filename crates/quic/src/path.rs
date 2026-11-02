@@ -1542,6 +1542,24 @@ impl Paths {
         let i = self.find(id);
         self.paths[i].challenge_owed
     }
+
+    /// How many paths there are.
+    pub fn len(&self) -> (r: usize)
+        ensures
+            r == self.ids().len(),
+    {
+        self.paths.len()
+    }
+
+    /// The id of entry `i`.
+    pub fn id_at(&self, i: usize) -> (r: PathId)
+        requires
+            i < self.ids().len(),
+        ensures
+            r == self.ids()[i as int],
+    {
+        self.paths[i].id
+    }
 }
 
 } // verus!
