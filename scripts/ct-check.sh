@@ -2,9 +2,10 @@
 # Constant-time checker runs: build tools/ct-driver, then analyse the fixtures under it and diff
 # their verdicts against tools/ct-fixtures/expected.txt, then run the interpreter selftest
 # (tools/ct-driver/selftest.txt) over crates/crypto and over the parser crates (wire, h3, quic),
-# then check crypto's roots (all must be ok) and the negative control (--cfg ct_negative; exactly
-# its one reject). Target dirs live under CT_TARGET_DIR (default $root/target/ct), one subdir per
-# run, except that selftest shares crypto's (same flags); reports under $CT_OUT/<run>.
+# then diff the fixtures' step bounds against expected-cost.txt, then check crypto's roots (all
+# must be ok) and the negative control (--cfg ct_negative; exactly its one reject). Target dirs
+# live under CT_TARGET_DIR (default $root/target/ct), one subdir per run, except that selftest
+# shares crypto's (same flags); reports under $CT_OUT/<run>.
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root" # rust-toolchain.toml pins rustc 1.98.1, the one ct-driver links against
@@ -40,7 +41,8 @@ analyse() {
         || fail "$run: analysis build failed"
     reports=
     for c in $(printf '%s' "$crates" | tr ',' ' '); do
-        case $mode in selftest) r=$CT_OUT/$run/selftest-$c.txt ;; *) r=$CT_OUT/$run/report-$c.txt ;; esac
+        case $mode in selftest) r=selftest- ;; cost) r=cost- ;; *) r=report- ;; esac
+        r=$CT_OUT/$run/$r$c.txt
         [ -f "$r" ] || fail "$run: no $r"
         reports="$reports $r"
     done
@@ -62,6 +64,24 @@ no_missing() {
     awk '{ print $2 }' "$2" | LC_ALL=C sort -u > "$2.paths"
     missing=$(awk '$1 == "root" { print $2 }' "$1" | LC_ALL=C sort | LC_ALL=C comm -23 - "$2.paths")
     [ -z "$missing" ] || fail "roots with no verdict: $missing"
+}
+
+# cost_verdicts <report>: its lines without coefficients, a first error's text or a `CalleeNone` or
+# `Validator` index (the closure's own numbering), sorted.
+cost_verdicts() {
+    sed -E 's/^(bounded .* deg=[012]) steps <= .*$/\1/
+            s/^(none .* (Unsupported|Unresolved)) .*$/\1/
+            s/ (CalleeNone|Validator)\([0-9]+\)$/ \1/' "$1" | LC_ALL=C sort
+}
+
+# cost_no_missing <manifest> <report>..: every cost-root has a verdict line in some report. Grepped
+# whole, because a path may hold spaces (`<a::B as a::C>::f`).
+cost_no_missing() {
+    sed -nE 's/^cost-root +//; T; s/[[:space:]]+#.*$//; p' "$1" > "$CT_OUT/cost-roots.txt"
+    shift
+    while IFS= read -r p; do
+        grep -qF -e "bounded $p deg=" -e "none $p " "$@" || fail "cost-root with no verdict: $p"
+    done < "$CT_OUT/cost-roots.txt"
 }
 
 fx=$root/tools/ct-fixtures
@@ -91,6 +111,15 @@ v=$(grep -c -E '^(wire|h3|quic)::' "$st")
 p=$(grep -c "^pass " "$CT_OUT/parsers/selftest.txt" || true)
 [ "$p" -eq "$v" ] || fail "selftest parsers: $p of $v vectors passed"
 echo "ct-check: selftest parsers $p/$v"
+
+# The fixtures' step bounds.
+analyse cost-fixtures ct_fixtures "$fx/manifest.txt:$fx/cost-manifest.txt" cost --manifest-path "$fx/Cargo.toml"
+cost_no_missing "$fx/cost-manifest.txt" "$report"
+got=$CT_OUT/cost-fixtures/verdicts.txt
+cost_verdicts "$report" > "$got"
+diff -u "$fx/expected-cost.txt" "$got" || fail "cost fixtures: verdicts differ from expected-cost.txt"
+n=$(wc -l < "$fx/expected-cost.txt" | tr -d ' ')
+echo "ct-check: cost fixtures $n/$n"
 
 # The driver keys declassify sites by file:line, so a second call on a line would go uncounted.
 calls=$(grep -rho --include='*.rs' 'declassify(' "$root/crates/crypto/src" | wc -l)
