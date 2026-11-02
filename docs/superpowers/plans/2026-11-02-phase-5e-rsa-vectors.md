@@ -267,6 +267,8 @@ Probed in preflight: 12 fns verify at `--rlimit 4` with no splitting (over `Seq`
 
 ### Task 6: RSA under the CT checker; phase exit
 
+**From the Task 4 review (M2):** the new timing row gains, before "Modulo the CT front-end" if present: "Secrets are not zeroised, and that is out of scope: d's bytes (the key, pad_be's copy on the heap) and the Montgomery intermediates on the stack stay in memory after signing, so a memory disclosure exposes d. RustCrypto's key did scrub itself on drop."
+
 **From the Task 1 review (M3):** TRUSTED's vector rows state what isn't run: ECDSA, 310 of 484 Wycheproof rows, and the CAVP SigGen file uses injected k (RFC 6979 has separate vectors); AES-GCM, 249 of 316 Wycheproof rows and the CAVP files outside Taglen 128 / IVlen 96 (375 of 7875 used per file); HKDF, 3 oversize rows. Also make `sources_match` require the listed set to equal the files present (M1).
 
 **From the crypto binary audit (.superpowers/archive/crypto-binary-audit.md, in the main checkout):**
