@@ -740,6 +740,7 @@ impl Connection {
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
             final(self).paths.ids() == old(self).paths.ids(),
+            final(self).peer_used_kept(*old(self)),
     {
         let ghost s0 = *self;
         self.paths.set_validated(self.hs_path);
@@ -928,6 +929,8 @@ impl Connection {
             final(self).paths.has(path),
             r matches Err(c) ==> c <= VARINT_MAX,
             r is Err ==> final(self).recv(p.kind).seen() == old(self).recv(p.kind).seen(),
+            r is Ok && final(self).phase_spec() is Open ==> final(self).paths.path(path).peer_used
+                == Some(p.dcid@),
     {
         let k = p.kind;
         let pn = p.pn;
@@ -1242,6 +1245,7 @@ impl Connection {
                     self.lemma_after_new_cid(s0);
                 }
                 self.rewrite_stale(rand);
+                self.assign_owed(rand);
                 Ok(())
             },
             Frame::RetireConnectionId(s) => match self.local_cids.on_retire(*s, dcid) {
@@ -1337,6 +1341,13 @@ impl Connection {
         &&& self.unused_unheld()
         &&& forall|q1: PathId, q2: PathId|
             #[trigger] self.paths.has(q1) && #[trigger] self.paths.has(q2) ==> self.pair_ok(q1, q2)
+    }
+
+    /// No path's `peer_used` changed.
+    closed spec fn peer_used_kept(&self, o: Connection) -> bool {
+        forall|q: PathId|
+            #![trigger self.paths.path(q)]
+            self.paths.path(q).peer_used == o.paths.path(q).peer_used
     }
 
     /// `q` holds no retired CID.
@@ -1465,6 +1476,7 @@ impl Connection {
             final(self).peer_cids == old(self).peer_cids,
             kept(old(self).paths, final(self).paths, q),
             final(self).paths.path(q).dcid == opt_slice_view(d),
+            final(self).peer_used_kept(*old(self)),
     {
         let ghost s0 = *self;
         self.put_dcid(q, d);
@@ -1563,8 +1575,12 @@ impl Connection {
                     old(self).peer_cids.entries(),
                     x,
                 ),
+            final(self).peer_used_kept(*old(self)),
             r ==> final(self).not_stale(q) && final(self).paths.path(q).dcid is Some,
             !r ==> final(self).paths == old(self).paths && final(self).peer_cids == old(self).peer_cids,
+            !r ==> forall|i: int|
+                0 <= i < old(self).peer_cids.entries().len() ==> (
+                #[trigger] old(self).peer_cids.entries()[i]).3,
     {
         let ghost s0 = *self;
         match self.peer_cids.use_next() {
@@ -1594,6 +1610,7 @@ impl Connection {
             final(self).wf(),
             final(self).frames_kept(*old(self)),
             final(self).paths.active_spec() == old(self).paths.active_spec(),
+            final(self).peer_used_kept(*old(self)),
     {
         if self.paths.dcid(q).is_some() {
             return;
@@ -1619,6 +1636,35 @@ impl Connection {
                 assert(s0.not_stale(r));
             }
             self.lemma_wf_of_weak();
+        }
+    }
+
+    /// A CID just arrived: a path with none that owes a PATH_RESPONSE or PATH_CHALLENGE takes one
+    /// now. Its full response queue would otherwise drop the peer's retransmitted probes at the
+    /// gate, so no later packet on it could reach `after_one_rtt`.
+    #[verifier::spinoff_prover]
+    fn assign_owed(&mut self, rand: &[u8; RAND_LEN])
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).frames_kept(*old(self)),
+    {
+        let n = self.paths.len();
+        let mut i: usize = 0;
+        while i < n
+            invariant
+                self.wf(),
+                self.frames_kept(*old(self)),
+                n == self.paths.ids().len(),
+                i <= n,
+            decreases n - i,
+        {
+            let q = self.path_at(i);
+            if self.paths.dcid(q).is_none() && (self.paths.has_response(q) || self.paths.challenge_owed(q)) {
+                self.assign_dcid(q, rand);
+            }
+            i += 1;
         }
     }
 
@@ -1677,6 +1723,7 @@ impl Connection {
             final(self).frames_kept(*old(self)),
             final(self).peer_cids == old(self).peer_cids,
             final(self).paths.active_spec() == old(self).paths.active_spec(),
+            final(self).peer_used_kept(*old(self)),
             path == old(self).paths.active_spec() ==> final(self).paths.path(path).dcid == old(
                 self,
             ).paths.path(path).dcid,
@@ -1696,6 +1743,7 @@ impl Connection {
                 self.frames_kept(*old(self)),
                 self.peer_cids == old(self).peer_cids,
                 self.paths.active_spec() == old(self).paths.active_spec(),
+                self.peer_used_kept(*old(self)),
                 self.paths.path(self.paths.active_spec()).dcid is Some,
                 self.unused_unheld(),
                 self.pairs_except(path),
@@ -1745,6 +1793,7 @@ impl Connection {
             final(self).frames_kept(*old(self)),
             final(self).peer_cids == old(self).peer_cids,
             final(self).paths.active_spec() == old(self).paths.active_spec(),
+            final(self).peer_used_kept(*old(self)),
             final(self).paths.path(final(self).paths.active_spec()).dcid is Some,
             final(self).unused_unheld(),
             final(self).pairs_except(path),
@@ -1832,6 +1881,7 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).frames_kept(*old(self)),
+            final(self).paths.path(path).peer_used == Some(dcid@),
     {
         let ghost s0 = *self;
         proof {
@@ -1867,6 +1917,10 @@ impl Connection {
         requires
             self.paths.wf(),
             self.paths.has(a),
+        ensures
+            !r ==> forall|q: PathId|
+                #[trigger] self.paths.has(q) && q != a && self.paths.path(q).dcid == Some(cur@)
+                    ==> self.paths.path(q).peer_used == self.paths.path(a).peer_used,
     {
         let n = self.paths.len();
         let mut i: usize = 0;
@@ -1876,6 +1930,11 @@ impl Connection {
                 self.paths.has(a),
                 n == self.paths.ids().len(),
                 i <= n,
+                forall|k: int|
+                    #![trigger self.paths.ids()[k]]
+                    0 <= k < i && self.paths.ids()[k] != a && self.paths.path(self.paths.ids()[k]).dcid
+                        == Some(cur@) ==> self.paths.path(self.paths.ids()[k]).peer_used
+                        == self.paths.path(a).peer_used,
             decreases n - i,
         {
             let q = self.path_at(i);
@@ -1887,12 +1946,22 @@ impl Connection {
             }
             i += 1;
         }
+        proof {
+            assert forall|q: PathId|
+                #[trigger] self.paths.has(q) && q != a && self.paths.path(q).dcid == Some(cur@) implies self.paths.path(q).peer_used
+                == self.paths.path(a).peer_used by {
+                let k = choose|k: int| 0 <= k < self.paths.ids().len() && self.paths.ids()[k] == q;
+                assert(self.paths.ids()[k] == q);
+            }
+        }
         false
     }
 
-    /// The active path holds a retired CID: it takes `current()` unless another path holds that
-    /// under another peer CID; then an unused CID, or with none `current()` anyway, and whichever
-    /// paths hold it under another peer CID lose it.
+    /// The active path holds a retired CID: it takes `current()`, unless another path holds that
+    /// under another peer CID; then it takes an unused CID. With none left, neither §5.1.2 nor §9.5
+    /// can be met by sending, so the connection closes silently (only the peer's exact-repeat
+    /// NEW_CONNECTION_ID with a raised Retire Prior To reaches this). The paths are still put in a
+    /// `wf` state, and being Closed nothing is sent on them.
     #[verifier::spinoff_prover]
     fn rewrite_active(&mut self, a: PathId)
         requires
@@ -1905,13 +1974,22 @@ impl Connection {
             final(self).frames_kept(*old(self)),
             final(self).paths.active_spec() == a,
             final(self).not_stale(a),
+            (exists|i: int|
+                0 <= i < old(self).peer_cids.entries().len() && !(
+                #[trigger] old(self).peer_cids.entries()[i]).3) ==> kept(
+                old(self).paths,
+                final(self).paths,
+                a,
+            ),
+            !kept(old(self).paths, final(self).paths, a) ==> final(self).phase_spec() is Closed,
     {
         proof {
             self.paths.lemma_wf();
             self.peer_cids.lemma_wf();
         }
         let cur = slice_to_vec(self.peer_cids.current());
-        if self.cur_taken(a, cur.as_slice()) && self.fresh_dcid(a) {
+        let taken = self.cur_taken(a, cur.as_slice());
+        if taken && self.fresh_dcid(a) {
             return;
         }
         let ghost s0 = *self;
@@ -1929,6 +2007,13 @@ impl Connection {
                 }
             }
         }
+        if !taken {
+            self.hold_dcid(a, Some(cur.as_slice()));
+            proof {
+                assert(peer_has_cid(self.peer_cids.entries(), cur@));
+            }
+            return;
+        }
         self.put_dcid(a, Some(cur.as_slice()));
         proof {
             self.lemma_unheld_edit(s0, a);
@@ -1940,6 +2025,8 @@ impl Connection {
             }
         }
         self.repair_pairs(a);
+        self.lc.close_silently();
+        self.streams = None;
         proof {
             assert(peer_has_cid(self.peer_cids.entries(), cur@));
         }
@@ -2075,7 +2162,6 @@ impl Connection {
                     self.lemma_path_edit(s0, path);
                     self.lemma_dcids_same(s0, path);
                 }
-                self.assign_dcid(path, rand);
             },
             Frame::PathResponse(d) => self.on_path_response(*d, now, rand),
             _ => {},
@@ -2161,6 +2247,7 @@ impl Connection {
             final(self).paths == old(self).paths,
             final(self).recovery == old(self).recovery,
             r is None <==> old(self).chal_used == 4,
+            r is None ==> final(self).chal_used == old(self).chal_used,
             r matches Some(c) ==> {
                 &&& final(self).chal_used == old(self).chal_used + 1
                 &&& c@ == rand@.subrange(
@@ -2190,6 +2277,15 @@ impl Connection {
             final(self).frames_kept(*old(self)),
             final(self).paths.active_spec() == old(self).paths.active_spec(),
             final(self).recovery == old(self).recovery,
+            final(self).peer_used_kept(*old(self)),
+            forall|r: PathId| r != q ==> #[trigger] final(self).paths.path(r) == old(self).paths.path(r),
+            final(self).paths.path(q).state == if old(self).chal_used < 4 && old(self).paths.path(q).state is Unvalidated {
+                PathState::Validating
+            } else {
+                old(self).paths.path(q).state
+            },
+            old(self).chal_used < 4 ==> final(self).paths.path(q).owed,
+            final(self).chal_used <= old(self).chal_used + 1,
     {
         if let Some(c) = self.next_challenge(rand) {
             let ghost s0 = *self;
@@ -2217,6 +2313,10 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).frames_kept(*old(self)),
+            final(self).peer_used_kept(*old(self)),
+            final(self).paths.active_spec() != old(self).paths.active_spec() ==> non_probing
+                && old(self).recv_1.largest_spec() == Some(pn) && final(self).paths.active_spec()
+                == path,
     {
         if path == self.paths.active() {
             return;
@@ -2305,6 +2405,21 @@ impl Connection {
                 #[trigger] final(self).paths.has(q) && q != path && final(self).paths.path(q).dcid
                     == final(self).paths.path(path).dcid ==> final(self).paths.path(q).peer_used
                     == final(self).paths.path(path).peer_used,
+            final(self).peer_used_kept(*old(self)),
+            final(self).paths.active_spec() == if old(self).paths.path(path).dcid is Some && !old(
+                self,
+            ).paths.path(path).mtu_failed {
+                path
+            } else {
+                old(self).paths.active_spec()
+            },
+            old(self).paths.path(path).dcid is Some && !old(self).paths.path(path).mtu_failed ==> {
+                &&& old(self).paths.path(path).state is Unvalidated && old(self).chal_used < 4
+                    ==> final(self).paths.path(path).owed
+                &&& old(self).paths.path(old(self).paths.active_spec()).state is Validated && old(
+                    self,
+                ).chal_used < 3 ==> final(self).paths.path(old(self).paths.active_spec()).owed
+            },
     {
         // §9.5: no fresh CID for a second destination.
         if self.paths.dcid(path).is_none() {
@@ -2851,6 +2966,11 @@ impl Connection {
         }
     }
 
+    /// `tail` is the reset token of an active CID we have used.
+    pub closed spec fn reset_matches(&self, tail: Seq<u8>) -> bool {
+        reset_match(self.peer_cids.entries(), tail)
+    }
+
     //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.1
     //# However, the comparison MUST be performed
     //# when the first packet in an incoming datagram either cannot be
@@ -2869,6 +2989,9 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
+            old(self).reset_matches(tail@) && old(self).phase_spec() is Open ==> final(self).phase_spec() is Draining,
+            old(self).reset_matches(tail@) ==> !(final(self).phase_spec() is Open),
+            !old(self).reset_matches(tail@) ==> final(self).phase_spec() == old(self).phase_spec(),
     {
         if now > self.now {
             self.now = now;
