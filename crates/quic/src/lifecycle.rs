@@ -491,6 +491,7 @@ impl Lifecycle {
         self.phase = Phase::Closed;
     }
 
+    // ponytail: byte cap only, one reply per datagram; a doubling reply threshold if closing floods matter.
     /// A datagram of `n` bytes arrived while closing: it counts toward the budget and a
     /// close is owed in reply.
     pub fn on_recv_closing(&mut self, n: u64)

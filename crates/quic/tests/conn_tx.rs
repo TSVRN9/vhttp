@@ -468,3 +468,39 @@ fn stale_active_silent_close_sends_nothing() {
     assert_eq!(c.poll_transmit(31), None);
     assert_eq!(c.poll_transmit(1_000_000), None);
 }
+
+#[test]
+fn close_out_of_pns_is_silent() {
+    let mut c = established_quiet();
+    c.skip_pns_for_test(PacketKind::OneRtt, PN_MAX);
+    c.close(0x0a, false, b"", 21);
+    assert_eq!(c.poll_transmit(21), None);
+    assert_eq!(c.phase(), Phase::Closed);
+    assert!(!c.streams_live());
+}
+
+#[test]
+fn close_waits_for_path_budget() {
+    let mut c = conn();
+    c.crypto_write(PacketKind::Initial, &[0xaa; 5000]);
+    assert_eq!(drain(&mut c, 0).len(), 3);
+    assert_eq!(c.path_budget(0), Some(0));
+    c.close(0x0a, false, b"", 1);
+    assert_eq!(c.poll_transmit(1), None);
+    assert_eq!(c.phase(), Phase::Closing);
+    c.on_datagram(0, 100, vec![], 2, &rnd(3));
+    let d = c.poll_transmit(2).unwrap();
+    assert!(datagram_len(&d) <= 300);
+    assert_eq!(c.poll_transmit(2), None);
+}
+
+#[test]
+fn pn_max_closes_with_no_budget() {
+    let mut c = conn();
+    c.crypto_write(PacketKind::Initial, &[0xaa; 5000]);
+    assert_eq!(drain(&mut c, 0).len(), 3);
+    assert_eq!(c.path_budget(0), Some(0));
+    c.skip_pns_for_test(PacketKind::Handshake, PN_MAX);
+    assert_eq!(c.poll_transmit(0), None);
+    assert_eq!(c.phase(), Phase::Closed);
+}

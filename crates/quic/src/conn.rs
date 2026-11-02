@@ -722,6 +722,11 @@ impl Connection {
         true
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    //# For the purposes of
+    //# avoiding amplification prior to address validation, servers MUST
+    //# count all of the payload bytes received in datagrams that are
+    //# uniquely attributed to a single connection.
     /// §8.1: the bytes of a datagram received on `path`.
     #[verifier::spinoff_prover]
     fn count_recv(&mut self, path: PathId, n: u64)
@@ -3272,6 +3277,16 @@ impl Connection {
         }
     }
 
+    proof fn lemma_header_bytes(&self, k: PacketKind)
+        requires
+            self.wf(),
+        ensures
+            self.header_bytes_spec(k) <= 40,
+    {
+        self.paths.lemma_wf();
+        assert(path_ok(self.paths.path(self.paths.active_spec())));
+    }
+
     /// `header_bytes_spec`.
     #[verifier::spinoff_prover]
     fn header_bytes(&self, k: PacketKind) -> (n: usize)
@@ -4218,12 +4233,6 @@ impl Connection {
     //# received.
     //
     //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
-    //# For the purposes of
-    //# avoiding amplification prior to address validation, servers MUST
-    //# count all of the payload bytes received in datagrams that are
-    //# uniquely attributed to a single connection.
-    //
-    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
     //= type=exception
     //= reason=client-only
     //# Clients MUST ensure that UDP datagrams containing Initial packets
@@ -4987,7 +4996,9 @@ impl Connection {
             assert(frames_view(fs@)[0] == g);
             assert(CLOSE_FRAME_MAX <= MAX_DATAGRAM);
         }
-        let _h = self.header_bytes(k);
+        proof {
+            self.lemma_header_bytes(k);
+        }
         self.make_packet(k, fs, pn_len, Ghost(1int), Ghost(CLOSE_FRAME_MAX as nat))
     }
 
@@ -5216,7 +5227,8 @@ impl Connection {
         let ps = match self.close_packets(&spaces, app, code, reason.as_slice()) {
             Some(ps) => ps,
             None => {
-                // §12.3: the space is out of packet numbers, and a close would need one.
+                // A close needs a packet number: the space is out of them (§12.3), or the next one
+                // can't be encoded against `largest_acked`.
                 self.lc.close_silently();
                 return None;
             },
