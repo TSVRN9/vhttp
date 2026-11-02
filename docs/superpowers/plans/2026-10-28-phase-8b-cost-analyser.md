@@ -606,6 +606,8 @@ pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Se
 
 ### Task 8 (stretch; controller go/no-go): off-progress loops via callee return facts
 
+**Also on the go/no-go list: `at_ok`.** A second frame hypothesis beside `plc` (every `Mut` target's root is a slot or a `RefMut` root) would make an address-taken write rule sound and recover `huffman_decode`, `scan_string`, `decode_string` and `decode_field_line`. Estimate: one spec fn, one syntactic set, about five lemmas. `theorem_cost`'s statement does not change; `cert_sem_ok` only gains a hypothesis, so Tasks 2-4's proofs stay valid inputs. Decide from Task 7's measured blockers.
+
 **Go only if** all of these hold (M10):
 - Tasks 1–7 are reviewed and approved;
 - ctcore's total proof time is < 60 s, measured as Task 1 Step 1 did, next to its recorded baseline;
