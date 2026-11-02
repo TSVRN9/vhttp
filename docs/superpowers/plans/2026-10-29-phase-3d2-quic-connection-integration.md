@@ -479,6 +479,8 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
 
 ### Task 2a-ii: `poll_transmit` (all spaces, padding, closing, the §12.3 and §14.2 gates) and `build_close` (preflight: Task 2 split, I7; 3d2 preflight sizing)
 
+**From the 2a-i re-review (M6):** `control_frames` must lift `handshake_done_frame`'s clauses and the CID conservation into its ensures. Today `self.hs_done = HsDone::Sent;` added after the helper call verifies and passes every test, which would lose HANDSHAKE_DONE on a misfit (§13.3). That mutant must fail verification.
+
 **From the 1b re-review:** add a test that drives the I4 silent close (the trace in Task 1b's close test) through `poll_transmit` and asserts it returns `None`: nothing goes out on that CID, CONNECTION_CLOSE included.
 
 **Files:**
