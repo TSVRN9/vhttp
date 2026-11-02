@@ -780,6 +780,7 @@ impl Paths {
                 budget: final(self).path(id).budget,
                 ..old(self).path(id)
             }),
+            final(self).path(id).budget <= old(self).path(id).budget,
             amp_ok(final(self).amp_trace(id)),
     {
         let i = self.find(id);
@@ -942,9 +943,8 @@ impl Paths {
     //# frame so that it can associate the peer's response with the
     //# corresponding PATH_CHALLENGE.
     /// Start validating path `id` with `data`, drawn from the shell's randomness at `now`. An
-    /// earlier challenge on the path is replaced; while Validating, the new one keeps the
-    /// first one's start time, so the §8.2.4 3·PTO bound runs from the first challenge. A
-    /// Validated path stays Validated (an MTU probe, §8.2.1).
+    /// earlier challenge on the path is replaced. A Validated path stays Validated (an MTU probe,
+    /// §8.2.1).
     pub fn start_challenge(&mut self, id: PathId, data: [u8; 8], now: u64)
         requires
             old(self).wf(),
@@ -955,15 +955,7 @@ impl Paths {
             final(self).last_validated_spec() == old(self).last_validated_spec(),
             final(self).path(id) == (SpecPath {
                 challenge: Some(
-                    (
-                        data,
-                        if old(self).path(id).state is Validating {
-                            old(self).path(id).challenge.unwrap().1
-                        } else {
-                            now
-                        },
-                        false,
-                    ),
+                    (data, now, false),
                 ),
                 owed: true,
                 state: if old(self).path(id).state is Unvalidated {
@@ -979,11 +971,7 @@ impl Paths {
         proof {
             assert(path_wf(self.paths@[i as int]));
         }
-        let t = match (self.paths[i].state, self.paths[i].challenge) {
-            (PathState::Validating, Some((_, t0, _))) => t0,
-            _ => now,
-        };
-        self.paths[i].challenge = Some((data, t, false));
+        self.paths[i].challenge = Some((data, now, false));
         self.paths[i].challenge_owed = true;
         if let PathState::Unvalidated = self.paths[i].state {
             self.paths[i].state = PathState::Validating;
@@ -999,8 +987,9 @@ impl Paths {
     //# unless the anti-amplification limit for the path does not permit
     //# sending a datagram of this size.
     /// The owed challenge's data on path `id`, now being sent; `padded` says whether its
-    /// datagram reached 1200 bytes (3d2 pads it). The challenge's clock stays its start time.
-    pub fn take_challenge(&mut self, id: PathId, padded: bool) -> (r: Option<[u8; 8]>)
+    /// datagram reached 1200 bytes (3d2 pads it). §8.2.4's timer starts here, at the send: one
+    /// that started at `start_challenge` could expire before the peer ever saw the challenge.
+    pub fn take_challenge(&mut self, id: PathId, padded: bool, now: u64) -> (r: Option<[u8; 8]>)
         requires
             old(self).wf(),
             old(self).has(id),
@@ -1008,13 +997,13 @@ impl Paths {
             final(self).wf(),
             r is Some <==> old(self).path(id).owed,
             old(self).path(id).owed ==> {
-                &&& old(self).path(id).challenge matches Some((d, t, _))
+                &&& old(self).path(id).challenge matches Some((d, _, _))
                 &&& r == Some(d)
                 &&& kept(*old(self), *final(self), id)
                 &&& final(self).last_validated_spec() == old(self).last_validated_spec()
                 &&& final(self).path(id) == (SpecPath {
                     owed: false,
-                    challenge: Some((d, t, padded)),
+                    challenge: Some((d, now, padded)),
                     ..old(self).path(id)
                 })
             },
@@ -1029,8 +1018,8 @@ impl Paths {
             assert(path_wf(self.paths@[i as int]));
         }
         match self.paths[i].challenge {
-            Some((d, t, _)) => {
-                self.paths[i].challenge = Some((d, t, padded));
+            Some((d, _, _)) => {
+                self.paths[i].challenge = Some((d, now, padded));
                 self.paths[i].challenge_owed = false;
                 proof {
                     Paths::lemma_set(a, *self, i as int);

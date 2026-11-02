@@ -5,6 +5,9 @@
 //! Caller obligations, which `Connection` cannot state as `requires`:
 //! - Drain `poll_stream_events` after every `on_datagram`: `events` is bounded only by that.
 //!   `H3Server::pump` discharges this; 3e drives `Connection` before any stream exists.
+//! - After `on_timeout(now)`, poll `poll_transmit` to None before sleeping until `next_timeout`:
+//!   `settled_later` proves that timer is then later than `now`, so the sleep cannot spin. That the
+//!   poll loop ends is not proved, so cap the polls per wake, as the tests' `drain` does at 1024.
 //! - Apply each `poll_cid_updates` output to the `CidTable`, in order, before routing the next
 //!   datagram. Then the table holds only tokens of CIDs we have used and never those of retired
 //!   CIDs (§10.3.1), each connection registers at most `PEER_CID_CAP` tokens, and
@@ -214,7 +217,7 @@ pub struct Connection {
     probe_h: bool,
     probe_1: bool,
     spin: bool,
-    /// Challenge slices of `rand` used in this call; every pub fn that takes `rand` resets it.
+    /// Challenge slices of `rand` used in this call; every pub fn that draws one resets it.
     chal_used: usize,
     /// Only `wf` and `out_log()` read it, which a plain `cargo build` erases.
     #[allow(dead_code)]
@@ -1471,6 +1474,7 @@ impl Connection {
                 ..old(self).paths.path(q)
             }),
             final(self).lc == old(self).lc,
+            final(self).clocks_kept(*old(self)),
     {
         let ghost s0 = *self;
         self.paths.set_dcid(q, d);
@@ -1512,6 +1516,7 @@ impl Connection {
             }),
             final(self).peer_used_kept(*old(self)),
             final(self).lc == old(self).lc,
+            final(self).clocks_kept(*old(self)),
     {
         let ghost s0 = *self;
         self.put_dcid(q, d);
@@ -1614,7 +1619,10 @@ impl Connection {
             r ==> final(self).not_stale(q) && final(self).paths.path(q).dcid is Some,
             final(self).paths.path(q).state == old(self).paths.path(q).state,
             final(self).paths.path(q).mtu_failed == old(self).paths.path(q).mtu_failed,
+            final(self).paths.path(q).challenge == old(self).paths.path(q).challenge,
+            final(self).paths.path(q).owed == old(self).paths.path(q).owed,
             final(self).lc == old(self).lc,
+            final(self).clocks_kept(*old(self)),
             !r ==> final(self).paths == old(self).paths && final(self).peer_cids == old(self).peer_cids,
             !r ==> forall|i: int|
                 0 <= i < old(self).peer_cids.entries().len() ==> (
@@ -2492,6 +2500,18 @@ impl Connection {
         }
         // §14.2: never make a failed-MTU path active (3d final review I2).
         if self.paths.mtu_failed(path) {
+            // The peer is sending from here: probe again, at most one a 3·PTO (§14.2 allows it).
+            if self.paths.needs_mtu_probe(path) {
+                self.challenge_path(path, now, rand);
+            }
+            proof {
+                assert forall|q: PathId|
+                    #[trigger] self.paths.has(q) && q != path && self.paths.path(q).dcid
+                        == self.paths.path(path).dcid && self.paths.path(path).dcid is Some implies self.paths.path(q).peer_used
+                    == self.paths.path(path).peer_used by {
+                    assert(self.paths.has(path));
+                }
+            }
             return;
         }
         let old_path = self.paths.active();
@@ -2634,6 +2654,7 @@ impl Connection {
             final(self).frames_kept(*old(self)),
             final(self).paths == old(self).paths,
             final(self).lc == old(self).lc,
+            final(self).clocks_kept(*old(self)),
             final(self).hs_done == (if f@ is HandshakeDone && !(old(self).hs_done is Acked) {
                 HsDone::Pending
             } else {
@@ -2960,6 +2981,7 @@ impl Connection {
             final(self).frames_kept(*old(self)),
             final(self).paths == old(self).paths,
             final(self).lc == old(self).lc,
+            final(self).clocks_kept(*old(self)),
     {
         if !self.complete {
             return;
@@ -2978,6 +3000,7 @@ impl Connection {
                 self.frames_kept(*old(self)),
                 self.paths == old(self).paths,
                 self.lc == old(self).lc,
+                self.clocks_kept(*old(self)),
             decreases 4 - i,
         {
             let s = slice_subrange(rand.as_slice(), 24 * i, 24 * i + 24);
@@ -3284,6 +3307,7 @@ impl Connection {
 
     /// What collecting frames leaves alone: all of `wf` but the frame sources.
     closed spec fn tx_kept(&self, o: Connection) -> bool {
+        &&& self.idle == o.idle
         &&& self.hs_path == o.hs_path
         &&& self.ids == o.ids
         &&& self.local_tp == o.local_tp
@@ -3391,6 +3415,10 @@ impl Connection {
             r matches Some(room) ==> room <= MAX_DATAGRAM && forall|n: nat|
                 #[trigger] min_pn_len(self.sent(k).next_pn_spec(), self.sent(k).largest_acked_spec(), n) ==> room
                     + self.header_bytes_spec(k) + n + AEAD_TAG_LEN + 3 <= left,
+            match r {
+                Some(x) => self.room_spec(k, left as nat) == Some(x as nat),
+                None => self.room_spec(k, left as nat) is None,
+            },
     {
         proof {
             self.sent(k).lemma_wf();
@@ -3399,6 +3427,16 @@ impl Connection {
             Some(n) => n as usize,
             None => 4,
         };
+        proof {
+            let pn = self.sent(k).next_pn_spec();
+            let la = self.sent(k).largest_acked_spec();
+            if pn_len < 4 {
+                assert(!pn_len_ok(pn, la, 1) ==> pn_len != 1);
+            }
+            assert(pn_len as nat == (if pn_len_ok(pn, la, 1) { 1nat } else if pn_len_ok(pn, la, 2) { 2nat } else if pn_len_ok(pn, la, 3) { 3nat } else { 4nat })) by {
+                assert(pn_len_ok(pn, la, pn_len as nat) || !pn_len_ok(pn, la, 3));
+            }
+        }
         let need = self.header_bytes(k) + pn_len + AEAD_TAG_LEN + 3;
         if left < need {
             return None;
@@ -3417,7 +3455,8 @@ impl Connection {
             r.0@.len() <= 1,
             ack_ok(frames_view(r.0@), self.recv(k)),
             r.0@.len() == 1 ==> frames_view(r.0@)[0] is Ack,
-            self.recv(k).has_new() && room >= FULL_ACK_LEN && self.recv(k).range_count() > 0 ==> r.0@.len() == 1,
+            self.recv(k).has_new() && self.recv(k).full_ack_fits(now, self.local_tp.ack_delay_exponent, room as int)
+                ==> r.0@.len() == 1,
             forall|i: int|
                 0 <= i < r.0@.len() ==> !ack_eliciting(
                     spec_frame_type(#[trigger] frames_view(r.0@)[i]),
@@ -3427,8 +3466,7 @@ impl Connection {
         proof {
             assert(frames_view(fs@) =~= Seq::<SpecFrame>::empty());
         }
-        // ponytail: no ACK goes on a path with under ~560 bytes of budget until the budget grows (amplification credit or validation); a partial-ACK path if that ever stalls a handshake.
-        if !self.recv_ref(k).has_new() || room < FULL_ACK_LEN {
+        if !self.recv_ref(k).has_new() {
             return (fs, room);
         }
         //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.6
@@ -3457,7 +3495,10 @@ impl Connection {
         //# packets from the server.
         match self.recv_ref(k).build_ack(now, self.local_tp.ack_delay_exponent, room) {
             None => (fs, room),
-            Some(a) => {
+            // Every range or none, so an ACK reports every packet number not yet reported.
+            Some(a) => if a.ranges.len() + 1 != self.recv_ref(k).range_len() {
+                (fs, room)
+            } else {
                 let ghost g = a@;
                 let ghost rc = self.recv(k);
                 let f = Frame::Ack(a);
@@ -3501,6 +3542,7 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).tx_kept(*old(self)),
+            final(self).now == old(self).now,
             final(self).streams == old(self).streams,
             final(self).polled == old(self).polled,
             tx_frames(frames_view(final(fs)@), k, base, *final(left) as nat, room),
@@ -3560,6 +3602,7 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).tx_kept(*old(self)),
+            final(self).now == old(self).now,
             final(self).streams == old(self).streams,
             final(self).polled == old(self).polled,
             tx_frames(frames_view(final(fs)@), PacketKind::OneRtt, base, *final(left) as nat, room),
@@ -3604,6 +3647,7 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).tx_kept(*old(self)),
+            final(self).now == old(self).now,
             final(self).streams == old(self).streams,
             final(self).polled == old(self).polled,
             tx_frames(frames_view(final(fs)@), PacketKind::OneRtt, base, *final(left) as nat, room),
@@ -3643,6 +3687,7 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).tx_kept(*old(self)),
+            final(self).now == old(self).now,
             final(self).streams == old(self).streams,
             final(self).polled == old(self).polled,
             tx_frames(frames_view(final(fs)@), PacketKind::OneRtt, base, *final(left) as nat, room),
@@ -3697,6 +3742,7 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).tx_kept(*old(self)),
+            final(self).now == old(self).now,
             final(self).streams == old(self).streams,
             final(self).polled == old(self).polled,
             tx_frames(frames_view(final(fs)@), PacketKind::OneRtt, base, *final(left) as nat, room),
@@ -3751,6 +3797,7 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).tx_kept(*old(self)),
+            final(self).now == old(self).now,
             tx_frames(frames_view(final(fs)@), PacketKind::OneRtt, base, 0, room),
             extends(frames_view(old(fs)@), frames_view(final(fs)@)),
             final(self).polled@ == frames_view(final(fs)@).skip(old(fs)@.len() as int),
@@ -3791,6 +3838,7 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).tx_kept(*old(self)),
+            final(self).now == old(self).now,
             tx_frames(frames_view(final(fs)@), k, old(fs)@.len() as int, 0, room),
             extends(frames_view(old(fs)@), frames_view(final(fs)@)),
             in_tail(final(self).polled@, frames_view(final(fs)@), old(fs)@.len() as int),
@@ -3939,11 +3987,16 @@ impl Connection {
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
             final(self).phase_spec() is Open ==> final(self).tx_kept(*old(self)),
+            r is None ==> final(self).now == old(self).now,
+            final(self).phase_spec() is Open || final(self).phase_spec() is Closed,
             r is None ==> final(self).polled@.len() == 0,
             !(k is OneRtt) ==> final(self).polled == old(self).polled,
             // §13.2.1: a due ACK that fits goes out.
-            final(self).phase_spec() is Open && old(self).recv(k).has_new() && room >= FULL_ACK_LEN
-                && old(self).recv(k).range_count() > 0 && ack_is_due(
+            final(self).phase_spec() is Open && old(self).recv(k).has_new() && old(self).recv(k).full_ack_fits(
+                now,
+                old(self).local_tp.ack_delay_exponent,
+                room as int,
+            ) && ack_is_due(
                 old(self).recv(k),
                 spec_ms_to_us(old(self).local_tp.max_ack_delay),
                 now,
@@ -4010,6 +4063,8 @@ impl Connection {
             final(self).sent(k).next_pn_spec() == old(self).sent(k).next_pn_spec() + 1,
             final(self).sent(k).inflight_spec() == old(self).sent(k).inflight_spec(),
             final(self).inflight_total() == old(self).inflight_total(),
+            final(self).tx_fixed(*old(self)),
+            forall|j: PacketKind| #[trigger] final(self).sent(j).inflight_spec() == old(self).sent(j).inflight_spec(),
     {
         //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.3
         //# New packet numbers MUST be used for any new packets that are sent; as
@@ -4033,6 +4088,7 @@ impl Connection {
             final(self).sends_kept(*old(self)),
             final(self).seen_kept(*old(self)),
             final(self).recv(k).unreported() == Set::<u64>::empty(),
+            final(self).tx_fixed(*old(self)),
     {
         match k {
             PacketKind::Initial => self.recv_i.on_ack_sent(ack_only),
@@ -4057,6 +4113,7 @@ impl Connection {
             final(self).sent_kept(*old(self), k),
             final(self).sent(k).next_pn_spec() == old(self).sent(k).next_pn_spec(),
             recorded(old(self).sent(k).inflight_spec(), final(self).sent(k).inflight_spec(), p@),
+            final(self).tx_timers(*old(self), now),
     {
         let size = packet_len(p);
         let rec = SentPacket {
@@ -4090,6 +4147,15 @@ impl Connection {
         proof {
             assert(self.sent(k).inflight_spec() == o.push(g));
             assert(o.push(g).drop_last() =~= o);
+            assert(g.time == now);
+            assert forall|j: PacketKind| j != k implies #[trigger] self.sent(j) == old(self).sent(j) by {
+                match k {
+                    PacketKind::Initial => { match j { PacketKind::Handshake => {}, PacketKind::OneRtt => {}, PacketKind::Initial => {} } },
+                    PacketKind::Handshake => { match j { PacketKind::Handshake => {}, PacketKind::OneRtt => {}, PacketKind::Initial => {} } },
+                    PacketKind::OneRtt => { match j { PacketKind::Handshake => {}, PacketKind::OneRtt => {}, PacketKind::Initial => {} } },
+                }
+            }
+            self.lemma_tx_recorded(*old(self), k, g, now);
         }
     }
 
@@ -4196,12 +4262,17 @@ impl Connection {
             p@.frames[0] is Ack ==> final(self).recv(k).unreported() == Set::<u64>::empty(),
             eliciting ==> recorded(old(self).sent(k).inflight_spec(), final(self).sent(k).inflight_spec(), p@),
             !eliciting ==> final(self).sent(k).inflight_spec() == old(self).sent(k).inflight_spec(),
+            final(self).tx_timers(*old(self), now),
     {
         let ghost s0 = *self;
         proof {
             lemma_not_inflight(s0.sent(k));
         }
         self.commit_pn(k);
+        let ghost s1 = *self;
+        proof {
+            self.lemma_tx_same(s0, now);
+        }
         if matches!(p.frames[0], Frame::Ack(_)) {
             proof {
                 //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
@@ -4213,9 +4284,26 @@ impl Connection {
                 assert(self.recv(k) == s0.recv(k));
             }
             self.commit_ack(k, ack_only);
+            proof {
+                assert forall|j: PacketKind| #[trigger] self.sent(j).inflight_spec() == s1.sent(j).inflight_spec() by {
+                    assert(self.sent(j) == s1.sent(j)) by {
+                        match j {
+                            PacketKind::Initial => {},
+                            PacketKind::Handshake => {},
+                            PacketKind::OneRtt => {},
+                        }
+                    }
+                }
+                self.lemma_tx_same(s1, now);
+                self.lemma_tx_trans(s1, s0, now);
+            }
         }
+        let ghost s2 = *self;
         if eliciting {
             self.commit_record(k, p, now);
+            proof {
+                self.lemma_tx_trans(s2, s0, now);
+            }
         }
     }
 
@@ -4241,7 +4329,18 @@ impl Connection {
             final(self).out_log() == old(self).out_log(),
             r is None ==> final(self).polled@.len() == 0,
             r is None && final(self).phase_spec() is Open ==> final(self).tx_kept(*old(self)),
+            r is None ==> final(self).now == old(self).now,
+            final(self).tx_timers(*old(self), now),
             !(k is OneRtt) ==> final(self).polled == old(self).polled,
+            r is None && final(self).phase_spec() is Open && old(self).recv(k).has_new() && old(self).recv(k).full_ack_fits(
+                now,
+                old(self).local_tp.ack_delay_exponent,
+                room as int,
+            ) ==> !ack_is_due(
+                old(self).recv(k),
+                spec_ms_to_us(old(self).local_tp.max_ack_delay),
+                now,
+            ),
             r matches Some((p, eliciting, _)) ==> {
                 &&& old(self).packet_ok(p@, k, room as nat)
                 &&& polled_in_packet(final(self).polled@, p@)
@@ -4267,9 +4366,19 @@ impl Connection {
         let ghost s0 = *self;
         let (p, eliciting, ack_only) = match self.collect_frames(k, room, can_pad, now) {
             Some(x) => x,
-            None => return None,
+            None => {
+                proof {
+                    if self.phase_spec() is Open {
+                        self.lemma_tx_kept_timers(s0, now);
+                    } else {
+                        self.lemma_tx_closed(s0, now);
+                    }
+                }
+                return None;
+            },
         };
         proof {
+            self.lemma_tx_kept_timers(s0, now);
             assert(self.recv(k) == s0.recv(k));
             assert(self.sent(k) == s0.sent(k));
             assert(self.inflight_total() == s0.inflight_total());
@@ -4277,6 +4386,7 @@ impl Connection {
         let ghost s1 = *self;
         self.commit_space_packet(k, &p, eliciting, ack_only, now);
         proof {
+            self.lemma_tx_trans(s1, s0, now);
             self.lemma_sent_kept(s1, k);
             assert(self.seen_kept(s0));
             self.lemma_seen_kept(s0);
@@ -4342,6 +4452,7 @@ impl Connection {
             final(self).sends_only_logged(*old(self)),
             final(self).lc == old(self).lc,
             final(self).paths_charged(*old(self), q),
+            forall|t: u64| #[trigger] final(self).tx_timers(*old(self), t),
     {
         let ghost s0 = *self;
         let n = datagram_len(d);
@@ -4352,6 +4463,22 @@ impl Connection {
             lemma_pn_step(s0.out_log@, d@, PacketKind::Initial, s0.sent(PacketKind::Initial).next_pn_spec());
             lemma_pn_step(s0.out_log@, d@, PacketKind::Handshake, s0.sent(PacketKind::Handshake).next_pn_spec());
             lemma_pn_step(s0.out_log@, d@, PacketKind::OneRtt, s0.sent(PacketKind::OneRtt).next_pn_spec());
+            assert(self.amp_blocked_spec() || !s0.amp_blocked_spec());
+            reveal(Connection::tx_timers);
+            assert forall|t: u64| #[trigger] self.tx_timers(s0, t) by {
+                assert forall|k: PacketKind| #[trigger] self.sent(k).inflight_spec() == s0.sent(k).inflight_spec() by {
+                    match k {
+                        PacketKind::Initial => {},
+                        PacketKind::Handshake => {},
+                        PacketKind::OneRtt => {},
+                    }
+                }
+                assert forall|r: PathId|
+                    #[trigger] self.paths.has(r) && timed(self.paths.path(r)) implies s0.paths.has(r) && (self.paths.path(r).challenge
+                        == s0.paths.path(r).challenge && timed(s0.paths.path(r)) || t <= self.paths.path(r).challenge.unwrap().1) by {
+                    assert(s0.paths.path(r).owed == self.paths.path(r).owed);
+                }
+            }
         }
     }
 
@@ -4922,6 +5049,7 @@ impl Connection {
             old(self).phase_spec() is Open,
             old(self).polled@.len() == 0,
             old(self).live(k) ==> old(self).sent(k).next_pn_spec() < PN_MAX,
+            old(d)@.packets.len() == 0 ==> now == old(self).now,
             old(self).built_ok(o, old(d)@.packets),
             old(d)@.packets.len() <= 2,
             out_datagram_sized(old(d)@),
@@ -4935,6 +5063,12 @@ impl Connection {
             !(k is OneRtt) ==> final(self).polled@.len() == 0,
             !(final(self).phase_spec() is Open) ==> final(self).polled@.len() == 0,
             final(d)@.path == old(d)@.path,
+            final(d)@.packets.len() == old(d)@.packets.len() ==> final(self).now == old(self).now,
+            final(self).tx_timers(*old(self), now),
+            final(self).phase_spec() is Open && old(d)@.packets.len() == 0 && final(d)@.packets.len() == 0
+                && budget == old(self).left_for_ack() ==> later(final(self).ack_term(k), now),
+            final(self).phase_spec() is Open && final(d)@.packets.len() == old(d)@.packets.len() ==> final(self).tx_kept(*old(self)),
+            final(self).phase_spec() is Open ==> final(d)@.packets.len() >= old(d)@.packets.len(),
             final(self).phase_spec() is Open ==> {
                 &&& final(self).built_ok(o, final(d)@.packets)
                 &&& final(d)@.packets.len() <= old(d)@.packets.len() + 1
@@ -4951,6 +5085,8 @@ impl Connection {
         let ghost s = d@.packets;
         proof {
             assert(polled_placed(self.polled@, d@));
+            self.lemma_tx_same(c, now);
+            assert(self.tx_kept(c));
         }
         if !self.is_live(k) {
             return;
@@ -4965,6 +5101,16 @@ impl Connection {
             None => {
                 proof {
                     if self.phase_spec() is Open {
+                        c.recv(k).lemma_owed_has_new();
+                        self.lemma_ack_term_kept(c, k);
+                        if s.len() == 0 {
+                            assert(out_datagram_len(d@) == 0);
+                            assert(left == budget);
+                            if budget == c.left_for_ack() && c.ack_fits(k) && c.recv(k).eliciting_since_ack() > 0 {
+                                assert(c.recv(k).full_ack_fits(now, c.local_tp.ack_delay_exponent, room as int));
+                                assert(!ack_is_due(c.recv(k), spec_ms_to_us(c.local_tp.max_ack_delay), now));
+                            }
+                        }
                         self.lemma_built_kept(c, o, s);
                         self.lemma_tx_kept(c);
                         assert(polled_placed(self.polled@, d@));
@@ -5062,10 +5208,103 @@ impl Connection {
         }
     }
 
+    /// A packet of each space with something due, into the empty `d`. The split keeps
+    /// `data_datagram` within rlimit 3.
+    #[verifier::spinoff_prover]
+    fn add_spaces(
+        &mut self,
+        budget: usize,
+        can_pad: bool,
+        now: u64,
+        d: &mut OutDatagram,
+        pad: &mut bool,
+        Ghost(o): Ghost<Connection>,
+    )
+        requires
+            now == old(self).now,
+            o.wf(),
+            old(self).wf(),
+            old(self).phase_spec() is Open,
+            old(self).polled@.len() == 0,
+            forall|k: PacketKind| #[trigger] old(self).live(k) ==> old(self).sent(k).next_pn_spec() < PN_MAX,
+            old(self).built_ok(o, old(d)@.packets),
+            old(d)@.packets.len() == 0,
+            out_datagram_sized(old(d)@),
+            budget <= MAX_DATAGRAM,
+            budget == old(self).left_for_ack(),
+            !*old(pad),
+        ensures
+            final(self).wf(),
+            final(self).out_log() == old(self).out_log(),
+            !(final(self).phase_spec() is Open) ==> final(self).polled@.len() == 0,
+            final(d)@.path == old(d)@.path,
+            final(self).tx_timers(*old(self), now),
+            final(self).phase_spec() is Open ==> {
+                &&& final(self).built_ok(o, final(d)@.packets)
+                &&& final(d)@.packets.len() <= 3
+                &&& out_datagram_sized(final(d)@)
+                &&& out_datagram_len(final(d)@) <= budget
+                &&& *final(pad) == has_eliciting_initial(final(d)@.packets)
+                &&& *final(pad) ==> can_pad
+                &&& polled_placed(final(self).polled@, final(d)@)
+                &&& final(d)@.packets.len() == 0 ==> final(self).acks_later(now)
+            },
+    {
+        let ghost s00 = *self;
+        proof {
+            self.lemma_tx_same(s00, now);
+            assert(has_eliciting_initial(d@.packets) == *pad);
+            assert(out_datagram_len(d@) == 0);
+            assert(self.live(PacketKind::Initial) ==> self.sent(PacketKind::Initial).next_pn_spec() < PN_MAX);
+            assert(self.live(PacketKind::Handshake) ==> self.sent(PacketKind::Handshake).next_pn_spec() < PN_MAX);
+            assert(self.live(PacketKind::OneRtt) ==> self.sent(PacketKind::OneRtt).next_pn_spec() < PN_MAX);
+        }
+        // A packet number that cannot be encoded closes silently (`collect_frames`). An earlier space's
+        // packet is then recorded and unsent, harmless once Closed; OneRtt runs last, so no polled
+        // frame is at risk.
+        self.add_space_packet(PacketKind::Initial, budget, can_pad, now, d, pad, Ghost(o));
+        if !matches!(self.lc.phase(), Phase::Open) {
+            return;
+        }
+        let ghost s01 = *self;
+        let ghost l0 = d@.packets.len();
+        self.add_space_packet(PacketKind::Handshake, budget, can_pad, now, d, pad, Ghost(o));
+        if !matches!(self.lc.phase(), Phase::Open) {
+            proof {
+                self.lemma_tx_phase(s01, now);
+                self.lemma_tx_closed(s00, now);
+            }
+            return;
+        }
+        proof {
+            self.lemma_tx_trans(s01, s00, now);
+        }
+        let ghost s02 = *self;
+        let ghost l1 = d@.packets.len();
+        self.add_space_packet(PacketKind::OneRtt, budget, can_pad, now, d, pad, Ghost(o));
+        if !matches!(self.lc.phase(), Phase::Open) {
+            proof {
+                self.lemma_tx_phase(s02, now);
+                self.lemma_tx_closed(s00, now);
+            }
+            return;
+        }
+        proof {
+            self.lemma_tx_trans(s02, s00, now);
+        }
+        proof {
+            if d@.packets.len() == 0 {
+                assert(l0 == 0 && l1 == 0);
+                self.lemma_no_packet_acks(s01, s02, now);
+            }
+        }
+    }
+
     /// The ordinary datagram of the Open state: a packet of each space with something due.
     #[verifier::spinoff_prover]
     fn data_datagram(&mut self, now: u64, Ghost(o): Ghost<Connection>) -> (r: Option<OutDatagram>)
         requires
+            now == old(self).now,
             o.wf(),
             old(self).wf(),
             old(self).phase_spec() is Open,
@@ -5087,7 +5326,13 @@ impl Connection {
                 &&& !o.mtu_failed_at(d@.path)
                 &&& final(self).path_rules(o, d@)
             },
+            final(self).tx_timers(*old(self), now),
+            r is None ==> final(self).acks_later(now),
     {
+        let ghost s00 = *self;
+        proof {
+            self.lemma_tx_same(s00, now);
+        }
         // ponytail: one datagram per call (the shell loops), one CRYPTO frame per space per packet.
         let q = self.paths.active();
         proof {
@@ -5101,6 +5346,11 @@ impl Connection {
         //# CONNECTION_CLOSE frames, on the affected path.
         // P17: the send gate, local to this body.
         if self.paths.mtu_failed(q) {
+            proof {
+                assert forall|k: PacketKind| later(#[trigger] self.ack_term(k), now) by {
+                    assert(!self.ack_fits(k));
+                }
+            }
             return None;
         }
         //= https://www.rfc-editor.org/rfc/rfc9000#section-14.1
@@ -5122,18 +5372,7 @@ impl Connection {
             assert(self.live(PacketKind::Handshake) ==> self.sent(PacketKind::Handshake).next_pn_spec() < PN_MAX);
             assert(self.live(PacketKind::OneRtt) ==> self.sent(PacketKind::OneRtt).next_pn_spec() < PN_MAX);
         }
-        // A packet number that cannot be encoded closes silently (`collect_frames`). An earlier space's
-        // packet is then recorded and unsent, harmless once Closed; OneRtt runs last, so no polled
-        // frame is at risk.
-        self.add_space_packet(PacketKind::Initial, budget, can_pad, now, &mut d, &mut pad, Ghost(o));
-        if !matches!(self.lc.phase(), Phase::Open) {
-            return None;
-        }
-        self.add_space_packet(PacketKind::Handshake, budget, can_pad, now, &mut d, &mut pad, Ghost(o));
-        if !matches!(self.lc.phase(), Phase::Open) {
-            return None;
-        }
-        self.add_space_packet(PacketKind::OneRtt, budget, can_pad, now, &mut d, &mut pad, Ghost(o));
+        self.add_spaces(budget, can_pad, now, &mut d, &mut pad, Ghost(o));
         if !matches!(self.lc.phase(), Phase::Open) {
             return None;
         }
@@ -5169,6 +5408,8 @@ impl Connection {
         proof {
             self.lemma_only_logged(c);
             self.lemma_built_sent(c, o, d@);
+            assert(self.tx_timers(c, now));
+            self.lemma_tx_trans(c, s00, now);
         }
         Some(d)
     }
@@ -5439,6 +5680,8 @@ impl Connection {
                 &&& final(self).close_sent(o, out_datagram_len(d@))
                 &&& final(self).path_rules(o, d@)
             },
+            final(self).lc.phase_spec() is Closed || (final(self).lc.phase_spec() is Closing
+                && final(self).lc.deadline_spec() == old(self).lc.deadline_spec()),
     {
         proof {
             self.paths.lemma_wf();
@@ -5612,7 +5855,7 @@ impl Connection {
 
     /// The frames owed on `q`: its oldest response and its owed challenge, taken.
     #[verifier::spinoff_prover]
-    fn take_path_frames(&mut self, q: PathId, padded: bool) -> (r: Vec<Frame>)
+    fn take_path_frames(&mut self, q: PathId, padded: bool, now: u64) -> (r: Vec<Frame>)
         requires
             old(self).wf(),
             old(self).paths.has(q),
@@ -5633,6 +5876,7 @@ impl Connection {
                 &&& path_frames_ok(frames_view(r@))
                 &&& frames_view(r@) == path_frames_of(a)
             }),
+            final(self).tx_timers(*old(self), now),
     {
         let ghost s0 = *self;
         let mut fs: Vec<Frame> = Vec::new();
@@ -5657,7 +5901,7 @@ impl Connection {
             }
         }
         let ghost v1 = frames_view(fs@);
-        if let Some(y) = self.paths.take_challenge(q, padded) {
+        if let Some(y) = self.paths.take_challenge(q, padded, now) {
             let f = Frame::PathChallenge(y);
             let ghost g = f@;
             fs.push(f);
@@ -5670,6 +5914,24 @@ impl Connection {
             assert(frames_view(fs@) =~= path_frames_of(s0.paths.path(q)));
             self.lemma_path_edit(s0, q);
             self.lemma_dcids_same(s0, q);
+            assert(self.tx_timers(s0, now)) by {
+                reveal(Connection::tx_timers);
+                assert forall|k: PacketKind| #[trigger] self.sent(k).inflight_spec() == s0.sent(k).inflight_spec() by {
+                    match k {
+                        PacketKind::Initial => {},
+                        PacketKind::Handshake => {},
+                        PacketKind::OneRtt => {},
+                    }
+                }
+                assert(self.amp_blocked_spec() || !s0.amp_blocked_spec());
+                assert forall|r: PathId|
+                    #[trigger] self.paths.has(r) && timed(self.paths.path(r)) implies s0.paths.has(r) && (self.paths.path(r).challenge
+                        == s0.paths.path(r).challenge && timed(s0.paths.path(r)) || now <= self.paths.path(r).challenge.unwrap().1) by {
+                    if r != q {
+                        assert(self.paths.path(r) == s0.paths.path(r));
+                    }
+                }
+            }
         }
         fs
     }
@@ -5818,12 +6080,13 @@ impl Connection {
             o.mtu_failed_at(q) ==> mtu_failed_frames(d@) && out_datagram_len(d@) == 1200,
             final(self).path_rules(o, d@),
             only_path_frames(d@),
+            final(self).tx_timers(*old(self), now),
             // §8.2.3: only a sent challenge's real size can validate the MTU.
             o.paths.path(q).owed ==> final(self).paths.path(q).challenge is Some
                 && final(self).paths.path(q).challenge.unwrap().2 == (out_datagram_len(d@) == 1200),
     {
         let ghost s0 = *self;
-        let fs = self.take_path_frames(q, expand);
+        let fs = self.take_path_frames(q, expand, now);
         let ghost sf = frames_view(fs@);
         let ghost s1 = *self;
         let p = self.path_packet(q, fs, pn_len);
@@ -5862,12 +6125,40 @@ impl Connection {
         self.commit_pn(PacketKind::OneRtt);
         proof {
             self.lemma_one_fresh(s1, d@, w);
+            self.lemma_tx_same(s1, now);
+            self.lemma_tx_trans(s1, s0, now);
         }
         let ghost c = *self;
         self.commit_datagram(q, &d);
+        let ghost c2 = *self;
         // §10.1: these packets are ack-eliciting, though not recorded (E2).
         self.idle.on_eliciting_sent(now);
         proof {
+            assert(c2.tx_timers(c, now));
+            c2.lemma_tx_trans(c, s0, now);
+            assert(self.tx_timers(s0, now)) by {
+              reveal(Connection::tx_timers);
+              if !(self.lc.phase_spec() is Closed) {
+                assert forall|k: PacketKind|
+                    #[trigger] self.sent(k).inflight_spec() == s0.sent(k).inflight_spec() || (self.sent(k).inflight_spec().len() > 0
+                        && now <= self.sent(k).inflight_spec().last().time) by {
+                    assert(c2.sent(k).inflight_spec() == s0.sent(k).inflight_spec() || (c2.sent(k).inflight_spec().len() > 0
+                        && now <= c2.sent(k).inflight_spec().last().time));
+                    assert(self.sent(k) == c2.sent(k)) by {
+                        match k {
+                            PacketKind::Initial => {},
+                            PacketKind::Handshake => {},
+                            PacketKind::OneRtt => {},
+                        }
+                    }
+                }
+                assert forall|r: PathId|
+                    #[trigger] self.paths.has(r) && timed(self.paths.path(r)) implies s0.paths.has(r) && (self.paths.path(r).challenge
+                        == s0.paths.path(r).challenge && timed(s0.paths.path(r)) || now <= self.paths.path(r).challenge.unwrap().1) by {
+                    assert(c2.paths.has(r) && timed(c2.paths.path(r)));
+                }
+              }
+            }
             reveal(Connection::path_rules);
             self.lemma_one_sent(o, d@, w);
             lemma_path_frames_of(o.paths.path(q));
@@ -5942,6 +6233,8 @@ impl Connection {
     //# A PATH_RESPONSE frame MUST be sent on the network path where the
     //# PATH_CHALLENGE frame was received.
     //= https://www.rfc-editor.org/rfc/rfc9000#section-9.4
+    //= type=exception
+    //= reason=One shared placeholder Recovery: old-path records acked after on_path_validated still raise cwnd. Path packets are unrecorded (E2), which covers only these. TRUSTED.md; Phase 6 closes it.
     //# Packets sent on the old path MUST NOT contribute to
     //# congestion control or RTT estimation for the new path.
     // ponytail: one shared Recovery, so old-path records acked after on_path_validated still raise cwnd; Phase 6 keeps per-path state.
@@ -5957,6 +6250,7 @@ impl Connection {
             old(self).polled@.len() == 0,
             old(self).tx_kept(o),
         ensures
+            r is None ==> final(self).now == old(self).now,
             final(self).wf(),
             final(self).polled@.len() == 0,
             final(self).out_log() == match r {
@@ -5974,7 +6268,12 @@ impl Connection {
                 &&& o.paths.path(d@.path).owed ==> final(self).paths.path(d@.path).challenge is Some
                     && final(self).paths.path(d@.path).challenge.unwrap().2 == (out_datagram_len(d@) == 1200)
             },
+            final(self).tx_timers(*old(self), now),
     {
+        let ghost s0 = *self;
+        proof {
+            self.lemma_tx_same(s0, now);
+        }
         // PATH frames arrive only in 1-RTT.
         if !self.complete {
             return None;
@@ -5984,6 +6283,9 @@ impl Connection {
             Some((_, _, None)) => {
                 self.lc.close_silently();
                 self.streams = None;
+                proof {
+                    self.lemma_tx_closed(s0, now);
+                }
                 None
             },
             Some((q, padded, Some(pn_len))) => Some(self.send_path_datagram(q, padded, pn_len, now, Ghost(o))),
@@ -6038,8 +6340,13 @@ impl Connection {
             old(self).phase_spec() is Open ==> forall|k: PacketKind|
                 #[trigger] old(self).live(k) && old(self).sent(k).next_pn_spec() == PN_MAX ==> r is None
                     && final(self).phase_spec() is Closed,
+            // A send moves no timer to `now` or before.
+            now < u64::MAX && old(self).timers_later(now) ==> final(self).timers_later(now),
+            // §13.2.1: nothing more to send, so no ACK that could go is due.
+            r is None ==> final(self).acks_later(now),
     {
         let ghost o = *old(self);
+        let ghost n0 = now;
         proof {
             reveal(Connection::path_rules);
         }
@@ -6086,20 +6393,47 @@ impl Connection {
             }
         }
         let now = self.now;
+        let ghost s0 = *self;
+        proof {
+            s0.lemma_tx_kept_timers(o, now);
+        }
         if let Some(d) = self.build_path_datagram(now, Ghost(o)) {
+            proof {
+                self.lemma_tx_trans(s0, o, now);
+                if n0 < u64::MAX && o.timers_later(n0) {
+                    self.lemma_tx_later(o, now, n0);
+                }
+            }
             return Some(d);
         }
         if !matches!(self.lc.phase(), Phase::Open) {
+            proof {
+                self.lemma_tx_phase(s0, now);
+            }
             return None;
         }
+        let ghost s1 = *self;
         proof {
+            self.lemma_tx_kept_timers(o, now);
             self.lemma_tx_kept(o);
             assert forall|k: PacketKind| #[trigger] self.live(k) implies self.sent(k).next_pn_spec() < PN_MAX by {
                 assert(o.live(k));
                 assert(self.sent(k) == o.sent(k));
             }
         }
-        self.data_datagram(now, Ghost(o))
+        let r = self.data_datagram(now, Ghost(o));
+        proof {
+            self.lemma_tx_trans(s1, o, now);
+            if n0 < u64::MAX && o.timers_later(n0) {
+                self.lemma_tx_later(o, now, n0);
+            }
+            if r is None && self.lc.phase_spec() is Open {
+                assert forall|k: PacketKind| later(#[trigger] self.ack_term(k), n0) by {
+                    assert(later(self.ack_term(k), now));
+                }
+            }
+        }
+        r
     }
 
     /// Test support (3d2 preflight M9): `sent(k)` jumps to packet number `next`, as if the numbers
@@ -6150,12 +6484,78 @@ impl Connection {
         }
     }
 
+    /// The frame room `room_for` gives a packet of space `k` in `left` bytes.
+    closed spec fn room_spec(&self, k: PacketKind, left: nat) -> Option<nat> {
+        let pn = self.sent(k).next_pn_spec();
+        let la = self.sent(k).largest_acked_spec();
+        let n: nat = if pn_len_ok(pn, la, 1) { 1 } else if pn_len_ok(pn, la, 2) { 2 } else if pn_len_ok(pn, la, 3) { 3 } else { 4 };
+        let need = self.header_bytes_spec(k) + n + AEAD_TAG_LEN + 3;
+        if left < need { None } else { Some((left - need) as nat) }
+    }
+
+    /// A fresh datagram's budget on the active path.
+    closed spec fn left_for_ack(&self) -> usize {
+        let b = self.paths.budget_spec(self.paths.active_spec());
+        if b > MAX_DATAGRAM { MAX_DATAGRAM } else { b as usize }
+    }
+
+    proof fn lemma_ack_term_kept(&self, o: Connection, k: PacketKind)
+        requires
+            self.tx_kept(o),
+            self.now == o.now,
+        ensures
+            self.ack_term(k) == o.ack_term(k),
+    {
+        self.lemma_tx_kept(o);
+        assert(self.active_dcid_spec() == o.active_dcid_spec());
+        assert(self.header_bytes_spec(k) == o.header_bytes_spec(k));
+        assert(self.room_spec(k, o.left_for_ack() as nat) == o.room_spec(k, o.left_for_ack() as nat));
+    }
+
+    /// No space built a packet, so none has an ACK due.
+    proof fn lemma_no_packet_acks(&self, s01: Connection, s02: Connection, now: u64)
+        requires
+            s02.tx_kept(s01),
+            self.tx_kept(s02),
+            s02.now == s01.now,
+            self.now == s02.now,
+            later(s01.ack_term(PacketKind::Initial), now),
+            later(s02.ack_term(PacketKind::Handshake), now),
+            later(self.ack_term(PacketKind::OneRtt), now),
+        ensures
+            forall|k: PacketKind| later(#[trigger] self.ack_term(k), now),
+    {
+        let (i, h) = (PacketKind::Initial, PacketKind::Handshake);
+        self.lemma_ack_term_kept(s02, i);
+        s02.lemma_ack_term_kept(s01, i);
+        self.lemma_ack_term_kept(s02, h);
+        assert forall|k: PacketKind| later(#[trigger] self.ack_term(k), now) by {
+            match k {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
+    }
+
+    /// A due ACK of space `k` can go in a fresh datagram on the active path: `data_datagram`'s send
+    /// gate and budget, `start_frames`' room.
+    closed spec fn ack_fits(&self, k: PacketKind) -> bool {
+        let a = self.paths.active_spec();
+        &&& !self.paths.mtu_failed_spec(a)
+        &&& self.room_spec(k, self.left_for_ack() as nat) matches Some(r) && self.recv(k).full_ack_fits(
+            self.now,
+            self.local_tp.ack_delay_exponent,
+            r as int,
+        )
+    }
+
     /// When space `k` owes an ACK, `RecvPns::ack_deadline` for a live space.
     closed spec fn ack_term(&self, k: PacketKind) -> Option<u64> {
         let r = self.recv(k);
         let first = r.first_unacked()->0;
         let m = spec_ms_to_us(self.local_tp.max_ack_delay);
-        if !self.live(k) || r.eliciting_since_ack() == 0 {
+        if !self.live(k) || r.eliciting_since_ack() == 0 || !self.ack_fits(k) {
             None
         } else {
             Some(
@@ -6208,6 +6608,295 @@ impl Connection {
         }
     }
 
+    /// What the timer terms read, other than `paths` and `lc`.
+    closed spec fn clocks_kept(&self, o: Connection) -> bool {
+        &&& self.idle == o.idle
+        &&& self.local_tp == o.local_tp
+        &&& self.peer_tp == o.peer_tp
+        &&& self.hs_path == o.hs_path
+        &&& self.recovery == o.recovery
+        &&& self.sent_i == o.sent_i
+        &&& self.sent_h == o.sent_h
+        &&& self.sent_1 == o.sent_1
+    }
+
+    /// What a send leaves alone among what the timer terms read.
+    closed spec fn tx_fixed(&self, o: Connection) -> bool {
+        &&& self.idle == o.idle
+        &&& self.local_tp == o.local_tp
+        &&& self.peer_tp == o.peer_tp
+        &&& self.hs_path == o.hs_path
+        &&& self.recovery == o.recovery
+        &&& self.live_i == o.live_i
+        &&& self.live_h == o.live_h
+        &&& self.complete == o.complete
+        &&& self.paths == o.paths
+        &&& self.lc == o.lc
+    }
+
+    /// A send from `o` at `t` moved a timer only to a start at or after `t`.
+    #[verifier::opaque]
+    closed spec fn tx_timers(&self, o: Connection, t: u64) -> bool {
+        self.lc.phase_spec() is Closed || {
+            &&& self.lc.phase_spec() == o.lc.phase_spec()
+            &&& self.paths.ids() == o.paths.ids()
+            &&& self.local_tp == o.local_tp
+            &&& self.peer_tp == o.peer_tp
+            &&& self.hs_path == o.hs_path
+            &&& self.recovery == o.recovery
+            &&& self.live_i == o.live_i
+            &&& self.live_h == o.live_h
+            &&& self.complete == o.complete
+            &&& self.idle.last == o.idle.last || t <= self.idle.last
+            &&& forall|k: PacketKind|
+                #[trigger] self.sent(k).inflight_spec() == o.sent(k).inflight_spec() || (self.sent(k).inflight_spec().len() > 0
+                    && t <= self.sent(k).inflight_spec().last().time)
+            &&& o.amp_blocked_spec() ==> self.amp_blocked_spec()
+            &&& forall|q: PathId|
+                #[trigger] self.paths.has(q) && timed(self.paths.path(q)) ==> o.paths.has(q) && (self.paths.path(q).challenge
+                    == o.paths.path(q).challenge && timed(o.paths.path(q)) || t <= self.paths.path(q).challenge.unwrap().1)
+        }
+    }
+
+    proof fn lemma_tx_trans(&self, m: Connection, o: Connection, t: u64)
+        requires
+            self.tx_timers(m, t),
+            m.tx_timers(o, t),
+        ensures
+            self.tx_timers(o, t),
+    {
+        reveal(Connection::tx_timers);
+        if !(self.lc.phase_spec() is Closed) {
+            assert forall|k: PacketKind|
+                #[trigger] self.sent(k).inflight_spec() == o.sent(k).inflight_spec() || (self.sent(k).inflight_spec().len() > 0
+                    && t <= self.sent(k).inflight_spec().last().time) by {
+                assert(self.sent(k).inflight_spec() == m.sent(k).inflight_spec() || (self.sent(k).inflight_spec().len() > 0
+                    && t <= self.sent(k).inflight_spec().last().time));
+                assert(m.sent(k).inflight_spec() == o.sent(k).inflight_spec() || (m.sent(k).inflight_spec().len() > 0
+                    && t <= m.sent(k).inflight_spec().last().time));
+            }
+            assert forall|q: PathId|
+                #[trigger] self.paths.has(q) && timed(self.paths.path(q)) implies o.paths.has(q) && (self.paths.path(q).challenge
+                    == o.paths.path(q).challenge && timed(o.paths.path(q)) || t <= self.paths.path(q).challenge.unwrap().1) by {
+                assert(m.paths.has(q));
+                if self.paths.path(q).challenge == m.paths.path(q).challenge && timed(m.paths.path(q)) {
+                    assert(m.paths.has(q) && timed(m.paths.path(q)));
+                }
+            }
+        }
+    }
+
+    proof fn lemma_tx_closed(&self, o: Connection, t: u64)
+        requires
+            self.lc.phase_spec() is Closed,
+        ensures
+            self.tx_timers(o, t),
+    {
+        reveal(Connection::tx_timers);
+    }
+
+    proof fn lemma_tx_phase(&self, o: Connection, t: u64)
+        requires
+            self.tx_timers(o, t),
+        ensures
+            self.lc.phase_spec() == o.lc.phase_spec() || self.lc.phase_spec() is Closed,
+    {
+        reveal(Connection::tx_timers);
+    }
+
+    /// `commit_record`'s step: space `k` gained a record stamped `now`, and the idle timer may have restarted.
+    proof fn lemma_tx_recorded(&self, o: Connection, k: PacketKind, g: SentPacket, now: u64)
+        requires
+            self.lc == o.lc,
+            self.paths == o.paths,
+            self.local_tp == o.local_tp,
+            self.peer_tp == o.peer_tp,
+            self.hs_path == o.hs_path,
+            self.recovery == o.recovery,
+            self.live_i == o.live_i,
+            self.live_h == o.live_h,
+            self.complete == o.complete,
+            self.idle.last == o.idle.last || now <= self.idle.last,
+            g.time == now,
+            self.sent(k).inflight_spec() == o.sent(k).inflight_spec().push(g),
+            forall|j: PacketKind| j != k ==> #[trigger] self.sent(j) == o.sent(j),
+        ensures
+            self.tx_timers(o, now),
+    {
+        reveal(Connection::tx_timers);
+        assert forall|j: PacketKind|
+            #[trigger] self.sent(j).inflight_spec() == o.sent(j).inflight_spec() || (self.sent(j).inflight_spec().len() > 0
+                && now <= self.sent(j).inflight_spec().last().time) by {
+            if j == k {
+                assert(o.sent(k).inflight_spec().push(g).last() == g);
+            }
+        }
+    }
+
+    /// Collecting frames moved no timer.
+    proof fn lemma_tx_kept_timers(&self, o: Connection, t: u64)
+        requires
+            self.tx_kept(o),
+        ensures
+            self.tx_timers(o, t),
+    {
+        reveal(Connection::tx_timers);
+        self.lemma_tx_kept(o);
+    }
+
+    /// Nothing that a timer reads moved.
+    proof fn lemma_tx_same(&self, o: Connection, t: u64)
+        requires
+            self.tx_fixed(o),
+            forall|k: PacketKind| #[trigger] self.sent(k).inflight_spec() == o.sent(k).inflight_spec(),
+        ensures
+            self.tx_timers(o, t),
+    {
+        reveal(Connection::tx_timers);
+    }
+
+    proof fn lemma_tx_later(&self, o: Connection, t: u64, now: u64)
+        requires
+            o.lc.phase_spec() is Open,
+            self.tx_timers(o, t),
+            o.timers_later(now),
+            now <= t,
+            now < u64::MAX,
+        ensures
+            self.timers_later(now),
+    {
+        reveal(Connection::tx_timers);
+        if self.lc.phase_spec() is Open {
+            assert(self.pto_spec() == o.pto_spec());
+            self.recovery.lemma_pto_pos(PacketKind::OneRtt, self.peer_mad_spec());
+            assert(later(self.idle_term(), now));
+            assert forall|k: PacketKind| later(#[trigger] self.pto_term(k), now) by {
+                assert(later(o.pto_term(k), now));
+                self.recovery.lemma_pto_pos(k, self.peer_mad_spec());
+                assert(self.live(k) == o.live(k)) by {
+                    match k {
+                        PacketKind::Initial => {},
+                        PacketKind::Handshake => {},
+                        PacketKind::OneRtt => {},
+                    }
+                }
+                assert(self.sent(k).inflight_spec() == o.sent(k).inflight_spec() || (self.sent(k).inflight_spec().len() > 0
+                    && t <= self.sent(k).inflight_spec().last().time));
+            }
+            assert forall|q: PathId| #[trigger] self.paths.has(q) && timed(self.paths.path(q)) implies now < expiry(self.paths.path(q), self.pto_spec()) by {
+                assert(o.paths.has(q));
+                if self.paths.path(q).challenge == o.paths.path(q).challenge && timed(o.paths.path(q)) {
+                    assert(o.paths.has(q) && timed(o.paths.path(q)));
+                    assert(now < expiry(o.paths.path(q), o.pto_spec()));
+                }
+            }
+        }
+    }
+
+    /// Every timer but the ACKs' is later than `now`: what `on_timeout(now, ..)` leaves.
+    pub closed spec fn timers_later(&self, now: u64) -> bool {
+        match self.lc.phase_spec() {
+            Phase::Open => {
+                &&& later(self.idle_term(), now)
+                &&& forall|k: PacketKind| later(#[trigger] self.pto_term(k), now)
+                &&& forall|q: PathId|
+                    #[trigger] self.paths.has(q) && timed(self.paths.path(q)) ==> now < expiry(
+                        self.paths.path(q),
+                        self.pto_spec(),
+                    )
+            },
+            Phase::Closing | Phase::Draining => later(self.lc.deadline_spec(), now),
+            Phase::Closed => true,
+        }
+    }
+
+    /// Every ACK timer is later than `now`: what draining `poll_transmit` leaves.
+    pub closed spec fn acks_later(&self, now: u64) -> bool {
+        self.lc.phase_spec() is Open ==> forall|k: PacketKind| later(#[trigger] self.ack_term(k), now)
+    }
+
+    /// `self` is `o` with PTOs fired: what `pto_term`, `idle_term` and the paths' expiries read, other
+    /// than the `sent`s and a larger `pto_count`, is the same.
+    proof fn lemma_pto_later(&self, o: Connection, k: PacketKind, t: u64)
+        requires
+            self.sent(k).inflight_spec() == o.sent(k).inflight_spec(),
+            self.live(k) == o.live(k),
+            self.paths == o.paths,
+            self.hs_path == o.hs_path,
+            self.peer_tp == o.peer_tp,
+            o.recovery.pto_count_spec() <= self.recovery.pto_count_spec(),
+            later(o.pto_term(k), t),
+        ensures
+            later(self.pto_term(k), t),
+    {
+        o.recovery.lemma_pto_grows(self.recovery, k, o.peer_mad_spec());
+    }
+
+    proof fn lemma_pto_spec_grows(&self, o: Connection)
+        requires
+            self.peer_tp == o.peer_tp,
+            o.recovery.pto_count_spec() <= self.recovery.pto_count_spec(),
+        ensures
+            o.pto_spec() <= self.pto_spec(),
+    {
+        o.recovery.lemma_pto_grows(self.recovery, PacketKind::OneRtt, o.peer_mad_spec());
+    }
+
+    /// Open after step 6: the terms step 2, `fail_paths` and `fire_ptos` left later than `t` still are.
+    proof fn lemma_after_timeout(&self, s3: Connection, s2: Connection, s5: Connection, t: u64, pto0: u64)
+        requires
+            self.lc.phase_spec() is Open,
+            self.lc == s3.lc,
+            self.frames_kept(s3),
+            self.paths == s3.paths,
+            self.clocks_kept(s3),
+            forall|k: PacketKind| later(#[trigger] s3.pto_term(k), t),
+            s3.lc == s5.lc,
+            s3.paths == s5.paths,
+            s3.idle == s2.idle,
+            s3.local_tp == s2.local_tp,
+            s3.peer_tp == s2.peer_tp,
+            s2.recovery.pto_count_spec() <= s3.recovery.pto_count_spec(),
+            s2.lc.phase_spec() is Open ==> later(s2.idle_term(), t),
+            s5.lc == s2.lc || s5.lc.phase_spec() is Closed,
+            pto0 == s2.pto_spec(),
+            forall|q: PathId| #[trigger] s5.paths.has(q) && timed(s5.paths.path(q)) ==> t < expiry(s5.paths.path(q), pto0),
+        ensures
+            self.timers_later(t),
+    {
+        self.lemma_pto_spec_grows(s2);
+        assert(later(self.idle_term(), t));
+        assert forall|k: PacketKind| later(#[trigger] self.pto_term(k), t) by {
+            assert(later(s3.pto_term(k), t));
+            match k {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
+        assert forall|q: PathId| #[trigger] self.paths.has(q) && timed(self.paths.path(q)) implies t < expiry(self.paths.path(q), self.pto_spec()) by {
+            assert(s5.paths.has(q));
+            assert(t < expiry(self.paths.path(q), pto0));
+        }
+    }
+
+    proof fn lemma_timers_weaken(&self, t: u64, now: u64)
+        requires
+            now <= t,
+            self.timers_later(t),
+        ensures
+            self.timers_later(now),
+    {
+        if self.lc.phase_spec() is Open {
+            assert forall|k: PacketKind| later(#[trigger] self.pto_term(k), now) by {
+                assert(later(self.pto_term(k), t));
+            }
+            assert forall|q: PathId| #[trigger] self.paths.has(q) && timed(self.paths.path(q)) implies now < expiry(self.paths.path(q), self.pto_spec()) by {
+                assert(t < expiry(self.paths.path(q), self.pto_spec()));
+            }
+        }
+    }
+
     /// What `on_timeout(now, ..)` guarantees of `self`, from `o`.
     pub closed spec fn timed_out(&self, o: Connection, now: u64) -> bool {
         // P15 (§9.3.2, §14.2): the active path's challenge expired, so the active path is usable.
@@ -6249,6 +6938,30 @@ impl Connection {
         if !self.is_live(k) {
             return None;
         }
+        let q = self.paths.active();
+        proof {
+            self.paths.lemma_wf();
+        }
+        // An ACK that `data_datagram` cannot place keeps no deadline, or a shell sleeping until it
+        // would spin. Only a receive or a change of active path changes that; `next_timeout` is
+        // read again after both.
+        if self.paths.mtu_failed(q) {
+            return None;
+        }
+        let b = self.paths.budget(q);
+        let left = if b > MAX_DATAGRAM as u64 { MAX_DATAGRAM } else { b as usize };
+        let room = match self.room_for(k, left) {
+            Some(r) => r,
+            None => return None,
+        };
+        // A full ACK only grows with the clock (the ACK Delay field), so one that does not fit now
+        // stays unplaceable until the budget changes.
+        match self.recv_ref(k).build_ack(self.now, self.local_tp.ack_delay_exponent, room) {
+            Some(a) => if a.ranges.len() + 1 != self.recv_ref(k).range_len() {
+                return None;
+            },
+            None => return None,
+        }
         self.recv_ref(k).ack_deadline(ms_to_us(self.local_tp.max_ack_delay))
     }
 
@@ -6275,6 +6988,7 @@ impl Connection {
             self.lc.phase_spec() is Open,
         ensures
             self.timers_cover(r),
+            forall|now: u64| #[trigger] self.timers_later(now) && self.acks_later(now) ==> later(r, now),
     {
         let m0 = self.idle_deadline();
         let m1 = earlier(m0, self.ack_deadline_of(PacketKind::Initial));
@@ -6317,6 +7031,18 @@ impl Connection {
                 assert(pd is Some);
                 assert(pd->0 <= expiry(self.paths.path(q), self.pto_spec()));
             }
+            assert forall|now: u64| #[trigger] self.timers_later(now) && self.acks_later(now) implies later(m7, now) by {
+                assert(later(self.ack_term(PacketKind::Initial), now));
+                assert(later(self.ack_term(PacketKind::Handshake), now));
+                assert(later(self.ack_term(PacketKind::OneRtt), now));
+                assert(later(self.pto_term(PacketKind::Initial), now));
+                assert(later(self.pto_term(PacketKind::Handshake), now));
+                assert(later(self.pto_term(PacketKind::OneRtt), now));
+                if let Some(d) = pd {
+                    let q = choose|q: PathId| #[trigger] self.paths.has(q) && timed(self.paths.path(q)) && d == expiry(self.paths.path(q), self.pto_spec());
+                    assert(self.paths.has(q) && timed(self.paths.path(q)));
+                }
+            }
         }
         m7
     }
@@ -6328,6 +7054,7 @@ impl Connection {
             self.wf(),
         ensures
             self.timers_cover(r),
+            forall|now: u64| #[trigger] self.timers_later(now) && self.acks_later(now) ==> later(r, now),
     {
         match self.lc.phase() {
             Phase::Closed => None,
@@ -6350,6 +7077,13 @@ impl Connection {
             final(self).frames_kept(*old(self)),
             final(self).paths == old(self).paths,
             final(self).lc == old(self).lc,
+            final(self).idle == old(self).idle,
+            final(self).local_tp == old(self).local_tp,
+            final(self).peer_tp == old(self).peer_tp,
+            final(self).hs_path == old(self).hs_path,
+            final(self).sent(k).inflight_spec().len() == 0,
+            forall|j: PacketKind| j != k ==> #[trigger] final(self).sent(j) == old(self).sent(j),
+            old(self).recovery.pto_count_spec() <= final(self).recovery.pto_count_spec(),
     {
         let mut lost: Vec<SentPacket> = Vec::new();
         match k {
@@ -6359,6 +7093,7 @@ impl Connection {
         }
         self.recovery.on_packets_lost(k, lost.len(), now);
         let ghost s0 = *old(self);
+        let ghost s1 = *self;
         let mut i: usize = 0;
         while i < lost.len()
             invariant
@@ -6367,6 +7102,7 @@ impl Connection {
                 self.frames_kept(s0),
                 self.paths == s0.paths,
                 self.lc == s0.lc,
+                self.clocks_kept(s1),
             decreases lost@.len() - i,
         {
             let frames = lost[i].frames.as_slice();
@@ -6378,12 +7114,16 @@ impl Connection {
                     self.frames_kept(s0),
                     self.paths == s0.paths,
                     self.lc == s0.lc,
+                    self.clocks_kept(s1),
                 decreases frames@.len() - j,
             {
                 self.on_lost_frame(k, &frames[j]);
                 j += 1;
             }
             i += 1;
+        }
+        proof {
+            self.recovery.lemma_wf();
         }
         self.recovery.on_pto_fired();
         match k {
@@ -6398,10 +7138,66 @@ impl Connection {
     fn pto_passed(&self, k: PacketKind, now: u64) -> (r: bool)
         requires
             self.wf(),
+        ensures
+            !r ==> later(self.pto_term(k), now),
     {
         match self.pto_deadline_of(k) {
             Some(d) => now >= d,
             None => false,
+        }
+    }
+
+    /// Fires every space whose PTO passed: one left due would wake the shell again at `t`. Each
+    /// firing lengthens the PTO, so a space it did not fire stays later than `t`.
+    #[verifier::spinoff_prover]
+    fn fire_ptos(&mut self, t: u64)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).frames_kept(*old(self)),
+            final(self).paths == old(self).paths,
+            final(self).lc == old(self).lc,
+            final(self).idle == old(self).idle,
+            final(self).local_tp == old(self).local_tp,
+            final(self).peer_tp == old(self).peer_tp,
+            final(self).hs_path == old(self).hs_path,
+            old(self).recovery.pto_count_spec() <= final(self).recovery.pto_count_spec(),
+            forall|k: PacketKind| later(#[trigger] final(self).pto_term(k), t),
+    {
+        let ghost s0 = *self;
+        let i = PacketKind::Initial;
+        let h = PacketKind::Handshake;
+        let o = PacketKind::OneRtt;
+        if self.pto_passed(i, t) {
+            self.fire_pto(i, t);
+        }
+        let ghost s1 = *self;
+        proof {
+            assert(later(s1.pto_term(i), t));
+        }
+        if self.pto_passed(h, t) {
+            self.fire_pto(h, t);
+        }
+        let ghost s2 = *self;
+        proof {
+            assert(later(s2.pto_term(h), t));
+            self.lemma_pto_later(s1, i, t);
+        }
+        if self.pto_passed(o, t) {
+            self.fire_pto(o, t);
+        }
+        proof {
+            assert(later(self.pto_term(o), t));
+            self.lemma_pto_later(s2, i, t);
+            self.lemma_pto_later(s2, h, t);
+            assert forall|k: PacketKind| later(#[trigger] self.pto_term(k), t) by {
+                match k {
+                    PacketKind::Initial => {},
+                    PacketKind::Handshake => {},
+                    PacketKind::OneRtt => {},
+                }
+            }
         }
     }
 
@@ -6417,6 +7213,11 @@ impl Connection {
             *final(self) == (Connection { paths: final(self).paths, ..*old(self) }),
             final(self).paths.active_spec() == old(self).paths.active_spec(),
             expired(old(self).paths.path(old(self).paths.active_spec()), now, pto0) ==> active_failed,
+            forall|q: PathId|
+                #[trigger] final(self).paths.has(q) && timed(final(self).paths.path(q)) ==> now < expiry(
+                    final(self).paths.path(q),
+                    pto0,
+                ),
     {
         let ghost s = *self;
         let a = self.paths.active();
@@ -6435,6 +7236,11 @@ impl Connection {
                 *self == (Connection { paths: self.paths, ..s }),
                 self.paths.active_spec() == a,
                 expired(s.paths.path(a), now, pto0) ==> active_failed,
+                forall|q: PathId|
+                    #[trigger] self.paths.has(q) && timed(self.paths.path(q)) ==> now < expiry(
+                        self.paths.path(q),
+                        pto0,
+                    ),
             decreases self.paths.timed_count(),
         {
             let ghost s1 = *self;
@@ -6489,6 +7295,8 @@ impl Connection {
             final(self).frames_kept(*old(self)),
             final(self).lc == old(self).lc || final(self).lc.phase_spec() is Closed,
             usable(final(self).paths.path(final(self).paths.active_spec())) || final(self).lc.phase_spec() is Closed,
+            final(self).clocks_kept(*old(self)),
+            forall|q: PathId| #[trigger] final(self).paths.has(q) && timed(final(self).paths.path(q)) ==> timed(old(self).paths.path(q)) && final(self).paths.path(q).challenge == old(self).paths.path(q).challenge,
     {
         proof {
             self.paths.lemma_wf();
@@ -6532,61 +7340,23 @@ impl Connection {
         }
     }
 
-    /// Starts the §8.2.3 probe on every path that needs one, from the unused slices of `rand`:
-    /// `on_path_frame` could not start one when `chal_used` was 4 (3d2 preflight M6).
+    /// Steps 1 and 2: the closing, draining and idle deadlines.
     #[verifier::spinoff_prover]
-    fn retry_mtu_probes(&mut self, now: u64, rand: &[u8; RAND_LEN])
-        requires
-            old(self).wf(),
-        ensures
-            final(self).wf(),
-            final(self).frames_kept(*old(self)),
-            final(self).lc == old(self).lc,
-            final(self).paths.active_spec() == old(self).paths.active_spec(),
-            usable(old(self).paths.path(old(self).paths.active_spec())) ==> usable(
-                final(self).paths.path(final(self).paths.active_spec()),
-            ),
-    {
-        let ghost s = *self;
-        let ghost a = self.paths.active_spec();
-        let n = self.paths.len();
-        let mut i: usize = 0;
-        while i < n
-            invariant
-                i <= n,
-                n == self.paths.ids().len(),
-                self.wf(),
-                self.frames_kept(s),
-                self.lc == s.lc,
-                self.paths.active_spec() == a,
-                usable(s.paths.path(a)) ==> usable(self.paths.path(a)),
-            decreases n - i,
-        {
-            let q = self.path_at(i);
-            if self.paths.needs_mtu_probe(q) {
-                self.challenge_path(q, now, rand);
-            }
-            i += 1;
-        }
-    }
-
-    /// The timers `next_timeout` named. The clock never goes back, so a late or early `now` is safe.
-    #[verifier::spinoff_prover]
-    pub fn on_timeout(&mut self, now: u64, rand: &[u8; RAND_LEN])
+    fn timeout_phase(&mut self, t: u64)
         requires
             old(self).wf(),
         ensures
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
-            final(self).timed_out(*old(self), now),
+            final(self).frames_kept(*old(self)),
+            final(self).paths == old(self).paths,
+            final(self).clocks_kept(*old(self)),
+            final(self).lc == old(self).lc || final(self).lc.phase_spec() is Closed,
+            final(self).lc.phase_spec() is Open ==> later(final(self).idle_term(), t),
+            !(final(self).lc.phase_spec() is Open) ==> final(self).lc.phase_spec() is Closed || later(final(self).lc.deadline_spec(), t),
+            (old(self).lc.phase_spec() is Closing || old(self).lc.phase_spec() is Draining) && (old(self).lc.deadline_spec() matches Some(d) && t >= d) ==> final(self).lc.phase_spec() is Closed,
+            old(self).lc.phase_spec() is Open && old(self).idle_term() is Some && t >= old(self).idle_term()->0 ==> !(final(self).lc.phase_spec() is Open),
     {
-        let ghost o = *self;
-        if now > self.now {
-            self.now = now;
-        }
-        self.chal_used = 0;
-        let t = self.now;
-        let pto0 = self.pto();
         // Step 1: the closing and draining deadlines.
         self.lc.on_timeout(t);
         if !matches!(self.lc.phase(), Phase::Open) {
@@ -6605,33 +7375,117 @@ impl Connection {
                 }
             }
         }
-        // Step 3: the first live space whose PTO passed.
-        if matches!(self.lc.phase(), Phase::Open) {
-            if self.pto_passed(PacketKind::Initial, t) {
-                self.fire_pto(PacketKind::Initial, t);
-            } else if self.pto_passed(PacketKind::Handshake, t) {
-                self.fire_pto(PacketKind::Handshake, t);
-            } else if self.pto_passed(PacketKind::OneRtt, t) {
-                self.fire_pto(PacketKind::OneRtt, t);
+        proof {
+        }
+    }
+
+    /// Steps 4 and 5.
+    #[verifier::spinoff_prover]
+    fn fail_paths(&mut self, t: u64, pto0: u64)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).out_log() == old(self).out_log(),
+            final(self).frames_kept(*old(self)),
+            final(self).clocks_kept(*old(self)),
+            final(self).lc == old(self).lc || final(self).lc.phase_spec() is Closed,
+            expired(old(self).paths.path(old(self).paths.active_spec()), t, pto0) ==> usable(
+                final(self).paths.path(final(self).paths.active_spec()),
+            ) || final(self).lc.phase_spec() is Closed,
+            forall|q: PathId|
+                #[trigger] final(self).paths.has(q) && timed(final(self).paths.path(q)) ==> t < expiry(
+                    final(self).paths.path(q),
+                    pto0,
+                ),
+    {
+        let active_failed = self.expire_paths(t, pto0);
+        let ghost s4 = *self;
+        proof {
+            self.paths.lemma_wf();
+        }
+        let a = self.paths.active();
+        if active_failed && (!matches!(self.paths.state(a), PathState::Validated) || self.paths.mtu_failed(a)) {
+            self.fall_back();
+        }
+        proof {
+            assert forall|q: PathId| #[trigger] self.paths.has(q) && timed(self.paths.path(q)) implies t < expiry(self.paths.path(q), pto0) by {
+                assert(s4.paths.has(q));
+                assert(timed(s4.paths.path(q)));
             }
         }
-        // Steps 4 and 5, in every phase but Closed: P15 has no phase, and a CONNECTION_CLOSE goes to
-        // the active path too.
+    }
+
+    /// The timers `next_timeout` named. The clock never goes back, so a late or early `now` is safe.
+    #[verifier::spinoff_prover]
+    pub fn on_timeout(&mut self, now: u64, rand: &[u8; RAND_LEN])
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).out_log() == old(self).out_log(),
+            final(self).timed_out(*old(self), now),
+            final(self).timers_later(now),
+    {
+        let ghost o = *self;
+        if now > self.now {
+            self.now = now;
+        }
+        let t = self.now;
+        let pto0 = self.pto();
+        self.timeout_phase(t);
+        let ghost s2 = *self;
+        // Steps 4 and 5, in every phase but Closed: P15 has no phase. §9.3.2's silent close is a MUST,
+        // and it outranks §10.2's SHOULD NOT on ending the closing or draining state early. In Closing
+        // the repeated CONNECTION_CLOSE then goes to a validated address; in Draining nothing is sent,
+        // so only the early close can be seen, and exempting Draining would only weaken P15.
         if !matches!(self.lc.phase(), Phase::Closed) {
-            let active_failed = self.expire_paths(t, pto0);
-            proof {
-                self.paths.lemma_wf();
-            }
-            let a = self.paths.active();
-            if active_failed && (!matches!(self.paths.state(a), PathState::Validated) || self.paths.mtu_failed(a)) {
-                self.fall_back();
-            }
+            self.fail_paths(t, pto0);
         }
-        // Step 6.
-        self.issue_cids(rand);
+        let ghost s5 = *self;
+        // Step 3: every live space whose PTO passed.
         if matches!(self.lc.phase(), Phase::Open) {
-            self.retry_mtu_probes(t, rand);
+            self.fire_ptos(t);
+            let ghost s3 = *self;
+            // Step 6.
+            self.issue_cids(rand);
+            proof {
+                self.lemma_after_timeout(s3, s2, s5, t, pto0);
+            }
         }
+        proof {
+            self.lemma_timers_weaken(t, now);
+        }
+    }
+
+    /// What 3e's shell relies on: after `on_timeout(now)` and a `poll_transmit` loop to None, every
+    /// timer is later than `now`, so sleeping until `next_timeout` cannot spin. Never called: its
+    /// contract is the proof, from the three public contracts alone. That the loop ends is not
+    /// proved, so it stops at `cap` as the shell does, and says nothing then.
+    #[verifier::spinoff_prover]
+    #[allow(dead_code)]
+    fn settled_later(&mut self, now: u64, rand: &[u8; RAND_LEN], cap: usize) -> (r: Option<Option<u64>>)
+        requires
+            old(self).wf(),
+            now < u64::MAX,
+        ensures
+            r matches Some(t) ==> later(t, now),
+    {
+        self.on_timeout(now, rand);
+        let mut i: usize = 0;
+        while i < cap
+            invariant
+                self.wf(),
+                now < u64::MAX,
+                self.timers_later(now),
+            decreases cap - i,
+        {
+            if self.poll_transmit(now).is_none() {
+                return Some(self.next_timeout());
+            }
+            i += 1;
+        }
+        None
     }
 
     // =========================================================================
@@ -6778,6 +7632,11 @@ impl Connection {
 // Helpers
 // =============================================================================
 
+/// `a`, if any, is later than `now`.
+pub open spec fn later(a: Option<u64>, now: u64) -> bool {
+    a matches Some(d) ==> now < d
+}
+
 /// `r` is no later than `a`.
 pub open spec fn covers(r: Option<u64>, a: Option<u64>) -> bool {
     a matches Some(d) ==> r matches Some(m) && m <= d
@@ -6797,6 +7656,7 @@ fn earlier(a: Option<u64>, b: Option<u64>) -> (r: Option<u64>)
     ensures
         covers(r, a),
         covers(r, b),
+        r == a || r == b,
 {
     match (a, b) {
         (Some(x), Some(y)) => Some(if x <= y {
