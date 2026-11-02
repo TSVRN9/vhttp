@@ -2800,6 +2800,7 @@ impl Connection {
             final(self).out_log() == old(self).out_log(),
             old(self).phase_spec() is Open ==> final(self).phase_spec() is Closing,
             !(old(self).phase_spec() is Open) ==> final(self).phase_spec() == old(self).phase_spec(),
+            final(self).events_spec() == old(self).events_spec(),
     {
         if now > self.now {
             self.now = now;
@@ -3044,6 +3045,7 @@ impl Connection {
             r matches Ok(n) ==> n <= data@.len() && (n < data@.len() ==> n == old(self).send_room_spec()),
             r matches Ok(n) ==> (n > 0 || data@.len() == 0 && fin) ==> final(self).fin_written(id) == (fin && n
                 == data@.len()),
+            final(self).events_spec() == old(self).events_spec(),
     {
         match &mut self.streams {
             Some(s) => {
@@ -3074,6 +3076,7 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
+            final(self).events_spec() == old(self).events_spec(),
     {
         if let Some(s) = &mut self.streams {
             s.reset(id, code);
@@ -3089,6 +3092,7 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
+            final(self).events_spec() == old(self).events_spec(),
     {
         if let Some(s) = &mut self.streams {
             s.stop_sending(id, code);
