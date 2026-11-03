@@ -67,7 +67,11 @@ pub fn lower_ty(m: &MirCrate, t: Ty, fuel: usize) -> (r: Result<c::Ty, Vec<u8>>)
         },
         RigidTy::Adt(_, _) => lower_adt_ty(m, t, f),
         RigidTy::Array(e, n) => match x_const_usize(m, n.id) {
-            Some(k) => Ok(c::Ty::Array(Box::new(lower_ty(m, *e, f)?), k)),
+            Some(k) => {
+                let tf = match x_tfuel(m) { Some(tf) => tf, None => return Err(msg(b"too many types")) };
+                if k != 0 && x_unit_like(m, *e, tf, true) { return Err(msg(b"an array of zero-sized values")); }
+                Ok(c::Ty::Array(Box::new(lower_ty(m, *e, f)?), k))
+            },
             None => Err(msg(b"array length")),
         },
         RigidTy::Slice(e) => Ok(c::Ty::Slice(Box::new(lower_ty(m, *e, f)?))),
@@ -997,7 +1001,8 @@ pub fn x_const(m: &MirCrate, k: &ConstOperand, tmp: &mut Tmp) -> (r: Result<c::O
     match &k.const_.kind {
         ConstantKind::ZeroSized => {
             let tf = match x_tfuel(m) { Some(tf) => tf, None => return Err(msg(b"too many types")) };
-            lower_ty(m, t, TYF)?;
+            let _ct = lower_ty(m, t, TYF)?;
+            proof { assert(lowers_ty(*m, t, _ct, tyf())); }
             if x_unit_like(m, t, tf, true) { Ok(c::Operand::Lit(c::ConstVal::Unit)) } else { Err(msg(b"a zero-sized constant of a non-unit-like type")) }
         },
         ConstantKind::Allocated(a) => {

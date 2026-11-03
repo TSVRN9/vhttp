@@ -1462,11 +1462,22 @@ pub open spec fn leaf_ok(m: MirCrate, pol: CallPolicy, key: Seq<u8>, gargs: Gene
     }
 }
 
+/// Each argument has its parameter's type (type ids are interned). A closure reached through
+/// `Fn::call` resolves to the closure body but is passed its arguments as one tuple (the rust-call
+/// ABI): an arity check alone does not see that, and `mir_entry` would bind the tuple to the first
+/// parameter.
+pub open spec fn args_typed(m: MirCrate, b: Body, args: Seq<Operand>, cb: Body) -> bool {
+    forall|k: int| 0 <= k < args.len() ==> op_ty(m, b, #[trigger] args[k]) == Some(cb.locals@[k + 1].ty)
+}
+
 pub open spec fn call_ok(m: MirCrate, pol: CallPolicy, b: Body, func: Operand, args: Seq<Operand>, dest: Place) -> bool {
     match callee_of(m, func) {
         Some((j, g)) => ops_ok(m, b, args) && place_ok(m, b, dest, true) && j < m.insts@.len()
             && if is_leaf(m, pol, m.insts@[j as int].key@, g) { leaf_ok(m, pol, m.insts@[j as int].key@, g, args.len(), place_ty(m, b, dest)) }
-               else { inst_body(m, j) matches Some(cb) && args.len() == cb.arg_count && sig_ok(m, cb) },
+               else {
+                   inst_body(m, j) matches Some(cb) && args.len() == cb.arg_count && sig_ok(m, cb)
+                       && cb.spread_arg is None && args_typed(m, b, args, cb)
+               },
         None => false,
     }
 }

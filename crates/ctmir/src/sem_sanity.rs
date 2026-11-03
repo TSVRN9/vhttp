@@ -101,7 +101,7 @@ fn arr_row(id: Ty, elem: Ty) -> (r: TyRow)
 }
 
 fn body(blocks: Vec<BasicBlock>, locals: Vec<LocalDecl>, arg_count: usize) -> (b: Body)
-    ensures b.blocks@ == blocks@, b.locals@ == locals@, b.arg_count == arg_count,
+    ensures b.blocks@ == blocks@, b.locals@ == locals@, b.arg_count == arg_count, b.spread_arg is None,
 {
     Body { blocks, locals, arg_count, var_debug_info: Vec::new(), spread_arg: None, span: 0 }
 }
@@ -830,7 +830,7 @@ pub open spec fn callc_ok(m: MirCrate) -> bool {
     }
     && {
         let f = m.insts@[1].body->Some_0;
-        f.arg_count == 1 && f.locals@.len() == 2 && f.locals@[0].ty == 10 && f.locals@[1].ty == 4 && f.blocks@.len() == 1
+        f.arg_count == 1 && f.locals@.len() == 2 && f.locals@[0].ty == 10 && f.locals@[1].ty == 4 && f.blocks@.len() == 1 && f.spread_arg is None
         && f.blocks@[0].statements@.len() == 1
         && (f.blocks@[0].statements@[0].kind matches StatementKind::Assign(p, rv) && p.local == 1 && p.projection@.len() == 1
             && p.projection@[0] is Deref && (rv matches Rvalue::Use(x, _) && cint(x, 2, b1(7))))
@@ -1011,6 +1011,9 @@ proof fn caller_blocks_ok(m: MirCrate, pol: CallPolicy)
     assert(m.insts@[1].key@ =~= Seq::<u8>::empty());
     assert(stmt_ok(m, c, c.blocks@[0].statements@[0]));
     assert(callee_of(m, c.blocks@[0].terminator.kind->Call_func) == Some((1nat, m.calls@[0].args)));
+    let args = c.blocks@[0].terminator.kind->Call_args@;
+    assert(op_ty(m, c, args[0]) == Some(4usize));
+    assert(args_typed(m, c, args, m.insts@[1].body->Some_0));
     assert(term_ok(m, pol, c, c.blocks@[0].terminator.kind));
 }
 

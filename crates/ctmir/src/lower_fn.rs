@@ -592,91 +592,155 @@ proof fn lemma_body_close(m: MirCrate, pol: Policy, ord: Seq<usize>, j: nat, b: 
     };
 }
 
-fn trim(s: &Vec<u8>) -> Vec<u8> {
+fn is_ws(c: u8) -> (r: bool)
+    ensures r == ws(c),
+{
+    c == b' ' || c == b'\n' || c == b'\t' || c == b'\r'
+}
+
+proof fn lemma_trim_lo(s: Seq<u8>, i: nat)
+    requires i <= s.len(), forall|k: int| 0 <= k < i ==> ws(#[trigger] s[k]),
+    ensures trim_lo(s, 0) == trim_lo(s, i),
+    decreases i,
+{
+    if i > 0 {
+        lemma_trim_lo_step(s, 0, i);
+    }
+}
+
+proof fn lemma_trim_lo_step(s: Seq<u8>, k: nat, i: nat)
+    requires k <= i <= s.len(), forall|q: int| k <= q < i ==> ws(#[trigger] s[q]),
+    ensures trim_lo(s, k) == trim_lo(s, i),
+    decreases i - k,
+{
+    if k < i { lemma_trim_lo_step(s, k + 1, i); }
+}
+
+proof fn lemma_trim_hi(s: Seq<u8>, lo: nat, j: nat, n: nat)
+    requires lo <= j <= n, forall|q: int| j <= q < n ==> ws(#[trigger] s[q]),
+    ensures trim_hi(s, lo, n) == trim_hi(s, lo, j),
+    decreases n - j,
+{
+    if j < n { lemma_trim_hi(s, lo, (j + 1) as nat, n); }
+}
+
+fn trim(s: &Vec<u8>) -> (r: Vec<u8>)
+    ensures r@ == trim_spec(s@),
+{
     let mut lo: usize = 0;
-    let mut hi: usize = s.len();
-    while lo < hi && (s[lo] == b' ' || s[lo] == b'\n' || s[lo] == b'\t' || s[lo] == b'\r')
-        invariant lo <= hi <= s@.len(),
-        decreases hi - lo,
+    while lo < s.len() && is_ws(s[lo])
+        invariant lo <= s@.len(), forall|k: int| 0 <= k < lo ==> ws(#[trigger] s@[k]),
+        decreases s.len() - lo,
     { lo += 1; }
-    while hi > lo && (s[hi - 1] == b' ' || s[hi - 1] == b'\n' || s[hi - 1] == b'\t' || s[hi - 1] == b'\r')
-        invariant lo <= hi <= s@.len(),
+    proof { lemma_trim_lo(s@, lo as nat); }
+    let mut hi: usize = s.len();
+    while hi > lo && is_ws(s[hi - 1])
+        invariant lo <= hi <= s@.len(), forall|k: int| hi <= k < s@.len() ==> ws(#[trigger] s@[k]),
         decreases hi - lo,
     { hi -= 1; }
+    proof { lemma_trim_hi(s@, lo as nat, hi as nat, s@.len()); }
     let mut v = Vec::new();
     let mut i = lo;
     while i < hi
-        invariant lo <= i <= hi <= s@.len(),
+        invariant lo <= i <= hi <= s@.len(), v@ == s@.subrange(lo as int, i as int),
         decreases hi - i,
     {
         v.push(s[i]);
+        proof { assert(v@ =~= s@.subrange(lo as int, i + 1)); }
         i += 1;
     }
     v
 }
 
-fn starts_with(s: &Vec<u8>, p: &[u8]) -> bool {
-    if s.len() < p.len() { return false; }
-    let mut i: usize = 0;
-    while i < p.len()
-        invariant i <= p@.len() <= s@.len(),
-        decreases p.len() - i,
-    {
-        if s[i] != p[i] { return false; }
-        i += 1;
-    }
-    true
+fn is_ct_attr(t: &Vec<u8>) -> (r: bool)
+    ensures r == ct_attr(t@),
+{
+    t.len() >= 6 && t[0] == b'#' && t[1] == b'[' && t[2] == b'c' && t[3] == b't' && t[4] == b':' && t[5] == b':'
 }
 
 /// The `#[ct::..]` attributes of the item of `def`, trimmed.
-fn attrs_of(m: &MirCrate, def: DefId) -> Vec<Vec<u8>> {
+fn attrs_of(m: &MirCrate, def: DefId) -> (r: Vec<Vec<u8>>)
+    ensures views(r@) == item_attrs(*m, def),
+{
     let mut out: Vec<Vec<u8>> = Vec::new();
     let mut k: usize = 0;
     while k < m.items.len()
-        invariant k <= m.items@.len(),
+        invariant k <= m.items@.len(), out@.len() == 0, forall|i: int| 0 <= i < k ==> (#[trigger] m.items@[i]).def != def,
         decreases m.items.len() - k,
     {
         if m.items[k].def == def {
             let a = &m.items[k].attrs;
             let mut i: usize = 0;
             while i < a.len()
-                invariant i <= a@.len(),
+                invariant i <= a@.len(), *a == m.items@[k as int].attrs, views(out@) == attrs_from(a@, i as nat),
                 decreases a.len() - i,
             {
                 let t = trim(&a[i]);
-                if starts_with(&t, b"#[ct::") { out.push(t); }
+                let ghost o0 = out@;
+                if is_ct_attr(&t) { out.push(t); }
+                proof { assert(views(out@) =~= attrs_from(a@, (i + 1) as nat)) by { assert(views(o0) == attrs_from(a@, i as nat)); }; }
                 i += 1;
             }
+            proof { crate::look::lemma_find(m.items@, |it: Item| it.def == def, k as nat); }
             return out;
         }
         k += 1;
     }
+    proof {
+        crate::look::lemma_find(m.items@, |it: Item| it.def == def, k as nat);
+        assert(views(out@) =~= Seq::<Seq<u8>>::empty());
+    }
     out
 }
 
-/// Parameter names from the argument locals' debug info (`argument_index` is 1-based).
-fn param_names(b: &Body) -> Vec<Vec<u8>> {
-    let mut out: Vec<Vec<u8>> = Vec::new();
-    let mut j: usize = 1;
-    while j <= b.arg_count && j < 0x1_0000
-        invariant 1 <= j,
-        decreases b.arg_count + 1 - j,
+/// Parameter `j`'s name from the argument locals' debug info (`argument_index` is 1-based).
+fn param_name(b: &Body, j: usize) -> (r: Vec<u8>)
+    ensures r@ == pname(*b, j as nat),
+{
+    let mut k: usize = 0;
+    while k < b.var_debug_info.len()
+        invariant k <= b.var_debug_info@.len(), forall|i: int| 0 <= i < k ==> !vdi_is(#[trigger] b.var_debug_info@[i], j as nat),
+        decreases b.var_debug_info.len() - k,
     {
-        let mut name = Vec::new();
-        let mut k: usize = 0;
-        while k < b.var_debug_info.len()
-            invariant k <= b.var_debug_info@.len(),
-            decreases b.var_debug_info.len() - k,
-        {
-            let v = &b.var_debug_info[k];
-            let here = match &v.value {
-                VarDebugInfoContents::Place(p) => p.local == j && p.projection.len() == 0,
-                _ => false,
-            };
-            if v.argument_index == Some(j as u16) && here { name = copy_bytes(&v.name); break; }
-            k += 1;
+        let v = &b.var_debug_info[k];
+        let here = match &v.value {
+            VarDebugInfoContents::Place(p) => p.local == j && p.projection.len() == 0,
+            _ => false,
+        };
+        let idx = match v.argument_index { Some(x) => x as usize == j, None => false };
+        if idx && here {
+            proof { crate::look::lemma_find_spec(b.var_debug_info@, |v: VarDebugInfo| vdi_is(v, j as nat)); }
+            return copy_bytes(&v.name);
         }
-        out.push(name);
+        k += 1;
+    }
+    proof { crate::look::lemma_find_spec(b.var_debug_info@, |v: VarDebugInfo| vdi_is(v, j as nat)); }
+    Vec::new()
+}
+
+fn param_names(b: &Body) -> (r: Vec<Vec<u8>>)
+    ensures views(r@) == pnames(*b),
+{
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    let mut j: usize = 0;
+    while j < b.arg_count
+        invariant j <= b.arg_count, views(out@) == Seq::new(j as nat, |k: int| pname(*b, (k + 1) as nat)),
+        decreases b.arg_count - j,
+    {
+        let nm = param_name(b, j + 1);
+        let ghost o0 = out@;
+        let ghost nmv = nm;
+        out.push(nm);
+        proof {
+            let want = Seq::new((j + 1) as nat, |k: int| pname(*b, (k + 1) as nat));
+            assert(views(o0).len() == o0.len());
+            assert(out@ == o0.push(nmv));
+            assert(views(out@)[j as int] == nmv@);
+            assert forall|k: int| 0 <= k < j + 1 implies views(out@)[k] == want[k] by {
+                if k < j { assert(out@[k] == o0[k]); assert(views(o0)[k] == pname(*b, (k + 1) as nat)); }
+            };
+            assert(views(out@) =~= want);
+        }
         j += 1;
     }
     out
@@ -690,11 +754,14 @@ fn err_at(path: &Vec<u8>, what: &[u8], site: Vec<u8>) -> Reject {
 pub fn lower_body(m: &MirCrate, pol: &Policy, order: &Vec<usize>, keys: &mut Keys, j: usize, is_root: bool, errs: &mut Vec<Reject>)
     -> (r: Option<(c::Body, FnInfo, Ghost<Seq<bool>>)>)
     requires j < m.insts@.len(),
-    ensures r matches Some((cb, info, rr)) ==> lowers_body(*m, *pol, order@, j as nat, cb, rr@) && info.inst == j && info.is_root == is_root,
+    ensures r matches Some((cb, info, rr)) ==> lowers_body(*m, *pol, order@, j as nat, cb, rr@) && info.inst == j && info.is_root == is_root
+        && info.path@ == fn_path(*m, j as nat) && views(info.attrs@) == item_attrs(*m, m.insts@[j as int].def)
+        && inst_body(*m, j as nat) is Some && views(info.param_names@) == pnames(inst_body(*m, j as nat)->Some_0),
 {
     let x = &m.insts[j];
     let is_shim = matches!(x.kind, InstanceKind::Shim);
     let path = if is_shim { copy_bytes(&x.name) } else { copy_bytes(&x.key) };
+    proof { assert(path@ == fn_path(*m, j as nat)); }
     let b = match x_inst_body(m, j) {
         Some(b) => b,
         None => { errs.push(err_at(&path, b"no MIR body", msg(b"?"))); return None; },
@@ -931,16 +998,21 @@ pub fn root_inst(m: &MirCrate, root: &[u8]) -> (r: Result<usize, Vec<u8>>)
 }
 
 /// Lowers the closure of manifest root `root` (a `ct_key`) to a core program, fn 0 the root.
-pub fn lower(m: &MirCrate, pol: &Policy, root: &[u8]) -> (r: Result<(c::Program, Vec<FnInfo>), Vec<Reject>>)
+/// `keys` is the crate's key map across its roots, in manifest order (as the old `by_key`): the
+/// root and each callee bind their key in it, and a key that names something else is a reject.
+pub fn lower(m: &MirCrate, pol: &Policy, root: &[u8], keys: &mut Keys) -> (r: Result<(c::Program, Vec<FnInfo>), Vec<Reject>>)
     ensures r matches Ok((p, infos)) ==> lowers(*m, *pol, root@, p, infos@) && ctcore::ct::wf(p),
 {
     let j0 = match root_inst(m, root) {
         Ok(j) => j,
         Err(e) => { let mut es = Vec::new(); es.push(Reject::Root { path: msg(root), msg: e }); return Err(es); },
     };
+    if !bind(keys, root, m.insts[j0].def, Some(j0)) {
+        let mut es = Vec::new();
+        es.push(Reject::Root { path: msg(root), msg: msg(b"ambiguous key: another root's closure reached a different fn under it") });
+        return Err(es);
+    }
     let order = closure_order(m, pol, j0);
-    let mut keys: Keys = Vec::new();
-    bind(&mut keys, root, m.insts[j0].def, Some(j0));
     let mut errs: Vec<Reject> = Vec::new();
     let mut fns: Vec<c::Body> = Vec::new();
     let mut infos: Vec<FnInfo> = Vec::new();
@@ -951,11 +1023,11 @@ pub fn lower(m: &MirCrate, pol: &Policy, root: &[u8]) -> (r: Result<(c::Program,
         invariant
             g <= order@.len(), forall|h: int| 0 <= h < order@.len() ==> (#[trigger] order@[h]) < m.insts@.len(),
             !bad ==> fns@.len() == g && infos@.len() == g && rs.len() == g
-                && forall|h: int| 0 <= h < g ==> (#[trigger] infos@[h]).inst == order@[h] && infos@[h].is_root == (h == 0)
+                && forall|h: int| 0 <= h < g ==> (#[trigger] infos@[h]).inst == order@[h] && info_ok(*m, infos@[h], h)
                     && lowers_body(*m, *pol, order@, order@[h] as nat, fns@[h], rs[h]),
         decreases order.len() - g,
     {
-        match lower_body(m, pol, &order, &mut keys, order[g], g == 0, &mut errs) {
+        match lower_body(m, pol, &order, keys, order[g], g == 0, &mut errs) {
             Some((cb, info, _r)) => {
                 fns.push(cb);
                 infos.push(info);
