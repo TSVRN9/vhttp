@@ -399,6 +399,17 @@ fn h3_conn_error_closes() {
     assert!(any_frame(&poll_all(&mut s, 41), &CC(true, 0x10a, &[])));
 }
 
+/// RFC 9114 §6.2.1: the peer resetting its control stream closes the connection.
+#[test]
+fn peer_control_reset_closes() {
+    let mut s = est();
+    poll_all(&mut s, 20);
+    let mut app = Vec::new();
+    dgram(&mut s, 0, vec![stream(2, 0, &[0x00, 0x04, 0x00], false)], 40, &mut app);
+    dgram(&mut s, 1, vec![Frame::ResetStream { stream_id: 2, error_code: 0, final_size: 3 }], 41, &mut app);
+    assert!(any_frame(&poll_all(&mut s, 42), &CC(true, 0x104, &[])));
+}
+
 #[test]
 fn peer_uni_too_small() {
     for n in [2, 0] {
