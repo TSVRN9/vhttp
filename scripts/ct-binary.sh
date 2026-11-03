@@ -26,7 +26,8 @@ bad=$(env | grep -E '^(RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_[A-Z_]*|CAR
 # Content stamp: cargo trusts mtimes for path packages, so a source change that keeps an old
 # mtime would leave a stale rlib. Any change to the workspace's non-test sources wipes the dir.
 files=$(find crates Cargo.toml Cargo.lock rust-toolchain.toml -path 'crates/*/tests' -prune -o \
-    -path 'crates/*/target' -prune -o -type f -print | LC_ALL=C sort) || die "find failed"
+    -path 'crates/*/target' -prune -o -type f -print) || die "find failed"
+files=$(printf '%s\n' "$files" | LC_ALL=C sort) || die "sort failed"
 sums=$(printf '%s\n' "$files" | xargs -d '\n' sha256sum) || die "sha256sum of the sources failed"
 stamp=$(printf '%s\n' "$sums" | sha256sum)
 [ "$(cat "$T/ct-binary.stamp" 2>/dev/null || true)" = "$stamp" ] || rm -rf "$T"
@@ -55,7 +56,9 @@ nunits=$(printf '%s\n' "$units" | grep -c . || true)
 for m in $units; do
     objdump -dr --no-show-raw-insn -C "$x/$m" >> "$x/dump" || die "objdump failed on $m"
 done
-objver=$(objdump --version | head -1)
+v=$(objdump --version) || die "objdump --version failed"
+objver=$(printf '%s\n' "$v" | head -1)
+[ -n "$objver" ] || die "objdump --version printed nothing"
 
 # Normalise: drop file and section headers (they carry paths and mangled crate hashes), each
 # line's offset column and objdump's `# ...` comments; strip `.llvm.N` suffixes, the per-unit
@@ -78,9 +81,11 @@ err() { echo "ct-binary: $*" >&2; errs=$((errs + 1)); }
 # Dependents: no other workspace rlib may define a crypto:: symbol (crypto code copied into its
 # units, which this gate does not hash); their `U crypto::` references are tracked below.
 : > "$x/refs"
+ndep=0
 for r in "$T"/release/lib*.rlib; do
     c=$(basename "$r" .rlib); c=${c#lib}
     [ "$c" != crypto ] || continue
+    ndep=$((ndep + 1))
     us=$(members "$r" "$x/dep/$c") || exit 1
     for m in $us; do
         nm -C "$x/dep/$c/$m" > "$x/dep/$c/$m.nm" || die "nm failed on $m"
@@ -93,6 +98,11 @@ if grep -q '^D ' "$x/refs"; then
     sed -n 's/^D /  /p' "$x/refs" >&2
     err "the symbols above are crypto:: code defined in another crate's units, which the gate does not hash: re-read them where they are $recipe, or make them calls"
 fi
+# Both below would leave --update writing a digests file with no U block.
+[ "$ndep" -gt 0 ] ||
+    err "no workspace rlib besides libcrypto.rlib in $T/release: the dependents' calls into crypto are unchecked, re-read tls's callers of crypto $recipe"
+grep -q '^U ' "$x/refs" ||
+    err "no dependent references a crypto:: symbol: every call into crypto became inlined code, re-read tls's callers of crypto $recipe"
 
 {
     echo "# crates/crypto object code, one sha256 per normalised function (scripts/ct-binary.sh)."

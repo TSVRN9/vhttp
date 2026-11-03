@@ -24,7 +24,8 @@
   - `crypto::bignum::ct_mask` is one out-of-line function, and its body is `mov`/`neg`/`ret`;
   - `crypto::p256::scalar_in_range` is one out-of-line function (F1);
   - the call sites read above, as `R_X86_64_PLT32` relocations against the symbol or its `.text` section: `ct_mask` at least 8 times in `rsa_pss_sha256_sign` and once each in `cond_sub` and `select_n`; `scalar_in_range` once each in `p256_public_key` and `p256_ecdh`, twice in `p256_ecdsa_sign`;
-  - no dependent defines a `crypto::` symbol.
+  - no dependent defines a `crypto::` symbol;
+  - at least one dependent rlib was read, and the `U` block is non-empty, so `--update` cannot write a digests file without it.
 - Commit tripwire: the last commit touching `docs/crypto-binary-digests.txt` also touches this doc, and an uncommitted change to the digests file comes with one to this doc.
 - Once the build has run, every check is reported, not only the first failure, and each message names what to re-read. The pre-checks (tools, environment, build, rlib members, unit count zero, the digest count) stop at the first failure. A missing tool, a build failure or no `.rcgu.o` member fails the gate.
 
