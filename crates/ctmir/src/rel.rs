@@ -403,8 +403,20 @@ pub open spec fn internal(m: MirCrate, pol: Policy, j: nat) -> bool {
 /// Core fn `h` is the image of `insts[j]` (`ord`: each fn's `insts` index).
 pub open spec fn fn_of(ord: Seq<usize>, h: usize, j: nat) -> bool { (h as nat) < ord.len() && ord[h as int] as nat == j }
 
+/// Each argument's type is the callee's parameter type. A closure called through `Fn::call`
+/// resolves to the closure body but is passed its arguments tupled (rust-call), which `call_ok`'s
+/// arity check does not see; type ids are interned, so equal types have equal ids.
+pub open spec fn args_typed(m: MirCrate, b: Body, args: Seq<Operand>, cb: Body) -> bool {
+    args.len() + 1 <= cb.locals@.len() && forall|k: int| 0 <= k < args.len() ==> op_ty(m, b, #[trigger] args[k]) == Some(cb.locals@[k + 1].ty)
+}
+
+/// The glue's parameter is `&mut t`.
+pub open spec fn glue_param_is(m: MirCrate, gb: Body, t: Ty) -> bool {
+    gb.locals@.len() > 1 && match rigid(m, gb.locals@[1].ty) { Some(RigidTy::Ref(_, pt, _)) => pt == t, _ => false }
+}
+
 /// `Call`: the callee resolved through `calls`; a leaf is its intrinsic, a body call the core fn
-/// of an internal instance.
+/// of an internal instance, whose parameters have the arguments' types.
 pub open spec fn lowers_call(m: MirCrate, pol: Policy, ord: Seq<usize>, b: Body, func: Operand, args: Seq<Operand>, dest: Place,
     tb: BasicBlockIdx, pre: Seq<c::Stmt>, base: nat, ct: c::Term) -> bool
 {
@@ -414,6 +426,7 @@ pub open spec fn lowers_call(m: MirCrate, pol: Policy, ord: Seq<usize>, b: Body,
         ct->Call_0 is Intr && intr_of(m, cpol(pol), m.insts@[j as int].key@, g) == Some(ct->Call_0->Intr_0)
     } else {
         ct->Call_0 is Fn && fn_of(ord, ct->Call_0->Fn_0, j) && internal(m, pol, j)
+            && inst_body(m, j) is Some && args_typed(m, b, args, inst_body(m, j)->Some_0)
     }
 }
 
@@ -426,7 +439,7 @@ pub open spec fn lowers_drop(m: MirCrate, ord: Seq<usize>, b: Body, nloc: nat, n
 {
     place_ty(m, b, place) matches Some(t) && drop_row(m, t) matches Some(d) && no_index(place)
     && if d.empty || vec_int(m, t) { pre.len() == 0 && ct is Goto && ct->Goto_0 == target } else {
-        glue_of(m, d.glue) matches Some((j, _)) && pre.len() == 1 && pre[0] is Assign && pre[0]->Assign_0.proj@.len() == 0
+        glue_of(m, d.glue) matches Some((j, gb)) && glue_param_is(m, gb, t) && pre.len() == 1 && pre[0] is Assign && pre[0]->Assign_0.proj@.len() == 0
         && pre[0]->Assign_1 is RefMut && lowers_place(m, b, place, pre[0]->Assign_1->RefMut_0, true) && {
             let x = pre[0]->Assign_0.local as nat;
             &&& nloc <= x < ncore
