@@ -180,7 +180,7 @@ pub proof fn lemma_us_write_at(v: Val, p: Seq<PE>, w: Val)
 /// and a `Variant` write of an ADT must not be core's `Unit`.
 pub open spec fn put_ok(v: Val, c: Val, e: PE, w: Val, d: Val) -> bool {
     &&& (c is Unit && !(v is Unit) ==> us(w))
-    &&& (e is Variant ==> !(d is Unit && w is Adt))
+    &&& (e is Variant && c is Adt ==> !(d is Unit && w is Adt))
 }
 
 proof fn lemma_vr_upd(vs: Seq<Val>, cs: Seq<Val>, i: nat, w: Val, d: Val)
@@ -253,6 +253,47 @@ pub proof fn lemma_vr_write_at(v: Val, c: Val, p: Seq<PE>, w: Val, d: Val)
         lemma_vr_get(v, c, p[0]);
         lemma_vr_write_at(v1, c1, p.drop_first(), w, d);
         lemma_vr_put(v, c, p[0], write_at(v1, p.drop_first(), w), write_at(c1, p.drop_first(), d));
+    }
+}
+
+/// A MIR-side condition for `wsafe`: a write into the interior of a unit-shaped value (not `Unit`)
+/// keeps it unit-shaped, and a write through a trailing `Variant` is not of a unit-shaped ADT.
+pub open spec fn mws(v: Val, p: Seq<PE>, w: Val) -> bool
+    decreases p.len(),
+{
+    p.len() == 0 || {
+        let v1 = get(v, p[0]);
+        &&& mws(v1, p.drop_first(), w)
+        &&& (us(v) && !(v is Unit) ==> us(write_at(v1, p.drop_first(), w)))
+        &&& (p[0] is Variant && p.len() == 1 ==> !(us(w) && w is Adt))
+    }
+}
+
+/// `put` into an ADT gives an ADT.
+proof fn lemma_put_adt(c: Val, e: PE, x: Val)
+    requires c is Adt,
+    ensures put(c, e, x) is Adt,
+{
+}
+
+pub proof fn lemma_mws(v: Val, c: Val, p: Seq<PE>, w: Val, d: Val)
+    requires vr(v, c), vr(w, d), mws(v, p, w),
+    ensures wsafe(v, c, p, w, d),
+    decreases p.len(),
+{
+    if p.len() > 0 {
+        let (v1, c1) = (get(v, p[0]), get(c, p[0]));
+        let rest = p.drop_first();
+        lemma_vr_get(v, c, p[0]);
+        lemma_mws(v1, c1, rest, w, d);
+        if p[0] is Variant && c is Adt {
+            if rest.len() > 0 {
+                assert(c1 is Adt);
+                lemma_put_adt(c1, rest[0], write_at(get(c1, rest[0]), rest.drop_first(), d));
+            } else {
+                if d is Unit && w is Adt { assert(us(w)); }
+            }
+        }
     }
 }
 
