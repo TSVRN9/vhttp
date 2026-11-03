@@ -7,7 +7,8 @@
 //! loss recovery hook, connection IDs, and the handshake's connection IDs and transport
 //! parameter checks, the anti-amplification budget, outgoing datagram lengths and datagram
 //! routing, the idle timeout with the closing and draining states, the path table, and the
-//! connection that joins them (3d), and the HTTP/3 server on top of it.
+//! connection that joins them (3d), and the HTTP/3 server on top of it. Header protection
+//! (RFC 9001 §5.4) over the verified AES (3e).
 pub mod ack;
 pub mod ack_track;
 pub mod amp;
@@ -22,6 +23,7 @@ pub mod frame;
 pub mod h3_server;
 pub mod handshake;
 pub mod header;
+pub mod hp;
 pub mod lifecycle;
 pub mod path;
 pub mod payload;
