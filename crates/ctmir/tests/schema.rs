@@ -111,9 +111,8 @@ fn dumps() {
         let unk: Vec<_> = bodies.iter().filter(|(_, d)| d.contains("Unknown(")).collect();
         eprintln!("{name}: {:?}, {} insts, {} bodies, {} with Unknown", t.elapsed(), m.insts.len(), bodies.len(), unk.len());
         for (i, d) in unk { eprintln!("  {}: {:?}", String::from_utf8_lossy(i), unknown_names(d)); }
-        for (t, d) in [("tys", format!("{:?}", m.tys)), ("layouts", format!("{:?}", m.layouts)), ("allocs", format!("{:?}", m.allocs))] {
-            if d.contains("Unknown(") { eprintln!("  table {t}: {:?}", unknown_names(&d)); }
-        }
+        let d = format!("{m:?}");
+        if d.contains("Unknown(") { eprintln!("  whole crate (bodies and tables): {:?}", unknown_names(&d)); }
         n += 1;
     }
     assert!(n > 0, "no mir-*.json under {}", dir.display());
