@@ -1,3 +1,7 @@
 //! Verified MIR front end of the constant-time checker (Phase 8c). `json` reads the dump bytes,
 //! with `print` (serde_json's compact writer as a spec) tying each parsed value to rustc's output.
+//! `mir` mirrors the rustc_public types the dump holds, and `schema` decodes a parsed dump into
+//! them against `decode_*`, serde's derive conventions as a spec.
 pub mod json;
+pub mod mir;
+pub mod schema;
