@@ -120,11 +120,6 @@ pub proof fn lemma_term_jump(m: MirCrate, pol: Policy, ord: Seq<usize>, b: Body,
     }
 }
 
-/// The reached blocks have no `Call` or `Drop` terminator (the spec's call-free fallback).
-pub open spec fn call_free(b: Body, r: Seq<bool>) -> bool {
-    forall|bb: int| 0 <= bb < r.len() && r[bb] ==> !((#[trigger] b.blocks@[bb]).terminator.kind is Call || b.blocks@[bb].terminator.kind is Drop)
-}
-
 /// What a body and its image share, unpacked for one reached block.
 proof fn lemma_reached(m: MirCrate, pol: Policy, ord: Seq<usize>, j: nat, cb: c::Body, r: Seq<bool>, bb: nat)
     requires lowers_body(m, pol, ord, j, cb, r), bb < r.len(), r[bb as int],
@@ -590,7 +585,7 @@ proof fn lemma_lb_entry(m: MirCrate, pol: Policy, ord: Seq<usize>, j: nat, cb: c
 }
 
 /// `step_term` of a call or a drop.
-proof fn lemma_step_cd(m: MirCrate, pol: CallPolicy, b: Body, kind: TerminatorKind, f1: Frame, fuel: nat)
+pub proof fn lemma_step_cd(m: MirCrate, pol: CallPolicy, b: Body, kind: TerminatorKind, f1: Frame, fuel: nat)
     ensures
         kind matches TerminatorKind::Call { func, args, destination, target, unwind: _ } ==> match target {
             Some(tb) => step_term(m, pol, b, kind, f1, fuel) == call_step(m, pol, b, func, args@, destination, tb as nat, f1, fuel),
@@ -601,7 +596,7 @@ proof fn lemma_step_cd(m: MirCrate, pol: CallPolicy, b: Body, kind: TerminatorKi
 }
 
 /// A no-op drop that jumps.
-proof fn lemma_drop_noop(m: MirCrate, pol: CallPolicy, b: Body, place: Place, tb: nat, fr: Frame, fuel: nat)
+pub proof fn lemma_drop_noop(m: MirCrate, pol: CallPolicy, b: Body, place: Place, tb: nat, fr: Frame, fuel: nat)
     requires drop_step(m, pol, b, place, tb, fr, fuel) is Jump,
         place_ty(m, b, place) matches Some(t) && drop_row(m, t) matches Some(d) && (d.empty || vec_int(m, t)),
     ensures eval_place(fr, place) matches Some((PRes::At(_), _)),
@@ -610,7 +605,7 @@ proof fn lemma_drop_noop(m: MirCrate, pol: CallPolicy, b: Body, place: Place, tb
 }
 
 /// `body_call` that returns, unpacked.
-proof fn lemma_body_call_ok(m: MirCrate, pol: CallPolicy, j: nat, cb: Body, vs: Seq<Val>, fr: Frame, fuel: nat)
+pub proof fn lemma_body_call_ok(m: MirCrate, pol: CallPolicy, j: nat, cb: Body, vs: Seq<Val>, fr: Frame, fuel: nat)
     requires body_call(m, pol, j, cb, vs, fr, fuel) is Ok,
     ensures ({
         let o = mir_run(m, pol, j, mir_entry(m, j, vs, call_slots(m, cb, fr, vs)), (fuel - 1) as nat);
@@ -623,7 +618,7 @@ proof fn lemma_body_call_ok(m: MirCrate, pol: CallPolicy, j: nat, cb: Body, vs: 
 }
 
 /// A drop through glue that jumps, unpacked.
-proof fn lemma_drop_parts(m: MirCrate, pol: CallPolicy, b: Body, place: Place, tb: nat, fr: Frame, fuel: nat)
+pub proof fn lemma_drop_parts(m: MirCrate, pol: CallPolicy, b: Body, place: Place, tb: nat, fr: Frame, fuel: nat)
     requires drop_step(m, pol, b, place, tb, fr, fuel) is Jump,
         place_ty(m, b, place) matches Some(t) && drop_row(m, t) matches Some(d) && !(d.empty || vec_int(m, t)),
     ensures ({
@@ -650,7 +645,7 @@ pub open spec fn call_res(m: MirCrate, pol: CallPolicy, b: Body, j: nat, gargs: 
     }
 }
 
-proof fn lemma_call_parts(m: MirCrate, pol: CallPolicy, b: Body, func: Operand, args: Seq<Operand>, dest: Place, tb: nat, fr: Frame, fuel: nat)
+pub proof fn lemma_call_parts(m: MirCrate, pol: CallPolicy, b: Body, func: Operand, args: Seq<Operand>, dest: Place, tb: nat, fr: Frame, fuel: nat)
     requires call_step(m, pol, b, func, args, dest, tb, fr, fuel) is Jump,
     ensures ({
         let (j, gargs) = callee_of(m, func)->Some_0;
