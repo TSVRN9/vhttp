@@ -1,6 +1,44 @@
 # Binary constant-time audit of crates/crypto (main at e6c1c00)
 
-**Status at 8b32220.** The body below is the audit of e6c1c00, unedited. Since then the shim is deleted (F2 and G1 are obsolete; the "Phase 5" deployment line it quotes is superseded by TRUSTED's RSA row). F1 is closed by `#[inline(never)]` on `scalar_in_range`. The shipped rlib is now 2 units; 7 of the 30 functions changed and were re-read, the other 23 have the same opcodes. The RSA read is the next section.
+**Status at 8b32220.** The body below is the audit of e6c1c00, unedited. Since then the shim is deleted (F2 and G1 are obsolete; the "Phase 5" deployment line it quotes is superseded by TRUSTED's RSA row). F1 is closed by `#[inline(never)]` on `scalar_in_range`. The shipped rlib is now 2 units; 7 of the 30 functions changed and were re-read, the other 23 have the same opcodes. The RSA read is the next section. Where the bodies below say verify.sh re-checks none of this, they predate the gate in the next section.
+
+## Gate (Phase 7a)
+
+`scripts/ct-binary.sh`, run by `verify.sh`, which prints `binary ok (<n> fns)`. It detects change in the object code read here, not leaks: a passing gate means the shipped code is the code read, not that the code is constant time.
+
+**What it checks.**
+
+- It runs the recipe's build: a plain workspace `cargo build --release --locked`, in its own target dir, `target/ct-binary`. It refuses to run if `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_*`, `CARGO_PROFILE_*`, `CARGO_INCREMENTAL`, `RUSTC` or a `RUSTC_*WRAPPER` is set.
+- It checks that the rlib's `.rcgu.o` count equals the `units` line of `docs/crypto-binary-digests.txt`, today 2.
+- It disassembles each unit with `objdump -dr --no-show-raw-insn -C`, splits the output per function symbol and normalises each function. It then diffs one `<sha256> <symbol>` line per function against `docs/crypto-binary-digests.txt`. That covers every function in both units, 49 at 8b32220's source: the 30 non-RSA functions, the RSA and bignum functions, and the `alloc`/`vstd` instantiations.
+- Normalisation:
+  - drops the file-format and section headers, which carry paths and mangled crate hashes;
+  - drops each line's offset column and objdump's `# ...` comments;
+  - strips `.llvm.N` suffixes, the per-unit hash in `anon.<hash>.N`, and the function ordinal in `.LCPI<k>_N`;
+  - squeezes blanks.
+
+  Opcodes, operands (function-relative jump and call targets included) and relocations stay.
+- Structural checks run in every mode, `--update` included, which refuses to write the file if any fails:
+  - `crypto::bignum::ct_mask` is one out-of-line function, and its body is `mov`/`neg`/`ret`;
+  - `rsa_pss_sha256_sign` has at least 8 `R_X86_64_PLT32 crypto::bignum::ct_mask` relocations, and `cond_sub` and `select_n` at least 1 each. These are the counts read above;
+  - `crypto::p256::scalar_in_range` is one out-of-line function (F1).
+- Every failure is reported, not only the first, and each message names what to re-read. A missing tool, a build failure or no `.rcgu.o` member fails the gate.
+
+**What it does not check.**
+
+- Leaks. A function whose digest is unchanged carries its earlier reading, nothing more. That reading has the limits stated in its section: tiers, loop-shape tracing, not dudect.
+- Data. Only executable sections are hashed. A constant or table in `.rodata` or `.data.rel.ro` is covered only through the relocations that reference it, not by its contents.
+- Other builds: LTO, `codegen-units`, `target-cpu`, other targets, and a linked binary (none exists).
+- Code from `crates/crypto` instantiated or inlined into another crate's units. The audit's `nm` check found none in `tls` or `quic`, and the gate does not repeat it.
+- Toolchain and profile are not checked separately. A change to either is expected to show as a digest change.
+
+**Update protocol.**
+
+1. When the gate fails on a digest, the diff lists the changed, added and removed symbols. The script leaves the full dump and the per-function text in `target/ct-binary/ct-binary/`.
+2. Read every changed or added symbol per the recipe above. Read it at least at the tier of its earlier reading, and whole if it is new or it calls `ct_mask` or `scalar_in_range`. A changed `units` line means every function is re-read.
+3. Record the read in this doc: date, commit, toolchain, the symbols and their verdicts.
+4. Then run `scripts/ct-binary.sh --update`, and commit the digests file together with the read.
+5. A structural failure is not cleared by `--update`. Restore the barrier in the source, or change the check in the script in a reviewed commit that carries a fresh read.
 
 ## RSA object read (Phase 5e, source 8b32220)
 

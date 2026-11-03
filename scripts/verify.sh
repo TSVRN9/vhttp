@@ -75,4 +75,8 @@ done
 rows=$(grep -c '^| crypto::' "$root/TRUSTED.md" || true)
 [ "$attrs" -eq "$named" ] || fail "$attrs attributes but $named name a following fn"
 [ "$attrs" -eq "$rows" ] || fail "$attrs attributes but $rows TRUSTED.md crypto rows"
-echo "verify.sh: all crates verified, duvet ok, ct ok ($d declassify), cost $cost, escapes accounted ($attrs)"
+# Binary gate: crates/crypto's shipped object code must match docs/crypto-binary-digests.txt.
+bin=$("$root/scripts/ct-binary.sh") || exit 1
+bin=$(printf '%s\n' "$bin" | sed -n 's/^ct-binary: ok (\([0-9]*\) fns)$/\1/p')
+[ -n "$bin" ] || { echo "verify.sh: no ok line in ct-binary's output" >&2; exit 1; }
+echo "verify.sh: all crates verified, duvet ok, ct ok ($d declassify), cost $cost, escapes accounted ($attrs), binary ok ($bin fns)"
