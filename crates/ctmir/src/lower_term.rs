@@ -258,7 +258,7 @@ proof fn lemma_drop_glue(m: MirCrate, pol: Policy, ord: Seq<usize>, b: Body, t: 
     requires
         t is Drop, t0.pre@.len() == 0, t0.nloc == b.locals@.len(),
         place_ty(m, b, t->Drop_place) == Some(ty), drop_row(m, ty) == Some(d), !(d.empty || vec_int(m, ty)),
-        glue_of(m, d.glue) == Some((j, gb)), gb.arg_count == 1, sig_ok(m, gb), is_mut_ref(m, gb.locals@[1].ty),
+        glue_of(m, d.glue) == Some((j, gb)), gb.arg_count == 1, sig_ok(m, gb), is_mut_ref(m, gb.locals@[1].ty), glue_param_is(m, gb, ty),
         no_index(t->Drop_place), ord_set(ord).contains(j),
         t2.nloc == t0.nloc, t2.pre@.len() == 1, t2.tys@.len() == t0.tys@.len() + 2,
         t2.pre@[0] is Assign && t2.pre@[0]->Assign_0.local == tbase(t0) && t2.pre@[0]->Assign_0.proj@.len() == 0,
@@ -356,6 +356,7 @@ proof fn lemma_call_post(m: MirCrate, pol: Policy, ord: Seq<usize>, b: Body, t: 
             } else {
                 ct->Call_0 is Fn && fn_of(ord, ct->Call_0->Fn_0, j) && internal(m, pol, j) && ord_set(ord).contains(j)
                 && inst_body(m, j) is Some && t->Call_args@.len() == inst_body(m, j)->Some_0.arg_count && sig_ok(m, inst_body(m, j)->Some_0)
+                && args_typed(m, b, t->Call_args@, inst_body(m, j)->Some_0)
             }
         },
     ensures term_post(m, pol, ord, b, t, ct, t0, t2),
@@ -370,7 +371,7 @@ proof fn lemma_call_post(m: MirCrate, pol: Policy, ord: Seq<usize>, b: Body, t: 
 
 /// Drop glue the translator calls: one `&mut T` parameter, `T` the dropped type.
 pub fn glue_ok(m: &MirCrate, gb: &Body, ty: Ty) -> (r: bool)
-    ensures r ==> gb.arg_count == 1 && gb.locals@.len() > 1 && sig_ok(*m, *gb) && is_mut_ref(*m, gb.locals@[1].ty),
+    ensures r ==> gb.arg_count == 1 && gb.locals@.len() > 1 && sig_ok(*m, *gb) && is_mut_ref(*m, gb.locals@[1].ty) && glue_param_is(*m, *gb, ty),
 {
     gb.arg_count == 1 && gb.locals.len() > 1 && x_sig_ok(m, gb) && x_is_mut_ref(m, gb.locals[1].ty)
         && matches!(x_rigid(m, gb.locals[1].ty), Some(RigidTy::Ref(_, pt, _)) if *pt == ty)
@@ -379,7 +380,7 @@ pub fn glue_ok(m: &MirCrate, gb: &Body, ty: Ty) -> (r: bool)
 /// A body call the translator makes: 0 when the callee's body takes these arguments (1: a
 /// rust-call body, 2: argument types differ from the parameters', 3: no body or signature).
 pub fn callee_ok(m: &MirCrate, b: &Body, args: &Vec<Operand>, j: usize) -> (r: u8)
-    ensures r == 0 ==> (inst_body(*m, j as nat) matches Some(cb) && args@.len() == cb.arg_count && sig_ok(*m, cb)),
+    ensures r == 0 ==> (inst_body(*m, j as nat) matches Some(cb) && args@.len() == cb.arg_count && sig_ok(*m, cb) && args_typed(*m, *b, args@, cb)),
 {
     match x_inst_body(m, j) {
         Some(cb) => if cb.spread_arg.is_some() { 1 } else if !(args.len() == cb.arg_count && x_sig_ok(m, cb)) { 3 }
@@ -389,13 +390,16 @@ pub fn callee_ok(m: &MirCrate, b: &Body, args: &Vec<Operand>, j: usize) -> (r: u
 }
 
 /// Each argument's type is the callee's parameter type (ids are interned types).
-pub fn args_match(m: &MirCrate, b: &Body, args: &Vec<Operand>, cb: &Body) -> bool {
+pub fn args_match(m: &MirCrate, b: &Body, args: &Vec<Operand>, cb: &Body) -> (r: bool)
+    ensures r ==> args_typed(*m, *b, args@, *cb),
+{
+    if args.len() >= cb.locals.len() { return false; }
     let mut k: usize = 0;
     while k < args.len()
-        invariant k <= args@.len(),
+        invariant k <= args@.len(), args@.len() < cb.locals@.len(),
+            forall|i: int| 0 <= i < k ==> op_ty(*m, *b, #[trigger] args@[i]) == Some(cb.locals@[i + 1].ty),
         decreases args.len() - k,
     {
-        if k + 1 >= cb.locals.len() { return false; }
         match x_op_ty(m, b, &args[k]) { Some(t) => if t != cb.locals[k + 1].ty { return false; }, None => return false }
         k += 1;
     }

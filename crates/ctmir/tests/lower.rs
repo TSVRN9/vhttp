@@ -176,3 +176,19 @@ fn shared_key_rejects() {
         Ok(_) => panic!("accepted"),
     }
 }
+
+/// Probe (Task 5 concern): `ctcore::check_program` on the new `pos_drop_secret_option` program,
+/// the root's parameter declared secret. `CT_T5_OUT=<dir> cargo test -p ctmir --release --test lower
+/// -- --ignored probe_secret_option --nocapture`.
+#[test]
+#[ignore]
+fn probe_secret_option() {
+    let out = std::path::PathBuf::from(std::env::var("CT_T5_OUT").expect("CT_T5_OUT"));
+    let m = dec(&std::fs::read(out.join("fixtures/mir-ct_fixtures.json")).unwrap());
+    let (p, infos) = lower(&m, &pol0(), b"ct_fixtures::fx::pos_drop_secret_option").ok().expect("lowers");
+    let decl: Vec<Option<Vec<bool>>> = infos.iter().map(|i| if i.is_root { Some(vec![true]) } else { None }).collect();
+    match ctcore::check_program(&p, &decl) {
+        Ok(_) => eprintln!("check_program: ok"),
+        Err(rs) => for r in rs { eprintln!("check_program reject: fn {} ({}) block {} {:?}", r.f, s(&infos[r.f].path), r.block, std::mem::discriminant(&r.kind)); },
+    }
+}
