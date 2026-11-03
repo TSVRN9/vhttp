@@ -164,24 +164,51 @@ pub proof fn lemma_rv_one(m: MirCrate, b: Body, fm: Frame, fc0: Frame, rv: Rvalu
     ensures rv_sim(fm, fc0, pre, base, cr, eval_rv(m, b, fm, rv)->Some_0),
 {
     match rv {
-        Rvalue::Use(x, _) => lemma_one(m, b, fm, fc0, x, cr->Use_0, pre, base),
-        Rvalue::UnaryOp(_, x) => lemma_one(m, b, fm, fc0, x, cr->Un_2, pre, base),
-        Rvalue::Cast(ck, x, _) => {
-            match ck {
-                CastKind::IntToInt => lemma_one(m, b, fm, fc0, x, cr->Cast_2, pre, base),
-                _ => lemma_one(m, b, fm, fc0, x, cr->Use_0, pre, base),
-            }
-        },
-        Rvalue::Repeat(x, _) => {
-            lemma_one(m, b, fm, fc0, x, cr->Repeat_0, pre, base);
-            let (fc1, _) = ctcore::sem::exec_stmts(pre, 0, fc0);
-            let v = eval_op(m, fm, x)->Some_0.0;
-            let cv = ctcore::sem::eval_op(fc1, cr->Repeat_0).0;
-            let n = cr->Repeat_1 as nat;
-            assert(vrs(Seq::new(n, |_i: int| v), Seq::new(n, |_j: int| cv)));
-        },
+        Rvalue::Use(x, _) => lemma_rv_use(m, b, fm, fc0, rv, x, cr, pre, base),
+        Rvalue::UnaryOp(_, x) => lemma_rv_un(m, b, fm, fc0, rv, x, cr, pre, base),
+        Rvalue::Cast(ck, x, _) => lemma_rv_cast(m, b, fm, fc0, rv, x, cr, pre, base),
+        Rvalue::Repeat(x, _) => lemma_rv_repeat(m, b, fm, fc0, rv, x, cr, pre, base),
         _ => {},
     }
+}
+
+proof fn lemma_rv_use(m: MirCrate, b: Body, fm: Frame, fc0: Frame, rv: Rvalue, x: Operand, cr: c::Rvalue, pre: Seq<c::Stmt>, base: nat)
+    requires lowers_rv(m, b, rv, cr, pre, base), fr_rel(fm, fc0), pure_fr(fm), fm.locals.len() <= base,
+        fc0.locals.len() >= base + pre.len(), eval_rv(m, b, fm, rv) is Some, rv is Use, rv->Use_0 == x,
+    ensures rv_sim(fm, fc0, pre, base, cr, eval_rv(m, b, fm, rv)->Some_0),
+{
+    lemma_one(m, b, fm, fc0, x, cr->Use_0, pre, base);
+}
+
+proof fn lemma_rv_un(m: MirCrate, b: Body, fm: Frame, fc0: Frame, rv: Rvalue, x: Operand, cr: c::Rvalue, pre: Seq<c::Stmt>, base: nat)
+    requires lowers_rv(m, b, rv, cr, pre, base), fr_rel(fm, fc0), pure_fr(fm), fm.locals.len() <= base,
+        fc0.locals.len() >= base + pre.len(), eval_rv(m, b, fm, rv) is Some,
+        rv matches Rvalue::UnaryOp(UnOp::Not, _) || rv matches Rvalue::UnaryOp(UnOp::Neg, _), rv->UnaryOp_1 == x,
+    ensures rv_sim(fm, fc0, pre, base, cr, eval_rv(m, b, fm, rv)->Some_0),
+{
+    lemma_one(m, b, fm, fc0, x, cr->Un_2, pre, base);
+}
+
+proof fn lemma_rv_cast(m: MirCrate, b: Body, fm: Frame, fc0: Frame, rv: Rvalue, x: Operand, cr: c::Rvalue, pre: Seq<c::Stmt>, base: nat)
+    requires lowers_rv(m, b, rv, cr, pre, base), fr_rel(fm, fc0), pure_fr(fm), fm.locals.len() <= base,
+        fc0.locals.len() >= base + pre.len(), eval_rv(m, b, fm, rv) is Some, rv is Cast, rv->Cast_1 == x,
+    ensures rv_sim(fm, fc0, pre, base, cr, eval_rv(m, b, fm, rv)->Some_0),
+{
+    if rv->Cast_0 is IntToInt { lemma_one(m, b, fm, fc0, x, cr->Cast_2, pre, base); }
+    else { lemma_one(m, b, fm, fc0, x, cr->Use_0, pre, base); }
+}
+
+proof fn lemma_rv_repeat(m: MirCrate, b: Body, fm: Frame, fc0: Frame, rv: Rvalue, x: Operand, cr: c::Rvalue, pre: Seq<c::Stmt>, base: nat)
+    requires lowers_rv(m, b, rv, cr, pre, base), fr_rel(fm, fc0), pure_fr(fm), fm.locals.len() <= base,
+        fc0.locals.len() >= base + pre.len(), eval_rv(m, b, fm, rv) is Some, rv is Repeat, rv->Repeat_0 == x,
+    ensures rv_sim(fm, fc0, pre, base, cr, eval_rv(m, b, fm, rv)->Some_0),
+{
+    lemma_one(m, b, fm, fc0, x, cr->Repeat_0, pre, base);
+    let (fc1, _) = ctcore::sem::exec_stmts(pre, 0, fc0);
+    let v = eval_op(m, fm, x)->Some_0.0;
+    let cv = ctcore::sem::eval_op(fc1, cr->Repeat_0).0;
+    let n = cr->Repeat_1 as nat;
+    assert(vrs(Seq::new(n, |_i: int| v), Seq::new(n, |_j: int| cv)));
 }
 
 pub proof fn lemma_rv_agg(m: MirCrate, b: Body, fm: Frame, fc0: Frame, ak: AggregateKind, os: Vec<Operand>, cr: c::Rvalue, pre: Seq<c::Stmt>, base: nat)

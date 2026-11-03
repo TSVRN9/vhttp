@@ -401,19 +401,40 @@ proof fn lemma_jump_facts(m: MirCrate, pol: Policy, ord: Seq<usize>, j: nat, p: 
     assert(blk_f1(m, b, bb, fm) == f1);
     assert(g < p.fns@.len() && bb < r.len() && r[bb as int] && !(kind is Call || kind is Drop)) by { reveal(body_sim_pre); reveal(blk_pre_ok); }
     assert(lowers_term(m, pol, ord, b, nloc, ncore, kind, pre, cblk.term) && succs_in(kind, marks(r)) && bb < cb.blocks@.len()) by { reveal(blk_pre_ok); }
-    assert(post_stmts(m, pol, j, p, g, bb, fm, fc, fuel));
-    assert(fr_rel(f1, fcs) && pure_fr(f1) && e1 == ce1 && f1.locals.len() == nloc && fcs.locals.len() == ncore && lo <= cs.len()) by { reveal(post_stmts); }
     assert(kind is Goto || kind is SwitchInt || kind is Assert) by { reveal(step_term); }
-    assert(run_tf(m, cpol(pol), b, st->Jump_0, st->Jump_1, (fuel - 1) as nat)) by { reveal(post_stmts); }
     let (t, f2, e2, s2) = (st->Jump_0, st->Jump_1, st->Jump_2, st->Jump_3);
     let (fct, ept) = ctcore::sem::exec_stmts(pre, 0, fcs);
-    assert(ctcore::sem::exec_stmts(cs, 0, fc) == (fct, ce1 + ept)) by { reveal(post_stmts); }
-    assert(run_block(m, cpol(pol), b, bb, fm, fuel) == match run_block(m, cpol(pol), b, t, f2, (fuel - 1) as nat) {
-        Out::Done(f3, e3, s3) => Out::Done(f3, e1 + e2 + e3, s1 + s2 + s3), o => o }) by { reveal(post_stmts); }
-    assert(s1 == lo) by { reveal(post_stmts); }
+    lemma_post_jump(m, pol, j, p, g, bb, fm, fc, fuel);
     lemma_jump_core(m, pol, ord, b, nloc, ncore, kind, pre, cblk.term, f1, fcs, fuel, p, g, bb, fc, cs, lo, ce1);
     lemma_jump_reached(kind, marks(r), st, m, cpol(pol), b, f1, fuel);
     lemma_marks_len(r, t);
+}
+
+/// `post_stmts` unpacked for a jump.
+proof fn lemma_post_jump(m: MirCrate, pol: Policy, j: nat, p: c::Program, g: nat, bb: nat, fm: Frame, fc: Frame, fuel: nat)
+    requires post_stmts(m, pol, j, p, g, bb, fm, fc, fuel),
+        step_term(m, cpol(pol), inst_body(m, j)->Some_0, inst_body(m, j)->Some_0.blocks@[bb as int].terminator.kind, blk_f1(m, inst_body(m, j)->Some_0, bb, fm), fuel) is Jump,
+    ensures ({
+        let b = inst_body(m, j)->Some_0;
+        let blk = b.blocks@[bb as int];
+        let cs = p.fns@[g as int].blocks@[bb as int].stmts@;
+        let lo = blk_lo(m, b, bb) as int;
+        let (f1, e1, s1) = exec_stmts(m, b, fm, blk.statements@, blk.statements@.len())->Some_0;
+        let (fcs, ce1) = xs(cs, 0, lo, fc);
+        let (fct, ept) = ctcore::sem::exec_stmts(cs.subrange(lo, cs.len() as int), 0, fcs);
+        let st = step_term(m, cpol(pol), b, blk.terminator.kind, f1, fuel);
+        let (t, f2, e2, s2) = (st->Jump_0, st->Jump_1, st->Jump_2, st->Jump_3);
+        &&& lo <= cs.len() && fr_rel(f1, fcs) && pure_fr(f1) && e1 == ce1 && s1 == lo
+        &&& f1.locals.len() == b.locals@.len() && fcs.locals.len() == p.fns@[g as int].locals@.len()
+        &&& ctcore::sem::exec_stmts(cs, 0, fc) == (fct, ce1 + ept)
+        &&& run_tf(m, cpol(pol), b, t, f2, (fuel - 1) as nat)
+        &&& run_block(m, cpol(pol), b, bb, fm, fuel) == match run_block(m, cpol(pol), b, t, f2, (fuel - 1) as nat) {
+            Out::Done(f3, e3, s3) => Out::Done(f3, e1 + e2 + e3, s1 + s2 + s3), o => o }
+    }),
+{
+    hide(run_tf);
+    hide(fr_rel);
+    hide(pure_fr);
 }
 
 /// Core's side of a jump: the terminator's temps, then the jump, from related frames.
