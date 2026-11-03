@@ -4,11 +4,11 @@
 
 ## Gate (Phase 7a)
 
-`scripts/ct-binary.sh`, run by `verify.sh`, which prints `binary ok (<n> fns)`. It detects change in the object code read here, not leaks: a passing gate means the shipped code is the code read, not that the code is constant time.
+`scripts/ct-binary.sh`, run by `verify.sh`, which prints `binary ok (<n> fns)`. It detects change in the object code read here, not leaks: a passing gate means the shipped code is the code read (for the instantiations listed below, only that it is unchanged), not that the code is constant time.
 
 **What it checks.**
 
-- It runs the recipe's build: a plain workspace `cargo build --release --locked`, in its own target dir, `target/ct-binary`. It refuses to run if `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_*`, `CARGO_PROFILE_*`, `CARGO_INCREMENTAL`, `RUSTC` or a `RUSTC_*WRAPPER` is set.
+- It runs the recipe's build: a plain workspace `cargo build --release --locked`, in its own target dir, `target/ct-binary`. It refuses to run if `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_*`, `CARGO_PROFILE_*`, `CARGO_TARGET_*_RUSTFLAGS`, `CARGO_INCREMENTAL`, `RUSTC` or a `RUSTC_*WRAPPER` is set.
 - It checks that the rlib's `.rcgu.o` count equals the `units` line of `docs/crypto-binary-digests.txt`, today 2.
 - It disassembles each unit with `objdump -dr --no-show-raw-insn -C`, splits the output per function symbol and normalises each function. It then diffs one `<sha256> <symbol>` line per function against `docs/crypto-binary-digests.txt`. That covers every function in both units, 49 at 8b32220's source: the 30 non-RSA functions, the RSA and bignum functions, and the `alloc`/`vstd` instantiations.
 - Normalisation:
@@ -26,6 +26,7 @@
 
 **What it does not check.**
 
+- The 9 `alloc`/`vstd` instantiations (`slice_subrange`, `RawVecInner`'s `do_reserve_and_handle`, `finish_grow` and `try_allocate_in`, `Vec::reserve`, `VecAdditionalExecFns::set`, the two `Drop::drop`s, `drop_glue`). They are tracked for change only: no section of this audit records a read of them, so for them a passing gate says nothing beyond "unchanged". A change to one needs at least a tier C read (the jump, index and div script), recorded like any other.
 - Leaks. A function whose digest is unchanged carries its earlier reading, nothing more. That reading has the limits stated in its section: tiers, loop-shape tracing, not dudect.
 - Data. Only executable sections are hashed. A constant or table in `.rodata` or `.data.rel.ro` is covered only through the relocations that reference it, not by its contents.
 - Other builds: LTO, `codegen-units`, `target-cpu`, other targets, and a linked binary (none exists).
@@ -35,7 +36,7 @@
 **Update protocol.**
 
 1. When the gate fails on a digest, the diff lists the changed, added and removed symbols. The script leaves the full dump and the per-function text in `target/ct-binary/ct-binary/`.
-2. Read every changed or added symbol per the recipe above. Read it at least at the tier of its earlier reading, and whole if it is new or it calls `ct_mask` or `scalar_in_range`. A changed `units` line means every function is re-read.
+2. Read every changed or added symbol per the recipe above. Read it at least at the tier of its earlier reading (tier C for the unread instantiations above), and whole if it is new or it calls `ct_mask` or `scalar_in_range`. A changed `units` line means every function is re-read.
 3. Record the read in this doc: date, commit, toolchain, the symbols and their verdicts.
 4. Then run `scripts/ct-binary.sh --update`, and commit the digests file together with the read.
 5. A structural failure is not cleared by `--update`. Restore the barrier in the source, or change the check in the script in a reviewed commit that carries a fresh read.

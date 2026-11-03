@@ -11,14 +11,14 @@ cd "$root"
 tracked=docs/crypto-binary-digests.txt
 T=${CT_BINARY_TARGET_DIR:-$root/target/ct-binary}
 recipe="per docs/crypto-binary-audit.md's recipe (\"Gate\", update protocol)"
-die() { echo "ct-binary: $*" >&2; exit 1; }
+die() { echo "ct-binary: $*; the gate failed closed, see docs/crypto-binary-audit.md (\"Gate\") for what to re-read" >&2; exit 1; }
 update=0
 case "${1-}" in --update) update=1 ;; "") ;; *) die "usage: ct-binary.sh [--update]" ;; esac
 for t in cargo ar objdump sha256sum awk sed diff; do
     command -v "$t" >/dev/null || die "missing tool: $t"
 done
 # The gate builds the shipped profile only; anything that would change codegen is refused.
-bad=$(env | grep -E '^(RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_[A-Z_]*|CARGO_PROFILE_[A-Z_]*|CARGO_INCREMENTAL|RUSTC|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER)=' | cut -d= -f1 || true)
+bad=$(env | grep -E '^(RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_[A-Z_]*|CARGO_PROFILE_[A-Z_]*|CARGO_TARGET_[A-Z0-9_]*_RUSTFLAGS|CARGO_INCREMENTAL|RUSTC|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER)=' | cut -d= -f1 || true)
 [ -z "$bad" ] || die "refusing to build with" $bad "set: the gate checks the shipped build"
 
 cargo build --release --locked -q --target-dir "$T" || die "cargo build --release failed"
