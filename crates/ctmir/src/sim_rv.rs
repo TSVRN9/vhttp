@@ -29,7 +29,7 @@ pub open spec fn rv_sim(fm: Frame, fc0: Frame, pre: Seq<c::Stmt>, base: nat, cr:
 }
 
 /// A single operand's image: run its temps, then it evaluates as in MIR.
-proof fn lemma_one(m: MirCrate, b: Body, fm: Frame, fc0: Frame, x: Operand, y: c::Operand, pre: Seq<c::Stmt>, base: nat)
+pub proof fn lemma_one(m: MirCrate, b: Body, fm: Frame, fc0: Frame, x: Operand, y: c::Operand, pre: Seq<c::Stmt>, base: nat)
     requires lowers_op(m, b, x, y, pre, base), fr_rel(fm, fc0), pure_fr(fm), fm.locals.len() <= base,
         fc0.locals.len() >= base + pre.len(), eval_op(m, fm, x) is Some,
     ensures ({
