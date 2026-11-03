@@ -25,7 +25,7 @@
   - `crypto::p256::scalar_in_range` is one out-of-line function (F1);
   - the call sites read above, as `R_X86_64_PLT32` relocations against the symbol or its `.text` section: `ct_mask` at least 8 times in `rsa_pss_sha256_sign` and once each in `cond_sub` and `select_n`; `scalar_in_range` once each in `p256_public_key` and `p256_ecdh`, twice in `p256_ecdsa_sign`;
   - no dependent defines a `crypto::` symbol;
-  - at least one dependent rlib was read, and the `U` block is non-empty, so `--update` cannot write a digests file without it.
+  - at least one dependent rlib was read, and the `U` block has `tls` lines, so `--update` cannot write a digests file without them.
 - Commit tripwire: the last commit touching `docs/crypto-binary-digests.txt` also touches this doc, and an uncommitted change to the digests file comes with one to this doc.
 - Once the build has run, every check is reported, not only the first failure, and each message names what to re-read. The pre-checks (tools, environment, build, rlib members, unit count zero, the digest count) stop at the first failure. A missing tool, a build failure or no `.rcgu.o` member fails the gate.
 
@@ -71,7 +71,10 @@
 ```sh
 cargo test --release -p crypto --test dudect --no-run
 taskset -c 2 cargo test --release -p crypto --test dudect -- --ignored --nocapture --test-threads 1
+scripts/ct-binary.sh && cmp target/release/deps/libcrypto-*.rlib target/ct-binary/release/libcrypto.rlib   # timed code = gated code
 ```
+
+Each run fails unless `/proc/self/status`'s `Cpus_allowed_list` is a single CPU. The `cmp` needs exactly one `libcrypto-*.rlib` in `target/release/deps`; if there are several, compare the one the test binary linked.
 
 **When to run.** By hand, after any gate digest update that touches a timed symbol or its callees, and on any new CPU or toolchain the server ships on. Record each run here.
 
@@ -80,9 +83,10 @@ taskset -c 2 cargo test --release -p crypto --test dudect -- --ignored --nocaptu
 - There are two classes, fixed and random. A fixed-seed xorshift draws the class for each call, so the classes interleave, and it also draws the random inputs. Inputs are built in batches of 100 outside the timed region; for the fixed class, the batch slot gets a copy of the fixed input. One warm-up batch is discarded.
 - Each call is timed with `lfence; rdtsc` on both sides (with `Instant` off x86-64). TSC ticks are invariant ticks, not core cycles.
 - Every measurement above the pooled 95th percentile is dropped. Welch's t is computed on the rest, with Welford's means and variances. The harness measures until at least `n` measurements survive the crop.
-- Verdict: a target fails at |t| > 10, and a NaN fails too.
+- Verdict: a target fails at |t| > 10, and a NaN fails too. The test is first-order with one crop: dudect proper also tests several crop percentiles and a second-order (variance) statistic, and this harness does neither.
 - The control runs first, in the same process and harness, before every target. It is `leaky_eq`, an early-exit 16-byte compare (`black_box` per byte), fixed = equal input, random = random input, at 10^6 measurements. It must give |t| > 10, or the target's verdict does not count.
-- `10 SE` is ten standard errors of the mean difference: roughly the smallest mean difference the run would flag.
+- `10 SE` is ten standard errors of the mean difference. A true difference of 10 SE is flagged with about even odds; about 12 SE is needed for 95% detection.
+- What a pass bounds: the fixed-versus-random class mean for one fixed secret, not leak size. A leak that averages equally over typical secrets is not detected at any n. For example, a cost linear in Hamming weight: the fixed P-256 d has popcount 128, exactly the expected value, and the fixed RSA d is within 1σ of the random keys' mean.
 
 **Targets.** One secret varies, and everything else is fixed.
 
@@ -93,23 +97,24 @@ taskset -c 2 cargo test --release -p crypto --test dudect -- --ignored --nocaptu
 | tag compare, through `aes128_gcm_open` | key fixed; both classes are wrong tags: the fixed one is wrong in byte 15, the random one in a random byte by a random nonzero xor | 10^6 |
 | `p256_ecdsa_sign` | d (fixed: RFC 6979 A.2.5's key; random: 32 random bytes, out of [1, n-1] with probability about 2^-32); msg fixed | 10^6 |
 | `p256_ecdh` | d, as above; peer a fixed valid point | 10^6 |
-| `rsa_pss_sha256_sign`, 2048 bits | d over 65 valid key pairs with RFC 9500's n: d = e^-1 mod lcm(p-1, q-1), fixed e = 65537, random a random odd e < 2^33. Each key is checked by signing and verifying with RustCrypto. d is zero-padded to 256 octets, as the loader must do: `pad_be`'s cost depends on d's encoded length, which is public under D7. msg and salt fixed | 10^4: a signature takes about 6 ms, so 10^6 would take about 100 min |
+| `rsa_pss_sha256_sign`, 2048 bits | d over 65 valid key pairs with RFC 9500's n: d = e^-1 mod lcm(p-1, q-1), fixed e = 65537, random one of 64 precomputed keys with a random odd e < 2^33 (not a fresh d per call). Each key is checked by signing and verifying with RustCrypto. d is zero-padded to 256 octets, as the loader must do: `pad_be`'s cost depends on d's encoded length, which is public under D7. msg and salt fixed | 10^4, a choice: a signature takes about 6 ms, so 10^6 would take about 100 min (P-256 ran 10^6 at a similar cost; at 10^6 RSA's floor would be about 2.3 µs) |
 
-**Power.** The control's gap is about 6 ticks, on a 60-tick call. On a target the noise grows with the call's length, so a pass rules out only mean differences above that run's 10 SE. To check the tag compare at its own scale, `gcm_open_tag_compare` adds a probe with no verdict: the same calls followed by `leaky_eq` on the tag. Its gap is about 3 ticks, against a 10 SE of about 35. It gave |t| 1.01, so **this test cannot see a 16-byte early-exit compare inside `aes128_gcm_open`**. The tag compare's evidence for constant time is the MIR proof plus the object read; the timing test bounds only larger leaks.
+**Power.** The control's gap is about 6 ticks, on a 60-tick call. On a target the noise grows with the call's length, so a pass says only that the class means differ by less than about that run's 10 SE (see Harness for the odds). To check the tag compare at its own scale, `gcm_open_tag_compare` adds a probe with no verdict: the same calls followed by `leaky_eq` on the tag. Its gap is about 3 ticks, against a 10 SE of about 35. It gave |t| 1.01, so **this test cannot see a 16-byte early-exit compare inside `aes128_gcm_open`**. The tag compare's evidence for constant time is the MIR proof plus the object read; the timing test bounds only larger leaks. **No leak was planted at the P-256 or RSA scale**: their floors (2.4-3.1 µs, 23 µs) come from the SE alone. The RSA test is not shown to detect `ct_mask`'s historical failure, and structurally is unlikely to: the branch chooses between equal-cost copies. The gate's `ct_mask` and call-site checks, shown to fail when `#[inline(never)]` is removed, are the check for it. Its signal would be a difference in mispredict counts, of order 10^2-10^3 cycles against a 23 µs floor.
 
 **Not covered:**
 
 - other CPUs and microarchitectures, including this CPU's E-cores (4-7);
-- frequency scaling: the TSC is invariant, so scaling shows only as noise;
+- data-dependent frequency (Hertzbleed-style). With an invariant TSC, scaling that does not depend on the data shows only as noise, and per-call interleaving smears DVFS effects across both classes;
 - SMT: this CPU has 1 thread per core, so it is untestable here;
 - cache attacks beyond the dudect signal: one process, warm caches, no co-resident attacker;
-- leaks below each run's 10 SE;
+- leaks below each run's 10 SE, and leaks that average equally over typical secrets (no atypical, e.g. low-weight, fixed secret was run);
+- leaks confined to the cropped top 5%, or to the variance alone (one crop, first-order test only);
 - the timing of SHA-256, HMAC, HKDF and `p256_public_key`;
 - every non-crypto secret path (TRUSTED's CT check scope row).
 
 ### Timing records
 
-- **2026-11-03, tree 0b846ce plus the test file (crates/crypto source as at 8b32220, gate digests unchanged), rustc 1.98.1, Intel Core Ultra 7 258V (Lunar Lake; P-cores 0-3, no SMT).** The runs went in parallel on P-cores 1, 2 and 3, one `taskset -c` process each, with the documented command filtered by test name. Load is the 1-minute average at start and end. It includes these three runs, so about 3 when all three were going. The TSC runs at about 3.3 GHz (ticks over wall time). **All pass.**
+- **2026-11-03, tree 0b846ce plus the test file (crates/crypto source as at 8b32220, gate digests unchanged), rustc 1.98.1, Intel Core Ultra 7 258V (Lunar Lake; P-cores 0-3, no SMT).** The timed `libcrypto` rlib is byte-identical to the gate's (`cmp`, checked after the run by the Task 2 review and again on 2026-11-03 before fix round 1); the timed regions call all six targets out of line (the review's disassembly of the test binary). The runs went in parallel on P-cores 1, 2 and 3, one `taskset -c` process each, with the documented command filtered by test name. Load is the 1-minute average at start and end. It includes these three runs, so about 3 when all three were going. The TSC runs at about 3.3 GHz (ticks over wall time). **All pass.**
 
   | Target | n measured / kept | \|t\| | Mean fixed / random (ticks) | 10 SE (ticks) | Wall | CPU | Load |
   |---|---|---|---|---|---|---|---|
