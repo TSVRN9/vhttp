@@ -74,3 +74,37 @@ fn short_header_bits() {
     assert_eq!(b[11..], input[11..]);
     assert_eq!(remove_hp(&b, 9, &CLIENT.hp), input);
 }
+
+// SERVER.hp over the A.2 sample gives mask[0] = 0x16, whose 0x10 bit tells 0x0f from 0x1f.
+#[test]
+fn mask_bit_0x10() {
+    assert_eq!(hp_mask(&SERVER.hp, &hex(A2_SAMPLE)).to_vec(), hex("165287d918"));
+}
+
+#[test]
+fn long_header_low_4_bits() {
+    let input = a2_input();
+    let mut b = input.clone();
+    apply_hp(&mut b, 0, 18, &SERVER.hp);
+    assert_eq!(b[0], 0xc5); // 0xc3 ^ (0x16 & 0x0f); 0x1f would give 0xd5
+    assert_eq!(b[1..18], input[1..18]);
+    assert_eq!(b[18..22], hex("5287d91a")[..]);
+    assert_eq!(b[22..], input[22..]);
+    assert_eq!(remove_hp(&b, 18, &SERVER.hp), input);
+}
+
+#[test]
+fn short_header_low_5_bits() {
+    let mut input = vec![0x41];
+    input.extend([0x11; 8]);
+    input.extend([0xa0, 0xa1, 0, 0]);
+    input.extend(hex(A2_SAMPLE));
+    input.extend([0; 3]);
+    let mut b = input.clone();
+    apply_hp(&mut b, 0, 9, &SERVER.hp);
+    assert_eq!(b[0], 0x57); // 0x41 ^ (0x16 & 0x1f); 0x0f would give 0x47
+    assert_eq!(b[1..9], input[1..9]);
+    assert_eq!(b[9..11], [0xf2, 0x26]);
+    assert_eq!(b[11..], input[11..]);
+    assert_eq!(remove_hp(&b, 9, &SERVER.hp), input);
+}
