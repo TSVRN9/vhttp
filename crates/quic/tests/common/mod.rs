@@ -31,7 +31,6 @@ pub const fn hx<const N: usize>(s: &str) -> [u8; N] {
     r
 }
 
-
 /// RFC 9001 A.1, client Initial keys.
 pub const CLIENT: PacketKeys = PacketKeys {
     key: hx("1f369613dd76d5467730efcbe3b1a22d"),

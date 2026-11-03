@@ -53,3 +53,16 @@ fn a2_build() {
     assert_eq!(build(&hex(A2_HEADER), 18, 2, &a2_payload(), &CLIENT), A2);
     assert_eq!(build(&hex(A3_HEADER), 18, 1, &A3_PAYLOAD, &SERVER), A3);
 }
+
+#[test]
+fn keys_debug_redacted() {
+    let s = format!("{:?}", KeyPair { rx: CLIENT, tx: SERVER });
+    // First bytes of each A.1 key, IV and HP key, in decimal and in hex.
+    for leak in [
+        "31, 54", "250, 4", "159, 80", "207, 58", "10, 193", "194, 6", "1f36", "fa04", "9f50", "cf3a", "0ac1",
+        "c206", "1F36", "CF3A",
+    ] {
+        assert!(!s.contains(leak), "{s}");
+    }
+    assert!(s.contains("16 bytes") && s.contains("12 bytes"), "{s}");
+}
