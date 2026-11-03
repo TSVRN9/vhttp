@@ -7,8 +7,10 @@ use crate::mir::*;
 use crate::sem::*;
 #[allow(unused_imports)]
 use crate::sim::*;
+#[cfg(verus_keep_ghost)]
+use ctcore::sem::{get, pad, put, read_at, write_at};
 #[allow(unused_imports)]
-use ctcore::sem::{get, pad, put, read_at, write_at, Event, Frame, Loc, Root, Val, PE};
+use ctcore::sem::{Event, Frame, Loc, Root, Val, PE};
 use vstd::prelude::*;
 
 verus! {

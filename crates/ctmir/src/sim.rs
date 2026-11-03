@@ -14,8 +14,10 @@ use crate::mir::*;
 use crate::rel::*;
 #[allow(unused_imports)]
 use crate::sem::*;
+#[cfg(verus_keep_ghost)]
+use ctcore::sem::{get, pad, put, read_at, write_at};
 #[allow(unused_imports)]
-use ctcore::sem::{get, nth, pad, put, read_at, write_at, Cur, Event, Frame, Loc, Root, Val, PE};
+use ctcore::sem::{Cur, Event, Frame, Loc, Root, Val, PE};
 #[allow(unused_imports)]
 use ctcore::syntax as c;
 use vstd::prelude::*;
