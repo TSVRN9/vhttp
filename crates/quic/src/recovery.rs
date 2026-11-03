@@ -1,4 +1,5 @@
-//! The loss recovery and congestion control hook (Phase 6 replaces the bodies, RFC 9002).
+//! The loss recovery and congestion control hook (Phase 6 replaces the bodies, RFC 9002, and
+//! `conn.rs`'s `fire_pto`, where a PTO drains the in-flight records).
 //! Phase 6 keeps the call sites but may extend the signatures (send times and sizes for RTT
 //! samples and persistent congestion).
 // Used only in ghost code, which a plain `cargo build` erases.
@@ -42,6 +43,18 @@ pub open spec fn sat_shl(v: u64, n: nat) -> u64
     }
 }
 
+pub proof fn lemma_shl_grows(v: u64, a: nat, b: nat)
+    requires
+        a <= b,
+    ensures
+        sat_shl(v, a) <= sat_shl(v, b),
+    decreases b - a,
+{
+    if a < b {
+        lemma_shl_grows(v, a, (b - 1) as nat);
+    }
+}
+
 /// The PTO before backoff: the 1-RTT space adds the peer's max_ack_delay (RFC 9002 §6.2.1).
 pub open spec fn pto_base(space: PacketKind, peer_max_ack_delay_us: u64) -> u64 {
     match space {
@@ -73,6 +86,24 @@ impl Recovery {
 
     pub closed spec fn pto_us_spec(&self, space: PacketKind, peer_max_ack_delay_us: u64) -> u64 {
         sat_shl(pto_base(space, peer_max_ack_delay_us), self.pto_count as nat)
+    }
+
+    /// More PTOs fired, no shorter a PTO.
+    pub proof fn lemma_pto_grows(&self, o: Recovery, space: PacketKind, mad: u64)
+        requires
+            self.pto_count_spec() <= o.pto_count_spec(),
+        ensures
+            self.pto_us_spec(space, mad) <= o.pto_us_spec(space, mad),
+        decreases o.pto_count_spec() - self.pto_count_spec(),
+    {
+        lemma_shl_grows(pto_base(space, mad), self.pto_count as nat, o.pto_count as nat);
+    }
+
+    pub proof fn lemma_pto_pos(&self, space: PacketKind, mad: u64)
+        ensures
+            self.pto_us_spec(space, mad) >= PLACEHOLDER_PTO_US,
+    {
+        lemma_shl_grows(pto_base(space, mad), 0, self.pto_count as nat);
     }
 
     pub proof fn lemma_wf(&self)

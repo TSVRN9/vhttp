@@ -159,12 +159,22 @@ impl RecvPns {
         }
         &&& self.ack_only_sent@ + self.eliciting_since_ack <= self.eliciting_rcvd@
         &&& (self.eliciting_since_ack > 0) == (self.first_unacked_time is Some)
+        &&& self.eliciting_since_ack > 0 ==> self.new_since_ack && self.ranges@.len() > 0
         &&& forall|p: u64| #[trigger] self.unreported@.contains(p) ==> in_ranges(self.ranges@, p)
         &&& match self.unacked_low {
             Some(u) => forall|p: u64| #[trigger] self.unreported@.contains(p) ==> u <= p,
             None => self.unreported@ == Set::<u64>::empty(),
         }
         &&& self.unacked_low is Some ==> self.eliciting_since_ack > 0
+    }
+
+    /// An ACK owed has something to report.
+    pub proof fn lemma_owed_has_new(&self)
+        requires
+            self.wf(),
+        ensures
+            self.eliciting_since_ack() > 0 ==> self.has_new() && self.range_count() > 0 && self.ack_only_allowed(),
+    {
     }
 
     /// The smallest ack-eliciting packet number received since the last ACK was sent.
@@ -245,6 +255,25 @@ impl RecvPns {
     /// Ranges remembered.
     pub closed spec fn range_count(&self) -> nat {
         self.ranges@.len()
+    }
+
+    /// The ACK that reports every remembered range fits `max_len` bytes at `now`.
+    pub closed spec fn full_ack_fits(&self, now: u64, ack_delay_exponent: u64, max_len: int) -> bool {
+        let delay = if self.kind_spec() is OneRtt {
+            ack_delay_field(now, self.largest_time_spec(), ack_delay_exponent)
+        } else {
+            0
+        };
+        self.ranges@.len() > 0 && spec_ack_bytes(
+            ack_of(self.ranges@, (self.ranges@.len() - 1) as nat, delay),
+        ).len() <= max_len
+    }
+
+    pub fn range_len(&self) -> (r: usize)
+        ensures
+            r == self.range_count(),
+    {
+        self.ranges.len()
     }
 
     /// The invariant, in terms of the accessors.
@@ -622,6 +651,8 @@ impl RecvPns {
             }),
             max_len >= FULL_ACK_LEN && self.range_count() > 0 ==> (r matches Some(a) && a.ranges@.len()
                 + 1 == self.range_count()),
+            self.full_ack_fits(now, ack_delay_exponent, max_len as int) == (r matches Some(a) && a.ranges@.len()
+                + 1 == self.range_count()),
     {
         hide(ranges_wf);
         hide(spec_ack_bytes);
@@ -648,6 +679,9 @@ impl RecvPns {
         }
         let base: usize = 2 + varint_len(hi0) + varint_len(delay) + varint_len(first);
         if base > max_len {
+            proof {
+                lemma_ack_grows(r, 0, (n - 1) as nat, delay);
+            }
             return None;
         }
         let mut ranges: Vec<(u64, u64)> = Vec::new();
@@ -692,6 +726,9 @@ impl RecvPns {
             lemma_acked_seen(r, self.floor, self.seen@, (i - 1) as nat, delay);
             if max_len >= FULL_ACK_LEN {
                 lemma_ack_complete(r, (i - 1) as nat, delay, max_len as int);
+            }
+            if full {
+                lemma_ack_grows(r, i as nat, (n - 1) as nat, delay);
             }
         }
         // §13.4 exceptions: see below.
@@ -1585,6 +1622,25 @@ proof fn lemma_pairs_len_bound(r: Seq<(u64, u64)>, k: nat)
     } else {
         lemma_pairs_len_bound(r, (k - 1) as nat);
         lemma_pairs_step(r, k - 1);
+    }
+}
+
+/// More ranges, no fewer bytes.
+proof fn lemma_ack_grows(r: Seq<(u64, u64)>, k: nat, j: nat, delay: u64)
+    requires
+        ranges_ok(r),
+        k <= j < r.len(),
+        r.len() <= MAX_ACK_RANGES,
+        delay <= VARINT_MAX,
+    ensures
+        spec_ack_bytes(ack_of(r, k, delay)).len() <= spec_ack_bytes(ack_of(r, j, delay)).len(),
+    decreases j - k,
+{
+    if k < j {
+        lemma_ack_grows(r, k, (j - 1) as nat, delay);
+        lemma_ack_len(r, (j - 1) as nat, delay);
+        lemma_ack_len(r, j, delay);
+        lemma_pairs_step(r, j - 1);
     }
 }
 

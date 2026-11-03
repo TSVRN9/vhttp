@@ -22,8 +22,8 @@ pub type PathId = u64;
 //# the absence of these mechanisms, QUIC endpoints SHOULD NOT send
 //# datagrams larger than the smallest allowed maximum datagram size.
 //
-// §14.2's cease-sending MUST (a path that cannot carry 1200 bytes) closes in 3d2 Task 3: a
-// failed MTU probe sets `Paths::mtu_failed`, and conn.rs's send gate cites it there.
+// §14.2's cease-sending MUST (a path that cannot carry 1200 bytes): a failed MTU probe sets
+// `Paths::mtu_failed`, and conn.rs's send gate cites it there.
 /// Our maximum datagram size: no PMTU discovery, so the smallest allowed one.
 pub const MAX_DATAGRAM: usize = 1200;
 

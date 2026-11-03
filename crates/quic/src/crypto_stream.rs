@@ -114,4 +114,13 @@ impl CryptoStream {
 
 } // verus!
 
+impl CryptoStream {
+    /// Test support: the allocated capacities of the reassembly buffers. Verus models `Vec`
+    /// length, not capacity (TRUSTED.md).
+    #[doc(hidden)]
+    pub fn capacities(&self) -> (usize, usize) {
+        self.re.capacities()
+    }
+}
+
 const _: () = assert!(MAX_CRYPTO_BUFFER >= 4096);

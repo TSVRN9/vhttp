@@ -121,12 +121,15 @@ pub proof fn lemma_decode_pn_bound(largest: Option<u64>, truncated: u64, pn_len:
             win > 0,
             e >= 0,
     ;
-    assert(q * win <= pow2(62) - win) by (nonlinear_arith)
+    // Two steps: the single query flips past the rlimit when pn_encode_len gains its first outside caller.
+    assert(q < m) by (nonlinear_arith)
         requires
-            q * win <= e,
-            e < m * win,
-            m * win == pow2(62),
-            q >= 0,
+            q * win < m * win,
+            win > 0,
+    ;
+    assert(q * win + win <= m * win) by (nonlinear_arith)
+        requires
+            q + 1 <= m,
             win > 0,
     ;
 }
@@ -209,6 +212,7 @@ pub fn pn_encode_len(full: u64, largest_acked: Option<u64>) -> (r: Option<u8>)
         r matches Some(n) ==> pn_len_ok(full, largest_acked, n as nat) && forall|m: nat|
             1 <= m < n ==> !pn_len_ok(full, largest_acked, m),
         r is None ==> !pn_len_ok(full, largest_acked, 4),
+        r is None ==> forall|m: nat| 1 <= m <= 4 ==> !pn_len_ok(full, largest_acked, m),
 {
     let mut n: u8 = 1;
     while n <= 4
