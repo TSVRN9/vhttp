@@ -332,7 +332,7 @@ Fixed modelling decisions (the author implements them and does not choose them):
 
 **Std-model rows.** The effect column is written from vstd's spec of the function. The events
 and cost columns are policy; they are today's leakage and cost model. "Admitted" is the generic
-argument the row covers; a call at any other instantiation is `Unresolved`.
+argument the row covers; a call at any other instantiation is `Unsupported`, the old translator's kind.
 
 | Key (`ct_key`) | Admitted | Effect (vstd) | Events | Extra cost |
 |---|---|---|---|---|
