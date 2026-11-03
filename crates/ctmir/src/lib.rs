@@ -3,7 +3,11 @@
 //! `mir` mirrors the rustc_public types the dump holds, and `schema` decodes a parsed dump into
 //! them against `decode_*`, serde's derive conventions as a spec.
 pub mod json;
+pub mod look;
+pub mod lower;
+pub mod lower_const;
 pub mod mir;
+pub mod policy;
 pub mod schema;
 pub mod sem;
 pub mod sem_sanity;
