@@ -327,10 +327,10 @@ pub fn lower_call(m: &MirCrate, pol: &Policy, order: &Vec<usize>, keys: &mut Key
         proof { lemma_set_of(pol.declassify@, key@); }
         if has_exec(&pol.declassify, key) {
             let ok = match x_op_ty(m, b, &args[0]) {
-                Some(at) => match x_tfuel(m) { Some(tf) => !x_unit_like(m, at, tf, true), None => false },
+                Some(at) => match x_tfuel(m) { Some(tf) => x_plain_ty(m, at, tf), None => false },
                 None => false,
             };
-            if !ok { return Err(uns(s, msg(b"a declassify of a unit-like value"))); }
+            if !ok { return Err(uns(s, msg(b"a declassify of a value that is not an int, bool or array of them"))); }
         }
         let kk = match x_intr_of(m, pol, key, ga) { Some(kk) => kk, None => return Err(uns(s, msg(b"a leaf without an intrinsic"))) };
         let declass = matches!(kk, c::Intrinsic::Declassify);
@@ -405,6 +405,18 @@ pub fn callee_ok(m: &MirCrate, b: &Body, args: &Vec<Operand>, j: usize) -> (r: u
         Some(cb) => if cb.spread_arg.is_some() { 1 } else if !(args.len() == cb.arg_count && x_sig_ok(m, cb)) { 3 }
             else if !args_match(m, b, args, cb) { 2 } else { 0 },
         None => 3,
+    }
+}
+
+/// `plain_ty`: an int, `bool`, or nested array of them.
+pub fn x_plain_ty(m: &MirCrate, t: Ty, fuel: usize) -> (r: bool)
+    ensures r ==> plain_ty(*m, t, fuel as nat),
+    decreases fuel,
+{
+    if fuel == 0 { return false; }
+    match x_rigid(m, t) {
+        Some(r) => x_int_of(r).is_some() || match r { RigidTy::Array(e, _) => x_plain_ty(m, *e, fuel - 1), _ => false },
+        None => false,
     }
 }
 
