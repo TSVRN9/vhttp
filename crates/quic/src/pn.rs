@@ -5,6 +5,7 @@ use vstd::arithmetic::div_mod::*;
 #[allow(unused_imports)]
 use vstd::arithmetic::power2::*;
 use vstd::prelude::*;
+use vstd::slice::slice_subrange;
 
 #[allow(unused_imports)]
 use crate::codes::*;
@@ -453,7 +454,8 @@ pub proof fn lemma_pn_roundtrip(full: u64, n: nat)
     }
 }
 
-/// Appends the low `pn_len` bytes of `full`, big-endian.
+/// Appends the low `pn_len` bytes of `full`, big-endian. No branch on `pn_len` or `full`
+/// (RFC 9001 §9.5): all 4 low bytes are computed, and the last `pn_len` of them are copied.
 pub fn put_pn(full: u64, pn_len: u8, out: &mut Vec<u8>)
     requires
         1 <= pn_len <= 4,
@@ -461,21 +463,28 @@ pub fn put_pn(full: u64, pn_len: u8, out: &mut Vec<u8>)
         final(out)@ == old(out)@ + pn_be(full, pn_len as nat),
 {
     let ghost start = out@;
-    if pn_len >= 4 {
-        out.push((full / 0x100_0000 % 256) as u8);
-    }
-    if pn_len >= 3 {
-        out.push((full / 0x1_0000 % 256) as u8);
-    }
-    if pn_len >= 2 {
-        out.push((full / 0x100 % 256) as u8);
-    }
-    out.push((full % 256) as u8);
+    let be: [u8; 4] = [
+        (full / 0x100_0000 % 256) as u8,
+        (full / 0x1_0000 % 256) as u8,
+        (full / 0x100 % 256) as u8,
+        (full % 256) as u8,
+    ];
+    let tail = slice_subrange(be.as_slice(), 4 - pn_len as usize, 4);
+    out.extend_from_slice(tail);
     proof {
         let n = pn_len as nat;
         reveal_with_fuel(pn_be, 5);
         assert(full / 256 / 256 == full / 0x1_0000) by (nonlinear_arith);
         assert(full / 256 / 256 / 256 == full / 0x100_0000) by (nonlinear_arith);
+        if n == 1 {
+            assert(tail@ =~= pn_be(full, n));
+        } else if n == 2 {
+            assert(tail@ =~= pn_be(full, n));
+        } else if n == 3 {
+            assert(tail@ =~= pn_be(full, n));
+        } else {
+            assert(tail@ =~= pn_be(full, n));
+        }
         assert(out@ =~= start + pn_be(full, n));
     }
 }
