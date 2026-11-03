@@ -30,7 +30,6 @@ pub mod sim_exec;
 pub mod sim_const;
 pub mod sim_entry;
 pub mod sim_op;
-pub mod sim_pure;
 pub mod sim_rv;
 pub mod sim_run;
 pub mod sim_stmt;

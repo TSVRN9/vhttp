@@ -26,7 +26,7 @@ pub open spec fn op_good(m: MirCrate, x: Operand, y: c::Operand, lo: nat, hi: na
     match x {
         Operand::Copy(p) => y is Copy && y->Copy_0.local == p.local && projs_rel(p.projection@, y->Copy_0.proj@),
         Operand::Move(p) => y is Copy && y->Copy_0.local == p.local && projs_rel(p.projection@, y->Copy_0.proj@),
-        Operand::Constant(k) => const_val(m, k) is Some && dep(y, lo, hi) && vr(const_val(m, k)->Some_0.0, ctcore::sem::eval_op(g, y).0)
+        Operand::Constant(k) => const_val(m, k) is Some && dep(y, lo, hi) && const_val(m, k)->Some_0.0 == ctcore::sem::eval_op(g, y).0
             && ctcore::sem::eval_op(g, y).1 == Seq::<Event>::empty(),
         _ => false,
     }
@@ -56,8 +56,8 @@ pub proof fn lemma_op_img(m: MirCrate, b: Body, x: Operand, y: c::Operand, pre: 
 
 /// A ready operand evaluates as in MIR: an agreeing value, the same events.
 pub proof fn lemma_op_eval(m: MirCrate, fm: Frame, fc: Frame, x: Operand, y: c::Operand, lo: nat, hi: nat)
-    requires op_good(m, x, y, lo, hi, fc), fr_rel(fm, fc), pure_fr(fm), eval_op(m, fm, x) is Some,
-    ensures vr(eval_op(m, fm, x)->Some_0.0, ctcore::sem::eval_op(fc, y).0), eval_op(m, fm, x)->Some_0.1 == ctcore::sem::eval_op(fc, y).1,
+    requires op_good(m, x, y, lo, hi, fc), fr_rel(fm, fc), eval_op(m, fm, x) is Some,
+    ensures eval_op(m, fm, x)->Some_0.0 == ctcore::sem::eval_op(fc, y).0, eval_op(m, fm, x)->Some_0.1 == ctcore::sem::eval_op(fc, y).1,
 {
     match x {
         Operand::Copy(p) => lemma_read_place(fm, fc, p, y->Copy_0),
@@ -124,11 +124,11 @@ pub proof fn lemma_charge_mono(m: MirCrate, os: Seq<Operand>, j: nat, n: nat)
 /// are the constant charges.
 pub proof fn lemma_ops_eval(m: MirCrate, fm: Frame, fc: Frame, os: Seq<Operand>, ys: Seq<c::Operand>, base: nat, n: nat)
     requires
-        fr_rel(fm, fc), pure_fr(fm), n <= os.len(), ys.len() == os.len(), eval_ops(m, fm, os, n) is Some,
+        fr_rel(fm, fc), n <= os.len(), ys.len() == os.len(), eval_ops(m, fm, os, n) is Some,
         forall|i: nat| i < n ==> op_good(m, #[trigger] os[i as int], ys[i as int], base + ops_charge(m, os, i), base + ops_charge(m, os, i + 1), fc),
     ensures ({
         let (vs, e, k) = eval_ops(m, fm, os, n)->Some_0;
-        &&& vrs(vs, ctcore::sem::op_vals(fc, ys.subrange(0, n as int)))
+        &&& vs == ctcore::sem::op_vals(fc, ys.subrange(0, n as int))
         &&& e == ctcore::sem::ops_ev(fc, ys.subrange(0, n as int))
         &&& k == ops_charge(m, os, n)
     }),
@@ -145,22 +145,23 @@ pub proof fn lemma_ops_eval(m: MirCrate, fm: Frame, fc: Frame, os: Seq<Operand>,
         let (vs1, _, _) = eval_ops(m, fm, os, k)->Some_0;
         let (v, _, _) = eval_op(m, fm, os[k as int])->Some_0;
         let cvs = ctcore::sem::op_vals(fc, yn);
-        assert forall|i: int| 0 <= i < n implies vr(#[trigger] vs1.push(v)[i], cvs[i]) by {
+        assert forall|i: int| 0 <= i < n implies #[trigger] vs1.push(v)[i] == cvs[i] by {
             if i < k { assert(ctcore::sem::op_vals(fc, ys.subrange(0, k as int))[i] == cvs[i]); }
         }
+        assert(vs1.push(v) =~= cvs);
         if let Operand::Constant(c0) = os[k as int] {} else {}
     }
 }
 
 /// A lowered operand list: run its temps, then its values and events are MIR's.
 pub proof fn lemma_ops(m: MirCrate, b: Body, fm: Frame, fc0: Frame, os: Seq<Operand>, ys: Seq<c::Operand>, pre: Seq<c::Stmt>, base: nat)
-    requires lowers_ops(m, b, os, ys, pre, base), fr_rel(fm, fc0), pure_fr(fm), fm.locals.len() <= base,
+    requires lowers_ops(m, b, os, ys, pre, base), fr_rel(fm, fc0), fm.locals.len() <= base,
         fc0.locals.len() >= base + pre.len(), eval_ops(m, fm, os, os.len()) is Some,
     ensures ({
         let (fc1, e0) = ctcore::sem::exec_stmts(pre, 0, fc0);
         let (vs, e, k) = eval_ops(m, fm, os, os.len())->Some_0;
         &&& e0 == Seq::<Event>::empty() && same_out(fc0, fc1, base, base + pre.len()) && fr_rel(fm, fc1)
-        &&& vrs(vs, ctcore::sem::op_vals(fc1, ys)) && e == ctcore::sem::ops_ev(fc1, ys) && k == pre.len()
+        &&& vs == ctcore::sem::op_vals(fc1, ys) && e == ctcore::sem::ops_ev(fc1, ys) && k == pre.len()
     }),
 {
     lemma_ops_prefix(m, b, os, ys, pre, base, os.len(), fc0);

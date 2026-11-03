@@ -19,41 +19,6 @@ use vstd::prelude::*;
 
 verus! {
 
-/// A type's unit-like value is unit-shaped.
-pub proof fn lemma_ul_us(m: MirCrate, t: Ty, fuel: nat, clos: bool)
-    ensures unit_like(m, t, fuel, clos) matches Some((v, _)) ==> us(v),
-    decreases fuel, 0nat,
-{
-    if fuel > 0 {
-        let f = (fuel - 1) as nat;
-        match rigid(m, t) {
-            Some(RigidTy::Tuple(ts)) => lemma_uls_us(m, ts@, f, ts@.len(), clos),
-            Some(RigidTy::Adt(_, _)) => if let Some(a) = adt_row(m, t) {
-                lemma_uls_us(m, a.variants@[0].fields@, f, a.variants@[0].fields@.len(), clos);
-            },
-            Some(RigidTy::Array(e, _)) => {
-                lemma_ul_us(m, e, f, clos);
-                if let Some((v, _)) = unit_like(m, t, fuel, clos) {
-                    if let Val::Arr(vs) = v {
-                        assert forall|i: int| 0 <= i < vs.len() implies us(#[trigger] vs[i]) by {}
-                    }
-                }
-            },
-            _ => {},
-        }
-    }
-}
-
-pub proof fn lemma_uls_us(m: MirCrate, ts: Seq<Ty>, fuel: nat, n: nat, clos: bool)
-    ensures unit_likes(m, ts, fuel, n, clos) matches Some((vs, _)) ==> vs.len() == n && forall|i: int| 0 <= i < vs.len() ==> us(#[trigger] vs[i]),
-    decreases fuel, n + 1,
-{
-    if n > 0 && n <= ts.len() {
-        lemma_uls_us(m, ts, fuel, (n - 1) as nat, clos);
-        lemma_ul_us(m, ts[n - 1], fuel, clos);
-    }
-}
-
 /// `dec_fields`, field by field.
 pub proof fn lemma_dec_fields_at(m: MirCrate, ts: Seq<Ty>, os: Seq<MachineSize>, a: Allocation, base: nat, fuel: nat, n: nat)
     requires dec_fields(m, ts, os, a, base, fuel, n) is Some,
@@ -110,24 +75,12 @@ pub proof fn lemma_uls_at(m: MirCrate, ts: Seq<Ty>, fuel: nat, n: nat)
     }
 }
 
-/// An image with no temps: its operand's value.
-proof fn lemma_no_pre(pre: Seq<c::Stmt>, base: nat, y: c::Operand, v: Val, fc0: Frame)
-    requires pre.len() == 0, !(y is Copy), vr(v, ctcore::sem::eval_op(fc0, y).0), ctcore::sem::eval_op(fc0, y).1 == Seq::<Event>::empty(),
-    ensures img_ok(pre, base, y, v, fc0),
-{
-}
-
 /// A literal image (decoder fuel `fuel`).
 pub proof fn lemma_lit(m: MirCrate, t: Ty, a: Allocation, off: nat, fuel: nat, y: c::Operand, pre: Seq<c::Stmt>, base: nat, fc0: Frame)
     requires lit_img(m, t, a, off, fuel, y), pre.len() == 0,
     ensures img_ok(pre, base, y, dec(m, t, a, off, fuel)->Some_0.0, fc0),
 {
-    let v = dec(m, t, a, off, fuel)->Some_0.0;
-    if y is Lit && !(core_cv(y->Lit_0) == v) {
-        assert(us(v));
-    } else if y is Lit {
-        lemma_vr_refl(v);
-    }
+    assert(unit_val() == Val::Unit);
 }
 
 /// One temp assigned at `base + c` after `pre[0..c]`: the image's result.
@@ -167,7 +120,7 @@ proof fn lemma_agg_tmp(pre: Seq<c::Stmt>, base: nat, cnt: nat, y: c::Operand, fc
             &&& e == Seq::<Event>::empty()
             &&& same_out(fc0, g, base, base + cnt)
             &&& forall|i: nat| i < n ==> dep(ops[i as int], base + cntf(i), base + cntf(i + 1))
-                && vr(valf(i), ctcore::sem::eval_op(g, #[trigger] ops[i as int]).0) && ctcore::sem::eval_op(g, ops[i as int]).1 == Seq::<Event>::empty()
+                && valf(i) == ctcore::sem::eval_op(g, #[trigger] ops[i as int]).0 && ctcore::sem::eval_op(g, ops[i as int]).1 == Seq::<Event>::empty()
         }),
     ensures img_ok(pre, base, y, Val::Adt(kv, vs), fc0),
 {
@@ -183,10 +136,11 @@ proof fn lemma_agg_tmp(pre: Seq<c::Stmt>, base: nat, cnt: nat, y: c::Operand, fc
     assert(e + r.1 == Seq::<Event>::empty());
     let cv = ctcore::sem::op_vals(g, ops);
     assert(r.0 == Val::Adt(kv, cv));
-    assert forall|i: int| 0 <= i < vs.len() implies vr(#[trigger] vs[i], cv[i]) by {
+    assert forall|i: int| 0 <= i < vs.len() implies #[trigger] vs[i] == cv[i] by {
         assert(vs[i as nat as int] == valf(i as nat));
-        assert(vr(valf(i as nat), ctcore::sem::eval_op(g, ops[i as nat as int]).0));
+        assert(valf(i as nat) == ctcore::sem::eval_op(g, ops[i as nat as int]).0);
     }
+    assert(vs =~= cv);
     let (fc1, _) = ctcore::sem::exec_stmts(pre, 0, fc0);
     assert forall|i: int| 0 <= i < fc0.locals.len() && !(base <= i < base + pre.len()) implies #[trigger] fc1.locals[i] == fc0.locals[i] by {
         assert(fc1.locals[i] == g.locals[i]);
@@ -205,7 +159,6 @@ pub proof fn lemma_cv(m: MirCrate, t: Ty, a: Allocation, off: nat, fuel: nat, y:
     } else if k == 1 && is_tmp(y, base) && tmp_rv(pre, 0) is Use && tmp_rv(pre, 0)->Use_0 is Lit && core_cv(tmp_rv(pre, 0)->Use_0->Lit_0) == v {
         lemma_last_tmp(pre, base, 0, y, fc0);
         lemma_xs_empty(pre, 0, fc0);
-        lemma_vr_refl(v);
         let (fc1, _) = ctcore::sem::exec_stmts(pre, 0, fc0);
         assert(Seq::<Event>::empty() + Seq::<Event>::empty() == Seq::<Event>::empty());
         assert forall|i: int| 0 <= i < fc0.locals.len() && !(base <= i < base + pre.len()) implies #[trigger] fc1.locals[i] == fc0.locals[i] by {}
@@ -362,7 +315,7 @@ pub proof fn lemma_ul(m: MirCrate, t: Ty, fuel: nat, y: c::Operand, pre: Seq<c::
 {
     let (v, k) = unit_like(m, t, fuel, true)->Some_0;
     if k == 0 && y is Lit {
-        if core_cv(y->Lit_0) == v { lemma_vr_refl(v); }
+        assert(unit_val() == Val::Unit);
     } else {
         lemma_ul_adt(m, t, fuel, y, pre, base, fc0);
     }
@@ -467,7 +420,7 @@ pub proof fn lemma_const(m: MirCrate, k: ConstOperand, y: c::Operand, pre: Seq<c
 {
     let t = k.const_.ty;
     match k.const_.kind {
-        ConstantKind::ZeroSized => { lemma_ul_us(m, t, tfuel(m), true); },
+        ConstantKind::ZeroSized => {},
         ConstantKind::Allocated(a) => {
             if charged(m, t) { lemma_cv(m, t, a, 0, dfuel(m), y, pre, base, fc0); }
             else { lemma_lit(m, t, a, 0, dfuel(m), y, pre, base, fc0); }
