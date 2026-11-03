@@ -11,7 +11,11 @@ done
 # Constant-time check; its crypto report is read by the declassify gate, so pin where it goes.
 export CT_TARGET_DIR="${CT_TARGET_DIR:-$root/target/ct}"
 export CT_OUT="${CT_OUT:-$CT_TARGET_DIR/out}"
-"$root/scripts/ct-check.sh"
+mkdir -p "$CT_OUT"
+"$root/scripts/ct-check.sh" > "$CT_OUT/ct-check.log" || { cat "$CT_OUT/ct-check.log"; exit 1; }
+cat "$CT_OUT/ct-check.log"
+cost=$(sed -n 's/^ct-check: cost \([0-9]*\/[0-9]*\) bounded$/\1/p' "$CT_OUT/ct-check.log")
+[ -n "$cost" ] || { echo "verify.sh: no cost line in ct-check's output" >&2; exit 1; }
 # Declassify gate: the report's `declassify <X>#<k> <file>:<line>` sites, the TRUSTED.md
 # `| ct-declassify: <X>#<k>: ... | <file>:<line> |` rows and the non-comment `declassify(` lines
 # of crates/crypto/src/ (ct.rs holds the definition) must be the same lists, duplicates included.
@@ -24,6 +28,11 @@ report=$CT_OUT/crypto/report-crypto.txt
 for f in fe_from_be sec1_decode_exec; do
     grep -q "^checked crypto::p256::$f secret= ret=" "$report" || fail "crypto::p256::$f has a secret-labelled param (its ct-declassify row says none)"
 done
+grep -q '^checked crypto::rsa::rsa_pss_sign_inner secret=d,msg,salt ret=' "$report" || fail "rsa_pss_sign_inner lost its secret labels"
+grep -q '^checked crypto::rsa::mod_pow_ct secret=[^ ]*\be\b' "$report" || fail "mod_pow_ct's exponent is not secret"
+grep -q '^checked crypto::rsa::modulus_bits secret= ret=' "$report" || fail "modulus_bits has a secret-labelled param"
+tree=$(cargo tree -p crypto -e normal --depth 1 --prefix none) || fail "cargo tree failed"
+[ "$(printf '%s\n' "$tree" | sed 1d | cut -d' ' -f1)" = vstd ] || fail "crypto's normal deps are not exactly vstd"
 g=$CT_OUT/gate
 mkdir -p "$g"
 awk '$1 == "declassify" { s = $NF; $1 = ""; $NF = ""; gsub(/^ +| +$/, ""); print $0, s }' "$report" | LC_ALL=C sort > "$g/report"
@@ -45,7 +54,7 @@ diff "$g/report-sites" "$g/source" >&2 || fail "report sites and declassify( lin
 # TRUSTED.md, and the attribute count must equal the number of `| crypto::` rows.
 gate=escape
 rc=0
-hits=$(grep -rnE 'admit[[:space:]]*\(|assume[[:space:]]*\(|external_body|assume_specification|verifier[[:space:]]*(::|\()[[:space:]]*external|\baxiom\b' "$root/crates" --include='*.rs') || rc=$?
+hits=$(grep -rnE 'admit[[:space:]]*\(|assume[[:space:]]*\(|external_body|assume_specification|external_type_specification|external_trait_specification|verifier[[:space:]]*(::|\()[[:space:]]*external|\baxiom\b' "$root/crates" --include='*.rs') || rc=$?
 [ "$rc" -le 1 ] || fail "grep failed (rc=$rc)"
 # Escapes split across lines (e.g. `assume` newline `(`), which the line-based grep misses.
 ml=$(grep -rlPz '\b(admit|assume)\s*\(' "$root/crates" --include='*.rs') && fail "escape across lines in: $ml"
@@ -66,4 +75,4 @@ done
 rows=$(grep -c '^| crypto::' "$root/TRUSTED.md" || true)
 [ "$attrs" -eq "$named" ] || fail "$attrs attributes but $named name a following fn"
 [ "$attrs" -eq "$rows" ] || fail "$attrs attributes but $rows TRUSTED.md crypto rows"
-echo "verify.sh: all crates verified, duvet ok, ct ok ($d declassify), escapes accounted ($attrs)"
+echo "verify.sh: all crates verified, duvet ok, ct ok ($d declassify), cost $cost, escapes accounted ($attrs)"

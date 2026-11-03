@@ -1,8 +1,10 @@
 # ct-driver selftest vectors (CT_MODE=selftest; format in tools/ct-driver/src/interp.rs):
 #   <def-path> <arg>... => <ret> <mut-out>...
+# A `#` token starts a comment unless a digit follows it (`#1(..)`, an enum value).
 # Each fn's translated closure runs in the core interpreter; the return value and the final
 # pointee of every `mut:` (&mut) param must equal these exactly. Every expected value is also
-# checked against the compiled Rust by the crypto crate's own tests (named per line).
+# checked against the compiled Rust by its crate's own tests (named per line). ct-check.sh counts
+# the crypto:: lines and the parser (wire::, h3::, quic::) lines separately.
 
 # FIPS 197 Appendix C.1 (crates/crypto/tests/aes_gcm.rs)
 crypto::aes::aes128_encrypt_block 000102030405060708090a0b0c0d0e0f 00112233445566778899aabbccddeeff => 69c4e0d86a7b0430d8cdb78070b4c55a
@@ -36,3 +38,39 @@ crypto::hkdf::hkdf_expand 077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec84
 # GCM spec test case 2 open: valid tag => Some(P), last tag byte flipped => None (crates/crypto/tests/aes_gcm.rs)
 crypto::gcm::aes128_gcm_open 00000000000000000000000000000000 000000000000000000000000 - 0388dace60b6a392f328c2b971b2fe78ab6e47d42cec13bdf53a67b21257bddf => Some(00000000000000000000000000000000)
 crypto::gcm::aes128_gcm_open 00000000000000000000000000000000 000000000000000000000000 - 0388dace60b6a392f328c2b971b2fe78ab6e47d42cec13bdf53a67b21257bdde => None
+# Montgomery -m^-1 mod 2^64 for m = 1 (neg_inv64_kat in crates/crypto/src/bignum.rs)
+crypto::bignum::neg_inv64 0x1u64 => 0xffffffffffffffffu64
+# Bit length of n, top octet 0x01 then 0xff (modulus_bits_edges in crates/crypto/src/rsa.rs)
+crypto::rsa::modulus_bits 01ff => 0x9usize
+
+# ---- parser crates (8b): translator coverage for the cost targets
+# RFC 9000 A.1: 0x9d.. is a 4-byte varint (rfc_a1_samples in crates/wire/tests/varint.rs)
+wire::varint::exec_len 0x9du8 => 0x4usize
+# GOAWAY(4) payload [04] is exactly one varint (roundtrip_send_frames in crates/h3/tests/frame.rs);
+# through parse_varint's vest_lib parser: &str, encoded upstream MIR, ADT constants
+h3::frame::parse_exact_varint 04 => Some(0x4u64)
+# GOAWAY payload [04 00] has a trailing byte => H3_FRAME_ERROR (frame_layout_errors, same file)
+h3::frame::parse_exact_varint 0400 => None
+# SETTINGS [(6, 0x400)] ok; setting 6 twice => H3_SETTINGS_ERROR (settings_rules, same file)
+h3::frame::settings_ok [(0x6u64,0x400u64)] => true
+h3::frame::settings_ok [(0x6u64,0x1u64),(0x6u64,0x2u64)] => false
+# RFC 7541 C.1.2: 1337 with a 5-bit prefix (rfc7541_c1 in crates/h3/tests/qpack_int.rs)
+h3::qpack::int::parse_prefix_int 0x5u8 1f9a0a => #1(0x539u64,0x3usize)
+# RFC 7541 C.4.1: www.example.com (rfc7541_c4_strings in crates/h3/tests/huffman.rs)
+h3::qpack::huffman::huffman_decode f1e3c2e5f23a6ba0ab90f4ff => Some(7777772e6578616d706c652e636f6d)
+# RFC 9204 B.1: :path /index.html (rfc9204_b1 in crates/h3/tests/field_section.rs); with no
+# budget left it is OverBudget, dropping the scanned Option<Vec<u8>> (decoded_budget in
+# crates/h3/tests/request.rs)
+h3::qpack::field_section::decode_field_line_bounded 510b2f696e6465782e68746d6c 0x10000u64 => #0((#0(3a70617468,2f696e6465782e68746d6c),0xdusize))
+h3::qpack::field_section::decode_field_line_bounded 510b2f696e6465782e68746d6c 0x0u64 => #1(#1())
+# Request-stream frame rules, niche-encoded Option<ReqError> constants: SETTINGS => H3_FRAME_UNEXPECTED
+# (frame_order), HEADERS over MAX_FIELD_SECTION_SIZE => H3_EXCESSIVE_LOAD (decoded_budget), a
+# small HEADERS frame is accepted (simple_get), all in crates/h3/tests/request.rs
+h3::request::req_header_error #0() 0x4u64 0x0u64 => Some(#0(0x105u64))
+h3::request::req_header_error #0() 0x1u64 0x10001u64 => Some(#1(0x107u64))
+h3::request::req_header_error #0() 0x1u64 0x10u64 => None
+# RESET_STREAM 04 04 07 5234: final size 0x1234 at offset 3 (small_frames in crates/quic/tests/frame.rs)
+quic::frame::vint_at 0404075234 0x3usize => Some((0x1234u64,0x5usize))
+# CONNECTION_CLOSE reason "hi"; a reason length past the end => FRAME_ENCODING_ERROR (close_frames, same file)
+quic::frame::bytes_at 1c0a06026869 0x4usize 0x2u64 => Some((6869,0x6usize))
+quic::frame::bytes_at 1c00000568 0x4usize 0x5u64 => None

@@ -421,7 +421,7 @@ pub fn build_flight(
             Ok(f) => (r matches Ok((evs, vd)) ==> evs.deep_view() == f.events && vd@ == f.client_vd)
                 && (r matches Err(e) ==> e == ALERT_INTERNAL_ERROR),
         },
-        // The RSA shim's `None` is one-directional; ECDSA is exact.
+        // sign_cv is exact for both kinds; this iff stays ECDSA-only. ponytail: dropping the guard exceeds --rlimit 4 on build_flight; do it when a caller needs it.
         cfg@[chain as int].key is EcdsaP256 ==> (r is Ok <==> spec_flight(
             cfg@,
             local_tp@,
