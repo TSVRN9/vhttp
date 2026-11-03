@@ -454,8 +454,9 @@ pub proof fn lemma_pn_roundtrip(full: u64, n: nat)
     }
 }
 
-/// Appends the low `pn_len` bytes of `full`, big-endian. No branch on `pn_len` or `full`
-/// (RFC 9001 §9.5): all 4 low bytes are computed, and the last `pn_len` of them are copied.
+/// Appends the low `pn_len` bytes of `full`, big-endian: all 4 low bytes are computed, and the
+/// last `pn_len` of them are copied. No branch on `pn_len` or `full`; the copy length is
+/// `pn_len` (residual, RFC 9001 §9.5).
 pub fn put_pn(full: u64, pn_len: u8, out: &mut Vec<u8>)
     requires
         1 <= pn_len <= 4,
