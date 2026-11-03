@@ -120,7 +120,7 @@ if [ "$update" -eq 0 ] && [ -f "$tracked" ]; then
     grep -qx "units $nunits" "$tracked" ||
         err "$nunits units in $rlib, $tracked records another count: inlining moved, re-read every function $recipe"
     grep -qxF "objdump $objver" "$tracked" ||
-        err "objdump is now '$objver', $tracked records another: digests may move with no code change; compare the raw .text* bytes (objcopy -O binary) of both builds before deciding what to re-read $recipe"
+        err "objdump is now '$objver', $tracked records another: digests may move with no code change; follow update protocol step 7 in $audit (build the commit that last wrote $tracked, cmp its whole .rcgu.o units, relocations included, against this build's in $x; identical: re-digest with --update and record the new objdump line and md5 in Gate records; otherwise re-read every changed symbol $recipe)"
 fi
 # Structural checks, in every mode. fnfile prints the normalised text's path of a symbol defined once.
 fnfile() {
@@ -163,7 +163,7 @@ if [ "$update" -eq 1 ]; then
 fi
 [ -f "$tracked" ] || die "no $tracked (run --update after a fresh read $recipe)"
 diff "$tracked" "$x/digests" >&2 ||
-    err "object code differs from $tracked (diff above: < tracked, > built; dump in $x/dump): re-read every changed symbol $recipe, then run scripts/ct-binary.sh --update"
+    err "object code differs from $tracked (diff above: < tracked, > built; dump in $x/dump): re-read every changed symbol, and for a removed U line the dependent's caller, $recipe, then run scripts/ct-binary.sh --update"
 # A digests change must come with its recorded read: the last commit touching the digests file
 # also touches the audit doc, and an uncommitted change to it comes with one to the audit doc.
 last=$(git log -1 --format=%H -- "$tracked") || die "git log failed"
