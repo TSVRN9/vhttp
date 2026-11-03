@@ -8,6 +8,7 @@ global size_of usize == 8;
 } // verus!
 
 pub mod aes;
+mod bignum;
 pub mod bytes;
 pub(crate) mod ct;
 #[cfg(ct_negative)]
@@ -21,4 +22,3 @@ pub mod p256;
 pub mod rsa;
 pub mod sha256;
 mod p256_group;
-mod shim;

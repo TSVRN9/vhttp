@@ -1,7 +1,8 @@
 //! Constant-time checker fixtures, built only by `scripts/ct-check.sh` under ct-driver. Every
-//! `fx::` fn below except the `helper_*` ones is a root in `manifest.txt`. Positive controls
-//! must get `ok`; each negative control must be rejected with its stated kind (the comment
-//! after it) among the reported kinds. `expected.txt` holds the verdicts.
+//! `fx::` fn below except the `helper_*` and `cost_*` ones is a root in `manifest.txt`. Positive
+//! controls must get `ok`; each negative control must be rejected with its stated kind (the comment
+//! after it) among the reported kinds. `expected.txt` holds the verdicts. The `cost_*` fns are the
+//! `cost-root`s of `cost-manifest.txt`, with verdicts in `expected-cost.txt`.
 
 /// The shims at the paths the manifest loader accepts: `<crate>::ct::declassify` and `ct_fixtures::ct::ghost_fallback`.
 pub mod ct {
@@ -389,5 +390,287 @@ pub mod fx {
             Discr::A => 1,
             Discr::B => 2,
         }
+    }
+
+    // ------------------------------------------------------------------ 8b translator coverage
+
+    #[cfg_attr(ct_check, ct::public(x))]
+    pub fn pos_str_unit(x: u8) -> Option<&'static str> {
+        // `&'static str` is an opaque `Unit`
+        if x == 0 {
+            Some("e")
+        } else {
+            None
+        }
+    }
+
+    #[cfg_attr(ct_check, ct::public)]
+    pub fn neg_str_len(s: &str) -> usize {
+        // Unresolved: `str::len` has no intr line, so no read of a `str` translates
+        s.len()
+    }
+
+    #[cfg_attr(ct_check, ct::public(v, i))]
+    pub fn pos_vec_elem_pair(v: &Vec<(u64, u64)>, i: usize) -> u64 {
+        // VecLen and VecIndex at element (u64, u64)
+        if i < v.len() {
+            v[i].0
+        } else {
+            0
+        }
+    }
+
+    pub struct TwoVecs {
+        pub a: Vec<u8>,
+        pub b: Vec<u8>,
+    }
+
+    #[cfg_attr(ct_check, ct::public(o, t))]
+    pub fn pos_drop_bounded(o: Option<Vec<u8>>, t: TwoVecs) -> u8 {
+        // drop glue that frees at most three Vec<u8> buffers
+        let _ = (&o, &t);
+        1
+    }
+
+    #[cfg_attr(ct_check, ct::secret(k))]
+    pub fn pos_drop_secret_option(k: Option<Vec<u8>>) -> u8 {
+        // drop glue branches on the variant of a secret: ok under D7, pinned here
+        let _ = &k;
+        1
+    }
+
+    pub struct WithDrop {
+        pub v: Vec<u8>,
+    }
+
+    impl Drop for WithDrop {
+        fn drop(&mut self) {}
+    }
+
+    #[cfg_attr(ct_check, ct::public(w))]
+    pub fn neg_drop_user_impl(w: WithDrop) -> u8 {
+        // Unsupported: the drop glue runs `<WithDrop as Drop>::drop`
+        let _ = &w;
+        1
+    }
+
+    #[cfg_attr(ct_check, ct::public(x))]
+    pub fn pos_const_direct_tag(x: u8) -> Option<u64> {
+        // allocated constants of a Direct-tag enum
+        if x == 0 {
+            Some(5)
+        } else {
+            None
+        }
+    }
+
+    pub enum Code {
+        Conn(u64),
+        Stream(u64),
+    }
+
+    #[cfg_attr(ct_check, ct::public(x))]
+    pub fn pos_const_niche(x: u8) -> Option<Code> {
+        // allocated constants of an enum niche-encoded in `Code`'s tag
+        if x == 0 {
+            Some(Code::Stream(7))
+        } else {
+            None
+        }
+    }
+
+    pub struct Zst;
+
+    impl Zst {
+        pub fn get(&self, x: u8) -> u8 {
+            x ^ 1
+        }
+    }
+
+    #[cfg_attr(ct_check, ct::public(x))]
+    pub fn pos_const_ref_zst(x: u8) -> u8 {
+        // a constant `&Zst` method receiver
+        Zst.get(x)
+    }
+
+    pub struct Pair {
+        pub a: u8,
+        pub b: u64,
+    }
+
+    pub fn helper_pair(p: &Pair) -> u64 {
+        p.b ^ p.a as u64
+    }
+
+    #[cfg_attr(ct_check, ct::public)]
+    pub fn neg_const_ref_non_zst() -> u64 {
+        // Unsupported: a constant `&Pair` (a pointer to non-zero-sized data)
+        helper_pair(&Pair { a: 1, b: 2 })
+    }
+
+    #[cfg_attr(ct_check, ct::public)]
+    pub fn pos_vec_new_pair() -> Vec<(u64, u64)> {
+        // VecNew at element (u64, u64); returned, so no drop of a Vec<(u64, u64)>
+        Vec::new()
+    }
+
+    #[cfg_attr(ct_check, ct::public(v, x))]
+    pub fn pos_vec_push_pair(v: &mut Vec<(u64, u64)>, x: u64) {
+        // VecPush at element (u64, u64), through `&mut`
+        v.push((x, x))
+    }
+
+    pub const SOME_REF: Option<&'static u8> = Some(&5);
+
+    #[cfg_attr(ct_check, ct::public)]
+    pub fn neg_const_pointer_tag() -> Option<&'static u8> {
+        // Unsupported: the niche tag of a whole-constant `Some(&_)` is a pointer (written as a
+        // named const: `Some(&5)` inline is an Aggregate around a constant `&u8` operand)
+        SOME_REF
+    }
+
+    #[repr(i8)]
+    pub enum SignedTag {
+        A(u8),
+        B(u8),
+    }
+
+    #[cfg_attr(ct_check, ct::public(x))]
+    pub fn neg_const_signed_tag(x: u8) -> SignedTag {
+        // Unsupported: a constant of a Direct-tag enum whose tag is signed
+        if x == 0 {
+            SignedTag::A(5)
+        } else {
+            SignedTag::B(7)
+        }
+    }
+
+    #[cfg_attr(ct_check, ct::public(s))]
+    pub fn neg_mut_str(s: &mut str) -> u8 {
+        // Unsupported: only shared `str` refs are the opaque `Unit`
+        let _ = &s;
+        1
+    }
+
+    // ------------------------------------------------------------------ cost fixtures
+
+    pub fn helper_cost_xor(s: &[u8]) -> u8 {
+        let n = s.len();
+        let mut acc = 0u8;
+        let mut i = 0usize;
+        while i < n {
+            acc ^= s[i];
+            i += 1;
+        }
+        acc
+    }
+
+    pub fn cost_pos_straight(a: u64, b: u64) -> u64 {
+        (a ^ b) & 0xff
+    }
+
+    pub fn cost_pos_loop_const(k: &[u8; 16]) -> u8 {
+        let mut acc = 0u8;
+        let mut i = 0usize;
+        while i < 16 {
+            acc ^= k[i];
+            i += 1;
+        }
+        acc
+    }
+
+    pub fn cost_pos_loop_len(s: &[u8]) -> u8 {
+        let n = s.len();
+        let mut acc = 0u8;
+        let mut i = 0usize;
+        while i < n {
+            acc ^= s[i];
+            i += 1;
+        }
+        acc
+    }
+
+    pub fn cost_pos_nested(s: &[u8]) -> u8 {
+        let n = s.len();
+        let mut acc = 0u8;
+        let mut i = 0usize;
+        while i < n {
+            let mut j = 0usize;
+            while j < n {
+                acc ^= s[j];
+                j += 1;
+            }
+            i += 1;
+        }
+        acc
+    }
+
+    pub fn cost_pos_early_exit(s: &[u8], x: u8) -> usize {
+        let n = s.len();
+        let mut i = 0usize;
+        while i < n {
+            if s[i] == x {
+                return i;
+            }
+            i += 1;
+        }
+        n
+    }
+
+    pub fn cost_pos_call(s: &[u8]) -> u8 {
+        helper_cost_xor(s) ^ 1
+    }
+
+    pub fn cost_neg_off_progress(s: &[u8]) -> usize {
+        // the counter advances by data, not by 1
+        let n = s.len();
+        let mut off = 0usize;
+        while off < n {
+            off = off + s[off] as usize + 1;
+        }
+        off
+    }
+
+    pub fn cost_neg_parsed_count(s: &[u8; 16]) -> u8 {
+        // a counted loop whose bound is an input byte
+        let n = s[0] as usize;
+        let mut acc = 0u8;
+        let mut i = 0usize;
+        while i < n {
+            acc ^= 1;
+            i += 1;
+        }
+        acc
+    }
+
+    pub fn cost_neg_recursion(n: u64) -> u64 {
+        if n == 0 {
+            0
+        } else {
+            cost_neg_recursion(n - 1)
+        }
+    }
+
+    pub fn cost_neg_while_true_break_on_data(s: &[u8; 16]) -> u8 {
+        // no counter: the only exit tests a byte, and the index is a fresh temp each time round
+        let mut a = 0u8;
+        loop {
+            let b = s[(a & 15) as usize];
+            if b == 0 {
+                return a;
+            }
+            a = b;
+        }
+    }
+
+    pub fn cost_neg_not_typed(x: &mut u8) -> &mut u8 {
+        // translates, but returning a `&mut` breaks `wf_body`: no bound without `check_program` `Ok`
+        x
+    }
+
+    pub fn cost_neg_not_typed_declassify(x: &mut u8) -> u8 {
+        // `Mut` locals pass wf; `Declassify` of a `Mut` operand fails `ok_intr`
+        let y = crate::ct::declassify(x);
+        *y
     }
 }

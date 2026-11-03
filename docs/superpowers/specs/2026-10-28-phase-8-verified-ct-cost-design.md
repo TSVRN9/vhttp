@@ -56,7 +56,7 @@ Its job is to make "constant-time style" a checked property of `crates/crypto`, 
    - Soundness: `analyze(p) == Some(b)` and the run terminates ⇒ `steps <= eval(b, inputs)`.
    - Only recognized counted loops are bounded, and they are inferred in verified code from MIR, because `decreases` clauses are erased.
    - Targets: wire varint, h3 frame parsing, QPACK integer/string/Huffman decode, quic frame parse.
-   - Bounds are stated in terms of input length.
+   - Bounds are stated over the parameter atoms (`len(x)`, a parameter's integer value); `scripts/ct-check.sh` pins which atoms each parser bound uses, and the 19 measured bounds use `len(..)` only.
    - A step bound is not wall-clock time and not memory. Memory relates to the known Vec-capacity gap.
 7. **Phasing.**
    - **8a:** core, semantics, proof, exec checker, driver, verify.sh integration, and a run over the 5a/5b crypto code.
@@ -140,8 +140,8 @@ Its job is to make "constant-time style" a checked property of `crates/crypto`, 
 
 **D9. 8b certifies bounds instead of proving an analysis.**
 - An exec inference in `ctcore` produces, per function, a certificate: per-block facts plus a potential polynomial. It does this with dominators, natural loops, counted-loop recognition and callee summaries.
-- A verified validator checks the certificate. It is incomplete but sound: `check_cert(..) == true ==> cert_sem_ok(..)`.
-- A separate theorem turns `cert_sem_ok` into the step bound by fuel induction.
+- A verified validator checks the certificate. It is incomplete but sound: `check_cert(..) == true ==> cert_for(..)`, where `cert_for` is `cert_sem_ok` plus empty entry facts and `sums[f]` being `Some` of a polynomial `poly_same` as `pot[0]` (8b preflight I1, Task 4 SPEC-CHANGE).
+- A separate theorem turns `cert_for` for every summarised fn into the step bound by fuel induction.
 - The inference has no correctness proof and needs none.
 - Soundness doesn't need an acyclic call graph either. The inference simply returns `None` for recursive SCCs.
 
@@ -592,34 +592,49 @@ The final line becomes `verify.sh: all crates verified, duvet ok, ct ok (D decla
 - This is a model of work, not time. Memory is not bounded. In particular, Vec capacity growth and the Phase 3c-style "copy on every append" can only be bounded when the copying is an intrinsic with a len-cost (extend, to_vec). Repeated `push` reallocations are hidden.
 
 **Bounds.**
-- `Poly` = `Vec<(u64 coef, Vec<Atom>)>`, a sum of monomials over atoms.
-- `Atom = Const(u64) | Val(local) | Len(local) | Gap(Box<Atom>, Box<Atom>)`:
-  - `Val`: the int value as nat; 0 for non-ints;
-  - `Len`: the length of the `Arr` behind the local's value (through `Shr`/`Mut`); 0 otherwise;
+- `Poly { monos: Vec<Mono> }` with `Mono { coef: u64, atoms: Vec<Atom> }` (at most 2 atoms), a sum of monomials over atoms (8b preflight I1).
+- `Atom = Const(u64) | Val(local, IntTy) | Len(local) | Gap(Box<Atom>, Box<Atom>)`:
+  - `Val(x, ty)`: `uval(ty, raw)` for an `Int(raw)`, i.e. the value at the width MIR compares it at; 0 for non-ints (8b preflight C2: frame ints are raw bit patterns, and `binop(Lt, ty, ..)` compares at `ty`);
+  - `Len`: the length of the `Arr` behind the local's value, through a `Mut`'s target and then any number of `Shr`; 0 otherwise (`parse` takes `&&[u8]`). `Rvalue::Len` reads one layer, so it is `<=` this atom, not equal;
   - `Gap(a, b)` = max(0, a − b).
-- A function's summary is a `Poly` over its parameter atoms. Example: `huffman_decode: steps <= c0 + c1·len(input)`.
+
+  An atom reads its local through `nth`, so an out-of-range local reads as `Unit`, as everywhere in `sem.rs`.
+- A function's summary is a `Poly` over its parameter atoms. Example: `parse_varint: steps <= 71 + 12·len(b)`.
 
 **Certificates** (D9).
 - `Cert` = per block `{ facts: Vec<Fact>, pot: Poly }`, with `Fact = Le(Atom, Atom) | Lt(Atom, Atom)`.
 - **`cert_sem_ok(p, f, cert, sums)` is semantic.** For every frame satisfying block b's facts, executing b leads to a successor b′ whose facts hold, with `pot_b(fr) >= cost(b, fr) + pot_b′(fr′)`. A return needs `pot_b(fr) >= cost(b)`. A call needs `cost` to include `1 + eval(sums[g], callee entry atoms)`, for *any* callee result within that bound (dst and `&mut` targets are havocked).
-- **Entry facts must be empty.** The summary is `pot[0]`.
+- `cert_sem_ok`'s hypotheses are, for all `ls`, `ok_prog(p, ls)` and `plc(p, ls, f, fr)`, plus the block's facts and `frame_len_ok` (every local's and slot's `len_ok`) (8b C1, option B). `ls` stays inside the quantifier because no cost proof reads a label, so `cert_for` and `check_cert` take no labels. `lemma_plc_reachable` composes 8a's per-construct `plc` lemmas into a run-level one.
+- **Entry facts must be empty.** The summary is `pot[0]`. `cert_for(p, f, cert, sums)` = `cert_sem_ok` ∧ empty entry facts ∧ `sums[f] is Some` ∧ `poly_same(sums[f].unwrap(), pot[0])`. `poly_same` compares coefficients and atom views, because `Vec` has no extensional `==` in this toolchain and `poly_val` reads views only (Task 4 SPEC-CHANGE).
 
-**Theorem** (the controller's soundness statement):
+**Theorem** (the controller's soundness statement, as amended by the 8b preflight rulings I1 and C2 and by C1 option B):
 
 ```rust
-pub proof fn theorem_cost(p: Program, certs: Seq<Cert>, sums: Seq<Option<Poly>>, f: nat,
+pub proof fn theorem_cost(p: Program, ls: Seq<FnLab>, certs: Seq<Cert>, sums: Seq<Option<Poly>>, f: nat,
                           args: Seq<Val>, slots: Seq<Val>, fuel: nat, b: Poly)
     requires
-        wf(p), f < p.fns@.len(), sums[f as int] == Some(b),
-        forall|g| 0 <= g < p.fns@.len() && sums[g] is Some ==> cert_sem_ok(p, g, certs[g], sums),
+        ok_prog(p, ls), f < p.fns@.len(), certs.len() == p.fns@.len(), sums.len() == p.fns@.len(),
+        sums[f as int] == Some(b),
+        forall|g: int| 0 <= g < p.fns@.len() && sums[g] is Some ==> cert_for(p, g as nat, certs[g], sums),
+        entry_plc(p, f, args, slots),                                // entry frame satisfies plc
         vals_len_ok(args), vals_len_ok(slots),                       // all lengths <= usize::MAX
         run_fn(p, f, init_entry(p, f, args, slots), fuel) is Some,
     ensures
         run_fn(p, f, init_entry(p, f, args, slots), fuel).unwrap().2
-            <= eval_poly(b, init_entry(p, f, args, slots)),
+            <= poly_val(init_entry(p, f, args, slots), b),
 ```
 
-- **The validator** is `pub fn check_cert(p: &Program, f: usize, c: &Cert, sums: &Vec<Option<Poly>>) -> (r: bool) ensures r ==> cert_sem_ok(*p, f as nat, *c, sums@)`. It is sound and incomplete. It works by symbolic execution of each block over a small abstract domain: unchanged, `+1`, constant, copy-of, `Len`-alias, unknown. A local whose address is taken by `RefMut` is unknown after any call or write-through. It then checks inequalities as monomial-wise coefficient dominance, after the pre→post atom rewrites (counter decrement under a `Lt` fact, upper bounds from `Le` facts, `Gap(a, x) <= a`).
+- `vals_len_ok(vs)` = `forall|i| 0 <= i < vs.len() ==> len_ok(vs[i])`. It gives `frame_len_ok(init_entry(..))`.
+- `poly_val(fr, p)` evaluates `p` with each atom read in `fr`.
+- `entry_plc(p, f, args, slots)` = `args.len() == nargs`, `slots.len() == nargs`, `no_mut` on every slot and on every arg whose parameter is not `Mut`-typed. It gives `plc` of `init_entry(..)` for any `ls`.
+- **Discharging the premises.** The cost driver runs `check_program` with no declared secrets, so all-public labels; its `Ok(ls)` gives `ok_prog(p, ls)`, a recursion reject gives `none <root> Recursion`, and any other reject gives `none <root> NotTyped`. `entry_plc` and `vals_len_ok` concern the Rust caller's values. As with `theorem_ct`'s `args_agree`, they are not discharged mechanically: `wf_local_ty` shows that a non-`&mut` parameter's type and a `&mut` pointee's type contain no `Mut`, and the claim rests on that.
+- The 8a-era statement had a `cert_sem_ok` premise, which never links `sums[f]` to `pot[0]`. It also had `eval_poly(b, fr)`. Both are superseded (I1).
+
+- **The validator** is `pub fn check_cert(p: &Program, f: usize, c: &Cert, sums: &Vec<Option<Poly>>) -> (r: bool) ensures r ==> cert_for(*p, f as nat, *c, sums@)`. It is sound and incomplete.
+  - It works by symbolic execution of each block over a small abstract domain: unchanged, `+1`, constant, copy-of, `Len`-alias, unknown. Each block's effect is stated against the successor frame, including the terminator's own writes: an intrinsic's dst, or a call's write-back and dst (I2). A call's or len-cost intrinsic's charge is read at the frame after the block's statements, so it is related to the block's start by the statements' effect alone.
+  - **Writes through `Mut` (C1, option B).** Under `plc` only a `Mut`-typed local holds a `Mut`, so the only writers are a `Deref`-first place on such a local and a `Mut`-typed operand passed to push/set/extend or a call. A target's root may be any non-`Mut`-typed local, not just one that was `RefMut`-borrowed, so a writer makes every local unknown. A direct write to a non-`Mut`-typed local also makes every `Mut`-typed local unknown, since its `Len` reads through its target.
+  - The `+1` and edge-fact rules are unsigned-only (C2).
+  - It then checks inequalities as monomial-wise coefficient dominance, after pulling the successor's potential and the block's charge back to block-start atoms (counter decrement under a `Lt` fact, which earns a credit; upper bounds from `Le` facts; `Gap(a, x) <= a`).
 - **The inference** (`loops.rs`, exec, no proof): dominator tree → back edges → natural loops → counted-loop recognition → potentials, with summaries bottom-up and `None` for recursive SCCs. A loop is *counted* when:
   - on every header→latch path, a test `i < N` (or `!(i >= N)`) dominates exactly one `i = i + 1` (or `wrapping_add(i, 1)`);
   - `N` is stable in the loop: a constant, a parameter's `Len`, or a local never assigned in the loop.
@@ -644,6 +659,36 @@ pub proof fn theorem_cost(p: Program, certs: Seq<Cert>, sums: Seq<Option<Poly>>,
 | `quic::payload::parse_payload` | `p += consumed` | **None** |
 
 - **Prediction: 27 of the 38 listed functions bounded, 11 `None`.** The real denominator comes from 8b Task 1's census.
+- **Denominator after the 8b preflight (I3), recorded before any run: 36, prediction 25 of 36.** The `<QuicVarInt<false>/<true> as Parser>::parse` rows can't be cost roots, for three reasons:
+  - the impl is generic, so the driver's root picker takes only monomorphic local fns;
+  - `QuicVarInt<true>` has no exec instance at all;
+  - `<QuicVarInt<false>>::parse` is counted inside `parse_varint`'s closure.
+
+  The 8b report shows its result against both 27/38 and 25/36, and against the Task 1b re-baseline below.
+- **Translator coverage (8b Task 1b).** These are deltas to §Front end, which stays as 8a shipped it. The preflight found that the 8a translator rejects most targets before any cost analysis (I4). Task 1b adds:
+  - (i) `str`/`&'static str` as opaque `Unit`;
+  - (ii) `-Zalways-encode-mir` for `translate-crate` crates, plus `translate-crate wire`;
+  - (iii) per-intrinsic element types where `sem.rs` is element-agnostic. The len-cost intrinsics stay `u8`;
+  - (iv) drop glue that frees a bounded number of `Vec<int>` buffers, as `Goto`.
+
+  (v) `copy_from_slice` stays unmapped (a new intrinsic would be a SPEC-CHANGE to 8a), so `parse_path` and its callers are `None`.
+- **Re-baseline (8b Task 1b, before Task 2):** 2026-10-29: **23/36 predicted bounded** before the Task 2 Step 0 domain subtraction, which is not yet ruled (Task 2 records the final X′ here, before any proof). The 25 predicted `Some` (I3) less `parse_path` and `parse_new_connection_id`, which both call `copy_from_slice` ((v); the preflight named only `parse_path`). The other 23 translate with 1b's (i)–(iv), allocated ADT constants (vi) and `translate-crate vest_lib` (vii), and pass 8a typing with all-public labels. No predicted-`None` target translates.
+- **2026-11-02:** C1 is ruled option B, there is no Task 2 Step 0 any more, and 23/36 is an upper bound. Task 2 Step 4 records the final X′ below, before Tasks 3+.
+- **2026-11-02:** Final X′ (8b Task 2, before Task 3): 19/36, from release MIR (`-Zinline-mir=no`) of the 23 and their call closure (31 fns, plus vest_lib's `ParseError::{unexpected_eof, non_canonical, new}`, which do not write) under Task 3's write rule; no cost analysis has run. Lost: `h3::qpack::huffman::huffman_decode`, whose loop counters and input `Len` cross the `feed_bit` call that takes `&mut` args, so every local is `Unknown` there; and its callers `scan_string`, `decode_string`, `decode_field_line` (`CalleeNone`). `feed_bit` also writes through `&mut` but stays bounded: it has no loop and only `lookup`'s constant summary follows its writers. No other function in the closure has a `&mut`.
+- **2026-11-02:** Correction to the X′ line above (8b Task 2 fix round): 19/36 is an upper bound, from a hand read of MIR, and it subtracts write-rule losses only. That scan could not see a loss from the atom language: with `len_nat` peeling one `Shr`, `Len` read 0 on `<QuicVarInt<false> as Parser>::parse`'s `&&[u8]` input, which would have taken `parse_varint` and its 10 callers among the targets, leaving at most 8. `len_nat` now reads any number of `Shr`. Re-read under it, the length reaches a parameter `Len` in each of the 19 through the Task 3 and Task 4 rules, which are not yet proved. The inference and validator have not run, so the measured figure can be lower.
+- **2026-11-02:** Correction to the X′ line above (8b Task 6 review, Task 7): `decode_field_line` is `Validator(11)`, not `CalleeNone`. Its `slice_to_vec` of a `static_entry` result field is a len-cost charge on a callee's result, which has no image at the entry, so it is lost independently of `huffman_decode`. The count stays 19/36.
+- **2026-11-02:** Measured (8b Task 7): **19/36 targets bounded**, against 27/38, 25/36 and the final X′ 19/36; the verdicts are `tools/ct-driver/expected-cost.txt`, gated by `scripts/ct-check.sh`. This is not a DoS bound for the server: each bound covers one call of one function, every top-level frame, payload and field-section decoder is `none` (`expected-cost.txt`), and header, transport-parameter and TLS parsers are not targets.
+- **2026-11-02:** Task 8: not attempted (final review ruling; go/no-go measured at eefc610). 0 of 5 off-progress candidates translate (`parse_settings`, `decode_lines`, `decode_lines_bounded`, `parse_payload`, `parse_ack`; the gate is at least 4), and ctcore verifies in 22 s (the gate is 60 s). `at_ok` would recover at most `huffman_decode`, `scan_string` and `decode_string`. The 19 bounds as measured are in the table under §8b result. The 17 `none` fall into: the four QPACK decoders (`huffman_decode` `NotCounted`, `scan_string` and `decode_string` `CalleeNone`, `decode_field_line` `Validator`), ten `Unsupported` (`Vec` drop or element types, or reaching one), three `Unresolved` on `copy_from_slice`. Only `parse_new_connection_id` and `parse_path` of the 13 translator-blocked targets were ever predicted bounded; the other 11 are pre-registered `None` for loop shape or for reaching `parse_ack`, so a translator fix moves them to `NotCounted`, which is Task 8, not to `bounded`. The first-error reason in `expected-cost.txt` hides this (`parse_frame_fields` shows `Unresolved` but also reaches `parse_ack`). Follow-ups:
+  1. `at_ok`, for `huffman_decode`, `scan_string`, `decode_string`.
+  2. Return-length facts for a len-cost charge on a callee's result, for `decode_field_line`. `at_ok` does not recover it.
+  3. `copy_from_slice`, a SPEC-CHANGE to frozen `sem.rs`, for `parse_path`, `parse_new_connection_id`, `parse_frame_fields`.
+  4. `Vec<(u64,u64)>` drop glue, a one-line whitelist change, for `parse_settings`, `parse_frame_payload`, `parse_ack`, `parse_frame*`. They then hit item 6.
+  5. `Vec<FieldLine>` and `Vec<Frame>`, for `decode_lines*`, `decode_field_section*`, `parse_payload`. This is more than the "VecNew element type" the error says: their drop glue is O(len) work, which `drop_bounded` refuses on purpose, so it needs a costed drop, not a wider whitelist.
+  6. Off-progress loops and `i < count` (Task 8 proper), for 11 targets. Items 4 and 5 are prerequisites.
+  7. A stated termination corollary. `theorem_cost` assumes the run returns; a DoS claim needs "and it does".
+  8. Discharging or instantiating the theorem, and composing per-call bounds to per-packet.
+  9. Widening the denominator: headers, transport parameters, TLS, `decode_field_line_bounded`, `quic::route`.
+  10. `push` realloc and memory, the disclosed capacity gap.
 - **The structural gap is off-progress loops** (`off += consumed` with `consumed >= 1` from a callee's postcondition). Closing it needs callee return facts. That is 8b's stretch task, behind an explicit go/no-go.
 
 ## Risks and fallbacks
@@ -673,3 +718,49 @@ pub proof fn theorem_cost(p: Program, certs: Seq<Cert>, sums: Seq<Option<Poly>>,
 **Spikes:**
 - the NI for the structured core with calls: 32 verified at rlimit 4 (0.1 suffices);
 - a 50-LOC rustc_public driver under `cargo build --release` as `RUSTC_WORKSPACE_WRAPPER` reads `ct::secret` attributes through `cfg_attr(ct_check, …)`, with Verus unaffected (34 verified).
+
+## 8b result
+
+**19 of 36 targets bounded** (2026-11-02, eefc610 plus the final-review fixes), against 27/38, 25/36 and the final X′ 19/36. Bounds are core steps, not time or memory. This is not a DoS bound for the server: each bound covers one call of one function, every top-level frame, payload and field-section decoder is `none` (`expected-cost.txt`), and header, transport-parameter and TLS parsers are not targets.
+
+| Target | original (27/38) | re-baseline (final X′) | actual | bound (steps) or reason |
+|---|---|---|---|---|
+| `wire::varint::exec_len` | Some | bounded | bounded | 9 |
+| `wire::varint::exec_min_len` | Some | bounded | bounded | 11 |
+| `wire::varint::parse_varint` | Some | bounded | bounded | 71 + 12·len(b) |
+| `h3::frame::parse_frame_header` | Some | bounded | bounded | 159 + 24·len(buf) |
+| `h3::frame::parse_exact_varint` | Some | bounded | bounded | 84 + 12·len(p) |
+| `h3::frame::settings_ok` | Some | bounded | bounded | 45·len(v) + 13·len(v)² + 38 |
+| `h3::frame::parse_settings` | None | none | none | `Unsupported`: drop of `Vec<(u64, u64)>`; then a non-unit step loop |
+| `h3::frame::parse_frame_payload` | None | none | none | `Unsupported`: reaches `parse_settings` |
+| `h3::qpack::int::parse_prefix_int` | Some | bounded | bounded | 53 + 34·len(buf) |
+| `h3::qpack::huffman::lookup` | Some | bounded | bounded | 22 |
+| `h3::qpack::huffman::feed_bit` | Some | bounded | bounded | 48 |
+| `h3::qpack::huffman::huffman_decode` | Some | none | none | `NotCounted(5)`: `recognize` rejects a loop whose body holds a `Mut`-arg call (`feed_bit`) |
+| `h3::qpack::field_section::scan_string` | Some | none | none | `CalleeNone(2)`: calls `huffman_decode` |
+| `h3::qpack::field_section::decode_string` | Some | none | none | `CalleeNone(1)`: calls `scan_string`/`huffman_decode` |
+| `h3::qpack::field_section::decode_field_line` | Some | none | none | `Validator(11)`: its own `slice_to_vec` of a `static_entry` result field, a len-cost charge on a callee's result (also calls `decode_string`) |
+| `h3::qpack::field_section::decode_lines` | None | none | none | `Unsupported`: `VecNew` element type (`Vec<FieldLine>`); then `pos += consumed` |
+| `h3::qpack::field_section::decode_lines_bounded` | None | none | none | `Unsupported`: `VecNew` element type; then `pos += consumed` |
+| `h3::qpack::field_section::decode_field_section` | None | none | none | `Unsupported`: reaches `decode_lines` |
+| `h3::qpack::field_section::decode_field_section_bounded` | None | none | none | `Unsupported`: reaches `decode_lines_bounded` |
+| `quic::frame::vint_at` | Some | bounded | bounded | 85 + 12·len(b) |
+| `quic::frame::bytes_at` | Some | bounded | bounded | 13 + len(b) |
+| `quic::frame::stream_data_at` | Some | bounded | bounded | 18 + len(b) |
+| `quic::frame::parse_reset_stream` | Some | bounded | bounded | 275 + 36·len(b) |
+| `quic::frame::parse_two_varints` | Some | bounded | bounded | 189 + 24·len(b) |
+| `quic::frame::parse_crypto` | Some | bounded | bounded | 208 + 25·len(b) |
+| `quic::frame::parse_stream` | Some | bounded | bounded | 306 + 37·len(b) |
+| `quic::frame::parse_one_varint` | Some | bounded | bounded | 108 + 12·len(b) |
+| `quic::frame::parse_new_connection_id` | Some | none | none | `Unresolved`: `copy_from_slice` |
+| `quic::frame::parse_path` | Some | none | none | `Unresolved`: `copy_from_slice` |
+| `quic::frame::parse_close` | Some | bounded | bounded | 296 + 37·len(b) |
+| `quic::frame::parse_frame_type` | Some | bounded | bounded | 101 + 12·len(b) |
+| `quic::ack::parse_ack` | None | none | none | `Unsupported`: drop of `Vec<(u64, u64)>`; then `i < count`, count a parsed varint |
+| `quic::frame::parse_frame_fields` | None | none | none | `Unresolved`: `copy_from_slice` (via `parse_new_connection_id`); also reaches `parse_ack` |
+| `quic::frame::parse_frame_body` | None | none | none | `Unsupported`: reaches `parse_ack` |
+| `quic::frame::parse_frame` | None | none | none | `Unsupported`: reaches `parse_ack` |
+| `quic::payload::parse_payload` | None | none | none | `Unsupported`: `VecNew` element type (`Vec<Frame>`); then `p += consumed` |
+| `<QuicVarInt<false>/<true> as Parser>::parse` (2 rows) | Some | not a root (I3) | not a root (I3) | counted inside `parse_varint` |
+
+Code added after pre-registration (`quic::route::route` and the rest of phase 3d) is not a target and stays out of the denominator.

@@ -1,0 +1,39 @@
+# Phase 8b step-bound roots: the 36 pre-registered parser targets (spec: Pre-registered coverage, I3),
+# read with manifest.txt by scripts/ct-check.sh's cost run. Each line's prediction is Task 2's final X'
+# (19/36); `orig` is the original 27/38 table's row. Verdicts: expected-cost.txt.
+cost-root wire::varint::exec_len  # predicted: bounded; orig: Some
+cost-root wire::varint::exec_min_len  # predicted: bounded; orig: Some
+cost-root wire::varint::parse_varint  # predicted: bounded; orig: Some
+cost-root h3::frame::parse_frame_header  # predicted: bounded; orig: Some
+cost-root h3::frame::parse_exact_varint  # predicted: bounded; orig: Some
+cost-root h3::frame::settings_ok  # predicted: bounded; orig: Some
+cost-root h3::frame::parse_settings  # predicted: none (non-unit step (off += n1 + n2); original None); orig: None
+cost-root h3::frame::parse_frame_payload  # predicted: none (calls parse_settings); orig: None
+cost-root h3::qpack::int::parse_prefix_int  # predicted: bounded; orig: Some
+cost-root h3::qpack::huffman::lookup  # predicted: bounded; orig: Some
+cost-root h3::qpack::huffman::feed_bit  # predicted: bounded; orig: Some
+cost-root h3::qpack::huffman::huffman_decode  # predicted: none (loop counters and input Len cross feed_bit's &mut call (Task 2 final X')); orig: Some
+cost-root h3::qpack::field_section::scan_string  # predicted: none (calls huffman_decode); orig: Some
+cost-root h3::qpack::field_section::decode_string  # predicted: none (calls huffman_decode); orig: Some
+cost-root h3::qpack::field_section::decode_field_line  # predicted: none (calls huffman_decode (X' line says CalleeNone; Task 6 review measured Validator)); orig: Some
+cost-root h3::qpack::field_section::decode_lines  # predicted: none (pos += consumed); orig: None
+cost-root h3::qpack::field_section::decode_lines_bounded  # predicted: none (pos += consumed); orig: None
+cost-root h3::qpack::field_section::decode_field_section  # predicted: none (pos += consumed); orig: None
+cost-root h3::qpack::field_section::decode_field_section_bounded  # predicted: none (pos += consumed); orig: None
+cost-root quic::frame::vint_at  # predicted: bounded; orig: Some
+cost-root quic::frame::bytes_at  # predicted: bounded; orig: Some
+cost-root quic::frame::stream_data_at  # predicted: bounded; orig: Some
+cost-root quic::frame::parse_reset_stream  # predicted: bounded; orig: Some
+cost-root quic::frame::parse_two_varints  # predicted: bounded; orig: Some
+cost-root quic::frame::parse_crypto  # predicted: bounded; orig: Some
+cost-root quic::frame::parse_stream  # predicted: bounded; orig: Some
+cost-root quic::frame::parse_one_varint  # predicted: bounded; orig: Some
+cost-root quic::frame::parse_new_connection_id  # predicted: none (copy_from_slice is unmapped (Task 1b re-baseline)); orig: Some
+cost-root quic::frame::parse_path  # predicted: none (copy_from_slice is unmapped (Task 1b re-baseline)); orig: Some
+cost-root quic::frame::parse_close  # predicted: bounded; orig: Some
+cost-root quic::frame::parse_frame_type  # predicted: bounded; orig: Some
+cost-root quic::ack::parse_ack  # predicted: none (i < count, count a parsed varint); orig: None
+cost-root quic::frame::parse_frame_fields  # predicted: none (dispatch reaches parse_ack); orig: None
+cost-root quic::frame::parse_frame_body  # predicted: none (dispatch reaches parse_ack); orig: None
+cost-root quic::frame::parse_frame  # predicted: none (dispatch reaches parse_ack); orig: None
+cost-root quic::payload::parse_payload  # predicted: none (p += consumed); orig: None

@@ -103,7 +103,7 @@ pub fn sign_cv(key: &SigningKey, th: &[u8; 32], salt: &[u8; 32]) -> (r: Result<V
     ensures
         r matches Ok(s) ==> spec_cv_signature(key@, th@, salt@) == Some(s@),
         r matches Err(e) ==> e == ALERT_INTERNAL_ERROR,
-        key@ is EcdsaP256 ==> (r is Ok <==> spec_cv_signature(key@, th@, salt@) is Some),
+        r is Ok <==> spec_cv_signature(key@, th@, salt@) is Some,
 {
     let content = cv_content(th);
     let sig: Vec<u8> = match key {
@@ -113,10 +113,7 @@ pub fn sign_cv(key: &SigningKey, th: &[u8; 32], salt: &[u8; 32]) -> (r: Result<V
                 None => return Err(ALERT_INTERNAL_ERROR),
             }
         },
-        SigningKey::Rsa(k) => match rsa_pss_sha256_sign(k, &content, salt) {
-            Some(s) => s,
-            None => return Err(ALERT_INTERNAL_ERROR),
-        },
+        SigningKey::Rsa(k) => rsa_pss_sha256_sign(k, &content, salt),
     };
     //= https://www.rfc-editor.org/rfc/rfc8446#section-4.4.3
     //# Servers MUST send this message when authenticating

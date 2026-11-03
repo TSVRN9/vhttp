@@ -1,0 +1,36 @@
+bounded h3::frame::parse_exact_varint deg=1 len(p)
+bounded h3::frame::parse_frame_header deg=1 len(buf)
+bounded h3::frame::settings_ok deg=2 len(v) len(v)*len(v)
+bounded h3::qpack::huffman::feed_bit deg=0
+bounded h3::qpack::huffman::lookup deg=0
+bounded h3::qpack::int::parse_prefix_int deg=1 len(buf)
+bounded quic::frame::bytes_at deg=1 len(b)
+bounded quic::frame::parse_close deg=1 len(b)
+bounded quic::frame::parse_crypto deg=1 len(b)
+bounded quic::frame::parse_frame_type deg=1 len(b)
+bounded quic::frame::parse_one_varint deg=1 len(b)
+bounded quic::frame::parse_reset_stream deg=1 len(b)
+bounded quic::frame::parse_stream deg=1 len(b)
+bounded quic::frame::parse_two_varints deg=1 len(b)
+bounded quic::frame::stream_data_at deg=1 len(b)
+bounded quic::frame::vint_at deg=1 len(b)
+bounded wire::varint::exec_len deg=0
+bounded wire::varint::exec_min_len deg=0
+bounded wire::varint::parse_varint deg=1 len(b)
+none h3::frame::parse_frame_payload Unsupported
+none h3::frame::parse_settings Unsupported
+none h3::qpack::field_section::decode_field_line Validator
+none h3::qpack::field_section::decode_field_section Unsupported
+none h3::qpack::field_section::decode_field_section_bounded Unsupported
+none h3::qpack::field_section::decode_lines Unsupported
+none h3::qpack::field_section::decode_lines_bounded Unsupported
+none h3::qpack::field_section::decode_string CalleeNone
+none h3::qpack::field_section::scan_string CalleeNone
+none h3::qpack::huffman::huffman_decode NotCounted
+none quic::ack::parse_ack Unsupported
+none quic::frame::parse_frame Unsupported
+none quic::frame::parse_frame_body Unsupported
+none quic::frame::parse_frame_fields Unresolved
+none quic::frame::parse_new_connection_id Unresolved
+none quic::frame::parse_path Unresolved
+none quic::payload::parse_payload Unsupported

@@ -1,0 +1,14 @@
+# The fixtures' step-bound roots (TRUSTED format: tools/ct-driver/src/manifest.rs), read with
+# manifest.txt by scripts/ct-check.sh's cost run. Verdicts: expected-cost.txt.
+cost-root ct_fixtures::fx::cost_pos_straight
+cost-root ct_fixtures::fx::cost_pos_loop_const
+cost-root ct_fixtures::fx::cost_pos_loop_len
+cost-root ct_fixtures::fx::cost_pos_nested
+cost-root ct_fixtures::fx::cost_pos_early_exit
+cost-root ct_fixtures::fx::cost_pos_call
+cost-root ct_fixtures::fx::cost_neg_off_progress
+cost-root ct_fixtures::fx::cost_neg_parsed_count
+cost-root ct_fixtures::fx::cost_neg_recursion
+cost-root ct_fixtures::fx::cost_neg_while_true_break_on_data
+cost-root ct_fixtures::fx::cost_neg_not_typed
+cost-root ct_fixtures::fx::cost_neg_not_typed_declassify

@@ -44,7 +44,7 @@ pub(crate) proof fn lemma_v4_bound(l: [u64; 4])
 }
 
 // a * b + c + d fits in a u128 for 64-bit operands.
-proof fn lemma_mac_bound(a: int, b: int, c: int, d: int)
+pub(crate) proof fn lemma_mac_bound(a: int, b: int, c: int, d: int)
     requires
         0 <= a < 0x1_0000_0000_0000_0000,
         0 <= b < 0x1_0000_0000_0000_0000,
@@ -59,7 +59,7 @@ proof fn lemma_mac_bound(a: int, b: int, c: int, d: int)
 }
 
 // Splitting a u128 by cast and shift is its % and / by 2^64 (no exec division on secrets).
-proof fn bv_split128(x: u128) by (bit_vector)
+pub(crate) proof fn bv_split128(x: u128) by (bit_vector)
     ensures
         (x as u64) as u128 == x % 0x1_0000_0000_0000_0000u128,
         ((x >> 64u128) as u64) as u128 == x / 0x1_0000_0000_0000_0000u128,
@@ -68,7 +68,7 @@ proof fn bv_split128(x: u128) by (bit_vector)
 
 // a * b + c + d as (low, high) limbs.
 #[cfg_attr(ct_check, ct::secret(a, b, c, d))]
-fn mac(a: u64, b: u64, c: u64, d: u64) -> (r: (u64, u64))
+pub(crate) fn mac(a: u64, b: u64, c: u64, d: u64) -> (r: (u64, u64))
     ensures
         r.0 as int + r.1 as int * 0x1_0000_0000_0000_0000 == a as int * b as int + c as int + d as int,
 {
@@ -91,7 +91,7 @@ proof fn lemma_mul4(a: int, b: [u64; 4])
 }
 
 // The CIOS quotient digit q = s0 * mp mod 2^64 clears the low limb.
-proof fn lemma_q_zero(s0: int, mp: int, m0: int)
+pub(crate) proof fn lemma_q_zero(s0: int, mp: int, m0: int)
     requires
         0 <= s0,
         0 <= mp,
@@ -285,7 +285,7 @@ pub(crate) proof fn bv_sel(x: u64, y: u64, b: u64) by (bit_vector)
 
 // a - b - bin as (low limb, borrow).
 #[cfg_attr(ct_check, ct::secret(a, b, bin))]
-fn sbb(a: u64, b: u64, bin: u64) -> (r: (u64, u64))
+pub(crate) fn sbb(a: u64, b: u64, bin: u64) -> (r: (u64, u64))
     requires
         bin <= 1,
     ensures
@@ -895,7 +895,7 @@ pub(crate) proof fn lemma_mdec_one(m: int, ri: int)
 }
 
 // One square-and-multiply step on exponents: e -> 2e (square) and 2e -> 2e + 1 (multiply).
-proof fn lemma_pow_step(x: int, e: nat, m: int)
+pub(crate) proof fn lemma_pow_step(x: int, e: nat, m: int)
     requires
         m > 0,
     ensures
@@ -1073,7 +1073,7 @@ proof fn lemma_os2ip_be8(s: Seq<u8>)
 
 // The u64 whose big-endian bytes are b[off..off + 8].
 #[cfg_attr(ct_check, ct::secret(b), ct::public(off))]
-fn load_be64(b: &[u8], off: usize) -> (r: u64)
+pub(crate) fn load_be64(b: &[u8], off: usize) -> (r: u64)
     requires
         off + 8 <= b@.len(),
     ensures

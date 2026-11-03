@@ -2,20 +2,28 @@
 //! with leakage events and step counts; the CT typing and its value/place lemmas; the verified
 //! exec checker, label inference and the `check_program` API.
 pub mod check;
+pub mod cost;
+pub mod cost_check;
+pub mod cost_sanity;
+pub mod cost_sym;
 pub mod ct;
 pub mod ct_lemmas;
 pub mod infer;
+pub mod loops;
 pub mod ni;
 pub mod sem;
 pub mod sem_sanity;
 pub mod syntax;
 
+pub use cost_check::check_cert;
 pub use syntax::*;
 
 use check::*;
+use cost::{Cert, Poly};
 #[allow(unused_imports)]
 use ct::*;
 use infer::*;
+use loops::{build_cert, CostWhy};
 use vstd::prelude::*;
 
 verus! {
@@ -300,6 +308,156 @@ pub fn check_program(p: &Program, decl: &Vec<Option<Vec<bool>>>) -> (r: Result<V
         f += 1;
     }
     Ok(ls)
+}
+
+// ------------------------------------------------------------------ step bounds
+
+/// Drops every summary whose certificate no longer checks against the rest, until none does. The
+/// result is `cert_for` on itself: nothing here trusts `build_cert`.
+#[verifier::loop_isolation(false)]
+pub fn revalidate(p: &Program, certs: &Vec<Cert>, sums: Vec<Option<Poly>>) -> (r: Vec<Option<Poly>>)
+    requires certs@.len() == p.fns@.len(), sums@.len() == p.fns@.len(),
+    ensures
+        r@.len() == p.fns@.len(),
+        forall|g: int| 0 <= g < r@.len() && r@[g] is Some ==> cost::cert_for(*p, g as nat, certs@[g], r@),
+{
+    let n = p.fns.len();
+    let mut sums = sums;
+    let mut pass = n;
+    while pass > 0
+        invariant sums@.len() == n,
+        decreases pass,
+    {
+        let mut changed = false;
+        let mut g: usize = 0;
+        while g < n
+            invariant
+                g <= n, sums@.len() == n,
+                !changed ==> forall|j: int| 0 <= j < g && sums@[j] is Some ==> cost::cert_for(*p, j as nat, certs@[j], sums@),
+            decreases n - g,
+        {
+            let some = match &sums[g] { Some(_) => true, None => false };
+            if some && !check_cert(p, g, &certs[g], &sums) {
+                sums.set(g, None);
+                changed = true;
+            }
+            g += 1;
+        }
+        if !changed { return sums; }
+        pass -= 1;
+    }
+    no_summaries(n)
+}
+
+fn no_summaries(n: usize) -> (r: Vec<Option<Poly>>)
+    ensures r@.len() == n, forall|g: int| 0 <= g < r@.len() ==> r@[g] is None,
+{
+    let mut r: Vec<Option<Poly>> = Vec::new();
+    while r.len() < n
+        invariant r@.len() <= n, forall|g: int| 0 <= g < r@.len() ==> r@[g] is None,
+        decreases n - r.len(),
+    {
+        r.push(None);
+    }
+    r
+}
+
+fn no_certs(n: usize) -> (r: Vec<Cert>)
+    ensures r@.len() == n,
+{
+    let mut r: Vec<Cert> = Vec::new();
+    while r.len() < n
+        invariant r@.len() <= n,
+        decreases n - r.len(),
+    {
+        r.push(Cert { blocks: Vec::new() });
+    }
+    r
+}
+
+fn whys_of(n: usize, rec: bool, wf: bool) -> (r: Vec<CostWhy>)
+    ensures r@.len() == n,
+{
+    let mut r: Vec<CostWhy> = Vec::new();
+    while r.len() < n
+        invariant r@.len() <= n,
+        decreases n - r.len(),
+    {
+        r.push(if !wf { CostWhy::NotWf } else if rec { CostWhy::Recursion } else { CostWhy::Bounded });
+    }
+    r
+}
+
+/// The block `check_cost_block` refuses, or 0.
+#[verifier::loop_isolation(false)]
+fn first_bad(p: &Program, g: usize, c: &Cert, sums: &Vec<Option<Poly>>) -> usize {
+    if g >= p.fns.len() { return 0; }
+    let mut b: usize = 0;
+    while b < p.fns[g].blocks.len()
+        decreases p.fns@[g as int].blocks@.len() - b,
+    {
+        if !cost_check::check_cost_block(p, g, b, c, sums) { return b; }
+        b += 1;
+    }
+    0
+}
+
+/// Step bounds, callees first. A `Some` means `cert_for`, and says nothing without `check_program`
+/// `Ok`: the driver supplies that. `theorem_cost` stays at `ctcore::cost::theorem_cost`.
+#[verifier::loop_isolation(false)]
+pub fn analyze(p: &Program) -> (r: (Vec<Option<Poly>>, Vec<Cert>, Vec<CostWhy>))
+    ensures
+        r.0@.len() == p.fns@.len(), r.1@.len() == p.fns@.len(),
+        forall|g: int| 0 <= g < r.0@.len() && r.0@[g] is Some ==> cost::cert_for(*p, g as nat, r.1@[g], r.0@),
+{
+    let n = p.fns.len();
+    if !check_wf(p) { return (no_summaries(n), no_certs(n), whys_of(n, false, false)); }
+    let order = match callee_order(p) {
+        Ok(o) => o,
+        Err(_) => return (no_summaries(n), no_certs(n), whys_of(n, true, true)),
+    };
+    let mut sums = no_summaries(n);
+    let mut certs = no_certs(n);
+    let mut whys = whys_of(n, false, true);
+    let mut i: usize = 0;
+    while i < order.len()
+        invariant sums@.len() == n, certs@.len() == n, whys@.len() == n,
+        decreases order.len() - i,
+    {
+        let f = order[i];
+        match build_cert(p, f, &sums) {
+            Ok(c) => {
+                if c.blocks.len() > 0 {
+                    sums.set(f, Some(cost_check::poly_copy(&c.blocks[0].pot)));
+                }
+                if check_cert(p, f, &c, &sums) {
+                    certs.set(f, c);
+                } else {
+                    whys.set(f, CostWhy::Validator(first_bad(p, f, &c, &sums)));
+                    sums.set(f, None);
+                }
+            },
+            Err(w) => whys.set(f, w),
+        }
+        i += 1;
+    }
+    let sums = revalidate(p, &certs, sums);
+    let mut g: usize = 0;
+    while g < n
+        invariant
+            whys@.len() == n, sums@.len() == n, certs@.len() == n,
+            forall|j: int| 0 <= j < n && sums@[j] is Some ==> cost::cert_for(*p, j as nat, certs@[j], sums@),
+        decreases n - g,
+    {
+        let none = match &sums[g] { None => true, Some(_) => false };
+        if none {
+            let dropped = match &whys[g] { CostWhy::Bounded => true, _ => false };
+            if dropped { whys.set(g, CostWhy::Validator(first_bad(p, g, &certs[g], &sums))); }
+            certs.set(g, Cert { blocks: Vec::new() });
+        }
+        g += 1;
+    }
+    (sums, certs, whys)
 }
 
 } // verus!
