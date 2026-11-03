@@ -4,7 +4,8 @@
 //!
 //! Environment: `CT_CRATES` (comma-separated crate names), `CT_MANIFEST` (colon-separated manifest
 //! paths), `CT_OUT` (report dir, created if missing), `CT_MODE` = `check` (default) | `census` |
-//! `selftest` (with `CT_SELFTEST` = the vector file, see `selftest`) | `cost` (see `cost`).
+//! `selftest` (with `CT_SELFTEST` = the vector file, see `selftest`) | `cost` (see `cost`) |
+//! `dump` (`$CT_OUT/mir-<crate>.json`, see `dump.rs`; the manifest only supplies `translate-crate`).
 //!
 //! Check mode writes `$CT_OUT/report-<crate>.txt` with one verdict per manifest root of the crate
 //! (`root <path> ok`, or one `reject <path> <Kind> <site> ..` line per kind and site), and for ok
@@ -18,7 +19,9 @@ extern crate rustc_middle;
 #[macro_use]
 extern crate rustc_public;
 extern crate rustc_public_bridge;
+extern crate serde_json;
 
+mod dump;
 mod interp;
 mod manifest;
 mod translate;
@@ -77,6 +80,7 @@ enum Mode {
     Census,
     Selftest,
     Cost,
+    Dump,
 }
 
 fn env_list(var: &str, sep: char) -> Vec<String> {
@@ -104,7 +108,8 @@ fn main() {
         Ok("census") => Mode::Census,
         Ok("selftest") => Mode::Selftest,
         Ok("cost") => Mode::Cost,
-        Ok(other) => die(&format!("unknown CT_MODE {other:?} (check | census | selftest | cost)")),
+        Ok("dump") => Mode::Dump,
+        Ok(other) => die(&format!("unknown CT_MODE {other:?} (check | census | selftest | cost | dump)")),
     };
     let paths: Vec<PathBuf> = env_list("CT_MANIFEST", ':').into_iter().map(PathBuf::from).collect();
     if paths.is_empty() {
@@ -125,6 +130,7 @@ fn main() {
             Mode::Check => check(&krate, &m, &out),
             Mode::Selftest => selftest(&krate, &m, &out),
             Mode::Cost => cost(&krate, &m, &out),
+            Mode::Dump => dump::dump(&krate, &out),
         };
         match r {
             Ok(()) => ControlFlow::Continue(()),
