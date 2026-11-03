@@ -732,8 +732,8 @@ Rows were redistributed by the Task 1/Task 2 split (preflight I7). The 3d final 
     ```
     if !started:
         if !(conn.handshake_complete() && conn.phase() is Open) { return }        // 2b obligation 2: drain gated on start
-        started = true
-        if conn.peer_uni_limit().unwrap() < MIN_PEER_UNI_STREAMS { conn.close(H3_GENERAL_PROTOCOL_ERROR, true, &[], conn.now()); return }   // RFC 9114 §6.2
+        if conn.peer_uni_limit().unwrap_or(0) < MIN_PEER_UNI_STREAMS { conn.close(H3_GENERAL_PROTOCOL_ERROR, true, &[], conn.now()); return }   // RFC 9114 §6.2; `started` stays false, so h3 is never started or drained
+        started = true                                                            // after the uni check (3d2 Task 4 review M3)
         h3.start(&mut outs); apply(outs, app)
     flush()                                                                       // acks may have freed room
     loop: conn.poll_stream_events(&mut evs); if evs empty break
