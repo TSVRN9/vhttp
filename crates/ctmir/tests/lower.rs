@@ -214,6 +214,14 @@ fn ambiguous_across_roots() {
     let mut keys = Vec::new();
     assert!(lower(&m, &pol0(), b"tiny::tiny", &mut keys).is_ok());
     assert!(ambiguous(&lower(&m, &pol0(), b"tiny::call", &mut keys)));
+    // the root path: `tiny::call`'s closure binds `tiny::tiny` to instance 3; root `tiny::tiny`
+    // (instance 0) on the same map is a `Root` reject
+    let mut keys = Vec::new();
+    assert!(lower(&m, &pol0(), b"tiny::call", &mut keys).is_ok());
+    match lower(&m, &pol0(), b"tiny::tiny", &mut keys) {
+        Err(es) => match &es[..] { [Reject::Root { msg, .. }] => assert!(s(msg).contains("ambiguous key")), _ => panic!() },
+        Ok(_) => panic!("accepted"),
+    }
 }
 
 /// Probe (Task 5 C2): label inference and `ctcore::explain` on the new `pos_drop_secret_option`

@@ -426,10 +426,21 @@ pub open spec fn lowers_call(m: MirCrate, pol: Policy, ord: Seq<usize>, b: Body,
     }
 }
 
-/// A declassify's one argument is not unit-like: `Declass(v)` carries the value, and a unit-like
-/// value is `Unit` in core but `unit_like` in MIR.
+/// An int, a `bool`, or an array of such, nested to any depth: a value core and MIR represent
+/// alike (no unit-like component).
+pub open spec fn plain_ty(m: MirCrate, t: Ty, fuel: nat) -> bool
+    decreases fuel,
+{
+    fuel > 0 && match rigid(m, t) {
+        Some(r) => int_of(r) is Some || (r matches RigidTy::Array(e, _) && plain_ty(m, e, (fuel - 1) as nat)),
+        None => false,
+    }
+}
+
+/// A declassify's one argument is plain: `Declass(v)` carries the value, and a unit-like value
+/// (or component) is `Unit` in core but `unit_like` in MIR.
 pub open spec fn declass_arg_ok(m: MirCrate, b: Body, args: Seq<Operand>) -> bool {
-    args.len() == 1 && op_ty(m, b, args[0]) is Some && unit_like(m, op_ty(m, b, args[0])->Some_0, tfuel(m), true) is None
+    args.len() == 1 && op_ty(m, b, args[0]) is Some && plain_ty(m, op_ty(m, b, args[0])->Some_0, tfuel(m))
 }
 
 pub open spec fn no_index(p: Place) -> bool { forall|k: int| 0 <= k < p.projection@.len() ==> !(#[trigger] p.projection@[k] is Index) }
