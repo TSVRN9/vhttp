@@ -89,17 +89,25 @@ fn synthetic_perf() {
     assert!(j.is_some());
 }
 
-/// Run by the controller after Task 1: `CT_DUMP_DIR=<dir> cargo test -p ctmir --release -- --ignored`.
+/// Every `mir-*.json` under `$CT_DUMP_DIR`, recursively (Task 1 writes `$CT_OUT/<run>/mir-<crate>.json`):
+/// `CT_DUMP_DIR=$CT_OUT cargo test -p ctmir --release --test json -- --ignored --nocapture`.
 #[test]
 #[ignore]
 fn dumps() {
-    let dir = std::env::var("CT_DUMP_DIR").expect("CT_DUMP_DIR");
-    let mut paths: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
+    let dir = std::path::PathBuf::from(std::env::var("CT_DUMP_DIR").expect("CT_DUMP_DIR"));
+    let (mut todo, mut paths) = (vec![dir.clone()], Vec::new());
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() { todo.push(p); } else { paths.push(p); }
+        }
+    }
     paths.sort();
     let mut n = 0;
     for p in paths {
-        let name = p.file_name().unwrap().to_string_lossy().into_owned();
-        if !(name.starts_with("mir-") && name.ends_with(".json")) { continue; }
+        let file = p.file_name().unwrap().to_string_lossy().into_owned();
+        if !(file.starts_with("mir-") && file.ends_with(".json")) { continue; }
+        let name = p.strip_prefix(&dir).unwrap().display().to_string();
         let b = std::fs::read(&p).unwrap();
         let t = Instant::now();
         let ok = parse(&b).is_some();
@@ -107,5 +115,5 @@ fn dumps() {
         assert!(ok, "{name} rejected");
         n += 1;
     }
-    assert!(n > 0, "no mir-*.json in {dir}");
+    assert!(n > 0, "no mir-*.json under {}", dir.display());
 }
