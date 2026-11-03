@@ -8,8 +8,10 @@
 //! parameter checks, the anti-amplification budget, outgoing datagram lengths and datagram
 //! routing, the idle timeout with the closing and draining states, the path table, and the
 //! connection that joins them (3d), and the HTTP/3 server on top of it. Header protection
-//! (RFC 9001 §5.4) over the verified AES (3e).
+//! (RFC 9001 §5.4) over the verified AES and AEAD packet protection (§5.3) over the verified
+//! GCM (3e).
 pub mod ack;
+pub mod aead;
 pub mod ack_track;
 pub mod amp;
 pub mod cid;

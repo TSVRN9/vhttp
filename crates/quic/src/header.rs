@@ -747,6 +747,7 @@ pub(crate) fn put_slice(s: &[u8], out: &mut Vec<u8>)
 /// Writes a long header through the packet number. `payload_len` counts the protected
 /// payload including the AEAD tag. Returns the packet-number offset from the first byte
 /// written.
+#[verifier::spinoff_prover]
 pub fn serialize_long_header(
     ty: LongType,
     dcid: &[u8],
