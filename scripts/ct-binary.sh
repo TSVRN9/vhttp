@@ -101,8 +101,8 @@ fi
 # Both below would leave --update writing a digests file with no U block.
 [ "$ndep" -gt 0 ] ||
     err "no workspace rlib besides libcrypto.rlib in $T/release: the dependents' calls into crypto are unchecked, re-read tls's callers of crypto $recipe"
-grep -q '^U ' "$x/refs" ||
-    err "no dependent references a crypto:: symbol: every call into crypto became inlined code, re-read tls's callers of crypto $recipe"
+grep -q '^U tls ' "$x/refs" ||
+    err "tls references no crypto:: symbol (or tls's rlib is missing): every call into crypto became inlined code, re-read tls's callers of crypto $recipe"
 
 {
     echo "# crates/crypto object code, one sha256 per normalised function (scripts/ct-binary.sh)."

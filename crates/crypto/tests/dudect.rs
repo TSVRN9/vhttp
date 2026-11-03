@@ -1,6 +1,7 @@
 //! dudect-style timing tests (Phase 7a; docs/crypto-binary-audit.md, "Timing tests"). Ignored, so
 //! run by hand, pinned to one P-core. crypto has no libc dev-dependency, so pinning is taskset's
-//! job; each line printed carries the CPUs the process may run on and the load average:
+//! job; each run fails unless `Cpus_allowed_list` is a single CPU, and each line printed carries
+//! it and the load average:
 //!
 //!     cargo test --release -p crypto --test dudect --no-run
 //!     taskset -c 2 cargo test --release -p crypto --test dudect -- --ignored --nocapture --test-threads 1
@@ -88,6 +89,8 @@ fn proc_field(path: &str, key: &str) -> String {
 /// errors: the smallest mean difference this run would flag. Returns Welch's t.
 fn dudect<I: Clone>(name: &str, n: usize, fixed: I, mut gen: impl FnMut(&mut Rng) -> I, mut f: impl FnMut(&I)) -> f64 {
     const BATCH: usize = 100;
+    let cpus = proc_field("/proc/self/status", "Cpus_allowed_list:");
+    assert!(cpus.parse::<u32>().is_ok(), "allowed CPUs '{cpus}': pin to one CPU with taskset -c <cpu> (see this file's header)");
     let (wall, load) = (Instant::now(), proc_field("/proc/loadavg", ""));
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
     let (mut ts, mut cs) = (Vec::with_capacity(n), Vec::with_capacity(n));
@@ -122,7 +125,7 @@ fn dudect<I: Clone>(name: &str, n: usize, fixed: I, mut gen: impl FnMut(&mut Rng
         if cfg!(target_arch = "x86_64") { "TSC ticks" } else { "ns" },
         wall.elapsed().as_secs_f64(),
         proc_field("/proc/loadavg", ""),
-        proc_field("/proc/self/status", "Cpus_allowed_list:"),
+        cpus,
     );
     t
 }
@@ -227,7 +230,8 @@ fn p256_ecdh_d() {
 
 // Same n (RFC 9500's 2048-bit key) and 64 more valid key pairs: d = e^-1 mod lcm(p - 1, q - 1)
 // for random odd e. Every d is zero-padded to k = 256 octets, as the loader must (pad_be's cost
-// depends on d's encoded length, public under spec D7). 10^4 calls, not 10^6: one takes ~6 ms.
+// depends on d's encoded length, public under spec D7). 10^4 calls is a choice: one takes ~6 ms, so 10^6 would
+// take ~100 min (P-256 ran 10^6 at a similar cost).
 #[test]
 #[ignore]
 fn rsa_pss_sha256_sign_d() {
