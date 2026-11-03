@@ -5,3 +5,5 @@
 pub mod json;
 pub mod mir;
 pub mod schema;
+pub mod sem;
+pub mod sem_sanity;
