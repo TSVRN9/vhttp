@@ -1,6 +1,9 @@
 //! Phase 3e shared test data: RFC 9001 Appendix A (keys A.1, protected packets A.2 and A.3) and
 //! the 3d2 helpers copied from `tests/conn_rx.rs`.
 #![allow(dead_code)]
+pub use quic::aead::PacketKeys;
+use quic::aead::seal_packet;
+use quic::hp::apply_hp;
 use quic::tp::*;
 
 pub fn hex(s: &str) -> Vec<u8> {
@@ -28,13 +31,6 @@ pub const fn hx<const N: usize>(s: &str) -> [u8; N] {
     r
 }
 
-/// The fields of Task 2's `quic::aead::PacketKeys`, which replaces this struct.
-#[derive(Clone, Copy, Debug)]
-pub struct PacketKeys {
-    pub key: [u8; 16],
-    pub iv: [u8; 12],
-    pub hp: [u8; 16],
-}
 
 /// RFC 9001 A.1, client Initial keys.
 pub const CLIENT: PacketKeys = PacketKeys {
@@ -111,6 +107,15 @@ pub const A3_PAYLOAD: [u8; 99] = hx("\
     88cfc79825df566dc5430b9a045a1200130100002e00330024001d00209d3c94\
     0d89690b84d08a60993c144eca684d1081287c834d5311bcf32bb9da1a002b00\
     020304");
+
+/// A protected packet: `header ++ seal_packet(k, pn, header, pt)`, then header protection with
+/// the Packet Number field at `pn_offset`. No check of the header or the frames.
+pub fn build(header: &[u8], pn_offset: usize, pn: u64, pt: &[u8], k: &PacketKeys) -> Vec<u8> {
+    let mut b = header.to_vec();
+    b.extend(seal_packet(k, pn, header, pt));
+    apply_hp(&mut b, 0, pn_offset, &k.hp);
+    b
+}
 
 pub fn rnd(n: u8) -> [u8; 129] {
     let mut r = [0u8; 129];
