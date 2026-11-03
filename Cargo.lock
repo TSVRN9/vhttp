@@ -450,6 +450,7 @@ dependencies = [
 name = "quic"
 version = "0.1.0"
 dependencies = [
+ "crypto",
  "h3",
  "vest_lib",
  "vstd",

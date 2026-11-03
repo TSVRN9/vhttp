@@ -9,7 +9,7 @@ Each outline is meant to become a full writing-plans document with the same hous
 
 Every one of them consumes the 3b codecs and adds none of its own.
 
-**Row accounting.** These are the 139 RFC 9000 rows whose Phase is 3. Each one is owned by exactly one plan: 3b 27, 3c 19, 3d 88, 3e 5. RFC 9001 and RFC 9002 have no Phase-3 rows.
+**Row accounting.** These are the 139 RFC 9000 rows whose Phase is 3. Each one is owned by exactly one plan: 3b 27, 3c 19, 3d 88, 3e 5. RFC 9002 has no Phase-3 rows; RFC 9001 §5.4.1–§5.4.2 were retagged to Phase 3 by the 3e plan.
 - How it was checked: `python3 -I <scratch>/chk3b/rows.py <scratch>/p3rows.txt` printed `139 27 19 88 5`, and asserted that every row appears exactly once.
 - Rows are named by `§` plus the matrix's own `(req)` label.
 - Mixed rows that 3b touches carry a `3b codec: … (closed in 3x)` note, and are listed once, under their owner here.

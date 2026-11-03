@@ -6,7 +6,7 @@
 - spec functions transcribed from the standards;
 - exec functions whose `ensures` state results in terms of those specs.
 
-Each exec body is a `#[verifier::external_body]` one-liner into a RustCrypto shim. That lets Phase 3b (QUIC packet protection) and Phase 4 (TLS 1.3) prove against the specs from day one. Phase 5 swaps each body for verified code behind the same signature.
+Each exec body is a `#[verifier::external_body]` one-liner into a RustCrypto shim. That lets Phase 3e (QUIC packet protection) and Phase 4 (TLS 1.3) prove against the specs from day one. Phase 5 swaps each body for verified code behind the same signature.
 
 **Architecture:**
 - **New crate `crates/crypto`.** It does not depend on `wire`/`h3`, and nothing depends on it yet.
@@ -196,7 +196,7 @@ Each exec body is a `#[verifier::external_body]` one-liner into a RustCrypto shi
     - K0 = `spec_sha256(key)` if `key.len() > 64`, else `key`, right-padded with zeros to 64 bytes;
     - the result is `H((K0 ⊕ opad) ++ H((K0 ⊕ ipad) ++ msg))`, with ipad = 64×`0x36` and opad = 64×`0x5c`.
   - `pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> (r: [u8; 32])`: external_body, with `requires key@.len() <= MAX_INPUT_LEN, msg@.len() <= MAX_INPUT_LEN` and `ensures r@ == spec_hmac_sha256(key@, msg@)`.
-- Produces (`crypto::hkdf`, RFC 5869 §2.2–2.3; **no** Expand-Label, which is Phase 3b/4):
+- Produces (`crypto::hkdf`, RFC 5869 §2.2–2.3; **no** Expand-Label, which is Phase 3e/4):
   - `pub open spec fn spec_hkdf_extract(salt: Seq<u8>, ikm: Seq<u8>) -> Seq<u8>` = `spec_hmac_sha256(salt, ikm)`. Add a comment: "salt not provided" is an empty `salt`; HMAC zero-pads keys to 64 bytes, so it equals HashLen zeros (A.3 checks this).
   - `spec fn hkdf_t(prk, info, i: nat) -> Seq<u8>`: T(0) is empty; T(i) = `HMAC(prk, T(i−1) ++ info ++ [i as u8])`.
   - `pub open spec fn spec_hkdf_expand(prk: Seq<u8>, info: Seq<u8>, len: nat) -> Seq<u8>`: the first `len` bytes of T(1) ++ … ++ T(⌈len/32⌉).
@@ -538,7 +538,7 @@ Each exec body is a `#[verifier::external_body]` one-liner into a RustCrypto shi
 - All four checks pass on the merged tree, and `verify.sh` prints its summary line.
 - TRUSTED.md has one `crypto::` row per `external_body` (11), all "Removed in phase 5", plus the `shim.rs` row and the RustCrypto pins.
 - RFC 8446 §4.2.8.2 and §9.1 (req) Notes carry their `3a spec:` pointers, with no ✅ anywhere for 3a.
-- Phase 3b can `use crypto::{gcm::*, aes::*, hkdf::*}` and prove against `spec_gcm_seal`, `spec_gcm_open`, `spec_aes128_encrypt` and `spec_hkdf_expand`.
+- Phase 3e can `use crypto::{gcm::*, aes::*, hkdf::*}` and prove against `spec_gcm_seal`, `spec_gcm_open`, `spec_aes128_encrypt` and `spec_hkdf_expand`.
 - The branch `phase-3a` is merged into `main`.
 
 ## Self-review (done while writing)

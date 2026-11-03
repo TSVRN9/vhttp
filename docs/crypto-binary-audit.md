@@ -19,7 +19,7 @@
   - squeezes blanks.
 
   Opcodes, operands (function-relative jump and call targets included) and relocations stay. Section-symbol relocations (`.text._RNv...`) keep the mangled crate hash, and the `anon.N`/`.Lanon.N` counters stay: both fail closed.
-- Dependents: every other workspace rlib in `target/ct-binary/release/` (its `.rcgu.o` units only) must define no symbol whose path contains `crypto::`, and its sorted `U crypto::` references are tracked as the `U <crate> <symbol>` block of the digests file (9 lines, all `tls`). A reference that disappears means a call became inlined code.
+- Dependents: every other workspace rlib in `target/ct-binary/release/` (its `.rcgu.o` units only) must define no symbol whose path contains `crypto::`, and its sorted `U crypto::` references are tracked as the `U <crate> <symbol>` block of the digests file (10 lines: 9 `tls`, 1 `quic` since Phase 3e). A reference that disappears means a call became inlined code.
 - Structural checks run in every mode, `--update` included, which refuses to write the file if any fails:
   - `crypto::bignum::ct_mask` is one out-of-line function, and its body is `mov`/`neg`/`ret`;
   - `crypto::p256::scalar_in_range` is one out-of-line function (F1);
@@ -70,6 +70,8 @@
   | `RawVec<u8>::drop` | 7 | 1 + 1 | `test %rsi,%rsi; je` capacity 0, else a tail jump to `__rust_dealloc` |
   | `Vec<u8>::drop` | 1 | 0 | `ret` |
   | `drop_glue::<Vec<u8>>` | 7 | 1 + 1 | Same instructions as `RawVec<u8>::drop` |
+
+- **2026-11-03, this commit on base 7e95f7f, rustc 1.98.1, GNU objdump 2.46.1.** Dependent added: quic (Phase 3e Task 1, `quic::hp::hp_mask`), 1 `U` line (`U quic crypto::aes::aes128_encrypt_block`), no `D` line, digests unchanged. Protocol step 2: the line is `U`, a call (`nm -C libquic.rlib` shows no defined `crypto::` symbol, so nothing was inlined); no crypto symbol changed, so no symbol read is due.
 
 ## Timing tests (Phase 7a)
 
