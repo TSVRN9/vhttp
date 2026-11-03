@@ -492,6 +492,7 @@ impl H3Server {
             final(self).emitted == old(self).emitted,
             final(self).conn.out_log() == old(self).conn.out_log(),
             final(self).conn.events_spec() == old(self).conn.events_spec(),
+            final(self).conn.keeps_later(old(self).conn),
             // A refused stream has no entry left in the queue.
             forall|j: u64| #[trigger] final(self).dropped@.contains(j) && !old(self).dropped@.contains(j)
                 ==> tails(final(self).pending@, j) == Seq::<u8>::empty(),
@@ -632,7 +633,11 @@ impl H3Server {
             final(self).emitted == old(self).emitted,
             final(self).conn.out_log() == old(self).conn.out_log(),
             final(self).conn.events_spec() == old(self).conn.events_spec(),
+            final(self).conn.keeps_later(old(self).conn),
     {
+        proof {
+            self.conn.lemma_keeps_refl();
+        }
         // ponytail: one deferred response per connection; per-stream queues if head-of-line blocking matters.
         // ponytail: `Vec::remove(0)` and a whole-queue purge, on at most one entry per open bidi stream
         // (`MAX_LOCAL_STREAMS`) plus one response and control writes; a `VecDeque` if that cap rises.
@@ -646,9 +651,15 @@ impl H3Server {
                 self.emitted == old(self).emitted,
                 self.conn.out_log() == old(self).conn.out_log(),
                 self.conn.events_spec() == old(self).conn.events_spec(),
+                self.conn.keeps_later(old(self).conn),
             decreases self.pending@.len(),
         {
-            if !self.flush_head() {
+            let ghost c0 = self.conn;
+            let more = self.flush_head();
+            proof {
+                self.conn.lemma_keeps_trans(c0, old(self).conn);
+            }
+            if !more {
                 return;
             }
         }
@@ -671,7 +682,11 @@ impl H3Server {
             final(self).conn.events_spec() == old(self).conn.events_spec(),
             forall|j: u64| #[trigger] (final(self).emitted@)(j) == (old(self).emitted@)(j) + write_of(o@, j),
             app_grew(old(app)@, final(app)@),
+            final(self).conn.keeps_later(old(self).conn),
     {
+        proof {
+            self.conn.lemma_keeps_refl();
+        }
         let ghost e0 = self.emitted@;
         let ghost a0 = app@;
         let ghost o_view = o@;
@@ -788,6 +803,7 @@ impl H3Server {
             final(self).conn.events_spec() == old(self).conn.events_spec(),
             forall|j: u64| #[trigger] (final(self).emitted@)(j) == (old(self).emitted@)(j) + writes_on(outs_view(outs@), j),
             app_grew(old(app)@, final(app)@),
+            final(self).conn.keeps_later(old(self).conn),
     {
         let ghost s = outs@;
         let ghost e0 = self.emitted@;
@@ -797,6 +813,7 @@ impl H3Server {
                 assert(outs_view(s.take(0)) =~= Seq::<SpecOutput>::empty());
                 assert(e0(j) + Seq::<u8>::empty() =~= e0(j));
             }
+            self.conn.lemma_keeps_refl();
         }
         for o in it: outs
             invariant
@@ -810,15 +827,18 @@ impl H3Server {
                 self.conn.events_spec() == old(self).conn.events_spec(),
                 forall|j: u64| #[trigger] (self.emitted@)(j) == e0(j) + writes_on(outs_view(s.take(it.index() as int)), j),
                 app_grew(a0, app@),
+                self.conn.keeps_later(old(self).conn),
         {
             let ghost i = it.index() as int;
             let ghost e1 = self.emitted@;
             let ghost a1 = app@;
+            let ghost c0 = self.conn;
             proof {
                 assert(s[i] == o);
             }
             self.apply_one(o, app);
             proof {
+                self.conn.lemma_keeps_trans(c0, old(self).conn);
                 lemma_app_trans(a0, a1, app@);
                 assert forall|j: u64| #[trigger] (self.emitted@)(j) == e0(j) + writes_on(outs_view(s.take(i + 1)), j) by {
                     lemma_writes_take(s, i, j);
@@ -849,6 +869,7 @@ impl H3Server {
             exists|o0: Seq<Output>, o1: Seq<Output>| #[trigger] one_call(old(self).h3, final(self).h3, e@, o0, o1)
                 && forall|j: u64| #[trigger] (final(self).emitted@)(j) == (old(self).emitted@)(j) + writes_on(added(o0, o1), j),
             app_grew(old(app)@, final(app)@),
+            final(self).conn.keeps_later(old(self).conn),
     {
         let ghost h0 = self.h3;
         let ghost e_view = e@;
@@ -909,12 +930,14 @@ impl H3Server {
             final(self).conn.events_spec() == old(self).conn.events_spec(),
             fed(old(self).h3, event_views(evs@), final(self).h3),
             app_grew(old(app)@, final(app)@),
+            final(self).conn.keeps_later(old(self).conn),
     {
         let ghost s = evs@;
         let ghost h0 = self.h3;
         let ghost a0 = app@;
         proof {
             assert(event_views(s.take(0)) =~= Seq::<SpecStreamEvent>::empty());
+            self.conn.lemma_keeps_refl();
         }
         for e in it: evs
             invariant
@@ -926,15 +949,18 @@ impl H3Server {
                 self.conn.events_spec() == old(self).conn.events_spec(),
                 fed(h0, event_views(s.take(it.index() as int)), self.h3),
                 app_grew(a0, app@),
+                self.conn.keeps_later(old(self).conn),
         {
             let ghost i = it.index() as int;
             let ghost hm = self.h3;
             let ghost a1 = app@;
+            let ghost c0 = self.conn;
             proof {
                 assert(s[i] == e);
             }
             self.feed(e, app);
             proof {
+                self.conn.lemma_keeps_trans(c0, old(self).conn);
                 lemma_app_trans(a0, a1, app@);
                 let v = event_views(s.take(i + 1));
                 assert(v.drop_last() =~= event_views(s.take(i)));
@@ -979,8 +1005,13 @@ impl H3Server {
                     event_views(old(self).conn_spec().events_spec()),
                     final(self).h3_spec(),
                 ),
+            // No timer moves to a time `on_timeout` has passed (`H3Server::settled_later`).
+            final(self).conn_spec().keeps_later(old(self).conn_spec()),
     {
         let ghost a0 = app@;
+        proof {
+            self.conn.lemma_keeps_refl();
+        }
         if !self.started {
             if !(self.conn.handshake_complete() && matches!(self.conn.phase(), Phase::Open)) {
                 return;
@@ -1011,7 +1042,9 @@ impl H3Server {
                 assert(self.h3.ctrl_bytes() == (self.emitted@)(3));
             }
         }
+        let ghost c1 = self.conn;
         self.flush();
+        let ghost c2 = self.conn;
         // One poll is the drain: only `on_frame` pushes events, and nothing `feed` calls reaches it
         // (the `events_spec` ensures of `close`, `stream_write`, `stream_reset`, `stream_stop_sending`).
         let mut evs: Vec<StreamEvent> = Vec::new();
@@ -1020,9 +1053,13 @@ impl H3Server {
             assert(evs@ =~= old(self).conn.events_spec());
         }
         let ghost a1 = app@;
+        let ghost c3 = self.conn;
         self.feed_all(evs, app);
         proof {
             lemma_app_trans(a0, a1, app@);
+            c2.lemma_keeps_trans(c1, old(self).conn);
+            c3.lemma_keeps_trans(c2, old(self).conn);
+            self.conn.lemma_keeps_trans(c3, old(self).conn);
         }
     }
 
@@ -1114,9 +1151,49 @@ impl H3Server {
             final(self).conn_spec().out_log() == old(self).conn_spec().out_log(),
             final(self).started_spec() ==> final(self).conn_spec().events_spec().len() == 0,
             app_grew(old(app)@, final(app)@),
+            // `Connection::on_timeout`'s, kept by `pump`.
+            now < u64::MAX ==> final(self).conn_spec().timers_later(now),
     {
         self.conn.on_timeout(now, rand);
+        let ghost c0 = self.conn;
         self.pump(app);
+        proof {
+            if now < u64::MAX {
+                self.conn.lemma_keeps_elim(c0, now);
+            }
+        }
+    }
+
+    /// `Connection::settled_later` over the driver Phase 4's shell uses: after `on_timeout(now)`
+    /// (which pumps) and a `poll_transmit` loop to None, `next_timeout` is later than `now`. Never
+    /// called: its contract is the proof. It stops at `cap` as the shell does, and says nothing then.
+    #[verifier::spinoff_prover]
+    #[allow(dead_code)]
+    fn settled_later(&mut self, now: u64, rand: &[u8; RAND_LEN], app: &mut Vec<AppEvent>, cap: usize) -> (r: Option<
+        Option<u64>,
+    >)
+        requires
+            old(self).wf(),
+            old(self).history_ok(),
+            now < u64::MAX,
+        ensures
+            r matches Some(t) ==> later(t, now),
+    {
+        self.on_timeout(now, rand, app);
+        let mut i: usize = 0;
+        while i < cap
+            invariant
+                self.wf(),
+                now < u64::MAX,
+                self.conn_spec().timers_later(now),
+            decreases cap - i,
+        {
+            if self.conn_mut().poll_transmit(now).is_none() {
+                return Some(self.conn().next_timeout());
+            }
+            i += 1;
+        }
+        None
     }
 
     /// Sends GOAWAY. A no-op before h3 has started: no request can have arrived, and a write now

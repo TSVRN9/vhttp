@@ -495,18 +495,26 @@ fn timeout_issues_cids() {
     assert_eq!(count(&drain(&mut c, 11)), 2);
 }
 
-/// P15 has no phase: a CONNECTION_CLOSE being repeated also leaves a path that failed validation.
+/// Steps 4 and 5 only while Open: a validation expiring in Closing leaves the active path alone, and
+/// the connection closes at its deadline, the only wake `next_timeout` names.
 #[test]
-fn closing_reverts() {
+fn closing_keeps_path() {
     let (mut c, _) = rebound();
     c.close(0, false, b"", 31);
+    let d = c.next_timeout().unwrap();
+    assert_eq!(d, 31 + 3 * PTO);
     c.on_timeout(30 + 3 * PTO, &rnd(6));
     assert_eq!(c.phase(), Phase::Closing);
-    assert_eq!(c.active_path(), 0);
+    assert_eq!(c.active_path(), 1);
+    assert_eq!(c.next_timeout(), Some(d));
+    c.on_timeout(d, &rnd(7));
+    assert!(c.is_closed());
+    assert_eq!(c.active_path(), 1);
 }
 
+/// No validated path either: still nothing before the deadline, where the connection closes.
 #[test]
-fn closing_no_validated_path_closes() {
+fn closing_no_validated_path_waits() {
     let mut c = conn();
     c.on_peer_params(&ptp(), 10);
     c.on_handshake_complete(b"h3", 10, &rnd(2));
@@ -514,7 +522,12 @@ fn closing_no_validated_path_closes() {
     c.on_datagram(1, 100, vec![one(1, vec![Frame::Ping])], 20, &rnd(4));
     drain(&mut c, 20);
     c.close(0, false, b"", 21);
+    let d = c.next_timeout().unwrap();
+    assert_eq!(d, 21 + 3 * PTO);
     c.on_timeout(20 + 3 * PTO, &rnd(5));
+    assert_eq!(c.phase(), Phase::Closing);
+    assert_eq!(c.next_timeout(), Some(d));
+    c.on_timeout(d, &rnd(6));
     assert!(c.is_closed());
     assert_eq!(c.next_timeout(), None);
 }

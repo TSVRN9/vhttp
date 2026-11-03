@@ -2264,6 +2264,7 @@ impl Connection {
                     }
                 }
             }
+            // ponytail: every PATH_RESPONSE may start a probe from the datagram's 4 challenge slices, so one packet answering three sub-1200 validations leaves `migrate`'s §9.3.3 old-path challenge none later in the same packet (only the peer can build it, and that challenge has no retry); start probes only while `chal_used < 2`, or reserve two slices for `after_one_rtt`, if that matters.
             if self.paths.needs_mtu_probe(q) {
                 self.challenge_path(q, now, rand);
             }
@@ -2801,13 +2802,22 @@ impl Connection {
             old(self).phase_spec() is Open ==> final(self).phase_spec() is Closing,
             !(old(self).phase_spec() is Open) ==> final(self).phase_spec() == old(self).phase_spec(),
             final(self).events_spec() == old(self).events_spec(),
+            final(self).keeps_later(*old(self)),
     {
+        let ghost o = *self;
         if now > self.now {
             self.now = now;
         }
         let pto = self.pto();
+        proof {
+            self.recovery.lemma_pto_pos(PacketKind::OneRtt, self.peer_mad_spec());
+        }
         self.lc.enter_closing(self.now, pto, app, code, reason);
         self.streams = None;
+        proof {
+            assert forall|t: u64| t < u64::MAX && t <= o.now && #[trigger] o.timers_later(t) implies self.timers_later(t) by {
+            }
+        }
     }
 
     /// The peer's max_ack_delay in microseconds; its default until TLS delivers its parameters.
@@ -3046,8 +3056,10 @@ impl Connection {
             r matches Ok(n) ==> (n > 0 || data@.len() == 0 && fin) ==> final(self).fin_written(id) == (fin && n
                 == data@.len()),
             final(self).events_spec() == old(self).events_spec(),
+            final(self).keeps_later(*old(self)),
     {
-        match &mut self.streams {
+        let ghost o = *self;
+        let r = match &mut self.streams {
             Some(s) => {
                 let room = s.send_room();
                 let n = if data.len() as u64 > room {
@@ -3056,15 +3068,20 @@ impl Connection {
                     data.len()
                 };
                 if n == 0 && !(fin && data.len() == 0) {
-                    return Ok(0);
-                }
-                match s.write(id, slice_subrange(data, 0, n), fin && n == data.len()) {
-                    Ok(()) => Ok(n),
-                    Err(()) => Err(()),
+                    Ok(0)
+                } else {
+                    match s.write(id, slice_subrange(data, 0, n), fin && n == data.len()) {
+                        Ok(()) => Ok(n),
+                        Err(()) => Err(()),
+                    }
                 }
             },
             None => Err(()),
+        };
+        proof {
+            self.lemma_keeps_streams(o);
         }
+        r
     }
 
     /// The application abandons sending on `id` (RESET_STREAM).
@@ -3077,9 +3094,14 @@ impl Connection {
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
             final(self).events_spec() == old(self).events_spec(),
+            final(self).keeps_later(*old(self)),
     {
+        let ghost o = *self;
         if let Some(s) = &mut self.streams {
             s.reset(id, code);
+        }
+        proof {
+            self.lemma_keeps_streams(o);
         }
     }
 
@@ -3093,9 +3115,14 @@ impl Connection {
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
             final(self).events_spec() == old(self).events_spec(),
+            final(self).keeps_later(*old(self)),
     {
+        let ghost o = *self;
         if let Some(s) = &mut self.streams {
             s.stop_sending(id, code);
+        }
+        proof {
+            self.lemma_keeps_streams(o);
         }
     }
 
@@ -3149,10 +3176,15 @@ impl Connection {
             final(self).out_log() == old(self).out_log(),
             final(out)@ == old(out)@ + old(self).events_spec(),
             final(self).events_spec().len() == 0,
+            final(self).keeps_later(*old(self)),
     {
+        let ghost o = *self;
         let mut taken: Vec<StreamEvent> = Vec::new();
         core::mem::swap(&mut self.events, &mut taken);
         out.append(&mut taken);
+        proof {
+            self.lemma_keeps_streams(o);
+        }
     }
 
     /// Moves `cid_updates` into `out`, then brings the registered reset tokens in line with
@@ -6612,8 +6644,9 @@ impl Connection {
         }
     }
 
-    /// What the timer terms read, other than `paths` and `lc`.
+    /// What the timer terms read, other than `paths` and `lc`, and the clock.
     closed spec fn clocks_kept(&self, o: Connection) -> bool {
+        &&& self.now == o.now
         &&& self.idle == o.idle
         &&& self.local_tp == o.local_tp
         &&& self.peer_tp == o.peer_tp
@@ -6814,6 +6847,66 @@ impl Connection {
         }
     }
 
+    /// The clock `now()` reads.
+    pub closed spec fn now_spec(&self) -> u64 {
+        self.now
+    }
+
+    /// From `o`, the clock has not gone back, and every timer `o` had later than a `t` up to its
+    /// clock still is: what a call between `on_timeout` and the `poll_transmit` loop must keep.
+    pub closed spec fn keeps_later(&self, o: Connection) -> bool {
+        &&& o.now <= self.now
+        &&& forall|t: u64| t < u64::MAX && t <= o.now && #[trigger] o.timers_later(t) ==> self.timers_later(t)
+    }
+
+    pub proof fn lemma_keeps_refl(&self)
+        ensures
+            self.keeps_later(*self),
+    {
+    }
+
+    pub proof fn lemma_keeps_trans(&self, m: Connection, o: Connection)
+        requires
+            self.keeps_later(m),
+            m.keeps_later(o),
+        ensures
+            self.keeps_later(o),
+    {
+        assert forall|t: u64| t < u64::MAX && t <= o.now && #[trigger] o.timers_later(t) implies self.timers_later(t) by {
+            assert(m.timers_later(t));
+        }
+    }
+
+    pub proof fn lemma_keeps_elim(&self, o: Connection, t: u64)
+        requires
+            self.keeps_later(o),
+            t < u64::MAX,
+            t <= o.now_spec(),
+            o.timers_later(t),
+        ensures
+            self.timers_later(t),
+    {
+    }
+
+    /// Only `streams` and `events` moved, and no timer reads them.
+    proof fn lemma_keeps_streams(&self, o: Connection)
+        requires
+            *self == (Connection { streams: self.streams, events: self.events, ..o }),
+        ensures
+            self.keeps_later(o),
+    {
+        assert forall|t: u64| t < u64::MAX && t <= o.now && #[trigger] o.timers_later(t) implies self.timers_later(t) by {
+            if self.lc.phase_spec() is Open {
+                assert(self.idle_term() == o.idle_term());
+                assert(self.pto_spec() == o.pto_spec());
+                assert forall|k: PacketKind| later(#[trigger] self.pto_term(k), t) by {
+                    assert(self.pto_term(k) == o.pto_term(k));
+                    assert(later(o.pto_term(k), t));
+                }
+            }
+        }
+    }
+
     /// Every ACK timer is later than `now`: what draining `poll_transmit` leaves.
     pub closed spec fn acks_later(&self, now: u64) -> bool {
         self.lc.phase_spec() is Open ==> forall|k: PacketKind| later(#[trigger] self.ack_term(k), now)
@@ -6903,8 +6996,8 @@ impl Connection {
 
     /// What `on_timeout(now, ..)` guarantees of `self`, from `o`.
     pub closed spec fn timed_out(&self, o: Connection, now: u64) -> bool {
-        // P15 (§9.3.2, §14.2): the active path's challenge expired, so the active path is usable.
-        &&& expired(o.paths.path(o.paths.active_spec()), now, o.pto_spec()) ==> usable(
+        // P15 (§9.3.2, §14.2): while Open, the active path's challenge expired, so the active path is usable.
+        &&& o.lc.phase_spec() is Open && expired(o.paths.path(o.paths.active_spec()), now, o.pto_spec()) ==> usable(
             self.paths.path(self.paths.active_spec()),
         ) || self.lc.phase_spec() is Closed
         // §10.1.
@@ -7088,6 +7181,7 @@ impl Connection {
             final(self).sent(k).inflight_spec().len() == 0,
             forall|j: PacketKind| j != k ==> #[trigger] final(self).sent(j) == old(self).sent(j),
             old(self).recovery.pto_count_spec() <= final(self).recovery.pto_count_spec(),
+            final(self).now == old(self).now,
     {
         let mut lost: Vec<SentPacket> = Vec::new();
         match k {
@@ -7168,6 +7262,7 @@ impl Connection {
             final(self).hs_path == old(self).hs_path,
             old(self).recovery.pto_count_spec() <= final(self).recovery.pto_count_spec(),
             forall|k: PacketKind| later(#[trigger] final(self).pto_term(k), t),
+            final(self).now == old(self).now,
     {
         let ghost s0 = *self;
         let i = PacketKind::Initial;
@@ -7285,6 +7380,8 @@ impl Connection {
     //# If an endpoint has no state about the last validated peer address, it
     //# MUST close the connection silently by discarding all connection
     //# state.
+    // Both only while Open (`on_timeout`): in Closing and Draining a validation that expires is not
+    // acted on before Closed (final review I1).
     // ponytail: only two validated paths are remembered, so after 0→1→2 with both 1 and 2 failing we close although 0 might still work (liveness only); a longer validated history if migration chains matter.
     /// The active path is no longer usable: back to the last validated one, which `Paths::wf` makes
     /// usable. It takes an unused CID if it has lost its own, so `wf_dcids` holds; with none left,
@@ -7430,6 +7527,7 @@ impl Connection {
             final(self).out_log() == old(self).out_log(),
             final(self).timed_out(*old(self), now),
             final(self).timers_later(now),
+            now <= final(self).now_spec(),
     {
         let ghost o = *self;
         if now > self.now {
@@ -7439,11 +7537,10 @@ impl Connection {
         let pto0 = self.pto();
         self.timeout_phase(t);
         let ghost s2 = *self;
-        // Steps 4 and 5, in every phase but Closed: P15 has no phase. §9.3.2's silent close is a MUST,
-        // and it outranks §10.2's SHOULD NOT on ending the closing or draining state early. In Closing
-        // the repeated CONNECTION_CLOSE then goes to a validated address; in Draining nothing is sent,
-        // so only the early close can be seen, and exempting Draining would only weaken P15.
-        if !matches!(self.lc.phase(), Phase::Closed) {
+        // Steps 4 and 5, only while Open. In Closing and Draining nothing is sent but CONNECTION_CLOSE
+        // (§14.2 exempts it on a failed path too) until the deadline, and `next_timeout` wakes only
+        // there, so a validation that expires then is not acted on before Closed.
+        if matches!(self.lc.phase(), Phase::Open) {
             self.fail_paths(t, pto0);
         }
         let ghost s5 = *self;
@@ -7553,7 +7650,10 @@ impl Connection {
         }
     }
 
-    pub fn now(&self) -> (r: u64) {
+    pub fn now(&self) -> (r: u64)
+        ensures
+            r == self.now_spec(),
+    {
         self.now
     }
 
