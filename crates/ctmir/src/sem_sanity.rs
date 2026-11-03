@@ -1792,4 +1792,55 @@ fn sanity_builders() {
         call_crate(), index2_place());
 }
 
+
+// ================================================================== 7. the canonical `Unit` (Task 6 alignment)
+//
+// Each fact pins one producer of a unit-like value to `Val::Unit`, written literally, so a revert
+// of the alignment edit in sem.rs fails it.
+
+/// **Fact 7a.** An entry local that is not a parameter starts as `Unit`.
+pub proof fn fact_entry_unit(m: MirCrate, i: nat, args: Seq<Val>, slots: Seq<Val>, k: int)
+    requires inst_body(m, i) is Some, 0 <= k < inst_body(m, i)->Some_0.locals@.len(), !(1 <= k <= inst_body(m, i)->Some_0.arg_count),
+    ensures mir_entry(m, i, args, slots).locals[k] == Val::Unit,
+{
+}
+
+/// **Fact 7b.** A `ZeroSized` constant of a unit-like type is `Unit`, with no charge.
+pub proof fn fact_zst_const_unit(m: MirCrate, c: ConstOperand)
+    requires c.const_.kind is ZeroSized, unit_like(m, c.const_.ty, tfuel(m), true) is Some,
+    ensures const_val(m, c) == Some((Val::Unit, 0nat)),
+{
+}
+
+/// **Fact 7c.** `Ghost::assume_new_fallback` (the std row) gives `Unit`.
+pub proof fn fact_ghost_new_unit(m: MirCrate, t: Ty, vs: Seq<Val>, fr: Frame)
+    requires zst_dest(m, t),
+    ensures std_apply(m, StdFn::GhostNew, Some(t), vs, fr) == Some((Val::Unit, fr, Seq::<Event>::empty(), 0nat)),
+{
+}
+
+/// **Fact 7d.** A decoded `()` is `Unit`.
+pub proof fn fact_dec_unit(m: MirCrate, t: Ty, a: Allocation, off: nat, fuel: nat)
+    requires fuel > 0, rigid(m, t) matches Some(RigidTy::Tuple(ts)) && ts@.len() == 0,
+        layout(m, t) matches Some(l) && offs_of(l.fields) matches Some(o) && o.len() == 0,
+    ensures dec(m, t, a, off, fuel) == Some((Val::Unit, 0nat)),
+{
+    assert(dec(m, t, a, off, fuel) == dec_tuple(m, t, rigid(m, t)->Some_0->Tuple_0@, a, off, (fuel - 1) as nat));
+}
+
+/// **Fact 7e.** `slice_to_vec` of more than `usize::MAX` elements panics (core's `SliceToVec` is `None`).
+pub proof fn fact_slice_to_vec_bound(m: MirCrate, xs: Seq<Val>, fr: Frame)
+    requires xs.len() > USZ,
+    ensures std_apply(m, StdFn::SliceToVec, None, seq![Val::Shr(Box::new(Val::Arr(xs)))], fr) is None,
+{
+}
+
+/// **Fact 7f.** The canonical `Unit` of a one-variant enum has that variant's discriminant.
+pub proof fn fact_discr_unit(m: MirCrate, b: Body, fr: Frame, p: Place)
+    requires read_place(fr, p) matches Some((v, _)) && v is Unit,
+        place_ty(m, b, p) matches Some(t) && adt_row(m, t) matches Some(a) && a.kind is Enum && a.variants@.len() == 1 && a.variants@[0].discr == Some(0u128),
+    ensures rv_discr(m, b, fr, p) == Some((Val::Int(0), read_place(fr, p)->Some_0.1, 0nat)),
+{
+}
+
 } // verus!
