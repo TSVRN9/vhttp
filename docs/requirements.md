@@ -12,7 +12,7 @@ Columns: `§` section, `Topic`, `#MUST/MUST NOT` (MUST, MUST NOT, REQUIRED, SHAL
 |---|---|
 | 1 | `wire`: QUIC variable-length integers (RFC 9000 §16 only) — proven: `theorem_matches_rfc`, `theorem_serialize_matches_rfc` in crates/wire/src/varint.rs |
 | 2 | `h3`: HTTP/3 framing, streams, settings, errors (RFC 9114), QPACK (RFC 9204), HTTP message validation |
-| 3 | `quic`: QUIC transport (RFC 9000 except §16), incl. anti-amplification, connection IDs, path validation, stateless reset, version negotiation |
+| 3 | `quic`: QUIC transport (RFC 9000 except §16), incl. anti-amplification, connection IDs, path validation, stateless reset, version negotiation; RFC 9001 §5.4.1–§5.4.2 header protection (3e) |
 | 4 | `tls`: TLS 1.3 server handshake, key schedule, record/AEAD use (RFC 8446) and QUIC-TLS (RFC 9001) |
 | 5 | `crypto`: requirements on the primitive algorithms themselves |
 | 6 | `recovery`: loss detection and congestion control (RFC 9002) |
@@ -392,7 +392,7 @@ Total keyword count: 307 across 115 sections.
 | 5.1 | Packet Protection Keys | 1 | no | N/A (binds spec authors) | "Other versions of TLS MUST provide a similar function in order to be used with QUIC." Requirement on specs for other TLS versions; we implement TLS 1.3 only, so it does not apply to an implementation. |
 | 5.2 | Initial Secrets | 1 | yes | 4 | HKDF-Expand-Label from TLS 1.3 MUST be used for Initial packets. The HKDF primitive itself is Phase 5. |
 | 5.3 | AEAD Usage | 3 | yes | 4 | Cipher suite MUST NOT be negotiated without a header protection scheme (we offer only AES-128-GCM); MUST NOT reject a ClientHello offering unsupported suites; MUST initiate key update before exceeding AEAD limits (see 6.6). |
-| 5.4.1 | Header Protection Application | 1 | yes | 4 | A header protection algorithm MUST be specified for each AEAD; we use the AES-128 HP defined in §5.4.3. |
+| 5.4.1 | Header Protection Application | 1 | yes | 3 | A header protection algorithm MUST be specified for each AEAD; we use the AES-128 HP defined in §5.4.3. ✅ 3e: crates/quic/src/hp.rs (AES-128 HP per §5.4.3, the HP of our only AEAD) |
 | 5.4.2 | Header Protection Sample | 1 | yes | 4 | Endpoint MUST discard packets too short to contain a complete sample. |
 | 5.5 | Receiving Protected Packets | 2 | yes | 4 | Discard higher-numbered packets that cannot be unprotected with the same or a subsequent key; discard packets that appear to trigger a key update but fail to unprotect. |
 | 5.6 | Use of 0-RTT Keys | 6 | partial | 4 | Server MUST NOT use 0-RTT keys to protect packets (never has them). Remaining rules are client-side or application profile. |
