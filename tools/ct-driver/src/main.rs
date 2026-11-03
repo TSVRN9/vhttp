@@ -24,6 +24,7 @@ extern crate serde_json;
 mod dump;
 mod interp;
 mod manifest;
+mod pprint;
 mod translate;
 
 use manifest::Manifest;
@@ -81,6 +82,7 @@ enum Mode {
     Selftest,
     Cost,
     Dump,
+    Program,
 }
 
 fn env_list(var: &str, sep: char) -> Vec<String> {
@@ -109,7 +111,8 @@ fn main() {
         Ok("selftest") => Mode::Selftest,
         Ok("cost") => Mode::Cost,
         Ok("dump") => Mode::Dump,
-        Ok(other) => die(&format!("unknown CT_MODE {other:?} (check | census | selftest | cost | dump)")),
+        Ok("program") => Mode::Program,
+        Ok(other) => die(&format!("unknown CT_MODE {other:?} (check | census | selftest | cost | dump | program)")),
     };
     let paths: Vec<PathBuf> = env_list("CT_MANIFEST", ':').into_iter().map(PathBuf::from).collect();
     if paths.is_empty() {
@@ -131,6 +134,7 @@ fn main() {
             Mode::Selftest => selftest(&krate, &m, &out),
             Mode::Cost => cost(&krate, &m, &out),
             Mode::Dump => dump::dump(&krate, &out),
+            Mode::Program => program(&krate, &m, &out),
         };
         match r {
             Ok(()) => ControlFlow::Continue(()),
@@ -401,6 +405,38 @@ fn cost(krate: &str, m: &Manifest, out: &std::path::Path) -> Result<(), String> 
     }
     let file = out.join(format!("cost-{krate}.txt"));
     std::fs::write(&file, lines.into_iter().collect::<String>()).map_err(|e| format!("{}: {e}", file.display()))
+}
+
+/// Program mode (test tooling for the 8c translator comparison): per `root` and then per
+/// `cost-root` of `krate`, in manifest order with one key map per list (as check and cost do),
+/// the translated program (`pprint`) or the translation errors as `reject <Kind> <site> <path>`.
+/// Writes `$CT_OUT/program-<krate>.txt`.
+fn program(krate: &str, m: &Manifest, out: &std::path::Path) -> Result<(), String> {
+    use translate::TrErr;
+    let prefix = format!("{krate}::");
+    let mut s = String::new();
+    for (list, roots) in [("root", &m.roots), ("cost-root", &m.cost_roots)] {
+        let mut by_key = HashMap::new();
+        for r in roots.iter().filter(|r| r.starts_with(&prefix)) {
+            s += &format!("=== {list} {r}\n");
+            match translate::translate_closure(m, r, &mut by_key) {
+                Ok((p, infos)) => s += &pprint::program_text(&p, &infos.iter().map(|i| i.path.clone()).collect::<Vec<_>>()),
+                Err(es) => {
+                    let mut lines: Vec<String> = es.iter().map(|e| match e {
+                        TrErr::Unsupported { path, span, what } => format!("reject Unsupported {span} {path} # {what}\n"),
+                        TrErr::Unresolved { path, callee, span } => format!("reject Unresolved {span} {path} # {callee}\n"),
+                        TrErr::Attr { path, msg } => format!("reject Attr {path} # {msg}\n"),
+                        TrErr::Root { path, msg } => format!("reject Root {path} # {msg}\n"),
+                    }).collect();
+                    lines.sort();
+                    lines.dedup();
+                    s += &lines.concat();
+                }
+            }
+        }
+    }
+    let file = out.join(format!("program-{krate}.txt"));
+    std::fs::write(&file, s).map_err(|e| format!("{}: {e}", file.display()))
 }
 
 /// One cost root's line. `check_program` gates `analyze`: `check_cert`'s `true` says nothing about
