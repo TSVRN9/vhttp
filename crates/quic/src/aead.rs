@@ -20,6 +20,9 @@ use vstd::arithmetic::power2::*;
 use vstd::bits::*;
 use vstd::prelude::*;
 
+#[allow(unused_imports)]
+use crate::codes::*;
+
 verus! {
 
 /// The largest UDP payload; the shell's receive buffer, and the bound below which datagrams are
@@ -27,7 +30,8 @@ verus! {
 pub const MAX_UDP_PAYLOAD: usize = 65535;
 
 /// One direction's packet protection keys (RFC 9001 §5.1): AEAD key, IV and header protection key.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// `Debug` (below, outside `verus!`) prints the field lengths only.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PacketKeys {
     pub key: [u8; 16],
     pub iv: [u8; 12],
@@ -45,6 +49,14 @@ impl View for PacketKeys {
 
     open spec fn view(&self) -> SpecKeys {
         SpecKeys { key: self.key@, iv: self.iv@, hp: self.hp@ }
+    }
+}
+
+impl DeepView for PacketKeys {
+    type V = SpecKeys;
+
+    open spec fn deep_view(&self) -> SpecKeys {
+        self@
     }
 }
 
@@ -68,6 +80,15 @@ impl View for KeyPair {
     }
 }
 
+/// So `keys.deep_view()` on `[Option<KeyPair>; 3]` is `Seq<Option<SpecKeyPair>>`.
+impl DeepView for KeyPair {
+    type V = SpecKeyPair;
+
+    open spec fn deep_view(&self) -> SpecKeyPair {
+        self@
+    }
+}
+
 // =============================================================================
 // RFC 9001 transcription
 // =============================================================================
@@ -78,10 +99,13 @@ impl View for KeyPair {
 //# reconstructed QUIC packet number in network byte order are left-
 //# padded with zeros to the size of the IV.  The exclusive OR of the
 //# padded packet number and the IV forms the AEAD nonce.
-/// The packet number, big-endian and left-padded to 12 bytes, XORed with the IV. Callers pass
-/// packet numbers of at most 62 bits (`PN_MAX`), for which the 8-byte encoding is the 62 bits
-/// padded.
-pub open spec fn rfc_nonce(iv: Seq<u8>, pn: u64) -> Seq<u8> {
+/// The packet number, big-endian and left-padded to 12 bytes, XORed with the IV. For
+/// `pn <= PN_MAX` (62 bits), which `nonce`, `seal_packet` and `open_packet` require, this is the
+/// 62 bits left-padded.
+pub open spec fn rfc_nonce(iv: Seq<u8>, pn: u64) -> Seq<u8>
+    recommends
+        pn <= PN_MAX,
+{
     xor_bytes(iv, i2osp(pn as nat, 12))
 }
 
@@ -195,6 +219,8 @@ pub proof fn lemma_gcm_open_seal(key: Seq<u8>, nonce: Seq<u8>, aad: Seq<u8>, pt:
 /// The §5.3 nonce: `iv[4 + i] ^= (pn >> (56 - 8i)) as u8` for the 8 low bytes; the high 4 bytes
 /// of the padded packet number are zero.
 pub fn nonce(iv: &[u8; 12], pn: u64) -> (n: [u8; 12])
+    requires
+        pn <= PN_MAX,
     ensures
         n@ == rfc_nonce(iv@, pn),
 {
@@ -258,6 +284,7 @@ pub fn nonce(iv: &[u8; 12], pn: u64) -> (n: [u8; 12])
 /// `header ++ c` afterwards.
 pub fn seal_packet(k: &PacketKeys, pn: u64, header: &[u8], payload: &[u8]) -> (c: Vec<u8>)
     requires
+        pn <= PN_MAX,
         header@.len() <= MAX_UDP_PAYLOAD,
         payload@.len() <= MAX_UDP_PAYLOAD,
     ensures
@@ -279,6 +306,7 @@ pub fn seal_packet(k: &PacketKeys, pn: u64, header: &[u8], payload: &[u8]) -> (c
 /// the tag does not match.
 pub fn open_packet(k: &PacketKeys, pn: u64, header: &[u8], ct: &[u8]) -> (r: Option<Vec<u8>>)
     requires
+        pn <= PN_MAX,
         header@.len() <= MAX_UDP_PAYLOAD,
         ct@.len() <= MAX_UDP_PAYLOAD,
     ensures
@@ -292,3 +320,13 @@ pub fn open_packet(k: &PacketKeys, pn: u64, header: &[u8], ct: &[u8]) -> (r: Opt
 }
 
 } // verus!
+
+impl core::fmt::Debug for PacketKeys {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PacketKeys")
+            .field("key", &format_args!("<{} bytes redacted>", self.key.len()))
+            .field("iv", &format_args!("<{} bytes redacted>", self.iv.len()))
+            .field("hp", &format_args!("<{} bytes redacted>", self.hp.len()))
+            .finish()
+    }
+}

@@ -11,8 +11,8 @@
 //! (RFC 9001 §5.4) over the verified AES and AEAD packet protection (§5.3) over the verified
 //! GCM (3e).
 pub mod ack;
-pub mod aead;
 pub mod ack_track;
+pub mod aead;
 pub mod amp;
 pub mod cid;
 pub mod codes;
