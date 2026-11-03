@@ -30,6 +30,27 @@ pub proof fn lemma_find<T>(s: Seq<T>, p: spec_fn(T) -> bool, i: nat)
     lemma_find_from(s, p, 0, i);
 }
 
+proof fn lemma_find_from_spec<T>(s: Seq<T>, p: spec_fn(T) -> bool, k: nat)
+    ensures match find_from(s, p, k) {
+        Some(i) => k <= i < s.len() && p(s[i as int]) && forall|l: int| k <= l < i ==> !p(#[trigger] s[l]),
+        None => forall|l: int| k <= l < s.len() ==> !p(#[trigger] s[l]),
+    },
+    decreases s.len() - k,
+{
+    if k < s.len() && !p(s[k as int]) { lemma_find_from_spec(s, p, k + 1); }
+}
+
+/// What `find` returns, for any predicate (a broadcast: it fires on the closures inside `sem`'s
+/// lookups, which a lemma call cannot name).
+pub broadcast proof fn lemma_find_spec<T>(s: Seq<T>, p: spec_fn(T) -> bool)
+    ensures #![trigger find(s, p)] match find(s, p) {
+        Some(i) => i < s.len() && p(s[i as int]) && forall|l: int| 0 <= l < i ==> !p(#[trigger] s[l]),
+        None => forall|l: int| 0 <= l < s.len() ==> !p(#[trigger] s[l]),
+    },
+{
+    lemma_find_from_spec(s, p, 0);
+}
+
 pub fn x_ty_kind(m: &MirCrate, t: Ty) -> (r: Option<&TyKind>)
     ensures match r { Some(x) => ty_kind(*m, t) == Some(*x), None => ty_kind(*m, t) is None },
 {
