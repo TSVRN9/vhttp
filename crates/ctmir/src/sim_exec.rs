@@ -158,7 +158,7 @@ pub proof fn lemma_same_out_rel(fm: Frame, f0: Frame, f1: Frame, lo: nat, hi: na
     requires fr_rel(fm, f0), same_out(f0, f1, lo, hi), fm.locals.len() <= lo,
     ensures fr_rel(fm, f1),
 {
-    assert forall|i: int| 0 <= i < fm.locals.len() implies vr(#[trigger] fm.locals[i], f1.locals[i]) by {
+    assert forall|i: int| 0 <= i < fm.locals.len() implies #[trigger] fm.locals[i] == f1.locals[i] by {
         assert(f1.locals[i] == f0.locals[i]);
     }
 }
@@ -227,7 +227,7 @@ pub open spec fn img_ok(pre: Seq<c::Stmt>, base: nat, y: c::Operand, v: Val, fc0
     &&& e == Seq::<Event>::empty()
     &&& same_out(fc0, fc1, base, base + pre.len())
     &&& dep(y, base, base + pre.len())
-    &&& vr(v, ctcore::sem::eval_op(fc1, y).0) && ctcore::sem::eval_op(fc1, y).1 == Seq::<Event>::empty()
+    &&& v == ctcore::sem::eval_op(fc1, y).0 && ctcore::sem::eval_op(fc1, y).1 == Seq::<Event>::empty()
 }
 
 /// Images one after another (an ADT constant's fields, or an operand list): run in order, each
@@ -243,7 +243,7 @@ pub proof fn lemma_imgs(pre: Seq<c::Stmt>, base: nat, ops: Seq<c::Operand>, cnt:
         &&& e == Seq::<Event>::empty()
         &&& same_out(fc0, g, base, base + cnt(n))
         &&& forall|i: nat| i < n ==> dep(ops[i as int], base + cnt(i), base + cnt(i + 1))
-            && vr(val(i), ctcore::sem::eval_op(g, #[trigger] ops[i as int]).0) && ctcore::sem::eval_op(g, ops[i as int]).1 == Seq::<Event>::empty()
+            && val(i) == ctcore::sem::eval_op(g, #[trigger] ops[i as int]).0 && ctcore::sem::eval_op(g, ops[i as int]).1 == Seq::<Event>::empty()
     }),
     decreases n,
 {
@@ -261,7 +261,7 @@ pub proof fn lemma_imgs(pre: Seq<c::Stmt>, base: nat, ops: Seq<c::Operand>, cnt:
         assert(e1 + e2 == Seq::<Event>::empty());
         lemma_same_out_trans(fc0, g1, g2, base, base + cnt(k), base + cnt(n));
         assert forall|i: nat| i < n implies dep(ops[i as int], base + cnt(i), base + cnt(i + 1))
-            && vr(val(i), ctcore::sem::eval_op(g2, #[trigger] ops[i as int]).0) && ctcore::sem::eval_op(g2, ops[i as int]).1 == Seq::<Event>::empty() by {
+            && val(i) == ctcore::sem::eval_op(g2, #[trigger] ops[i as int]).0 && ctcore::sem::eval_op(g2, ops[i as int]).1 == Seq::<Event>::empty() by {
             if i < k {
                 lemma_cnt_mono(cnt, i + 1, k);
                 lemma_dep_survives(ops[i as int], base + cnt(i), base + cnt(i + 1), g1, g2, base + cnt(k), base + cnt(n));

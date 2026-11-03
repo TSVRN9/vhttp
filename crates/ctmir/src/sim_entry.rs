@@ -1,5 +1,5 @@
-//! The simulation, entry frames and the theorem (call-free form): well-typed arguments give related
-//! entry frames, and a completed MIR run of a call-free translated fn is core's run of its image.
+//! The simulation, entry frames and the theorem (call-free form): the entry frames are equal on the
+//! MIR locals, and a completed MIR run of a call-free translated fn is core's run of its image.
 #[allow(unused_imports)]
 use crate::lower::FnInfo;
 #[allow(unused_imports)]
@@ -139,36 +139,22 @@ pub open spec fn wt_args_at(m: MirCrate, b: Body, args: Seq<Val>, slots: Seq<Val
     &&& if is_mut_ref(m, b.locals@[j + 1].ty) { wt_val(m, pointee(m, b.locals@[j + 1].ty), slots[j]) } else { slots[j] == Val::Unit }
 }
 
-/// The entry frames are related.
+/// The entry frames are related (for any arguments, one per parameter: both sides put the same
+/// values there).
 pub proof fn lemma_entry(m: MirCrate, pol: Policy, ord: Seq<usize>, j: nat, p: c::Program, g: nat, r: Seq<bool>, args: Seq<Val>, slots: Seq<Val>)
-    requires g < p.fns@.len(), lowers_body(m, pol, ord, j, p.fns@[g as int], r), wt_args(m, j, args, slots),
+    requires g < p.fns@.len(), lowers_body(m, pol, ord, j, p.fns@[g as int], r), args.len() >= inst_body(m, j)->Some_0.arg_count,
     ensures ({
         let (fm, fc) = (mir_entry(m, j, args, slots), ctcore::sem::init_entry(p, g, args, slots));
-        &&& fr_rel(fm, fc) && pure_fr(fm)
+        &&& fr_rel(fm, fc)
         &&& fm.locals.len() == inst_body(m, j)->Some_0.locals@.len() && fc.locals.len() == p.fns@[g as int].locals@.len()
     }),
 {
     let b = inst_body(m, j)->Some_0;
     let cb = p.fns@[g as int];
     let (fm, fc) = (mir_entry(m, j, args, slots), ctcore::sem::init_entry(p, g, args, slots));
-    assert forall|j2: int| 0 <= j2 < b.arg_count implies #[trigger] wt_args_at(m, b, args, slots, j2) by {}
-    assert forall|k: int| 0 <= k < fm.locals.len() implies vr(#[trigger] fm.locals[k], fc.locals[k]) && pure(fm.locals[k]) by {
+    assert forall|k: int| 0 <= k < fm.locals.len() implies #[trigger] fm.locals[k] == fc.locals[k] by {
         assert(lowers_ty(m, b.locals@[k].ty, cb.locals@[k], tyf()));
         lemma_lowers_ty_mut(m, b.locals@[k].ty, cb.locals@[k], tyf());
-        if 1 <= k <= b.arg_count {
-            lemma_param(m, b, args, slots, k - 1);
-            lemma_vr_refl(args[k - 1]);
-            if !is_mut_ref(m, b.locals@[k].ty) { crate::sim::lemma_mf_pure(args[k - 1]); }
-        } else {
-            crate::sim_const::lemma_ul_us(m, b.locals@[k].ty, tfuel(m), false);
-            crate::sim_pure::lemma_ul_mf(m, b.locals@[k].ty, tfuel(m), false);
-            if let Some((v, _)) = unit_like(m, b.locals@[k].ty, tfuel(m), false) { crate::sim::lemma_mf_pure(v); }
-        }
-    }
-    lemma_vrs_refl(slots);
-    assert forall|k: int| 0 <= k < fm.slots.len() implies pure(#[trigger] fm.slots[k]) by {
-        lemma_param(m, b, args, slots, k);
-        crate::sim::lemma_mf_pure(slots[k]);
     }
 }
 
@@ -239,15 +225,13 @@ pub open spec fn call_free_fn(m: MirCrate, j: nat) -> bool {
 }
 
 /// **The simulation, call-free form.** A completed MIR run of a translated fn whose body makes no
-/// call or drop, from well-typed arguments, along which the typing facts hold (`run_tf`, see the
-/// Task 6 report), is matched by core's run of its image from the same arguments: the same trace
-/// and the same steps, and the final frames agree (`fr_rel`: the return local and the slots by `vr`).
+/// call or drop is matched by core's run of its image from the same arguments: the same trace and
+/// the same steps, and the final frames are equal on the MIR locals (the return local) and slots.
 pub proof fn theorem_sim_call_free(m: MirCrate, pol: Policy, root: Seq<u8>, p: c::Program, infos: Seq<FnInfo>, g: nat,
     args: Seq<Val>, slots: Seq<Val>, fuel: nat)
     requires
         lowers(m, pol, root, p, infos), g < p.fns@.len(), wt_args(m, infos[g as int].inst as nat, args, slots),
         call_free_fn(m, infos[g as int].inst as nat),
-        run_tf(m, cpol(pol), inst_body(m, infos[g as int].inst as nat)->Some_0, 0, mir_entry(m, infos[g as int].inst as nat, args, slots), fuel),
     ensures ({
         let i = infos[g as int].inst as nat;
         mir_run_fn(m, cpol(pol), i, mir_entry(m, i, args, slots), fuel) matches Some((fm, t, n)) ==>
@@ -256,11 +240,9 @@ pub proof fn theorem_sim_call_free(m: MirCrate, pol: Policy, root: Seq<u8>, p: c
     }),
 {
     hide(lowers_body);
-    hide(run_tf);
     hide(mir_entry);
     hide(ctcore::sem::init_entry);
     hide(fr_rel);
-    hide(pure_fr);
     hide(run_ok);
     let rs = choose|rs: Seq<Seq<bool>>| lowers_rs(m, pol, root, p, infos, rs);
     let j = infos[g as int].inst as nat;

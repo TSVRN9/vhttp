@@ -92,7 +92,7 @@ pub proof fn lemma_term_jump(m: MirCrate, pol: Policy, ord: Seq<usize>, b: Body,
     requires
         lowers_term_at(m, pol, ord, b, nloc, ncore, kind, pre, ct, base), tmps_in(base, pre.len(), nloc, ncore),
         kind is Goto || kind is SwitchInt || kind is Assert,
-        fr_rel(f1, fcs), pure_fr(f1), f1.locals.len() == nloc, fcs.locals.len() == ncore,
+        fr_rel(f1, fcs), f1.locals.len() == nloc, fcs.locals.len() == ncore,
         step_term(m, cpol(pol), b, kind, f1, fuel) is Jump,
     ensures ({
         let (fct, ept) = ctcore::sem::exec_stmts(pre, 0, fcs);
@@ -119,21 +119,6 @@ pub proof fn lemma_term_jump(m: MirCrate, pol: Policy, ord: Seq<usize>, b: Body,
 /// The reached blocks have no `Call` or `Drop` terminator (the spec's call-free fallback).
 pub open spec fn call_free(b: Body, r: Seq<bool>) -> bool {
     forall|bb: int| 0 <= bb < r.len() && r[bb] ==> !((#[trigger] b.blocks@[bb]).terminator.kind is Call || b.blocks@[bb].terminator.kind is Drop)
-}
-
-/// The typing facts along MIR's run from block `bb` (call-free): each block's statements'.
-pub open spec fn run_tf(m: MirCrate, pol: CallPolicy, b: Body, bb: nat, fm: Frame, fuel: nat) -> bool
-    decreases fuel,
-{
-    fuel == 0 || bb >= b.blocks@.len() || {
-        let blk = b.blocks@[bb as int];
-        let n = blk.statements@.len();
-        &&& stmts_tf(m, b, fm, blk.statements@, n)
-        &&& exec_stmts(m, b, fm, blk.statements@, n) matches Some((f1, _, _)) ==> match step_term(m, pol, b, blk.terminator.kind, f1, fuel) {
-            Step::Jump(t, f2, _, _) => run_tf(m, pol, b, t, f2, (fuel - 1) as nat),
-            _ => true,
-        }
-    }
 }
 
 /// What a body and its image share, unpacked for one reached block.
@@ -168,8 +153,7 @@ pub open spec fn run_ok(m: MirCrate, pol: CallPolicy, b: Body, bb: nat, fm: Fram
 /// The run induction (call-free).
 pub proof fn lemma_block(m: MirCrate, pol: Policy, ord: Seq<usize>, j: nat, p: c::Program, g: nat, r: Seq<bool>, bb: nat, fm: Frame, fc: Frame, fuel: nat)
     requires body_sim_pre(m, pol, ord, j, p, g, r), bb < r.len(), r[bb as int],
-        fr_rel(fm, fc), pure_fr(fm), fm.locals.len() == inst_body(m, j)->Some_0.locals@.len(), fc.locals.len() == p.fns@[g as int].locals@.len(),
-        run_tf(m, cpol(pol), inst_body(m, j)->Some_0, bb, fm, fuel),
+        fr_rel(fm, fc), fm.locals.len() == inst_body(m, j)->Some_0.locals@.len(), fc.locals.len() == p.fns@[g as int].locals@.len(),
     ensures run_ok(m, cpol(pol), inst_body(m, j)->Some_0, bb, fm, fuel, p, g, fc),
     decreases fuel, 2nat,
 {
@@ -199,8 +183,8 @@ pub open spec fn blk_lo(m: MirCrate, b: Body, bb: nat) -> nat { soff(m, b.blocks
 /// terminator's temps follow.
 proof fn lemma_block_pre(m: MirCrate, pol: Policy, ord: Seq<usize>, j: nat, p: c::Program, g: nat, r: Seq<bool>, bb: nat, fm: Frame, fc: Frame, fuel: nat)
     requires body_sim_pre(m, pol, ord, j, p, g, r), blk_pre_ok(m, pol, ord, j, p, g, r, bb),
-        fr_rel(fm, fc), pure_fr(fm), fm.locals.len() == inst_body(m, j)->Some_0.locals@.len(), fc.locals.len() == p.fns@[g as int].locals@.len(),
-        run_tf(m, cpol(pol), inst_body(m, j)->Some_0, bb, fm, fuel), fuel > 0,
+        fr_rel(fm, fc), fm.locals.len() == inst_body(m, j)->Some_0.locals@.len(), fc.locals.len() == p.fns@[g as int].locals@.len(),
+        fuel > 0,
         exec_stmts(m, inst_body(m, j)->Some_0, fm, inst_body(m, j)->Some_0.blocks@[bb as int].statements@, inst_body(m, j)->Some_0.blocks@[bb as int].statements@.len()) is Some,
     ensures post_stmts(m, pol, j, p, g, bb, fm, fc, fuel),
 {
@@ -248,8 +232,8 @@ proof fn lemma_rf_ret(p: c::Program, f: nat, bb: nat, fc: Frame, fuel: nat)
 
 proof fn lemma_block_step(m: MirCrate, pol: Policy, ord: Seq<usize>, j: nat, p: c::Program, g: nat, r: Seq<bool>, bb: nat, fm: Frame, fc: Frame, fuel: nat)
     requires body_sim_pre(m, pol, ord, j, p, g, r), bb < r.len(), r[bb as int], fuel > 0,
-        fr_rel(fm, fc), pure_fr(fm), fm.locals.len() == inst_body(m, j)->Some_0.locals@.len(), fc.locals.len() == p.fns@[g as int].locals@.len(),
-        run_tf(m, cpol(pol), inst_body(m, j)->Some_0, bb, fm, fuel), run_block(m, cpol(pol), inst_body(m, j)->Some_0, bb, fm, fuel) is Done,
+        fr_rel(fm, fc), fm.locals.len() == inst_body(m, j)->Some_0.locals@.len(), fc.locals.len() == p.fns@[g as int].locals@.len(),
+        run_block(m, cpol(pol), inst_body(m, j)->Some_0, bb, fm, fuel) is Done,
         blk_pre_ok(m, pol, ord, j, p, g, r, bb),
     ensures run_ok(m, cpol(pol), inst_body(m, j)->Some_0, bb, fm, fuel, p, g, fc),
     decreases fuel, 1nat,
@@ -260,10 +244,8 @@ proof fn lemma_block_step(m: MirCrate, pol: Policy, ord: Seq<usize>, j: nat, p: 
     hide(ctcore::sem::exec_stmts);
     hide(xs);
     hide(fr_rel);
-    hide(pure_fr);
     hide(run_ok);
     hide(blk_pre_ok);
-    hide(run_tf);
     hide(ctcore::sem::run_from);
     hide(lowers_body);
     hide(body_sim_pre);
@@ -298,13 +280,9 @@ pub open spec fn post_stmts(m: MirCrate, pol: Policy, j: nat, p: c::Program, g: 
     let (fcs, ce1) = xs(cs, 0, lo as int, fc);
     let (fct, ept) = ctcore::sem::exec_stmts(cs.subrange(lo as int, cs.len() as int), 0, fcs);
     &&& exec_stmts(m, b, fm, ss, ss.len()) is Some
-    &&& lo <= cs.len() && fr_rel(f1, fcs) && pure_fr(f1) && e1 == ce1 && s1 == lo
+    &&& lo <= cs.len() && fr_rel(f1, fcs) && e1 == ce1 && s1 == lo
     &&& f1.locals.len() == b.locals@.len() && fcs.locals.len() == p.fns@[g as int].locals@.len()
     &&& ctcore::sem::exec_stmts(cs, 0, fc) == (fct, ce1 + ept)
-    &&& match step_term(m, cpol(pol), b, b.blocks@[bb as int].terminator.kind, f1, fuel) {
-        Step::Jump(t, f2, _, _) => run_tf(m, cpol(pol), b, t, f2, (fuel - 1) as nat),
-        _ => true,
-    }
     &&& run_block(m, cpol(pol), b, bb, fm, fuel) == match step_term(m, cpol(pol), b, b.blocks@[bb as int].terminator.kind, f1, fuel) {
         Step::Stop(Out::Done(f2, e2, s2)) => Out::Done(f2, e1 + e2, s1 + s2),
         Step::Stop(o) => o,
@@ -362,8 +340,8 @@ proof fn lemma_jump_facts(m: MirCrate, pol: Policy, ord: Seq<usize>, j: nat, p: 
         let fct = ctcore::sem::exec_stmts(cs.subrange(lo, cs.len() as int), 0, fcs).0;
         let st = step_term(m, cpol(pol), b, blk.terminator.kind, f1, fuel);
         let (t, f2, e2, s2) = (st->Jump_0, st->Jump_1, st->Jump_2, st->Jump_3);
-        &&& fr_rel(f2, fct) && pure_fr(f2) && f2.locals.len() == b.locals@.len() && fct.locals.len() == p.fns@[g as int].locals@.len()
-        &&& t < r.len() && r[t as int] && run_tf(m, cpol(pol), b, t, f2, (fuel - 1) as nat)
+        &&& fr_rel(f2, fct) && f2.locals.len() == b.locals@.len() && fct.locals.len() == p.fns@[g as int].locals@.len()
+        &&& t < r.len() && r[t as int]
         &&& ctcore::sem::run_from(p, g, bb, fc, fuel) == match ctcore::sem::run_from(p, g, t, fct, (fuel - 1) as nat) {
             Some((f3, t3, n3)) => Some((f3, e1 + e2 + t3, s1 + s2 + n3)), None => None }
         &&& run_block(m, cpol(pol), b, bb, fm, fuel) == match run_block(m, cpol(pol), b, t, f2, (fuel - 1) as nat) {
@@ -374,11 +352,9 @@ proof fn lemma_jump_facts(m: MirCrate, pol: Policy, ord: Seq<usize>, j: nat, p: 
     hide(ctcore::sem::exec_stmts);
     hide(xs);
     hide(fr_rel);
-    hide(pure_fr);
     hide(run_block);
     hide(ctcore::sem::run_from);
     hide(lowers_body);
-    hide(run_tf);
     hide(lowers_term_at);
     hide(step_term);
     hide(blk_pre_ok);
@@ -424,17 +400,14 @@ proof fn lemma_post_jump(m: MirCrate, pol: Policy, j: nat, p: c::Program, g: nat
         let (fct, ept) = ctcore::sem::exec_stmts(cs.subrange(lo, cs.len() as int), 0, fcs);
         let st = step_term(m, cpol(pol), b, blk.terminator.kind, f1, fuel);
         let (t, f2, e2, s2) = (st->Jump_0, st->Jump_1, st->Jump_2, st->Jump_3);
-        &&& lo <= cs.len() && fr_rel(f1, fcs) && pure_fr(f1) && e1 == ce1 && s1 == lo
+        &&& lo <= cs.len() && fr_rel(f1, fcs) && e1 == ce1 && s1 == lo
         &&& f1.locals.len() == b.locals@.len() && fcs.locals.len() == p.fns@[g as int].locals@.len()
         &&& ctcore::sem::exec_stmts(cs, 0, fc) == (fct, ce1 + ept)
-        &&& run_tf(m, cpol(pol), b, t, f2, (fuel - 1) as nat)
         &&& run_block(m, cpol(pol), b, bb, fm, fuel) == match run_block(m, cpol(pol), b, t, f2, (fuel - 1) as nat) {
             Out::Done(f3, e3, s3) => Out::Done(f3, e1 + e2 + e3, s1 + s2 + s3), o => o }
     }),
 {
-    hide(run_tf);
     hide(fr_rel);
-    hide(pure_fr);
 }
 
 /// Core's side of a jump: the terminator's temps, then the jump, from related frames.
@@ -442,7 +415,7 @@ proof fn lemma_jump_core(m: MirCrate, pol: Policy, ord: Seq<usize>, b: Body, nlo
     ct: c::Term, f1: Frame, fcs: Frame, fuel: nat, p: c::Program, g: nat, bb: nat, fc: Frame, cs: Seq<c::Stmt>, lo: int, ce1: Seq<Event>)
     requires
         lowers_term(m, pol, ord, b, nloc, ncore, kind, pre, ct), kind is Goto || kind is SwitchInt || kind is Assert,
-        fr_rel(f1, fcs), pure_fr(f1), f1.locals.len() == nloc, fcs.locals.len() == ncore,
+        fr_rel(f1, fcs), f1.locals.len() == nloc, fcs.locals.len() == ncore,
         step_term(m, cpol(pol), b, kind, f1, fuel) is Jump, fuel > 0,
         g < p.fns@.len(), bb < p.fns@[g as int].blocks@.len(), p.fns@[g as int].blocks@[bb as int].stmts@ == cs, p.fns@[g as int].blocks@[bb as int].term == ct,
         0 <= lo <= cs.len(), pre == cs.subrange(lo, cs.len() as int),
@@ -476,10 +449,8 @@ proof fn lemma_block_jump(m: MirCrate, pol: Policy, ord: Seq<usize>, j: nat, p: 
     hide(ctcore::sem::exec_stmts);
     hide(xs);
     hide(fr_rel);
-    hide(pure_fr);
     hide(run_ok);
     hide(ctcore::sem::run_from);
-    hide(run_tf);
     hide(step_term);
     hide(blk_pre_ok);
     hide(body_sim_pre);
