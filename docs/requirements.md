@@ -251,7 +251,7 @@ Total keyword count: 44 across 22 sections.
 | 9 (req) | Path validation on any peer address change unless previously validated | 1 | yes | 3 | Includes NAT rebinding. ✅ 3d: crates/quic/src/conn.rs |
 | 9 (req) | Client discards packets from unknown server address | 1 | no | N/A (client-only) |  |
 | 9.3 | Responding to connection migration | 3 | yes | 3 | If we permit migration: send to new address and validate; protect against attacks while unvalidated. ✅ 3d: crates/quic/src/conn.rs |
-| 9.3.2 | On-path address spoofing | 2 | yes | 3 | Revert to last validated address on failure; close silently if no such state. ✅ 3d: crates/quic/src/conn.rs + path.rs |
+| 9.3.2 | On-path address spoofing | 2 | yes | 3 | Revert to last validated address on failure; close silently if no such state. Both only while Open: in Closing and Draining a validation that expires is not acted on before Closed, and only CONNECTION_CLOSE is sent until the deadline (final review I1). ✅ 3d: crates/quic/src/conn.rs + path.rs |
 | 9.3.3 | Off-path packet forwarding | 1 | yes | 3 | Validate previous path with PATH_CHALLENGE on apparent migration. ✅ 3d: crates/quic/src/conn.rs |
 | 9.4 | Loss detection and congestion control | 3 | yes | 3 | Reset CC/RTT on new path (unless port-only change); hooks into phase 6 recovery. Port-only MAY not used; RTT/CC reset is Recovery::on_path_validated (placeholder until Phase 6); old-path clause open until Phase 6 (TRUSTED.md). ✅ 3d: crates/quic/src/conn.rs + path.rs |
 | 9.5 | Privacy implications of connection migration | 2 | partial | 3 | Rows below. ✅ 3d: crates/quic/src/conn.rs |

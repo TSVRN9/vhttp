@@ -175,6 +175,19 @@ fn crypto_write_gated() {
     assert_eq!(c.crypto_capacity(PacketKind::Handshake), 0);
 }
 
+/// `discard` leaves the Handshake space fresh CRYPTO buffers (TRUSTED.md's capacity paragraph).
+#[test]
+fn discard_frees_crypto() {
+    let mut c = conn();
+    c.crypto_write(PacketKind::Handshake, &[1; 10]);
+    c.on_datagram(0, 1200, vec![hs(0, vec![Frame::Crypto { offset: 5, data: vec![2; 10] }])], 10, &rnd(9));
+    assert!(c.crypto_capacity(PacketKind::Handshake) > 10);
+    c.on_peer_params(&ptp(), 10);
+    c.on_handshake_complete(b"h3", 10, &rnd(2));
+    assert!(c.handshake_complete());
+    assert_eq!(c.crypto_capacity(PacketKind::Handshake), 0);
+}
+
 // The handshake path of `established_with`, which later tasks build on. Peer limit 4 and our cap
 // of 4 active CIDs mean three more CIDs, from the first three slices of `rnd(2)`.
 #[test]
@@ -404,6 +417,27 @@ fn stream_events() {
     c.poll_stream_events(&mut ev);
     assert_eq!(ev, vec![StreamEvent::Data { id: 0, data: b"GET".to_vec(), fin: true }]);
     assert_eq!(c.stream_write(0, b"ok", true), Ok(2));
+}
+
+/// A 1-RTT packet coalesced with the client's Finished comes before `on_handshake_complete`, so the
+/// gate drops it (RFC 9001 §5.7). The Phase 4 binding note's recipe: hand it over again afterwards,
+/// with length 0, and it is processed.
+#[test]
+fn early_one_rtt_refed() {
+    let mut c = conn();
+    c.on_peer_params(&ptp(), 10);
+    let p = || one(0, vec![stream(0, b"GET", true)]);
+    c.on_datagram(0, 1200, vec![hs(0, vec![Frame::Ping]), p()], 10, &rnd(9));
+    assert_eq!(c.largest_pn(PacketKind::Handshake), Some(0));
+    assert_eq!(c.largest_pn(PacketKind::OneRtt), None);
+    c.on_handshake_complete(b"h3", 10, &rnd(2));
+    let mut ev = Vec::new();
+    c.poll_stream_events(&mut ev);
+    assert!(ev.is_empty());
+    c.on_datagram(0, 0, vec![p()], 10, &rnd(3));
+    assert_eq!(c.largest_pn(PacketKind::OneRtt), Some(0));
+    c.poll_stream_events(&mut ev);
+    assert_eq!(ev, vec![StreamEvent::Data { id: 0, data: b"GET".to_vec(), fin: true }]);
 }
 
 #[test]
