@@ -324,6 +324,36 @@ Fixed modelling decisions (the author implements them and does not choose them):
    from `manifest.txt` into `ctmir::sem` as spec. The manifest keeps only policy: `root`,
    `label`, `cost-root`, `internal-crate` and `translate-crate` lines.
 
+**Std-model rows.** The effect column is written from vstd's spec of the function. The events
+and cost columns are policy; they are today's leakage and cost model. "Admitted" is the generic
+argument the row covers; a call at any other instantiation is `Unresolved`.
+
+| Key (`ct_key`) | Admitted | Effect (vstd) | Events | Extra cost |
+|---|---|---|---|---|
+| `std::vec::Vec::new` | `E` ∈ {`u8`, `(u64, u64)`} | an empty Vec | — | 0 |
+| `std::vec::Vec::with_capacity` | `u8` | an empty Vec | `Alloc(n)` | 0 |
+| `std::vec::Vec::push` | `u8`, `(u64, u64)` | `v@.push(x)` through the `&mut` | — | 0 |
+| `std::vec::Vec::extend_from_slice` | `u8` | `v@ + s@` | — | `len(s)` |
+| `std::vec::Vec::as_slice` | `u8` | `&[u8]` with `v`'s elements | — | 0 |
+| `std::array::<impl [u8; N]>::as_slice`, N ∈ {16, 32, 64, 128} | — | `&[u8]` with the array's elements | — | 0 |
+| `std::vec::Vec::len` | `u8`, `(u64, u64)` | `v@.len()` | — | 0 |
+| `<Vec<u8> as vstd::pervasive::VecAdditionalExecFns<u8>>::set` | — | `v@.update(i, x)` | `Idx(i)` | 0 |
+| `<Vec<(u64, u64)> as Index<usize>>::index` | — | `&v@[i]` | `Idx(i)` | 0 |
+| `vstd::slice::slice_subrange` | `u8` | `&s@.subrange(lo, hi)` | `Range(lo, hi)` | 0 |
+| `vstd::slice::slice_to_vec` | `u8` | a Vec with `s`'s elements | — | `len(s)` |
+| `core::num::<impl u32>::wrapping_add`, `core::num::<impl u64>::wrapping_sub` | — | wrapping arithmetic | — | 0 |
+| `vstd::prelude::Ghost::assume_new_fallback` | any | the unit-like value | — | 0 |
+
+Where vstd's spec has a precondition (an index below the length, `lo <= hi <= len`, a length
+that fits in usize) and Rust would panic, the MIR run is `None`.
+
+Two kinds of call are policy, from the manifest:
+- `declassify <path>`: identity, emitting `Declass(v)`;
+- `ghost <path>`: the unit-like value, with no events.
+
+These replace the old `intr … Declassify` and `intr … GhostUnit` lines, which named crate fns
+such as `crypto::ct::declassify`.
+
 A sanity file, `ctmir/src/sem_sanity.rs`, proves small facts the reviewer can read: a toy body's
 run, the event order of a projection, that drop of `Vec<u8>` is a no-op, and that a niche
 constant decodes.
@@ -350,6 +380,19 @@ lower(m, root, man) == Ok((p, infos)) && wt_args(m, f, args, slots)  ==>
    mir_run(m, inst(f), mir_entry(m, f, args, slots), fuel)
      == core_rel(ctcore::run_fn(p, f, ctcore::init_entry(p, f, args', slots'), fuel))
 ```
+
+Only the MIR-to-core direction is needed. The MIR semantics may be partial where core is total:
+an out-of-bounds index panics in MIR (`None`) but reads `Unit` in core. The form is:
+
+```
+mir_run_fn(m, inst(f), mir_entry(..), fuel) == Some(r)  ==>  ctcore::run_fn(p, f, init_entry(..), fuel) == Some(r)
+```
+
+Both theorems quantify only over completed MIR runs, which then equal completed core runs:
+- CT takes two completed MIR runs;
+- cost takes one returning MIR run.
+
+So nothing is lost, and the proof never has to match core's totality conventions.
 
 Results, event traces and step counts are equal. `args'` relates to `args` by the value
 relation, which is identity on the shared `Val` domain except where the translator changes a

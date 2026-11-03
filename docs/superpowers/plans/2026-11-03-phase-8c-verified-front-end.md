@@ -133,7 +133,7 @@
 - Produces:
 
   ```
-  pub open spec fn mir_run_fn(m: MirCrate, i: nat /* insts index */, fr: Frame, fuel: nat) -> Res
+  pub open spec fn mir_run_fn(m: MirCrate, pol: CallPolicy /* declassify and ghost paths */, i: nat /* insts index */, fr: Frame, fuel: nat) -> Res
   pub open spec fn mir_entry(m: MirCrate, i: nat, args: Seq<Val>, slots: Seq<Val>) -> Frame
   pub open spec fn wt_val(m: MirCrate, ty: TyId, v: Val) -> bool   // the value is a well-typed value of `ty`
   pub open spec fn std_model(key: Seq<u8>, gargs: GenericArgs) -> Option<StdFn>
@@ -199,8 +199,9 @@
   ```
   pub proof fn theorem_sim(m: MirCrate, pol: Policy, root: Seq<u8>, p: Program, infos: Seq<FnInfo>, g: nat, args: Seq<Val>, slots: Seq<Val>, fuel: nat)
       requires lowers(m, pol, root, p, infos), g < p.fns.len(), wt_args(m, infos[g].inst, args, slots)
-      ensures mir_run_fn(m, infos[g].inst, mir_entry(m, infos[g].inst, args, slots), fuel)
-              == ctcore::sem::run_fn(p, g, ctcore::sem::init_entry(p, g, args, slots), fuel)
+      ensures mir_run_fn(m, pol, infos[g].inst, mir_entry(m, infos[g].inst, args, slots), fuel) is Some ==>
+              ctcore::sem::run_fn(p, g, ctcore::sem::init_entry(p, g, args, slots), fuel)
+                == mir_run_fn(m, pol, infos[g].inst, mir_entry(m, infos[g].inst, args, slots), fuel)
   ```
 
   This is the exact form. If a construct forces the fallback, the fallback is spec §Translator's weaker form, and the report says which constructs needed it.
