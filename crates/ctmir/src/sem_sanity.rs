@@ -10,6 +10,8 @@ use crate::sem::*;
 use ctcore::sem::{binop, read_at, Event, Frame, Loc, Root, Val, PE};
 #[cfg(verus_keep_ghost)]
 use ctcore::syntax::{BinOp as COp, IntTy as CTy};
+#[cfg(verus_keep_ghost)]
+use vstd::arithmetic::power2::pow2;
 use vstd::prelude::*;
 
 verus! {
@@ -92,6 +94,12 @@ fn ref_row(id: Ty, pointee: Ty, mu: Mutability) -> (r: TyRow)
     TyRow { id, kind: TyKind::RigidTy(RigidTy::Ref(Json::Null, pointee, mu)) }
 }
 
+fn arr_row(id: Ty, elem: Ty) -> (r: TyRow)
+    ensures r.id == id, r.kind matches TyKind::RigidTy(RigidTy::Array(e, _)) && e == elem,
+{
+    TyRow { id, kind: TyKind::RigidTy(RigidTy::Array(elem, TyConst { kind: Json::Null, id: 0 })) }
+}
+
 fn body(blocks: Vec<BasicBlock>, locals: Vec<LocalDecl>, arg_count: usize) -> (b: Body)
     ensures b.blocks@ == blocks@, b.locals@ == locals@, b.arg_count == arg_count,
 {
@@ -146,14 +154,18 @@ pub open spec fn tiny_bb1(blk: BasicBlock) -> bool {
 
 pub open spec fn tiny_ok(m: MirCrate) -> bool {
     m.insts@.len() == 1 && m.insts@[0].kind is Item && m.insts@[0].body is Some && m.allocs@.len() == 0
-    && m.tys@.len() == 3
+    && m.tys@.len() == 6
     && m.tys@[0].id == 2 && (m.tys@[0].kind matches TyKind::RigidTy(RigidTy::Uint(UintTy::U8)))
     && m.tys@[1].id == 1 && (m.tys@[1].kind matches TyKind::RigidTy(RigidTy::Uint(UintTy::Usize)))
-    && m.tys@[2].id == 3 && (m.tys@[2].kind matches TyKind::RigidTy(RigidTy::Ref(_, _, mu)) && mu is Not)
+    && m.tys@[2].id == 3 && (m.tys@[2].kind matches TyKind::RigidTy(RigidTy::Ref(_, p, mu)) && p == 11 && mu is Not)
+    && m.tys@[3].id == 11 && (m.tys@[3].kind matches TyKind::RigidTy(RigidTy::Array(e, _)) && e == 2)
+    && m.tys@[4].id == 7 && (m.tys@[4].kind matches TyKind::RigidTy(RigidTy::Bool))
+    && m.tys@[5].id == 9 && (m.tys@[5].kind matches TyKind::RigidTy(RigidTy::Array(e, _)) && e == 2)
     && {
         let b = m.insts@[0].body->Some_0;
         b.arg_count == 2 && b.locals@.len() == 7 && b.blocks@.len() == 2
-        && b.locals@[0].ty == 2 && b.locals@[1].ty == 3 && b.locals@[2].ty == 1 && b.locals@[4].ty == 2 && b.locals@[5].ty == 1
+        && b.locals@[0].ty == 2 && b.locals@[1].ty == 3 && b.locals@[2].ty == 1 && b.locals@[3].ty == 9 && b.locals@[4].ty == 2
+        && b.locals@[5].ty == 1 && b.locals@[6].ty == 7
         && tiny_bb0(b.blocks@[0]) && tiny_bb1(b.blocks@[1])
     }
 }
@@ -210,6 +222,9 @@ pub fn tiny_crate() -> (m: MirCrate) ensures tiny_ok(m) {
     tys.push(uint(2, UintTy::U8));
     tys.push(uint(1, UintTy::Usize));
     tys.push(ref_row(3, 11, Mutability::Not));
+    tys.push(arr_row(11, 2));
+    tys.push(TyRow { id: 7, kind: TyKind::RigidTy(RigidTy::Bool) });
+    tys.push(arr_row(9, 2));
     krate(insts, Vec::new(), Vec::new(), tys, Vec::new(), Vec::new())
 }
 
@@ -218,9 +233,91 @@ pub open spec fn tb(m: MirCrate) -> Body { m.insts@[0].body->Some_0 }
 proof fn tiny_tys(m: MirCrate)
     requires tiny_ok(m),
     ensures int_ty(m, 2) == Some(CTy::U8), int_ty(m, 1) == Some(CTy::Usize), !is_mut_ref(m, 1), !is_mut_ref(m, 3),
-        !charged(m, 1), !charged(m, 2), dfuel(m) == 4,
+        !charged(m, 1), !charged(m, 2), dfuel(m) == 7, tfuel(m) == 7, int_ty(m, 7) == Some(CTy::Bool),
+        rigid(m, 3) matches Some(RigidTy::Ref(_, p, mu)) && p == 11 && mu is Not,
+        rigid(m, 11) matches Some(RigidTy::Array(e, _)) && e == 2,
+        rigid(m, 9) matches Some(RigidTy::Array(e, _)) && e == 2,
+        unit_like(m, 1, 7, false) is None, unit_like(m, 2, 7, false) is None, unit_like(m, 7, 7, false) is None,
+        unit_like(m, 9, 7, false) is None,
 {
-    reveal_with_fuel(find_from, 4);
+    reveal_with_fuel(find_from, 7);
+    assert(unit_like(m, 2, 6, false) is None);
+}
+
+/// bb0's `_3 = [1, 2, 3]` is in the subset.
+proof fn tiny_s1_ok(m: MirCrate)
+    requires tiny_ok(m),
+    ensures stmt_ok(m, tb(m), tb(m).blocks@[0].statements@[1]),
+{
+    let fr = Frame { locals: seq![], slots: seq![] };
+    let ops = tb(m).blocks@[0].statements@[1].kind->Assign_1->Aggregate_1@;
+    tiny_const(m, fr, ops[0], 1, false);
+    tiny_const(m, fr, ops[1], 2, false);
+    tiny_const(m, fr, ops[2], 3, false);
+    assert(ops_ok(m, tb(m), ops));
+}
+
+/// bb0's two `BinaryOp`s on usize, and its `Assert` on a bool, are in the subset.
+proof fn tiny_s45_ok(m: MirCrate, pol: CallPolicy)
+    requires tiny_ok(m),
+    ensures stmt_ok(m, tb(m), tb(m).blocks@[0].statements@[4]), stmt_ok(m, tb(m), tb(m).blocks@[0].statements@[5]),
+        term_ok(m, pol, tb(m), tb(m).blocks@[0].terminator.kind),
+{
+    let fr = Frame { locals: seq![], slots: seq![] };
+    let ss0 = tb(m).blocks@[0].statements@;
+    tiny_tys(m);
+    tiny_const(m, fr, bin_y(ss0[4]), 3, true);
+    tiny_const(m, fr, bin_y(ss0[5]), 4, true);
+}
+
+/// tiny's bb0 passes the static subset gate.
+proof fn tiny_bb0_ok(m: MirCrate, pol: CallPolicy)
+    requires tiny_ok(m),
+    ensures block_ok(m, pol, tb(m), tb(m).blocks@[0]),
+{
+    reveal(block_ok);
+    let b = tb(m);
+    let ss0 = b.blocks@[0].statements@;
+    tiny_s1_ok(m);
+    tiny_s45_ok(m, pol);
+    assert forall|k: int| 0 <= k < ss0.len() implies stmt_ok(m, b, #[trigger] ss0[k]) by {
+        if k == 0 || k == 2 || k == 3 { assert(is_noop(ss0[k])); }
+    };
+}
+
+/// tiny's bb1 passes the static subset gate.
+proof fn tiny_bb1_ok(m: MirCrate, pol: CallPolicy)
+    requires tiny_ok(m),
+    ensures block_ok(m, pol, tb(m), tb(m).blocks@[1]),
+{
+    reveal(block_ok);
+    let b = tb(m);
+    let fr = Frame { locals: seq![], slots: seq![] };
+    tiny_tys(m);
+    let ss1 = b.blocks@[1].statements@;
+    tiny_const(m, fr, bin_y(ss1[1]), 2, false);
+    let q = ss1[0].kind->Assign_1->Use_0->Copy_0;
+    assert(tys_along(m, 3, q.projection@, 0) == Some(3usize));
+    assert(proj_ty(m, 3, q.projection@[0]) == Some(11usize));
+    assert(tys_along(m, 3, q.projection@, 1) == Some(11usize));
+    assert(proj_ok(m, b, 3, q.projection@[0], false));
+    assert(proj_ok(m, b, 11, q.projection@[1], false));
+    assert(path_ok(m, b, 3, q.projection@, 0, false));
+    assert(path_ok(m, b, 3, q.projection@, 1, false));
+    assert(path_ok(m, b, 3, q.projection@, 2, false));
+    assert(stmt_ok(m, b, ss1[0]));
+    assert(stmt_ok(m, b, ss1[1]));
+    assert forall|k: int| 0 <= k < ss1.len() implies stmt_ok(m, b, #[trigger] ss1[k]) by {
+        if k >= 2 { assert(is_noop(ss1[k])); }
+    };
+}
+
+proof fn tiny_blocks_ok(m: MirCrate, pol: CallPolicy)
+    requires tiny_ok(m),
+    ensures block_ok(m, pol, tb(m), tb(m).blocks@[0]), block_ok(m, pol, tb(m), tb(m).blocks@[1]),
+{
+    tiny_bb0_ok(m, pol);
+    tiny_bb1_ok(m, pol);
 }
 
 /// A u8 constant (1 byte) or usize constant (8 bytes) evaluates to its value, at no charge.
@@ -229,7 +326,7 @@ proof fn tiny_const(m: MirCrate, fr: Frame, op: Operand, x: u8, wide: bool)
     ensures eval_op(m, fr, op) == Some((Val::Int(x as u128), seq![], 0nat)),
 {
     tiny_tys(m);
-    reveal_with_fuel(find_from, 3);
+    reveal_with_fuel(find_from, 7);
     reveal_with_fuel(le, 9);
     let c = op->Constant_0;
     let a = c.const_.kind->Allocated_0;
@@ -458,32 +555,58 @@ proof fn tiny_entry(m: MirCrate, a: Seq<Val>, i: u128)
     assert(mir_entry(m, 0, tiny_args(a, i), seq![]).locals =~= tiny_fr0(a, i).locals);
 }
 
+/// bb1's Return from `fr_b`.
+proof fn tiny_ret(m: MirCrate, pol: CallPolicy, fb: Frame, fuel: nat)
+    requires tiny_ok(m),
+    ensures step_term(m, pol, tb(m), tb(m).blocks@[1].terminator.kind, fb, fuel) == Step::Stop(Out::Done(fb, Seq::<Event>::empty(), 1nat)),
+{
+}
+
 /// bb1 from `fr_a`: its statements (2 steps, `[Idx(i & 3)]`) then the Return (1 step).
 proof fn tiny_run_bb1(m: MirCrate, pol: CallPolicy, a: Seq<Val>, i: u128, fuel: nat)
     requires tiny_ok(m), fuel >= 1, i < 0x1_0000_0000_0000_0000, a.len() == 4,
         forall|k: int| 0 <= k < 4 ==> (#[trigger] a[k]) is Int && a[k]->Int_0 < 256,
     ensures run_block(m, pol, tb(m), 1, fr_a(tiny_fr0(a, i), i), fuel)
-        == Some((fr_b(fr_a(tiny_fr0(a, i), i), a, i), seq![Event::Idx(i & 3)], 3nat)),
+        == Out::Done(fr_b(fr_a(tiny_fr0(a, i), i), a, i), seq![Event::Idx(i & 3)], 3nat),
 {
     let b = tb(m);
     let fa = fr_a(tiny_fr0(a, i), i);
+    let fb = fr_b(fa, a, i);
+    let blk = b.blocks@[1];
+    tiny_blocks_ok(m, pol);
     tiny_bitand(i);
     assert(a[(i & 3) as int] is Int);
     tiny_bb1_stmts(m, fa, a, i);
-    let fb = fr_b(fa, a, i);
-    assert(step_term(m, pol, b, b.blocks@[1].terminator.kind, fb, fuel) == Some(Step::Done(fb, Seq::<Event>::empty(), 1nat)));
+    tiny_ret(m, pol, fb, fuel);
     assert(seq![Event::Idx(i & 3)] + Seq::<Event>::empty() =~= seq![Event::Idx(i & 3)]);
+    assert(exec_stmts(m, b, fa, blk.statements@, blk.statements@.len()) == Some((fb, seq![Event::Idx(i & 3)], 2nat)));
 }
 
 /// bb0's Assert(move _6, true): `_6 == 1`, so `Cond(1)` and on to bb1; cost 1.
 proof fn tiny_term0(m: MirCrate, pol: CallPolicy, a: Seq<Val>, i: u128, fuel: nat)
     requires tiny_ok(m),
     ensures step_term(m, pol, tb(m), tb(m).blocks@[0].terminator.kind, fr_a(tiny_fr0(a, i), i), fuel)
-        == Some(Step::Jump(1, fr_a(tiny_fr0(a, i), i), seq![Event::Cond(1)], 1nat)),
+        == Step::Jump(1, fr_a(tiny_fr0(a, i), i), seq![Event::Cond(1)], 1nat),
 {
     let fa = fr_a(tiny_fr0(a, i), i);
     assert(eval_op(m, fa, tb(m).blocks@[0].terminator.kind->Assert_cond) == Some((Val::Int(1), Seq::<Event>::empty(), 0nat)));
     assert(Seq::<Event>::empty() + seq![Event::Cond(1)] =~= seq![Event::Cond(1)]);
+}
+
+/// bb0 then bb1 from tiny's entry frame: 7 steps, `[Cond(1), Idx(i & 3)]`.
+proof fn tiny_run_bb0(m: MirCrate, pol: CallPolicy, a: Seq<Val>, i: u128, fuel: nat)
+    requires tiny_ok(m), fuel >= 2, i < 0x1_0000_0000_0000_0000, a.len() == 4,
+        forall|k: int| 0 <= k < 4 ==> (#[trigger] a[k]) is Int && a[k]->Int_0 < 256,
+    ensures run_block(m, pol, tb(m), 0, tiny_fr0(a, i), fuel)
+        == Out::Done(fr_b(fr_a(tiny_fr0(a, i), i), a, i), seq![Event::Cond(1), Event::Idx(i & 3)], 7nat),
+{
+    let b = tb(m);
+    let fr0 = tiny_fr0(a, i);
+    tiny_blocks_ok(m, pol);
+    tiny_bb0_stmts(m, fr0, i);
+    tiny_term0(m, pol, a, i, fuel);
+    tiny_run_bb1(m, pol, a, i, (fuel - 1) as nat);
+    assert(Seq::<Event>::empty() + seq![Event::Cond(1)] + seq![Event::Idx(i & 3)] =~= seq![Event::Cond(1), Event::Idx(i & 3)]);
 }
 
 /// **Fact 1.** `tiny(a, i)` returns `a[i & 3] ^ 2`, with events `[Cond(1), Idx(i & 3)]` and 7
@@ -496,16 +619,11 @@ pub proof fn fact_tiny(m: MirCrate, pol: CallPolicy, a: Seq<Val>, i: u128, fuel:
         && f.locals[0] == Val::Int(a[(i & 3) as int]->Int_0 ^ 2)
         && ev == seq![Event::Cond(1), Event::Idx(i & 3)] && st == 7,
 {
-    let b = tb(m);
-    let fr0 = tiny_fr0(a, i);
-    let fa = fr_a(fr0, i);
-    let fb = fr_b(fa, a, i);
     tiny_entry(m, a, i);
-    tiny_bb0_stmts(m, fr0, i);
-    tiny_term0(m, pol, a, i, fuel);
-    tiny_run_bb1(m, pol, a, i, (fuel - 1) as nat);
-    assert(Seq::<Event>::empty() + seq![Event::Cond(1)] + seq![Event::Idx(i & 3)] =~= seq![Event::Cond(1), Event::Idx(i & 3)]);
-    assert(run_block(m, pol, b, 0, fr0, fuel) == Some((fb, seq![Event::Cond(1), Event::Idx(i & 3)], 7nat)));
+    tiny_run_bb0(m, pol, a, i, fuel);
+    let fb = fr_b(fr_a(tiny_fr0(a, i), i), a, i);
+    assert(mir_run(m, pol, 0, tiny_fr0(a, i), fuel) == Out::Done(fb, seq![Event::Cond(1), Event::Idx(i & 3)], 7nat));
+    assert(fb.locals[0] == Val::Int(a[(i & 3) as int]->Int_0 ^ 2));
 }
 
 // ================================================================== 2. Drop of a Vec<u8>
@@ -514,7 +632,7 @@ pub proof fn fact_tiny(m: MirCrate, pol: CallPolicy, a: Seq<Val>, i: u128, fuel:
 // bb1: return. The `drops` row for ty 5 has a non-empty glue, but `Vec<int>`'s glue is the std-model
 // leaf (decision 4): the Drop costs 1 and leaves the frame as it was. Steps: Drop 1 + Return 1 = 2.
 
-pub open spec fn drop_ok(m: MirCrate) -> bool {
+pub open spec fn dropc_ok(m: MirCrate) -> bool {
     m.insts@.len() == 1 && m.insts@[0].kind is Item && m.insts@[0].body is Some
     && m.tys@.len() == 2 && m.tys@[0].id == 5
     && (m.tys@[0].kind matches TyKind::RigidTy(RigidTy::Adt(_, ga)) && ga.0@.len() == 2 && (ga.0@[0] matches GenericArgKind::Type(e) && e == 2))
@@ -530,7 +648,7 @@ pub open spec fn drop_ok(m: MirCrate) -> bool {
     }
 }
 
-pub fn drop_crate() -> (m: MirCrate) ensures drop_ok(m) {
+pub fn drop_crate() -> (m: MirCrate) ensures dropc_ok(m) {
     let mut blocks = Vec::new();
     blocks.push(BasicBlock { statements: Vec::new(), terminator: term(TerminatorKind::Drop { place: place0(1), target: 1, unwind: Json::Null }) });
     blocks.push(BasicBlock { statements: Vec::new(), terminator: term(TerminatorKind::Return) });
@@ -555,22 +673,23 @@ pub fn drop_crate() -> (m: MirCrate) ensures drop_ok(m) {
 
 /// **Fact 2.** Dropping a `Vec<u8>` local is a no-op on the frame: 2 steps, no events.
 pub proof fn fact_drop_vec(m: MirCrate, pol: CallPolicy, fr: Frame, fuel: nat)
-    requires drop_ok(m), fr.locals.len() == 2, fuel >= 2,
+    requires dropc_ok(m), fr.locals.len() == 2, fuel >= 2,
     ensures mir_run_fn(m, pol, 0, fr, fuel) == Some((fr, Seq::<Event>::empty(), 2nat)),
 {
     let b = m.insts@[0].body->Some_0;
     let e = Seq::<Event>::empty();
     reveal_with_fuel(find_from, 3);
+    assert(block_ok(m, pol, b, b.blocks@[0]) && block_ok(m, pol, b, b.blocks@[1])) by { reveal(block_ok); };
     assert(vec_elem(m, 5) == Some(2usize));
     assert(int_ty(m, 2) == Some(CTy::U8));
     assert(vec_int(m, 5));
     assert(place_ty(m, b, b.blocks@[0].terminator.kind->Drop_place) == Some(5usize));
     tiny_store0(fr, b.blocks@[0].terminator.kind->Drop_place, 1, Val::Unit);
     assert(exec_stmts(m, b, fr, b.blocks@[0].statements@, 0) == Some((fr, e, 0nat)));
-    assert(step_term(m, pol, b, b.blocks@[0].terminator.kind, fr, fuel) == Some(Step::Jump(1, fr, e, 1nat)));
-    assert(step_term(m, pol, b, b.blocks@[1].terminator.kind, fr, (fuel - 1) as nat) == Some(Step::Done(fr, e, 1nat)));
+    assert(step_term(m, pol, b, b.blocks@[0].terminator.kind, fr, fuel) == Step::Jump(1, fr, e, 1nat));
+    assert(step_term(m, pol, b, b.blocks@[1].terminator.kind, fr, (fuel - 1) as nat) == Step::Stop(Out::Done(fr, e, 1nat)));
     assert(e + e =~= e);
-    assert(run_block(m, pol, b, 1, fr, (fuel - 1) as nat) == Some((fr, e, 1nat)));
+    assert(run_block(m, pol, b, 1, fr, (fuel - 1) as nat) == Out::Done(fr, e, 1nat));
     assert(e + e + e =~= e);
 }
 
@@ -583,15 +702,24 @@ pub proof fn fact_drop_vec(m: MirCrate, pol: CallPolicy, fr: Frame, fuel: nat)
 // <= 0 - 0, so the variant is 0 + 0 = None, which has no fields: `Adt(0, [])`, 1 ADT node.
 
 pub open spec fn niche_ok(m: MirCrate) -> bool {
-    m.tys@.len() == 1 && m.allocs@.len() == 0 && m.tys@[0].id == 6 && (m.tys@[0].kind matches TyKind::RigidTy(RigidTy::Adt(_, _)))
-    && m.adts@.len() == 1 && m.adts@[0].ty == 6 && !m.adts@[0].is_box && m.adts@[0].kind is Enum
+    m.tys@.len() == 4 && m.allocs@.len() == 0 && m.tys@[0].id == 6 && (m.tys@[0].kind matches TyKind::RigidTy(RigidTy::Adt(_, _)))
+    && m.tys@[1].id == 7 && (m.tys@[1].kind matches TyKind::RigidTy(RigidTy::Adt(_, _)))
+    && m.tys@[2].id == 8 && (m.tys@[2].kind matches TyKind::RigidTy(RigidTy::Pat(base, _)) && base == 9)
+    && m.tys@[3].id == 9 && (m.tys@[3].kind matches TyKind::RigidTy(RigidTy::Uint(UintTy::U8)))
+    && m.adts@.len() == 2 && m.adts@[0].ty == 6 && !m.adts@[0].is_box && m.adts@[0].kind is Enum
     && m.adts@[0].variants@.len() == 2 && m.adts@[0].variants@[0].fields@.len() == 0
-    && m.layouts@.len() == 1 && m.layouts@[0].ty == 6
+    && m.adts@[0].variants@[1].fields@.len() == 1 && m.adts@[0].variants@[1].fields@[0] == 7
+    && m.adts@[1].ty == 7 && !m.adts@[1].is_box && m.adts@[1].kind is Struct && m.adts@[1].variants@.len() == 1
+    && m.adts@[1].variants@[0].fields@.len() == 1 && m.adts@[1].variants@[0].fields@[0] == 8
+    && m.layouts@.len() == 2 && m.layouts@[0].ty == 6 && m.layouts@[1].ty == 7
+    && (m.layouts@[1].shape.fields matches FieldsShape::Arbitrary { offsets } && offsets@.len() == 1 && offsets@[0].num_bits == 0)
+    && (m.layouts@[1].shape.variants matches VariantsShape::Single { index } && index == 0)
     && {
         let l = m.layouts@[0].shape;
         (l.fields matches FieldsShape::Arbitrary { offsets } && offsets@.len() == 1 && offsets@[0].num_bits == 0)
         && (l.variants matches VariantsShape::Multiple { tag, tag_encoding, tag_field, variants }
             && tag_field == 0 && variants@.len() == 2 && variants@[0].offsets@.len() == 0
+            && variants@[1].offsets@.len() == 1 && variants@[1].offsets@[0].num_bits == 0
             && (tag matches Scalar::Initialized { value, .. } && (value matches Primitive::Int { length, .. } && length is I8))
             && (tag_encoding matches TagEncoding::Niche { untagged_variant, niche_variants, niche_start }
                 && untagged_variant == 1 && niche_variants.start == 0 && niche_variants.end == 0 && niche_start == 0))
@@ -603,13 +731,21 @@ pub fn niche_crate() -> (m: MirCrate) ensures niche_ok(m) {
     ga.push(GenericArgKind::Type(7));
     let mut tys = Vec::new();
     tys.push(TyRow { id: 6, kind: TyKind::RigidTy(RigidTy::Adt(0, GenericArgs(ga))) });
+    tys.push(TyRow { id: 7, kind: TyKind::RigidTy(RigidTy::Adt(1, GenericArgs(Vec::new()))) });
+    tys.push(TyRow { id: 8, kind: TyKind::RigidTy(RigidTy::Pat(9, Json::Null)) });
+    tys.push(uint(9, UintTy::U8));
     let mut f1 = Vec::new();
     f1.push(7);
+    let mut nzf = Vec::new();
+    nzf.push(8);
+    let mut nzv = Vec::new();
+    nzv.push(AdtVariant { discr: None, fields: nzf });
     let mut vars = Vec::new();
     vars.push(AdtVariant { discr: Some(0), fields: Vec::new() });
     vars.push(AdtVariant { discr: Some(1), fields: f1 });
     let mut adts = Vec::new();
     adts.push(Adt { ty: 6, name: Vec::new(), kind: AdtKind::Enum, is_box: false, variants: vars });
+    adts.push(Adt { ty: 7, name: Vec::new(), kind: AdtKind::Struct, is_box: false, variants: nzv });
     let mut offs = Vec::new();
     offs.push(MachineSize { num_bits: 0 });
     let mut o1 = Vec::new();
@@ -629,8 +765,18 @@ pub fn niche_crate() -> (m: MirCrate) ensures niche_ok(m) {
         abi_align: 1,
         size: MachineSize { num_bits: 8 },
     };
+    let mut o7 = Vec::new();
+    o7.push(MachineSize { num_bits: 0 });
+    let nz = LayoutShape {
+        fields: FieldsShape::Arbitrary { offsets: o7 },
+        variants: VariantsShape::Single { index: 0 },
+        abi: Json::Null,
+        abi_align: 1,
+        size: MachineSize { num_bits: 8 },
+    };
     let mut layouts = Vec::new();
     layouts.push(LayoutRow { ty: 6, shape });
+    layouts.push(LayoutRow { ty: 7, shape: nz });
     krate(Vec::new(), Vec::new(), Vec::new(), tys, adts, layouts)
 }
 
@@ -650,8 +796,8 @@ pub proof fn fact_niche(m: MirCrate, a: Allocation)
     assert(le(a, 0, 1) == Some(0nat));
     assert(tag_variant(m.adts@[0], l.variants->Multiple_tag_encoding, 0, 8) == Some(0nat));
     assert(adt_sel(m.adts@[0], l, a, 0) == Some((0nat, Seq::<MachineSize>::empty())));
-    assert(dfuel(m) == 2);
-    assert(dec_adt(m, 6, a, 0, 1) == Some((Val::Adt(0, seq![]), 1nat)));
+    assert(dfuel(m) == 5);
+    assert(dec_adt(m, 6, a, 0, 4) == Some((Val::Adt(0, seq![]), 1nat)));
 }
 
 // ================================================================== 4. a call with a `&mut` argument
@@ -664,15 +810,16 @@ pub proof fn fact_niche(m: MirCrate, a: Allocation)
 // written back to the caller's `_1`. Steps: `_2 = &mut _1` 1 + the Call 1 + f's (assign 1 +
 // return 1) + the caller's return 1 = 5. Events: none. Fuel: the callee runs on fuel - 1.
 
-pub open spec fn call_ok(m: MirCrate) -> bool {
+pub open spec fn callc_ok(m: MirCrate) -> bool {
     m.insts@.len() == 2 && m.insts@[0].id == 0 && m.insts@[1].id == 1 && m.insts@[0].kind is Item && m.insts@[1].kind is Item
     && m.insts@[0].body is Some && m.insts@[1].body is Some && m.insts@[1].key@.len() == 0
-    && m.tys@.len() == 2 && m.tys@[0].id == 2 && (m.tys@[0].kind matches TyKind::RigidTy(RigidTy::Uint(UintTy::U8)))
+    && m.tys@.len() == 3 && m.tys@[0].id == 2 && (m.tys@[0].kind matches TyKind::RigidTy(RigidTy::Uint(UintTy::U8)))
     && m.tys@[1].id == 4 && (m.tys@[1].kind matches TyKind::RigidTy(RigidTy::Ref(_, p, mu)) && p == 2 && mu is Mut)
+    && m.tys@[2].id == 10 && (m.tys@[2].kind matches TyKind::RigidTy(RigidTy::Tuple(ts)) && ts@.len() == 0)
     && m.calls@.len() == 1 && m.calls@[0].fn_ty == 8 && m.calls@[0].resolved == Some(1usize) && m.calls@[0].args.0@.len() == 0
     && {
         let c = m.insts@[0].body->Some_0;
-        c.arg_count == 1 && c.locals@.len() == 3 && c.locals@[1].ty == 2 && c.locals@[2].ty == 4 && c.blocks@.len() == 2
+        c.arg_count == 1 && c.locals@.len() == 3 && c.locals@[0].ty == 10 && c.locals@[1].ty == 2 && c.locals@[2].ty == 4 && c.blocks@.len() == 2
         && c.blocks@[0].statements@.len() == 1
         && (c.blocks@[0].statements@[0].kind matches StatementKind::Assign(p, rv) && local0(p, 2)
             && (rv matches Rvalue::Ref(_, bk, q) && bk is Mut && local0(q, 1)))
@@ -683,7 +830,7 @@ pub open spec fn call_ok(m: MirCrate) -> bool {
     }
     && {
         let f = m.insts@[1].body->Some_0;
-        f.arg_count == 1 && f.locals@.len() == 2 && f.locals@[1].ty == 4 && f.blocks@.len() == 1
+        f.arg_count == 1 && f.locals@.len() == 2 && f.locals@[0].ty == 10 && f.locals@[1].ty == 4 && f.blocks@.len() == 1
         && f.blocks@[0].statements@.len() == 1
         && (f.blocks@[0].statements@[0].kind matches StatementKind::Assign(p, rv) && p.local == 1 && p.projection@.len() == 1
             && p.projection@[0] is Deref && (rv matches Rvalue::Use(x, _) && cint(x, 2, b1(7))))
@@ -695,7 +842,7 @@ fn zst_fn(ty: Ty) -> (op: Operand) ensures op matches Operand::Constant(k) && k.
     Operand::Constant(ConstOperand { span: 0, user_ty: Json::Null, const_: MirConst { kind: ConstantKind::ZeroSized, ty, id: 0 } })
 }
 
-pub fn call_crate() -> (m: MirCrate) ensures call_ok(m) {
+pub fn call_crate() -> (m: MirCrate) ensures callc_ok(m) {
     let mut cs = Vec::new();
     cs.push(stmt(StatementKind::Assign(place0(2), Rvalue::Ref(Json::Null, BorrowKind::Mut { kind: Json::Null }, place0(1)))));
     let mut args = Vec::new();
@@ -723,18 +870,19 @@ pub fn call_crate() -> (m: MirCrate) ensures call_ok(m) {
     let mut tys = Vec::new();
     tys.push(uint(2, UintTy::U8));
     tys.push(ref_row(4, 2, Mutability::Mut));
+    tys.push(TyRow { id: 10, kind: TyKind::RigidTy(RigidTy::Tuple(Vec::new())) });
     krate(insts, calls, Vec::new(), tys, Vec::new(), Vec::new())
 }
 
 pub open spec fn l1() -> Loc { Loc { root: Root::Local(1), path: seq![] } }
 pub open spec fn s0() -> Loc { Loc { root: Root::Slot(0), path: seq![] } }
 
-pub open spec fn cfr_in(x: u128) -> Frame { Frame { locals: seq![Val::Unit, Val::Mut(s0())], slots: seq![Val::Int(x)] } }
-pub open spec fn cfr_out() -> Frame { Frame { locals: seq![Val::Unit, Val::Mut(s0())], slots: seq![Val::Int(7)] } }
+pub open spec fn cfr_in(x: u128) -> Frame { Frame { locals: seq![unit_val(), Val::Mut(s0())], slots: seq![Val::Int(x)] } }
+pub open spec fn cfr_out() -> Frame { Frame { locals: seq![unit_val(), Val::Mut(s0())], slots: seq![Val::Int(7)] } }
 
 /// The callee's `(*_1) = 7`: `_1` holds `Mut(Slot(0))`, so the write lands in slot 0. Cost 1.
 proof fn callee_stmt(m: MirCrate, x: u128)
-    requires call_ok(m),
+    requires callc_ok(m),
     ensures exec_stmt(m, m.insts@[1].body->Some_0, cfr_in(x), (m.insts@[1].body->Some_0).blocks@[0].statements@[0])
         == Some((cfr_out(), Seq::<Event>::empty(), 1nat)),
 {
@@ -753,17 +901,18 @@ proof fn callee_stmt(m: MirCrate, x: u128)
 
 /// The callee runs its one block: 1 + the Return's 1 = 2 steps.
 proof fn call_callee(m: MirCrate, pol: CallPolicy, x: u128, fuel: nat)
-    requires call_ok(m), fuel >= 1,
-    ensures mir_run_fn(m, pol, 1, cfr_in(x), fuel) == Some((cfr_out(), Seq::<Event>::empty(), 2nat)),
+    requires callc_ok(m), fuel >= 1,
+    ensures mir_run(m, pol, 1, cfr_in(x), fuel) == Out::Done(cfr_out(), Seq::<Event>::empty(), 2nat),
 {
     let f = m.insts@[1].body->Some_0;
     let e = Seq::<Event>::empty();
     assert(e + e =~= e);
+    callee_block_ok(m, pol);
     callee_stmt(m, x);
     assert(exec_stmts(m, f, cfr_in(x), f.blocks@[0].statements@, 0) == Some((cfr_in(x), e, 0nat)));
     assert(exec_stmts(m, f, cfr_in(x), f.blocks@[0].statements@, 1) == Some((cfr_out(), e, 1nat)));
-    assert(step_term(m, pol, f, f.blocks@[0].terminator.kind, cfr_out(), fuel) == Some(Step::Done(cfr_out(), e, 1nat)));
-    assert(run_block(m, pol, f, 0, cfr_in(x), fuel) == Some((cfr_out(), e, 2nat)));
+    assert(step_term(m, pol, f, f.blocks@[0].terminator.kind, cfr_out(), fuel) == Step::Stop(Out::Done(cfr_out(), e, 1nat)));
+    assert(run_block(m, pol, f, 0, cfr_in(x), fuel) == Out::Done(cfr_out(), e, 2nat));
 }
 
 /// A u8 constant in a crate whose `tys` has `u8` (id 2) first.
@@ -779,8 +928,8 @@ proof fn tiny_const_any(m: MirCrate, fr: Frame, op: Operand, x: u8)
     assert(dfuel(m) > 0) by (nonlinear_arith) requires dfuel(m) == (m.tys@.len() + 1) * (m.allocs@.len() + 1);
 }
 
-pub open spec fn call_fr1(x: u128) -> Frame { Frame { locals: seq![Val::Unit, Val::Int(x), Val::Mut(l1())], slots: seq![] } }
-pub open spec fn call_fr2() -> Frame { Frame { locals: seq![Val::Unit, Val::Int(7), Val::Mut(l1())], slots: seq![] } }
+pub open spec fn call_fr1(x: u128) -> Frame { Frame { locals: seq![unit_val(), Val::Int(x), Val::Mut(l1())], slots: seq![] } }
+pub open spec fn call_fr2() -> Frame { Frame { locals: seq![unit_val(), Val::Int(7), Val::Mut(l1())], slots: seq![] } }
 
 /// The empty key names no std-model row.
 proof fn call_not_std(m: MirCrate, g: GenericArgs)
@@ -805,9 +954,69 @@ proof fn call_not_std(m: MirCrate, g: GenericArgs)
     assert(b"vstd::prelude::Ghost::assume_new_fallback"@.len() > 0);
 }
 
+/// `()` (ty 10) is unit-like: `Tup([])`; `u8` and `&mut u8` are not.
+proof fn call_unit(m: MirCrate)
+    requires callc_ok(m),
+    ensures unit_like(m, 10, tfuel(m), false) == Some((unit_val(), 0nat)), unit_like(m, 2, tfuel(m), false) is None,
+        unit_like(m, 4, tfuel(m), false) is None, tfuel(m) == 4,
+{
+    reveal_with_fuel(find_from, 4);
+    let ts = (m.tys@[2].kind->RigidTy_0)->Tuple_0@;
+    assert(unit_likes(m, ts, 3, 0, false) == Some((Seq::<Val>::empty(), 0nat)));
+    assert(unit_val() == Val::Tup(Seq::<Val>::empty()));
+}
+
+/// f's signature: returns `()`, takes `&mut u8`.
+proof fn callee_sig_ok(m: MirCrate)
+    requires callc_ok(m),
+    ensures sig_ok(m, m.insts@[1].body->Some_0),
+{
+    reveal_with_fuel(find_from, 4);
+    assert(ty_free(m, 10, 4, false));
+    assert(ty_free(m, 2, 3, false));
+}
+
+/// f's block passes the static subset gate.
+proof fn callee_block_ok(m: MirCrate, pol: CallPolicy)
+    requires callc_ok(m),
+    ensures block_ok(m, pol, m.insts@[1].body->Some_0, (m.insts@[1].body->Some_0).blocks@[0]),
+{
+    reveal(block_ok);
+    reveal_with_fuel(find_from, 4);
+    let f = m.insts@[1].body->Some_0;
+    let fs = f.blocks@[0].statements@[0];
+    tiny_const_any(m, Frame { locals: seq![], slots: seq![] }, fs.kind->Assign_1->Use_0, 7);
+    let ps = (fs.kind->Assign_0).projection@;
+    assert(rigid(m, 4) matches Some(RigidTy::Ref(_, p, mu)) && p == 2 && mu is Mut);
+    assert(!(rigid(m, 2) matches Some(RigidTy::Str)));
+    assert(proj_ty(m, 4, ps[0]) == Some(2usize));
+    assert(proj_ok(m, f, 4, ps[0], true));
+    assert(path_ok(m, f, 4, ps, 0, true));
+    assert(tys_along(m, 4, ps, 0) == Some(4usize));
+    assert(path_ok(m, f, 4, ps, 1, true));
+    assert(stmt_ok(m, f, fs));
+}
+
+/// The caller's two blocks pass the static subset gate.
+proof fn caller_blocks_ok(m: MirCrate, pol: CallPolicy)
+    requires callc_ok(m), !pol.declassify.contains(Seq::<u8>::empty()), !pol.ghost_unit.contains(Seq::<u8>::empty()),
+    ensures block_ok(m, pol, m.insts@[0].body->Some_0, (m.insts@[0].body->Some_0).blocks@[0]),
+        block_ok(m, pol, m.insts@[0].body->Some_0, (m.insts@[0].body->Some_0).blocks@[1]),
+{
+    reveal(block_ok);
+    reveal_with_fuel(find_from, 4);
+    let c = m.insts@[0].body->Some_0;
+    call_not_std(m, m.calls@[0].args);
+    callee_sig_ok(m);
+    assert(m.insts@[1].key@ =~= Seq::<u8>::empty());
+    assert(stmt_ok(m, c, c.blocks@[0].statements@[0]));
+    assert(callee_of(m, c.blocks@[0].terminator.kind->Call_func) == Some((1nat, m.calls@[0].args)));
+    assert(term_ok(m, pol, c, c.blocks@[0].terminator.kind));
+}
+
 /// Entering f: `_2`'s location passes the `&mut` check, slot 0 gets `_1`'s value `x`.
 proof fn call_enter(m: MirCrate, x: u128)
-    requires call_ok(m),
+    requires callc_ok(m),
     ensures args_ok(m, m.insts@[1].body->Some_0, call_fr1(x), seq![Val::Mut(l1())]),
         call_slots(m, m.insts@[1].body->Some_0, call_fr1(x), seq![Val::Mut(l1())]) == seq![Val::Int(x)],
         mir_entry(m, 1, seq![Val::Mut(l1())], seq![Val::Int(x)]) == cfr_in(x),
@@ -818,16 +1027,17 @@ proof fn call_enter(m: MirCrate, x: u128)
     assert(is_mut_ref(m, 4));
     assert(arg_ok(m, f, call_fr1(x), vs, 0));
     assert(call_slots(m, f, call_fr1(x), vs) =~= seq![Val::Int(x)]);
+    call_unit(m);
     assert(mir_entry(m, 1, vs, seq![Val::Int(x)]).locals =~= cfr_in(x).locals);
 }
 
-pub open spec fn call_fw() -> Frame { Frame { locals: seq![Val::Unit, Val::Int(7), Val::Mut(l1())], slots: seq![] } }
+pub open spec fn call_fw() -> Frame { Frame { locals: seq![unit_val(), Val::Int(7), Val::Mut(l1())], slots: seq![] } }
 
 /// Leaving f: its return value is `Unit` (a `()` body never writes `_0`); slot 0 (7) is written
 /// back to the caller's `_1`.
 proof fn call_leave(m: MirCrate, x: u128)
-    requires call_ok(m),
-    ensures return_to(m, m.insts@[1].body->Some_0, call_fr1(x), seq![Val::Mut(l1())], cfr_out()) == Some((Val::Unit, call_fw())),
+    requires callc_ok(m),
+    ensures return_to(m, m.insts@[1].body->Some_0, call_fr1(x), seq![Val::Mut(l1())], cfr_out()) == Some((unit_val(), call_fw())),
 {
     reveal_with_fuel(find_from, 3);
     let f = m.insts@[1].body->Some_0;
@@ -841,9 +1051,9 @@ proof fn call_leave(m: MirCrate, x: u128)
 
 /// The caller's Call terminator: 1 + the callee's 2 = 3 steps; `_1` is 7 afterwards.
 proof fn call_term(m: MirCrate, pol: CallPolicy, x: u128, fuel: nat)
-    requires call_ok(m), fuel >= 2, !pol.declassify.contains(Seq::<u8>::empty()), !pol.ghost_unit.contains(Seq::<u8>::empty()),
+    requires callc_ok(m), fuel >= 2, !pol.declassify.contains(Seq::<u8>::empty()), !pol.ghost_unit.contains(Seq::<u8>::empty()),
     ensures step_term(m, pol, m.insts@[0].body->Some_0, (m.insts@[0].body->Some_0).blocks@[0].terminator.kind, call_fr1(x), fuel)
-        == Some(Step::Jump(1, call_fr2(), Seq::<Event>::empty(), 3nat)),
+        == Step::Jump(1, call_fr2(), Seq::<Event>::empty(), 3nat),
 {
     let c = m.insts@[0].body->Some_0;
     let t = c.blocks@[0].terminator.kind;
@@ -863,16 +1073,18 @@ proof fn call_term(m: MirCrate, pol: CallPolicy, x: u128, fuel: nat)
     call_enter(m, x);
     call_callee(m, pol, x, (fuel - 1) as nat);
     call_leave(m, x);
-    assert(store(call_fw(), Loc { root: Root::Local(0), path: seq![] }, Val::Unit) == Some(call_fr2())) by {
-        assert(call_fw().locals.update(0, Val::Unit) =~= call_fr2().locals);
+    let f = m.insts@[1].body->Some_0;
+    assert(body_call(m, pol, 1, f, vs, fr, fuel) == Ok::<(Val, Frame, Seq<Event>, nat), Out>((unit_val(), call_fw(), e, 2nat)));
+    assert(store(call_fw(), Loc { root: Root::Local(0), path: seq![] }, unit_val()) == Some(call_fr2())) by {
+        assert(call_fw().locals.update(0, unit_val()) =~= call_fr2().locals);
     };
 }
 
-pub open spec fn call_fr0(x: u128) -> Frame { Frame { locals: seq![Val::Unit, Val::Int(x), Val::Unit], slots: seq![] } }
+pub open spec fn call_fr0(x: u128) -> Frame { Frame { locals: seq![unit_val(), Val::Int(x), Val::Unit], slots: seq![] } }
 
 /// The caller's `_2 = &mut _1`: `Mut` of `_1`'s location. Cost 1.
 proof fn caller_stmt(m: MirCrate, x: u128)
-    requires call_ok(m),
+    requires callc_ok(m),
     ensures exec_stmt(m, m.insts@[0].body->Some_0, call_fr0(x), (m.insts@[0].body->Some_0).blocks@[0].statements@[0])
         == Some((call_fr1(x), Seq::<Event>::empty(), 1nat)),
 {
@@ -889,25 +1101,27 @@ proof fn caller_stmt(m: MirCrate, x: u128)
 /// **Fact 4.** The `&mut` argument's pointee is copied into the callee's slot, written there, and
 /// written back to the caller's `_1` on return: `_1 == 7`, 5 steps, no events.
 pub proof fn fact_mut_call(m: MirCrate, pol: CallPolicy, x: u128, fuel: nat)
-    requires call_ok(m), fuel >= 2, !pol.declassify.contains(Seq::<u8>::empty()), !pol.ghost_unit.contains(Seq::<u8>::empty()),
+    requires callc_ok(m), fuel >= 2, !pol.declassify.contains(Seq::<u8>::empty()), !pol.ghost_unit.contains(Seq::<u8>::empty()),
     ensures mir_run_fn(m, pol, 0, mir_entry(m, 0, seq![Val::Int(x)], seq![]), fuel) == Some((call_fr2(), Seq::<Event>::empty(), 5nat)),
         call_fr2().locals[1] == Val::Int(7),
 {
-    reveal_with_fuel(find_from, 2);
+    reveal_with_fuel(find_from, 3);
     let c = m.insts@[0].body->Some_0;
     let e = Seq::<Event>::empty();
     assert(e + e =~= e);
     assert(e + e + e =~= e);
     assert(!is_mut_ref(m, 2));
+    call_unit(m);
+    caller_blocks_ok(m, pol);
     assert(mir_entry(m, 0, seq![Val::Int(x)], seq![]).locals =~= call_fr0(x).locals);
     caller_stmt(m, x);
     assert(exec_stmts(m, c, call_fr0(x), c.blocks@[0].statements@, 0) == Some((call_fr0(x), e, 0nat)));
     assert(exec_stmts(m, c, call_fr0(x), c.blocks@[0].statements@, 1) == Some((call_fr1(x), e, 1nat)));
     call_term(m, pol, x, fuel);
     assert(exec_stmts(m, c, call_fr2(), c.blocks@[1].statements@, 0) == Some((call_fr2(), e, 0nat)));
-    assert(step_term(m, pol, c, c.blocks@[1].terminator.kind, call_fr2(), (fuel - 1) as nat) == Some(Step::Done(call_fr2(), e, 1nat)));
-    assert(run_block(m, pol, c, 1, call_fr2(), (fuel - 1) as nat) == Some((call_fr2(), e, 1nat)));
-    assert(run_block(m, pol, c, 0, call_fr0(x), fuel) == Some((call_fr2(), e, 5nat)));
+    assert(step_term(m, pol, c, c.blocks@[1].terminator.kind, call_fr2(), (fuel - 1) as nat) == Step::Stop(Out::Done(call_fr2(), e, 1nat)));
+    assert(run_block(m, pol, c, 1, call_fr2(), (fuel - 1) as nat) == Out::Done(call_fr2(), e, 1nat));
+    assert(run_block(m, pol, c, 0, call_fr0(x), fuel) == Out::Done(call_fr2(), e, 5nat));
 }
 
 // ================================================================== 5. the event order of a projection
@@ -962,11 +1176,252 @@ pub proof fn fact_proj_order(fr: Frame, p: Place, vs: Seq<Val>, ws: Seq<Val>, i:
     };
 }
 
+// ------------------------------------------------------------------ 3b. the untagged niche variant
+//
+// The same `Option<NonZeroU8>` with byte 5: t = 5, rel = (5 - 0) mod 2^8 = 5 > 0 - 0, so the untagged
+// variant 1 (Some), whose one field (NonZeroU8, ty 7) sits at offset 0. NonZeroU8 is a struct
+// (`Single { index: 0 }`) of one `u8 is 1..` field (ty 8, a pattern over u8, ty 9) at offset 0.
+// Value: `Adt(1, [Adt(0, [Int(5)])])`, 2 ADT nodes. Fuel: dfuel = (4 + 1) * (0 + 1) = 5, one level
+// per type: 6 (5), 7 (4 via dec_adt; dec at 4), 8 (3), 9 (2).
+
+proof fn niche_inner(m: MirCrate, a: Allocation)
+    requires niche_ok(m), a.bytes@ == b1(5), a.provenance.ptrs@.len() == 0,
+    ensures dec(m, 7, a, 0, 4) == Some((Val::Adt(0, seq![Val::Int(5)]), 1nat)),
+{
+    reveal_with_fuel(find_from, 4);
+    reveal_with_fuel(le, 2);
+    assert(le(a, 0, 1) == Some(5nat));
+    assert(dec(m, 9, a, 0, 2) == Some((Val::Int(5), 0nat)));
+    assert(dec(m, 8, a, 0, 3) == Some((Val::Int(5), 0nat)));
+    let fs = m.adts@[1].variants@[0].fields@;
+    let os = (m.layouts@[1].shape.fields)->Arbitrary_offsets@;
+    assert(adt_sel(m.adts@[1], m.layouts@[1].shape, a, 0) == Some((0nat, os)));
+    assert(dec_fields(m, fs, os, a, 0, 3, 0) == Some((Seq::<Val>::empty(), 0nat)));
+    assert(seq![].push(Val::Int(5)) =~= seq![Val::Int(5)]);
+    assert(dec_fields(m, fs, os, a, 0, 3, 1) == Some((seq![Val::Int(5)], 0nat)));
+    assert(dec_adt(m, 7, a, 0, 3) == Some((Val::Adt(0, seq![Val::Int(5)]), 1nat)));
+}
+
+/// **Fact 3b.** Byte 5 decodes to `Some(NonZeroU8(5))` = `Adt(1, [Adt(0, [Int(5)])])`, 2 nodes.
+pub proof fn fact_niche_untagged(m: MirCrate, a: Allocation)
+    requires niche_ok(m), a.bytes@ == b1(5), a.provenance.ptrs@.len() == 0,
+    ensures dec(m, 6, a, 0, dfuel(m)) == Some((Val::Adt(1, seq![Val::Adt(0, seq![Val::Int(5)])]), 2nat)),
+{
+    reveal_with_fuel(find_from, 4);
+    reveal_with_fuel(le, 2);
+    vstd::arithmetic::power2::lemma2_to64();
+    let l = m.layouts@[0].shape;
+    assert(le(a, 0, 1) == Some(5nat));
+    assert(tag_variant(m.adts@[0], l.variants->Multiple_tag_encoding, 5, 8) == Some(1nat));
+    let os = (l.variants->Multiple_variants)@[1].offsets@;
+    assert(adt_sel(m.adts@[0], l, a, 0) == Some((1nat, os)));
+    niche_inner(m, a);
+    let fs = m.adts@[0].variants@[1].fields@;
+    let v = Val::Adt(0, seq![Val::Int(5)]);
+    assert(dec_fields(m, fs, os, a, 0, 4, 0) == Some((Seq::<Val>::empty(), 0nat)));
+    assert(seq![].push(v) =~= seq![v]);
+    assert(dec_fields(m, fs, os, a, 0, 4, 1) == Some((seq![v], 1nat)));
+    assert(dfuel(m) == 5);
+    assert(dec_adt(m, 6, a, 0, 4) == Some((Val::Adt(1, seq![v]), 2nat)));
+}
+
+// ------------------------------------------------------------------ 3c. a `Direct` tag
+//
+// `enum Code { A(u64) = 3, B(u64) = 7 }`: the layout shape of the fixture `ct_fixtures::fx::Code`
+// (T3 dump: tag I64 at offset 0, `Direct`, both variants' field at bit 64, size 128), with the
+// discriminants set to 3 and 7 so the tag differs from the variant index. Bytes: tag 7 (LE), then
+// 9. t = 7; variant 0 has discr 3 mod 2^64 = 3 != 7, variant 1 has 7 mod 2^64 = 7: variant 1. Its
+// u64 field at byte 64 / 8 = 8 is 9. Value `Adt(1, [Int(9)])`, 1 ADT node. dfuel = (2 + 1) * 1 = 3.
+
+pub open spec fn b16(t: u8, x: u8) -> Seq<Option<u8>> { b8(t) + b8(x) }
+
+pub open spec fn direct_ok(m: MirCrate) -> bool {
+    m.tys@.len() == 2 && m.allocs@.len() == 0
+    && m.tys@[0].id == 12 && (m.tys@[0].kind matches TyKind::RigidTy(RigidTy::Adt(_, _)))
+    && m.tys@[1].id == 13 && (m.tys@[1].kind matches TyKind::RigidTy(RigidTy::Uint(UintTy::U64)))
+    && m.adts@.len() == 1 && m.adts@[0].ty == 12 && !m.adts@[0].is_box && m.adts@[0].kind is Enum
+    && m.adts@[0].variants@.len() == 2 && m.adts@[0].variants@[0].discr == Some(3u128) && m.adts@[0].variants@[1].discr == Some(7u128)
+    && m.adts@[0].variants@[1].fields@.len() == 1 && m.adts@[0].variants@[1].fields@[0] == 13
+    && m.layouts@.len() == 1 && m.layouts@[0].ty == 12
+    && {
+        let l = m.layouts@[0].shape;
+        (l.fields matches FieldsShape::Arbitrary { offsets } && offsets@.len() == 1 && offsets@[0].num_bits == 0)
+        && (l.variants matches VariantsShape::Multiple { tag, tag_encoding, tag_field, variants }
+            && tag_field == 0 && variants@.len() == 2 && variants@[1].offsets@.len() == 1 && variants@[1].offsets@[0].num_bits == 64
+            && (tag matches Scalar::Initialized { value, .. } && (value matches Primitive::Int { length, .. } && length is I64))
+            && tag_encoding is Direct)
+    }
+}
+
+fn ms(bits: usize) -> (v: Vec<MachineSize>) ensures v@.len() == 1, v@[0].num_bits == bits {
+    let mut v = Vec::new();
+    v.push(MachineSize { num_bits: bits });
+    v
+}
+
+pub fn direct_crate() -> (m: MirCrate) ensures direct_ok(m) {
+    let mut tys = Vec::new();
+    tys.push(TyRow { id: 12, kind: TyKind::RigidTy(RigidTy::Adt(2, GenericArgs(Vec::new()))) });
+    tys.push(uint(13, UintTy::U64));
+    let mut fa = Vec::new();
+    fa.push(13);
+    let mut fb = Vec::new();
+    fb.push(13);
+    let mut vars = Vec::new();
+    vars.push(AdtVariant { discr: Some(3), fields: fa });
+    vars.push(AdtVariant { discr: Some(7), fields: fb });
+    let mut adts = Vec::new();
+    adts.push(Adt { ty: 12, name: Vec::new(), kind: AdtKind::Enum, is_box: false, variants: vars });
+    let mut vf = Vec::new();
+    vf.push(VariantFields { offsets: ms(64) });
+    vf.push(VariantFields { offsets: ms(64) });
+    let tag = Scalar::Initialized {
+        value: Primitive::Int { length: IntegerLength::I64, signed: false },
+        valid_range: WrappingRange { start: 3, end: 7 },
+    };
+    let shape = LayoutShape {
+        fields: FieldsShape::Arbitrary { offsets: ms(0) },
+        variants: VariantsShape::Multiple { tag, tag_encoding: TagEncoding::Direct, tag_field: 0, variants: vf },
+        abi: Json::Null,
+        abi_align: 8,
+        size: MachineSize { num_bits: 128 },
+    };
+    let mut layouts = Vec::new();
+    layouts.push(LayoutRow { ty: 12, shape });
+    krate(Vec::new(), Vec::new(), Vec::new(), tys, adts, layouts)
+}
+
+proof fn direct_le(a: Allocation)
+    requires a.bytes@ == b16(7, 9), a.provenance.ptrs@.len() == 0,
+    ensures le(a, 0, 8) == Some(7nat), le(a, 8, 8) == Some(9nat),
+{
+    reveal_with_fuel(le, 9);
+    assert(le(a, 7, 1) == Some(0nat));
+    assert(le(a, 15, 1) == Some(0nat));
+}
+
+/// **Fact 3c.** The `Direct`-tagged constant decodes to `Adt(1, [Int(9)])`, 1 node.
+pub proof fn fact_direct(m: MirCrate, a: Allocation)
+    requires direct_ok(m), a.bytes@ == b16(7, 9), a.provenance.ptrs@.len() == 0,
+    ensures dec(m, 12, a, 0, dfuel(m)) == Some((Val::Adt(1, seq![Val::Int(9)]), 1nat)),
+{
+    reveal_with_fuel(find_from, 3);
+    vstd::arithmetic::power2::lemma2_to64();
+    vstd::arithmetic::power2::lemma2_to64_rest();
+    direct_le(a);
+    let row = m.adts@[0];
+    let l = m.layouts@[0].shape;
+    let p = |v: AdtVariant| v.discr is Some && (v.discr->Some_0 as int) % (pow2(64) as int) == 7int;
+    assert(!p(row.variants@[0]));
+    assert(p(row.variants@[1]));
+    assert(tag_variant(row, TagEncoding::Direct, 7, 64) == Some(1nat));
+    let os = (l.variants->Multiple_variants)@[1].offsets@;
+    assert(adt_sel(row, l, a, 0) == Some((1nat, os)));
+    assert(rd_int(a, 8, CTy::U64) == Some(9u128));
+    assert(dec(m, 13, a, 8, 2) == Some((Val::Int(9), 0nat)));
+    let fs = row.variants@[1].fields@;
+    assert(dec_fields(m, fs, os, a, 0, 2, 0) == Some((Seq::<Val>::empty(), 0nat)));
+    assert(seq![].push(Val::Int(9)) =~= seq![Val::Int(9)]);
+    assert(dec_fields(m, fs, os, a, 0, 2, 1) == Some((seq![Val::Int(9)], 0nat)));
+    assert(dec_adt(m, 12, a, 0, 2) == Some((Val::Adt(1, seq![Val::Int(9)]), 1nat)));
+    assert(dfuel(m) == 3);
+}
+
+// ------------------------------------------------------------------ 3d. a `&str` constant
+//
+// `&str` (ty 20 = `&'static str`, ty 21 = `str`) decodes to the opaque `Unit`, whatever its bytes,
+// with no charge (`str` is unsized, so `&str` is not `&ZST`), and `Unit` is a well-typed `&str`.
+
+pub open spec fn str_ok(m: MirCrate) -> bool {
+    m.tys@.len() == 2 && m.allocs@.len() == 0
+    && m.tys@[0].id == 20 && (m.tys@[0].kind matches TyKind::RigidTy(RigidTy::Ref(_, p, mu)) && p == 21 && mu is Not)
+    && m.tys@[1].id == 21 && (m.tys@[1].kind matches TyKind::RigidTy(RigidTy::Str))
+}
+
+pub fn str_crate() -> (m: MirCrate) ensures str_ok(m) {
+    let mut tys = Vec::new();
+    tys.push(ref_row(20, 21, Mutability::Not));
+    tys.push(TyRow { id: 21, kind: TyKind::RigidTy(RigidTy::Str) });
+    krate(Vec::new(), Vec::new(), Vec::new(), tys, Vec::new(), Vec::new())
+}
+
+proof fn prov_none(a: Allocation, off: nat)
+    requires a.provenance.ptrs@.len() == 0,
+    ensures prov_at(a, off) is None,
+{
+    assert(find_from(a.provenance.ptrs@, |e: (usize, AllocId)| e.0 as nat == off, 0) is None);
+}
+
+/// **Fact 3d.**
+pub proof fn fact_str(m: MirCrate, a: Allocation)
+    requires str_ok(m), a.provenance.ptrs@.len() == 0,
+    ensures decode_const(m, 20, a, 0) == Some(Val::Unit), !charged(m, 20), wt_val(m, 20, Val::Unit),
+{
+    reveal_with_fuel(find_from, 3);
+    prov_none(a, 0);
+    assert(dfuel(m) == 3) by (nonlinear_arith) requires dfuel(m) == (m.tys@.len() + 1) * (m.allocs@.len() + 1), m.tys@.len() == 2, m.allocs@.len() == 0;
+    assert(dec_ref(m, 21, a, 0, 2) == Some((Val::Unit, 0nat)));
+    assert(dec(m, 20, a, 0, 3) == Some((Val::Unit, 0nat)));
+    assert(!is_zst(m, 21));
+    assert(m.tys@[0].id == 20 && m.tys@[1].id == 21);
+    assert(ty_kind(m, 21) == Some(m.tys@[1].kind));
+    assert(rigid(m, 21) matches Some(RigidTy::Str));
+    assert(rigid(m, 20) matches Some(RigidTy::Ref(_, p, mu)) && p == 21 && mu is Not);
+    assert(ty_free(m, 21, 2, false));
+    assert(ty_free(m, 20, 3, true));
+}
+
+// ================================================================== 6. tiny is in the subset
+//
+// The witness: the closure `{0}` (tiny calls nothing) and its blocks `{0, 1}` (bb0's Assert goes to
+// bb1; bb1 returns). Its signature (`&[u8; 4], usize -> u8`) and locals are free of `&mut`, `Box`
+// and the rest; both blocks pass `block_ok`. So by `theorem_in_subset_no_unsup` no run of tiny is
+// `Unsup`.
+
+proof fn tiny_types_ok(m: MirCrate)
+    requires tiny_ok(m),
+    ensures sig_ok(m, tb(m)), locals_ok(m, tb(m)),
+{
+    tiny_tys(m);
+    reveal_with_fuel(find_from, 7);
+    let b = tb(m);
+    assert(ty_free(m, 2, 5, false));
+    assert(ty_free(m, 11, 6, false));
+    assert(ty_free(m, 3, 7, false));
+    assert(ty_free(m, 3, 7, true));
+    assert(ty_free(m, 2, 7, true) && ty_free(m, 1, 7, true) && ty_free(m, 7, 7, true));
+    assert(ty_free(m, 2, 6, true));
+    assert(ty_free(m, 9, 7, true));
+    assert(ty_free(m, 2, 7, false) && ty_free(m, 1, 7, false));
+    assert forall|k: int| 0 <= k < b.locals@.len() implies ty_free(m, #[trigger] b.locals@[k].ty, tfuel(m), true) by {
+        if k == 0 {} else if k == 1 {} else if k == 2 {} else if k == 3 {} else if k == 4 {} else if k == 5 {} else {}
+    };
+}
+
+/// **Fact 6.**
+pub proof fn fact_tiny_in_subset(m: MirCrate, pol: CallPolicy)
+    requires tiny_ok(m),
+    ensures in_subset(m, pol, 0),
+{
+    let s = set![0nat];
+    let rs = |j: nat| set![0nat, 1nat];
+    tiny_types_ok(m);
+    tiny_blocks_ok(m, pol);
+    let b = tb(m);
+    assert(body_in(m, pol, s, rs, 0)) by {
+        assert forall|bb: nat| #[trigger] rs(0).contains(bb) implies bb < b.blocks@.len() && block_ok(m, pol, b, b.blocks@[bb as int])
+            && succs_in(b.blocks@[bb as int].terminator.kind, rs(0)) && callees_in(m, pol, b, b.blocks@[bb as int].terminator.kind, s) by {
+            assert(bb == 0 || bb == 1);
+        };
+    };
+    assert(closed(m, pol, s, rs));
+}
+
 // ------------------------------------------------------------------ the builders run
 
 #[test]
 fn sanity_builders() {
-    let _ = (tiny_crate(), drop_crate(), niche_crate(), call_crate(), index2_place());
+    let _ = (tiny_crate(), drop_crate(), niche_crate(), direct_crate(), str_crate(), call_crate(), index2_place());
 }
 
 } // verus!
