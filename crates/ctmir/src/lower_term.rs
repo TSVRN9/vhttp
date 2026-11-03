@@ -204,6 +204,7 @@ pub fn lower_term(m: &MirCrate, pol: &Policy, order: &Vec<usize>, keys: &mut Key
 
 /// `Drop` through its `drops` row: an empty shim or the `Vec<int>` leaf is a `Goto`; any other
 /// glue is a `Call` of the glue fn on a fresh `&mut place` temp, into a fresh `Unit` temp.
+#[allow(unused_variables)] // `pol` is the relation's
 pub fn lower_drop(m: &MirCrate, pol: &Policy, order: &Vec<usize>, b: &Body, tmp: &mut Tmp, s: &Site, t: &Terminator) -> (r: Result<(c::Term, bool), Reject>)
     requires old(tmp).nloc == b.locals@.len(), old(tmp).pre@.len() == 0, t.kind is Drop,
     ensures r matches Ok((ct, _)) ==> term_post(*m, *pol, order@, *b, t.kind, ct, *old(tmp), *final(tmp)),
@@ -359,6 +360,10 @@ proof fn lemma_call_post(m: MirCrate, pol: Policy, ord: Seq<usize>, b: Body, t: 
         },
     ensures term_post(m, pol, ord, b, t, ct, t0, t2),
 {
+    hide(lowers_ops);
+    hide(ops_ok);
+    hide(leaf_ok);
+    hide(sig_ok);
     assert(seg(t0, t2) =~= t2.pre@);
     assert(lowers_term_at(m, pol, ord, b, b.locals@.len(), tbase(t2), t, t2.pre@, ct, tbase(t0)));
 }
