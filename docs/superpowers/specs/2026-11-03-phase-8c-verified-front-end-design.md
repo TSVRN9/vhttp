@@ -126,13 +126,13 @@ dumper builds from query answers, with no conditions.
 ```
 { "crate": "<name>",
   "items":  [ {"def": <DefId>, "name": <str>, "inst": <InstanceDef>|null, "attrs": [<str>…]} … ],
-  "insts":  [ {"id": <InstanceDef>, "name": <str>, "key": <str>, "krate": <str>, "kind": †InstanceKind,
+  "insts":  [ {"id": <InstanceDef>, "def": <DefId>, "name": <str>, "key": <str>, "krate": <str>, "kind": †InstanceKind,
                "body": †Body|null, "fn_sig": †FnSig|null} … ],
-  "calls":  [ {"fn_ty": <Ty>, "def": <FnDef>, "args": †GenericArgs, "resolved": <InstanceDef>|null} … ],
+  "calls":  [ {"fn_ty": <Ty>, "def": <FnDef>, "def_name": <str>, "args": †GenericArgs, "resolved": <InstanceDef>|null} … ],
   "drops":  [ {"ty": <Ty>, "glue": <InstanceDef>, "empty": <bool>} … ],
   "tys":    [ {"id": <Ty>, "kind": †TyKind} … ],
   "adts":   [ {"ty": <Ty>, "name": <str>, "kind": †AdtKind, "is_box": <bool>,
-               "variants": [ {"discr": <u128>, "fields": [<Ty>…]} … ]} … ],
+               "variants": [ {"discr": <u128>|null /* null unless kind is Enum */, "fields": [<Ty>…]} … ]} … ],
   "consts": [ {"id": <TyConstId>, "usize": <u64>|null} … ],
   "layouts":[ {"ty": <Ty>, "shape": †LayoutShape} … ],
   "allocs": [ {"id": <AllocId>, "alloc": †GlobalAlloc} … ],
@@ -151,9 +151,18 @@ already serialized:
 | `tys` | every Ty id reachable from anything above (closure) | `ty.kind()` |
 | `adts` | every `RigidTy::Adt` in `tys` | `def.name()`, `def.kind()`, `def.is_box()`, `discriminant_for_variant`, `ty_with_args` per field |
 | `consts` | every `TyConst` reachable (array lengths, repeat counts) | `eval_target_usize` (`null` on error) |
-| `layouts` | the type of every allocated constant, and their field types, transitively | `ty.layout().shape()` |
+| `layouts` | the type of every allocated constant, then the types a value holds, transitively: ADT fields, tuple, array, slice and pattern elements, `Ref`/`RawPtr` pointees; never `FnPtr`, `Dynamic`, `FnDef`, closures or coroutines (`layout_of` ICEs under binders) | `ty.layout().shape()` |
 | `allocs` | every provenance target, transitively | `GlobalAlloc::from(id)` |
 | `spans` | every Span id reached | `get_filename`, `get_lines().start_line` |
+
+Notes for the consumer:
+- `insts[].def` is the identity the key-ambiguity rule uses: one key may name only one def.
+- `fn_sig` is `ty().kind().fn_sig().skip_binder()`. For drop glue it is `unsafe fn(*mut T)`,
+  while the glue body's argument is `&mut T`.
+- Intrinsic instances can carry a fallback body. `ctmir` decides by `kind`, never by
+  `body != null`.
+- The dumper does not follow `GlobalAlloc::Function` and `Static`. Neither has a table, so a
+  constant that reaches one is `Unresolved`/`Unsupported`.
 
 Every place where the old translator decided something (`own_drop`, `drop_bounded`,
 `is_internal`, `pick_roots`, `bind_key`, `normal_blocks`, the residue) moves into `ctmir`.
