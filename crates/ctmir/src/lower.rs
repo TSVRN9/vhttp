@@ -448,7 +448,6 @@ pub fn lower_rv_place(m: &MirCrate, b: &Body, rv: &Rvalue) -> (r: Result<c::Rval
             let ok = match x_place_ty(m, b, p) {
                 Some(t) => match x_adt_row(m, t) {
                     Some(a) => match a.kind {
-                        AdtKind::Struct => true,
                         AdtKind::Enum => discr_is_index(a),
                         _ => false,
                     },
@@ -457,7 +456,7 @@ pub fn lower_rv_place(m: &MirCrate, b: &Body, rv: &Rvalue) -> (r: Result<c::Rval
                 None => false,
             };
             if ok { Ok(c::Rvalue::Discr(lower_place(m, b, p, false)?)) } else {
-                Err(msg(b"discriminant of an enum with explicit discriminants (or a non-ADT)"))
+                Err(msg(b"discriminant of a struct, of an enum with explicit discriminants, or of a non-ADT"))
             }
         },
         Rvalue::CopyForDeref(p) => Ok(c::Rvalue::Use(c::Operand::Copy(lower_place(m, b, p, false)?))),

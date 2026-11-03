@@ -285,11 +285,11 @@ pub open spec fn two_ops(m: MirCrate, b: Body, x: Operand, y: Operand, cx: c::Op
         && lowers_op(m, b, y, cy, pre.subrange(n as int, pre.len() as int), base + n)
 }
 
-/// Core `Discr` reads the variant index: the place is a struct, or an enum whose discriminants
-/// are the indices.
+/// Core `Discr` reads the variant index: the place is an enum whose discriminants are the indices
+/// (a struct is excluded: sem gives 0 whatever the stored variant, core the stored variant).
 pub open spec fn discr_index(m: MirCrate, b: Body, p: Place) -> bool {
-    place_ty(m, b, p) matches Some(t) && adt_row(m, t) matches Some(a) && (a.kind is Struct
-        || (a.kind is Enum && forall|k: int| 0 <= k < a.variants@.len() ==> (#[trigger] a.variants@[k]).discr == Some(k as u128)))
+    place_ty(m, b, p) matches Some(t) && adt_row(m, t) matches Some(a)
+        && a.kind is Enum && forall|k: int| 0 <= k < a.variants@.len() ==> (#[trigger] a.variants@[k]).discr == Some(k as u128)
 }
 
 pub open spec fn lowers_rv(m: MirCrate, b: Body, rv: Rvalue, cr: c::Rvalue, pre: Seq<c::Stmt>, base: nat) -> bool {
@@ -416,7 +416,7 @@ pub open spec fn lowers_call(m: MirCrate, pol: Policy, ord: Seq<usize>, b: Body,
     tb: BasicBlockIdx, pre: Seq<c::Stmt>, base: nat, ct: c::Term) -> bool
 {
     callee_of(m, func) matches Some((j, g)) && j < m.insts@.len() && ct is Call && ct->Call_3 == tb
-    && lowers_place(m, b, dest, ct->Call_2, true) && no_index(dest) && lowers_ops(m, b, args, ct->Call_1@, pre, base)
+    && lowers_place(m, b, dest, ct->Call_2, true) && dest_ok(dest) && lowers_ops(m, b, args, ct->Call_1@, pre, base)
     && if is_leaf(m, cpol(pol), m.insts@[j as int].key@, g) {
         ct->Call_0 is Intr && intr_of(m, cpol(pol), m.insts@[j as int].key@, g) == Some(ct->Call_0->Intr_0)
             && (cpol(pol).declassify.contains(m.insts@[j as int].key@) ==> declass_arg_ok(m, b, args))
@@ -426,13 +426,14 @@ pub open spec fn lowers_call(m: MirCrate, pol: Policy, ord: Seq<usize>, b: Body,
     }
 }
 
-/// An int, a `bool`, or an array of such, nested to any depth: a value core and MIR represent
+/// An int, a `bool`, or a nonempty array of such, nested to any depth: a value core and MIR represent
 /// alike (no unit-like component).
 pub open spec fn plain_ty(m: MirCrate, t: Ty, fuel: nat) -> bool
     decreases fuel,
 {
     fuel > 0 && match rigid(m, t) {
-        Some(r) => int_of(r) is Some || (r matches RigidTy::Array(e, _) && plain_ty(m, e, (fuel - 1) as nat)),
+        Some(r) => int_of(r) is Some || (r matches RigidTy::Array(e, n) && const_usize(m, n.id) matches Some(k) && k > 0
+            && plain_ty(m, e, (fuel - 1) as nat)),
         None => false,
     }
 }
@@ -444,6 +445,12 @@ pub open spec fn declass_arg_ok(m: MirCrate, b: Body, args: Seq<Operand>) -> boo
 }
 
 pub open spec fn no_index(p: Place) -> bool { forall|k: int| 0 <= k < p.projection@.len() ==> !(#[trigger] p.projection@[k] is Index) }
+
+/// A call destination reads nothing from the frame: no `Index` and no `Deref` (sem evaluates it
+/// before the call, core after the write-back).
+pub open spec fn dest_ok(p: Place) -> bool {
+    forall|k: int| 0 <= k < p.projection@.len() ==> !(#[trigger] p.projection@[k] is Index) && !(p.projection@[k] is Deref)
+}
 
 /// `Drop` through its `drops` row: an empty shim or the `Vec<int>` leaf is a `Goto`; other glue is
 /// `x = &mut place` (in `pre`) and a call of the glue's core fn on `x` into a fresh unit temp.

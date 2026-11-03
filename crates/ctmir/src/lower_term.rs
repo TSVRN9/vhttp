@@ -312,11 +312,13 @@ pub fn lower_call(m: &MirCrate, pol: &Policy, order: &Vec<usize>, keys: &mut Key
     }
     let mut q: usize = 0;
     while q < dest.projection.len()
-        invariant q <= dest.projection@.len(), forall|i: int| 0 <= i < q ==> !(#[trigger] dest.projection@[i] is Index),
+        invariant q <= dest.projection@.len(),
+            forall|i: int| 0 <= i < q ==> !(#[trigger] dest.projection@[i] is Index) && !(dest.projection@[i] is Deref),
         decreases dest.projection.len() - q,
     {
         // sem evaluates the destination before the call, core after its write-back
         if matches!(dest.projection[q], ProjectionElem::Index(_)) { return Err(uns(s, msg(b"a call into an indexed place"))); }
+        if matches!(dest.projection[q], ProjectionElem::Deref) { return Err(uns(s, msg(b"a call into a place behind a reference"))); }
         q += 1;
     }
     let ghost t0 = *tmp;
@@ -365,7 +367,7 @@ proof fn lemma_call_post(m: MirCrate, pol: Policy, ord: Seq<usize>, b: Body, t: 
         callee_of(m, t->Call_func) matches Some((jj, g)) && jj == j && j < m.insts@.len() && {
             let key = m.insts@[j as int].key@;
             &&& ct is Call && ct->Call_3 == t->Call_target->Some_0
-            &&& lowers_place(m, b, t->Call_destination, ct->Call_2, true) && no_index(t->Call_destination)
+            &&& lowers_place(m, b, t->Call_destination, ct->Call_2, true) && dest_ok(t->Call_destination)
             &&& grew(t0, t2) && lowers_ops(m, b, t->Call_args@, ct->Call_1@, seg(t0, t2), tbase(t0)) && ops_ok(m, b, t->Call_args@)
             &&& if is_leaf(m, cpol(pol), key, g) {
                 ct->Call_0 is Intr && intr_of(m, cpol(pol), key, g) == Some(ct->Call_0->Intr_0)
@@ -415,7 +417,10 @@ pub fn x_plain_ty(m: &MirCrate, t: Ty, fuel: usize) -> (r: bool)
 {
     if fuel == 0 { return false; }
     match x_rigid(m, t) {
-        Some(r) => x_int_of(r).is_some() || match r { RigidTy::Array(e, _) => x_plain_ty(m, *e, fuel - 1), _ => false },
+        Some(r) => x_int_of(r).is_some() || match r {
+            RigidTy::Array(e, n) => match x_const_usize(m, n.id) { Some(k) => k > 0 && x_plain_ty(m, *e, fuel - 1), None => false },
+            _ => false,
+        },
         None => false,
     }
 }

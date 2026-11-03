@@ -954,7 +954,7 @@ proof fn call_not_std(m: MirCrate, g: GenericArgs)
     assert(b"vstd::prelude::Ghost::assume_new_fallback"@.len() > 0);
 }
 
-/// `()` (ty 10) is unit-like: `Tup([])`; `u8` and `&mut u8` are not.
+/// `()` (ty 10) is unit-like, with the canonical value `Unit`; `u8` and `&mut u8` are not.
 proof fn call_unit(m: MirCrate)
     requires callc_ok(m),
     ensures unit_like(m, 10, tfuel(m), false) == Some((unit_val(), 0nat)), unit_like(m, 2, tfuel(m), false) is None,
@@ -963,7 +963,7 @@ proof fn call_unit(m: MirCrate)
     reveal_with_fuel(find_from, 4);
     let ts = (m.tys@[2].kind->RigidTy_0)->Tuple_0@;
     assert(unit_likes(m, ts, 3, 0, false) == Some((Seq::<Val>::empty(), 0nat)));
-    assert(unit_val() == Val::Tup(Seq::<Val>::empty()));
+    assert(tup_val(Seq::<Val>::empty()) == Val::Unit);
 }
 
 /// f's signature: returns `()`, takes `&mut u8`.
@@ -1709,11 +1709,11 @@ proof fn order_g(m: MirCrate)
     assert(tfuel(m) == 3);
 }
 
-/// **Fact 4c.** The ghost call writes G's one value, with no events, cost 1.
+/// **Fact 4c.** The ghost call writes the canonical `Unit` for G, with no events, cost 1.
 pub proof fn fact_ghost(m: MirCrate, pol: CallPolicy, a: Seq<Val>, i: u128, x: u128, g: Val, fuel: nat)
     requires order_ok(m), pol.ghost_unit.contains(g_key()), !pol.declassify.contains(g_key()),
     ensures step_term(m, pol, m.insts@[0].body->Some_0, (m.insts@[0].body->Some_0).blocks@[1].terminator.kind, order_fr(a, i, x, g), fuel)
-        == Step::Jump(2, order_fr(a, i, x, g_val()), Seq::<Event>::empty(), 1nat),
+        == Step::Jump(2, order_fr(a, i, x, Val::Unit), Seq::<Event>::empty(), 1nat),
 {
     reveal_with_fuel(find_from, 3);
     let b = m.insts@[0].body->Some_0;
@@ -1723,11 +1723,19 @@ pub proof fn fact_ghost(m: MirCrate, pol: CallPolicy, a: Seq<Val>, i: u128, x: u
     order_g(m);
     assert(callee_of(m, t->Call_func) == Some((2nat, m.calls@[1].args)));
     assert(eval_ops(m, fr, t->Call_args@, 0) == Some((Seq::<Val>::empty(), e, 0nat)));
-    tiny_store0(fr, t->Call_destination, 4, g_val());
+    tiny_store0(fr, t->Call_destination, 4, Val::Unit);
     assert(place_ty(m, b, t->Call_destination) == Some(30usize));
-    let fr2 = order_fr(a, i, x, g_val());
-    assert(put_local(fr, 4, g_val()) == fr2) by { assert(fr.locals.update(4, g_val()) =~= fr2.locals); };
+    let fr2 = order_fr(a, i, x, Val::Unit);
+    assert(put_local(fr, 4, Val::Unit) == fr2) by { assert(fr.locals.update(4, Val::Unit) =~= fr2.locals); };
     assert(e + e + e =~= e);
+}
+
+/// **Fact 4d.** A `&mut` met inside a `&` snapshot is not followed: the projection gives `None`
+/// (core's walk would read `Unit` there).
+pub proof fn fact_snap_mut(fr: Frame, l: Loc)
+    ensures proj_step(fr, PRes::Snap(Val::Mut(l)), ProjectionElem::Deref) is None,
+        proj_step(fr, PRes::At(l), ProjectionElem::Deref) is Some ==> true,
+{
 }
 
 // ================================================================== 6. tiny is in the subset
