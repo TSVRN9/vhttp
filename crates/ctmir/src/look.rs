@@ -148,7 +148,7 @@ pub fn x_alloc_mem(m: &MirCrate, id: AllocId) -> (r: Option<&Allocation>)
 }
 
 pub fn x_inst_idx(m: &MirCrate, id: InstanceDef) -> (r: Option<usize>)
-    ensures match r { Some(j) => inst_idx(*m, id) == Some(j as nat), None => inst_idx(*m, id) is None },
+    ensures match r { Some(j) => inst_idx(*m, id) == Some(j as nat) && j < m.insts@.len(), None => inst_idx(*m, id) is None },
 {
     let mut i: usize = 0;
     while i < m.insts.len()

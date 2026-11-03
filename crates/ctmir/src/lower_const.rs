@@ -377,7 +377,7 @@ pub fn fresh(tmp: &mut Tmp, ty: c::Ty, rv: c::Rvalue) -> (r: Result<usize, Vec<u
 }
 
 /// One temp's segment satisfies `temps_at`.
-proof fn lemma_one_temp(old: Tmp, new: Tmp, x: nat)
+pub proof fn lemma_one_temp(old: Tmp, new: Tmp, x: nat)
     requires grew(old, new), new.pre@.len() == old.pre@.len() + 1, x == tbase(old),
         new.pre@.last() is Assign, new.pre@.last()->Assign_0.local == x, new.pre@.last()->Assign_0.proj@.len() == 0,
     ensures temps_at(seg(old, new), tbase(old)), seg(old, new).len() == 1, seg(old, new)[0] == new.pre@.last(),
@@ -386,7 +386,7 @@ proof fn lemma_one_temp(old: Tmp, new: Tmp, x: nat)
 }
 
 /// Appending a segment after a segment: both are segments of the whole, `temps_at` composes.
-proof fn lemma_seg_trans(t0: Tmp, t1: Tmp, t2: Tmp)
+pub proof fn lemma_seg_trans(t0: Tmp, t1: Tmp, t2: Tmp)
     requires grew(t0, t1), grew(t1, t2), temps_at(seg(t0, t1), tbase(t0)), temps_at(seg(t1, t2), tbase(t1)),
     ensures grew(t0, t2), temps_at(seg(t0, t2), tbase(t0)), tbase(t1) == tbase(t0) + seg(t0, t1).len(),
         seg(t0, t2).subrange(0, seg(t0, t1).len() as int) == seg(t0, t1),

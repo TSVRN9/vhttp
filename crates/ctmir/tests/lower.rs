@@ -1,5 +1,6 @@
 use ctmir::json::parse;
-use ctmir::lower::{lower, FnInfo, Reject};
+use ctmir::lower::{FnInfo, Reject};
+use ctmir::lower_fn::lower;
 use ctmir::mir::*;
 use ctmir::policy::Policy;
 use ctmir::schema::decode;

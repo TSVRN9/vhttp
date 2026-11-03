@@ -324,13 +324,8 @@ pub open spec fn lowers_rv(m: MirCrate, b: Body, rv: Rvalue, cr: c::Rvalue, pre:
 
 // ------------------------------------------------------------------ statements and blocks
 
-/// The first temp of an image (`nloc` when it has none).
-pub open spec fn seg_base(pre: Seq<c::Stmt>, nloc: nat) -> nat { if pre.len() > 0 { pre[0]->Assign_0.local as nat } else { nloc } }
-
-/// An image's temps lie after the MIR locals and inside the core body.
-pub open spec fn in_tmps(pre: Seq<c::Stmt>, nloc: nat, ncore: nat) -> bool {
-    nloc <= seg_base(pre, nloc) && seg_base(pre, nloc) + pre.len() <= ncore
-}
+/// Temps `base..base + n` lie after the MIR locals and inside the core body.
+pub open spec fn tmps_in(base: nat, n: nat, nloc: nat, ncore: nat) -> bool { nloc <= base && base + n <= ncore }
 
 /// A statement's image: its temps, then the assignment (`stmt_ok` holds); none for the
 /// statements that generate no code.
@@ -338,7 +333,7 @@ pub open spec fn lowers_stmt(m: MirCrate, b: Body, nloc: nat, ncore: nat, s: Sta
     match s.kind {
         StatementKind::Assign(p, rv) => cs.len() >= 1 && cs.last() is Assign && rv_ok(m, b, rv)
             && lowers_place(m, b, p, cs.last()->Assign_0, true)
-            && in_tmps(cs.drop_last(), nloc, ncore) && lowers_rv(m, b, rv, cs.last()->Assign_1, cs.drop_last(), seg_base(cs.drop_last(), nloc)),
+            && exists|base: nat| tmps_in(base, (cs.len() - 1) as nat, nloc, ncore) && #[trigger] lowers_rv(m, b, rv, cs.last()->Assign_1, cs.drop_last(), base),
         StatementKind::StorageLive(_) | StatementKind::StorageDead(_) | StatementKind::Nop | StatementKind::FakeRead(_, _)
         | StatementKind::PlaceMention(_) | StatementKind::AscribeUserType { .. } | StatementKind::Coverage(_)
         | StatementKind::ConstEvalCounter => cs.len() == 0,
@@ -409,12 +404,12 @@ pub open spec fn internal(m: MirCrate, pol: Policy, j: nat) -> bool {
     }
 }
 
-/// Core fn `h` is the image of `insts[j]`.
-pub open spec fn fn_of(infos: Seq<FnInfo>, h: usize, j: nat) -> bool { (h as nat) < infos.len() && infos[h as int].inst as nat == j }
+/// Core fn `h` is the image of `insts[j]` (`ord`: each fn's `insts` index).
+pub open spec fn fn_of(ord: Seq<usize>, h: usize, j: nat) -> bool { (h as nat) < ord.len() && ord[h as int] as nat == j }
 
 /// `Call`: the callee resolved through `calls`; a leaf is its intrinsic, a body call the core fn
 /// of an internal instance.
-pub open spec fn lowers_call(m: MirCrate, pol: Policy, infos: Seq<FnInfo>, b: Body, func: Operand, args: Seq<Operand>, dest: Place,
+pub open spec fn lowers_call(m: MirCrate, pol: Policy, ord: Seq<usize>, b: Body, func: Operand, args: Seq<Operand>, dest: Place,
     tb: BasicBlockIdx, pre: Seq<c::Stmt>, base: nat, ct: c::Term) -> bool
 {
     callee_of(m, func) matches Some((j, g)) && j < m.insts@.len() && ct is Call && ct->Call_3 == tb
@@ -422,7 +417,7 @@ pub open spec fn lowers_call(m: MirCrate, pol: Policy, infos: Seq<FnInfo>, b: Bo
     && if is_leaf(m, cpol(pol), m.insts@[j as int].key@, g) {
         ct->Call_0 is Intr && intr_of(m, cpol(pol), m.insts@[j as int].key@, g) == Some(ct->Call_0->Intr_0)
     } else {
-        ct->Call_0 is Fn && fn_of(infos, ct->Call_0->Fn_0, j) && internal(m, pol, j)
+        ct->Call_0 is Fn && fn_of(ord, ct->Call_0->Fn_0, j) && internal(m, pol, j)
     }
 }
 
@@ -430,7 +425,7 @@ pub open spec fn no_index(p: Place) -> bool { forall|k: int| 0 <= k < p.projecti
 
 /// `Drop` through its `drops` row: an empty shim or the `Vec<int>` leaf is a `Goto`; other glue is
 /// `x = &mut place` (in `pre`) and a call of the glue's core fn on `x` into a fresh unit temp.
-pub open spec fn lowers_drop(m: MirCrate, infos: Seq<FnInfo>, b: Body, nloc: nat, ncore: nat, place: Place, target: BasicBlockIdx,
+pub open spec fn lowers_drop(m: MirCrate, ord: Seq<usize>, b: Body, nloc: nat, ncore: nat, place: Place, target: BasicBlockIdx,
     pre: Seq<c::Stmt>, ct: c::Term) -> bool
 {
     place_ty(m, b, place) matches Some(t) && drop_row(m, t) matches Some(d) && no_index(place)
@@ -439,18 +434,24 @@ pub open spec fn lowers_drop(m: MirCrate, infos: Seq<FnInfo>, b: Body, nloc: nat
         && pre[0]->Assign_1 is RefMut && lowers_place(m, b, place, pre[0]->Assign_1->RefMut_0, true) && {
             let x = pre[0]->Assign_0.local as nat;
             &&& nloc <= x < ncore
-            &&& ct is Call && ct->Call_0 is Fn && fn_of(infos, ct->Call_0->Fn_0, j) && ct->Call_3 == target
+            &&& ct is Call && ct->Call_0 is Fn && fn_of(ord, ct->Call_0->Fn_0, j) && ct->Call_3 == target
             &&& ct->Call_1@.len() == 1 && is_tmp(ct->Call_1@[0], x)
             &&& ct->Call_2.proj@.len() == 0 && nloc <= ct->Call_2.local < ncore && ct->Call_2.local != x
         }
     }
 }
 
-pub open spec fn lowers_term(m: MirCrate, pol: Policy, infos: Seq<FnInfo>, b: Body, nloc: nat, ncore: nat, t: TerminatorKind,
+pub open spec fn lowers_term(m: MirCrate, pol: Policy, ord: Seq<usize>, b: Body, nloc: nat, ncore: nat, t: TerminatorKind,
     pre: Seq<c::Stmt>, ct: c::Term) -> bool
 {
-    let base = seg_base(pre, nloc);
-    in_tmps(pre, nloc, ncore) && match t {
+    exists|base: nat| tmps_in(base, pre.len(), nloc, ncore) && #[trigger] lowers_term_at(m, pol, ord, b, nloc, ncore, t, pre, ct, base)
+}
+
+/// `lowers_term` with the terminator's temps from `base`.
+pub open spec fn lowers_term_at(m: MirCrate, pol: Policy, ord: Seq<usize>, b: Body, nloc: nat, ncore: nat, t: TerminatorKind,
+    pre: Seq<c::Stmt>, ct: c::Term, base: nat) -> bool
+{
+    match t {
         TerminatorKind::Goto { target } => pre.len() == 0 && ct is Goto && ct->Goto_0 == target,
         TerminatorKind::SwitchInt { discr, targets } => ct is Switch && lowers_op(m, b, discr, ct->Switch_0, pre, base)
             && ct->Switch_1@ == targets.branches@ && ct->Switch_2 == targets.otherwise,
@@ -458,35 +459,33 @@ pub open spec fn lowers_term(m: MirCrate, pol: Policy, infos: Seq<FnInfo>, b: Bo
             && ct->Assert_1 == expected && ct->Assert_2 == target,
         TerminatorKind::Return => pre.len() == 0 && ct is Return,
         TerminatorKind::Unreachable => pre.len() == 0 && ct is Abort,
-        TerminatorKind::Drop { place, target, unwind: _ } => lowers_drop(m, infos, b, nloc, ncore, place, target, pre, ct),
+        TerminatorKind::Drop { place, target, unwind: _ } => lowers_drop(m, ord, b, nloc, ncore, place, target, pre, ct),
         TerminatorKind::Call { func, args, destination, target: Some(tb), unwind: _ } =>
-            lowers_call(m, pol, infos, b, func, args@, destination, tb, pre, base, ct),
+            lowers_call(m, pol, ord, b, func, args@, destination, tb, pre, base, ct),
         _ => false,
     }
 }
 
 /// A reachable block: its statements' images one after another, then its terminator's temps and
 /// the terminator.
-pub open spec fn lowers_block(m: MirCrate, pol: Policy, infos: Seq<FnInfo>, b: Body, nloc: nat, ncore: nat, blk: BasicBlock, cb: c::Block) -> bool {
+pub open spec fn lowers_block(m: MirCrate, pol: Policy, ord: Seq<usize>, b: Body, nloc: nat, ncore: nat, blk: BasicBlock, cb: c::Block) -> bool {
     let ss = blk.statements@;
     let n = ss.len();
     let cs = cb.stmts@;
     &&& soff(m, ss, n) <= cs.len()
     &&& forall|i: int| 0 <= i < n ==> lowers_stmt(m, b, nloc, ncore, #[trigger] ss[i], cs.subrange(soff(m, ss, i as nat) as int, soff(m, ss, (i + 1) as nat) as int))
-    &&& lowers_term(m, pol, infos, b, nloc, ncore, blk.terminator.kind, cs.subrange(soff(m, ss, n) as int, cs.len() as int), cb.term)
+    &&& lowers_term(m, pol, ord, b, nloc, ncore, blk.terminator.kind, cs.subrange(soff(m, ss, n) as int, cs.len() as int), cb.term)
 }
 
 // ------------------------------------------------------------------ fns and the program
 
 /// The instances the program's fns are images of.
-pub open spec fn inst_set(infos: Seq<FnInfo>) -> Set<nat> { infos.map_values(|i: FnInfo| i.inst as nat).to_set() }
+pub open spec fn ord_set(ord: Seq<usize>) -> Set<nat> { ord.map_values(|j: usize| j as nat).to_set() }
 
-/// Core fn `g` is the image of `insts[infos[g].inst]` with reachable blocks `r` (marks): that body
-/// is in the subset (`body_in`'s conditions, block by block), locals map 1:1 by `lowers_ty`, a
-/// reachable block by `lowers_block`, an unreachable one is an empty `Abort` block.
-pub open spec fn lowers_fn(m: MirCrate, pol: Policy, p: c::Program, infos: Seq<FnInfo>, r: Seq<bool>, g: int) -> bool {
-    let j = infos[g].inst as nat;
-    let cb = p.fns@[g];
+/// Core body `cb` is the image of `insts[j]` with reachable blocks `r` (marks): that body is in
+/// the subset (`body_in`'s conditions, block by block), locals map 1:1 by `lowers_ty`, a reachable
+/// block by `lowers_block`, an unreachable one is an empty `Abort` block.
+pub open spec fn lowers_body(m: MirCrate, pol: Policy, ord: Seq<usize>, j: nat, cb: c::Body, r: Seq<bool>) -> bool {
     inst_body(m, j) matches Some(b) && {
         let nloc = b.locals@.len();
         let ncore = cb.locals@.len();
@@ -494,16 +493,26 @@ pub open spec fn lowers_fn(m: MirCrate, pol: Policy, p: c::Program, infos: Seq<F
         &&& cb.nargs == b.arg_count && nloc <= ncore && cb.blocks@.len() == b.blocks@.len() && r.len() == b.blocks@.len()
         &&& forall|k: int| 0 <= k < nloc ==> lowers_ty(m, #[trigger] b.locals@[k].ty, cb.locals@[k], tyf())
         &&& r.len() > 0 && r[0]
-        &&& forall|bb: int| 0 <= bb < r.len() ==> if #[trigger] r[bb] {
-                &&& block_ok(m, cpol(pol), b, b.blocks@[bb])
-                &&& succs_in(b.blocks@[bb].terminator.kind, marks(r))
-                &&& callees_in(m, cpol(pol), b, b.blocks@[bb].terminator.kind, inst_set(infos))
-                &&& lowers_block(m, pol, infos, b, nloc, ncore, b.blocks@[bb], cb.blocks@[bb])
-            } else {
-                cb.blocks@[bb].stmts@.len() == 0 && cb.blocks@[bb].term is Abort
-            }
+        &&& forall|bb: int| 0 <= bb < r.len() ==> #[trigger] block_rel(m, pol, ord, b, nloc, ncore, r, b.blocks@[bb], cb.blocks@[bb], r[bb])
     }
 }
+
+/// One block of `lowers_body`.
+pub open spec fn block_rel(m: MirCrate, pol: Policy, ord: Seq<usize>, b: Body, nloc: nat, ncore: nat, r: Seq<bool>,
+    blk: BasicBlock, cblk: c::Block, reached: bool) -> bool
+{
+    if reached {
+        &&& block_ok(m, cpol(pol), b, blk)
+        &&& succs_in(blk.terminator.kind, marks(r))
+        &&& callees_in(m, cpol(pol), b, blk.terminator.kind, ord_set(ord))
+        &&& lowers_block(m, pol, ord, b, nloc, ncore, blk, cblk)
+    } else {
+        cblk.stmts@.len() == 0 && cblk.term is Abort
+    }
+}
+
+/// The `insts` index of each fn.
+pub open spec fn ords(infos: Seq<FnInfo>) -> Seq<usize> { infos.map_values(|i: FnInfo| i.inst) }
 
 /// The blocks a mark sequence holds.
 pub open spec fn marks(r: Seq<bool>) -> Set<nat> {
@@ -536,7 +545,7 @@ pub open spec fn lowers_rs(m: MirCrate, pol: Policy, root: Seq<u8>, p: c::Progra
     &&& p.fns@.len() == infos.len() && rs.len() == infos.len() && infos.len() >= 1
     &&& root_of(m, root, infos[0].inst as nat) && infos[0].is_root
     &&& forall|g: int, h: int| 0 <= g < infos.len() && 0 <= h < infos.len() && g != h ==> (#[trigger] infos[g]).inst != (#[trigger] infos[h]).inst
-    &&& forall|g: int| 0 <= g < infos.len() ==> lowers_fn(m, pol, p, infos, #[trigger] rs[g], g)
+    &&& forall|g: int| 0 <= g < infos.len() ==> lowers_body(m, pol, ords(infos), infos[g].inst as nat, p.fns@[g], #[trigger] rs[g])
 }
 
 /// The translator's contract: some reachable-block marks per fn make every fn the image of its

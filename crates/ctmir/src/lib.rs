@@ -15,6 +15,8 @@ pub mod json;
 pub mod look;
 pub mod lower;
 pub mod lower_const;
+pub mod lower_fn;
+pub mod lower_term;
 pub mod mir;
 pub mod policy;
 pub mod rel;
