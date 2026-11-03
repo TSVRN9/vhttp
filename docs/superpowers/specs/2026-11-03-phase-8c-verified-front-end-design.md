@@ -136,7 +136,7 @@ dumper builds from query answers, with no conditions.
   "consts": [ {"id": <TyConstId>, "usize": <u64>|null} … ],
   "layouts":[ {"ty": <Ty>, "shape": †LayoutShape} … ],
   "allocs": [ {"id": <AllocId>, "alloc": †GlobalAlloc} … ],
-  "spans":  [ {"id": <Span>, "file": <str>, "line": <u64>} … ] }
+  "spans":  [ {"id": <Span>, "file": <str>, "line": <usize>} … ] }
 ```
 
 These are the only queries the dumper makes. Each table key comes from a value the dumper has
@@ -206,13 +206,17 @@ reads, with the same names, fields and variant order. Values the semantics never
 `user_ty`, `source_info.scope` and `Retag`, are kept as raw `Json` fields, so nothing is
 silently dropped.
 
-`spec fn decode_*(j: Json) -> Option<T>` follows serde's derive conventions:
+`spec fn decode_*(j: Json, x: T) -> bool` follows serde's derive conventions:
 
 - a struct is an object whose keys are in declaration order;
 - a newtype struct is its inner value;
 - a tuple, or a tuple variant with two or more fields, is an array; a one-field tuple variant is its bare payload (`{"StorageLive":3}`);
 - an enum is externally tagged: a unit variant is a string, any other variant is
   `{"Variant": payload}`.
+
+The full list of conventions, including `Option` as `null`/bare, `RangeInclusive` as
+`{start,end}`, exact field sets, integer widths, and "a known name with the wrong shape gives no
+decoding", is the header of `crates/ctmir/src/schema.rs`, which is authoritative.
 
 An unknown variant name decodes to `Unknown(j)`. The translator rejects it, so a toolchain bump
 that renames or adds variants fails closed.
