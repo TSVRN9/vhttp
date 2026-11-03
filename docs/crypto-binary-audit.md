@@ -4,42 +4,64 @@
 
 ## Gate (Phase 7a)
 
-`scripts/ct-binary.sh`, run by `verify.sh`, which prints `binary ok (<n> fns)`. It detects change in the object code read here, not leaks: a passing gate means the shipped code is the code read (for the instantiations listed below, only that it is unchanged), not that the code is constant time.
+`scripts/ct-binary.sh`, run by `verify.sh`, which prints `binary ok (<n> fns)`. It detects change in the object code read here, not leaks: a passing gate means the shipped code is the code read, not that the code is constant time. Nothing mechanical ties `--update` to a read beyond the commit tripwire below: the read itself is on trust.
 
 **What it checks.**
 
-- It runs the recipe's build: a plain workspace `cargo build --release --locked`, in its own target dir, `target/ct-binary`. It refuses to run if `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_*`, `CARGO_PROFILE_*`, `CARGO_TARGET_*_RUSTFLAGS`, `CARGO_INCREMENTAL`, `RUSTC` or a `RUSTC_*WRAPPER` is set.
-- It checks that the rlib's `.rcgu.o` count equals the `units` line of `docs/crypto-binary-digests.txt`, today 2.
-- It disassembles each unit with `objdump -dr --no-show-raw-insn -C`, splits the output per function symbol and normalises each function. It then diffs one `<sha256> <symbol>` line per function against `docs/crypto-binary-digests.txt`. That covers every function in both units, 49 at 8b32220's source: the 30 non-RSA functions, the RSA and bignum functions, and the `alloc`/`vstd` instantiations.
+- It runs the recipe's build: a plain workspace `cargo build --release --locked`, in `target/ct-binary` (fixed, not configurable). The dir is kept warm behind a content stamp: a sha256 over every non-test file under `crates/` (`crates/*/tests` and `crates/*/target` excluded), `Cargo.toml`, `Cargo.lock` and `rust-toolchain.toml`. Any change to that content wipes the dir, so the build is fresh whenever a source changed, whatever its mtime (cargo alone trusts mtimes for path packages). Otherwise the build is warm, and cargo's fingerprints cover toolchain and profile changes.
+- It refuses to run if `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_*`, `CARGO_PROFILE_*`, `CARGO_TARGET_*_RUSTFLAGS`, `CARGO_INCREMENTAL`, `RUSTC` or a `RUSTC_*WRAPPER` is set. It does not look at cargo config files, `CARGO_HOME` or `RUSTUP_TOOLCHAIN` (none is in use today). In normal mode a build they change shows as a digest diff, but `--update` would record it as if it were the shipped build.
+- The rlib holds only `lib.rmeta`, `lib.rmeta-link` and `.rcgu.o` units, and the unit count equals the `units` line of `docs/crypto-binary-digests.txt`, today 2. The `objdump` line records `objdump --version`, because the digests hash objdump's text: a binutils update can move every digest with no code change, and the message then says to compare the raw `.text*` bytes (`objcopy -O binary`) of both builds before deciding what to re-read.
+- It disassembles each unit with `objdump -dr --no-show-raw-insn -C`, splits the output per function symbol and normalises each function. It then diffs one `<sha256> <symbol>` line per function against `docs/crypto-binary-digests.txt`. That covers every function in both units, 49 at 8b32220's source: the 30 non-RSA functions, the RSA and bignum functions, and the 9 `alloc`/`vstd` instantiations (read below).
 - Normalisation:
   - drops the file-format and section headers, which carry paths and mangled crate hashes;
   - drops each line's offset column and objdump's `# ...` comments;
-  - strips `.llvm.N` suffixes, the per-unit hash in `anon.<hash>.N`, and the function ordinal in `.LCPI<k>_N`;
+  - strips `.llvm.N` suffixes, the per-unit hash in `anon.<hash>.N` and `.Lanon.<hash>.N`, and the function ordinal in `.LCPI<k>_N`;
   - squeezes blanks.
 
-  Opcodes, operands (function-relative jump and call targets included) and relocations stay.
+  Opcodes, operands (function-relative jump and call targets included) and relocations stay. Section-symbol relocations (`.text._RNv...`) keep the mangled crate hash, and the `anon.N`/`.Lanon.N` counters stay: both fail closed.
+- Dependents: every other workspace rlib in `target/ct-binary/release/` (its `.rcgu.o` units only) must define no symbol whose path contains `crypto::`, and its sorted `U crypto::` references are tracked as the `U <crate> <symbol>` block of the digests file (9 lines, all `tls`). A reference that disappears means a call became inlined code.
 - Structural checks run in every mode, `--update` included, which refuses to write the file if any fails:
   - `crypto::bignum::ct_mask` is one out-of-line function, and its body is `mov`/`neg`/`ret`;
-  - `rsa_pss_sha256_sign` has at least 8 `R_X86_64_PLT32 crypto::bignum::ct_mask` relocations, and `cond_sub` and `select_n` at least 1 each. These are the counts read above;
-  - `crypto::p256::scalar_in_range` is one out-of-line function (F1).
-- Every failure is reported, not only the first, and each message names what to re-read. A missing tool, a build failure or no `.rcgu.o` member fails the gate.
+  - `crypto::p256::scalar_in_range` is one out-of-line function (F1);
+  - the call sites read above, as `R_X86_64_PLT32` relocations against the symbol or its `.text` section: `ct_mask` at least 8 times in `rsa_pss_sha256_sign` and once each in `cond_sub` and `select_n`; `scalar_in_range` once each in `p256_public_key` and `p256_ecdh`, twice in `p256_ecdsa_sign`;
+  - no dependent defines a `crypto::` symbol.
+- Commit tripwire: the last commit touching `docs/crypto-binary-digests.txt` also touches this doc, and an uncommitted change to the digests file comes with one to this doc.
+- Once the build has run, every check is reported, not only the first failure, and each message names what to re-read. The pre-checks (tools, environment, build, rlib members, unit count zero, the digest count) stop at the first failure. A missing tool, a build failure or no `.rcgu.o` member fails the gate.
 
 **What it does not check.**
 
-- The 9 `alloc`/`vstd` instantiations (`slice_subrange`, `RawVecInner`'s `do_reserve_and_handle`, `finish_grow` and `try_allocate_in`, `Vec::reserve`, `VecAdditionalExecFns::set`, the two `Drop::drop`s, `drop_glue`). They are tracked for change only: no section of this audit records a read of them, so for them a passing gate says nothing beyond "unchanged". A change to one needs at least a tier C read (the jump, index and div script), recorded like any other.
 - Leaks. A function whose digest is unchanged carries its earlier reading, nothing more. That reading has the limits stated in its section: tiers, loop-shape tracing, not dudect.
-- Data. Only executable sections are hashed. A constant or table in `.rodata` or `.data.rel.ro` is covered only through the relocations that reference it, not by its contents.
+- Data. Only executable sections are hashed. A constant or table in `.rodata` or `.data.rel.ro` is covered only through the relocations that reference it, not by its contents. Contents change values, not which addresses are touched or which branches run; jump tables and indexed lookups show in the hashed code.
 - Other builds: LTO, `codegen-units`, `target-cpu`, other targets, and a linked binary (none exists).
-- Code from `crates/crypto` instantiated or inlined into another crate's units. The audit's `nm` check found none in `tls` or `quic`, and the gate does not repeat it.
+- Code inlined into a dependent from its first build. `nm` sees only out-of-line copies and the references that remain, so a new call to crypto that is inlined from the start leaves no trace. Protocol step 2 covers it.
+- tls's own constant-time sites read above (`ct_eq32` inlined into `on_crypto`, the zero-share check in `build_flight`) are not hashed: a change to them is not detected.
 - Toolchain and profile are not checked separately. A change to either is expected to show as a digest change.
 
 **Update protocol.**
 
 1. When the gate fails on a digest, the diff lists the changed, added and removed symbols. The script leaves the full dump and the per-function text in `target/ct-binary/ct-binary/`.
-2. Read every changed or added symbol per the recipe above. Read it at least at the tier of its earlier reading (tier C for the unread instantiations above), and whole if it is new or it calls `ct_mask` or `scalar_in_range`. A changed `units` line means every function is re-read.
+2. Read every changed or added symbol per the recipe above. Read it at least at the tier of its earlier reading, and whole if it is new or it calls `ct_mask` or `scalar_in_range`. The 9 instantiations need tier B (every jump and its flag producer) or a whole read. A changed `units` line means every function is re-read. For a new or changed `pub fn` of crypto, confirm it appears as `U crypto::...` in its dependents' block.
 3. Record the read in this doc: date, commit, toolchain, the symbols and their verdicts.
 4. Then run `scripts/ct-binary.sh --update`, and commit the digests file together with the read.
 5. A structural failure is not cleared by `--update`. Restore the barrier in the source, or change the check in the script in a reviewed commit that carries a fresh read.
+6. A change to the normalisation alone (the script, not the code) may be re-digested without a fresh read, provided the recipe's whole-dump md5 is unchanged and the old rules applied to the new build reproduce the old digests. Record both in this doc.
+
+### Gate records
+
+- **2026-11-03, b3b5d8a (crates/crypto source as at 8b32220), rustc 1.98.1, GNU objdump 2.46.1.** Normalisation-only re-digest (step 6): `.Lanon.<hash>.N` lost its unit hash, and the `objdump` line and the `U` block were added. The recipe's md5 on the gate's own units is still `a247bd0fc9216f57f9ba2fe5fc376e88`, and the previous rules applied to this build reproduce the previous 49 digest lines byte for byte.
+- **2026-11-03, b3b5d8a, same toolchain.** Whole read of the 9 `alloc`/`vstd` instantiations (each at most 52 instructions). Every conditional jump below is on a length, a capacity, an index or an allocator result. Under spec D7 and the MIR leakage model, lengths, capacities (allocation sizes), indices and subslice bounds are public, and allocation failure is a public abort. The indirect `call/jmp *0x0(%rip)` are GOT loads of fixed symbols. **Clean.**
+
+  | Instantiation | Instructions | Jumps (conditional + `jmp`) | Each conditional jump and its flag producer |
+  |---|---|---|---|
+  | `vstd::slice::slice_subrange::<u8>` | 16 | 2 + 0 | `sub %rdx,%rdi; jb` end < start; `cmp %rsi,%rcx; ja` end > len. Both to `slice_index_fail` |
+  | `RawVecInner::reserve::do_reserve_and_handle` | 32 | 2 + 0; 2 cmov | `add %rdx,%rsi; jb` len + additional overflows; `cmpl $0x1,(%rsp); je` `finish_grow` returned Err. `cmova`/`cmovae` are max(2 cap, required) and max(8, ...) |
+  | `RawVecInner::finish_grow` | 42 | 5 + 3 | `test %rcx,%rcx; js` new size > isize::MAX; `test %rsi,%rsi; je` no old allocation (alloc vs realloc); `test %rax,%rax; jne` realloc result; `test %r14,%r14; je` size 0; `test %rax,%rax; jne` alloc result. The one indexed store `mov %r14,(%rbx,%rax,1)` has `%rax` = 8 or 16, set from constants on each path |
+  | `RawVecInner::try_allocate_in` | 52 | 5 + 3 | `mul %rsi; seto; cmp; seta; or; je` capacity x element size overflows or exceeds isize::MAX - align; `test %r15,%r15; je` size 0; `test %bpl,%bpl; je` zeroed or not (the caller's init kind); `test %rax,%rax; je`, `test %rax,%rax; jne` allocator results. `mul` multiplies the capacity by the element size |
+  | `Vec<u8>::reserve` | 7 | 1 + 0 | `cmp %rax,%rdx; ja` additional > cap - len, a tail jump to `do_reserve_and_handle` |
+  | `VecAdditionalExecFns::set` | 11 | 1 + 0 | `cmp %rax,%rsi; jae` i >= len, to `panic_bounds_check`. The store `mov %dl,(%rax,%rsi,1)` is at index i, the caller's index (an index event in the MIR model) |
+  | `RawVec<u8>::drop` | 7 | 1 + 1 | `test %rsi,%rsi; je` capacity 0, else a tail jump to `__rust_dealloc` |
+  | `Vec<u8>::drop` | 1 | 0 | `ret` |
+  | `drop_glue::<Vec<u8>>` | 7 | 1 + 1 | Same instructions as `RawVec<u8>::drop` |
 
 ## RSA object read (Phase 5e, source 8b32220)
 
