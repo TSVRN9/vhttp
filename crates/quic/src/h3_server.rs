@@ -438,6 +438,8 @@ impl H3Server {
             final(self).started == old(self).started,
             final(self).emitted == old(self).emitted,
             final(self).written == old(self).written,
+            final(self).dropped@ == old(self).dropped@.insert(id),
+            tails(final(self).pending@, id) == Seq::<u8>::empty(),
     {
         let mut taken: Vec<Pending> = Vec::new();
         core::mem::swap(&mut self.pending, &mut taken);
@@ -476,6 +478,9 @@ impl H3Server {
             final(self).emitted == old(self).emitted,
             final(self).conn.out_log() == old(self).conn.out_log(),
             final(self).conn.events_spec() == old(self).conn.events_spec(),
+            // A refused stream has no entry left in the queue.
+            forall|j: u64| #[trigger] final(self).dropped@.contains(j) && !old(self).dropped@.contains(j)
+                ==> tails(final(self).pending@, j) == Seq::<u8>::empty(),
     {
         let ghost s0 = self.pending@;
         let ghost w0 = self.written@;
