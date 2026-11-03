@@ -1,6 +1,6 @@
 # Binary constant-time audit of crates/crypto (main at e6c1c00)
 
-**Status at 8b32220.** The body below is the audit of e6c1c00, unedited. Since then the shim is deleted (F2 and G1 are obsolete; the "Phase 5" deployment line it quotes is superseded by TRUSTED's RSA row). F1 is closed by `#[inline(never)]` on `scalar_in_range`. The shipped rlib is now 2 units; 7 of the 30 functions changed and were re-read, the other 23 have the same opcodes. The RSA read is the next section. Where the bodies below say verify.sh re-checks none of this, they predate the gate in the next section.
+**Status at 8b32220.** The body below is the audit of e6c1c00, unedited. Since then the shim is deleted (F2 and G1 are obsolete; the "Phase 5" deployment line it quotes is superseded by TRUSTED's RSA row). F1 is closed by `#[inline(never)]` on `scalar_in_range`. The shipped rlib is now 2 units; 7 of the 30 functions changed and were re-read, the other 23 have the same opcodes. The RSA read is the next section. Where the bodies below say verify.sh re-checks none of this, they predate the gate in the next section. Where they say no timing was measured, they predate "Timing tests" below.
 
 ## Gate (Phase 7a)
 
@@ -63,6 +63,66 @@
   | `RawVec<u8>::drop` | 7 | 1 + 1 | `test %rsi,%rsi; je` capacity 0, else a tail jump to `__rust_dealloc` |
   | `Vec<u8>::drop` | 1 | 0 | `ret` |
   | `drop_glue::<Vec<u8>>` | 7 | 1 + 1 | Same instructions as `RawVec<u8>::drop` |
+
+## Timing tests (Phase 7a)
+
+`crates/crypto/tests/dudect.rs`, dudect-style, std only. Every target test is `#[ignore]`d: the tests run by hand and are not in `verify.sh`. crypto has no `libc` dev-dependency, so `taskset` does the pinning, and every result line prints the allowed CPUs and the load average. Pick a P-core (CPUs 0-3 on this machine):
+
+```sh
+cargo test --release -p crypto --test dudect --no-run
+taskset -c 2 cargo test --release -p crypto --test dudect -- --ignored --nocapture --test-threads 1
+```
+
+**When to run.** By hand, after any gate digest update that touches a timed symbol or its callees, and on any new CPU or toolchain the server ships on. Record each run here.
+
+**Harness.**
+
+- There are two classes, fixed and random. A fixed-seed xorshift draws the class for each call, so the classes interleave, and it also draws the random inputs. Inputs are built in batches of 100 outside the timed region; for the fixed class, the batch slot gets a copy of the fixed input. One warm-up batch is discarded.
+- Each call is timed with `lfence; rdtsc` on both sides (with `Instant` off x86-64). TSC ticks are invariant ticks, not core cycles.
+- Every measurement above the pooled 95th percentile is dropped. Welch's t is computed on the rest, with Welford's means and variances. The harness measures until at least `n` measurements survive the crop.
+- Verdict: a target fails at |t| > 10, and a NaN fails too.
+- The control runs first, in the same process and harness, before every target. It is `leaky_eq`, an early-exit 16-byte compare (`black_box` per byte), fixed = equal input, random = random input, at 10^6 measurements. It must give |t| > 10, or the target's verdict does not count.
+- `10 SE` is ten standard errors of the mean difference: roughly the smallest mean difference the run would flag.
+
+**Targets.** One secret varies, and everything else is fixed.
+
+| Target | Secret varied (fixed vs random) | n kept |
+|---|---|---|
+| `aes128_encrypt_block` | key; block fixed | 10^6 |
+| GHASH, through `aes128_gcm_seal` (`gf128_mul_exec` is private) | key, so H = E_K(0); 16 KiB AAD, no plaintext, so 1025 multiplies by H, plus key expansion and two AES blocks | 10^6 |
+| tag compare, through `aes128_gcm_open` | key fixed; both classes are wrong tags: the fixed one is wrong in byte 15, the random one in a random byte by a random nonzero xor | 10^6 |
+| `p256_ecdsa_sign` | d (fixed: RFC 6979 A.2.5's key; random: 32 random bytes, out of [1, n-1] with probability about 2^-32); msg fixed | 10^6 |
+| `p256_ecdh` | d, as above; peer a fixed valid point | 10^6 |
+| `rsa_pss_sha256_sign`, 2048 bits | d over 65 valid key pairs with RFC 9500's n: d = e^-1 mod lcm(p-1, q-1), fixed e = 65537, random a random odd e < 2^33. Each key is checked by signing and verifying with RustCrypto. d is zero-padded to 256 octets, as the loader must do: `pad_be`'s cost depends on d's encoded length, which is public under D7. msg and salt fixed | 10^4: a signature takes about 6 ms, so 10^6 would take about 100 min |
+
+**Power.** The control's gap is about 6 ticks, on a 60-tick call. On a target the noise grows with the call's length, so a pass rules out only mean differences above that run's 10 SE. To check the tag compare at its own scale, `gcm_open_tag_compare` adds a probe with no verdict: the same calls followed by `leaky_eq` on the tag. Its gap is about 3 ticks, against a 10 SE of about 35. It gave |t| 1.01, so **this test cannot see a 16-byte early-exit compare inside `aes128_gcm_open`**. The tag compare's evidence for constant time is the MIR proof plus the object read; the timing test bounds only larger leaks.
+
+**Not covered:**
+
+- other CPUs and microarchitectures, including this CPU's E-cores (4-7);
+- frequency scaling: the TSC is invariant, so scaling shows only as noise;
+- SMT: this CPU has 1 thread per core, so it is untestable here;
+- cache attacks beyond the dudect signal: one process, warm caches, no co-resident attacker;
+- leaks below each run's 10 SE;
+- the timing of SHA-256, HMAC, HKDF and `p256_public_key`;
+- every non-crypto secret path (TRUSTED's CT check scope row).
+
+### Timing records
+
+- **2026-11-03, tree 0b846ce plus the test file (crates/crypto source as at 8b32220, gate digests unchanged), rustc 1.98.1, Intel Core Ultra 7 258V (Lunar Lake; P-cores 0-3, no SMT).** The runs went in parallel on P-cores 1, 2 and 3, one `taskset -c` process each, with the documented command filtered by test name. Load is the 1-minute average at start and end. It includes these three runs, so about 3 when all three were going. The TSC runs at about 3.3 GHz (ticks over wall time). **All pass.**
+
+  | Target | n measured / kept | \|t\| | Mean fixed / random (ticks) | 10 SE (ticks) | Wall | CPU | Load |
+  |---|---|---|---|---|---|---|---|
+  | control, before each target | 1052700 / 1009938-1041064 | 280.72-329.85 | 63.1-70.3 / 57.4-63.1 | 0.2 | 0.1 s | 1, 2, 3 | 1.36-3.36 |
+  | `aes128_encrypt_block` | 1052700 / 1001478 | 0.89 | 39411.3 / 39409.6 | 19.6 | 12.7 s | 1 | 1.36 -> 1.72 |
+  | GHASH via `aes128_gcm_seal` | 1052700 / 1000112 | 0.27 | 610087.3 / 610095.0 | 280.3 | 195.2 s | 1 | 2.57 -> 3.36 |
+  | tag compare via `aes128_gcm_open` | 1052700 / 1000879 | 0.77 | 71822.7 / 71820.2 | 33.4 | 23.1 s | 1 | 1.72 -> 2.30 |
+  | (probe: + planted early exit) | 1052700 / 1000450 | 1.01 | 71921.4 / 71917.8 | 35.5 | 23.1 s | 1 | 2.30 -> 2.57 |
+  | `p256_ecdsa_sign` | 1052700 / 1000066 | 0.84 | 17001636.2 / 17000967.1 | 7980.0 | 5450.5 s | 2 | 1.39 -> 1.21 |
+  | `p256_ecdh` | 1052700 / 1000066 | 0.43 | 16597248.1 / 16597682.6 | 10173.3 | 5322.7 s | 3 | 1.36 -> 2.34 |
+  | `rsa_pss_sha256_sign` 2048 | 10600 / 10071 | 1.83 | 20404680.7 / 20390815.2 | 75566.3 | 66.3 s | 1 | 3.36 -> 3.54 |
+
+  10 SE as a fraction of the call: AES 0.05%, GHASH 0.05%, tag compare 0.05%, ECDSA 0.05%, ECDH 0.06%, RSA 0.37%. In absolute terms that is about 6 ns, 85 ns, 10 ns, 2.4 µs, 3.1 µs and 23 µs. The P-256 calls take about 5 ms each here, as long as an RSA signature. They ran at the brief's 10^6 anyway: about 90 min each.
 
 ## RSA object read (Phase 5e, source 8b32220)
 
