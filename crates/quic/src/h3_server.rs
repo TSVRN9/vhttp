@@ -3,9 +3,10 @@
 //!
 //! `H3Conn` emits whole writes and `stream_write` takes a prefix, so unaccepted bytes wait in a FIFO
 //! with an offset. `send_response` is refused (`Busy`) while anything waits, so h3 never commits a
-//! response that can't be buffered. h3's own answers (a 501 or 421) queue regardless, one per stream
-//! at most; they leave the queue when the stream's sending part is reset, so the queue is bounded by
-//! the bidi streams QUIC holds open.
+//! response that can't be buffered. h3's own answers (a 501 or 421) queue regardless. By construction,
+//! not proof: h3 answers a stream at most once, and an answer leaves the queue when the stream's
+//! sending part is reset, so the queue is bounded by the bidi streams QUIC holds open (the
+//! STOP_SENDING path is pinned by the test `stopped_answers_do_not_pile_up`).
 //!
 //! Caller obligations:
 //! - `pump` after any change made through `conn_mut`, with the `poll_transmit` loop after it.
@@ -79,7 +80,9 @@ proof fn lemma_app_trans(a0: Seq<AppEvent>, a1: Seq<AppEvent>, a2: Seq<AppEvent>
     }
 }
 
-/// The h3 method for this event was called, once, taking `h0` to `h1` and `o0` to `o1`.
+/// `h0` to `h1` and `o0` to `o1` meet the ensures of this event's h3 method. Where h3's ensures say
+/// nothing more than `step` and `frame` (a Reset on a stream id ending in 1 or 3, or a StopSending on
+/// a stream that already can't be answered), a skipped call would also meet them.
 pub open spec fn one_call(h0: H3Conn, h1: H3Conn, e: SpecStreamEvent, o0: Seq<Output>, o1: Seq<Output>) -> bool {
     match e {
         SpecStreamEvent::Data { id, data, fin } => {
@@ -87,11 +90,19 @@ pub open spec fn one_call(h0: H3Conn, h1: H3Conn, e: SpecStreamEvent, o0: Seq<Ou
             &&& frame(h0, h1, Some(id))
             &&& !h0.closed() && id % 4 == 0 ==> req_call(h0, h1, id, data, fin, added(o0, o1))
             &&& !h0.closed() && id % 4 == 2 ==> uni_fed(h0, h1, id, data, fin, added(o0, o1))
+            &&& !h0.closed() && id % 4 != 0 && id % 4 != 2 ==> added(o0, o1) == seq![
+                SpecOutput::CloseConnection { code: H3_STREAM_CREATION_ERROR },
+            ]
         },
         SpecStreamEvent::Reset { id, .. } => {
             &&& step(h0, h1, o0, o1)
             &&& frame(h0, h1, Some(id))
             &&& !h0.closed() && id % 4 == 0 ==> added(o0, o1) == reset_outs(id, h0.req_state(id)) && !h1.req_known(id)
+            &&& !h0.closed() && id % 4 == 2 && h0.uni_known(id) && critical(h3::uni::kind_of_bytes(h0.uni_hist(id).0))
+                ==> added(o0, o1) == seq![SpecOutput::CloseConnection { code: H3_CLOSED_CRITICAL_STREAM }]
+            &&& !h0.closed() && id % 4 == 2 && !(h0.uni_known(id) && critical(
+                h3::uni::kind_of_bytes(h0.uni_hist(id).0),
+            )) ==> added(o0, o1) == Seq::<SpecOutput>::empty() && !h1.closed() && !h1.uni_known(id)
         },
         SpecStreamEvent::StopSending { id, .. } => {
             &&& step(h0, h1, o0, o1)
@@ -102,7 +113,7 @@ pub open spec fn one_call(h0: H3Conn, h1: H3Conn, e: SpecStreamEvent, o0: Seq<Ou
     }
 }
 
-/// `evs` were passed to h3 in order, each to exactly one method call, taking `h0` to `h1`.
+/// `evs`, in order, each meet `one_call`, taking `h0` to `h1`.
 pub open spec fn fed(h0: H3Conn, evs: Seq<SpecStreamEvent>, h1: H3Conn) -> bool
     decreases evs.len(),
 {
@@ -280,7 +291,8 @@ pub struct H3Server {
     h3: H3Conn,
     started: bool,
     pending: Vec<Pending>,
-    /// Per stream, every byte h3 has emitted.
+    /// Per stream, every byte of the `StreamWrite`s `apply` was given. `feed` and `send_response`
+    /// ensure that these are the outputs h3 returned.
     emitted: Ghost<spec_fn(u64) -> Seq<u8>>,
     /// Per stream, every byte passed to `Connection::stream_write`.
     written: Ghost<spec_fn(u64) -> Seq<u8>>,
@@ -398,7 +410,9 @@ impl H3Server {
         &self.conn
     }
 
-    /// The TLS boundary and `poll_transmit`. Call `pump` after any change made through it.
+    /// Only for the TLS calls, `close` and `poll_transmit`; call `pump` after any change made through
+    /// it. `stream_write`, `stream_reset` or `poll_stream_events` through it bypass the write log and
+    /// h3, so the per-stream prefix and every-event-to-h3 guarantees would no longer hold.
     pub fn conn_mut(&mut self) -> (r: &mut Connection)
         requires
             old(self).wf(),
@@ -831,7 +845,9 @@ impl H3Server {
             final(self).started,
             final(self).conn.out_log() == old(self).conn.out_log(),
             final(self).conn.events_spec() == old(self).conn.events_spec(),
-            exists|o0: Seq<Output>, o1: Seq<Output>| #[trigger] one_call(old(self).h3, final(self).h3, e@, o0, o1),
+            // The outputs of that one call are what `apply` logged.
+            exists|o0: Seq<Output>, o1: Seq<Output>| #[trigger] one_call(old(self).h3, final(self).h3, e@, o0, o1)
+                && forall|j: u64| #[trigger] (final(self).emitted@)(j) == (old(self).emitted@)(j) + writes_on(added(o0, o1), j),
             app_grew(old(app)@, final(app)@),
     {
         let ghost h0 = self.h3;
@@ -949,7 +965,8 @@ impl H3Server {
             !old(self).started_spec() && !(old(self).conn_spec().live(PacketKind::OneRtt)
                 && old(self).conn_spec().phase_spec() is Open) ==> !final(self).started_spec(),
             old(self).started_spec() ==> final(self).started_spec(),
-            // 2b obligation 1: every event, in order, one h3 call each, and none left behind.
+            // 2b obligation 1: every event, in order, meets its h3 method's ensures (`one_call`), and
+            // none is left behind.
             final(self).started_spec() ==> final(self).conn_spec().events_spec().len() == 0,
             old(self).started_spec() ==> fed(
                 old(self).h3_spec(),
@@ -1025,6 +1042,10 @@ impl H3Server {
             r is Err && r->Err_0 == SendError::Busy ==> final(self).h3_spec() == old(self).h3_spec()
                 && final(self).conn_spec() == old(self).conn_spec() && !old(self).idle_spec(),
             old(self).idle_spec() == !(r is Err && r->Err_0 == SendError::Busy),
+            // h3's response is what was logged; a refusal logs nothing.
+            r is Ok ==> exists|a: Seq<SpecOutput>| #[trigger] one_response(a, id, resp@)
+                && forall|j: u64| #[trigger] final(self).emitted(j) == old(self).emitted(j) + writes_on(a, j),
+            r is Err ==> forall|j: u64| #[trigger] final(self).emitted(j) == old(self).emitted(j),
     {
         if self.pending.len() != 0 {
             return Err(SendError::Busy);
