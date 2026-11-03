@@ -7,7 +7,9 @@
 //! - an int or `bool` is `Int(bit pattern)`; a tuple `Tup`, an ADT `Adt(variant, fields)`, an array
 //!   or slice `Arr`; a `Vec<E>` is `Arr` of its elements (the value model has no heap);
 //! - `&place` is `Shr(snapshot)`, `&mut place` is `Mut(location)` (decision 3);
-//! - fn items, closures and fn pointers are the opaque `Unit`; `()` is `Tup([])`.
+//! - fn items, closures and fn pointers are the opaque `Unit`. A value of a unit-like type built by
+//!   a constant, an entry local, a ghost or a `()`-returning std call is `Unit`, and a decoded `()`
+//!   is `Unit`; an aggregate `()` is `Tup([])` (single-inhabitant values: no operation tells them apart).
 //!
 //! The AST is read only through views (`@`): `Vec`-holding values are never compared with `==`.
 #[allow(unused_imports)]
@@ -192,7 +194,11 @@ pub open spec fn mut_free(v: Val) -> bool
     }
 }
 
-pub open spec fn unit_val() -> Val { Val::Tup(seq![]) }
+pub open spec fn unit_val() -> Val { Val::Unit }
+
+/// A tuple's value; `()` is the canonical `Unit` (a single-inhabitant value: its representation
+/// carries no meaning, and `Unit` is what core's images build for it).
+pub open spec fn tup_val(vs: Seq<Val>) -> Val { if vs.len() == 0 { Val::Unit } else { Val::Tup(vs) } }
 
 /// The value of a zero-sized type, with its count of ADT and reference nodes (for decision 7):
 /// tuples, single-variant structs, arrays of them and empty arrays (`[T; 0]`, of any `T`); fn
@@ -205,7 +211,7 @@ pub open spec fn unit_like(m: MirCrate, t: Ty, fuel: nat, clos: bool) -> Option<
         let f = (fuel - 1) as nat;
         match rigid(m, t) {
             Some(RigidTy::Tuple(ts)) => match unit_likes(m, ts@, f, ts@.len(), clos) {
-                Some((vs, c)) => Some((Val::Tup(vs), c)),
+                Some((vs, c)) => Some((tup_val(vs), c)),
                 None => None,
             },
             Some(RigidTy::Adt(_, _)) => match adt_row(m, t) {
@@ -432,7 +438,7 @@ pub open spec fn dec_tuple(m: MirCrate, t: Ty, ts: Seq<Ty>, a: Allocation, off: 
     match layout(m, t) {
         Some(l) => match offs_of(l.fields) {
             Some(o) => if o.len() == ts.len() {
-                match dec_fields(m, ts, o, a, off, fuel, ts.len()) { Some((vs, c)) => Some((Val::Tup(vs), c)), None => None }
+                match dec_fields(m, ts, o, a, off, fuel, ts.len()) { Some((vs, c)) => Some((tup_val(vs), c)), None => None }
             } else { None },
             None => None,
         },
@@ -528,7 +534,7 @@ pub open spec fn const_val(m: MirCrate, c: ConstOperand) -> Option<(Val, nat)> {
             Some((v, k)) => Some((v, if charged(m, t) { k } else { 0 })),
             None => None,
         },
-        ConstantKind::ZeroSized => match unit_like(m, t, tfuel(m), true) { Some((v, _)) => Some((v, 0)), None => None },
+        ConstantKind::ZeroSized => match unit_like(m, t, tfuel(m), true) { Some(_) => Some((Val::Unit, 0)), None => None },
         _ => None,
     }
 }
@@ -568,14 +574,16 @@ pub open spec fn extend(p: PRes, e: PE) -> PRes {
     match p { PRes::At(l) => PRes::At(Loc { root: l.root, path: l.path.push(e) }), PRes::Snap(v) => PRes::Snap(get(v, e)) }
 }
 
-/// One projection. `Index` reads its local, is bounds-checked (out of bounds is UB: MiniRust
+/// One projection. `Deref` follows a `&mut` location only from a location: a `&mut` met inside a
+/// `&` snapshot is not followed (rustc's MIR does not do it in the subset: `ty_free` forbids `&mut`
+/// under `&`), so the run gives `None`. `Index` reads its local, is bounds-checked (out of bounds is UB: MiniRust
 /// expressions.md `Index`) and emits `Idx(i)`; `ConstantIndex` checks `min_length` and the bound.
 pub open spec fn proj_step(fr: Frame, p: PRes, e: ProjectionElem) -> Option<(PRes, Seq<Event>)> {
     match pres_val(fr, p) {
         None => None,
         Some(cur) => match e {
             ProjectionElem::Deref => match cur {
-                Val::Mut(l) => Some((PRes::At(l), seq![])),
+                Val::Mut(l) => if p is At { Some((PRes::At(l), seq![])) } else { None },
                 Val::Shr(b) => Some((PRes::Snap(*b), seq![])),
                 _ => None,
             },
@@ -1004,15 +1012,13 @@ pub open spec fn std_apply(m: MirCrate, f: StdFn, dty: Option<Ty>, vs: Seq<Val>,
             }
         } else { None },
         StdFn::SliceToVec => if vs.len() == 1 {
-            match shr_arr(vs[0]) { Some(xs) => Some((Val::Arr(xs), fr, seq![], xs.len())), None => None }
+            match shr_arr(vs[0]) { Some(xs) => if xs.len() <= USZ { Some((Val::Arr(xs), fr, seq![], xs.len())) } else { None }, None => None }
         } else { None },
         StdFn::Wrapping(op, it) => if vs.len() == 2 {
             match (int_arg(vs[0]), int_arg(vs[1])) { (Some(a), Some(c)) => Some((Val::Int(binop(op, it, a, c)), fr, seq![], 0)), _ => None }
         } else { None },
         StdFn::GhostNew => match dty {
-            Some(t) => if zst_dest(m, t) {
-                match unit_like(m, t, tfuel(m), false) { Some((v, _)) => Some((v, fr, seq![], 0)), None => None }
-            } else { None },
+            Some(t) => if zst_dest(m, t) { Some((Val::Unit, fr, seq![], 0)) } else { None },
             None => None,
         },
     }
@@ -1026,9 +1032,7 @@ pub open spec fn leaf_call(m: MirCrate, pol: CallPolicy, key: Seq<u8>, gargs: Ge
         if vs.len() == 1 { Some((vs[0], fr, seq![Event::Declass(vs[0])], 0)) } else { None }
     } else if pol.ghost_unit.contains(key) {
         match dty {
-            Some(t) => if zst_dest(m, t) {
-                match unit_like(m, t, tfuel(m), false) { Some((v, _)) => Some((v, fr, seq![], 0)), None => None }
-            } else { None },
+            Some(t) => if zst_dest(m, t) { Some((Val::Unit, fr, seq![], 0)) } else { None },
             None => None,
         }
     } else {
@@ -1043,8 +1047,8 @@ pub open spec fn is_leaf(m: MirCrate, pol: CallPolicy, key: Seq<u8>, gargs: Gene
 // ------------------------------------------------------------------ calls (decision 3)
 
 /// The frame a body starts in: parameter `1 + j` is `args[j]`, or `Mut(Slot(j))` when its type is
-/// `&mut` (slot `j` holds the pointee). Local 0 and the other locals are `Unit` (uninitialized),
-/// except a local of unit-like type, which holds its one value (a ZST read never fails, MiniRust).
+/// `&mut` (slot `j` holds the pointee). Local 0 and the other locals are `Unit`: uninitialized, or
+/// the canonical value of a unit-like type (a ZST read never fails, MiniRust).
 pub open spec fn mir_entry(m: MirCrate, i: nat, args: Seq<Val>, slots: Seq<Val>) -> Frame {
     match inst_body(m, i) {
         Some(b) => Frame { locals: Seq::new(b.locals@.len(), |k: int| entry_local(m, b, args, k)), slots },
@@ -1055,8 +1059,6 @@ pub open spec fn mir_entry(m: MirCrate, i: nat, args: Seq<Val>, slots: Seq<Val>)
 pub open spec fn entry_local(m: MirCrate, b: Body, args: Seq<Val>, k: int) -> Val {
     if 1 <= k <= b.arg_count && k - 1 < args.len() && k < b.locals@.len() {
         if is_mut_ref(m, b.locals@[k].ty) { Val::Mut(Loc { root: Root::Slot((k - 1) as nat), path: seq![] }) } else { args[k - 1] }
-    } else if 0 <= k < b.locals@.len() {
-        match unit_like(m, b.locals@[k].ty, tfuel(m), false) { Some((v, _)) => v, None => Val::Unit }
     } else { Val::Unit }
 }
 
