@@ -196,7 +196,7 @@ Each exec body is a `#[verifier::external_body]` one-liner into a RustCrypto shi
     - K0 = `spec_sha256(key)` if `key.len() > 64`, else `key`, right-padded with zeros to 64 bytes;
     - the result is `H((K0 ⊕ opad) ++ H((K0 ⊕ ipad) ++ msg))`, with ipad = 64×`0x36` and opad = 64×`0x5c`.
   - `pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> (r: [u8; 32])`: external_body, with `requires key@.len() <= MAX_INPUT_LEN, msg@.len() <= MAX_INPUT_LEN` and `ensures r@ == spec_hmac_sha256(key@, msg@)`.
-- Produces (`crypto::hkdf`, RFC 5869 §2.2–2.3; **no** Expand-Label, which is Phase 3e/4):
+- Produces (`crypto::hkdf`, RFC 5869 §2.2–2.3; **no** Expand-Label, which is Phase 4):
   - `pub open spec fn spec_hkdf_extract(salt: Seq<u8>, ikm: Seq<u8>) -> Seq<u8>` = `spec_hmac_sha256(salt, ikm)`. Add a comment: "salt not provided" is an empty `salt`; HMAC zero-pads keys to 64 bytes, so it equals HashLen zeros (A.3 checks this).
   - `spec fn hkdf_t(prk, info, i: nat) -> Seq<u8>`: T(0) is empty; T(i) = `HMAC(prk, T(i−1) ++ info ++ [i as u8])`.
   - `pub open spec fn spec_hkdf_expand(prk: Seq<u8>, info: Seq<u8>, len: nat) -> Seq<u8>`: the first `len` bytes of T(1) ++ … ++ T(⌈len/32⌉).

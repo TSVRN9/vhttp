@@ -1,11 +1,14 @@
 //! Header protection (RFC 9001 §5.4): a 5-byte AES-ECB mask over a 16-byte ciphertext sample
 //! (§5.4.2, §5.4.3), applied to the first byte and the packet number as in Figure 6.
 //!
-//! Timing: `hp_mask` and `apply_hp` have no branch or index on the key or the mask; `apply_hp`
-//! loops over the packet number length read before masking. `remove_hp` loops over the length
-//! read after unmasking, which it computes from the mask, so its loop count depends on the mask.
-//! Both are the length header protection hides on the wire (RFC 9001 §9.5), 1 to 4 bytes. This
-//! is a known gap; the code is not CT-checked.
+//! Timing (RFC 9001 §9.5), constant time in style: no branch, loop count or index in `hp_mask`,
+//! `apply_hp` or `remove_hp` depends on the key, the mask, the packet number or its length.
+//! Both always read and write all 4 candidate packet number bytes, each XORed with its mask byte
+//! under a select mask (0xff or 0) computed arithmetically from the 2-bit length field; the
+//! first byte's mask (0x0f long, 0x1f short) is computed from the header form bit, which is not
+//! protected. Not met, a known gap: this is style only. Nothing checks quic at the MIR or binary
+//! level, so the compiler may still emit a branch; and the AEAD work that follows depends on the
+//! payload length, which is the packet length minus the packet number length.
 use crypto::aes::*;
 use vstd::prelude::*;
 use vstd::slice::{slice_subrange, slice_to_vec};
@@ -207,22 +210,42 @@ pub fn hp_mask(hp: &[u8; 16], sample: &[u8]) -> (m: [u8; 5])
     m
 }
 
+proof fn bv_first_byte_ct(b: u8, m: u8)
+    by (bit_vector)
+    ensures
+        b & 0x80u8 == 0x80u8 ==> b ^ (m & (0x1fu8 ^ ((b >> 7u8) << 4u8))) == b ^ (m & 0x0fu8),
+        b & 0x80u8 != 0x80u8 ==> b ^ (m & (0x1fu8 ^ ((b >> 7u8) << 4u8))) == b ^ (m & 0x1fu8),
+{
+}
+
+proof fn bv_select(x: u8, y: u8)
+    by (bit_vector)
+    ensures
+        x ^ (y & 0xffu8) == x ^ y,
+        x ^ (y & 0u8) == x,
+{
+}
+
+/// `hp_first_byte` without a branch: the low-bit mask is 0x1f, less 0x10 when the header form
+/// bit is set.
 fn first_byte(b: u8, m: u8) -> (r: u8)
     ensures
         r == hp_first_byte(b, m),
 {
-    if b & 0x80 == 0x80 {
-        b ^ (m & 0x0f)
-    } else {
-        b ^ (m & 0x1f)
+    proof {
+        bv_first_byte_ct(b, m);
     }
+    b ^ (m & (0x1f ^ ((b >> 7) << 4)))
 }
 
-/// `hp_xor` in place over the packet that starts at `start`.
-fn xor_header(buf: &mut Vec<u8>, start: usize, o: usize, m: &[u8; 5], b0: u8, n: usize)
+/// `hp_xor` in place over the packet that starts at `start`, with packet number length `p + 1`.
+/// All 4 candidate bytes are rewritten; byte `j` takes `m[1 + j]` under the select mask
+/// `((p + 8 - j) / 8) * 255`, which is 0xff for `j <= p` and 0 otherwise. The 4 bytes exist
+/// because every caller has the 20-byte sample from `o + 4`.
+fn xor_header(buf: &mut Vec<u8>, start: usize, o: usize, m: &[u8; 5], b0: u8, p: u8)
     requires
         o >= 1,
-        1 <= n <= 4,
+        p < 4,
         start + o + 4 <= old(buf)@.len(),
     ensures
         final(buf)@ == old(buf)@.take(start as int) + hp_xor(
@@ -230,35 +253,44 @@ fn xor_header(buf: &mut Vec<u8>, start: usize, o: usize, m: &[u8; 5], b0: u8, n:
             o as nat,
             m@,
             b0,
-            n as nat,
+            p as nat + 1,
         ),
 {
     let ghost b = buf@;
     let _len = buf.len();
     buf.set(start, b0);
     let mut i: usize = 0;
-    while i < n
+    while i < 4
         invariant
-            i <= n <= 4,
+            i <= 4,
+            p < 4,
             o >= 1,
             start + o + 4 <= b.len() == _len,
             buf@.len() == b.len(),
             forall|j: int|
                 0 <= j < b.len() ==> #[trigger] buf@[j] == if j == start {
                     b0
-                } else if start + o <= j < start + o + i {
+                } else if start + o <= j < start + o + i && j - start - o <= p {
                     b[j] ^ m@[j - start - o + 1]
                 } else {
                     b[j]
                 },
-        decreases n - i,
+        decreases 4 - i,
     {
         let k = start + o + i;
-        let v = buf[k] ^ m[i + 1];
-        buf.set(k, v);
+        let t = p + 8 - i as u8;
+        let sel = (t / 8) * 255;
+        assert(i <= p ==> sel == 0xffu8);
+        assert(i > p ==> sel == 0u8);
+        let x = buf[k];
+        let y = m[i + 1];
+        proof {
+            bv_select(x, y);
+        }
+        buf.set(k, x ^ (y & sel));
         i += 1;
     }
-    assert(buf@ =~= b.take(start as int) + hp_xor(b.skip(start as int), o as nat, m@, b0, n as nat));
+    assert(buf@ =~= b.take(start as int) + hp_xor(b.skip(start as int), o as nat, m@, b0, p as nat + 1));
 }
 
 /// Figure 6 in place on the packet that starts at `buf[start]`, whose Packet Number field
@@ -284,8 +316,7 @@ pub fn apply_hp(buf: &mut Vec<u8>, start: usize, pn_offset: usize, hp: &[u8; 16]
     proof {
         bv_pn_len(b);
     }
-    let n = (b & 3) as usize + 1;
-    xor_header(buf, start, pn_offset, &m, first_byte(b, m[0]), n);
+    xor_header(buf, start, pn_offset, &m, first_byte(b, m[0]), b & 3);
 }
 
 /// Figure 6 for removal, on a copy of the packet.
@@ -308,16 +339,16 @@ pub fn remove_hp(pkt: &[u8], pn_offset: usize, hp: &[u8; 16]) -> (u: Vec<u8>)
     proof {
         bv_pn_len(b0);
     }
-    let n = (b0 & 3) as usize + 1;
     let mut u = slice_to_vec(pkt);
-    xor_header(&mut u, 0, pn_offset, &m, b0, n);
+    xor_header(&mut u, 0, pn_offset, &m, b0, b0 & 3);
+    let ghost n = (b0 & 3u8) as nat + 1;
     assert(pkt@.skip(0) =~= pkt@);
-    assert(pkt@.take(0) + hp_xor(pkt@, pn_offset as nat, m@, b0, n as nat) =~= hp_xor(
+    assert(pkt@.take(0) + hp_xor(pkt@, pn_offset as nat, m@, b0, n) =~= hp_xor(
         pkt@,
         pn_offset as nat,
         m@,
         b0,
-        n as nat,
+        n,
     ));
     u
 }
