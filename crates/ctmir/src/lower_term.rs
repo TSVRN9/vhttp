@@ -310,10 +310,27 @@ pub fn lower_call(m: &MirCrate, pol: &Policy, order: &Vec<usize>, keys: &mut Key
         }
         return Err(uns(s, w));
     }
+    let mut q: usize = 0;
+    while q < dest.projection.len()
+        invariant q <= dest.projection@.len(), forall|i: int| 0 <= i < q ==> !(#[trigger] dest.projection@[i] is Index),
+        decreases dest.projection.len() - q,
+    {
+        // sem evaluates the destination before the call, core after its write-back
+        if matches!(dest.projection[q], ProjectionElem::Index(_)) { return Err(uns(s, msg(b"a call into an indexed place"))); }
+        q += 1;
+    }
     let ghost t0 = *tmp;
     if leaf {
         if !x_leaf_ok(m, pol, key, ga, args.len(), x_place_ty(m, b, dest)) {
             return Err(uns(s, msg(b"a std or policy call at an unexpected arity or result type")));
+        }
+        proof { lemma_set_of(pol.declassify@, key@); }
+        if has_exec(&pol.declassify, key) {
+            let ok = match x_op_ty(m, b, &args[0]) {
+                Some(at) => match x_tfuel(m) { Some(tf) => !x_unit_like(m, at, tf, true), None => false },
+                None => false,
+            };
+            if !ok { return Err(uns(s, msg(b"a declassify of a unit-like value"))); }
         }
         let kk = match x_intr_of(m, pol, key, ga) { Some(kk) => kk, None => return Err(uns(s, msg(b"a leaf without an intrinsic"))) };
         let declass = matches!(kk, c::Intrinsic::Declassify);
@@ -348,15 +365,16 @@ proof fn lemma_call_post(m: MirCrate, pol: Policy, ord: Seq<usize>, b: Body, t: 
         callee_of(m, t->Call_func) matches Some((jj, g)) && jj == j && j < m.insts@.len() && {
             let key = m.insts@[j as int].key@;
             &&& ct is Call && ct->Call_3 == t->Call_target->Some_0
-            &&& lowers_place(m, b, t->Call_destination, ct->Call_2, true)
+            &&& lowers_place(m, b, t->Call_destination, ct->Call_2, true) && no_index(t->Call_destination)
             &&& grew(t0, t2) && lowers_ops(m, b, t->Call_args@, ct->Call_1@, seg(t0, t2), tbase(t0)) && ops_ok(m, b, t->Call_args@)
             &&& if is_leaf(m, cpol(pol), key, g) {
                 ct->Call_0 is Intr && intr_of(m, cpol(pol), key, g) == Some(ct->Call_0->Intr_0)
                 && leaf_ok(m, cpol(pol), key, g, t->Call_args@.len(), place_ty(m, b, t->Call_destination))
+                && (cpol(pol).declassify.contains(key) ==> declass_arg_ok(m, b, t->Call_args@))
             } else {
                 ct->Call_0 is Fn && fn_of(ord, ct->Call_0->Fn_0, j) && internal(m, pol, j) && ord_set(ord).contains(j)
                 && inst_body(m, j) is Some && t->Call_args@.len() == inst_body(m, j)->Some_0.arg_count && sig_ok(m, inst_body(m, j)->Some_0)
-                && args_typed(m, b, t->Call_args@, inst_body(m, j)->Some_0)
+                && args_typed(m, b, t->Call_args@, inst_body(m, j)->Some_0) && inst_body(m, j)->Some_0.spread_arg is None
             }
         },
     ensures term_post(m, pol, ord, b, t, ct, t0, t2),
@@ -380,7 +398,8 @@ pub fn glue_ok(m: &MirCrate, gb: &Body, ty: Ty) -> (r: bool)
 /// A body call the translator makes: 0 when the callee's body takes these arguments (1: a
 /// rust-call body, 2: argument types differ from the parameters', 3: no body or signature).
 pub fn callee_ok(m: &MirCrate, b: &Body, args: &Vec<Operand>, j: usize) -> (r: u8)
-    ensures r == 0 ==> (inst_body(*m, j as nat) matches Some(cb) && args@.len() == cb.arg_count && sig_ok(*m, cb) && args_typed(*m, *b, args@, cb)),
+    ensures r == 0 ==> (inst_body(*m, j as nat) matches Some(cb) && args@.len() == cb.arg_count && sig_ok(*m, cb) && cb.spread_arg is None
+        && args_typed(*m, *b, args@, cb)),
 {
     match x_inst_body(m, j) {
         Some(cb) => if cb.spread_arg.is_some() { 1 } else if !(args.len() == cb.arg_count && x_sig_ok(m, cb)) { 3 }

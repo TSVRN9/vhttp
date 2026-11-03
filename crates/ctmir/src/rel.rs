@@ -44,7 +44,9 @@ pub open spec fn lowers_ty(m: MirCrate, t: Ty, ct: c::Ty, fuel: nat) -> bool
                         && forall|i: int| 0 <= i < ts@.len() ==> lowers_ty(m, #[trigger] ts@[i], ct->Tuple_0@[i], f)
                 },
                 RigidTy::Adt(_, _) => lowers_adt_ty(m, t, ct, f),
-                RigidTy::Array(e, n) => ct is Array && const_usize(m, n.id) == Some(ct->Array_1) && lowers_ty(m, e, *ct->Array_0, f),
+                // a unit-like element makes `[T; n]` unit-like in MIR (`Arr` of n) but `Unit` in core
+                RigidTy::Array(e, n) => ct is Array && const_usize(m, n.id) == Some(ct->Array_1) && lowers_ty(m, e, *ct->Array_0, f)
+                    && (ct->Array_1 == 0 || unit_like(m, e, tfuel(m), true) is None),
                 RigidTy::Slice(e) => ct is Slice && lowers_ty(m, e, *ct->Slice_0, f),
                 RigidTy::Str => ct is Unit,
                 RigidTy::Ref(_, p, mu) => if rigid(m, p) matches Some(RigidTy::Str) { mu is Not && ct is Unit } else {
@@ -237,7 +239,7 @@ pub open spec fn lowers_const(m: MirCrate, k: ConstOperand, y: c::Operand, pre: 
     let t = k.const_.ty;
     &&& const_val(m, k) matches Some((_, ch)) && pre.len() == ch
     &&& match k.const_.kind {
-        ConstantKind::ZeroSized => y is Lit && y->Lit_0 is Unit,
+        ConstantKind::ZeroSized => y is Lit && y->Lit_0 is Unit && exists|ct: c::Ty| #[trigger] lowers_ty(m, t, ct, tyf()),
         ConstantKind::Allocated(a) => if charged(m, t) { lowers_cv(m, t, a, 0, dfuel(m), y, pre, base) }
             else { lit_img(m, t, a, 0, dfuel(m), y) },
         _ => false,
@@ -403,13 +405,6 @@ pub open spec fn internal(m: MirCrate, pol: Policy, j: nat) -> bool {
 /// Core fn `h` is the image of `insts[j]` (`ord`: each fn's `insts` index).
 pub open spec fn fn_of(ord: Seq<usize>, h: usize, j: nat) -> bool { (h as nat) < ord.len() && ord[h as int] as nat == j }
 
-/// Each argument's type is the callee's parameter type. A closure called through `Fn::call`
-/// resolves to the closure body but is passed its arguments tupled (rust-call), which `call_ok`'s
-/// arity check does not see; type ids are interned, so equal types have equal ids.
-pub open spec fn args_typed(m: MirCrate, b: Body, args: Seq<Operand>, cb: Body) -> bool {
-    args.len() + 1 <= cb.locals@.len() && forall|k: int| 0 <= k < args.len() ==> op_ty(m, b, #[trigger] args[k]) == Some(cb.locals@[k + 1].ty)
-}
-
 /// The glue's parameter is `&mut t`.
 pub open spec fn glue_param_is(m: MirCrate, gb: Body, t: Ty) -> bool {
     gb.locals@.len() > 1 && match rigid(m, gb.locals@[1].ty) { Some(RigidTy::Ref(_, pt, _)) => pt == t, _ => false }
@@ -421,13 +416,20 @@ pub open spec fn lowers_call(m: MirCrate, pol: Policy, ord: Seq<usize>, b: Body,
     tb: BasicBlockIdx, pre: Seq<c::Stmt>, base: nat, ct: c::Term) -> bool
 {
     callee_of(m, func) matches Some((j, g)) && j < m.insts@.len() && ct is Call && ct->Call_3 == tb
-    && lowers_place(m, b, dest, ct->Call_2, true) && lowers_ops(m, b, args, ct->Call_1@, pre, base)
+    && lowers_place(m, b, dest, ct->Call_2, true) && no_index(dest) && lowers_ops(m, b, args, ct->Call_1@, pre, base)
     && if is_leaf(m, cpol(pol), m.insts@[j as int].key@, g) {
         ct->Call_0 is Intr && intr_of(m, cpol(pol), m.insts@[j as int].key@, g) == Some(ct->Call_0->Intr_0)
+            && (cpol(pol).declassify.contains(m.insts@[j as int].key@) ==> declass_arg_ok(m, b, args))
     } else {
         ct->Call_0 is Fn && fn_of(ord, ct->Call_0->Fn_0, j) && internal(m, pol, j)
             && inst_body(m, j) is Some && args_typed(m, b, args, inst_body(m, j)->Some_0)
     }
+}
+
+/// A declassify's one argument is not unit-like: `Declass(v)` carries the value, and a unit-like
+/// value is `Unit` in core but `unit_like` in MIR.
+pub open spec fn declass_arg_ok(m: MirCrate, b: Body, args: Seq<Operand>) -> bool {
+    args.len() == 1 && op_ty(m, b, args[0]) is Some && unit_like(m, op_ty(m, b, args[0])->Some_0, tfuel(m), true) is None
 }
 
 pub open spec fn no_index(p: Place) -> bool { forall|k: int| 0 <= k < p.projection@.len() ==> !(#[trigger] p.projection@[k] is Index) }
@@ -550,11 +552,85 @@ pub open spec fn root_of(m: MirCrate, root: Seq<u8>, j: nat) -> bool {
         && forall|k2: int| 0 <= k2 < m.items@.len() && #[trigger] item_may_be(m, k2, root) ==> k2 == k
 }
 
+// ------------------------------------------------------------------ the report metadata (FnInfo)
+
+pub open spec fn ws(c: u8) -> bool { c == 32 || c == 10 || c == 9 || c == 13 }
+
+pub open spec fn trim_lo(s: Seq<u8>, i: nat) -> nat
+    decreases s.len() - i,
+{
+    if i < s.len() && ws(s[i as int]) { trim_lo(s, i + 1) } else { i }
+}
+
+pub open spec fn trim_hi(s: Seq<u8>, lo: nat, j: nat) -> nat
+    decreases j,
+{
+    if j > lo && ws(s[j - 1]) { trim_hi(s, lo, (j - 1) as nat) } else { j }
+}
+
+/// `s` without leading and trailing ASCII whitespace.
+pub open spec fn trim_spec(s: Seq<u8>) -> Seq<u8> {
+    let lo = trim_lo(s, 0);
+    s.subrange(lo as int, trim_hi(s, lo, s.len()) as int)
+}
+
+/// Starts with `#[ct::`.
+pub open spec fn ct_attr(t: Seq<u8>) -> bool {
+    t.len() >= 6 && t[0] == 35u8 && t[1] == 91u8 && t[2] == 99u8 && t[3] == 116u8 && t[4] == 58u8 && t[5] == 58u8
+}
+
+/// The first `n` attribute strings, trimmed, the `#[ct::..]` ones.
+pub open spec fn attrs_from(a: Seq<Vec<u8>>, n: nat) -> Seq<Seq<u8>>
+    decreases n,
+{
+    if n == 0 || n > a.len() { seq![] } else {
+        let t = trim_spec(a[n - 1]@);
+        attrs_from(a, (n - 1) as nat) + if ct_attr(t) { seq![t] } else { Seq::<Seq<u8>>::empty() }
+    }
+}
+
+/// The `#[ct::..]` attributes of the (first) item of `def`.
+pub open spec fn item_attrs(m: MirCrate, def: DefId) -> Seq<Seq<u8>> {
+    match find(m.items@, |it: Item| it.def == def) {
+        Some(k) => attrs_from(m.items@[k as int].attrs@, m.items@[k as int].attrs@.len()),
+        None => seq![],
+    }
+}
+
+/// Debug info naming argument `j` as a plain local.
+pub open spec fn vdi_is(v: VarDebugInfo, j: nat) -> bool {
+    v.argument_index is Some && v.argument_index->Some_0 as nat == j
+        && v.value is Place && v.value->Place_0.local == j && v.value->Place_0.projection@.len() == 0
+}
+
+/// Parameter `j`'s name (1-based), or empty.
+pub open spec fn pname(b: Body, j: nat) -> Seq<u8> {
+    match find(b.var_debug_info@, |v: VarDebugInfo| vdi_is(v, j)) { Some(k) => b.var_debug_info@[k as int].name@, None => seq![] }
+}
+
+pub open spec fn pnames(b: Body) -> Seq<Seq<u8>> { Seq::new(b.arg_count as nat, |k: int| pname(b, (k + 1) as nat)) }
+
+/// A fn's report path: its key, or the instance name for a shim (drop glue).
+pub open spec fn fn_path(m: MirCrate, j: nat) -> Seq<u8> {
+    if m.insts@[j as int].kind is Shim { m.insts@[j as int].name@ } else { m.insts@[j as int].key@ }
+}
+
+pub open spec fn views(v: Seq<Vec<u8>>) -> Seq<Seq<u8>> { v.map_values(|x: Vec<u8>| x@) }
+
+/// `FnInfo` `g`'s metadata, from the dump: root flag, path, attributes, parameter names.
+pub open spec fn info_ok(m: MirCrate, i: FnInfo, g: int) -> bool {
+    &&& i.is_root == (g == 0) && i.inst < m.insts@.len()
+    &&& i.path@ == fn_path(m, i.inst as nat)
+    &&& views(i.attrs@) == item_attrs(m, m.insts@[i.inst as int].def)
+    &&& inst_body(m, i.inst as nat) matches Some(b) && views(i.param_names@) == pnames(b)
+}
+
 pub open spec fn lowers_rs(m: MirCrate, pol: Policy, root: Seq<u8>, p: c::Program, infos: Seq<FnInfo>, rs: Seq<Seq<bool>>) -> bool {
     &&& p.fns@.len() == infos.len() && rs.len() == infos.len() && infos.len() >= 1
     &&& root_of(m, root, infos[0].inst as nat) && infos[0].is_root
     &&& forall|g: int, h: int| 0 <= g < infos.len() && 0 <= h < infos.len() && g != h ==> (#[trigger] infos[g]).inst != (#[trigger] infos[h]).inst
     &&& forall|g: int| 0 <= g < infos.len() ==> lowers_body(m, pol, ords(infos), infos[g].inst as nat, p.fns@[g], #[trigger] rs[g])
+    &&& forall|g: int| 0 <= g < infos.len() ==> info_ok(m, #[trigger] infos[g], g)
 }
 
 /// The translator's contract: some reachable-block marks per fn make every fn the image of its

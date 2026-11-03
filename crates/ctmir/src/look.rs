@@ -451,7 +451,7 @@ pub fn x_locals_ok(m: &MirCrate, b: &Body) -> (r: bool)
 
 /// `unit_like(m, t, fuel, clos) is Some`.
 pub fn x_unit_like(m: &MirCrate, t: Ty, fuel: usize, clos: bool) -> (r: bool)
-    ensures r ==> unit_like(*m, t, fuel as nat, clos) is Some,
+    ensures r == unit_like(*m, t, fuel as nat, clos) is Some,
     decreases fuel, 0nat,
 {
     if fuel == 0 { return false; }
@@ -474,7 +474,7 @@ pub fn x_unit_like(m: &MirCrate, t: Ty, fuel: usize, clos: bool) -> (r: bool)
 }
 
 pub fn x_unit_likes(m: &MirCrate, ts: &Vec<Ty>, fuel: usize, clos: bool) -> (r: bool)
-    ensures r ==> unit_likes(*m, ts@, fuel as nat, ts@.len(), clos) is Some,
+    ensures r == unit_likes(*m, ts@, fuel as nat, ts@.len(), clos) is Some,
     decreases fuel, 1nat,
 {
     let mut k: usize = 0;
@@ -482,10 +482,22 @@ pub fn x_unit_likes(m: &MirCrate, ts: &Vec<Ty>, fuel: usize, clos: bool) -> (r: 
         invariant k <= ts@.len(), unit_likes(*m, ts@, fuel as nat, k as nat, clos) is Some,
         decreases ts.len() - k,
     {
-        if !x_unit_like(m, ts[k], fuel, clos) { return false; }
+        if !x_unit_like(m, ts[k], fuel, clos) {
+            proof { lemma_unit_likes_none(*m, ts@, fuel as nat, (k + 1) as nat, ts@.len(), clos); }
+            return false;
+        }
         k += 1;
     }
     true
+}
+
+/// A failed prefix of `unit_likes` stays failed.
+pub proof fn lemma_unit_likes_none(m: MirCrate, ts: Seq<Ty>, fuel: nat, k: nat, n: nat, clos: bool)
+    requires 0 < k <= n <= ts.len(), unit_likes(m, ts, fuel, k, clos) is None,
+    ensures unit_likes(m, ts, fuel, n, clos) is None,
+    decreases n - k,
+{
+    if k < n { lemma_unit_likes_none(m, ts, fuel, k, (n - 1) as nat, clos); }
 }
 
 pub fn x_zst_dest(m: &MirCrate, t: Ty) -> (r: bool)
