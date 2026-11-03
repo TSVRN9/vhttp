@@ -94,7 +94,8 @@ pub proof fn lemma_rv_bin(m: MirCrate, b: Body, fm: Frame, fc0: Frame, op: BinOp
 
 /// Shape facts `vr` alone does not give: an array read by `Len`/`PtrMetadata`, or an ADT read by
 /// `Discriminant`, that core might hold as `Unit` (it is unit-shaped) is empty / of variant 0, and a
-/// struct's stored variant is 0. These hold of well-typed values (Task 6 report: typing facts).
+/// struct's stored variant is 0. MIR-side over-approximations: a fieldless enum at a nonzero variant
+/// is unit-shaped, so `discr_tf` fails on it although core is exact there (Task 6 report).
 pub open spec fn arr_tf(v: Val) -> bool { v is Arr && us(v) ==> v->Arr_0.len() == 0 }
 
 pub open spec fn discr_tf(is_struct: bool, v: Val) -> bool { v is Adt && (is_struct || us(v)) ==> v->Adt_0 == 0 }
