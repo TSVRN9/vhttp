@@ -2,6 +2,7 @@
 //! names are bytes. `declassify` and `ghost` are the manifest's `declassify <path>` and
 //! `ghost <path>` lines (`ghost_unit`: `ghost` is a Verus keyword), the semantics' `CallPolicy`.
 use crate::json::bytes_eq;
+#[cfg(verus_keep_ghost)]
 use crate::sem::CallPolicy;
 use vstd::prelude::*;
 

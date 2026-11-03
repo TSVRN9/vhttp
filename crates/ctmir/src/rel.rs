@@ -365,10 +365,6 @@ pub open spec fn soff(m: MirCrate, ss: Seq<Statement>, i: nat) -> nat
     if i == 0 || i > ss.len() { 0 } else { soff(m, ss, (i - 1) as nat) + slen(m, ss[i - 1]) }
 }
 
-pub open spec fn is_declassify(pol: Policy, m: MirCrate, func: Operand) -> bool {
-    callee_of(m, func) matches Some((j, _)) && j < m.insts@.len() && has(pol.declassify@, m.insts@[j as int].key@)
-}
-
 /// The core intrinsic of a leaf: policy calls first, then the std model (as `leaf_call`).
 pub open spec fn intr_of(m: MirCrate, pol: CallPolicy, key: Seq<u8>, g: GenericArgs) -> Option<c::Intrinsic> {
     if pol.declassify.contains(key) { Some(c::Intrinsic::Declassify) }

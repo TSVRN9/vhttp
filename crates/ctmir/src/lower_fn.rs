@@ -397,19 +397,44 @@ proof fn lemma_block_close(m: MirCrate, pol: Policy, ord: Seq<usize>, b: Body, n
         cb.stmts@ == st0 + pre, cb.term == ct,
     ensures block_ok(m, cpol(pol), b, blk), lowers_block(m, pol, ord, b, nloc, n2, blk, cb),
 {
-    reveal(stmts_rel);
+    hide(lowers_stmt);
+    hide(lowers_term);
+    hide(term_ok);
     let ss = blk.statements@;
     let cs = cb.stmts@;
     assert forall|k: int| 0 <= k < ss.len() implies lowers_stmt(m, b, nloc, n2, #[trigger] ss[k],
         cs.subrange(soff(m, ss, k as nat) as int, soff(m, ss, (k + 1) as nat) as int)) by {
-        lemma_soff_mono(m, ss, (k + 1) as nat, ss.len());
-        lemma_soff_mono(m, ss, k as nat, (k + 1) as nat);
-        assert(cs.subrange(soff(m, ss, k as nat) as int, soff(m, ss, (k + 1) as nat) as int)
-            =~= st0.subrange(soff(m, ss, k as nat) as int, soff(m, ss, (k + 1) as nat) as int));
-        lemma_stmt_mono(m, b, nloc, n1, n2, ss[k], st0.subrange(soff(m, ss, k as nat) as int, soff(m, ss, (k + 1) as nat) as int));
+        lemma_stmts_at(m, b, nloc, n1, ss, ss.len(), st0, k);
+        lemma_stmt_prev(m, b, nloc, n1, n2, ss, ss.len(), st0, pre, k);
     };
+    lemma_stmts_len(m, b, nloc, n1, ss, ss.len(), st0);
     assert(cs.subrange(soff(m, ss, ss.len()) as int, cs.len() as int) =~= pre);
+    lemma_block_ok(m, pol, b, nloc, n1, blk, st0);
+}
+
+proof fn lemma_stmts_len(m: MirCrate, b: Body, nloc: nat, ncore: nat, ss: Seq<Statement>, i: nat, cs: Seq<c::Stmt>)
+    requires stmts_rel(m, b, nloc, ncore, ss, i, cs),
+    ensures cs.len() == soff(m, ss, i),
+{
+    reveal(stmts_rel);
+}
+
+/// An instance of `stmts_rel`.
+proof fn lemma_stmts_at(m: MirCrate, b: Body, nloc: nat, ncore: nat, ss: Seq<Statement>, i: nat, cs: Seq<c::Stmt>, k: int)
+    requires stmts_rel(m, b, nloc, ncore, ss, i, cs), 0 <= k < i,
+    ensures cs.len() == soff(m, ss, i), lowers_stmt(m, b, nloc, ncore, ss[k], cs.subrange(soff(m, ss, k as nat) as int, soff(m, ss, (k + 1) as nat) as int)),
+{
+    reveal(stmts_rel);
+}
+
+proof fn lemma_block_ok(m: MirCrate, pol: Policy, b: Body, nloc: nat, n1: nat, blk: BasicBlock, st0: Seq<c::Stmt>)
+    requires stmts_rel(m, b, nloc, n1, blk.statements@, blk.statements@.len(), st0), term_ok(m, cpol(pol), b, blk.terminator.kind),
+    ensures block_ok(m, cpol(pol), b, blk),
+{
+    hide(lowers_stmt);
+    let ss = blk.statements@;
     assert forall|k: int| 0 <= k < ss.len() implies stmt_ok(m, b, #[trigger] ss[k]) by {
+        lemma_stmts_at(m, b, nloc, n1, ss, ss.len(), st0, k);
         lemma_stmt_len(m, b, nloc, n1, ss[k], st0.subrange(soff(m, ss, k as nat) as int, soff(m, ss, (k + 1) as nat) as int));
     };
     reveal(block_ok);
@@ -897,8 +922,8 @@ pub fn root_inst(m: &MirCrate, root: &[u8]) -> (r: Result<usize, Vec<u8>>)
     }
     if n > 1 { return Err(msg(b"root is ambiguous: several fns of the crate share its key")); }
     match hit {
-        Some((h, Some(j))) => {
-            proof { assert(item_may_be(*m, h as int, root@) && item_inst(*m, h as int) == Some(j as nat)); }
+        Some((_h, Some(j))) => {
+            proof { assert(item_may_be(*m, _h as int, root@) && item_inst(*m, _h as int) == Some(j as nat)); }
             Ok(j)
         },
         _ => Err(msg(b"root matches no monomorphic fn of the crate")),
@@ -931,10 +956,10 @@ pub fn lower(m: &MirCrate, pol: &Policy, root: &[u8]) -> (r: Result<(c::Program,
         decreases order.len() - g,
     {
         match lower_body(m, pol, &order, &mut keys, order[g], g == 0, &mut errs) {
-            Some((cb, info, r)) => {
+            Some((cb, info, _r)) => {
                 fns.push(cb);
                 infos.push(info);
-                proof { rs = rs.push(r@); }
+                proof { rs = rs.push(_r@); }
             },
             None => { bad = true; },
         }
@@ -952,6 +977,49 @@ pub fn lower(m: &MirCrate, pol: &Policy, root: &[u8]) -> (r: Result<(c::Program,
         assert(lowers_rs(*m, *pol, root@, p, infos@, rs));
     }
     Ok((p, infos))
+}
+
+// ------------------------------------------------------------------ what `lowers` gives the semantics
+
+/// Some fn of the program is the image of `insts[j]`.
+pub open spec fn idx_of(infos: Seq<FnInfo>, j: nat) -> int { choose|h: int| 0 <= h < infos.len() && infos[h].inst as nat == j }
+
+proof fn lemma_body_in(m: MirCrate, pol: Policy, ord: Seq<usize>, j: nat, cb: c::Body, r: Seq<bool>, rf: spec_fn(nat) -> Set<nat>)
+    requires lowers_body(m, pol, ord, j, cb, r), rf(j) == marks(r),
+    ensures body_in(m, cpol(pol), ord_set(ord), rf, j),
+{
+    let b = inst_body(m, j)->Some_0;
+    lemma_marks(r, 0);
+    assert forall|bb: nat| #[trigger] rf(j).contains(bb) implies bb < b.blocks@.len() && block_ok(m, cpol(pol), b, b.blocks@[bb as int])
+        && succs_in(b.blocks@[bb as int].terminator.kind, rf(j)) && callees_in(m, cpol(pol), b, b.blocks@[bb as int].terminator.kind, ord_set(ord)) by {
+        lemma_marks(r, bb);
+        assert(block_rel(m, pol, ord, b, b.locals@.len(), cb.locals@.len(), r, b.blocks@[bb as int], cb.blocks@[bb as int], r[bb as int]));
+    };
+}
+
+/// **`lowers` puts every translated fn in the subset**: the fns' instances and their reachable
+/// blocks are a closed set (`sem::closed`), so `theorem_in_subset_no_unsup` applies to each, and a
+/// `None` from `mir_run_fn` there is a panic or fuel.
+pub proof fn theorem_lowers_in_subset(m: MirCrate, pol: Policy, root: Seq<u8>, p: c::Program, infos: Seq<FnInfo>, g: int)
+    requires lowers(m, pol, root, p, infos), 0 <= g < infos.len(),
+    ensures in_subset(m, cpol(pol), infos[g].inst as nat),
+{
+    let rs = choose|rs: Seq<Seq<bool>>| lowers_rs(m, pol, root, p, infos, rs);
+    let ord = ords(infos);
+    let s = ord_set(ord);
+    let rf = |j: nat| marks(rs[idx_of(infos, j)]);
+    let w = ord.map_values(|x: usize| x as nat);
+    w.to_set_ensures();
+    assert forall|j: nat| #[trigger] s.contains(j) implies body_in(m, cpol(pol), s, rf, j) by {
+        let k = choose|k: int| 0 <= k < w.len() && w[k] == j;
+        assert(infos[k].inst as nat == j);
+        let h = idx_of(infos, j);
+        assert(lowers_body(m, pol, ord, infos[h].inst as nat, p.fns@[h], rs[h]));
+        lemma_body_in(m, pol, ord, j, p.fns@[h], rs[h], rf);
+    };
+    assert(closed(m, cpol(pol), s, rf));
+    assert(w[g] == infos[g].inst as nat);
+    assert(s.contains(infos[g].inst as nat));
 }
 
 } // verus!

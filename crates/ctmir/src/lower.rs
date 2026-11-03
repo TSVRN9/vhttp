@@ -2,16 +2,13 @@
 //! rvalues, statements and terminators. Bodies, the closure and `lower` are in `lower_fn`. Each
 //! lowering also proves the semantics' static gate for its construct (`rv_ok`, `stmt_ok`,
 //! `term_ok`, `callees_in`), which `lowers` requires of every reachable block.
-use crate::json::bytes_eq;
 use crate::look::*;
 use crate::lower_const::*;
 use crate::mir::*;
-use crate::policy::*;
 #[cfg(verus_keep_ghost)]
 use crate::rel::*;
 #[cfg(verus_keep_ghost)]
 use crate::sem::*;
-use crate::sem::StdFn;
 use ctcore::syntax as c;
 use vstd::prelude::*;
 

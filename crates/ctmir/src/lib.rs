@@ -2,6 +2,7 @@
 //! with `print` (serde_json's compact writer as a spec) tying each parsed value to rustc's output.
 //! `mir` mirrors the rustc_public types the dump holds, and `schema` decodes a parsed dump into
 //! them against `decode_*`, serde's derive conventions as a spec.
+#![allow(unused_braces)]
 use vstd::prelude::*;
 
 verus! {
