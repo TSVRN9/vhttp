@@ -143,7 +143,7 @@
   Everything follows the spec's fixed decisions 1–8: the run shape, no unwinding, the `&`/`&mut` model, Drop via glue, constants by layout, the leakage table, the cost table (with the ADT-constant charge) and the std model rows equal to today's `intr` lines at today's admitted types.
 
 - [ ] **Step 1:** Write `sem_sanity.rs` first. Each item is a proof of a concrete fact:
-  - the spike's `tiny` body, hand-built as a `MirCrate` value, returns `a[i&3] ^ 2` with events `[Cond(1), Idx(i&3)]` and 5 steps;
+  - the `tiny` body from `tests/data/tiny.json` (Task 3), hand-built as a `MirCrate` value, returns `a[i&3] ^ 2`. Its events and steps are computed by hand from that MIR and the spec's tables. For the spike's MIR these are `[Cond(1), Idx(i&3)]` and 7 steps: 3 assignments, the Assert, 2 assignments and the Return; StorageLive/Dead cost 0;
   - `Drop` of a `Vec<u8>` local is a no-op on the frame;
   - an `Option<NonZeroU8>`-shaped niche constant decodes to `Adt(0, [])` for byte 0;
   - a call with a `&mut` argument writes the callee's slot back.
@@ -158,11 +158,12 @@
 - Create: `crates/ctmir/src/lower.rs` (exec translator), `crates/ctmir/src/rel.rs` (`spec fn lowers_*`: the per-construct relation between a MIR item and its core image), `crates/ctmir/tests/lower.rs`.
 
 **Interfaces:**
-- Consumes: `MirCrate`, the `Policy` from the manifest (parsed in Task 7; this task takes a `Policy` value built by its tests), and `ctcore::syntax`.
+- Consumes: `MirCrate` and `ctcore::syntax`.
+- Creates `crates/ctmir/src/policy.rs` with only `pub struct Policy { roots, cost_roots, labels: Vec<(Vec<u8>, Vec<Vec<u8>>, Vec<Vec<u8>>)>, internal_crates, translate_crates }`. Its tests build values directly; Task 7 adds the parser. `FnInfo` carries `attrs: Vec<Vec<u8>>` and no `decl`/`attr_err`: Task 7 computes the labels.
 - Produces:
 
   ```
-  pub struct FnInfo { path: Vec<u8>, is_root: bool, decl: Option<Vec<bool>>, param_names: Vec<Vec<u8>>, block_sites: Vec<Vec<u8>>, declassify_sites: Vec<Vec<u8>>, stmt_sites: Vec<Vec<Vec<u8>>>, attr_err: Option<Vec<u8>>, inst: usize }
+  pub struct FnInfo { path: Vec<u8>, is_root: bool, attrs: Vec<Vec<u8>>, param_names: Vec<Vec<u8>>, block_sites: Vec<Vec<u8>>, declassify_sites: Vec<Vec<u8>>, stmt_sites: Vec<Vec<Vec<u8>>>, inst: usize }
   pub enum Reject { Unsupported { path, what, site }, Unresolved { path, callee, site }, Attr { path, msg }, Root { path, msg } }
   pub fn lower(m: &MirCrate, pol: &Policy, root: &[u8]) -> (r: Result<(Program, Vec<FnInfo>), Vec<Reject>>)
       ensures r is Ok ==> lowers(m, pol, root, r->Ok_0.0, r->Ok_0.1) && ctcore::sem::wf(r->Ok_0.0)
@@ -212,7 +213,7 @@
 ### Task 7: The pipeline, the end-to-end theorems and `ct-front`
 
 **Files:**
-- Create: `crates/ctmir/src/policy.rs` (manifest grammar spec and verified parser: `root`, `label`, `cost-root`, `internal-crate`, `translate-crate`; `intr` lines are rejected as obsolete; `decl_spec` for `ct::` attributes), `crates/ctmir/src/pipeline.rs`, `crates/ctmir/src/text.rs` (report line spec and exec renderers, including `poly_text_spec`/`atom_text_spec` and reject texts), `crates/ctmir/tests/policy.rs`.
+- Modify: `crates/ctmir/src/policy.rs`, adding the manifest grammar spec and the verified parser for the `Policy` struct from Task 5: `root`, `label`, `cost-root`, `internal-crate`, `translate-crate`; `intr` lines are rejected as obsolete; `decl_spec` for `ct::` attributes), `crates/ctmir/src/pipeline.rs`, `crates/ctmir/src/text.rs` (report line spec and exec renderers, including `poly_text_spec`/`atom_text_spec` and reject texts), `crates/ctmir/tests/policy.rs`.
 - Create: `tools/ct-front/{Cargo.toml, src/main.rs}`.
 
 **Interfaces:**

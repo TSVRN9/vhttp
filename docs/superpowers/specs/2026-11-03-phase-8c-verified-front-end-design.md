@@ -298,6 +298,9 @@ Fixed modelling decisions (the author implements them and does not choose them):
      chosen so that MIR steps equal core steps exactly, and it is recorded as such in TRUSTED.md.
    - A std-model call costs 1 plus its table cost.
    - The callee's steps add to the caller's.
+   - A `Drop` costs 1. When its glue is neither an empty shim nor the Vec leaf, the Drop costs 1
+     more for passing `&mut place`, plus the glue's own steps. The core image needs a temp for
+     the reference, and this charge keeps MIR steps equal to core steps.
 8. **Std model.** A trusted table: the callee's `key` and generic args map to an effect, events
    and a cost. It mirrors vstd's specs of the same functions, and each row cites the vstd spec it
    mirrors. The rows are exactly today's `intr` lines, at today's admitted types. The table moves
