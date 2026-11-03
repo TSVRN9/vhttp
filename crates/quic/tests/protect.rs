@@ -122,3 +122,14 @@ fn datagram_eliciting_initial_unkeyed_peer() {
     protect_datagram(&d, &keys(false), &mut v);
     assert_eq!(v, [0xee]);
 }
+
+// An unkeyed Initial is not on the wire, so §14.1 does not hold back the keyed packets with it.
+#[test]
+fn datagram_unkeyed_initial_not_held() {
+    let hs = hs_packet(vec![Frame::Crypto { offset: 0, data: vec![7; 30] }]);
+    let want = protected(&hs, &CLIENT);
+    let d = OutDatagram { path: 0, packets: vec![a3_packet(), hs] };
+    let mut v = Vec::new();
+    protect_datagram(&d, &[None, Some(KeyPair { rx: SERVER, tx: CLIENT }), None], &mut v);
+    assert_eq!(v, want);
+}

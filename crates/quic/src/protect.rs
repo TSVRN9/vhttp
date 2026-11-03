@@ -2,14 +2,15 @@
 //! payload of an `OutPacket`, AEAD over the payload with the header as associated data, then
 //! header protection, appended to a datagram buffer.
 //!
-//! Timing (RFC 9001 §9.5), constant time in style: no branch or loop count on the packet number
-//! or its length. The header's packet number bytes come from `put_pn`, which copies the last
-//! `pn_len` of 4 computed bytes; `nonce` and `apply_hp` are branch-free over both. The branches
-//! that remain are on public values: the packet type, the key phase and spin bits, the Length
-//! varint (sent in clear) and the padding count. Not met, a known gap: the packet layout itself
-//! depends on `pn_len` (the copy length, the offset of everything after the packet number, and
-//! the GCM work over a payload of the packet length minus `pn_len`), and nothing checks quic at
-//! the MIR or binary level.
+//! Timing (RFC 9001 §9.5), constant time in style: no branch on the packet number or its length
+//! in this module, `put_pn`, `nonce` or `apply_hp`. The header's packet number bytes come from
+//! `put_pn`, which copies the last `pn_len` of 4 computed bytes. The other branches are on
+//! public values: the packet type, the key phase and spin bits, the Length varint (sent in
+//! clear) and which spaces have keys. Not met, a known gap: the packet layout depends on
+//! `pn_len`, namely `put_pn`'s copy length, the offset of everything after the packet number,
+//! the padding count (a datagram padded to a fixed size pads by a count that falls as `pn_len`
+//! grows, and the padding loop runs that many times) and the GCM work over a payload of the
+//! packet length minus `pn_len`; and nothing checks quic at the MIR or binary level.
 #[allow(unused_imports)]
 use crypto::aes::*;
 #[allow(unused_imports)]
@@ -55,7 +56,8 @@ pub open spec fn protect_ok(p: SpecOutPacket) -> bool {
 }
 
 /// A packet 3d2's `transmit_ok` hands over (P7) is protectable once its packet number is within
-/// `PN_MAX` (P4 with `Sent`'s `next_pn <= PN_MAX`).
+/// `PN_MAX`, which `Connection::poll_transmit` ensures for every packet it returns (`pn <
+/// PN_MAX`; proved in conn.rs by `lemma_transmit_pn_max` from P4 and `SentPackets::wf`).
 pub proof fn lemma_wf_protect_ok(p: SpecOutPacket, la: Option<u64>)
     requires
         out_packet_wf(p, la),
@@ -123,19 +125,26 @@ pub open spec fn protect_keyed(ps: Seq<SpecOutPacket>, keys: Seq<Option<SpecKeyP
     }
 }
 
+/// An ack-eliciting Initial among the packets that have keys: the Initial space is keyed and an
+/// Initial of `ps` is ack-eliciting.
+pub open spec fn kept_eliciting_initial(ps: Seq<SpecOutPacket>, keys: Seq<Option<SpecKeyPair>>) -> bool {
+    keys[space_idx(PacketKind::Initial)] is Some && has_eliciting_initial(ps)
+}
+
 //= https://www.rfc-editor.org/rfc/rfc9000#section-14.1
 //# Similarly, a server MUST expand the payload of all UDP
 //# datagrams carrying ack-eliciting Initial packets to at least the
 //# smallest allowed maximum datagram size of 1200 bytes.
 /// Decision 4. Every packet keyed: all of them, in order. Otherwise, if an ack-eliciting
-/// Initial is in the datagram, nothing: dropping an unkeyed packet would leave it under 1200
-/// bytes. Otherwise the keyed packets, in order.
+/// Initial would go out (its space is keyed), nothing: dropping an unkeyed packet would leave
+/// it under 1200 bytes. Otherwise the keyed packets, in order; an unkeyed Initial is not on
+/// the wire, so §14.1 does not hold the rest back.
 pub open spec fn rfc_protect_datagram(d: SpecOutDatagram, keys: Seq<Option<SpecKeyPair>>) -> Seq<
     u8,
 > {
     if all_keyed(d.packets, keys) {
         protect_keyed(d.packets, keys)
-    } else if has_eliciting_initial(d.packets) {
+    } else if kept_eliciting_initial(d.packets, keys) {
         Seq::empty()
     } else {
         protect_keyed(d.packets, keys)
@@ -185,6 +194,7 @@ proof fn lemma_keyed_len(ps: Seq<SpecOutPacket>, keys: Seq<Option<SpecKeyPair>>)
     decreases ps.len(),
 {
     hide(rfc_protect);
+    hide(has_eliciting_initial);
     if ps.len() > 0 {
         let q = ps.drop_last();
         assert forall|i: int| 0 <= i < q.len() implies protect_ok(#[trigger] q[i]) by {
@@ -416,8 +426,13 @@ pub fn protect_datagram(d: &OutDatagram, keys: &[Option<KeyPair>; 3], out: &mut 
         final(out)@.len() <= old(out)@.len() + out_datagram_len(d@),
         all_keyed(d@.packets, keys.deep_view()) ==> final(out)@.len() == old(out)@.len()
             + out_datagram_len(d@),
+        // §14.1: a keyed ack-eliciting Initial goes out with the whole datagram or not at all.
+        kept_eliciting_initial(d@.packets, keys.deep_view()) && final(out)@.len() > old(out)@.len()
+            ==> final(out)@.len() == old(out)@.len() + out_datagram_len(d@),
 {
     hide(rfc_protect);
+    hide(has_eliciting_initial);
+    hide(all_keyed);
     let ghost kd = keys.deep_view();
     let ghost ps = d@.packets;
     let ghost start = out@;
@@ -425,12 +440,30 @@ pub fn protect_datagram(d: &OutDatagram, keys: &[Option<KeyPair>; 3], out: &mut 
         lemma_keyed_len(ps, kd);
     }
     let (all, elic) = scan(d, keys);
-    if !all && elic {
+    assert(kd[0] == keys@[0].deep_view());
+    if !all && elic && keys[0].is_some() {
         assert(rfc_protect_datagram(d@, kd) =~= Seq::<u8>::empty());
         assert(out@ =~= start + rfc_protect_datagram(d@, kd));
         return ;
     }
-    // Pass 2: protect each keyed packet, in order.
+    protect_kept(d, keys, out);
+}
+
+/// Pass 2 of `protect_datagram`: each keyed packet, protected with its space's `tx` keys, in
+/// order.
+#[verifier::spinoff_prover]
+fn protect_kept(d: &OutDatagram, keys: &[Option<KeyPair>; 3], out: &mut Vec<u8>)
+    requires
+        forall|i: int| 0 <= i < d@.packets.len() ==> protect_ok(#[trigger] d@.packets[i]),
+    ensures
+        final(out)@ == old(out)@ + protect_keyed(d@.packets, keys.deep_view()),
+{
+    hide(rfc_protect);
+    hide(protect_ok);
+    let ghost kd = keys.deep_view();
+    let ghost ps = d@.packets;
+    let ghost start = out@;
+    assert(ps.take(0) =~= Seq::<SpecOutPacket>::empty());
     let mut i: usize = 0;
     while i < d.packets.len()
         invariant

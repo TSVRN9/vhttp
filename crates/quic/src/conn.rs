@@ -6385,6 +6385,9 @@ impl Connection {
             now < u64::MAX && old(self).timers_later(now) ==> final(self).timers_later(now),
             // §13.2.1: nothing more to send, so no ACK that could go is due.
             r is None ==> final(self).acks_later(now),
+            // The nonce's domain (3e `protect_ok`): every packet number is below 2^62 - 1.
+            r matches Some(d) ==> forall|i: int|
+                0 <= i < d@.packets.len() ==> (#[trigger] d@.packets[i]).pn < PN_MAX,
     {
         let ghost o = *old(self);
         let ghost n0 = now;
@@ -6405,6 +6408,7 @@ impl Connection {
                 proof {
                     if r is Some {
                         lemma_only_close(r->0@);
+                        lemma_transmit_pn_max(o, *self, r->0@);
                     }
                     if n0 < u64::MAX && o.timers_later(n0) && !(self.lc.phase_spec() is Closed) {
                         assert(self.pto_spec() == o.pto_spec());
@@ -6451,6 +6455,7 @@ impl Connection {
                 if n0 < u64::MAX && o.timers_later(n0) {
                     self.lemma_tx_later(o, now, n0);
                 }
+                lemma_transmit_pn_max(o, *self, d@);
             }
             return Some(d);
         }
@@ -6479,6 +6484,9 @@ impl Connection {
                 assert forall|k: PacketKind| later(#[trigger] self.ack_term(k), n0) by {
                     assert(later(self.ack_term(k), now));
                 }
+            }
+            if r is Some {
+                lemma_transmit_pn_max(o, *self, r->0@);
             }
         }
         r
@@ -8254,6 +8262,55 @@ pub open spec fn transmit_ok(o: Connection, c: Connection, d: SpecOutDatagram) -
     &&& forall|i: int, j: int|
         0 <= i < d.packets.len() && 0 <= j < d.packets[i].frames.len() && #[trigger] d.packets[i].frames[j]
             is HandshakeDone ==> c.live(PacketKind::OneRtt)
+}
+
+/// A packet of `s` is in its space's packet number list.
+proof fn lemma_pns_member(s: Seq<SpecOutPacket>, i: int)
+    requires
+        0 <= i < s.len(),
+    ensures
+        packets_pns(s, s[i].kind).contains(s[i].pn),
+    decreases s.len(),
+{
+    let k = s[i].kind;
+    let q = s.drop_last();
+    if i == s.len() - 1 {
+        assert(packets_pns(s, k) == packets_pns(q, k).push(s[i].pn));
+        assert(packets_pns(s, k).last() == s[i].pn);
+    } else {
+        lemma_pns_member(q, i);
+        assert(q[i] == s[i]);
+        let a = packets_pns(q, k);
+        let j = choose|j: int| 0 <= j < a.len() && a[j] == s[i].pn;
+        if s.last().kind == k {
+            assert(packets_pns(s, k) == a.push(s.last().pn));
+            assert(packets_pns(s, k)[j] == s[i].pn);
+        }
+    }
+}
+
+/// Every packet of a datagram `transmit_ok` accepts has a packet number below `PN_MAX`: P4
+/// puts it below its space's `next_pn`, which `SentPackets::wf` bounds by `PN_MAX`.
+proof fn lemma_transmit_pn_max(o: Connection, c: Connection, d: SpecOutDatagram)
+    requires
+        c.wf(),
+        transmit_ok(o, c, d),
+    ensures
+        forall|i: int| 0 <= i < d.packets.len() ==> (#[trigger] d.packets[i]).pn < PN_MAX,
+{
+    assert forall|i: int| 0 <= i < d.packets.len() implies (#[trigger] d.packets[i]).pn < PN_MAX by {
+        let k = d.packets[i].kind;
+        lemma_pns_member(d.packets, i);
+        match k {
+            PacketKind::Initial => c.sent_i.lemma_wf(),
+            PacketKind::Handshake => c.sent_h.lemma_wf(),
+            PacketKind::OneRtt => c.sent_1.lemma_wf(),
+        }
+        let s = packets_pns(d.packets, k);
+        assert(pns_ok(s, c.sent(k).next_pn_spec()));
+        let j = choose|j: int| 0 <= j < s.len() && s[j] == d.packets[i].pn;
+        assert(s[j] < c.sent(k).next_pn_spec());
+    }
 }
 
 /// A datagram with an ack-eliciting Initial in it.
