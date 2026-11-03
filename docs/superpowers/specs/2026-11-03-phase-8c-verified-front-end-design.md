@@ -303,8 +303,14 @@ Fixed modelling decisions (the author implements them and does not choose them):
    | std-model calls | their own events (below) |
    | `crypto::ct::declassify` | `Declass(v)` |
 
-   Event order is evaluation order: operands left to right, then the place's projections, then
-   the construct's own event. Shapes, meaning lengths and enum variants, are public (spec D7).
+   Event order:
+   - **Assign:** the rvalue's events (operands left to right, then its own), then the
+     destination place's projection events.
+   - **Call:** the arguments' events left to right, then the callee's (a body's trace, or a
+     std-model or policy row's own events), then the destination place's events.
+   - **SwitchInt and Assert:** the operand's events, then `Cond`.
+
+   The destination's events always come last. Shapes, meaning lengths and enum variants, are public (spec D7).
 7. **Cost table.**
    - Each MIR statement costs 1, except `StorageLive`, `StorageDead`, `Nop`, `FakeRead`,
      `PlaceMention`, `AscribeUserType`, `Coverage` and `ConstEvalCounter`, which cost 0 because
