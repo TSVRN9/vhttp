@@ -7,7 +7,7 @@ use crate::mir::*;
 #[cfg(verus_keep_ghost)]
 use crate::sem::*;
 #[cfg(verus_keep_ghost)]
-use ctcore::sem::{binop, read_at, Event, Frame, Loc, Root, Val, PE};
+use ctcore::sem::{binop, read_at, write_at, Event, Frame, Loc, Root, Val, PE};
 #[cfg(verus_keep_ghost)]
 use ctcore::syntax::{BinOp as COp, IntTy as CTy};
 #[cfg(verus_keep_ghost)]
@@ -95,7 +95,7 @@ fn ref_row(id: Ty, pointee: Ty, mu: Mutability) -> (r: TyRow)
 }
 
 fn arr_row(id: Ty, elem: Ty) -> (r: TyRow)
-    ensures r.id == id, r.kind matches TyKind::RigidTy(RigidTy::Array(e, _)) && e == elem,
+    ensures r.id == id, r.kind matches TyKind::RigidTy(RigidTy::Array(e, c)) && e == elem && c.id == 0,
 {
     TyRow { id, kind: TyKind::RigidTy(RigidTy::Array(elem, TyConst { kind: Json::Null, id: 0 })) }
 }
@@ -154,7 +154,7 @@ pub open spec fn tiny_bb1(blk: BasicBlock) -> bool {
 
 pub open spec fn tiny_ok(m: MirCrate) -> bool {
     m.insts@.len() == 1 && m.insts@[0].kind is Item && m.insts@[0].body is Some && m.allocs@.len() == 0
-    && m.tys@.len() == 6
+    && m.consts@.len() == 0 && m.tys@.len() == 6
     && m.tys@[0].id == 2 && (m.tys@[0].kind matches TyKind::RigidTy(RigidTy::Uint(UintTy::U8)))
     && m.tys@[1].id == 1 && (m.tys@[1].kind matches TyKind::RigidTy(RigidTy::Uint(UintTy::Usize)))
     && m.tys@[2].id == 3 && (m.tys@[2].kind matches TyKind::RigidTy(RigidTy::Ref(_, p, mu)) && p == 11 && mu is Not)
@@ -1333,7 +1333,7 @@ pub proof fn fact_direct(m: MirCrate, a: Allocation)
 // with no charge (`str` is unsized, so `&str` is not `&ZST`), and `Unit` is a well-typed `&str`.
 
 pub open spec fn str_ok(m: MirCrate) -> bool {
-    m.tys@.len() == 2 && m.allocs@.len() == 0
+    m.tys@.len() == 2 && m.allocs@.len() == 1 && m.allocs@[0].id == 12 && m.allocs@[0].alloc is Memory
     && m.tys@[0].id == 20 && (m.tys@[0].kind matches TyKind::RigidTy(RigidTy::Ref(_, p, mu)) && p == 21 && mu is Not)
     && m.tys@[1].id == 21 && (m.tys@[1].kind matches TyKind::RigidTy(RigidTy::Str))
 }
@@ -1342,7 +1342,31 @@ pub fn str_crate() -> (m: MirCrate) ensures str_ok(m) {
     let mut tys = Vec::new();
     tys.push(ref_row(20, 21, Mutability::Not));
     tys.push(TyRow { id: 21, kind: TyKind::RigidTy(RigidTy::Str) });
-    krate(Vec::new(), Vec::new(), Vec::new(), tys, Vec::new(), Vec::new())
+    let target = Allocation { bytes: bytes1(101), provenance: ProvenanceMap { ptrs: Vec::new() }, align: 1, mutability: Mutability::Not };
+    let mut allocs = Vec::new();
+    allocs.push(AllocRow { id: 12, alloc: GlobalAlloc::Memory(target) });
+    MirCrate {
+        crate_name: Vec::new(), items: Vec::new(), insts: Vec::new(), calls: Vec::new(), drops: Vec::new(), tys,
+        adts: Vec::new(), consts: Vec::new(), layouts: Vec::new(), allocs, spans: Vec::new(),
+    }
+}
+
+/// An allocation of `bytes` with one pointer at offset 0 into alloc `id`.
+fn alloc_ptr(bytes: Vec<Option<u8>>, id: AllocId) -> (a: Allocation)
+    ensures a.bytes@ == bytes@, a.provenance.ptrs@ == seq![(0usize, id)],
+{
+    let mut ptrs = Vec::new();
+    ptrs.push((0usize, id));
+    assert(ptrs@ =~= seq![(0usize, id)]);
+    Allocation { bytes, provenance: ProvenanceMap { ptrs }, align: 8, mutability: Mutability::Mut }
+}
+
+/// A `&str` constant as rustc writes it: 16 bytes, pointer at 0 with provenance into alloc 12.
+pub fn str_const_alloc() -> (a: Allocation) ensures a.provenance.ptrs@ == seq![(0usize, 12usize)] {
+    let mut b = bytes8(0);
+    let mut l = bytes8(1);
+    b.append(&mut l);
+    alloc_ptr(b, 12)
 }
 
 proof fn prov_none(a: Allocation, off: nat)
@@ -1359,9 +1383,9 @@ pub proof fn fact_str(m: MirCrate, a: Allocation)
 {
     reveal_with_fuel(find_from, 3);
     prov_none(a, 0);
-    assert(dfuel(m) == 3) by (nonlinear_arith) requires dfuel(m) == (m.tys@.len() + 1) * (m.allocs@.len() + 1), m.tys@.len() == 2, m.allocs@.len() == 0;
-    assert(dec_ref(m, 21, a, 0, 2) == Some((Val::Unit, 0nat)));
-    assert(dec(m, 20, a, 0, 3) == Some((Val::Unit, 0nat)));
+    assert(dfuel(m) == 6) by (nonlinear_arith) requires dfuel(m) == (m.tys@.len() + 1) * (m.allocs@.len() + 1), m.tys@.len() == 2, m.allocs@.len() == 1;
+    assert(dec_ref(m, 21, a, 0, 5) == Some((Val::Unit, 0nat)));
+    assert(dec(m, 20, a, 0, 6) == Some((Val::Unit, 0nat)));
     assert(!is_zst(m, 21));
     assert(m.tys@[0].id == 20 && m.tys@[1].id == 21);
     assert(ty_kind(m, 21) == Some(m.tys@[1].kind));
@@ -1369,6 +1393,338 @@ pub proof fn fact_str(m: MirCrate, a: Allocation)
     assert(rigid(m, 20) matches Some(RigidTy::Ref(_, p, mu)) && p == 21 && mu is Not);
     assert(ty_free(m, 21, 2, false));
     assert(ty_free(m, 20, 3, true));
+}
+
+/// **Fact 3e.** A `&str` constant with provenance into a `GlobalAlloc::Memory` (alloc 12) is the
+/// opaque `Unit` too.
+pub proof fn fact_str_prov(m: MirCrate, a: Allocation)
+    requires str_ok(m), a.provenance.ptrs@ == seq![(0usize, 12usize)],
+    ensures decode_const(m, 20, a, 0) == Some(Val::Unit),
+{
+    reveal_with_fuel(find_from, 3);
+    assert(prov_at(a, 0) == Some(12usize));
+    assert(alloc_mem(m, 12) is Some);
+    assert(dfuel(m) == 6) by (nonlinear_arith) requires dfuel(m) == (m.tys@.len() + 1) * (m.allocs@.len() + 1), m.tys@.len() == 2, m.allocs@.len() == 1;
+    assert(m.tys@[0].id == 20 && m.tys@[1].id == 21);
+    assert(rigid(m, 21) matches Some(RigidTy::Str));
+    assert(dec_ref(m, 21, a, 0, 5) == Some((Val::Unit, 0nat)));
+    assert(dec(m, 20, a, 0, 6) == Some((Val::Unit, 0nat)));
+}
+
+// ------------------------------------------------------------------ 3f. a pointer niche tag
+//
+// `None::<&str>` from `pos_str_unit` bb2 (fixtures dump, ty 240 = `Option<&str>`): the layout copied
+// from the dump, tag `Initialized { Pointer(0) }` at offset 0, `Niche { untagged 1, 0..=0, start 0 }`.
+// Bytes: 8 zero bytes, then 8 uninitialized (the absent length). Tag width 8 (a pointer), no
+// provenance on it: t = 0, rel = (0 - 0) mod 2^64 = 0 <= 0, so variant 0 (None), no fields:
+// `Adt(0, [])`, 1 node. dfuel = (3 + 1) * (0 + 1) = 4. With provenance on the tag (a real
+// pointer, as in `neg_const_pointer_tag`), `no_prov` fails and the constant does not decode.
+
+pub open spec fn b8u() -> Seq<Option<u8>> { seq![None, None, None, None, None, None, None, None] }
+
+pub open spec fn optref_ok(m: MirCrate) -> bool {
+    m.tys@.len() == 3 && m.allocs@.len() == 0
+    && m.tys@[0].id == 240 && (m.tys@[0].kind matches TyKind::RigidTy(RigidTy::Adt(_, _)))
+    && m.adts@.len() == 1 && m.adts@[0].ty == 240 && !m.adts@[0].is_box && m.adts@[0].kind is Enum
+    && m.adts@[0].variants@.len() == 2 && m.adts@[0].variants@[0].fields@.len() == 0
+    && m.layouts@.len() == 1 && m.layouts@[0].ty == 240
+    && {
+        let l = m.layouts@[0].shape;
+        (l.fields matches FieldsShape::Arbitrary { offsets } && offsets@.len() == 1 && offsets@[0].num_bits == 0)
+        && (l.variants matches VariantsShape::Multiple { tag, tag_encoding, tag_field, variants }
+            && tag_field == 0 && variants@.len() == 2 && variants@[0].offsets@.len() == 0
+            && (tag matches Scalar::Initialized { value, .. } && value is Pointer)
+            && (tag_encoding matches TagEncoding::Niche { untagged_variant, niche_variants, niche_start }
+                && untagged_variant == 1 && niche_variants.start == 0 && niche_variants.end == 0 && niche_start == 0))
+    }
+}
+
+pub fn optref_crate() -> (m: MirCrate) ensures optref_ok(m) {
+    let mut ga = Vec::new();
+    ga.push(GenericArgKind::Type(130));
+    let mut tys = Vec::new();
+    tys.push(TyRow { id: 240, kind: TyKind::RigidTy(RigidTy::Adt(141, GenericArgs(ga))) });
+    tys.push(ref_row(130, 394, Mutability::Not));
+    tys.push(TyRow { id: 394, kind: TyKind::RigidTy(RigidTy::Str) });
+    let mut f1 = Vec::new();
+    f1.push(130);
+    let mut vars = Vec::new();
+    vars.push(AdtVariant { discr: Some(0), fields: Vec::new() });
+    vars.push(AdtVariant { discr: Some(1), fields: f1 });
+    let mut adts = Vec::new();
+    adts.push(Adt { ty: 240, name: Vec::new(), kind: AdtKind::Enum, is_box: false, variants: vars });
+    let mut vf = Vec::new();
+    vf.push(VariantFields { offsets: Vec::new() });
+    vf.push(VariantFields { offsets: ms(0) });
+    let tag = Scalar::Initialized { value: Primitive::Pointer(0), valid_range: WrappingRange { start: 0, end: 18446744073709551615 } };
+    let enc = TagEncoding::Niche { untagged_variant: 1, niche_variants: RangeInclusive { start: 0, end: 0 }, niche_start: 0 };
+    let shape = LayoutShape {
+        fields: FieldsShape::Arbitrary { offsets: ms(0) },
+        variants: VariantsShape::Multiple { tag, tag_encoding: enc, tag_field: 0, variants: vf },
+        abi: Json::Null,
+        abi_align: 8,
+        size: MachineSize { num_bits: 128 },
+    };
+    let mut layouts = Vec::new();
+    layouts.push(LayoutRow { ty: 240, shape });
+    krate(Vec::new(), Vec::new(), Vec::new(), tys, adts, layouts)
+}
+
+proof fn le_zero8(a: Allocation)
+    requires a.bytes@.len() == 16, forall|k: int| 0 <= k < 8 ==> a.bytes@[k] == Some(0u8),
+    ensures le(a, 0, 8) == Some(0nat),
+{
+    reveal_with_fuel(le, 9);
+    assert(le(a, 8, 0) == Some(0nat));
+    assert(le(a, 7, 1) == Some(0nat));
+}
+
+/// **Fact 3f.** `None::<&str>` (null pointer tag, no provenance) decodes to variant 0, 1 node; the
+/// same bytes with provenance on the tag do not decode.
+pub proof fn fact_none_ref(m: MirCrate, a: Allocation, p: Allocation)
+    requires optref_ok(m), a.bytes@ == b8(0) + b8u(), a.provenance.ptrs@.len() == 0,
+        p.bytes@ == b8(0) + b8u(), p.provenance.ptrs@ == seq![(0usize, 12usize)],
+    ensures dec(m, 240, a, 0, dfuel(m)) == Some((Val::Adt(0, seq![]), 1nat)), dec(m, 240, p, 0, dfuel(m)) is None,
+{
+    reveal_with_fuel(find_from, 2);
+    vstd::arithmetic::power2::lemma2_to64();
+    vstd::arithmetic::power2::lemma2_to64_rest();
+    let l = m.layouts@[0].shape;
+    le_zero8(a);
+    assert(tag_bytes((l.variants->Multiple_tag)->Initialized_value) == Some(8nat));
+    assert(tag_variant(m.adts@[0], l.variants->Multiple_tag_encoding, 0, 64) == Some(0nat));
+    assert(adt_sel(m.adts@[0], l, a, 0) == Some((0nat, Seq::<MachineSize>::empty())));
+    assert(dfuel(m) == 4);
+    assert(dec_adt(m, 240, a, 0, 3) == Some((Val::Adt(0, seq![]), 1nat)));
+    assert(!no_prov(p, 0, 8)) by { assert(p.provenance.ptrs@[0].0 == 0usize); };
+    assert(adt_sel(m.adts@[0], l, p, 0) is None);
+    assert(dec_adt(m, 240, p, 0, 3) is None);
+}
+
+// ------------------------------------------------------------------ 3g. an empty-array reference
+//
+// `&[u8; 0]` (crypto::sha256::sha256 has one): `[u8; 0]` (ty 41) is a ZST (layout size 0) whose one
+// value is `Arr([])`, whatever the element type, so the constant is `Shr(Arr([]))`, and as an
+// `&ZST` it costs 1 (one reference node, decision 7).
+
+pub open spec fn empty_ok(m: MirCrate) -> bool {
+    m.tys@.len() == 3 && m.allocs@.len() == 0
+    && m.tys@[0].id == 40 && (m.tys@[0].kind matches TyKind::RigidTy(RigidTy::Ref(_, p, mu)) && p == 41 && mu is Not)
+    && m.tys@[1].id == 41 && (m.tys@[1].kind matches TyKind::RigidTy(RigidTy::Array(e, c)) && e == 2 && c.id == 0)
+    && m.tys@[2].id == 2 && (m.tys@[2].kind matches TyKind::RigidTy(RigidTy::Uint(UintTy::U8)))
+    && m.consts@.len() == 1 && m.consts@[0].id == 0 && m.consts@[0].usize == Some(0u64)
+    && m.layouts@.len() == 1 && m.layouts@[0].ty == 41 && m.layouts@[0].shape.size.num_bits == 0
+}
+
+pub fn empty_crate() -> (m: MirCrate) ensures empty_ok(m) {
+    let mut tys = Vec::new();
+    tys.push(ref_row(40, 41, Mutability::Not));
+    tys.push(arr_row(41, 2));
+    tys.push(uint(2, UintTy::U8));
+    let mut consts = Vec::new();
+    consts.push(ConstRow { id: 0, usize: Some(0) });
+    let shape = LayoutShape {
+        fields: FieldsShape::Array { stride: MachineSize { num_bits: 8 }, count: 0 },
+        variants: VariantsShape::Single { index: 0 },
+        abi: Json::Null,
+        abi_align: 1,
+        size: MachineSize { num_bits: 0 },
+    };
+    let mut layouts = Vec::new();
+    layouts.push(LayoutRow { ty: 41, shape });
+    MirCrate {
+        crate_name: Vec::new(), items: Vec::new(), insts: Vec::new(), calls: Vec::new(), drops: Vec::new(), tys,
+        adts: Vec::new(), consts, layouts, allocs: Vec::new(), spans: Vec::new(),
+    }
+}
+
+/// **Fact 3g.**
+pub proof fn fact_empty_array_ref(m: MirCrate, a: Allocation)
+    requires empty_ok(m), a.bytes@ == b8(1), a.provenance.ptrs@.len() == 0,
+    ensures dec(m, 40, a, 0, dfuel(m)) == Some((Val::Shr(Box::new(Val::Arr(seq![]))), 1nat)), charged(m, 40),
+{
+    reveal_with_fuel(find_from, 4);
+    reveal_with_fuel(le, 9);
+    prov_none(a, 0);
+    assert(le(a, 7, 1) == Some(0nat));
+    assert(le(a, 0, 8) is Some);
+    assert(is_zst(m, 41));
+    assert(const_usize(m, 0) == Some(0u64));
+    assert(tfuel(m) == 4);
+    assert(unit_like(m, 41, 4, true) == Some((Val::Arr(seq![]), 0nat)));
+    assert(dfuel(m) == 4) by (nonlinear_arith) requires dfuel(m) == (m.tys@.len() + 1) * (m.allocs@.len() + 1), m.tys@.len() == 3, m.allocs@.len() == 0;
+    assert(rigid(m, 41) matches Some(RigidTy::Array(_, _)));
+    assert(rigid(m, 40) matches Some(RigidTy::Ref(_, p, mu)) && p == 41 && mu is Not);
+    assert(dec_ref(m, 41, a, 0, 3) == Some((Val::Shr(Box::new(Val::Arr(seq![]))), 1nat)));
+}
+
+// ------------------------------------------------------------------ 4b. call event order, ghost results
+//
+// One body (insts[0]): _0: (), _1: [u8; 4] (ty 11), _2: usize, _3: u8, _4: G (ty 30).
+//   bb0: _1[_2] = d(copy _3) -> bb1      (d = insts[1], key "": a `declassify` policy key)
+//   bb1: _4 = g() -> bb2                 (g = insts[2], key "g": a `ghost` policy key)
+//   bb2: return
+// G is `struct G(PhantomData)` (tys 30, 31) with no layout row, like vstd's `Ghost<_>`.
+// bb0's Call: the argument has no events, the row emits `Declass(x)`, then the destination's
+// `Index` emits `Idx(i)`: `[Declass(x), Idx(i)]` (decision 6: destination last); cost 1; `_1[i] = x`.
+// bb1's Call: `zst_dest(G)` holds (sized, unit-like without closures, no layout row), so `_4` gets
+// G's one value `Adt(0, [Adt(0, [])])`; no events; cost 1.
+
+pub open spec fn g_key() -> Seq<u8> { seq![103u8] }
+
+pub open spec fn order_ok(m: MirCrate) -> bool {
+    m.insts@.len() == 3 && m.insts@[0].kind is Item && m.insts@[0].body is Some
+    && m.insts@[1].id == 1 && m.insts@[1].key@.len() == 0 && m.insts@[2].id == 2 && m.insts@[2].key@ == g_key()
+    && m.insts@[0].id == 0
+    && m.tys@.len() == 2 && m.tys@[0].id == 30 && (m.tys@[0].kind matches TyKind::RigidTy(RigidTy::Adt(_, _)))
+    && m.tys@[1].id == 31 && (m.tys@[1].kind matches TyKind::RigidTy(RigidTy::Adt(_, _)))
+    && m.adts@.len() == 2 && m.adts@[0].ty == 30 && m.adts@[1].ty == 31
+    && !m.adts@[0].is_box && m.adts@[0].kind is Struct && m.adts@[0].variants@.len() == 1
+    && m.adts@[0].variants@[0].fields@.len() == 1 && m.adts@[0].variants@[0].fields@[0] == 31
+    && !m.adts@[1].is_box && m.adts@[1].kind is Struct && m.adts@[1].variants@.len() == 1 && m.adts@[1].variants@[0].fields@.len() == 0
+    && m.layouts@.len() == 0
+    && m.calls@.len() == 2 && m.calls@[0].fn_ty == 8 && m.calls@[0].resolved == Some(1usize)
+    && m.calls@[1].fn_ty == 9 && m.calls@[1].resolved == Some(2usize)
+    && {
+        let b = m.insts@[0].body->Some_0;
+        b.locals@.len() == 5 && b.locals@[4].ty == 30 && b.blocks@.len() == 3
+        && (b.blocks@[0].terminator.kind matches TerminatorKind::Call { func, args, destination, target, .. }
+            && (func matches Operand::Constant(k) && k.const_.ty == 8) && args@.len() == 1 && copy_of(args@[0], 3)
+            && destination.local == 1 && destination.projection@.len() == 1
+            && (destination.projection@[0] matches ProjectionElem::Index(x) && x == 2) && target == Some(1usize))
+        && (b.blocks@[1].terminator.kind matches TerminatorKind::Call { func, args, destination, target, .. }
+            && (func matches Operand::Constant(k) && k.const_.ty == 9) && args@.len() == 0 && local0(destination, 4)
+            && target == Some(2usize))
+    }
+}
+
+fn call_to(fn_ty: Ty, args: Vec<Operand>, dest: Place, target: usize) -> (t: TerminatorKind)
+    ensures t matches TerminatorKind::Call { func, args: a, destination, target: tg, .. }
+        && (func matches Operand::Constant(k) && k.const_.ty == fn_ty) && a@ == args@ && destination == dest && tg == Some(target),
+{
+    TerminatorKind::Call { func: zst_fn(fn_ty), args, destination: dest, target: Some(target), unwind: Json::Null }
+}
+
+fn bare_inst(id: InstanceDef, key: Vec<u8>) -> (x: Inst) ensures x.id == id, x.key@ == key@ {
+    Inst { id, def: id, name: Vec::new(), key, krate: Vec::new(), kind: InstanceKind::Item, body: None, fn_sig: None }
+}
+
+pub fn order_crate() -> (m: MirCrate) ensures order_ok(m) {
+    let mut a0 = Vec::new();
+    a0.push(Operand::Copy(place0(3)));
+    let mut proj = Vec::new();
+    proj.push(ProjectionElem::Index(2));
+    let mut blocks = Vec::new();
+    blocks.push(BasicBlock { statements: Vec::new(), terminator: term(call_to(8, a0, Place { local: 1, projection: proj }, 1)) });
+    blocks.push(BasicBlock { statements: Vec::new(), terminator: term(call_to(9, Vec::new(), place0(4), 2)) });
+    blocks.push(BasicBlock { statements: Vec::new(), terminator: term(TerminatorKind::Return) });
+    let mut locals = Vec::new();
+    locals.push(ldecl(10));
+    locals.push(ldecl(11));
+    locals.push(ldecl(1));
+    locals.push(ldecl(2));
+    locals.push(ldecl(30));
+    let mut insts = Vec::new();
+    insts.push(inst(0, body(blocks, locals, 0)));
+    insts.push(bare_inst(1, Vec::new()));
+    let mut gk = Vec::new();
+    gk.push(103u8);
+    assert(gk@ =~= g_key());
+    insts.push(bare_inst(2, gk));
+    let mut calls = Vec::new();
+    calls.push(Call { fn_ty: 8, def: 1, def_name: Vec::new(), args: GenericArgs(Vec::new()), resolved: Some(1) });
+    calls.push(Call { fn_ty: 9, def: 2, def_name: Vec::new(), args: GenericArgs(Vec::new()), resolved: Some(2) });
+    let mut gf = Vec::new();
+    gf.push(31);
+    let mut gv = Vec::new();
+    gv.push(AdtVariant { discr: None, fields: gf });
+    let mut pv = Vec::new();
+    pv.push(AdtVariant { discr: None, fields: Vec::new() });
+    let mut adts = Vec::new();
+    adts.push(Adt { ty: 30, name: Vec::new(), kind: AdtKind::Struct, is_box: false, variants: gv });
+    adts.push(Adt { ty: 31, name: Vec::new(), kind: AdtKind::Struct, is_box: false, variants: pv });
+    let mut tys = Vec::new();
+    tys.push(TyRow { id: 30, kind: TyKind::RigidTy(RigidTy::Adt(3, GenericArgs(Vec::new()))) });
+    tys.push(TyRow { id: 31, kind: TyKind::RigidTy(RigidTy::Adt(4, GenericArgs(Vec::new()))) });
+    krate(insts, calls, Vec::new(), tys, adts, Vec::new())
+}
+
+pub open spec fn order_fr(a: Seq<Val>, i: u128, x: u128, g: Val) -> Frame {
+    Frame { locals: seq![unit_val(), Val::Arr(a), Val::Int(i), Val::Int(x), g], slots: seq![] }
+}
+
+/// **Fact 4b.** The declassify call with an `Index` destination: `[Declass(Int(x)), Idx(i)]`.
+pub proof fn fact_call_order(m: MirCrate, pol: CallPolicy, a: Seq<Val>, i: u128, x: u128, g: Val, fuel: nat)
+    requires order_ok(m), pol.declassify.contains(Seq::<u8>::empty()), (i as nat) < a.len(),
+    ensures step_term(m, pol, m.insts@[0].body->Some_0, (m.insts@[0].body->Some_0).blocks@[0].terminator.kind, order_fr(a, i, x, g), fuel)
+        == Step::Jump(1, order_fr(a.update(i as int, Val::Int(x)), i, x, g), seq![Event::Declass(Val::Int(x)), Event::Idx(i)], 1nat),
+{
+    reveal_with_fuel(find_from, 3);
+    reveal_with_fuel(eval_ops, 2);
+    reveal_with_fuel(write_at, 2);
+    let b = m.insts@[0].body->Some_0;
+    let t = b.blocks@[0].terminator.kind;
+    let fr = order_fr(a, i, x, g);
+    let e = Seq::<Event>::empty();
+    let dest = t->Call_destination;
+    assert(callee_of(m, t->Call_func) == Some((1nat, m.calls@[0].args)));
+    assert(m.insts@[1].key@ =~= Seq::<u8>::empty());
+    assert(eval_ops(m, fr, t->Call_args@, 1) == Some((seq![Val::Int(x)], e, 0nat))) by {
+        assert(seq![].push(Val::Int(x)) =~= seq![Val::Int(x)]);
+        assert(e + e =~= e);
+    };
+    let l = Loc { root: Root::Local(1), path: seq![PE::Index(i as nat)] };
+    assert(places(fr, PRes::At(Loc { root: Root::Local(1), path: seq![] }), dest.projection@, 0)
+        == Some((PRes::At(Loc { root: Root::Local(1), path: seq![] }), e)));
+    assert(seq![].push(PE::Index(i as nat)) =~= seq![PE::Index(i as nat)]);
+    assert(e + seq![Event::Idx(i)] =~= seq![Event::Idx(i)]);
+    assert(eval_place(fr, dest) == Some((PRes::At(l), seq![Event::Idx(i)])));
+    assert(write_at(Val::Arr(a), seq![PE::Index(i as nat)], Val::Int(x)) == Val::Arr(a.update(i as int, Val::Int(x)))) by {
+        assert(seq![PE::Index(i as nat)].drop_first() =~= Seq::<PE>::empty());
+    };
+    let fr2 = order_fr(a.update(i as int, Val::Int(x)), i, x, g);
+    assert(store(fr, l, Val::Int(x)) == Some(fr2)) by { assert(fr.locals.update(1, Val::Arr(a.update(i as int, Val::Int(x)))) =~= fr2.locals); };
+    assert(e + seq![Event::Declass(Val::Int(x))] + seq![Event::Idx(i)] =~= seq![Event::Declass(Val::Int(x)), Event::Idx(i)]);
+}
+
+pub open spec fn g_val() -> Val { Val::Adt(0, seq![Val::Adt(0, seq![])]) }
+
+/// G (ty 30) is a ghost-result type: `zst_dest` holds although it has no layout row, and its value
+/// is `Adt(0, [Adt(0, [])])`.
+proof fn order_g(m: MirCrate)
+    requires order_ok(m),
+    ensures zst_dest(m, 30), unit_like(m, 30, tfuel(m), false) == Some((g_val(), 2nat)), !is_zst(m, 30),
+{
+    reveal_with_fuel(find_from, 3);
+    let fs = m.adts@[0].variants@[0].fields@;
+    let es = m.adts@[1].variants@[0].fields@;
+    assert(unit_likes(m, es, 1, 0, false) == Some((Seq::<Val>::empty(), 0nat)));
+    assert(unit_like(m, 31, 2, false) == Some((Val::Adt(0, seq![]), 1nat)));
+    assert(unit_likes(m, fs, 2, 0, false) == Some((Seq::<Val>::empty(), 0nat)));
+    assert(seq![].push(Val::Adt(0, seq![])) =~= seq![Val::Adt(0, seq![])]);
+    assert(unit_likes(m, fs, 2, 1, false) == Some((seq![Val::Adt(0, seq![])], 1nat)));
+    assert(tfuel(m) == 3);
+}
+
+/// **Fact 4c.** The ghost call writes G's one value, with no events, cost 1.
+pub proof fn fact_ghost(m: MirCrate, pol: CallPolicy, a: Seq<Val>, i: u128, x: u128, g: Val, fuel: nat)
+    requires order_ok(m), pol.ghost_unit.contains(g_key()), !pol.declassify.contains(g_key()),
+    ensures step_term(m, pol, m.insts@[0].body->Some_0, (m.insts@[0].body->Some_0).blocks@[1].terminator.kind, order_fr(a, i, x, g), fuel)
+        == Step::Jump(2, order_fr(a, i, x, g_val()), Seq::<Event>::empty(), 1nat),
+{
+    reveal_with_fuel(find_from, 3);
+    let b = m.insts@[0].body->Some_0;
+    let t = b.blocks@[1].terminator.kind;
+    let fr = order_fr(a, i, x, g);
+    let e = Seq::<Event>::empty();
+    order_g(m);
+    assert(callee_of(m, t->Call_func) == Some((2nat, m.calls@[1].args)));
+    assert(eval_ops(m, fr, t->Call_args@, 0) == Some((Seq::<Val>::empty(), e, 0nat)));
+    tiny_store0(fr, t->Call_destination, 4, g_val());
+    assert(place_ty(m, b, t->Call_destination) == Some(30usize));
+    let fr2 = order_fr(a, i, x, g_val());
+    assert(put_local(fr, 4, g_val()) == fr2) by { assert(fr.locals.update(4, g_val()) =~= fr2.locals); };
+    assert(e + e + e =~= e);
 }
 
 // ================================================================== 6. tiny is in the subset
@@ -1421,7 +1777,8 @@ pub proof fn fact_tiny_in_subset(m: MirCrate, pol: CallPolicy)
 
 #[test]
 fn sanity_builders() {
-    let _ = (tiny_crate(), drop_crate(), niche_crate(), direct_crate(), str_crate(), call_crate(), index2_place());
+    let _ = (tiny_crate(), drop_crate(), niche_crate(), direct_crate(), str_crate(), str_const_alloc(), optref_crate(), order_crate(), empty_crate(),
+        call_crate(), index2_place());
 }
 
 } // verus!

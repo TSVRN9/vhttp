@@ -195,7 +195,8 @@ pub open spec fn mut_free(v: Val) -> bool
 pub open spec fn unit_val() -> Val { Val::Tup(seq![]) }
 
 /// The value of a zero-sized type, with its count of ADT and reference nodes (for decision 7):
-/// tuples, single-variant structs and arrays of them; fn items are `Unit`, and so are closures
+/// tuples, single-variant structs, arrays of them and empty arrays (`[T; 0]`, of any `T`); fn
+/// items are `Unit`, and so are closures
 /// when `clos` (a `ZeroSized` constant or a ZST-layout pointee: a closure without captures).
 pub open spec fn unit_like(m: MirCrate, t: Ty, fuel: nat, clos: bool) -> Option<(Val, nat)>
     decreases fuel, 0nat,
@@ -216,9 +217,14 @@ pub open spec fn unit_like(m: MirCrate, t: Ty, fuel: nat, clos: bool) -> Option<
                 } else { None },
                 None => None,
             },
-            Some(RigidTy::Array(e, c)) => match (const_usize(m, c.id), unit_like(m, e, f, clos)) {
-                (Some(n), Some((v, k))) => Some((Val::Arr(Seq::new(n as nat, |_i: int| v)), (n as nat) * k)),
-                _ => None,
+            Some(RigidTy::Array(e, c)) => match const_usize(m, c.id) {
+                Some(n) => if n == 0 { Some((Val::Arr(seq![]), 0)) } else {
+                    match unit_like(m, e, f, clos) {
+                        Some((v, k)) => Some((Val::Arr(Seq::new(n as nat, |_i: int| v)), (n as nat) * k)),
+                        None => None,
+                    }
+                },
+                None => None,
             },
             Some(RigidTy::FnDef(_, _)) => Some((Val::Unit, 0)),
             Some(RigidTy::Closure(_, _)) => if clos { Some((Val::Unit, 0)) } else { None },
@@ -327,6 +333,13 @@ pub open spec fn len_bytes(l: IntegerLength) -> nat {
     match l { IntegerLength::I8 => 1, IntegerLength::I16 => 2, IntegerLength::I32 => 4, IntegerLength::I64 => 8, _ => 16 }
 }
 
+/// A tag's width in bytes: an int of its length, or a pointer (8 bytes on x86-64, e.g. the null
+/// niche of `Option<&T>`). Its bytes must carry no provenance (`adt_sel`'s `no_prov`), so a tag
+/// holding a real pointer is outside the subset.
+pub open spec fn tag_bytes(p: Primitive) -> Option<nat> {
+    match p { Primitive::Int { length, signed: _ } => Some(len_bytes(length)), Primitive::Pointer(_) => Some(8), _ => None }
+}
+
 /// The variant a tag selects (rustc_abi `TagEncoding`): `Direct` stores the discriminant truncated
 /// to the tag; `Niche` maps tag `t` to `start + (t - niche_start) mod 2^bits` when that lies in
 /// `niche_variants`, else to the untagged variant.
@@ -349,9 +362,9 @@ pub open spec fn adt_sel(row: Adt, l: LayoutShape, a: Allocation, off: nat) -> O
     match l.variants {
         VariantsShape::Single { index } => match offs_of(l.fields) { Some(o) => Some((index as nat, o)), None => None },
         VariantsShape::Multiple { tag, tag_encoding, tag_field, variants } => match (tag, offs_of(l.fields)) {
-            (Scalar::Initialized { value: Primitive::Int { length, signed: _ }, valid_range: _ }, Some(o)) =>
-                if tag_field < o.len() && o[tag_field as int].num_bits % 8 == 0 {
-                    let n = len_bytes(length);
+            (Scalar::Initialized { value, valid_range: _ }, Some(o)) =>
+                if tag_field < o.len() && o[tag_field as int].num_bits % 8 == 0 && tag_bytes(value) is Some {
+                    let n = tag_bytes(value)->Some_0;
                     let toff = (off + o[tag_field as int].num_bits / 8) as nat;
                     match (no_prov(a, toff, n), le(a, toff, n)) {
                         (true, Some(t)) => match tag_variant(row, tag_encoding, t, 8 * n) {
@@ -1166,7 +1179,8 @@ pub open spec fn run_block(m: MirCrate, pol: CallPolicy, b: Body, bb: nat, fr: F
 }
 
 /// Terminators, each costing 1. Only normal successors are followed (`Resume`, inline asm and
-/// unknown terminators are outside the subset; `block_ok` stops them first).
+/// unknown terminators are outside the subset; `block_ok` stops them first). A call with no
+/// return target diverges (a panic), so the run never completes: `Panic`.
 pub open spec fn step_term(m: MirCrate, pol: CallPolicy, b: Body, t: TerminatorKind, fr: Frame, fuel: nat) -> Step
     decreases fuel, 2nat,
 {
@@ -1179,7 +1193,7 @@ pub open spec fn step_term(m: MirCrate, pol: CallPolicy, b: Body, t: TerminatorK
         TerminatorKind::Drop { place, target, unwind: _ } => drop_step(m, pol, b, place, target as nat, fr, fuel),
         TerminatorKind::Call { func, args, destination, target, unwind: _ } => match target {
             Some(tb) => call_step(m, pol, b, func, args@, destination, tb as nat, fr, fuel),
-            None => Step::Stop(Out::Unsup),
+            None => Step::Stop(Out::Panic),
         },
         _ => Step::Stop(Out::Unsup),
     }
@@ -1469,7 +1483,7 @@ pub open spec fn term_ok(m: MirCrate, pol: CallPolicy, b: Body, t: TerminatorKin
         TerminatorKind::SwitchInt { discr, .. } => int_op(m, b, discr),
         TerminatorKind::Assert { cond, .. } => int_op(m, b, cond),
         TerminatorKind::Drop { place, .. } => drop_ok(m, b, place),
-        TerminatorKind::Call { func, args, destination, target, .. } => target is Some && call_ok(m, pol, b, func, args@, destination),
+        TerminatorKind::Call { func, args, destination, target, .. } => target is None || call_ok(m, pol, b, func, args@, destination),
         _ => false,
     }
 }
@@ -1497,7 +1511,7 @@ pub open spec fn succs_in(t: TerminatorKind, r: Set<nat>) -> bool {
 /// The body callees and drop glue a terminator runs are in `s`.
 pub open spec fn callees_in(m: MirCrate, pol: CallPolicy, b: Body, t: TerminatorKind, s: Set<nat>) -> bool {
     match t {
-        TerminatorKind::Call { func, .. } => match callee_of(m, func) {
+        TerminatorKind::Call { func, target, .. } => target is None || match callee_of(m, func) {
             Some((j, g)) => is_leaf(m, pol, m.insts@[j as int].key@, g) || s.contains(j),
             None => true,
         },

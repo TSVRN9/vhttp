@@ -46,6 +46,7 @@ proof fn lemma_call(m: MirCrate, pol: CallPolicy, s: Set<nat>, rs: spec_fn(nat) 
     ensures step_good(step_term(m, pol, b, t, fr, fuel), r),
 {
     let (func, args, dest) = (t->Call_func, t->Call_args@, t->Call_destination);
+    if t->Call_target is None { return; }
     let (j, g) = callee_of(m, func)->Some_0;
     if !is_leaf(m, pol, m.insts@[j as int].key@, g) {
         let cb = inst_body(m, j)->Some_0;
