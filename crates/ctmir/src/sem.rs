@@ -799,7 +799,8 @@ pub open spec fn rv_agg(m: MirCrate, fr: Frame, ak: AggregateKind, ops: Seq<Oper
     }
 }
 
-/// `Discriminant`: the discriminant (a bit pattern) of the stored variant; 0 for a struct.
+/// `Discriminant`: the discriminant (a bit pattern) of the stored variant (a one-variant enum's
+/// canonical `Unit` is its variant); 0 for a struct.
 pub open spec fn rv_discr(m: MirCrate, b: Body, fr: Frame, p: Place) -> Option<(Val, Seq<Event>, nat)> {
     match (read_place(fr, p), place_ty(m, b, p)) {
         (Some((v, e)), Some(t)) => match adt_row(m, t) {
@@ -807,6 +808,10 @@ pub open spec fn rv_discr(m: MirCrate, b: Body, fr: Frame, p: Place) -> Option<(
                 AdtKind::Enum => match v {
                     Val::Adt(k, _) => if k < a.variants@.len() && a.variants@[k as int].discr is Some {
                         Some((Val::Int(a.variants@[k as int].discr->Some_0), e, 0))
+                    } else { None },
+                    // the canonical `Unit` of a one-variant enum
+                    Val::Unit => if a.variants@.len() == 1 && a.variants@[0].discr is Some {
+                        Some((Val::Int(a.variants@[0].discr->Some_0), e, 0))
                     } else { None },
                     _ => None,
                 },
