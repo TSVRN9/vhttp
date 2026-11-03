@@ -495,26 +495,33 @@ fn timeout_issues_cids() {
     assert_eq!(count(&drain(&mut c, 11)), 2);
 }
 
-/// Steps 4 and 5 only while Open: a validation expiring in Closing leaves the active path alone, and
-/// the connection closes at its deadline, the only wake `next_timeout` names.
+/// §9.3.2 in Closing: `next_timeout` names the validation's expiry before the closing deadline, the
+/// wake reverts to the validated path, and the next CONNECTION_CLOSE copy goes there.
 #[test]
-fn closing_keeps_path() {
+fn closing_reverts() {
     let (mut c, _) = rebound();
     c.close(0, false, b"", 31);
+    drain(&mut c, 31);
+    let e = c.next_timeout().unwrap();
+    assert_eq!(e, 30 + 3 * PTO);
+    c.on_timeout(e, &rnd(6));
+    assert_eq!(c.phase(), Phase::Closing);
+    assert_eq!(c.active_path(), 0);
+    // A packet from the failed address is answered on the validated one.
+    c.on_datagram(1, 100, vec![one(2, vec![Frame::Ping])], e, &rnd(7));
+    let v = drain(&mut c, e);
+    assert!(!v.is_empty());
+    assert!(v.iter().all(|d| d.path == 0 && has_close(d)));
     let d = c.next_timeout().unwrap();
     assert_eq!(d, 31 + 3 * PTO);
-    c.on_timeout(30 + 3 * PTO, &rnd(6));
-    assert_eq!(c.phase(), Phase::Closing);
-    assert_eq!(c.active_path(), 1);
-    assert_eq!(c.next_timeout(), Some(d));
-    c.on_timeout(d, &rnd(7));
+    c.on_timeout(d, &rnd(8));
     assert!(c.is_closed());
-    assert_eq!(c.active_path(), 1);
+    assert_eq!(c.next_timeout(), None);
 }
 
-/// No validated path either: still nothing before the deadline, where the connection closes.
+/// No validated path: the wake at the validation's expiry closes silently, before the deadline.
 #[test]
-fn closing_no_validated_path_waits() {
+fn closing_no_validated_path_closes() {
     let mut c = conn();
     c.on_peer_params(&ptp(), 10);
     c.on_handshake_complete(b"h3", 10, &rnd(2));
@@ -522,14 +529,14 @@ fn closing_no_validated_path_waits() {
     c.on_datagram(1, 100, vec![one(1, vec![Frame::Ping])], 20, &rnd(4));
     drain(&mut c, 20);
     c.close(0, false, b"", 21);
-    let d = c.next_timeout().unwrap();
-    assert_eq!(d, 21 + 3 * PTO);
-    c.on_timeout(20 + 3 * PTO, &rnd(5));
-    assert_eq!(c.phase(), Phase::Closing);
-    assert_eq!(c.next_timeout(), Some(d));
-    c.on_timeout(d, &rnd(6));
+    drain(&mut c, 21);
+    let e = c.next_timeout().unwrap();
+    assert_eq!(e, 20 + 3 * PTO);
+    c.on_timeout(e, &rnd(5));
     assert!(c.is_closed());
     assert_eq!(c.next_timeout(), None);
+    c.on_datagram(1, 100, vec![one(2, vec![Frame::Ping])], e, &rnd(6));
+    assert_eq!(c.poll_transmit(e), None);
 }
 
 #[test]

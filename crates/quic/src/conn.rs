@@ -2816,6 +2816,7 @@ impl Connection {
         self.streams = None;
         proof {
             assert forall|t: u64| t < u64::MAX && t <= o.now && #[trigger] o.timers_later(t) implies self.timers_later(t) by {
+                assert(self.pto_spec() == o.pto_spec());
             }
         }
     }
@@ -4489,6 +4490,7 @@ impl Connection {
             final(self).lc == old(self).lc,
             final(self).paths_charged(*old(self), q),
             forall|t: u64| #[trigger] final(self).tx_timers(*old(self), t),
+            final(self).expiries_kept(*old(self)),
     {
         let ghost s0 = *self;
         let n = datagram_len(d);
@@ -5625,6 +5627,7 @@ impl Connection {
             final(self).wf(),
             final(self).built_ok(o, s),
             final(self).polled == old(self).polled,
+            final(self).tx_fixed(*old(self)),
     {
         let ghost c0 = *self;
         let mut j: usize = 0;
@@ -5645,6 +5648,7 @@ impl Connection {
                 j <= spaces@.len(),
                 self.built_ok(o, s.take(j as int)),
                 self.polled == c0.polled,
+                self.tx_fixed(c0),
                 forall|i: int| j <= i < s.len() ==> self.sent(#[trigger] spaces@[i]).next_pn_spec() == c0.sent(spaces@[i]).next_pn_spec(),
             decreases spaces@.len() - j,
         {
@@ -5718,6 +5722,7 @@ impl Connection {
             },
             final(self).lc.phase_spec() is Closed || (final(self).lc.phase_spec() is Closing
                 && final(self).lc.deadline_spec() == old(self).lc.deadline_spec()),
+            final(self).expiries_kept(*old(self)),
     {
         proof {
             self.paths.lemma_wf();
@@ -6401,6 +6406,13 @@ impl Connection {
                     if r is Some {
                         lemma_only_close(r->0@);
                     }
+                    if n0 < u64::MAX && o.timers_later(n0) && !(self.lc.phase_spec() is Closed) {
+                        assert(self.pto_spec() == o.pto_spec());
+                        assert forall|q: PathId| #[trigger] self.paths.has(q) && timed(self.paths.path(q)) implies n0 < expiry(self.paths.path(q), self.pto_spec()) by {
+                            assert(self.paths.path(q).challenge == o.paths.path(q).challenge);
+                            assert(o.paths.has(q) && timed(o.paths.path(q)));
+                        }
+                    }
                 }
                 return r;
             },
@@ -6639,9 +6651,26 @@ impl Connection {
                         Some(expiry(self.paths.path(q), self.pto_spec())),
                     )
             },
-            Phase::Closing | Phase::Draining => r == self.lc.deadline_spec(),
+            Phase::Closing | Phase::Draining => {
+                &&& covers(r, self.lc.deadline_spec())
+                &&& forall|q: PathId|
+                    #[trigger] self.paths.has(q) && timed(self.paths.path(q)) ==> covers(
+                        r,
+                        Some(expiry(self.paths.path(q), self.pto_spec())),
+                    )
+            },
             Phase::Closed => r is None,
         }
+    }
+
+    /// Every validation's deadline is where it was: what a Closing send leaves.
+    closed spec fn expiries_kept(&self, o: Connection) -> bool {
+        &&& self.paths.ids() == o.paths.ids()
+        &&& self.recovery == o.recovery
+        &&& self.peer_tp == o.peer_tp
+        &&& forall|q: PathId|
+            (#[trigger] self.paths.path(q)).challenge == o.paths.path(q).challenge && self.paths.path(q).owed
+                == o.paths.path(q).owed
     }
 
     /// What the timer terms read, other than `paths` and `lc`, and the clock.
@@ -6842,7 +6871,14 @@ impl Connection {
                         self.pto_spec(),
                     )
             },
-            Phase::Closing | Phase::Draining => later(self.lc.deadline_spec(), now),
+            Phase::Closing | Phase::Draining => {
+                &&& later(self.lc.deadline_spec(), now)
+                &&& forall|q: PathId|
+                    #[trigger] self.paths.has(q) && timed(self.paths.path(q)) ==> now < expiry(
+                        self.paths.path(q),
+                        self.pto_spec(),
+                    )
+            },
             Phase::Closed => true,
         }
     }
@@ -6896,9 +6932,9 @@ impl Connection {
             self.keeps_later(o),
     {
         assert forall|t: u64| t < u64::MAX && t <= o.now && #[trigger] o.timers_later(t) implies self.timers_later(t) by {
+            assert(self.pto_spec() == o.pto_spec());
             if self.lc.phase_spec() is Open {
                 assert(self.idle_term() == o.idle_term());
-                assert(self.pto_spec() == o.pto_spec());
                 assert forall|k: PacketKind| later(#[trigger] self.pto_term(k), t) by {
                     assert(self.pto_term(k) == o.pto_term(k));
                     assert(later(o.pto_term(k), t));
@@ -6991,13 +7027,18 @@ impl Connection {
             assert forall|q: PathId| #[trigger] self.paths.has(q) && timed(self.paths.path(q)) implies now < expiry(self.paths.path(q), self.pto_spec()) by {
                 assert(t < expiry(self.paths.path(q), self.pto_spec()));
             }
+        } else if !(self.lc.phase_spec() is Closed) {
+            assert forall|q: PathId| #[trigger] self.paths.has(q) && timed(self.paths.path(q)) implies now < expiry(self.paths.path(q), self.pto_spec()) by {
+                assert(t < expiry(self.paths.path(q), self.pto_spec()));
+            }
         }
     }
 
     /// What `on_timeout(now, ..)` guarantees of `self`, from `o`.
     pub closed spec fn timed_out(&self, o: Connection, now: u64) -> bool {
-        // P15 (§9.3.2, §14.2): while Open, the active path's challenge expired, so the active path is usable.
-        &&& o.lc.phase_spec() is Open && expired(o.paths.path(o.paths.active_spec()), now, o.pto_spec()) ==> usable(
+        // P15 (§9.3.2, §14.2), in every phase: the active path's challenge expired, so the active path
+        // is usable.
+        &&& expired(o.paths.path(o.paths.active_spec()), now, o.pto_spec()) ==> usable(
             self.paths.path(self.paths.active_spec()),
         ) || self.lc.phase_spec() is Closed
         // §10.1.
@@ -7155,9 +7196,40 @@ impl Connection {
     {
         match self.lc.phase() {
             Phase::Closed => None,
-            Phase::Closing | Phase::Draining => self.lc.deadline(),
+            Phase::Closing | Phase::Draining => self.close_timeout(),
             Phase::Open => self.open_timeout(),
         }
+    }
+
+    /// The earliest deadline of a Closing or Draining connection: its own, or a validation's, which
+    /// `on_timeout` acts on until Closed (§9.3.2).
+    #[verifier::spinoff_prover]
+    fn close_timeout(&self) -> (r: Option<u64>)
+        requires
+            self.wf(),
+            self.lc.phase_spec() is Closing || self.lc.phase_spec() is Draining,
+        ensures
+            self.timers_cover(r),
+            forall|now: u64| #[trigger] self.timers_later(now) && self.acks_later(now) ==> later(r, now),
+    {
+        let pd = self.paths.deadline(self.pto());
+        let r = earlier(self.lc.deadline(), pd);
+        proof {
+            assert forall|q: PathId| #[trigger] self.paths.has(q) && timed(self.paths.path(q)) implies covers(
+                r,
+                Some(expiry(self.paths.path(q), self.pto_spec())),
+            ) by {
+                assert(pd is Some);
+                assert(pd->0 <= expiry(self.paths.path(q), self.pto_spec()));
+            }
+            assert forall|now: u64| #[trigger] self.timers_later(now) && self.acks_later(now) implies later(r, now) by {
+                if let Some(d) = pd {
+                    let q = choose|q: PathId| #[trigger] self.paths.has(q) && timed(self.paths.path(q)) && d == expiry(self.paths.path(q), self.pto_spec());
+                    assert(self.paths.has(q) && timed(self.paths.path(q)));
+                }
+            }
+        }
+        r
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
@@ -7380,8 +7452,8 @@ impl Connection {
     //# If an endpoint has no state about the last validated peer address, it
     //# MUST close the connection silently by discarding all connection
     //# state.
-    // Both only while Open (`on_timeout`): in Closing and Draining a validation that expires is not
-    // acted on before Closed (final review I1).
+    // Both in every phase but Closed (`on_timeout`); `next_timeout` wakes for them in Closing and
+    // Draining too.
     // ponytail: only two validated paths are remembered, so after 0→1→2 with both 1 and 2 failing we close although 0 might still work (liveness only); a longer validated history if migration chains matter.
     /// The active path is no longer usable: back to the last validated one, which `Paths::wf` makes
     /// usable. It takes an unused CID if it has lost its own, so `wf_dcids` holds; with none left,
@@ -7537,10 +7609,12 @@ impl Connection {
         let pto0 = self.pto();
         self.timeout_phase(t);
         let ghost s2 = *self;
-        // Steps 4 and 5, only while Open. In Closing and Draining nothing is sent but CONNECTION_CLOSE
-        // (§14.2 exempts it on a failed path too) until the deadline, and `next_timeout` wakes only
-        // there, so a validation that expires then is not acted on before Closed.
-        if matches!(self.lc.phase(), Phase::Open) {
+        // Steps 4 and 5, in every phase but Closed: §9.3.2 has no exception by state, and
+        // `next_timeout` wakes at the earliest validation deadline in Closing and Draining too. A
+        // revert in Closing moves the repeated CONNECTION_CLOSE to the validated address (it goes on
+        // the active path, within its §8.1 budget and the closing byte cap); the silent close
+        // outranks §10.2's SHOULD NOT on ending the closing or draining state early.
+        if !matches!(self.lc.phase(), Phase::Closed) {
             self.fail_paths(t, pto0);
         }
         let ghost s5 = *self;
@@ -7555,6 +7629,10 @@ impl Connection {
             }
         }
         proof {
+            if self.lc.phase_spec() is Closing || self.lc.phase_spec() is Draining {
+                assert(self.pto_spec() == pto0);
+                assert(s2.lc == self.lc);
+            }
             self.lemma_timers_weaken(t, now);
         }
     }
