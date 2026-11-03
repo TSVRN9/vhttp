@@ -114,7 +114,19 @@ pub open spec fn ibytes(it: CTy) -> nat { if it is Bool { 1 } else { bits(it) / 
 
 pub open spec fn is_mut_ref(m: MirCrate, t: Ty) -> bool { rigid(m, t) matches Some(RigidTy::Ref(_, _, Mutability::Mut)) }
 
-pub open spec fn is_zst(m: MirCrate, t: Ty) -> bool { layout(m, t) matches Some(l) && l.size.num_bits == 0 }
+/// Not `str`, a slice or a trait object (the dump gives these a size-0 layout).
+pub open spec fn sized(m: MirCrate, t: Ty) -> bool {
+    rigid(m, t) matches Some(r) && !(r is Str || r is Slice || r is Dynamic)
+}
+
+pub open spec fn is_zst(m: MirCrate, t: Ty) -> bool { sized(m, t) && (layout(m, t) matches Some(l) && l.size.num_bits == 0) }
+
+/// A ghost result's type: sized, unit-like without closures, and size 0 if its layout is dumped
+/// (most `Ghost<_>` destinations have no layout row).
+pub open spec fn zst_dest(m: MirCrate, t: Ty) -> bool {
+    sized(m, t) && unit_like(m, t, tfuel(m), false) is Some
+        && match layout(m, t) { Some(l) => l.size.num_bits == 0, None => true }
+}
 
 /// `Vec<E, _>`: its element type `E`.
 pub open spec fn vec_elem(m: MirCrate, t: Ty) -> Option<Ty> {
@@ -183,42 +195,43 @@ pub open spec fn mut_free(v: Val) -> bool
 pub open spec fn unit_val() -> Val { Val::Tup(seq![]) }
 
 /// The value of a zero-sized type, with its count of ADT and reference nodes (for decision 7):
-/// tuples, single-variant structs and arrays of them; fn items and closures are `Unit`.
-pub open spec fn unit_like(m: MirCrate, t: Ty, fuel: nat) -> Option<(Val, nat)>
+/// tuples, single-variant structs and arrays of them; fn items are `Unit`, and so are closures
+/// when `clos` (a `ZeroSized` constant or a ZST-layout pointee: a closure without captures).
+pub open spec fn unit_like(m: MirCrate, t: Ty, fuel: nat, clos: bool) -> Option<(Val, nat)>
     decreases fuel, 0nat,
 {
     if fuel == 0 { None } else {
         let f = (fuel - 1) as nat;
         match rigid(m, t) {
-            Some(RigidTy::Tuple(ts)) => match unit_likes(m, ts@, f, ts@.len()) {
+            Some(RigidTy::Tuple(ts)) => match unit_likes(m, ts@, f, ts@.len(), clos) {
                 Some((vs, c)) => Some((Val::Tup(vs), c)),
                 None => None,
             },
             Some(RigidTy::Adt(_, _)) => match adt_row(m, t) {
                 Some(a) => if !a.is_box && !(a.kind is Union) && a.variants@.len() == 1 {
-                    match unit_likes(m, a.variants@[0].fields@, f, a.variants@[0].fields@.len()) {
+                    match unit_likes(m, a.variants@[0].fields@, f, a.variants@[0].fields@.len(), clos) {
                         Some((vs, c)) => Some((Val::Adt(0, vs), c + 1)),
                         None => None,
                     }
                 } else { None },
                 None => None,
             },
-            Some(RigidTy::Array(e, c)) => match (const_usize(m, c.id), unit_like(m, e, f)) {
+            Some(RigidTy::Array(e, c)) => match (const_usize(m, c.id), unit_like(m, e, f, clos)) {
                 (Some(n), Some((v, k))) => Some((Val::Arr(Seq::new(n as nat, |_i: int| v)), (n as nat) * k)),
                 _ => None,
             },
             Some(RigidTy::FnDef(_, _)) => Some((Val::Unit, 0)),
-            Some(RigidTy::Closure(_, _)) => Some((Val::Unit, 0)),
+            Some(RigidTy::Closure(_, _)) => if clos { Some((Val::Unit, 0)) } else { None },
             _ => None,
         }
     }
 }
 
-pub open spec fn unit_likes(m: MirCrate, ts: Seq<Ty>, fuel: nat, n: nat) -> Option<(Seq<Val>, nat)>
+pub open spec fn unit_likes(m: MirCrate, ts: Seq<Ty>, fuel: nat, n: nat, clos: bool) -> Option<(Seq<Val>, nat)>
     decreases fuel, n,
 {
     if n == 0 { Some((seq![], 0)) } else if n > ts.len() { None } else {
-        match (unit_likes(m, ts, fuel, (n - 1) as nat), unit_like(m, ts[n - 1], fuel)) {
+        match (unit_likes(m, ts, fuel, (n - 1) as nat, clos), unit_like(m, ts[n - 1], fuel, clos)) {
             (Some((vs, c)), Some((v, k))) => Some((vs.push(v), c + k)),
             _ => None,
         }
@@ -230,8 +243,10 @@ pub open spec fn strip_pat(m: MirCrate, t: Ty) -> Ty {
     match rigid(m, t) { Some(RigidTy::Pat(base, _)) => base, _ => t }
 }
 
-/// `v` is a well-typed value of `ty` (patterns are not checked).
-pub open spec fn wt_val(m: MirCrate, ty: Ty, v: Val) -> bool
+/// `v` is a well-typed value of `ty`, a type the subset admits (patterns are not checked).
+pub open spec fn wt_val(m: MirCrate, ty: Ty, v: Val) -> bool { ty_free(m, ty, tfuel(m), true) && wt_rec(m, ty, v) }
+
+pub open spec fn wt_rec(m: MirCrate, ty: Ty, v: Val) -> bool
     decreases v,
 {
     let t = strip_pat(m, ty);
@@ -241,26 +256,27 @@ pub open spec fn wt_val(m: MirCrate, ty: Ty, v: Val) -> bool
             Some(it) => v matches Val::Int(n) && (n as int) < pow2(bits(it)),
             None => match v {
                 Val::Tup(vs) => match r {
-                    RigidTy::Tuple(ts) => vs.len() == ts@.len() && forall|i: int| 0 <= i < vs.len() ==> wt_val(m, ts@[i], #[trigger] vs[i]),
+                    RigidTy::Tuple(ts) => vs.len() == ts@.len() && forall|i: int| 0 <= i < vs.len() ==> wt_rec(m, ts@[i], #[trigger] vs[i]),
                     _ => false,
                 },
                 Val::Arr(vs) => match r {
                     RigidTy::Array(e, c) => const_usize(m, c.id) == Some(vs.len() as u64) && vs.len() <= USZ
-                        && forall|i: int| 0 <= i < vs.len() ==> wt_val(m, e, #[trigger] vs[i]),
-                    RigidTy::Slice(e) => vs.len() <= USZ && forall|i: int| 0 <= i < vs.len() ==> wt_val(m, e, #[trigger] vs[i]),
+                        && forall|i: int| 0 <= i < vs.len() ==> wt_rec(m, e, #[trigger] vs[i]),
+                    RigidTy::Slice(e) => vs.len() <= USZ && forall|i: int| 0 <= i < vs.len() ==> wt_rec(m, e, #[trigger] vs[i]),
                     RigidTy::Adt(_, _) => vec_elem(m, t) matches Some(e) && vs.len() <= USZ
-                        && forall|i: int| 0 <= i < vs.len() ==> wt_val(m, e, #[trigger] vs[i]),
+                        && forall|i: int| 0 <= i < vs.len() ==> wt_rec(m, e, #[trigger] vs[i]),
                     _ => false,
                 },
                 Val::Adt(k, vs) => match (r, adt_row(m, t)) {
                     (RigidTy::Adt(_, _), Some(a)) => vec_elem(m, t) is None && !a.is_box && !(a.kind is Union)
                         && k < a.variants@.len() && vs.len() == a.variants@[k as int].fields@.len()
-                        && forall|i: int| 0 <= i < vs.len() ==> wt_val(m, a.variants@[k as int].fields@[i], #[trigger] vs[i]),
+                        && forall|i: int| 0 <= i < vs.len() ==> wt_rec(m, a.variants@[k as int].fields@[i], #[trigger] vs[i]),
                     _ => false,
                 },
-                Val::Shr(b) => match r { RigidTy::Ref(_, p, Mutability::Not) => wt_val(m, p, *b), _ => false },
+                Val::Shr(b) => match r { RigidTy::Ref(_, p, Mutability::Not) => wt_rec(m, p, *b), _ => false },
                 Val::Mut(_) => r matches RigidTy::Ref(_, _, Mutability::Mut),
-                Val::Unit => r is FnDef || r is Closure,
+                Val::Unit => r is FnDef || r is Closure || r is FnPtr
+                    || (r matches RigidTy::Ref(_, p, Mutability::Not) && rigid(m, p) matches Some(RigidTy::Str)),
                 _ => false,
             },
         },
@@ -452,15 +468,19 @@ pub open spec fn dec_adt(m: MirCrate, t: Ty, a: Allocation, off: nat, fuel: nat)
 
 /// `&ZST`: `Shr` of the ZST's value, whatever the address.
 pub open spec fn dec_zst_ref(m: MirCrate, p: Ty) -> Option<(Val, nat)> {
-    match unit_like(m, p, tfuel(m)) { Some((v, c)) => Some((Val::Shr(Box::new(v)), c + 1)), None => None }
+    match unit_like(m, p, tfuel(m), true) { Some((v, c)) => Some((Val::Shr(Box::new(v)), c + 1)), None => None }
 }
 
-/// A shared reference: to a ZST as `Shr` of its value (rustc gives such a pointer either no
-/// provenance or provenance into a zero-size `GlobalAlloc::Memory`); to an array through its
-/// provenance into a `GlobalAlloc::Memory`, the pointer's bytes being the offset there.
+/// A shared reference: `&str` is the opaque `Unit` (its contents are never read in the subset);
+/// to a ZST, `Shr` of its value (rustc gives such a pointer either no provenance or provenance
+/// into a zero-size `GlobalAlloc::Memory`); to an array through its provenance into a
+/// `GlobalAlloc::Memory`, the pointer's bytes being the offset there.
 pub open spec fn dec_ref(m: MirCrate, p: Ty, a: Allocation, off: nat, fuel: nat) -> Option<(Val, nat)>
     decreases fuel, 2nat, 0nat,
 {
+    if rigid(m, p) matches Some(RigidTy::Str) {
+        match prov_at(a, off) { Some(id) => if alloc_mem(m, id) is Some { Some((Val::Unit, 0)) } else { None }, None => Some((Val::Unit, 0)) }
+    } else {
     match (prov_at(a, off), le(a, off, 8)) {
         (Some(id), Some(addr)) => match (alloc_mem(m, id), rigid(m, p)) {
             (Some(a2), Some(r)) => if is_zst(m, p) { dec_zst_ref(m, p) } else if r is Array {
@@ -470,6 +490,7 @@ pub open spec fn dec_ref(m: MirCrate, p: Ty, a: Allocation, off: nat, fuel: nat)
         },
         (None, Some(_)) => if no_prov(a, off, 8) && is_zst(m, p) { dec_zst_ref(m, p) } else { None },
         _ => None,
+    }
     }
 }
 
@@ -494,7 +515,7 @@ pub open spec fn const_val(m: MirCrate, c: ConstOperand) -> Option<(Val, nat)> {
             Some((v, k)) => Some((v, if charged(m, t) { k } else { 0 })),
             None => None,
         },
-        ConstantKind::ZeroSized => match unit_like(m, t, tfuel(m)) { Some((v, _)) => Some((v, 0)), None => None },
+        ConstantKind::ZeroSized => match unit_like(m, t, tfuel(m), true) { Some((v, _)) => Some((v, 0)), None => None },
         _ => None,
     }
 }
@@ -976,7 +997,9 @@ pub open spec fn std_apply(m: MirCrate, f: StdFn, dty: Option<Ty>, vs: Seq<Val>,
             match (int_arg(vs[0]), int_arg(vs[1])) { (Some(a), Some(c)) => Some((Val::Int(binop(op, it, a, c)), fr, seq![], 0)), _ => None }
         } else { None },
         StdFn::GhostNew => match dty {
-            Some(t) => match unit_like(m, t, tfuel(m)) { Some((v, _)) => Some((v, fr, seq![], 0)), None => None },
+            Some(t) => if zst_dest(m, t) {
+                match unit_like(m, t, tfuel(m), false) { Some((v, _)) => Some((v, fr, seq![], 0)), None => None }
+            } else { None },
             None => None,
         },
     }
@@ -989,7 +1012,12 @@ pub open spec fn leaf_call(m: MirCrate, pol: CallPolicy, key: Seq<u8>, gargs: Ge
     if pol.declassify.contains(key) {
         if vs.len() == 1 { Some((vs[0], fr, seq![Event::Declass(vs[0])], 0)) } else { None }
     } else if pol.ghost_unit.contains(key) {
-        match dty { Some(t) => match unit_like(m, t, tfuel(m)) { Some((v, _)) => Some((v, fr, seq![], 0)), None => None }, None => None }
+        match dty {
+            Some(t) => if zst_dest(m, t) {
+                match unit_like(m, t, tfuel(m), false) { Some((v, _)) => Some((v, fr, seq![], 0)), None => None }
+            } else { None },
+            None => None,
+        }
     } else {
         match std_model(m, key, gargs) { Some(f) => std_apply(m, f, dty, vs, fr), None => None }
     }
@@ -1001,8 +1029,9 @@ pub open spec fn is_leaf(m: MirCrate, pol: CallPolicy, key: Seq<u8>, gargs: Gene
 
 // ------------------------------------------------------------------ calls (decision 3)
 
-/// The frame a body starts in: local 0 and the non-parameters `Unit` (uninitialized); parameter
-/// `1 + j` is `args[j]`, or `Mut(Slot(j))` when its type is `&mut` (slot `j` holds the pointee).
+/// The frame a body starts in: parameter `1 + j` is `args[j]`, or `Mut(Slot(j))` when its type is
+/// `&mut` (slot `j` holds the pointee). Local 0 and the other locals are `Unit` (uninitialized),
+/// except a local of unit-like type, which holds its one value (a ZST read never fails, MiniRust).
 pub open spec fn mir_entry(m: MirCrate, i: nat, args: Seq<Val>, slots: Seq<Val>) -> Frame {
     match inst_body(m, i) {
         Some(b) => Frame { locals: Seq::new(b.locals@.len(), |k: int| entry_local(m, b, args, k)), slots },
@@ -1013,6 +1042,8 @@ pub open spec fn mir_entry(m: MirCrate, i: nat, args: Seq<Val>, slots: Seq<Val>)
 pub open spec fn entry_local(m: MirCrate, b: Body, args: Seq<Val>, k: int) -> Val {
     if 1 <= k <= b.arg_count && k - 1 < args.len() && k < b.locals@.len() {
         if is_mut_ref(m, b.locals@[k].ty) { Val::Mut(Loc { root: Root::Slot((k - 1) as nat), path: seq![] }) } else { args[k - 1] }
+    } else if 0 <= k < b.locals@.len() {
+        match unit_like(m, b.locals@[k].ty, tfuel(m), false) { Some((v, _)) => v, None => Val::Unit }
     } else { Val::Unit }
 }
 
@@ -1068,153 +1099,436 @@ pub open spec fn callee_of(m: MirCrate, func: Operand) -> Option<(nat, GenericAr
     }
 }
 
-/// A block's terminator outcome: jump to a block, or return; with events and steps.
-pub enum Step { Jump(nat, Frame, Seq<Event>, nat), Done(Frame, Seq<Event>, nat) }
+/// A run's outcome. `Panic` is a failed `Assert`, `Unreachable`/`Abort`, UB guarded by rustc's
+/// checks (an index out of bounds, `/ 0`, unchecked overflow), a std precondition, or a value of
+/// the wrong shape for its construct (impossible on well-typed frames: type soundness, Task 6).
+/// `Unsup` is a construct outside the subset, decided statically (`block_ok`, `inst_body`).
+pub enum Out { Done(Frame, Seq<Event>, nat), Panic, Unsup, Fuel }
+
+/// A block's terminator outcome: jump to a block with events and steps, or stop with an outcome.
+pub enum Step { Jump(nat, Frame, Seq<Event>, nat), Stop(Out) }
 
 /// `SwitchInt`: the operand's bit pattern against the branch values, emitting `Cond(d)`.
-pub open spec fn switch_step(m: MirCrate, fr: Frame, x: Operand, tg: SwitchTargets) -> Option<Step> {
+pub open spec fn switch_step(m: MirCrate, fr: Frame, x: Operand, tg: SwitchTargets) -> Step {
     match eval_op(m, fr, x) {
         Some((Val::Int(d), e, k)) => {
             let t = match find(tg.branches@, |br: (u128, BasicBlockIdx)| br.0 == d) {
                 Some(j) => tg.branches@[j as int].1 as nat,
                 None => tg.otherwise as nat,
             };
-            Some(Step::Jump(t, fr, e + seq![Event::Cond(d)], 1 + k))
+            Step::Jump(t, fr, e + seq![Event::Cond(d)], 1 + k)
         },
-        _ => None,
+        _ => Step::Stop(Out::Panic),
     }
 }
 
-/// `Assert`: emits `Cond(c)`; a condition other than `expected` panics (`None`).
-pub open spec fn assert_step(m: MirCrate, fr: Frame, x: Operand, expected: bool, target: BasicBlockIdx) -> Option<Step> {
+/// `Assert`: emits `Cond(c)`; a condition other than `expected` panics.
+pub open spec fn assert_step(m: MirCrate, fr: Frame, x: Operand, expected: bool, target: BasicBlockIdx) -> Step {
     match eval_op(m, fr, x) {
         Some((Val::Int(c), e, k)) => if (c == 0 || c == 1) && (c == 1) == expected {
-            Some(Step::Jump(target as nat, fr, e + seq![Event::Cond(c)], 1 + k))
-        } else { None },
-        _ => None,
+            Step::Jump(target as nat, fr, e + seq![Event::Cond(c)], 1 + k)
+        } else { Step::Stop(Out::Panic) },
+        _ => Step::Stop(Out::Panic),
     }
 }
 
 // ------------------------------------------------------------------ runs (decisions 1, 2, 4)
 
-/// A run of `insts[i]` from `fr`. Fuel: each block entered and each call to a body takes 1.
-pub open spec fn mir_run_fn(m: MirCrate, pol: CallPolicy, i: nat, fr: Frame, fuel: nat) -> Res
-    decreases fuel, 3nat,
-{
-    match inst_body(m, i) { Some(b) => run_block(m, pol, b, 0, fr, fuel), None => None }
+/// A run of `insts[i]` from `fr`: `Some` exactly when it returns.
+pub open spec fn mir_run_fn(m: MirCrate, pol: CallPolicy, i: nat, fr: Frame, fuel: nat) -> Res {
+    match mir_run(m, pol, i, fr, fuel) { Out::Done(f, e, s) => Some((f, e, s)), _ => None }
 }
 
-pub open spec fn run_block(m: MirCrate, pol: CallPolicy, b: Body, bb: nat, fr: Frame, fuel: nat) -> Res
-    decreases fuel, 2nat,
+/// Fuel: each block entered and each call to a body takes 1.
+pub open spec fn mir_run(m: MirCrate, pol: CallPolicy, i: nat, fr: Frame, fuel: nat) -> Out
+    decreases fuel, 4nat,
 {
-    if fuel == 0 || bb >= b.blocks@.len() { None } else {
+    match inst_body(m, i) { Some(b) => run_block(m, pol, b, 0, fr, fuel), None => Out::Unsup }
+}
+
+pub open spec fn run_block(m: MirCrate, pol: CallPolicy, b: Body, bb: nat, fr: Frame, fuel: nat) -> Out
+    decreases fuel, 3nat,
+{
+    if fuel == 0 { Out::Fuel } else if bb >= b.blocks@.len() || !block_ok(m, pol, b, b.blocks@[bb as int]) { Out::Unsup } else {
         let blk = b.blocks@[bb as int];
         match exec_stmts(m, b, fr, blk.statements@, blk.statements@.len()) {
             Some((f1, e1, s1)) => match step_term(m, pol, b, blk.terminator.kind, f1, fuel) {
-                Some(Step::Done(f2, e2, s2)) => Some((f2, e1 + e2, s1 + s2)),
-                Some(Step::Jump(t, f2, e2, s2)) => match run_block(m, pol, b, t, f2, (fuel - 1) as nat) {
-                    Some((f3, e3, s3)) => Some((f3, e1 + e2 + e3, s1 + s2 + s3)),
-                    None => None,
+                Step::Stop(Out::Done(f2, e2, s2)) => Out::Done(f2, e1 + e2, s1 + s2),
+                Step::Stop(o) => o,
+                Step::Jump(t, f2, e2, s2) => match run_block(m, pol, b, t, f2, (fuel - 1) as nat) {
+                    Out::Done(f3, e3, s3) => Out::Done(f3, e1 + e2 + e3, s1 + s2 + s3),
+                    o => o,
                 },
-                None => None,
             },
-            None => None,
+            None => Out::Panic,
         }
     }
 }
 
-/// Terminators, each costing 1. Only normal successors are followed: `Resume`, `Abort`,
-/// `Unreachable`, inline asm and a call with no return target are `None`.
-pub open spec fn step_term(m: MirCrate, pol: CallPolicy, b: Body, t: TerminatorKind, fr: Frame, fuel: nat) -> Option<Step>
-    decreases fuel, 1nat,
+/// Terminators, each costing 1. Only normal successors are followed (`Resume`, inline asm and
+/// unknown terminators are outside the subset; `block_ok` stops them first).
+pub open spec fn step_term(m: MirCrate, pol: CallPolicy, b: Body, t: TerminatorKind, fr: Frame, fuel: nat) -> Step
+    decreases fuel, 2nat,
 {
     match t {
-        TerminatorKind::Goto { target } => Some(Step::Jump(target as nat, fr, seq![], 1)),
+        TerminatorKind::Goto { target } => Step::Jump(target as nat, fr, seq![], 1),
         TerminatorKind::SwitchInt { discr, targets } => switch_step(m, fr, discr, targets),
         TerminatorKind::Assert { cond, expected, msg: _, target, unwind: _ } => assert_step(m, fr, cond, expected, target),
-        TerminatorKind::Return => Some(Step::Done(fr, seq![], 1)),
+        TerminatorKind::Return => Step::Stop(Out::Done(fr, seq![], 1)),
+        TerminatorKind::Unreachable | TerminatorKind::Abort => Step::Stop(Out::Panic),
         TerminatorKind::Drop { place, target, unwind: _ } => drop_step(m, pol, b, place, target as nat, fr, fuel),
         TerminatorKind::Call { func, args, destination, target, unwind: _ } => match target {
             Some(tb) => call_step(m, pol, b, func, args@, destination, tb as nat, fr, fuel),
-            None => None,
+            None => Step::Stop(Out::Unsup),
         },
-        _ => None,
+        _ => Step::Stop(Out::Unsup),
     }
 }
 
-/// `Call`: arguments left to right, then the destination's projections, then the call's own
-/// events (decision 6). A leaf costs 1 plus constant charges plus its table cost; a body call
-/// costs 1 plus charges plus the callee's steps, and runs on 1 less fuel. Policy calls first,
-/// then the std model, then any `Item`/`Shim` instance with a body; anything else is `None`.
-pub open spec fn call_step(m: MirCrate, pol: CallPolicy, b: Body, func: Operand, args: Seq<Operand>, dest: Place, tb: nat, fr: Frame, fuel: nat)
-    -> Option<Step>
+/// A body call: enter with the `&mut` slots, run on 1 less fuel, return and write back.
+pub open spec fn body_call(m: MirCrate, pol: CallPolicy, j: nat, cb: Body, vs: Seq<Val>, fr: Frame, fuel: nat)
+    -> Result<(Val, Frame, Seq<Event>, nat), Out>
     decreases fuel, 0nat,
 {
-    match (callee_of(m, func), eval_ops(m, fr, args, args.len()), eval_place(fr, dest)) {
-        (Some((j, gargs)), Some((vs, e1, k1)), Some((PRes::At(l), e2))) => {
-            let key = m.insts@[j as int].key@;
-            if is_leaf(m, pol, key, gargs) {
-                match leaf_call(m, pol, key, gargs, place_ty(m, b, dest), vs, fr) {
-                    Some((r, f2, e3, x)) => match store(f2, l, r) {
-                        Some(f3) => Some(Step::Jump(tb, f3, e1 + e2 + e3, 1 + k1 + x)),
-                        None => None,
+    if fuel == 0 { Err(Out::Fuel) } else if !args_ok(m, cb, fr, vs) { Err(Out::Panic) } else {
+        match mir_run(m, pol, j, mir_entry(m, j, vs, call_slots(m, cb, fr, vs)), (fuel - 1) as nat) {
+            Out::Done(cf, e, s) => match return_to(m, cb, fr, vs, cf) {
+                Some((r, f2)) => Ok((r, f2, e, s)),
+                None => Err(Out::Panic),
+            },
+            o => Err(o),
+        }
+    }
+}
+
+/// `Call` (decision 6, amended): the arguments' events left to right, then the callee's (a body's
+/// trace, or the policy or std row's events), then the destination place's events. The place is
+/// evaluated before the call (MiniRust terminators.md), its events listed last. A leaf costs 1
+/// plus constant charges plus its table cost; a body call 1 plus charges plus the callee's steps.
+/// Policy calls first, then the std model, then an `Item`/`Shim` instance with a body.
+pub open spec fn call_step(m: MirCrate, pol: CallPolicy, b: Body, func: Operand, args: Seq<Operand>, dest: Place, tb: nat, fr: Frame, fuel: nat)
+    -> Step
+    decreases fuel, 1nat,
+{
+    match callee_of(m, func) {
+        None => Step::Stop(Out::Unsup),
+        Some((j, gargs)) => if j >= m.insts@.len() { Step::Stop(Out::Unsup) } else { match (eval_ops(m, fr, args, args.len()), eval_place(fr, dest)) {
+            (Some((vs, e1, k1)), Some((PRes::At(l), e2))) => {
+                let key = m.insts@[j as int].key@;
+                let r: Result<(Val, Frame, Seq<Event>, nat), Out> = if is_leaf(m, pol, key, gargs) {
+                    match leaf_call(m, pol, key, gargs, place_ty(m, b, dest), vs, fr) {
+                        Some(x) => Ok(x),
+                        None => Err(Out::Panic),
+                    }
+                } else {
+                    match inst_body(m, j) { Some(cb) => body_call(m, pol, j, cb, vs, fr, fuel), None => Err(Out::Unsup) }
+                };
+                match r {
+                    Ok((v, f2, e3, x)) => match store(f2, l, v) {
+                        Some(f3) => Step::Jump(tb, f3, e1 + e3 + e2, 1 + k1 + x),
+                        None => Step::Stop(Out::Panic),
                     },
-                    None => None,
+                    Err(o) => Step::Stop(o),
                 }
-            } else {
-                match inst_body(m, j) {
-                    Some(cb) => if fuel > 0 && args_ok(m, cb, fr, vs) {
-                        match mir_run_fn(m, pol, j, mir_entry(m, j, vs, call_slots(m, cb, fr, vs)), (fuel - 1) as nat) {
-                            Some((cf, e3, s3)) => match return_to(m, cb, fr, vs, cf) {
-                                Some((r, f2)) => match store(f2, l, r) {
-                                    Some(f3) => Some(Step::Jump(tb, f3, e1 + e2 + e3, 1 + k1 + s3)),
-                                    None => None,
-                                },
-                                None => None,
-                            },
-                            None => None,
-                        }
-                    } else { None },
-                    None => None,
-                }
-            }
-        },
-        _ => None,
+            },
+            _ => Step::Stop(Out::Panic),
+        } },
     }
 }
 
 /// `Drop` (decision 4): `drop_in_place::<T>` through the `drops` row for the place's type. An empty
 /// shim and the `Vec<int>` leaf are no-ops costing 1; otherwise the glue body runs on `&mut place`
-/// (slot 0, written back), costing 2 plus its steps.
-pub open spec fn drop_step(m: MirCrate, pol: CallPolicy, b: Body, place: Place, tb: nat, fr: Frame, fuel: nat) -> Option<Step>
-    decreases fuel, 0nat,
+/// (slot 0, written back), costing 2 plus its steps. Events: the place's, then the glue's.
+pub open spec fn drop_step(m: MirCrate, pol: CallPolicy, b: Body, place: Place, tb: nat, fr: Frame, fuel: nat) -> Step
+    decreases fuel, 1nat,
 {
     match (place_ty(m, b, place), eval_place(fr, place)) {
-        (Some(t), Some((PRes::At(l), e))) => match find(m.drops@, |d: DropRow| d.ty == t) {
-            Some(k) => if m.drops@[k as int].empty || vec_int(m, t) { Some(Step::Jump(tb, fr, e, 1)) } else {
-                match inst_idx(m, m.drops@[k as int].glue) {
-                    Some(j) => match inst_body(m, j) {
-                        Some(gb) => {
-                            let vs = seq![Val::Mut(l)];
-                            if fuel > 0 && args_ok(m, gb, fr, vs) {
-                                match mir_run_fn(m, pol, j, mir_entry(m, j, vs, call_slots(m, gb, fr, vs)), (fuel - 1) as nat) {
-                                    Some((cf, e2, s2)) => match return_to(m, gb, fr, vs, cf) {
-                                        Some((_, f2)) => Some(Step::Jump(tb, f2, e + e2, 2 + s2)),
-                                        None => None,
-                                    },
-                                    None => None,
-                                }
-                            } else { None }
-                        },
-                        None => None,
+        (Some(t), Some((PRes::At(l), e))) => match drop_row(m, t) {
+            Some(d) => if d.empty || vec_int(m, t) { Step::Jump(tb, fr, e, 1) } else {
+                match glue_of(m, d.glue) {
+                    Some((j, gb)) => match body_call(m, pol, j, gb, seq![Val::Mut(l)], fr, fuel) {
+                        Ok((_, f2, e2, s2)) => Step::Jump(tb, f2, e + e2, 2 + s2),
+                        Err(o) => Step::Stop(o),
                     },
-                    None => None,
+                    None => Step::Stop(Out::Unsup),
                 }
             },
-            None => None,
+            None => Step::Stop(Out::Unsup),
         },
-        _ => None,
+        (None, _) => Step::Stop(Out::Unsup),
+        _ => Step::Stop(Out::Panic),
     }
+}
+
+pub open spec fn drop_row(m: MirCrate, t: Ty) -> Option<DropRow> {
+    match find(m.drops@, |d: DropRow| d.ty == t) { Some(k) => Some(m.drops@[k as int]), None => None }
+}
+
+/// A drop glue instance: its `insts` index and body.
+pub open spec fn glue_of(m: MirCrate, g: InstanceDef) -> Option<(nat, Body)> {
+    match inst_idx(m, g) { Some(j) => match inst_body(m, j) { Some(gb) => Some((j, gb)), None => None }, None => None }
+}
+
+// ------------------------------------------------------------------ the subset (static)
+//
+// Each predicate mirrors the static `None` arms of the evaluation functions above: a construct
+// passes exactly when its evaluation can fail only on values (a panic, or a mis-shaped value).
+
+/// No `Box`, union, `UnsafeCell`, raw pointer, float, `char`, trait object or unresolved type
+/// anywhere in `t`; `&mut` only where `mut_ok` (not inside any reference's pointee).
+pub open spec fn ty_free(m: MirCrate, t: Ty, fuel: nat, mut_ok: bool) -> bool
+    decreases fuel,
+{
+    if fuel == 0 { false } else {
+        let f = (fuel - 1) as nat;
+        match rigid(m, t) {
+            Some(r) => match r {
+                RigidTy::Bool | RigidTy::Int(_) | RigidTy::Uint(_) => int_of(r) is Some,
+                RigidTy::Str | RigidTy::Never | RigidTy::FnDef(_, _) | RigidTy::FnPtr(_) | RigidTy::Closure(_, _) => true,
+                RigidTy::Pat(base, _) => ty_free(m, base, f, mut_ok),
+                RigidTy::Tuple(ts) => forall|k: int| 0 <= k < ts@.len() ==> ty_free(m, #[trigger] ts@[k], f, mut_ok),
+                RigidTy::Array(e, _) => ty_free(m, e, f, mut_ok),
+                RigidTy::Slice(e) => ty_free(m, e, f, mut_ok),
+                RigidTy::Ref(_, p, mu) => (mu is Not || mut_ok) && !(mu is Unknown) && ty_free(m, p, f, false),
+                RigidTy::Adt(_, _) => match vec_elem(m, t) {
+                    Some(e) => ty_free(m, e, f, false),
+                    None => match adt_row(m, t) {
+                        Some(a) => !a.is_box && !(a.kind is Union) && !(a.kind is Unknown) && a.name@ != b"std::cell::UnsafeCell"@
+                            && forall|k: int, i: int| 0 <= k < a.variants@.len() && 0 <= i < a.variants@[k].fields@.len()
+                                ==> ty_free(m, #[trigger] a.variants@[k].fields@[i], f, mut_ok),
+                        None => false,
+                    },
+                },
+                _ => false,
+            },
+            None => false,
+        }
+    }
+}
+
+/// A callee's signature: no `&mut` in the return type; a parameter is `&mut T` with `T` free of
+/// `&mut`, or free of `&mut` itself (decision 3's slots).
+pub open spec fn sig_ok(m: MirCrate, b: Body) -> bool {
+    b.arg_count < b.locals@.len() && ty_free(m, b.locals@[0].ty, tfuel(m), false)
+    && forall|k: int| 1 <= k <= b.arg_count ==> match rigid(m, #[trigger] b.locals@[k].ty) {
+        Some(RigidTy::Ref(_, p, Mutability::Mut)) => ty_free(m, p, tfuel(m), false),
+        _ => ty_free(m, b.locals@[k].ty, tfuel(m), false),
+    }
+}
+
+pub open spec fn locals_ok(m: MirCrate, b: Body) -> bool {
+    forall|k: int| 0 <= k < b.locals@.len() ==> ty_free(m, #[trigger] b.locals@[k].ty, tfuel(m), true)
+}
+
+/// One projection at type `t`: `Deref` of a reference, not onto `str` (whose contents are never
+/// read) and, when `mutating`, not through a shared reference; `Index` of a local.
+pub open spec fn proj_ok(m: MirCrate, b: Body, t: Ty, e: ProjectionElem, mutating: bool) -> bool {
+    proj_ty(m, t, e) is Some && match e {
+        ProjectionElem::Deref => match rigid(m, t) {
+            Some(RigidTy::Ref(_, p, mu)) => !(rigid(m, p) matches Some(RigidTy::Str)) && !(mutating && !(mu is Mut)),
+            _ => false,
+        },
+        ProjectionElem::Index(x) => x < b.locals@.len(),
+        _ => true,
+    }
+}
+
+pub open spec fn path_ok(m: MirCrate, b: Body, t: Ty, ps: Seq<ProjectionElem>, n: nat, mutating: bool) -> bool
+    decreases n,
+{
+    if n == 0 { true } else if n > ps.len() { false } else {
+        path_ok(m, b, t, ps, (n - 1) as nat, mutating)
+            && match tys_along(m, t, ps, (n - 1) as nat) { Some(u) => proj_ok(m, b, u, ps[n - 1], mutating), None => false }
+    }
+}
+
+/// A place the subset evaluates; `mutating` for a write, a `&mut` borrow or a drop.
+pub open spec fn place_ok(m: MirCrate, b: Body, p: Place, mutating: bool) -> bool {
+    p.local < b.locals@.len() && path_ok(m, b, b.locals@[p.local as int].ty, p.projection@, p.projection@.len(), mutating)
+}
+
+pub open spec fn op_ok(m: MirCrate, b: Body, x: Operand) -> bool {
+    match x {
+        Operand::Copy(p) => place_ok(m, b, p, false),
+        Operand::Move(p) => place_ok(m, b, p, false),
+        Operand::Constant(c) => const_val(m, c) is Some,
+        _ => false,
+    }
+}
+
+pub open spec fn ops_ok(m: MirCrate, b: Body, xs: Seq<Operand>) -> bool {
+    forall|k: int| 0 <= k < xs.len() ==> op_ok(m, b, #[trigger] xs[k])
+}
+
+/// An operand of int or `bool` type.
+pub open spec fn int_op(m: MirCrate, b: Body, x: Operand) -> bool {
+    op_ok(m, b, x) && (op_ty(m, b, x) matches Some(t) && int_ty(m, t) is Some)
+}
+
+pub open spec fn cast_ok(m: MirCrate, b: Body, ck: CastKind, x: Operand, to: Ty) -> bool {
+    op_ok(m, b, x) && match op_ty(m, b, x) {
+        Some(tx) => match ck {
+            CastKind::IntToInt => int_ty(m, tx) is Some && int_ty(m, to) is Some,
+            CastKind::PointerCoercion(PointerCoercion::Unsize) => match (rigid(m, tx), rigid(m, to)) {
+                (Some(RigidTy::Ref(_, p, _)), Some(RigidTy::Ref(_, q, _))) =>
+                    (rigid(m, p) matches Some(RigidTy::Array(_, _))) && (rigid(m, q) matches Some(RigidTy::Slice(_))),
+                _ => false,
+            },
+            CastKind::PointerCoercion(PointerCoercion::ClosureFnPointer(_)) | CastKind::PointerCoercion(PointerCoercion::ReifyFnPointer(_)) =>
+                rigid(m, tx) matches Some(r) && (r is Closure || r is FnDef),
+            CastKind::Subtype => true,
+            _ => false,
+        },
+        None => false,
+    }
+}
+
+pub open spec fn rv_ok(m: MirCrate, b: Body, rv: Rvalue) -> bool {
+    match rv {
+        Rvalue::Use(x, _) => op_ok(m, b, x),
+        Rvalue::BinaryOp(op, x, y) => core_bin(op) is Some && int_op(m, b, x) && int_op(m, b, y),
+        Rvalue::CheckedBinaryOp(op, x, y) => (op is Add || op is Sub || op is Mul) && int_op(m, b, x) && int_op(m, b, y),
+        Rvalue::UnaryOp(op, x) => match op {
+            UnOp::Not => int_op(m, b, x),
+            UnOp::Neg => int_op(m, b, x) && signed(int_ty(m, op_ty(m, b, x)->Some_0)->Some_0),
+            UnOp::PtrMetadata => op_ok(m, b, x) && (op_ty(m, b, x) matches Some(tx)
+                && (rigid(m, tx) matches Some(RigidTy::Ref(_, p, _)) && rigid(m, p) matches Some(RigidTy::Slice(_)))),
+            _ => false,
+        },
+        Rvalue::Cast(ck, x, to) => cast_ok(m, b, ck, x, to),
+        Rvalue::Aggregate(ak, ops) => ops_ok(m, b, ops@) && match ak {
+            AggregateKind::Array(_) | AggregateKind::Tuple => true,
+            AggregateKind::Adt(_, _, _, _, active) => active is None,
+            _ => false,
+        },
+        Rvalue::Repeat(x, c) => op_ok(m, b, x) && const_usize(m, c.id) is Some,
+        Rvalue::Ref(_, bk, p) => match bk {
+            BorrowKind::Shared => place_ok(m, b, p, false),
+            BorrowKind::Mut { .. } => place_ok(m, b, p, true),
+            _ => false,
+        },
+        Rvalue::Len(p) => place_ok(m, b, p, false)
+            && (place_ty(m, b, p) matches Some(t) && rigid(m, t) matches Some(r) && (r is Array || r is Slice)),
+        Rvalue::Discriminant(p) => place_ok(m, b, p, false) && (place_ty(m, b, p) matches Some(t) && adt_row(m, t) matches Some(a)
+            && (a.kind is Struct || (a.kind is Enum && forall|k: int| 0 <= k < a.variants@.len() ==> (#[trigger] a.variants@[k]).discr is Some))),
+        Rvalue::CopyForDeref(p) => place_ok(m, b, p, false),
+        _ => false,
+    }
+}
+
+pub open spec fn stmt_ok(m: MirCrate, b: Body, s: Statement) -> bool {
+    match s.kind {
+        StatementKind::Assign(p, rv) => place_ok(m, b, p, true) && rv_ok(m, b, rv),
+        StatementKind::StorageLive(_) | StatementKind::StorageDead(_) | StatementKind::Nop | StatementKind::FakeRead(_, _)
+        | StatementKind::PlaceMention(_) | StatementKind::AscribeUserType { .. } | StatementKind::Coverage(_)
+        | StatementKind::ConstEvalCounter => true,
+        _ => false,
+    }
+}
+
+pub open spec fn std_arity(f: StdFn) -> Option<nat> {
+    match f {
+        StdFn::VecNew => Some(0),
+        StdFn::VecWithCapacity | StdFn::VecAsSlice | StdFn::ArrayAsSlice | StdFn::VecLen | StdFn::SliceToVec => Some(1),
+        StdFn::VecPush | StdFn::VecExtendFromSlice | StdFn::VecIndex | StdFn::Wrapping(_, _) => Some(2),
+        StdFn::VecSet | StdFn::SliceSubrange => Some(3),
+        StdFn::GhostNew => None,
+    }
+}
+
+/// A leaf call's static shape: arity, and a ghost result's type.
+pub open spec fn leaf_ok(m: MirCrate, pol: CallPolicy, key: Seq<u8>, gargs: GenericArgs, n: nat, dty: Option<Ty>) -> bool {
+    if pol.declassify.contains(key) { n == 1 }
+    else if pol.ghost_unit.contains(key) { dty matches Some(t) && zst_dest(m, t) }
+    else {
+        match std_model(m, key, gargs) {
+            Some(f) => match std_arity(f) { Some(a) => a == n, None => dty matches Some(t) && zst_dest(m, t) },
+            None => false,
+        }
+    }
+}
+
+pub open spec fn call_ok(m: MirCrate, pol: CallPolicy, b: Body, func: Operand, args: Seq<Operand>, dest: Place) -> bool {
+    match callee_of(m, func) {
+        Some((j, g)) => ops_ok(m, b, args) && place_ok(m, b, dest, true) && j < m.insts@.len()
+            && if is_leaf(m, pol, m.insts@[j as int].key@, g) { leaf_ok(m, pol, m.insts@[j as int].key@, g, args.len(), place_ty(m, b, dest)) }
+               else { inst_body(m, j) matches Some(cb) && args.len() == cb.arg_count && sig_ok(m, cb) },
+        None => false,
+    }
+}
+
+pub open spec fn drop_ok(m: MirCrate, b: Body, place: Place) -> bool {
+    place_ok(m, b, place, true) && (place_ty(m, b, place) matches Some(t) && drop_row(m, t) matches Some(d)
+        && (d.empty || vec_int(m, t) || (glue_of(m, d.glue) matches Some((_, gb)) && gb.arg_count == 1 && sig_ok(m, gb)
+            && is_mut_ref(m, gb.locals@[1].ty))))
+}
+
+pub open spec fn term_ok(m: MirCrate, pol: CallPolicy, b: Body, t: TerminatorKind) -> bool {
+    match t {
+        TerminatorKind::Goto { .. } | TerminatorKind::Return | TerminatorKind::Unreachable | TerminatorKind::Abort => true,
+        TerminatorKind::SwitchInt { discr, .. } => int_op(m, b, discr),
+        TerminatorKind::Assert { cond, .. } => int_op(m, b, cond),
+        TerminatorKind::Drop { place, .. } => drop_ok(m, b, place),
+        TerminatorKind::Call { func, args, destination, target, .. } => target is Some && call_ok(m, pol, b, func, args@, destination),
+        _ => false,
+    }
+}
+
+/// The static gate `run_block` applies before running a block.
+#[verifier::opaque]
+pub open spec fn block_ok(m: MirCrate, pol: CallPolicy, b: Body, blk: BasicBlock) -> bool {
+    (forall|k: int| 0 <= k < blk.statements@.len() ==> stmt_ok(m, b, #[trigger] blk.statements@[k]))
+    && term_ok(m, pol, b, blk.terminator.kind)
+}
+
+/// The normal successors of a terminator are in `r`.
+pub open spec fn succs_in(t: TerminatorKind, r: Set<nat>) -> bool {
+    match t {
+        TerminatorKind::Goto { target } => r.contains(target as nat),
+        TerminatorKind::SwitchInt { discr: _, targets } => r.contains(targets.otherwise as nat)
+            && forall|k: int| 0 <= k < targets.branches@.len() ==> r.contains((#[trigger] targets.branches@[k]).1 as nat),
+        TerminatorKind::Assert { target, .. } => r.contains(target as nat),
+        TerminatorKind::Drop { target, .. } => r.contains(target as nat),
+        TerminatorKind::Call { target, .. } => match target { Some(x) => r.contains(x as nat), None => true },
+        _ => true,
+    }
+}
+
+/// The body callees and drop glue a terminator runs are in `s`.
+pub open spec fn callees_in(m: MirCrate, pol: CallPolicy, b: Body, t: TerminatorKind, s: Set<nat>) -> bool {
+    match t {
+        TerminatorKind::Call { func, .. } => match callee_of(m, func) {
+            Some((j, g)) => is_leaf(m, pol, m.insts@[j as int].key@, g) || s.contains(j),
+            None => true,
+        },
+        TerminatorKind::Drop { place, .. } => match place_ty(m, b, place) {
+            Some(t) => match drop_row(m, t) {
+                Some(d) => d.empty || vec_int(m, t) || (glue_of(m, d.glue) matches Some((j, _)) && s.contains(j)),
+                None => true,
+            },
+            None => true,
+        },
+        _ => true,
+    }
+}
+
+/// Instance `j`'s body, its signature and local types are in the subset, and `rs(j)` (closed under
+/// normal successors, holding the entry block) holds only `block_ok` blocks whose callees are in `s`.
+pub open spec fn body_in(m: MirCrate, pol: CallPolicy, s: Set<nat>, rs: spec_fn(nat) -> Set<nat>, j: nat) -> bool {
+    inst_body(m, j) matches Some(b) && sig_ok(m, b) && locals_ok(m, b) && rs(j).contains(0)
+    && forall|bb: nat| #[trigger] rs(j).contains(bb) ==> bb < b.blocks@.len() && block_ok(m, pol, b, b.blocks@[bb as int])
+        && succs_in(b.blocks@[bb as int].terminator.kind, rs(j)) && callees_in(m, pol, b, b.blocks@[bb as int].terminator.kind, s)
+}
+
+pub open spec fn closed(m: MirCrate, pol: CallPolicy, s: Set<nat>, rs: spec_fn(nat) -> Set<nat>) -> bool {
+    forall|j: nat| #[trigger] s.contains(j) ==> body_in(m, pol, s, rs, j)
+}
+
+/// `insts[i]` is in the subset: some set of instances holding it, closed under body calls and drop
+/// glue, whose normal-edge reachable blocks (any closed superset of them) are all in the subset.
+/// The least such sets are the closure and its reachable blocks.
+pub open spec fn in_subset(m: MirCrate, pol: CallPolicy, i: nat) -> bool {
+    exists|s: Set<nat>, rs: spec_fn(nat) -> Set<nat>| #[trigger] closed(m, pol, s, rs) && s.contains(i)
 }
 
 } // verus!
