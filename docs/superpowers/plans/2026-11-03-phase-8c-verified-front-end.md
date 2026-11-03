@@ -103,7 +103,7 @@
   - `LayoutShape`/`FieldsShape`/`VariantsShape`/`TagEncoding`/`Scalar`/`Primitive`, `GlobalAlloc`, `VarDebugInfo`.
 
   Each enum has a final `Unknown(Json)` variant. Fields the semantics never reads are `Json`.
-- Produces `pub open spec fn decode_crate(j: Json) -> Option<MirCrate>` and `pub fn decode(j: &Json) -> (r: Option<MirCrate>) ensures r == decode_crate(j)` (up to view).
+- Produces `pub open spec fn decode_crate(j: Json, m: MirCrate) -> bool` and `pub fn decode(j: Json) -> (r: Option<MirCrate>)`. Its ensures: `Some(m) ==> decode_crate(j, m)`, and `None ==> forall m. !decode_crate(j, m)`. The relation form is ruled; see the ledger.
 - Rule: a body that contains an `Unknown` is still decoded. The decision to reject it belongs to the translator. `None` means only that the JSON does not have the shape serde would write for these types.
 
 - [ ] **Step 1:** Write the tests:

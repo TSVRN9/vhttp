@@ -210,14 +210,18 @@ silently dropped.
 
 - a struct is an object whose keys are in declaration order;
 - a newtype struct is its inner value;
-- a tuple or a tuple variant is an array;
+- a tuple, or a tuple variant with two or more fields, is an array; a one-field tuple variant is its bare payload (`{"StorageLive":3}`);
 - an enum is externally tagged: a unit variant is a string, any other variant is
   `{"Variant": payload}`.
 
-An unknown variant name decodes to `None`. A toolchain bump that renames or adds variants then
-fails closed.
+An unknown variant name decodes to `Unknown(j)`. The translator rejects it, so a toolchain bump
+that renames or adds variants fails closed.
 
-The exec decoders have the contract `ensures r == decode_*(j)`. This is the second trusted mirror
+The spec is a relation, `decode_crate(j: Json, m: MirCrate) -> bool`: Verus spec fns cannot
+build `Vec`s. The exec decoder takes `j` by value, and its contract is
+`Some(m) ==> decode_crate(j, m)` and `None ==> forall m. !decode_crate(j, m)`. The relation
+branches on `j` only, so it is functional; the review checks this. The semantics reads the AST
+through views (`@`). This is the second trusted mirror
 (spec ↔ rustc_public source). The review checks it side by side with
 `$(rustc --print sysroot)/lib/rustlib/rustc-src/rust/compiler/rustc_public/src`.
 
