@@ -3214,7 +3214,9 @@ impl Connection {
                 old(self).registered(),
                 final(self).registered(),
             ),
+            final(self).keeps_later(*old(self)),
     {
+        let ghost o = *self;
         let ghost n0 = out@.len() as int;
         let ghost updates = self.cid_updates@;
         let mut taken: Vec<CidUpdate> = Vec::new();
@@ -3302,6 +3304,7 @@ impl Connection {
                     s1.len() <= w < s2.len() && #[trigger] s2[w] == CidUpdate::AddToken(used@[i]);
                 assert(s[w - n0] == s2[w]);
             }
+            self.lemma_keeps_cids(o);
         }
     }
 
@@ -6936,6 +6939,25 @@ impl Connection {
     proof fn lemma_keeps_streams(&self, o: Connection)
         requires
             *self == (Connection { streams: self.streams, events: self.events, ..o }),
+        ensures
+            self.keeps_later(o),
+    {
+        assert forall|t: u64| t < u64::MAX && t <= o.now && #[trigger] o.timers_later(t) implies self.timers_later(t) by {
+            assert(self.pto_spec() == o.pto_spec());
+            if self.lc.phase_spec() is Open {
+                assert(self.idle_term() == o.idle_term());
+                assert forall|k: PacketKind| later(#[trigger] self.pto_term(k), t) by {
+                    assert(self.pto_term(k) == o.pto_term(k));
+                    assert(later(o.pto_term(k), t));
+                }
+            }
+        }
+    }
+
+    /// Only `cid_updates` and `tokens_registered` moved, and no timer reads them.
+    proof fn lemma_keeps_cids(&self, o: Connection)
+        requires
+            *self == (Connection { cid_updates: self.cid_updates, tokens_registered: self.tokens_registered, ..o }),
         ensures
             self.keeps_later(o),
     {
