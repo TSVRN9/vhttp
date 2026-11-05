@@ -10,7 +10,8 @@
 //! translate-crate <crate>              foreign crate whose bodies may be translated
 //! internal-crate <crate>               another crate whose bodies are entered
 //! declassify <crate>::ct::declassify   the declassify shim (`CallPolicy::declassify`)
-//! ghost <path>                         a call that returns `()` and does nothing (`CallPolicy::ghost_unit`)
+//! ghost <path>                         a call that returns `()` and does nothing (`CallPolicy::ghost_unit`):
+//!                                      only ct_fixtures::ct::ghost_fallback, vest_lib::prelude::Ghost::assume_new_fallback
 //! ```
 //!
 //! A line is its words (runs of bytes other than ASCII whitespace) up to the first word starting
@@ -239,6 +240,12 @@ pub open spec fn policy_of(ms: Seq<Seq<u8>>, pol: Policy) -> bool {
     &&& views(pol.translate_crates@) == paths_of(es, b"translate-crate"@)
     &&& views(pol.declassify@) == paths_of(es, b"declassify"@)
     &&& views(pol.ghost_unit@) == paths_of(es, b"ghost"@)
+    &&& forall|k: int| 0 <= k < pol.ghost_unit@.len() ==> ghost_shape(#[trigger] pol.ghost_unit@[k]@)
+}
+
+/// The two `ghost` lines in use: the fixtures' shim and vest_lib's `Ghost::assume_new_fallback`.
+pub open spec fn ghost_shape(p: Seq<u8>) -> bool {
+    p == b"ct_fixtures::ct::ghost_fallback"@ || p == b"vest_lib::prelude::Ghost::assume_new_fallback"@
 }
 
 // ------------------------------------------------------------------ the parser
@@ -650,7 +657,8 @@ pub fn parse_manifests(ms: &Vec<Vec<u8>>) -> (r: Result<Policy, Vec<u8>>)
                &&& views(pol.internal_crates@) == paths_of(p, b"internal-crate"@)
                &&& views(pol.translate_crates@) == paths_of(p, b"translate-crate"@)
                &&& views(pol.declassify@) == paths_of(p, b"declassify"@)
-               &&& views(pol.ghost_unit@) == paths_of(p, b"ghost"@) }),
+               &&& views(pol.ghost_unit@) == paths_of(p, b"ghost"@)
+               &&& forall|q: int| 0 <= q < pol.ghost_unit@.len() ==> ghost_shape(#[trigger] pol.ghost_unit@[q]@) }),
         decreases es.len() - k,
     {
         let e = &es[k];
@@ -721,6 +729,9 @@ pub fn parse_manifests(ms: &Vec<Vec<u8>>) -> (r: Result<Policy, Vec<u8>>)
             proof { lemma_views_push(o, pol.declassify@.last()); assert(pol.declassify@ == o.push(pol.declassify@.last())); }
         } else if kg {
             if rest.len() == 0 { return Err(err_line(mi, n, b"malformed ghost line", line)); }
+            if !(bytes_eq(path.as_slice(), b"ct_fixtures::ct::ghost_fallback") || bytes_eq(path.as_slice(), b"vest_lib::prelude::Ghost::assume_new_fallback")) {
+                return Err(err_line(mi, n, b"ghost names only ct_fixtures::ct::ghost_fallback or vest_lib::prelude::Ghost::assume_new_fallback", line));
+            }
             if has_bytes(&pol.ghost_unit, &path) { return Err(err_line(mi, n, b"duplicate ghost path", line)); }
             let ghost o = pol.ghost_unit@;
             pol.ghost_unit.push(path);
