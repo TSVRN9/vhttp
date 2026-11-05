@@ -9,7 +9,8 @@
 //! routing, the idle timeout with the closing and draining states, the path table, and the
 //! connection that joins them (3d), and the HTTP/3 server on top of it. Header protection
 //! (RFC 9001 §5.4) over the verified AES, AEAD packet protection (§5.3) over the verified
-//! GCM, and packet and datagram protection on the send side (3e).
+//! GCM, packet and datagram protection on both sides, and the receive and send pipelines
+//! between them and the connection (3e).
 pub mod ack;
 pub mod ack_track;
 pub mod aead;
@@ -29,6 +30,7 @@ pub mod hp;
 pub mod lifecycle;
 pub mod path;
 pub mod payload;
+pub mod pipeline;
 pub mod pn;
 pub mod protect;
 pub mod reassembly;
