@@ -64,7 +64,7 @@ pub open spec fn xpe_pe(e: XPE) -> PE {
     match e { XPE::Field(f) => PE::Field(f as nat), XPE::Index(x) => PE::Index(x as nat), XPE::Variant(k) => PE::Variant(k as nat), XPE::Snap => PE::Field(0) }
 }
 
-fn root_in(fr: &CFrame, r: &CRoot) -> (b: bool)
+pub fn root_in(fr: &CFrame, r: &CRoot) -> (b: bool)
     ensures b == root_val(fv(*fr), root_v(*r)) is Some,
 {
     match r { CRoot::Local(i) => *i < fr.locals.len(), CRoot::Slot(j) => *j < fr.slots.len() }
@@ -158,7 +158,7 @@ fn e_deref(fr: &CFrame, c: ECur, n: (Option<&CVal>, Option<usize>)) -> (r: R<ECu
 }
 
 /// The length of the array a navigation result reads, if it reads one.
-fn nav_arr_len(n: (Option<&CVal>, Option<usize>), Ghost(t): Ghost<Val>) -> (r: Option<usize>)
+pub fn nav_arr_len(n: (Option<&CVal>, Option<usize>), Ghost(t): Ghost<Val>) -> (r: Option<usize>)
     requires nav_ok(n, t),
     ensures match r { Some(k) => t is Arr && t->Arr_0.len() == k, None => !(t is Arr) },
 {
@@ -654,7 +654,7 @@ pub fn e_store(fr: &mut CFrame, l: &CLoc, w: CVal) -> (r: R<()>)
 }
 
 /// A location cursor as a location.
-fn cur_loc(c: ECur) -> (l: CLoc)
+pub fn cur_loc(c: ECur) -> (l: CLoc)
     requires c.loc, no_snap(c.path@),
     ensures loc_v(l) == (Loc { root: root_v(c.root), path: xpes(c.path@) }),
 {
