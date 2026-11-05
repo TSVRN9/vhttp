@@ -96,10 +96,10 @@ wire::varint::exec_min_len 0x25u64 => 0x1usize
 wire::varint::parse_varint 0400 => Some((0x1usize,0x4u64))
 # the same test's parse_frame_header([04 00]) == Complete { ty: 4, len: 0, hdr_len: 2 }
 h3::frame::parse_frame_header 0400 => #1(0x4u64,0x0u64,0x2usize)
-# rfc7541_c4_strings in crates/h3/tests/huffman.rs, www.example.com = f1 e3 ..: the 7th bit of f1 completes
+# hand-traced (no public test shows this state): rfc7541_c4_strings in crates/h3/tests/huffman.rs, www.example.com = f1 e3 ..: the 7th bit of f1 completes
 # 'w' (code 1111000): the state after bits 111100 is acc 0x3c, len 6, not all ones; bit 0 appends 0x77 and resets it
 h3::qpack::huffman::feed_bit mut:- mut:0x3cu32 mut:0x6u32 mut:false false () () => true 77 0x0u32 0x0u32 true
-# the same decode at 'w', the lookup of the completed code (acc 0x78, len 7) hits 'w'
+# hand-traced (no public test shows this state): the same decode at 'w', the lookup of the completed code (acc 0x78, len 7) hits 'w'
 h3::qpack::huffman::lookup 0x78u32 0x7u32 => Some(0x77u8)
 # small_frames in crates/quic/tests/frame.rs: parse_frame([04 04 07 52 34]) hands parse_reset_stream the body 04 07 52 34
 quic::frame::parse_reset_stream 04075234 => Some((#3(0x4u64,0x7u64,0x1234u64),0x4usize))
