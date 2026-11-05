@@ -13,6 +13,7 @@ global size_of usize == 8;
 } // verus!
 
 pub mod json;
+pub mod json_inj;
 pub mod look;
 pub mod lower;
 pub mod lower_const;
