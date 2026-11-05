@@ -7,9 +7,16 @@
 //! - an int or `bool` is `Int(bit pattern)`; a tuple `Tup`, an ADT `Adt(variant, fields)`, an array
 //!   or slice `Arr`; a `Vec<E>` is `Arr` of its elements (the value model has no heap);
 //! - `&place` is `Shr(snapshot)`, `&mut place` is `Mut(location)` (decision 3);
-//! - fn items, closures and fn pointers are the opaque `Unit`. A value of a unit-like type built by
-//!   a constant, an entry local, a ghost or a `()`-returning std call is `Unit`, and a decoded `()`
-//!   is `Unit`; an aggregate `()` is `Tup([])` (single-inhabitant values: no operation tells them apart).
+//! - fn items, closures and fn pointers are the opaque `Unit`;
+//! - a value of a unit-like (single-inhabitant) type has two forms, chosen by its producer: the
+//!   canonical `Unit` from a `ZeroSized` constant, an entry local, a ghost result, a `()`-returning
+//!   std row and a decoded `()`; the structural `Tup`/`Adt`/`Arr` from aggregates, `Repeat`, decoded
+//!   structs and arrays and `&ZST` constants; a root argument may be either (`wt_val`). A unit-like
+//!   type holding an array (`ul_arr`) is structural from every producer, since an `Arr`'s length is
+//!   read. Every consumer
+//!   treats the two forms alike (`Discriminant` reads a one-variant enum's `Unit` as its variant;
+//!   navigation and writes go through `ctcore::sem`'s `get`/`put`, which give and keep `Unit`), except
+//!   that a `Declass(v)` event carries the form.
 //!
 //! The AST is read only through views (`@`): `Vec`-holding values are never compared with `==`.
 #[allow(unused_imports)]
@@ -250,6 +257,36 @@ pub open spec fn unit_likes(m: MirCrate, ts: Seq<Ty>, fuel: nat, n: nat, clos: b
     }
 }
 
+/// An array among a type's tuple, one-variant ADT and array components (`unit_like`'s arms).
+pub open spec fn has_arr(m: MirCrate, t: Ty, fuel: nat) -> bool
+    decreases fuel,
+{
+    if fuel == 0 { false } else {
+        let f = (fuel - 1) as nat;
+        match rigid(m, t) {
+            Some(RigidTy::Tuple(ts)) => exists|k: int| 0 <= k < ts@.len() && has_arr(m, #[trigger] ts@[k], f),
+            Some(RigidTy::Adt(_, _)) => match adt_row(m, t) {
+                Some(a) => a.variants@.len() == 1
+                    && exists|k: int| 0 <= k < a.variants@[0].fields@.len() && has_arr(m, #[trigger] a.variants@[0].fields@[k], f),
+                None => false,
+            },
+            Some(RigidTy::Array(_, _)) => true,
+            _ => false,
+        }
+    }
+}
+
+/// A unit-like type holding an array (`[T; 0]`, or `[Z; n]` of a unit-like `Z`, at any depth): its
+/// value's `Arr` nodes carry lengths that `Len`, `PtrMetadata`, `Index`, `ConstantIndex` and the
+/// std rows read, so its producers keep `unit_like`'s structural value.
+pub open spec fn ul_arr(m: MirCrate, t: Ty) -> bool { unit_like(m, t, tfuel(m), true) is Some && has_arr(m, t, tfuel(m)) }
+
+/// The value a producer gives a unit-like type: the canonical `Unit`, or, for a type holding an
+/// array, `unit_like`'s structural value (closures without captures `Unit`).
+pub open spec fn ul_val(m: MirCrate, t: Ty) -> Val {
+    if ul_arr(m, t) { unit_like(m, t, tfuel(m), true)->Some_0.0 } else { Val::Unit }
+}
+
 /// `ty` with any pattern type (`u8 is 1..`) replaced by its base.
 pub open spec fn strip_pat(m: MirCrate, t: Ty) -> Ty {
     match rigid(m, t) { Some(RigidTy::Pat(base, _)) => base, _ => t }
@@ -287,8 +324,10 @@ pub open spec fn wt_rec(m: MirCrate, ty: Ty, v: Val) -> bool
                 },
                 Val::Shr(b) => match r { RigidTy::Ref(_, p, Mutability::Not) => wt_rec(m, p, *b), _ => false },
                 Val::Mut(_) => r matches RigidTy::Ref(_, _, Mutability::Mut),
+                // a unit-like type without an array has two forms: structural and the canonical `Unit`
                 Val::Unit => r is FnDef || r is Closure || r is FnPtr
-                    || (r matches RigidTy::Ref(_, p, Mutability::Not) && rigid(m, p) matches Some(RigidTy::Str)),
+                    || (r matches RigidTy::Ref(_, p, Mutability::Not) && rigid(m, p) matches Some(RigidTy::Str))
+                    || (unit_like(m, t, tfuel(m), true) is Some && !ul_arr(m, t)),
                 _ => false,
             },
         },
@@ -534,7 +573,7 @@ pub open spec fn const_val(m: MirCrate, c: ConstOperand) -> Option<(Val, nat)> {
             Some((v, k)) => Some((v, if charged(m, t) { k } else { 0 })),
             None => None,
         },
-        ConstantKind::ZeroSized => match unit_like(m, t, tfuel(m), true) { Some(_) => Some((Val::Unit, 0)), None => None },
+        ConstantKind::ZeroSized => match unit_like(m, t, tfuel(m), true) { Some(_) => Some((ul_val(m, t), 0)), None => None },
         _ => None,
     }
 }
@@ -809,8 +848,8 @@ pub open spec fn rv_discr(m: MirCrate, b: Body, fr: Frame, p: Place) -> Option<(
                     Val::Adt(k, _) => if k < a.variants@.len() && a.variants@[k as int].discr is Some {
                         Some((Val::Int(a.variants@[k as int].discr->Some_0), e, 0))
                     } else { None },
-                    // the canonical `Unit` of a one-variant enum
-                    Val::Unit => if a.variants@.len() == 1 && a.variants@[0].discr is Some {
+                    // the canonical `Unit` of a unit-like one-variant enum
+                    Val::Unit => if a.variants@.len() == 1 && a.variants@[0].discr is Some && unit_like(m, t, tfuel(m), true) is Some {
                         Some((Val::Int(a.variants@[0].discr->Some_0), e, 0))
                     } else { None },
                     _ => None,
@@ -1023,7 +1062,7 @@ pub open spec fn std_apply(m: MirCrate, f: StdFn, dty: Option<Ty>, vs: Seq<Val>,
             match (int_arg(vs[0]), int_arg(vs[1])) { (Some(a), Some(c)) => Some((Val::Int(binop(op, it, a, c)), fr, seq![], 0)), _ => None }
         } else { None },
         StdFn::GhostNew => match dty {
-            Some(t) => if zst_dest(m, t) { Some((Val::Unit, fr, seq![], 0)) } else { None },
+            Some(t) => if zst_dest(m, t) { Some((ul_val(m, t), fr, seq![], 0)) } else { None },
             None => None,
         },
     }
@@ -1037,7 +1076,7 @@ pub open spec fn leaf_call(m: MirCrate, pol: CallPolicy, key: Seq<u8>, gargs: Ge
         if vs.len() == 1 { Some((vs[0], fr, seq![Event::Declass(vs[0])], 0)) } else { None }
     } else if pol.ghost_unit.contains(key) {
         match dty {
-            Some(t) => if zst_dest(m, t) { Some((Val::Unit, fr, seq![], 0)) } else { None },
+            Some(t) => if zst_dest(m, t) { Some((ul_val(m, t), fr, seq![], 0)) } else { None },
             None => None,
         }
     } else {
@@ -1052,8 +1091,10 @@ pub open spec fn is_leaf(m: MirCrate, pol: CallPolicy, key: Seq<u8>, gargs: Gene
 // ------------------------------------------------------------------ calls (decision 3)
 
 /// The frame a body starts in: parameter `1 + j` is `args[j]`, or `Mut(Slot(j))` when its type is
-/// `&mut` (slot `j` holds the pointee). Local 0 and the other locals are `Unit`: uninitialized, or
-/// the canonical value of a unit-like type (a ZST read never fails, MiniRust).
+/// `&mut` (slot `j` holds the pointee). Local 0 and the other locals are `Unit` (uninitialized),
+/// except that a local of unit-like type holds its one value, `ul_val` (a ZST read never fails,
+/// MiniRust; rustc's `RemoveZsts` removes assignments to ZST places, so a run reads this value):
+/// the canonical `Unit`, or the structural value of a type holding an array.
 pub open spec fn mir_entry(m: MirCrate, i: nat, args: Seq<Val>, slots: Seq<Val>) -> Frame {
     match inst_body(m, i) {
         Some(b) => Frame { locals: Seq::new(b.locals@.len(), |k: int| entry_local(m, b, args, k)), slots },
@@ -1064,7 +1105,7 @@ pub open spec fn mir_entry(m: MirCrate, i: nat, args: Seq<Val>, slots: Seq<Val>)
 pub open spec fn entry_local(m: MirCrate, b: Body, args: Seq<Val>, k: int) -> Val {
     if 1 <= k <= b.arg_count && k - 1 < args.len() && k < b.locals@.len() {
         if is_mut_ref(m, b.locals@[k].ty) { Val::Mut(Loc { root: Root::Slot((k - 1) as nat), path: seq![] }) } else { args[k - 1] }
-    } else { Val::Unit }
+    } else if 0 <= k < b.locals@.len() { ul_val(m, b.locals@[k].ty) } else { Val::Unit }
 }
 
 /// Argument `j` can be passed: a `&mut` parameter gets a location whose (mut-free) pointee is
@@ -1121,7 +1162,8 @@ pub open spec fn callee_of(m: MirCrate, func: Operand) -> Option<(nat, GenericAr
 
 /// A run's outcome. `Panic` is a failed `Assert`, `Unreachable`/`Abort`, UB guarded by rustc's
 /// checks (an index out of bounds, `/ 0`, unchecked overflow), a std precondition, or a value of
-/// the wrong shape for its construct (impossible on well-typed frames: type soundness, Task 6).
+/// the wrong shape for its construct (not proved unreachable: sem is untyped, and that rustc-typed
+/// MIR in the subset never meets one is a TRUSTED assumption, the never-Stuck row).
 /// `Unsup` is a construct outside the subset, decided statically (`block_ok`, `inst_body`).
 pub enum Out { Done(Frame, Seq<Event>, nat), Panic, Unsup, Fuel }
 
