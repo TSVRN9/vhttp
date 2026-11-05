@@ -7,6 +7,7 @@
 - TLS bytes, secrets, peer transport parameters, completion and errors cross the boundary as RFC 9001 §4 requires;
 - the unverified shell serves HTTP/3 with a P-256 certificate;
 - `curl --http3` and the quiche client fetch a response, which is the design spec's Phase 4 exit.
+  - **Note (2026-11-05, final review):** the curl half passes (`curl_fetches`, `curl_two_requests`). The quiche half (Task 6b) is open, pending the user's permission to build quiche-client; `quiche_fetches` skips without `QUICHE_CLIENT`. `Conn::respond`'s stop-at-first-Busy path is untested by any external client, and by an in-repo test too: `send_response` is `Busy` only while a write waits for send-buffer room (`MAX_SEND_BUFFER`, 1 MiB), which the static response (about 70 bytes, at most 100 streams) cannot reach through `Server`.
 
 **Split (decided):** QUIC key update and the AEAD limits (outline Tasks 6–7) move to a **Phase 4d**.
 - With them, this plan has 6 + at least 3 tasks, because key update alone touches `rfc_unprotect`, the pipeline key signature, and the sent-packet key-phase tracking in `conn.rs`. That is more than the 8-task ceiling.
@@ -634,6 +635,7 @@ After Task 4, `duvet_q.py` over the 29 sections prints exactly the 22 lines of t
 - `duvet_q.py` over the 29 sections prints exactly the 22 4d/§9.5 lines (§9.5's two MUSTs stay uncited).
 - RFC 9001 Appendix A: A.1 derived (`a1_keys`); A.2 and A.3 reproduced under derived keys (`a2_a3_under_derived_keys`). A.4 (Retry) and A.5 (ChaCha20) are declined; A.5's `ku` vector is 4d's.
 - `curl_fetches` and `quiche_fetches` pass with `--ignored`: the design spec's Phase 4 exit.
+  - **Amended 2026-11-05 (final review):** met for curl only. The quiche half (Task 6b) stays open pending the user's permission to build quiche-client, so the Phase 4 exit is half met. Set `INTEROP_STRICT` to make `quiche_fetches` fail instead of skip without `QUICHE_CLIENT`. Stop-at-first-Busy in `respond` is untested (see the note under Goal).
 - TRUSTED.md: the A.1 row is gone; the secret-lifetime, CT-scope, shell and `ServerConfig::wf` rows are updated. RSA keys are refused until Phase 7, in TRUSTED and in the RFC 8446 §9.1 (req) note (Ruling D4).
 - `phase-4c` is merged into `main`.
 
