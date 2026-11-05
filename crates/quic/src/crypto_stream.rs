@@ -40,6 +40,18 @@ impl CryptoStream {
         CryptoStream { re: Reassembly::new() }
     }
 
+    /// Nothing buffered, and everything below `base` read.
+    pub fn new_at(base: u64) -> (r: CryptoStream)
+        requires
+            base <= VARINT_MAX,
+        ensures
+            r.wf(),
+            r.reassembly().base() == base,
+            r.reassembly().buf_len() == 0,
+    {
+        CryptoStream { re: Reassembly::new_at(base) }
+    }
+
     /// A CRYPTO frame's `offset` and `data`.
     pub fn on_crypto(&mut self, offset: u64, data: &[u8]) -> (r: Result<(), u64>)
         requires
@@ -49,9 +61,9 @@ impl CryptoStream {
             final(self).wf(),
             r is Err <==> offset + data@.len() > old(self).reassembly().base() + MAX_CRYPTO_BUFFER,
             r is Err ==> r == Err::<(), u64>(CRYPTO_BUFFER_EXCEEDED),
-            (r is Err || offset + data@.len() <= old(self).reassembly().base()) ==> *final(self)
-                == *old(self),
-            (r is Ok && offset + data@.len() > old(self).reassembly().base()) ==> {
+            (r is Err || offset + data@.len() <= old(self).reassembly().base() || data@.len() == 0)
+                ==> *final(self) == *old(self),
+            (r is Ok && offset + data@.len() > old(self).reassembly().base() && data@.len() > 0) ==> {
                 &&& final(self).reassembly().inserted() == old(self).reassembly().inserted().push(
                     (offset as nat, data@),
                 )
@@ -79,6 +91,10 @@ impl CryptoStream {
             //# If an endpoint does not expand its buffer, it MUST close
             //# the connection with a CRYPTO_BUFFER_EXCEEDED error code.
             return Err(CRYPTO_BUFFER_EXCEEDED);
+        }
+        if data.len() == 0 {
+            // No bytes: the window is not extended past what was received (RFC 9001 §4.1.3).
+            return Ok(());
         }
         self.re.insert(offset, data);
         Ok(())
@@ -109,6 +125,27 @@ impl CryptoStream {
             self.re.lemma_wf();
         }
         self.re.pop(out);
+    }
+
+    /// The read offset.
+    pub fn start(&self) -> (r: u64)
+        ensures
+            r == self.reassembly().base(),
+    {
+        self.re.base_exec()
+    }
+
+    /// The end of the received data: the read offset plus the buffered window.
+    pub fn end(&self) -> (r: u64)
+        requires
+            self.wf(),
+        ensures
+            r == self.reassembly().base() + self.reassembly().buf_len(),
+    {
+        proof {
+            self.re.lemma_wf();
+        }
+        self.re.base_exec() + self.re.buf_len() as u64
     }
 }
 

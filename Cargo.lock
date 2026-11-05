@@ -466,6 +466,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "quictls"
+version = "0.1.0"
+dependencies = [
+ "crypto",
+ "h3",
+ "quic",
+ "ring",
+ "rustls",
+ "tls",
+ "vstd",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -611,8 +624,14 @@ dependencies = [
 name = "server"
 version = "0.1.0"
 dependencies = [
+ "crypto",
+ "h3",
  "libc",
  "quic",
+ "quictls",
+ "ring",
+ "rustls",
+ "tls",
 ]
 
 [[package]]

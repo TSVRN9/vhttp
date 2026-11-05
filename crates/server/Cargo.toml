@@ -5,4 +5,12 @@ edition = "2021"
 
 [dependencies]
 quic = { path = "../quic" }
+quictls = { path = "../quictls" }
+tls = { path = "../tls" }
+h3 = { path = "../h3" }
 libc = "=0.2.191"
+
+[dev-dependencies]
+crypto = { path = "../crypto" }
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std"] }
+ring = "=0.17.14"
