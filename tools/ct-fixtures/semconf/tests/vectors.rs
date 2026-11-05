@@ -244,7 +244,16 @@ fn write_vectors() {
 fn data_vectors(o: &mut Out) {
     use data::*;
     o.f1("data::slice_len", |x: Bytes| slice_len(&x.0));
-    o.f2("data::slice_get", |x: Bytes, i: u8| slice_get(&x.0, i as usize % 48));
+    let mut ins: Vec<(Bytes, usize)> = Vec::new();
+    for x in Bytes::edges() {
+        for i in [0, 1, usize::MAX] {
+            ins.push((x.clone(), i));
+        }
+    }
+    ins.extend((0..RANDOM).map(|_| (Bytes::random(&mut o.rng), o.rng.below(48) as usize)));
+    for (x, i) in ins {
+        o.line("data::slice_get", &[x.show(), i.show()], || vec![slice_get(&x.0, i).show()]);
+    }
     o.f1("data::slice_sum", |x: Bytes| slice_sum(&x.0));
     for _ in 0..RANDOM {
         let a: [u16; 8] = std::array::from_fn(|_| o.rng.next() as u16);
