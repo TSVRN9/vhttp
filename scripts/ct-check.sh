@@ -3,7 +3,10 @@
 # their verdicts against tools/ct-fixtures/expected.txt, then run the interpreter selftest
 # (tools/ct-driver/selftest.txt) over crates/crypto and over the parser crates (wire, h3, quic),
 # then diff the fixtures' and the parser targets' step bounds against their expected-cost.txt, then
-# check crypto's roots (all must be ok) and the negative control (--cfg ct_negative; exactly its one reject). Target dirs
+# check crypto's roots (all must be ok) and the negative control (--cfg ct_negative; exactly its one reject), then
+# run the semconf conformance check: its native vectors (tools/ct-fixtures/semconf) are regenerated
+# and diffed against vectors.txt, its dump is checked by scripts/ct-zarr.py, and every vector must
+# pass ct-front's verified selftest within a time bound. Target dirs
 # live under CT_TARGET_DIR (default $root/target/ct), one subdir per run, except that selftest
 # shares crypto's (same flags); reports under $CT_OUT/<run>.
 set -eu
@@ -193,9 +196,13 @@ diff -u "$sc/vectors.txt" "$CT_TARGET_DIR/semconf-native/semconf-vectors.txt" ||
 cargo build --release --locked -q --manifest-path "$root/tools/ct-front/Cargo.toml" --target-dir "$CT_TARGET_DIR/front" \
     || fail "ct-front build failed"
 analyse semconf semconf "$sc/manifest.txt" dump --manifest-path "$sc/Cargo.toml"
-python3 -I "$root/scripts/ct-zarr.py" "$report" > /dev/null || fail "semconf: the dump holds a unit-like array site"
+python3 -I "$root/scripts/ct-zarr.py" "$report" >&2 || fail "semconf: the dump holds a unit-like array site (above)"
 got=$CT_OUT/semconf/selftest-semconf.txt
-"$CT_TARGET_DIR/front/release/ct-front" "selftest=$sc/vectors.txt" "$report" "$got" "$sc/manifest.txt" || fail "semconf: ct-front failed"
+# A `=> panic` vector passes when the core run does not complete, and running out of fuel (2^32
+# blocks per activation) would count; the whole run takes well under a second, so a 60 s bound
+# keeps a looping vector from passing that way.
+timeout 60 "$CT_TARGET_DIR/front/release/ct-front" "selftest=$sc/vectors.txt" "$report" "$got" "$sc/manifest.txt" \
+    || fail "semconf: ct-front failed or ran past 60 s"
 grep -v '^pass ' "$got" >&2 && fail "semconf: vectors failed (above)"
 v=$(grep -c '^semconf::' "$sc/vectors.txt")
 p=$(grep -c '^pass ' "$got" || true)
