@@ -113,7 +113,7 @@
 - [ ] **Step 3: Implement the Produces block.**
   - Each `e_X` follows `sem::X`'s match arm by arm, and calls the mirrors of the spec fns `X` calls.
   - The step loop's lookups (`rigid`, `int_ty`, `adt_row`, `layout`, `place_ty`, `op_ty`, `callee_of`, `inst_body`) go through `Tabs`.
-  - `e_ul_val` and `e_mir_entry` may use `look.rs`'s exact linear mirrors.
+  - `e_ul_val` and `e_mir_entry` are not cold: every body call enters through `mir_entry`. Route `e_ul_val`'s `unit_like`/`has_arr` lookups through `Tabs` (Tabs-based copies of `x_unit_like`/`x_has_arr`). If Task 2's probe still shows entry as hot, memoize one entry template per instance.
   - `tabs`: build each index in one pass over the rows, setting an entry only while it is `None`. The invariant is the first-match `find` over the prefix; reuse `look::lemma_find`.
   - No events are built.
 - [ ] **Step 4:** Run the tests, then verify ctmir: default run first, then a forced run, ranked by rlimit. Expected: tests pass, and `cargo verus verify -p ctmir -- --rlimit 4` reports 0 errors.
@@ -179,13 +179,17 @@
 **Files:**
 - Modify: `crates/ctmir/src/vectors.rs` (`vec_run`, `passes`, `panics`, `check_vector`), `crates/ctmir/src/pipeline.rs` (`selftest`, `line_ok`, new `pass_ok`), `crates/ctmir/src/lib.rs`, `scripts/ct-check.sh` (comments on what the selftest runs; the semconf panic comment)
 - Delete: `crates/ctmir/src/interp.rs`. Before deleting, `grep -rn 'interp::' crates tools` must show only `vectors.rs` and `tests/interp.rs`.
-- Test: `crates/ctmir/tests/interp.rs`. Delete its hand-built core-`Program` cases. Keep the arithmetic, vector-syntax and selftest cases.
+- Test: `crates/ctmir/tests/interp.rs`. Delete its hand-built core-`Program` cases. Keep the arithmetic, vector-syntax and selftest cases. Cases that call `check_vector` directly go through the `selftest` helper, since its new signature takes `m`, `tb`, `pol` and `i`.
 
 **Interfaces:**
 - Consumes: from Tasks 1–2, `mir_eval`, `Ev`, `ev_ok`, `tabs`, `x_wt_args`. Also `lower_fn::theorem_lowers_in_subset(m, pol, path, p, infos, 0)`, and `lower`'s `Ok((p, infos))`, which `selftest` now keeps.
 - Produces:
-  - `pub open spec fn vec_run(m: MirCrate, pol: Policy, i: nat, p: Program, v: VSpec) -> Out`. It is `mir_run(m, cpol(pol), i, mir_entry(m, i, a, entry_slots(p.fns@[0], a)), FUEL as nat)` with `a = entry_args(p.fns@[0], v)`.
-  - `passes(m, pol, i, p, v, n)`, with `a` as above and `sl = entry_slots(p.fns@[0], a)`:
+  - `pub open spec fn mir_args(b: ctcore::syntax::Body, v: VSpec) -> Seq<Val>`. It is `entry_args(b, v)`, except that at each `mut_param(b, j)` the argument is `Val::Mut(Loc { root: Root::Slot(j), path: seq![] })`.
+    - `entry_args` puts the raw pointee there, and `wt_rec` accepts only a `Mut` at a `&mut` type (sem.rs:326), so `wt_args` would reject every `mut:` vector.
+    - `entry_local` ignores the argument at a `&mut` parameter and uses the slot (sem.rs:1105-1108), so the frame is unchanged.
+    - Check both arms before writing it.
+  - `pub open spec fn vec_run(m: MirCrate, pol: Policy, i: nat, p: Program, v: VSpec) -> Out`. It is `mir_run(m, cpol(pol), i, mir_entry(m, i, a, sl), FUEL as nat)` with `a = mir_args(p.fns@[0], v)` and `sl = entry_slots(p.fns@[0], entry_args(p.fns@[0], v))`.
+  - `passes(m, pol, i, p, v, n)`, with `a` and `sl` as above:
     - `shape_ok(p, v) && !v.panic && wt_args(m, i, a, sl)`;
     - `vec_run(..) matches Out::Done(fr, _, k) && k == n`;
     - `seq![nth(fr.locals, 0)] + mouts(v.args, fr.slots, v.args.len()) == v.want`.
@@ -202,7 +206,8 @@
 
 - [ ] **Step 1: Write the failing tests** in `tests/interp.rs`, using its existing `selftest` helper over `tiny.json`:
   - The existing selftest test still gives the same `pass`/`fail` lines.
-  - `selftest_ill_typed_args_fail`: `tiny::tiny 0x5usize 0x5usize => 0x0u8` gives `fail tiny::tiny args not well-typed`.
+  - `selftest_ill_typed_args_fail`: `tiny::tiny 0a0b0c 0x5usize => 0x0u8` gives `fail tiny::tiny args not well-typed`. The vector passes 3 bytes for `[u8; 4]`, with no width suffix, so the existing width check passes it to `x_wt_args`.
+  - `selftest_mut_args_well_typed`: a `mut:` vector is accepted by `x_wt_args`. `tiny.json` has no `&mut` parameter, so prove this in `check_vector`: `x_wt_args` on `mir_args`, not on `entry_args`. The crypto selftest's `serialize_ecdsa_der` and semconf's write-back vectors are the runtime check.
   - `selftest_mir_panics_where_core_completes`, the I1 scenario: edit `tiny.json` so `tiny::tiny`'s index is unguarded. Make the mask constant `3` into `7` and the bounds `Assert` into a `Goto` to its target. A vector with `i = 5` must then give a line starting `fail tiny::tiny mir: panic`.
   - `selftest_panic_vector_needs_panic`: `tiny::opt true => panic` is a `fail` with `the run completed (want panic)`, and `pass` is never printed for it.
 - [ ] **Step 2:** Run `cargo test -p ctmir --test interp`. Expected: the new tests fail.
@@ -263,7 +268,7 @@
   - verify.sh's final line byte-identical to Global Constraints;
   - the crypto selftest at most 150 s.
 - [ ] **Step 5: The text.**
-  - TRUSTED row 45: the vectors run `ctmir::sem` through `ctmir::eval`; `pass` lines are claims (`pass_ok`); the native value is matched in `check_vector`'s ensures.
+  - TRUSTED row 45: the vectors run `ctmir::sem` through `ctmir::eval`; `pass` lines are claims (`pass_ok`); the native value is matched in `check_vector`'s ensures. Replace its sentence "Selftest `pass` lines are not claims of `report_sound`, and the theorems do not rest on them", which `pass_ok` makes false.
   - TRUSTED row 48, never-Stuck: every crypto `ok` root and every parser `bounded` root reaches `Done` under `mir_run` on native inputs, and so do the semconf vectors (or they reach `Panic` where native panics). Never-Stuck stays trusted for inputs not exercised, and for the fixtures and the negative control.
   - §8c result: Goal 4 met for the exercised inputs. In the follow-ups, replace the evaluator item with "never-Stuck proof (type soundness, or a backward simulation with typing premises)" and add "`lemma_mir_run_fuel_mono` with `ct_mir` over two fuels".
   - Fill the addendum's "8d result": verified count, timings, vector counts, findings and mutations.
