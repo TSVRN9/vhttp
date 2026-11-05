@@ -33,7 +33,7 @@
 
 - Leaks. A function whose digest is unchanged carries its earlier reading, nothing more. That reading has the limits stated in its section: tiers, loop-shape tracing, not dudect.
 - Data. Only executable sections are hashed. A constant or table in `.rodata` or `.data.rel.ro` is covered only through the relocations that reference it, not by its contents. Contents change values, not which addresses are touched or which branches run; jump tables and indexed lookups show in the hashed code.
-- Other builds: LTO, `codegen-units`, `target-cpu`, other targets, and a linked binary (none exists).
+- Other builds: LTO, `codegen-units`, `target-cpu`, other targets, and a linked binary (`crates/server`'s, since 3e).
 - Code inlined into a dependent from its first build. `nm` sees only out-of-line copies and the references that remain, so a new call to crypto that is inlined from the start leaves no trace. Protocol step 2 covers it.
 - tls's own constant-time sites read above (`ct_eq32` inlined into `on_crypto`, the zero-share check in `build_flight`) are not hashed: a change to them is not detected.
 - Toolchain and profile are not checked separately. A change to either is expected to show as a digest change.
@@ -405,7 +405,7 @@ The `sext(i1)` select pattern is reachable here too: `select4`, `mont_mul`'s sub
 
 ## Not checked
 
-- Fat or thin LTO, `codegen-units=1` as a real profile (the 1-CGU object is a close stand-in), a linked binary (none exists), other `target-cpu` values, other targets.
+- Fat or thin LTO, `codegen-units=1` as a real profile (the 1-CGU object is a close stand-in), a linked binary (`crates/server`'s, since 3e), other `target-cpu` values, other targets.
 - `tls` key schedule glue, `hkdf_expand_label`, transcript handling, beyond the two spot checks above. `quic` references no `crypto::` symbol in its release objects; `h3` and `wire` were not disassembled.
 - RSA shim beyond F2, and all of crypto-bigint/rsa/sha2 (G1). `sha2::compress256` is only used by the shim.
 - Not dudect: no timing was measured. Nothing about data cache behaviour beyond the indices above, instruction cache, branch predictor state from public branches, speculation (Spectre, including bounds-check bypass), `mul` latency on old CPUs, or flag-dependent `cmov` behaviour on future microarchitectures. `cmov` was taken as data-independent as instructed.
