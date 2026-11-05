@@ -33,7 +33,9 @@ verus! {
 /// Fresh randomness for one `accept` or `receive`, filled by the shell: `conn` for the pipeline,
 /// `refeed` for `refeed_one_rtt`, `complete` for `on_handshake_complete`, `tls` for `on_crypto`
 /// (the ECDHE scalar and the PSS salt, so no derived `Debug`). No array goes to two `Connection`
-/// calls.
+/// calls, except in `accept`: `conn` goes through `accept_datagram` to both `Connection::accept`
+/// and `Connection::on_datagram`, which draw disjoint parts of it (`accept` uses `[0..24]`; on the
+/// accepting datagram `on_datagram` draws neither the PATH_CHALLENGE part nor the spin bit).
 pub struct Rand {
     pub conn: [u8; RAND_LEN],
     pub refeed: [u8; RAND_LEN],
@@ -115,7 +117,8 @@ fn shut(c: &mut Connection, code: u64, now: u64)
 //# Upon receiving an error alert, the TLS implementation
 //# SHOULD indicate an error to the application and MUST NOT allow any
 //# further data to be sent or received on the connection.
-// Every TLS error closes the connection, the alert as CRYPTO_ERROR_BASE + alert, which is how QUIC
+// Every TLS error is passed to a close (not an ensures: `tampered_finished_0x133`, `error_ranges` and
+// `a2_closes_0x178` pin the close and its code), the alert as CRYPTO_ERROR_BASE + alert, which is how QUIC
 // sends alert X; the closing state sends only CONNECTION_CLOSE (3d). The quoted sentence is about
 // receiving an error alert, whose QUIC image is a peer CONNECTION_CLOSE: conn.rs enters draining,
 // which sends and processes nothing (RFC 9000 §10.2.2). `on_crypto` also returns transport codes

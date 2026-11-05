@@ -1,4 +1,7 @@
 //! Phase 4 exit: other HTTP/3 clients fetch the static response. Run with `--ignored`.
+//! The curl half passes. The quiche half (Task 6b) is open pending the user's permission to build
+//! quiche-client: `quiche_fetches` skips without `QUICHE_CLIENT`, and panics if `INTEROP_STRICT`
+//! is set. `Conn::respond`'s stop-at-first-Busy path is untested by any external client.
 use server::*;
 use std::process::Command;
 
@@ -55,6 +58,7 @@ fn curl_two_requests() {
 #[ignore]
 fn quiche_fetches() {
     let Ok(bin) = std::env::var("QUICHE_CLIENT") else {
+        assert!(std::env::var_os("INTEROP_STRICT").is_none(), "QUICHE_CLIENT unset with INTEROP_STRICT set");
         eprintln!("skipped: QUICHE_CLIENT unset");
         return;
     };
