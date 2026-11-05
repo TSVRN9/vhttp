@@ -237,7 +237,11 @@ After Task 4, `duvet_q.py` over the 29 sections prints exactly the 22 lines of t
     - `p2 = protected(&OutPacket{Initial, [0x99; 8], C1, 0, 4, [Ping], 1150, false}, &CLIENT)`, protected with S1's keys, which are public;
     - `accept_datagram(bad ++ p2, 0, 0, &rnd(1), &ltp(), &K)` is `None`;
     - `accept_datagram(A2, …, &K)` is `Some(c)` with `c.local_params().original_destination_connection_id == Some(S1.to_vec())`.
-  - **`crypto_end_tracks_received`:** after `accepted_a2()`, `crypto_end(Initial) == 241`; `is_live(Initial)` and `is_live(Handshake)` are `true`, and `is_live(OneRtt)` is `false`.
+  - **`crypto_end_tracks_received`:**
+    - after `accepted_a2()`, `crypto_end(Initial) == 241`;
+    - `is_live(Initial)` and `is_live(Handshake)` are `true`, and `is_live(OneRtt)` is `false`;
+    - then `receive` of a 1200-byte Initial (pn 3) carrying `Crypto{300, [7; 10]}`, a gapped frame, gives `crypto_end(Initial) == 310`. This pins `base + buf_len` as the high-water mark of received data.
+    - If `Reassembly` leaves slack past the inserted end, this fails. Then add `lemma_crypto_end_is_max`: `crypto_end_spec` equals 1 + the largest key of `rfc_received(inserted())`, or `base` when there is none, and make `crypto_end` compute that.
 
   In `tests/h3_server.rs`:
   - **`h3_on_datagram_passes_error`:** `H3Server::new(established())`, then `on_datagram(0, 100, vec![], Some((0x0a, <1-RTT header from the file's builders, frames []>)), 30, &rnd(3), &mut app)`, leaves `conn().phase()` Closing.
@@ -268,7 +272,7 @@ After Task 4, `duvet_q.py` over the 29 sections prints exactly the 22 lines of t
 **Interfaces:**
 - Consumes: Task 1 (`initial_keys`, `packet_keys`), Task 2 (`refeed_one_rtt`, `accept_datagram`'s odcid ensures, `is_live`, `crypto_end`, `crypto_read`'s bound), and the Global Constraints lists.
 - Produces (`tls::quic_server`):
-  - `pub struct Rand { pub conn: [u8; RAND_LEN], pub complete: [u8; RAND_LEN], pub tls: [u8; TLS_RAND_LEN] }`.
+  - `pub struct Rand { pub conn: [u8; RAND_LEN], pub complete: [u8; RAND_LEN], pub tls: [u8; TLS_RAND_LEN] }`. `tls` holds the ECDHE scalar and the PSS salt, so `Rand` gets no derived `Debug` (3e's `PacketKeys` ruling). `QuicServer` gets no derives. Any derive a task adds goes on TRUSTED's derived-impl tls row (4b's).
   - `pub enum TlsCall { Fed { level: Level, current: Level }, KeyChange { lower: Level, unread: nat } }` (ghost log entries), with `pub open spec fn level_rank(l: Level) -> nat` (Initial 0, Handshake 1, OneRtt 2).
   - `pub struct QuicServer<'a> { h3: H3Server, hs: ServerHandshake<'a>, keys: [Option<KeyPair>; 3], level: Level, init_end: u64, log: Ghost<Seq<TlsCall>> }`:
     - `level` is TLS's current receive level as the glue tracks it: Initial; then Handshake at `Secrets { Handshake }`; then OneRtt at `Complete`;
@@ -310,7 +314,8 @@ After Task 4, `duvet_q.py` over the 29 sections prints exactly the 22 lines of t
     - **`fn sync_keys(&mut self)`**: `keys[0] = None` unless `is_live(Initial)`; `keys[1] = None` unless `is_live(Handshake)`. This is what makes the wf key clauses hold after any `Connection` call.
     - **`fn tls_step(&mut self, now: u64, r: &Rand)`**. Requires `old(self).wf()`. Ensures:
       - `final(self).wf()` and `final(self).conn_spec().out_log() == old(self).conn_spec().out_log()`;
-      - `final(self).hs@.phase is Failed && !(old(self).hs@.phase is Failed) ==> final(self).keys_spec()[2] is None`.
+      - `final(self).hs@.phase is Failed && !(old(self).hs@.phase is Failed) ==> final(self).keys_spec()[2] is None`. This needs `proof fn lemma_ok_not_failed(cfg, tp, s, level, data, rand)` in this module: `!(s.phase is Failed) && spec_on_crypto(cfg, tp, s, level, data, rand).1 is Ok ==> !(spec_on_crypto(…).0.phase is Failed)`. It is an induction on `spec_rank` over `spec_drain`, shaped like 4b's `lemma_drain_readers`; 4b exports no such lemma;
+      - **§4.1.3 close:** `!(old(self).level_spec() is Initial) && old(self).conn_spec().crypto_end_spec(Initial) > old(self).init_end && old(self).conn_spec().phase_spec() is Open ==> !(final(self).conn_spec().phase_spec() is Open)`. It follows from `close`'s `Open ==> Closing` ensures; `crypto_read` keeps `base + buf_len`, so the entry value is the one step 1 compares.
 
       In this order:
       1. **Superseded Initial:** if `level` is not Initial, read `crypto_read(Initial)` into `b`. If `b` is non-empty or `crypto_end(Initial) > init_end`, close with PROTOCOL_VIOLATION and return (§4.1.3; the 4b binding note: check before `on_crypto`, which would say 0x10a). Handshake needs no such check: `on_handshake_complete` discards it in the call that leaves it, and resets its stream.
@@ -347,8 +352,10 @@ After Task 4, `duvet_q.py` over the 29 sections prints exactly the 22 lines of t
     - After `accept` with datagram 1, `transmit` carries no CRYPTO frame.
     - After `receive` with datagram 2, `transmit` carries one Initial whose CRYPTO data at offset 0 is exactly the 4b HRR `020000340303cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c00130100000c003300020017002b00020304`. `key_slots() == [true, false, false]`.
   - **`direct_flight`:** `accept` with `ini(S1, 0, [Crypto{0, h3ch(id)}], _)` (a P-256 share, so no HRR).
-    - `transmit` gives one datagram: an Initial whose CRYPTO data starts with a ServerHello (byte 0 is `02`, and bytes 6..38 are not `HRR_RANDOM`), followed by a Handshake packet.
-    - The Handshake packet is checked by `parse_long_header` on the bytes after the Initial's Length (type Handshake, DCID `C1`). Its keys need the ECDHE secret, so Task 4's harness decrypts it.
+    - Over the datagrams `transmit` returns until `None` (3d's packing and padding are not pinned):
+      - an Initial whose CRYPTO data starts with a ServerHello (byte 0 is `02`, and bytes 6..38 are not `HRR_RANDOM`);
+      - and at least one Handshake packet with DCID `C1`, found by walking each datagram's long headers with `parse_long_header` and their Lengths.
+    - The Handshake keys need the ECDHE secret, so Task 4's harness is what decrypts that packet.
     - `key_slots() == [true, true, true]`.
   - **`ch2_under_1200_dropped`** (Review Focus 4): after `curl_ch_two_datagrams_hrr`'s HRR, CH2 is `CURL_CH` with its key_share replaced by `(0x17, P256_SHARE)`, built with tls's `split_ch`/`join_ch`, in one CRYPTO frame at offset 1532 (Initial's stream continues).
     - In a 1199-byte datagram it produces no ServerHello: the next `transmit` is `None` or ACK-only.
@@ -377,7 +384,7 @@ After Task 4, `duvet_q.py` over the 29 sections prints exactly the 22 lines of t
     - "CT check scope" row: add `tls::quic_keys` and `tls::quic_server` (traffic secrets and packet keys handled outside crypto, not CT-checked);
     - a new row: `| Secret lifetime (RFC 8446 §6 "forget"): QuicServer holds no traffic secret after deriving packet keys; ServerHandshake drops transcript, CH1 and client_vd on Failed (4b); the 1-RTT key slot is cleared on a TLS failure; Initial and Handshake packet keys stay until their space is discarded or the connection is dropped, because CONNECTION_CLOSE needs them. Memory is not zeroised: freed buffers, the TlsEvent secrets and stack copies keep their bytes until reused, so a memory disclosure exposes them | crates/tls/src/quic_server.rs, crates/tls/src/server.rs | Verus cannot express erasure, and plain overwrites are dead stores the optimiser may drop | never (known gap) |`.
 - [ ] **Step 4:** The four checks; the tls rlimit-4 run (and `build_flight`'s margin). Binary gate per the Global Constraints. The `U tls crypto::…` block may grow if quic's small fns are inlined into tls.
-  - **Mutations:** drop the `pending(Initial)` pre-check (fails `wf`'s `KeyChange` clause); drop the `pending(Handshake)` pre-check (same); run step 2's loop from Initial whatever `level` is (fails `wf`'s `Fed` clause); `sync_keys` keeps `keys[0]` (fails `wf`'s Initial clause); drop `keys[2] = None` on `Err` (fails the `tls_step` ensures `old.hs not failed && final.hs failed ==> final.keys_spec()[2] is None`, which this task adds).
+  - **Mutations:** drop the `pending(Initial)` pre-check (fails `wf`'s `KeyChange` clause); drop the `pending(Handshake)` pre-check (same); delete step 1's close (fails the §4.1.3 close ensures); feed step 1's bytes to `on_crypto(Initial)` instead of closing (fails `wf`'s `Fed` clause); `sync_keys` keeps `keys[0]` (fails `wf`'s Initial clause); drop `keys[2] = None` on `Err` (fails the `tls_step` ensures `old.hs not failed && final.hs failed ==> final.keys_spec()[2] is None`, which this task adds).
   - Residual, as in 3e's C4: a body that skips a `KeyChange`/`Fed` push still verifies. It goes in the report as one line.
 - [ ] **Step 5: Commit:** `feat(tls): verified QUIC-TLS glue (RFC 9001 §4, §4.1.3, §4.8, §4.9): events to the connection, key slots in lockstep with discard, alerts to CONNECTION_CLOSE`
 - [ ] **Step 6: Matrix commit.**
@@ -416,7 +423,7 @@ After Task 4, `duvet_q.py` over the 29 sections prints exactly the 22 lines of t
   - **`finished_coalesced_with_one_rtt`** (Review Focus 1): the client's Finished datagram also carries `extra_one_rtt = [Ping]` (pn 0). Right after that one `receive`, `server.conn().largest_pn(OneRtt) == Some(0)`.
   - **`finished_trailing_bytes_pv`:** the client's Finished CRYPTO plus one byte `0x14` closes with 0x0a: the server's next datagram has `ConnectionClose{false, 0x0a, …}` in a Handshake packet, and no `HandshakeDone`.
   - **`tampered_finished_0x133`:** flip the last verify_data byte; the close code is `0x133` (decrypt_error), in a Handshake packet. Afterwards `key_slots()[2] == false`.
-  - **`zero_rtt_dropped`** (§4.6.2, §8.3): before CH1, a 0-RTT long header (type `0xd0`, DCID `odcid`, a Length covering 30 bytes of `[0x06; 30]`, so it looks like CRYPTO) coalesced in front of the client's first Initial. `accept` still succeeds, the handshake completes, and no close happens.
+  - **`zero_rtt_dropped`** (§4.6.2, §8.3): a 0-RTT long header (type `0xd0`, DCID `odcid`, a Length covering 30 bytes of `[0x06; 30]`, so it looks like CRYPTO) is coalesced *after* the client's first Initial in the same datagram (RFC 9000 §12.2 order). It must go after: `accept` keys by the first header, which must be an Initial. `accept` succeeds, the handshake completes, and no close happens. A second case does the same in front of the client's CH2 Initial, through `receive`.
 - [ ] **Step 2:** `cargo test -p tls --test quic_e2e`. Tasks 1–3 exist, so this is a check, not a red step; on a failure, fix the glue (Task 3's file) and say so in the report.
 - [ ] **Step 3: Annotations**, at the end of `quic_server.rs`, under the heading comment `// Requirements on clients, on specification authors, and on TLS records, which QUIC replaces`. Each is a `type=exception` with a reason, unless it says "cite":
   - RFC 9001:
@@ -524,7 +531,8 @@ After Task 4, `duvet_q.py` over the 29 sections prints exactly the 22 lines of t
   2. Check, before building: the vendored BoringSSL's CMake does not *require* Go (this machine has none; cmake 3, clang and perl are present), and `quiche-client --help`'s flags and default ALPN (`h3`) at that tag.
   3. `git clone --depth 1 --branch <tag> --recurse-submodules https://github.com/cloudflare/quiche <scratch>/vt-4c-evidence/dl/quiche-<tag>`, then `cargo build --release --bin quiche-client` there (its own toolchain resolution, outside the workspace).
   4. Record the tag, the commit (`git rev-parse HEAD`) and the binary's sha256.
-  5. If Go turns out to be required, stop and report: installing it needs a ruling.
+  5. Toolchain: `dl/` is inside the project tree, so rustup applies the project's `rust-toolchain.toml` (1.98.1, Verus's pin), and any parent `.cargo/config.toml` applies too. Check both before debugging a quiche build failure. If quiche needs another toolchain, set `RUSTUP_TOOLCHAIN` for that build only, and record it.
+  6. If Go turns out to be required, stop and report: installing it needs a ruling.
 - [ ] **Step 3: Run.**
   - `cargo build --release -p server`.
   - `cargo test -p server --test interop -- --ignored` with `QUICHE_CLIENT` set: both pass.
