@@ -241,7 +241,17 @@ pub open spec fn policy_of(ms: Seq<Seq<u8>>, pol: Policy) -> bool {
     &&& views(pol.declassify@) == paths_of(es, b"declassify"@)
     &&& views(pol.ghost_unit@) == paths_of(es, b"ghost"@)
     &&& forall|k: int| 0 <= k < pol.ghost_unit@.len() ==> ghost_shape(#[trigger] pol.ghost_unit@[k]@)
+    &&& forall|k: int| 0 <= k < pol.declassify@.len() ==> declassify_shape(#[trigger] pol.declassify@[k]@)
+    &&& forall|k: int| 0 <= k < es.len() && (#[trigger] es[k])[0] == b"label"@ ==> label_spec(es[k].drop_first()) is Some
 }
+
+/// A `declassify` path: `<c>::ct::declassify` with `c` a nonempty run of ASCII letters, digits or `_`.
+pub open spec fn declassify_shape(p: Seq<u8>) -> bool {
+    &&& p.len() > shim_tail().len() && p.subrange(p.len() - shim_tail().len(), p.len() as int) == shim_tail()
+    &&& forall|i: int| 0 <= i < p.len() - shim_tail().len() ==> name_byte(#[trigger] p[i])
+}
+
+pub open spec fn shim_tail() -> Seq<u8> { b"::ct::declassify"@ }
 
 /// The two `ghost` lines in use: the fixtures' shim and vest_lib's `Ghost::assume_new_fallback`.
 pub open spec fn ghost_shape(p: Seq<u8>) -> bool {
@@ -549,27 +559,46 @@ fn kind_is(e: &Vec<Vec<u8>>, k: &[u8]) -> (r: bool)
 }
 
 /// `<c>::ct::declassify` with `c` a plain crate name.
-fn declassify_shim(p: &Vec<u8>) -> bool {
+fn declassify_shim(p: &Vec<u8>) -> (r: bool)
+    ensures r == declassify_shape(p@),
+{
     let tail: &[u8] = b"::ct::declassify";
+    let ghost t = shim_tail();
+    assert(tail@ == t);
     if p.len() <= tail.len() { return false; }
     let c = p.len() - tail.len();
+    let ghost lo: int = p@.len() - t.len();
+    assert(lo == c as int);
     let mut i: usize = 0;
     while i < c
-        invariant c <= p@.len(),
+        invariant t == shim_tail(), c as int == lo, lo == p@.len() - t.len(), i <= c, forall|j: int| 0 <= j < i ==> name_byte(#[trigger] p@[j]),
         decreases c - i,
     {
         let b = p[i];
-        if !((48 <= b && b <= 57) || (65 <= b && b <= 90) || (97 <= b && b <= 122) || b == 95) { return false; }
+        if !((48 <= b && b <= 57) || (65 <= b && b <= 90) || (97 <= b && b <= 122) || b == 95) {
+            assert(!name_byte(p@[i as int]));
+            return false;
+        }
         i += 1;
     }
+    let ghost tl = p@.subrange(lo, p@.len() as int);
     let mut k: usize = 0;
     while k < tail.len()
-        invariant c + tail@.len() == p@.len(), k <= tail@.len(), p@.len() <= usize::MAX,
+        invariant t == shim_tail(), c as int == lo, lo == p@.len() - t.len(), k <= t.len(), p@.len() <= usize::MAX, tail@ == t,
+            tl == p@.subrange(lo, p@.len() as int), tl.len() == t.len(),
+            forall|j: int| 0 <= j < c ==> name_byte(#[trigger] p@[j]),
+            forall|j: int| 0 <= j < k ==> #[trigger] tl[j] == t[j],
         decreases tail.len() - k,
     {
-        if p[c + k] != tail[k] { return false; }
+        assert(tl[k as int] == p@[c + k]);
+        if p[c + k] != tail[k] {
+            assert(tl[k as int] != t[k as int]);
+            assert(tl != t);
+            return false;
+        }
         k += 1;
     }
+    assert(tl =~= t);
     true
 }
 
@@ -658,7 +687,9 @@ pub fn parse_manifests(ms: &Vec<Vec<u8>>) -> (r: Result<Policy, Vec<u8>>)
                &&& views(pol.translate_crates@) == paths_of(p, b"translate-crate"@)
                &&& views(pol.declassify@) == paths_of(p, b"declassify"@)
                &&& views(pol.ghost_unit@) == paths_of(p, b"ghost"@)
-               &&& forall|q: int| 0 <= q < pol.ghost_unit@.len() ==> ghost_shape(#[trigger] pol.ghost_unit@[q]@) }),
+               &&& forall|q: int| 0 <= q < pol.ghost_unit@.len() ==> ghost_shape(#[trigger] pol.ghost_unit@[q]@)
+               &&& forall|q: int| 0 <= q < pol.declassify@.len() ==> declassify_shape(#[trigger] pol.declassify@[q]@)
+               &&& forall|q: int| 0 <= q < k && (#[trigger] ev[q])[0] == b"label"@ ==> label_spec(ev[q].drop_first()) is Some }),
         decreases es.len() - k,
     {
         let e = &es[k];
@@ -697,6 +728,7 @@ pub fn parse_manifests(ms: &Vec<Vec<u8>>) -> (r: Result<Policy, Vec<u8>>)
             proof { lemma_views_push(o, pol.cost_roots@.last()); assert(pol.cost_roots@ == o.push(pol.cost_roots@.last())); }
         } else if kl {
             let l = match label_exec(&rest) { Some(l) => l, None => return Err(err_line(mi, n, b"malformed label line", line)) };
+            proof { assert(views(rest@) == ev[k as int].drop_first()); }
             let mut i: usize = 0;
             while i < pol.labels.len()
                 decreases pol.labels.len() - i,

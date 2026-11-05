@@ -445,8 +445,9 @@ report. It contains no `verus!` code and no logic.
 
 `pub fn interp(p: &ctcore::Program, f: usize, args: …, fuel: u64) -> (r: Option<…>) ensures r ==
 ctcore::run_fn(...) mapped`. The interpreter is exec and works over a concrete value type with a
-proved view into `Val`. It interprets core rather than MIR, and the simulation carries the result
-to `ctmir::sem`. The selftest mode runs `selftest.txt` through it, and `interp.rs` is deleted.
+proved view into `Val`. It interprets core rather than MIR. The simulation is one-directional (a
+completed MIR run is core's run of the image), so a vector that passes shows that `ctmir::sem`
+does not complete with a different value on that input, not that it completes (see §8c result). The selftest mode runs `selftest.txt` through it, and `interp.rs` is deleted.
 
 Conformance: a new fixture crate, `tools/ct-fixtures/semconf`, has one small function per
 supported construct:
@@ -534,7 +535,21 @@ every report line is `line_ok`. A `root <path> ok` line gives `ct_mir` for the r
 declared-secret parameter secret and that the report prints in its `checked` line. A `bounded`
 line gives `cost_mir` (`theorem_cost` carried the same way, its entry premises discharged from
 the MIR parameter types), and its text is `poly_text_spec` of the bound. The selftest runs on the
-verified interpreter, proved equal to `ctcore::sem::run_fn`.
+verified interpreter, proved equal to `ctcore::sem::run_fn`. As built, the pipeline's signature is
+`pipeline(dump: &[u8], manifests: &Vec<Vec<u8>>, mode: &Mode) -> (r: Result<Vec<u8>, Vec<u8>>)`
+with `ensures r is Ok ==> report_sound(dump@, manifests@, *mode, r->Ok_0@)` (§Pipeline shows
+the planned one).
+
+**Goal 4 is partly met.** The interpreter is proved equal to core's `run_fn`, and every selftest
+and semconf vector passes. But the vectors run core, and `theorem_sim` goes from MIR to core
+only, so they show that `ctmir::sem` never completes with a value different from native's on
+those inputs; they do not test that it completes. Never-Stuck (no `Panic`/`None` on rustc-typed
+in-subset MIR where Rust completes) rests only on the two clean-room audits and `sem_sanity`'s
+synthetic facts, and no crypto root is shown to reach `Done` under `mir_run_fn`. If `ctmir::sem`
+wrongly panicked on a construct a root uses, that root's `ok` line would be vacuous with every
+gate green. The follow-up is Phase 8d: an exec MIR evaluator proved equal to `mir_run_fn`, run
+on the crypto roots (the selftest inputs) and the semconf vectors (alternative: a backward
+simulation, core `Some` implies MIR `Done`).
 
 **The trust table, as built.**
 
@@ -545,8 +560,8 @@ verified interpreter, proved equal to `ctcore::sem::run_fn`.
 | `ct-dump` (`tools/ct-driver`): calls rustc_public queries and serializes their answers with rustc's own derives; decides nothing | rust_verify's HIR reader | ≤ 300 lines | decision-free: the closure walk, `ct_key`, the `dangling` check. 466 lines outside tests (`main.rs` 105, `dump.rs` 361 with `dangling`), over the target. `-Zalways-encode-mir` comes from `CT_ENCODE_MIR`, which ct-check.sh takes from the `translate-crate` lines |
 | The JSON grammar spec (`print`) and the schema spec (`decode_crate`) | — | small, beside rustc_public's definitions | trusted spec text, without the verified exec parser and decoder: `print` and its helpers about 94 lines of `json.rs` (met); `decode_crate` and its clauses about 670 lines of `schema.rs`, plus the 428-line AST `mir.rs` (missed: not small). `print` is proved injective up to views; `decode_crate` is not proved functional (reviewed by inspection; TRUSTED.md row; follow-up) |
 | `ctmir::sem`: value model, leakage table, cost table (with the constant charge), std model | Verus's encoding of Rust, plus vstd's `assume_specification`s | about the size of `ctcore::sem` | missed: more trusted lines than planned, and the sem file is the main residual trust. `sem.rs` 1608 lines (about 1380 of them spec fns and their docs) and `sem_subset.rs` 154 (`in_subset`), against `ctcore::sem`'s 616 (about 2.9x by whole files), plus the shared vocabulary it imports from `ctcore::sem` (`binop`, `cast`, `get`, `put`, …). Never-Stuck (no `Panic`/`None` on rustc-typed in-subset MIR where Rust completes) is trusted, not proved; `size_of::<usize>() == 8` is assumed |
-| Policy inputs: roots, `ct::secret`/`ct::public` labels, `declassify` and `ghost` lines | the user's specs | — | read by the verified parser against `policy_of`; `intr` lines are rejected; crypto's `checked` lines are pinned by `tools/ct-driver/expected-labels.txt`; `report_sound` proves declared secrets secret in the labels used. The `ghost` grammar admits only the two paths in use, whose unit, effect-free result is trusted (reviewed). What the lines mean is `policy.rs`'s specs (`policy_of`, `ghost_shape`, `decl_spec`, `cpol`) |
-| `main` of `ct-front`: reads files, calls one verified function, writes its result | Verus's driver | ≤ 80 lines | 37 lines (met). The statements it relies on are read as the claim: `report_sound` and the line specs, and every spec fn they unfold to (listed in TRUSTED.md's statement row: `wt_args` in `sim_entry.rs`; `root_of`, `item_may_be`, `item_attrs`, `pnames`, `fn_path` in `rel.rs`; `decl_spec`, `cpol`, `policy_of` in `policy.rs`; `wt_val`, `mir_entry`, `mir_run_fn` in `sem.rs`; and others). Non-root `checked` lines are pinned, not proved; ct-check.sh (unverified shell) reads the claims by their `root `/`bounded ` prefixes |
+| Policy inputs: roots, `ct::secret`/`ct::public` labels, `declassify` and `ghost` lines | the user's specs | — | read by the verified parser against `policy_of`, which includes the declassify shim's shape (`declassify_shape`) and that every `label` line parses; `intr` lines are rejected; crypto's `checked` lines are pinned by `tools/ct-driver/expected-labels.txt`; `report_sound` proves declared secrets secret in the labels used. The `ghost` grammar admits only the two paths in use, whose unit, effect-free result is trusted (reviewed). What the lines mean is `policy.rs`'s specs (`policy_of`, `ghost_shape`, `decl_spec`, `cpol`) |
+| `main` of `ct-front`: reads files, calls one verified function, writes its result | Verus's driver | ≤ 80 lines | 37 lines (met). The statements it relies on are read as the claim: `report_sound` and the line specs, and every spec fn they unfold to, transitively, including ctcore's (the rule and its files are in TRUSTED.md's statement row; among them `wt_args`, `root_of`, `item_may_be`, `decl_spec`, `cpol`, `policy_of`, `mir_run_fn`). Non-root `checked` lines are pinned, not proved; ct-check.sh (unverified shell) reads the claims by their `root `/`bounded ` prefixes |
 | Everything below MIR: LLVM and the CPU (Phase 7a) | rustc codegen | — | unchanged |
 
 `ctcore::sem`'s statement, terminator and call rules are now an internal step (`theorem_sim`).
@@ -565,8 +580,11 @@ selftest value. Every other difference was on the list ruled in Tasks 5 and 7:
 | cost fixtures | `cost_neg_not_typed`, `cost_neg_not_typed_declassify` | none NotTyped | none Unsupported | both `none` |
 | cost parsers | `h3::frame::parse_frame_payload`, `parse_settings`, `quic::ack::parse_ack`, `quic::frame::parse_frame`, `parse_frame_body` | none Unsupported | none Unresolved | the Unsupported → Unresolved class (and reject order); all `none` |
 
-Selftest step counts differ by +1 on the `sha256` vectors and `p256_ecdsa_sign`, and by +4 on
-`decode_field_line_bounded` (the translator's extra steps; informational, not gated). Reject and
+Selftest step counts, old core (the old translator's image) against new core (`ctmir::lower`'s
+image, whose steps equal `ctmir::sem`'s exactly by `theorem_sim`), differ by +1 on the `sha256`
+vectors and `p256_ecdsa_sign`, and by +4 on `decode_field_line_bounded`: the new lowering's
+extra statements under decision 7 (the Drop-glue `&mut` temp, the constant charge; Task 5 recorded
+the `&[u8; 0]` constant). Informational, not gated. Reject and
 `none` texts differ in wording, with the same kinds and sites, apart from
 `neg_enum_discriminant` (site moves from the type to the `Discriminant` statement) and
 `neg_fn_pointer_call` (only the call is rejected). The expected files were re-pinned to exactly
@@ -574,5 +592,8 @@ these differences. Final numbers: fixtures 59/59, selftest 22/22 and parsers 15/
 12/12, cost 19/36 bounded, crypto ok (105 fns, 11 roots, 10 declassify), negative control
 rejected, semconf 31723/31723, dumps 7/7 (every dump parses and decodes with no `Unknown`).
 
-**Follow-ups.** Prove `decode_crate` functional up to views and delete its TRUSTED.md row; prove
-never-Stuck (type soundness of `ctmir::sem` on rustc-typed MIR), or narrow it.
+**Follow-ups.** Phase 8d: an exec MIR evaluator proved equal to `mir_run_fn`, run on the crypto
+roots and the semconf vectors, so each `ok` root is shown to reach `Done` on real inputs (or a
+backward simulation; either way toward never-Stuck, whose proof as type soundness of `ctmir::sem`
+on rustc-typed MIR stays open). Prove `decode_crate` functional up to views and delete its
+TRUSTED.md row. Add quic's send and receive paths as CT roots (RFC 9001 §9.5).
