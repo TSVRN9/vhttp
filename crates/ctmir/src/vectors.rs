@@ -1,5 +1,5 @@
 //! The selftest vector grammar (`tools/ct-driver/selftest.txt`, `tools/ct-fixtures/semconf/
-//! vectors.txt`) as a spec, its verified parser, and the verified vector check over `interp`.
+//! vectors.txt`) as a spec, its verified parser, and the verified vector check over the verified evaluator (`eval`).
 //! A line is `<path> <arg>... => <ret> <mut-out>...` or `<path> <arg>... => panic`. `vector_spec`
 //! is the grammar of the words after the path; the line's split into words at ASCII whitespace,
 //! and its cut at the first comment word (one starting `#` and not then a digit), are done by

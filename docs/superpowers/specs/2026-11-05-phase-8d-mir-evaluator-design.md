@@ -234,4 +234,19 @@ When the evaluator gives `Panic` or a wrong value where native completes, that i
 
 ## 8d result
 
-(Filled in by the last task.)
+- **Verified**: 1273 verified, 0 errors (forced `ctmir` re-run at `--rlimit 4`); verify.sh ends with its
+  usual line (`cost 19/36`, `escapes accounted (0)`, `binary ok (49 fns)`). `sem.rs` is unchanged.
+- **Vectors**: the crypto selftest has 23 (new: `rsa_pss_sign_inner`, 378 million MIR steps, from the
+  RFC 9500 2048-bit key; the signature equals the spike's `8febad92..`), the parser selftest 28 (new: 13,
+  one per bounded root that had none), semconf 31723. Every one runs `ctmir::sem` through `ctmir::eval`
+  and passes; none gave `Panic`, `Fuel` or `GaveUp`.
+- **Coverage gate**: `ct-check: done roots 11/11, bounded 19/19`. Removing the RSA vector from
+  `selftest.txt` fails the run on that root; so do deleting a parser root's `pass` lines, turning them
+  into `pass .. panic`, and a pass path with a space (evidence: `vt-8d-evidence/t4/demo`).
+- **Timings**: crypto selftest 74 s under its 150 s bound; `eval_probe` (sha256 and p256_public_key step
+  counts equal the deleted core interpreter's) 16 s, now run by ct-check; ct-check 1 min 44 s, verify.sh
+  2 min 51 s with ctmir re-verified.
+- **Findings**: none; no vector disagreed with the evaluator. Two parser vectors (`feed_bit`, `lookup`)
+  are hand-traced from the decode loop over the named test's input, since no public test shows the
+  intermediate state.
+- **Left trusted**: never-Stuck for inputs no vector exercises (TRUSTED row 48); fuel monotonicity.
