@@ -1,5 +1,6 @@
 //! The selftest vector grammar (`tools/ct-driver/selftest.txt`, `tools/ct-fixtures/semconf/
-//! vectors.txt`) as a spec, its verified parser, and the verified vector check over `interp`.
+//! vectors.txt`) as a spec, its verified parser, and the verified vector check over the verified
+//! evaluator (`eval`).
 //! A line is `<path> <arg>... => <ret> <mut-out>...` or `<path> <arg>... => panic`. `vector_spec`
 //! is the grammar of the words after the path; the line's split into words at ASCII whitespace,
 //! and its cut at the first comment word (one starting `#` and not then a digit), are done by
@@ -11,9 +12,19 @@
 //! - `[v,..]` (an `Arr`), `(v,..)` (a `Tup`), `()`, `None`, `Some(v)`, `#k(v,..)` (variant `k`).
 //! A plain argument that is an `Arr` is passed by shared reference, as is any plain argument of a
 //! `Shr` parameter (`entry_args`); a `mut:` argument is the initial pointee of a `&mut` parameter.
+use crate::eval::x_wt_args;
+use crate::eval_run::{mir_eval, Ev};
+use crate::eval_tab::Tabs;
 #[cfg(verus_keep_ghost)]
-use crate::interp::fs;
-use crate::interp::interp;
+use crate::eval_tab::tabs_ok;
+use crate::mir::MirCrate;
+use crate::policy::Policy;
+#[cfg(verus_keep_ghost)]
+use crate::policy::cpol;
+#[cfg(verus_keep_ghost)]
+use crate::sem::{closed, in_subset, mir_entry, mir_run, Out};
+#[cfg(verus_keep_ghost)]
+use crate::sim_entry::wt_args;
 #[allow(unused_imports)]
 use crate::interp_val::*;
 #[cfg(verus_keep_ghost)]
@@ -22,7 +33,7 @@ use crate::policy::sub;
 #[cfg(verus_keep_ghost)]
 use crate::rel::views;
 #[cfg(verus_keep_ghost)]
-use ctcore::sem::{bits, init_entry, nth, run_fn};
+use ctcore::sem::{bits, nth, Loc, Root};
 use ctcore::sem::Val;
 use ctcore::syntax::{Program, Ty};
 use vstd::prelude::*;
@@ -781,24 +792,44 @@ pub open spec fn shape_ok(p: Program, v: VSpec) -> bool {
         && widths_ok(p.fns@[0], v)
 }
 
-pub open spec fn vec_run(p: Program, v: VSpec) -> ctcore::sem::Res {
-    let a = entry_args(p.fns@[0], v);
-    run_fn(p, 0, init_entry(p, 0, a, entry_slots(p.fns@[0], a)), FUEL as nat)
+/// The MIR arguments: `entry_args`, except a `Mut(Slot(j))` at each `&mut` parameter `j`
+/// (`wt_rec` accepts only a `Mut` at a `&mut` type; `entry_local` binds the slot there anyway).
+pub open spec fn mir_args(b: ctcore::syntax::Body, v: VSpec) -> Seq<Val> {
+    Seq::new(v.args.len(), |j: int| if mut_param(b, j) { Val::Mut(Loc { root: Root::Slot(j as nat), path: seq![] }) } else { entry_arg(b, v.args[j].0, j, v.args[j].1) })
 }
 
-/// **A passing vector**: fn 0's run on the vector's arguments completes in `n` steps with the
-/// wanted return value and final `mut:` pointees.
-pub open spec fn passes(p: Program, v: VSpec, n: nat) -> bool {
-    shape_ok(p, v) && !v.panic && (vec_run(p, v) matches Some((fr, _, m)) && m == n
-        && seq![nth(fr.locals, 0)] + mouts(v.args, fr.slots, v.args.len()) == v.want)
+/// The vector's slots: the `mut:` arguments' initial pointees.
+pub open spec fn mir_slots(b: ctcore::syntax::Body, v: VSpec) -> Seq<Val> { entry_slots(b, entry_args(b, v)) }
+
+/// Root `insts[i]`'s MIR run on the vector, from `mir_entry`, at `FUEL`.
+#[verifier::opaque]
+pub open spec fn vec_run(m: MirCrate, pol: Policy, i: nat, p: Program, v: VSpec) -> Out {
+    mir_run(m, cpol(pol), i, mir_entry(m, i, mir_args(p.fns@[0], v), mir_slots(p.fns@[0], v)), FUEL as nat)
 }
 
-/// **A passing panic vector**: fn 0's run does not complete: it panics (a failed `Assert`,
-/// `Abort`), stops on a Vec overflow, exhausts `FUEL` in some activation, or takes more than `u64`
-/// steps. Fuel exhaustion counts as a panic here; `ct-check.sh` bounds the selftest's time so a
-/// looping vector cannot pass that way.
-pub open spec fn panics(p: Program, v: VSpec) -> bool {
-    shape_ok(p, v) && v.panic && (vec_run(p, v) is None || vec_run(p, v)->Some_0.2 > u64::MAX)
+/// The vector's MIR arguments and slots are well-typed for root `insts[i]` (`wt_args`).
+#[verifier::opaque]
+pub open spec fn vec_wt(m: MirCrate, i: nat, p: Program, v: VSpec) -> bool {
+    wt_args(m, i, mir_args(p.fns@[0], v), mir_slots(p.fns@[0], v))
+}
+
+/// **A passing vector**: the root's MIR run on the vector's (well-typed) arguments completes in
+/// `n` steps with the wanted return value and final `mut:` pointees.
+pub open spec fn passes(m: MirCrate, pol: Policy, i: nat, p: Program, v: VSpec, n: nat) -> bool {
+    shape_ok(p, v) && !v.panic && vec_wt(m, i, p, v)
+        && (vec_run(m, pol, i, p, v) matches Out::Done(fr, _, k) && k == n && want_ok(v, fr))
+}
+
+/// The final frame's return value and `mut:` pointees are the vector's wanted values.
+#[verifier::opaque]
+pub open spec fn want_ok(v: VSpec, fr: ctcore::sem::Frame) -> bool {
+    seq![nth(fr.locals, 0)] + mouts(v.args, fr.slots, v.args.len()) == v.want
+}
+
+/// **A passing panic vector**: the root's MIR run on the vector's (well-typed) arguments panics.
+/// (`Out::Panic` also covers a stuck state, so this is no never-Stuck evidence.)
+pub open spec fn panics(m: MirCrate, pol: Policy, i: nat, p: Program, v: VSpec) -> bool {
+    shape_ok(p, v) && v.panic && vec_wt(m, i, p, v) && vec_run(m, pol, i, p, v) is Panic
 }
 
 fn is_mut_param(b: &ctcore::syntax::Body, j: usize) -> (r: bool)
@@ -845,13 +876,16 @@ fn want_width(t: &Ty, w: Option<u32>, k: usize) -> (r: Result<(), Vec<u8>>)
     }
 }
 
-/// Checks vector `v` against fn 0 of `p`: `Ok(Some(steps))` for a completed run with the wanted
-/// values, `Ok(None)` for a panic vector whose run does not complete, `Err(why)` otherwise.
-pub fn check_vector(p: &Program, v: &Vector) -> (r: Result<Option<u64>, Vec<u8>>)
+/// Checks vector `v` against root `insts[i]`, whose translation is `p` (shapes and widths are read
+/// from `p`'s fn 0): `Ok(Some(steps))` for a completed MIR run with the wanted values, `Ok(None)`
+/// for a panic vector whose run panics, `Err(why)` otherwise.
+pub fn check_vector(m: &MirCrate, tb: &Tabs, pol: &Policy, i: usize, p: &Program, v: &Vector) -> (r: Result<Option<u64>, Vec<u8>>)
+    requires tabs_ok(*m, *tb), in_subset(*m, cpol(*pol), i as nat), p.fns@.len() > 0,
     ensures
-        r matches Ok(Some(n)) ==> passes(*p, vector_v(*v), n as nat),
-        r matches Ok(None) ==> panics(*p, vector_v(*v)),
+        r matches Ok(Some(n)) ==> passes(*m, *pol, i as nat, *p, vector_v(*v), n as nat),
+        r matches Ok(None) ==> panics(*m, *pol, i as nat, *p, vector_v(*v)),
 {
+    hide(closed);
     let ghost vs = vector_v(*v);
     if p.fns.len() == 0 { return Err(crate::pipeline::cat(b"empty program", b"")); }
     let b = &p.fns[0];
@@ -959,6 +993,27 @@ pub fn check_vector(p: &Program, v: &Vector) -> (r: Result<Option<u64>, Vec<u8>>
         assert(cvs(args@) =~= entry_args(*b, vs));
         assert(cvs(slots@) =~= entry_slots(*b, entry_args(*b, vs)));
     }
+    proof { assert(shape_ok(*p, vs)); }
+    run_vector(m, tb, pol, i, p, v, args, slots, nm)
+}
+
+/// The run part of `check_vector`, on the shaped entry arguments.
+fn run_vector(m: &MirCrate, tb: &Tabs, pol: &Policy, i: usize, p: &Program, v: &Vector, args: Vec<CVal>, slots: Vec<CVal>, nm: usize)
+    -> (r: Result<Option<u64>, Vec<u8>>)
+    requires tabs_ok(*m, *tb), in_subset(*m, cpol(*pol), i as nat), p.fns@.len() > 0, shape_ok(*p, vector_v(*v)),
+        cvs(args@) == entry_args(p.fns@[0], vector_v(*v)), cvs(slots@) == entry_slots(p.fns@[0], entry_args(p.fns@[0], vector_v(*v))),
+    ensures
+        r matches Ok(Some(n)) ==> passes(*m, *pol, i as nat, *p, vector_v(*v), n as nat),
+        r matches Ok(None) ==> panics(*m, *pol, i as nat, *p, vector_v(*v)),
+{
+    hide(mir_run);
+    hide(mir_entry);
+    hide(in_subset);
+    hide(closed);
+    hide(shape_ok);
+    proof { reveal(vec_run); reveal(vec_wt); }
+    let ghost vs = vector_v(*v);
+    let b = &p.fns[0];
     if !v.panic && (nm >= usize::MAX || v.want.len() != nm + 1) {
         let mut e = crate::text::dec(v.want.len() as u64);
         crate::text::put(&mut e, b" expected values for 1 return value and ");
@@ -966,45 +1021,98 @@ pub fn check_vector(p: &Program, v: &Vector) -> (r: Result<Option<u64>, Vec<u8>>
         crate::text::put(&mut e, b" &mut params");
         return Err(e);
     }
-    let r = interp(p, 0, &args, &slots, FUEL);
+    let margs = mir_args_exec(b, &args, Ghost(vs));
+    if !x_wt_args(m, tb, i, &margs, &slots) { return Err(crate::pipeline::cat(b"args not well-typed", b"")); }
+    let r = mir_eval(m, tb, pol, i, &margs, &slots, FUEL);
     if v.panic {
         return match r {
-            None => Ok(None),
-            Some(_) => Err(crate::pipeline::cat(b"the run completed (want panic)", b"")),
+            Ev::Panic => Ok(None),
+            Ev::Done(_, _) => Err(crate::pipeline::cat(b"the run completed (want panic)", b"")),
+            Ev::Fuel => Err(crate::pipeline::cat(b"mir: fuel", b"")),
+            Ev::GaveUp => Err(crate::pipeline::cat(b"mir: gave up", b"")),
         };
     }
     match r {
-        None => Err(crate::pipeline::cat(b"the run gave None (abort, failed assert, fuel or steps)", b"")),
-        Some((ret, sl, n)) => {
-            let mut got: Vec<CVal> = Vec::new();
-            got.push(ret);
-            let mut j: usize = 0;
-            while j < v.args.len()
-                invariant j <= v.args@.len(), vs == vector_v(*v), got@.len() >= 1, cv(got@[0]) == cv(ret),
-                    cvs(got@) == seq![cv(ret)] + mouts(vs.args, cvs(sl@), j as nat),
-                decreases v.args.len() - j,
-            {
-                if v.args[j].0 {
-                    let x = if j < sl.len() { cclone(&sl[j]) } else { CVal::Unit };
-                    proof { lemma_cvs_push(got@, x); }
-                    got.push(x);
-                }
-                proof { assert(mouts(vs.args, cvs(sl@), (j + 1) as nat) =~= mouts(vs.args, cvs(sl@), j as nat) + if vs.args[j as int].0 { seq![nth(cvs(sl@), j as nat)] } else { Seq::<Val>::empty() }); }
-                j += 1;
-            }
-            if ceq_vec(&got, &v.want) {
-                Ok(Some(n))
-            } else {
-                let mut e = crate::pipeline::cat(b"got", b"");
-                let mut k: usize = 0;
-                while k < got.len() decreases got.len() - k { e.push(32u8); show(&got[k], &mut e); k += 1; }
-                crate::text::put(&mut e, b" want");
-                let mut k: usize = 0;
-                while k < v.want.len() decreases v.want.len() - k { e.push(32u8); show(&v.want[k], &mut e); k += 1; }
-                Err(e)
-            }
+        Ev::Panic => Err(crate::pipeline::cat(b"mir: panic", b"")),
+        Ev::Fuel => Err(crate::pipeline::cat(b"mir: fuel", b"")),
+        Ev::GaveUp => Err(crate::pipeline::cat(b"mir: gave up", b"")),
+        Ev::Done(fr, n) => match got_want(fr, v) {
+            Ok(()) => Ok(Some(n)),
+            Err(e) => Err(e),
         },
     }
+}
+
+/// A completed run's return value and final `mut:` pointees, against the wanted values.
+fn got_want(fr: CFrame, v: &Vector) -> (r: Result<(), Vec<u8>>)
+    ensures r is Ok ==> want_ok(vector_v(*v), fv(fr)),
+{
+    proof { reveal(want_ok); }
+    let ghost vs = vector_v(*v);
+    let CFrame { locals: mut cl, slots: sl } = fr;
+    let ghost l0 = cvs(cl@);
+    let ret = if cl.len() > 0 { take_at(&mut cl, 0) } else { CVal::Unit };
+    proof { assert(cv(ret) == nth(l0, 0)); }
+    let mut got: Vec<CVal> = Vec::new();
+    got.push(ret);
+    let mut j: usize = 0;
+    while j < v.args.len()
+        invariant j <= v.args@.len(), vs == vector_v(*v), got@.len() >= 1, cv(got@[0]) == cv(ret),
+            cvs(got@) == seq![cv(ret)] + mouts(vs.args, cvs(sl@), j as nat),
+        decreases v.args.len() - j,
+    {
+        if v.args[j].0 {
+            let x = if j < sl.len() { cclone(&sl[j]) } else { CVal::Unit };
+            proof { lemma_cvs_push(got@, x); }
+            got.push(x);
+        }
+        proof { assert(mouts(vs.args, cvs(sl@), (j + 1) as nat) =~= mouts(vs.args, cvs(sl@), j as nat) + if vs.args[j as int].0 { seq![nth(cvs(sl@), j as nat)] } else { Seq::<Val>::empty() }); }
+        j += 1;
+    }
+    if ceq_vec(&got, &v.want) {
+        Ok(())
+    } else {
+        let mut e = crate::pipeline::cat(b"got", b"");
+        let mut k: usize = 0;
+        while k < got.len() decreases got.len() - k { e.push(32u8); show(&got[k], &mut e); k += 1; }
+        crate::text::put(&mut e, b" want");
+        let mut k: usize = 0;
+        while k < v.want.len() decreases v.want.len() - k { e.push(32u8); show(&v.want[k], &mut e); k += 1; }
+        Err(e)
+    }
+}
+
+/// `mir_args` from the entry arguments: a `Mut(Slot(j))` at each `&mut` parameter.
+fn mir_args_exec(b: &ctcore::syntax::Body, args: &Vec<CVal>, Ghost(vs): Ghost<VSpec>) -> (r: Vec<CVal>)
+    requires cvs(args@) == entry_args(*b, vs),
+    ensures cvs(r@) == mir_args(*b, vs),
+{
+    let mut r: Vec<CVal> = Vec::new();
+    let mut j: usize = 0;
+    proof { assert(cvs(args@).len() == args@.len()); assert(entry_args(*b, vs).len() == vs.args.len()); }
+    while j < args.len()
+        invariant j <= args@.len() == vs.args.len(), cvs(args@) == entry_args(*b, vs), r@.len() == j,
+            forall|q: int| 0 <= q < j ==> cv(#[trigger] r@[q]) == mir_args(*b, vs)[q],
+        decreases args.len() - j,
+    {
+        let x = if is_mut_param(b, j) {
+            let l = CLoc { root: CRoot::Slot(j), path: Vec::new() };
+            proof { assert(pes(l.path@) =~= Seq::<ctcore::sem::PE>::empty()); }
+            CVal::Mut(l)
+        } else {
+            proof { assert(cvs(args@)[j as int] == cv(args@[j as int])); }
+            cclone(&args[j])
+        };
+        proof {
+            assert(mir_args(*b, vs)[j as int] == if mut_param(*b, j as int) { Val::Mut(Loc { root: Root::Slot(j as nat), path: seq![] }) } else { entry_arg(*b, vs.args[j as int].0, j as int, vs.args[j as int].1) });
+            assert(entry_args(*b, vs)[j as int] == entry_arg(*b, vs.args[j as int].0, j as int, vs.args[j as int].1));
+            assert(cv(x) == mir_args(*b, vs)[j as int]);
+        }
+        r.push(x);
+        j += 1;
+    }
+    proof { assert(cvs(r@) =~= mir_args(*b, vs)); }
+    r
 }
 
 fn put_hex(out: &mut Vec<u8>, n: u128)

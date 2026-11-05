@@ -1,5 +1,5 @@
 //! Exec integer arithmetic proved equal to `ctcore::sem`'s opaque `binop`, `unop` and `cast`, for
-//! the verified interpreter (`interp`). Every op works on the unsigned readings `uval` of its
+//! the verified MIR evaluator (`eval`). Every op works on the unsigned readings `uval` of its
 //! operands modulo `md(t) = 2^bits(t)`; a signed reading `ival` is `uval` or `uval - md(t)`, so
 //! each spec formula reduces to one on the unsigned readings.
 #[cfg(verus_keep_ghost)]
@@ -31,7 +31,7 @@ pub open spec fn md(t: IntTy) -> int {
 
 pub open spec fn wide(t: IntTy) -> bool { t is U128 || t is I128 }
 
-proof fn lemma_md(t: IntTy)
+pub proof fn lemma_md(t: IntTy)
     ensures pow2(bits(t)) == md(t), pow2((bits(t) - 1) as nat) * 2 == md(t), bits(t) >= 1, wide(t) <==> md(t) == M128,
         !wide(t) ==> md(t) <= 0x1_0000_0000_0000_0000,
 {
@@ -42,7 +42,7 @@ proof fn lemma_md(t: IntTy)
 }
 
 /// The readings of `a` at `t`: `u = uval`, `x = ival`, with `x` congruent to `u`.
-proof fn lemma_read(t: IntTy, a: u128)
+pub proof fn lemma_read(t: IntTy, a: u128)
     ensures ({
         let (m, u, x) = (md(t), uval(t, a), ival(t, a));
         &&& 0 <= u < m && m >= 2 && m % 2 == 0
@@ -105,7 +105,7 @@ pub fn is_signed(t: &IntTy) -> (r: bool)
 }
 
 /// `md(t)` for a type narrower than 128 bits.
-fn md_exec(t: &IntTy) -> (r: u128)
+pub fn md_exec(t: &IntTy) -> (r: u128)
     requires !wide(*t),
     ensures r == md(*t),
 {
@@ -120,7 +120,7 @@ fn md_exec(t: &IntTy) -> (r: u128)
 }
 
 /// Half of `md(t)`: the sign bit.
-fn half_exec(t: &IntTy) -> (r: u128)
+pub fn half_exec(t: &IntTy) -> (r: u128)
     ensures r * 2 == md(*t),
 {
     match t {
