@@ -1,7 +1,7 @@
 //! Phase 4 exit: other HTTP/3 clients fetch the static response. Run with `--ignored`.
-//! The curl half passes. The quiche half (Task 6b) is open pending the user's permission to build
-//! quiche-client: `quiche_fetches` skips without `QUICHE_CLIENT`, and panics if `INTEROP_STRICT`
-//! is set. `Conn::respond`'s stop-at-first-Busy path is untested by any external client.
+//! Both pass: curl 8.18.0 and quiche-client from cloudflare/quiche 0.30.0 (be47c50; build with
+//! `cargo build --release --bin quiche-client`, then set `QUICHE_CLIENT` to it). `quiche_fetches`
+//! skips without `QUICHE_CLIENT`, and panics if `INTEROP_STRICT` is set. `Conn::respond`'s stop-at-first-Busy path is untested by any external client.
 use server::*;
 use std::process::Command;
 
