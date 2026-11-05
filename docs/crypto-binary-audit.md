@@ -290,7 +290,7 @@ The object from the suggested `cargo rustc --release -p crypto --lib -- --emit=o
 - **Primary evidence:** the 5 `.rcgu.o` members of `libcrypto-*.rlib` from a plain workspace `cargo build --release`. All addresses below are from these.
 - **Secondary:** the 1-CGU object was also read. Same verdicts. Functions whose text matched after normalising addresses carry that reading over.
 - **Profile:** `[profile.release]` sets only `overflow-checks`; `crypto` sets it false. No `lto`, `codegen-units` or `opt-level` override, so opt-level 3 and no cross-crate LTO.
-- **Real binary:** none exists on main. The only `main.rs` is `tools/ct-driver`. No `[[bin]]`. With LTO off, a future binary links these objects unchanged, unless its profile changes.
+- **Real binary:** `crates/server`'s binary (since 3e) is the only one besides `tools/ct-driver`'s. With LTO off, it links these objects unchanged, unless its profile changes.
 - **Cross-crate inlining:** `nm` on the `tls` and `quic` rlibs shows no locally defined `crypto::` symbol. `tls` calls `p256_ecdsa_sign`, `serialize_ecdsa_der`, `hkdf_expand`, `hkdf_extract`, `hmac_sha256`, `p256_ecdh`, `p256_public_key`, `rsa_pss_sha256_sign`, `sha256` as external symbols.
 - **No in-workspace GCM caller:** neither `tls` nor `quic` references `crypto::gcm` or `crypto::aes` in the release objects, so priority 1 is not yet reachable from released code.
 

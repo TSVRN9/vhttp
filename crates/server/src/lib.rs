@@ -9,7 +9,7 @@ use quic::route::{route, CidTable, ConnId, Route};
 use quic::tp::{default_transport_params, TransportParams};
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::time::{Duration, Instant};
 
 pub const MAX_POLLS: usize = 1024;
@@ -61,16 +61,31 @@ fn setopt(fd: i32, level: i32, name: i32, val: i32) -> io::Result<()> {
 //# An endpoint MUST NOT increase the PMTU based on ICMP messages; see
 //# Item 6 in Section 3 of [DPLPMTUD].
 /// A UDP socket on `addr` with the Don't Fragment bit set (IPv4 `IP_PMTUDISC_PROBE`; IPv6
-/// `IPV6_PMTUDISC_PROBE` and `IPV6_DONTFRAG`); a failed `setsockopt` is an error.
-// ponytail: a dual-stack [::] socket's v4-mapped traffic gets no IPv4 DF; bind v4 and v6 separately if both are needed.
+/// `IPV6_PMTUDISC_PROBE`, `IPV6_DONTFRAG` and `IPV6_V6ONLY`, so no v4-mapped traffic escapes DF); a failed `setsockopt` is an error.
 pub fn bind(addr: SocketAddr) -> io::Result<UdpSocket> {
-    let s = UdpSocket::bind(addr)?;
-    let fd = s.as_raw_fd();
-    if addr.is_ipv4() {
-        setopt(fd, libc::IPPROTO_IP, libc::IP_MTU_DISCOVER, libc::IP_PMTUDISC_PROBE)?;
-    } else {
-        setopt(fd, libc::IPPROTO_IPV6, libc::IPV6_MTU_DISCOVER, libc::IPV6_PMTUDISC_PROBE)?;
-        setopt(fd, libc::IPPROTO_IPV6, libc::IPV6_DONTFRAG, 1)?;
+    let SocketAddr::V6(a) = addr else {
+        let s = UdpSocket::bind(addr)?;
+        setopt(s.as_raw_fd(), libc::IPPROTO_IP, libc::IP_MTU_DISCOVER, libc::IP_PMTUDISC_PROBE)?;
+        return Ok(s);
+    };
+    // IPV6_V6ONLY must precede bind, so the socket is made by hand; the fd is owned from here.
+    let fd = unsafe { libc::socket(libc::AF_INET6, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let s = unsafe { UdpSocket::from_raw_fd(fd) };
+    setopt(fd, libc::IPPROTO_IPV6, libc::IPV6_V6ONLY, 1)?;
+    setopt(fd, libc::IPPROTO_IPV6, libc::IPV6_MTU_DISCOVER, libc::IPV6_PMTUDISC_PROBE)?;
+    setopt(fd, libc::IPPROTO_IPV6, libc::IPV6_DONTFRAG, 1)?;
+    let mut sa: libc::sockaddr_in6 = unsafe { std::mem::zeroed() };
+    sa.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+    sa.sin6_port = a.port().to_be();
+    sa.sin6_addr.s6_addr = a.ip().octets();
+    sa.sin6_flowinfo = a.flowinfo();
+    sa.sin6_scope_id = a.scope_id();
+    let p = &sa as *const libc::sockaddr_in6 as *const libc::sockaddr;
+    if unsafe { libc::bind(fd, p, std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t) } < 0 {
+        return Err(io::Error::last_os_error());
     }
     Ok(s)
 }
@@ -139,7 +154,7 @@ struct Conn {
     addrs: Vec<SocketAddr>,
 }
 
-type Send = Vec<(Vec<u8>, SocketAddr)>;
+type Outbox = Vec<(Vec<u8>, SocketAddr)>;
 
 /// The socket-free server: datagrams and wake-ups in, datagrams out.
 // ponytail: linear scans over conns and route's CID/token lists (<= MAX_CONNS = 102 connections; route costs <= 512 CID and 816 CT token comparisons per datagram); a random-keyed SipHash index before production, never a sorted Vec (it leaks token order, §10.3.1). Connections are capped by route's has_room (MAX_CONNS), counted at the first applied Add, which service applies before the next datagram; nothing is evicted, and RFC 9000 §10.1's 3*PTO floor lets a peer hold a slot up to 55.6 min (3d2 note), which admission must plan for. A.1-only keys allow one connection in 3e.
@@ -171,7 +186,7 @@ impl Server {
         self.conns.iter().filter_map(|c| c.conn.next_timeout()).min()
     }
 
-    pub fn on_datagram(&mut self, d: &[u8], from: SocketAddr, now: u64, send: &mut Send) -> io::Result<()> {
+    pub fn on_datagram(&mut self, d: &[u8], from: SocketAddr, now: u64, send: &mut Outbox) -> io::Result<()> {
         // The sole version_negotiation call site (RFC 9000 §17.2.1) is route.
         match route(d, &self.table) {
             Route::VersionNegotiation(v) => send.push((v, from)),
@@ -216,7 +231,7 @@ impl Server {
     }
 
     /// Fires the due timers, then services every connection.
-    pub fn on_wake(&mut self, now: u64, send: &mut Send) -> io::Result<()> {
+    pub fn on_wake(&mut self, now: u64, send: &mut Outbox) -> io::Result<()> {
         let mut i = 0;
         while i < self.conns.len() {
             if matches!(self.conns[i].conn.next_timeout(), Some(t) if t <= now) {
@@ -236,7 +251,7 @@ impl Server {
 
     /// In `settled_later`'s order: the CID updates, then the datagrams, then the removal of a
     /// closed connection. Returns whether the connection at `i` was removed.
-    fn service(&mut self, i: usize, now: u64, send: &mut Send) -> bool {
+    fn service(&mut self, i: usize, now: u64, send: &mut Outbox) -> bool {
         let c = &mut self.conns[i];
         let mut ups = Vec::new();
         c.conn.poll_cid_updates(&mut ups);
@@ -269,7 +284,7 @@ impl Server {
     }
 }
 
-fn send_all(sock: &UdpSocket, send: &mut Send) {
+fn send_all(sock: &UdpSocket, send: &mut Outbox) {
     for (b, to) in send.drain(..) {
         let _ = sock.send_to(&b, to); // UDP: a lost datagram is the protocol's business
     }
