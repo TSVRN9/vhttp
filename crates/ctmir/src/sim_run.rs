@@ -560,6 +560,11 @@ proof fn lemma_rf_call(p: c::Program, f: nat, bb: nat, fc: Frame, fuel: nat)
         }
     }),
 {
+    hide(ctcore::sem::run_from);
+    hide(ctcore::sem::exec_stmts);
+    hide(ctcore::sem::exec_intr);
+    hide(ctcore::sem::call_enter);
+    hide(ctcore::sem::call_leave);
     let blk = p.fns@[f as int].blocks@[bb as int];
     let (f1, t1) = ctcore::sem::exec_stmts(blk.stmts@, 0, fc);
     if blk.term->Call_0 is Fn {
@@ -581,7 +586,12 @@ proof fn lemma_rf_call(p: c::Program, f: nat, bb: nat, fc: Frame, fuel: nat)
 proof fn lemma_lb_entry(m: MirCrate, pol: Policy, ord: Seq<usize>, j: nat, cb: c::Body, r: Seq<bool>)
     requires lowers_body(m, pol, ord, j, cb, r),
     ensures r.len() > 0 && r[0], inst_body(m, j) is Some, inst_body(m, j)->Some_0.locals@.len() <= cb.locals@.len(),
+        forall|k: int| 0 <= k < inst_body(m, j)->Some_0.locals@.len() ==> !ul_arr(m, #[trigger] inst_body(m, j)->Some_0.locals@[k].ty),
 {
+    let b = inst_body(m, j)->Some_0;
+    assert forall|k: int| 0 <= k < b.locals@.len() implies !ul_arr(m, #[trigger] b.locals@[k].ty) by {
+        assert(lowers_ty(m, b.locals@[k].ty, cb.locals@[k], tyf()));
+    }
 }
 
 /// `step_term` of a call or a drop.

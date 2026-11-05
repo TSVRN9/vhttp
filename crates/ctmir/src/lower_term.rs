@@ -321,6 +321,11 @@ pub fn lower_call(m: &MirCrate, pol: &Policy, order: &Vec<usize>, keys: &mut Key
         if matches!(dest.projection[q], ProjectionElem::Deref) { return Err(uns(s, msg(b"a call into a place behind a reference"))); }
         q += 1;
     }
+    if let Some(dt) = x_place_ty(m, b, dest) {
+        let tf = match x_tfuel(m) { Some(tf) => tf, None => return Err(uns(s, msg(b"too many types"))) };
+        // a ghost result there is structural in sem, `Unit` in core
+        if x_ul_arr(m, dt, tf) { return Err(uns(s, msg(b"a call into a place of a unit-like type holding an array"))); }
+    }
     let ghost t0 = *tmp;
     if leaf {
         if !x_leaf_ok(m, pol, key, ga, args.len(), x_place_ty(m, b, dest)) {
@@ -367,7 +372,7 @@ proof fn lemma_call_post(m: MirCrate, pol: Policy, ord: Seq<usize>, b: Body, t: 
         callee_of(m, t->Call_func) matches Some((jj, g)) && jj == j && j < m.insts@.len() && {
             let key = m.insts@[j as int].key@;
             &&& ct is Call && ct->Call_3 == t->Call_target->Some_0
-            &&& lowers_place(m, b, t->Call_destination, ct->Call_2, true) && dest_ok(t->Call_destination)
+            &&& lowers_place(m, b, t->Call_destination, ct->Call_2, true) && dest_ok(t->Call_destination) && dest_ul_ok(m, b, t->Call_destination)
             &&& grew(t0, t2) && lowers_ops(m, b, t->Call_args@, ct->Call_1@, seg(t0, t2), tbase(t0)) && ops_ok(m, b, t->Call_args@)
             &&& if is_leaf(m, cpol(pol), key, g) {
                 ct->Call_0 is Intr && intr_of(m, cpol(pol), key, g) == Some(ct->Call_0->Intr_0)

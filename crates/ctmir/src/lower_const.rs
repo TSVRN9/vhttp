@@ -1003,7 +1003,9 @@ pub fn x_const(m: &MirCrate, k: &ConstOperand, tmp: &mut Tmp) -> (r: Result<c::O
             let tf = match x_tfuel(m) { Some(tf) => tf, None => return Err(msg(b"too many types")) };
             let _ct = lower_ty(m, t, TYF)?;
             proof { assert(lowers_ty(*m, t, _ct, tyf())); }
-            if x_unit_like(m, t, tf, true) { Ok(c::Operand::Lit(c::ConstVal::Unit)) } else { Err(msg(b"a zero-sized constant of a non-unit-like type")) }
+            if !x_unit_like(m, t, tf, true) { return Err(msg(b"a zero-sized constant of a non-unit-like type")); }
+            if x_ul_arr(m, t, tf) { return Err(msg(b"a zero-sized constant of a unit-like type holding an array")); }
+            Ok(c::Operand::Lit(c::ConstVal::Unit))
         },
         ConstantKind::Allocated(a) => {
             let df = match x_dfuel(m) { Some(f) => f, None => return Err(msg(b"too many types")) };

@@ -239,7 +239,8 @@ pub open spec fn lowers_const(m: MirCrate, k: ConstOperand, y: c::Operand, pre: 
     let t = k.const_.ty;
     &&& const_val(m, k) matches Some((_, ch)) && pre.len() == ch
     &&& match k.const_.kind {
-        ConstantKind::ZeroSized => y is Lit && y->Lit_0 is Unit && exists|ct: c::Ty| #[trigger] lowers_ty(m, t, ct, tyf()),
+        // a unit-like type holding an array keeps its structural value in sem (`ul_val`)
+        ConstantKind::ZeroSized => y is Lit && y->Lit_0 is Unit && !ul_arr(m, t) && exists|ct: c::Ty| #[trigger] lowers_ty(m, t, ct, tyf()),
         ConstantKind::Allocated(a) => if charged(m, t) { lowers_cv(m, t, a, 0, dfuel(m), y, pre, base) }
             else { lit_img(m, t, a, 0, dfuel(m), y) },
         _ => false,
@@ -416,7 +417,7 @@ pub open spec fn lowers_call(m: MirCrate, pol: Policy, ord: Seq<usize>, b: Body,
     tb: BasicBlockIdx, pre: Seq<c::Stmt>, base: nat, ct: c::Term) -> bool
 {
     callee_of(m, func) matches Some((j, g)) && j < m.insts@.len() && ct is Call && ct->Call_3 == tb
-    && lowers_place(m, b, dest, ct->Call_2, true) && dest_ok(dest) && lowers_ops(m, b, args, ct->Call_1@, pre, base)
+    && lowers_place(m, b, dest, ct->Call_2, true) && dest_ok(dest) && dest_ul_ok(m, b, dest) && lowers_ops(m, b, args, ct->Call_1@, pre, base)
     && if is_leaf(m, cpol(pol), m.insts@[j as int].key@, g) {
         ct->Call_0 is Intr && intr_of(m, cpol(pol), m.insts@[j as int].key@, g) == Some(ct->Call_0->Intr_0)
             && (cpol(pol).declassify.contains(m.insts@[j as int].key@) ==> declass_arg_ok(m, b, args))
@@ -439,7 +440,7 @@ pub open spec fn plain_ty(m: MirCrate, t: Ty, fuel: nat) -> bool
 }
 
 /// A declassify's one argument is plain: `Declass(v)` carries the value, and a unit-like value
-/// (or component) is `Unit` in core but `unit_like` in MIR.
+/// (or component) has two forms, chosen by its producer.
 pub open spec fn declass_arg_ok(m: MirCrate, b: Body, args: Seq<Operand>) -> bool {
     args.len() == 1 && op_ty(m, b, args[0]) is Some && plain_ty(m, op_ty(m, b, args[0])->Some_0, tfuel(m))
 }
@@ -451,6 +452,10 @@ pub open spec fn no_index(p: Place) -> bool { forall|k: int| 0 <= k < p.projecti
 pub open spec fn dest_ok(p: Place) -> bool {
     forall|k: int| 0 <= k < p.projection@.len() ==> !(#[trigger] p.projection@[k] is Index) && !(p.projection@[k] is Deref)
 }
+
+/// A call destination's type is not a unit-like type holding an array (a ghost result there is
+/// structural in sem, `Unit` in core).
+pub open spec fn dest_ul_ok(m: MirCrate, b: Body, p: Place) -> bool { !(place_ty(m, b, p) matches Some(t) && ul_arr(m, t)) }
 
 /// `Drop` through its `drops` row: an empty shim or the `Vec<int>` leaf is a `Goto`; other glue is
 /// `x = &mut place` (in `pre`) and a call of the glue's core fn on `x` into a fresh unit temp.
@@ -513,14 +518,15 @@ pub open spec fn ord_set(ord: Seq<usize>) -> Set<nat> { ord.map_values(|j: usize
 
 /// Core body `cb` is the image of `insts[j]` with reachable blocks `r` (marks): that body is in
 /// the subset (`body_in`'s conditions, block by block), locals map 1:1 by `lowers_ty`, a reachable
-/// block by `lowers_block`, an unreachable one is an empty `Abort` block.
+/// block by `lowers_block`, an unreachable one is an empty `Abort` block. No local has a unit-like
+/// type holding an array (its entry value is structural in sem, `Unit` in core).
 pub open spec fn lowers_body(m: MirCrate, pol: Policy, ord: Seq<usize>, j: nat, cb: c::Body, r: Seq<bool>) -> bool {
     inst_body(m, j) matches Some(b) && {
         let nloc = b.locals@.len();
         let ncore = cb.locals@.len();
         &&& b.spread_arg is None && sig_ok(m, b) && locals_ok(m, b)
         &&& cb.nargs == b.arg_count && nloc <= ncore && cb.blocks@.len() == b.blocks@.len() && r.len() == b.blocks@.len()
-        &&& forall|k: int| 0 <= k < nloc ==> lowers_ty(m, #[trigger] b.locals@[k].ty, cb.locals@[k], tyf())
+        &&& forall|k: int| 0 <= k < nloc ==> lowers_ty(m, #[trigger] b.locals@[k].ty, cb.locals@[k], tyf()) && !ul_arr(m, b.locals@[k].ty)
         &&& r.len() > 0 && r[0]
         &&& forall|bb: int| 0 <= bb < r.len() ==> #[trigger] block_rel(m, pol, ord, b, nloc, ncore, r, b.blocks@[bb], cb.blocks@[bb], r[bb])
     }
