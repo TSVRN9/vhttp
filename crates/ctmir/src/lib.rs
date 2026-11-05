@@ -12,6 +12,9 @@ global size_of usize == 8;
 
 } // verus!
 
+pub mod interp;
+pub mod interp_arith;
+pub mod interp_val;
 pub mod json;
 pub mod json_inj;
 pub mod look;
@@ -37,3 +40,4 @@ pub mod sim_rv;
 pub mod sim_run;
 pub mod sim_stmt;
 pub mod text;
+pub mod vectors;
