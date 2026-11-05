@@ -1,6 +1,143 @@
 # Binary constant-time audit of crates/crypto (main at e6c1c00)
 
-**Status at 8b32220.** The body below is the audit of e6c1c00, unedited. Since then the shim is deleted (F2 and G1 are obsolete; the "Phase 5" deployment line it quotes is superseded by TRUSTED's RSA row). F1 is closed by `#[inline(never)]` on `scalar_in_range`. The shipped rlib is now 2 units; 7 of the 30 functions changed and were re-read, the other 23 have the same opcodes. The RSA read is the next section.
+**Status at 8b32220.** The body below is the audit of e6c1c00, unedited. Since then the shim is deleted (F2 and G1 are obsolete; the "Phase 5" deployment line it quotes is superseded by TRUSTED's RSA row). F1 is closed by `#[inline(never)]` on `scalar_in_range`. The shipped rlib is now 2 units; 7 of the 30 functions changed and were re-read, the other 23 have the same opcodes. The RSA read is the next section. Where the bodies below say verify.sh re-checks none of this, they predate the gate in the next section. Where they say no timing was measured, they predate "Timing tests" below.
+
+## Gate (Phase 7a)
+
+`scripts/ct-binary.sh`, run by `verify.sh`, which prints `binary ok (<n> fns)`. It detects change in the object code read here, not leaks: a passing gate means the shipped code is the code read, not that the code is constant time. Nothing mechanical ties `--update` to a read beyond the commit tripwire below: the read itself is on trust.
+
+**What it checks.**
+
+- It runs the recipe's build: a plain workspace `cargo build --release --locked`, in `target/ct-binary` (fixed, not configurable). The dir is kept warm behind a content stamp: a sha256 over every non-test file under `crates/` (`crates/*/tests` and `crates/*/target` excluded), `Cargo.toml`, `Cargo.lock` and `rust-toolchain.toml`. Any change to that content wipes the dir, so the build is fresh whenever a source changed, whatever its mtime (cargo alone trusts mtimes for path packages). Otherwise the build is warm, and cargo's fingerprints cover toolchain and profile changes.
+- It refuses to run if `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_*`, `CARGO_PROFILE_*`, `CARGO_TARGET_*_RUSTFLAGS`, `CARGO_INCREMENTAL`, `RUSTC` or a `RUSTC_*WRAPPER` is set. It does not look at cargo config files, `CARGO_HOME` or `RUSTUP_TOOLCHAIN` (none is in use today). In normal mode a build they change shows as a digest diff, but `--update` would record it as if it were the shipped build.
+- The rlib holds only `lib.rmeta`, `lib.rmeta-link` and `.rcgu.o` units, and the unit count equals the `units` line of `docs/crypto-binary-digests.txt`, today 2. The `objdump` line records `objdump --version`, because the digests hash objdump's text: a binutils update (a distro rebuild included, since the line carries the package release) can move every digest with no code change, and the message then points to update protocol step 7.
+- It disassembles each unit with `objdump -dr --no-show-raw-insn -C`, splits the output per function symbol and normalises each function. It then diffs one `<sha256> <symbol>` line per function against `docs/crypto-binary-digests.txt`. That covers every function in both units, 49 at 8b32220's source: the 30 non-RSA functions, the RSA and bignum functions, and the 9 `alloc`/`vstd` instantiations (read below).
+- Normalisation:
+  - drops the file-format and section headers, which carry paths and mangled crate hashes;
+  - drops each line's offset column and objdump's `# ...` comments;
+  - strips `.llvm.N` suffixes, the per-unit hash in `anon.<hash>.N` and `.Lanon.<hash>.N`, and the function ordinal in `.LCPI<k>_N`;
+  - squeezes blanks.
+
+  Opcodes, operands (function-relative jump and call targets included) and relocations stay. Section-symbol relocations (`.text._RNv...`) keep the mangled crate hash, and the `anon.N`/`.Lanon.N` counters stay: both fail closed.
+- Dependents: every other workspace rlib in `target/ct-binary/release/` (its `.rcgu.o` units only) must define no symbol whose path contains `crypto::`, and its sorted `U crypto::` references are tracked as the `U <crate> <symbol>` block of the digests file (12 lines: 9 `tls`, 3 `quic` since Phase 3e). A reference that disappears means a call became inlined code.
+- Structural checks run in every mode, `--update` included, which refuses to write the file if any fails:
+  - `crypto::bignum::ct_mask` is one out-of-line function, and its body is `mov`/`neg`/`ret`;
+  - `crypto::p256::scalar_in_range` is one out-of-line function (F1);
+  - the call sites read above, as `R_X86_64_PLT32` relocations against the symbol or its `.text` section: `ct_mask` at least 8 times in `rsa_pss_sha256_sign` and once each in `cond_sub` and `select_n`; `scalar_in_range` once each in `p256_public_key` and `p256_ecdh`, twice in `p256_ecdsa_sign`;
+  - no dependent defines a `crypto::` symbol;
+  - at least one dependent rlib was read, and the `U` block has `tls` lines, so `--update` cannot write a digests file without them.
+- Commit tripwire: the last commit touching `docs/crypto-binary-digests.txt` also touches this doc, and an uncommitted change to the digests file comes with one to this doc.
+- Once the build has run, every check is reported, not only the first failure, and each message names what to re-read. The pre-checks (tools, environment, build, rlib members, unit count zero, the digest count) stop at the first failure. A missing tool, a build failure or no `.rcgu.o` member fails the gate.
+
+**What it does not check.**
+
+- Leaks. A function whose digest is unchanged carries its earlier reading, nothing more. That reading has the limits stated in its section: tiers, loop-shape tracing, not dudect.
+- Data. Only executable sections are hashed. A constant or table in `.rodata` or `.data.rel.ro` is covered only through the relocations that reference it, not by its contents. Contents change values, not which addresses are touched or which branches run; jump tables and indexed lookups show in the hashed code.
+- Other builds: LTO, `codegen-units`, `target-cpu`, other targets, and a linked binary (`crates/server`'s, since 3e).
+- Code inlined into a dependent from its first build. `nm` sees only out-of-line copies and the references that remain, so a new call to crypto that is inlined from the start leaves no trace. Protocol step 2 covers it.
+- tls's own constant-time sites read above (`ct_eq32` inlined into `on_crypto`, the zero-share check in `build_flight`) are not hashed: a change to them is not detected.
+- Toolchain and profile are not checked separately. A change to either is expected to show as a digest change.
+
+**Update protocol.**
+
+1. When the gate fails on a digest, the diff lists the changed, added and removed symbols. The script leaves the full dump and the per-function text in `target/ct-binary/ct-binary/`.
+2. Read every changed or added symbol per the Recipe (under "RSA object read"). Read it at least at the tier of its earlier reading, and whole if it is new or it calls `ct_mask` or `scalar_in_range`. Earlier tiers are recorded in four places: the Coverage table (the 30 non-RSA functions), "Jump classes, shipped rlib" (RSA and bignum), "Non-RSA symbols re-read" (the 7 re-read and `scalar_in_range`) and Gate records (the 9 instantiations, which need tier B, every jump and its flag producer, or a whole read). Tier C means re-running the criteria listed under Coverage; the script itself is not in the repo. A changed `units` line means every function is re-read. For a new or changed `pub fn` of crypto, confirm it appears as `U crypto::...` in its dependents' block. A removed `U` line: confirm in the dependent's source that the call is gone; otherwise it was inlined, so read the inlined code in the dependent's caller per the Recipe and record it.
+3. Record the read in this doc: date, commit, toolchain, the symbols and their verdicts.
+4. Then run `scripts/ct-binary.sh --update`, and commit the digests file together with the read.
+
+   4a. If a changed symbol is a timed target or is inlined into one, rerun the timing tests per "Timing tests" and record the run.
+5. A structural failure is not cleared by `--update`. Restore the barrier in the source, or change the check in the script in a reviewed commit that carries a fresh read.
+6. A change to the normalisation alone (the script, not the code) may be re-digested without a fresh read, provided the recipe's whole-dump md5 is unchanged and the old rules applied to the new build reproduce the old digests. Record both in this doc. This does not cover an `objdump` change: both conditions hash objdump's own text. Use step 7 for that.
+7. `objdump` only (the gate reports a new `objdump` line). Identical `.text` bytes are not enough: in a relocatable object every call and data reference is a zero displacement plus a relocation entry.
+   1. Build the commit that last wrote the digests file (`git log -1 --format=%H -- docs/crypto-binary-digests.txt`) in a scratch worktree, with the same toolchain, as the Recipe builds it.
+   2. `cmp` each of its extracted `.rcgu.o` units against the same-named unit of the current build (`target/ct-binary/ct-binary/`). Whole objects, so the relocation tables are compared too.
+   3. If every unit is identical, the code is the code read: run `--update` with no read. Record in Gate records the new `objdump` line, the recipe's whole-dump md5 under the new objdump, and the commit compared against.
+   4. Otherwise, read per step 2 every symbol whose digest changed.
+
+### Gate records
+
+- **2026-11-03, b3b5d8a (crates/crypto source as at 8b32220), rustc 1.98.1, GNU objdump 2.46.1.** Normalisation-only re-digest (step 6): `.Lanon.<hash>.N` lost its unit hash, and the `objdump` line and the `U` block were added. The recipe's md5 on the gate's own units is still `a247bd0fc9216f57f9ba2fe5fc376e88`, and the previous rules applied to this build reproduce the previous 49 digest lines byte for byte.
+- **2026-11-03, b3b5d8a, same toolchain.** Whole read of the 9 `alloc`/`vstd` instantiations (each at most 52 instructions). Every conditional jump below is on a length, a capacity, an index or an allocator result. Under spec D7 and the MIR leakage model, lengths, capacities (allocation sizes), indices and subslice bounds are public, and allocation failure is a public abort. The indirect `call/jmp *0x0(%rip)` are GOT loads of fixed symbols. **Clean.**
+
+  | Instantiation | Instructions | Jumps (conditional + `jmp`) | Each conditional jump and its flag producer |
+  |---|---|---|---|
+  | `vstd::slice::slice_subrange::<u8>` | 16 | 2 + 0 | `sub %rdx,%rdi; jb` end < start; `cmp %rsi,%rcx; ja` end > len. Both to `slice_index_fail` |
+  | `RawVecInner::reserve::do_reserve_and_handle` | 32 | 2 + 0; 2 cmov | `add %rdx,%rsi; jb` len + additional overflows; `cmpl $0x1,(%rsp); je` `finish_grow` returned Err. `cmova`/`cmovae` are max(2 cap, required) and max(8, ...) |
+  | `RawVecInner::finish_grow` | 42 | 5 + 3 | `test %rcx,%rcx; js` new size > isize::MAX; `test %rsi,%rsi; je` no old allocation (alloc vs realloc); `test %rax,%rax; jne` realloc result; `test %r14,%r14; je` size 0; `test %rax,%rax; jne` alloc result. The one indexed store `mov %r14,(%rbx,%rax,1)` has `%rax` = 8 or 16, set from constants on each path |
+  | `RawVecInner::try_allocate_in` | 52 | 5 + 3 | `mul %rsi; seto; cmp; seta; or; je` capacity x element size overflows or exceeds isize::MAX - align; `test %r15,%r15; je` size 0; `test %bpl,%bpl; je` zeroed or not (the caller's init kind); `test %rax,%rax; je`, `test %rax,%rax; jne` allocator results. `mul` multiplies the capacity by the element size |
+  | `Vec<u8>::reserve` | 7 | 1 + 0 | `cmp %rax,%rdx; ja` additional > cap - len, a tail jump to `do_reserve_and_handle` |
+  | `VecAdditionalExecFns::set` | 11 | 1 + 0 | `cmp %rax,%rsi; jae` i >= len, to `panic_bounds_check`. The store `mov %dl,(%rax,%rsi,1)` is at index i, the caller's index (an index event in the MIR model) |
+  | `RawVec<u8>::drop` | 7 | 1 + 1 | `test %rsi,%rsi; je` capacity 0, else a tail jump to `__rust_dealloc` |
+  | `Vec<u8>::drop` | 1 | 0 | `ret` |
+  | `drop_glue::<Vec<u8>>` | 7 | 1 + 1 | Same instructions as `RawVec<u8>::drop` |
+
+- **2026-11-03, this commit on base 7e95f7f, rustc 1.98.1, GNU objdump 2.46.1.** Dependent added: quic (Phase 3e Task 1, `quic::hp::hp_mask`), 1 `U` line (`U quic crypto::aes::aes128_encrypt_block`), no `D` line, digests unchanged. Protocol step 2: the line is `U`, a call (`nm -C libquic.rlib` shows no defined `crypto::` symbol, so nothing was inlined); no crypto symbol changed, so no symbol read is due.
+- **2026-11-03, this commit on base 7e95f7f, rustc 1.98.1, GNU objdump 2.46.1.** Dependent extended: quic (Phase 3e Task 2, `quic::aead::{seal_packet, open_packet}`), 2 `U` lines (`U quic crypto::gcm::aes128_gcm_open`, `U quic crypto::gcm::aes128_gcm_seal`), no `D` line, digests unchanged. Protocol step 2: both lines are `U`, calls (`nm -C libquic.rlib` shows no defined `crypto::` symbol, so nothing was inlined); no crypto symbol changed, so no symbol read is due.
+
+## Timing tests (Phase 7a)
+
+`crates/crypto/tests/dudect.rs`, dudect-style, std only. Every target test is `#[ignore]`d: the tests run by hand and are not in `verify.sh`. crypto has no `libc` dev-dependency, so `taskset` does the pinning, and every result line prints the allowed CPUs and the load average. Pick a P-core (CPUs 0-3 on this machine):
+
+```sh
+cargo test --release -p crypto --test dudect --no-run
+taskset -c 2 cargo test --release -p crypto --test dudect -- --ignored --nocapture --test-threads 1
+scripts/ct-binary.sh && cmp target/release/deps/libcrypto-*.rlib target/ct-binary/release/libcrypto.rlib   # timed code = gated code
+```
+
+Each run fails unless `/proc/self/status`'s `Cpus_allowed_list` is a single CPU. The `cmp` needs exactly one `libcrypto-*.rlib` in `target/release/deps`; if there are several, compare the one the test binary linked.
+
+**When to run.** By hand, after any gate digest update that touches a timed symbol or its callees, and on any new CPU or toolchain the server ships on. Record each run here.
+
+**Harness.**
+
+- There are two classes, fixed and random. A fixed-seed xorshift draws the class for each call, so the classes interleave, and it also draws the random inputs. Inputs are built in batches of 100 outside the timed region; for the fixed class, the batch slot gets a copy of the fixed input. One warm-up batch is discarded.
+- Each call is timed with `lfence; rdtsc` on both sides (with `Instant` off x86-64). TSC ticks are invariant ticks, not core cycles.
+- Every measurement above the pooled 95th percentile is dropped. Welch's t is computed on the rest, with Welford's means and variances. The harness measures until at least `n` measurements survive the crop.
+- Verdict: a target fails at |t| > 10, and a NaN fails too. The test is first-order with one crop: dudect proper also tests several crop percentiles and a second-order (variance) statistic, and this harness does neither.
+- The control runs first, in the same process and harness, before every target. It is `leaky_eq`, an early-exit 16-byte compare (`black_box` per byte), fixed = equal input, random = random input, at 10^6 measurements. It must give |t| > 10, or the target's verdict does not count.
+- `10 SE` is ten standard errors of the mean difference. A true difference of 10 SE is flagged with about even odds; about 12 SE is needed for 95% detection.
+- What a pass bounds: the fixed-versus-random class mean for one fixed secret, not leak size. A leak that averages equally over typical secrets is not detected at any n. For example, a cost linear in Hamming weight: the fixed P-256 d has popcount 128, exactly the expected value, and the fixed RSA d is within 1σ of the random keys' mean.
+
+**Targets.** One secret varies, and everything else is fixed.
+
+| Target | Secret varied (fixed vs random) | n kept |
+|---|---|---|
+| `aes128_encrypt_block` | key; block fixed | 10^6 |
+| GHASH, through `aes128_gcm_seal` (`gf128_mul_exec` is private) | key, so H = E_K(0); 16 KiB AAD, no plaintext, so 1025 multiplies by H, plus key expansion and two AES blocks | 10^6 |
+| tag compare, through `aes128_gcm_open` | key fixed; both classes are wrong tags: the fixed one is wrong in byte 15, the random one in a random byte by a random nonzero xor | 10^6 |
+| `p256_ecdsa_sign` | d (fixed: RFC 6979 A.2.5's key; random: 32 random bytes, out of [1, n-1] with probability about 2^-32); msg fixed | 10^6 |
+| `p256_ecdh` | d, as above; peer a fixed valid point | 10^6 |
+| `rsa_pss_sha256_sign`, 2048 bits | d over 65 valid key pairs with RFC 9500's n: d = e^-1 mod lcm(p-1, q-1), fixed e = 65537, random one of 64 precomputed keys with a random odd e < 2^33 (not a fresh d per call). Each key is checked by signing and verifying with RustCrypto. d is zero-padded to 256 octets, as the loader must do: `pad_be`'s cost depends on d's encoded length, which is public under D7. msg and salt fixed | 10^4, a choice: a signature takes about 6 ms, so 10^6 would take about 100 min (P-256 ran 10^6 at a similar cost; at 10^6 RSA's floor would be about 2.3 µs) |
+
+**Power.** The control's gap is about 6 ticks, on a 60-tick call. On a target the noise grows with the call's length, so a pass says only that the class means differ by less than about that run's 10 SE (see Harness for the odds). To check the tag compare at its own scale, `gcm_open_tag_compare` adds a probe with no verdict: the same calls followed by `leaky_eq` on the tag. Its gap is about 3 ticks, against a 10 SE of about 35. It gave |t| 1.01, so **this test cannot see a 16-byte early-exit compare inside `aes128_gcm_open`**. The tag compare's evidence for constant time is the MIR proof plus the object read; the timing test bounds only larger leaks. **No leak was planted at the P-256 or RSA scale**: their floors (2.4-3.1 µs, 23 µs) come from the SE alone. The RSA test is not shown to detect `ct_mask`'s historical failure, and structurally is unlikely to: the branch chooses between equal-cost copies. The gate's `ct_mask` and call-site checks, shown to fail when `#[inline(never)]` is removed, are the check for it. Its signal would be a difference in mispredict counts, of order 10^2-10^3 cycles against a 23 µs floor.
+
+**Not covered:**
+
+- other CPUs and microarchitectures, including this CPU's E-cores (4-7);
+- data-dependent frequency (Hertzbleed-style). With an invariant TSC, scaling that does not depend on the data shows only as noise, and per-call interleaving smears DVFS effects across both classes;
+- SMT: this CPU has 1 thread per core, so it is untestable here;
+- cache attacks beyond the dudect signal: one process, warm caches, no co-resident attacker;
+- leaks below each run's 10 SE, and leaks that average equally over typical secrets (no atypical, e.g. low-weight, fixed secret was run);
+- leaks confined to the cropped top 5%, or to the variance alone (one crop, first-order test only);
+- the timing of SHA-256, HMAC, HKDF and `p256_public_key`;
+- every non-crypto secret path (TRUSTED's CT check scope row).
+
+### Timing records
+
+- **2026-11-03, tree 0b846ce plus the test file (crates/crypto source as at 8b32220, gate digests unchanged), rustc 1.98.1, Intel Core Ultra 7 258V (Lunar Lake; P-cores 0-3, no SMT).** The timed `libcrypto` rlib is byte-identical to the gate's (`cmp`, checked after the run by the Task 2 review and again on 2026-11-03 before fix round 1); the timed regions call all six targets out of line (the review's disassembly of the test binary). The runs went in parallel on P-cores 1, 2 and 3, one `taskset -c` process each, with the documented command filtered by test name. Load is the 1-minute average at start and end. It includes these three runs, so about 3 when all three were going. The TSC runs at about 3.3 GHz (ticks over wall time). **All pass.**
+
+  | Target | n measured / kept | \|t\| | Mean fixed / random (ticks) | 10 SE (ticks) | Wall | CPU | Load |
+  |---|---|---|---|---|---|---|---|
+  | control, before each target | 1052700 / 1009938-1041064 | 280.72-329.85 | 63.1-70.3 / 57.4-63.1 | 0.2 | 0.1 s | 1, 2, 3 | 1.36-3.36 |
+  | `aes128_encrypt_block` | 1052700 / 1001478 | 0.89 | 39411.3 / 39409.6 | 19.6 | 12.7 s | 1 | 1.36 -> 1.72 |
+  | GHASH via `aes128_gcm_seal` | 1052700 / 1000112 | 0.27 | 610087.3 / 610095.0 | 280.3 | 195.2 s | 1 | 2.57 -> 3.36 |
+  | tag compare via `aes128_gcm_open` | 1052700 / 1000879 | 0.77 | 71822.7 / 71820.2 | 33.4 | 23.1 s | 1 | 1.72 -> 2.30 |
+  | (probe: + planted early exit) | 1052700 / 1000450 | 1.01 | 71921.4 / 71917.8 | 35.5 | 23.1 s | 1 | 2.30 -> 2.57 |
+  | `p256_ecdsa_sign` | 1052700 / 1000066 | 0.84 | 17001636.2 / 17000967.1 | 7980.0 | 5450.5 s | 2 | 1.39 -> 1.21 |
+  | `p256_ecdh` | 1052700 / 1000066 | 0.43 | 16597248.1 / 16597682.6 | 10173.3 | 5322.7 s | 3 | 1.36 -> 2.34 |
+  | `rsa_pss_sha256_sign` 2048 | 10600 / 10071 | 1.83 | 20404680.7 / 20390815.2 | 75566.3 | 66.3 s | 1 | 3.36 -> 3.54 |
+
+  10 SE as a fraction of the call: AES 0.05%, GHASH 0.05%, tag compare 0.05%, ECDSA 0.05%, ECDH 0.06%, RSA 0.37%. In absolute terms that is about 6 ns, 85 ns, 10 ns, 2.4 µs, 3.1 µs and 23 µs. The P-256 calls take about 5 ms each here, as long as an RSA signature. They ran at the brief's 10^6 anyway: about 90 min each.
 
 ## RSA object read (Phase 5e, source 8b32220)
 
@@ -153,9 +290,9 @@ The object from the suggested `cargo rustc --release -p crypto --lib -- --emit=o
 - **Primary evidence:** the 5 `.rcgu.o` members of `libcrypto-*.rlib` from a plain workspace `cargo build --release`. All addresses below are from these.
 - **Secondary:** the 1-CGU object was also read. Same verdicts. Functions whose text matched after normalising addresses carry that reading over.
 - **Profile:** `[profile.release]` sets only `overflow-checks`; `crypto` sets it false. No `lto`, `codegen-units` or `opt-level` override, so opt-level 3 and no cross-crate LTO.
-- **Real binary:** none exists on main. The only `main.rs` is `tools/ct-driver`. No `[[bin]]`. With LTO off, a future binary links these objects unchanged, unless its profile changes.
+- **Real binary:** `crates/server`'s binary (since 3e) is the only one besides `tools/ct-driver`'s. With LTO off, it links these objects unchanged, unless its profile changes.
 - **Cross-crate inlining:** `nm` on the `tls` and `quic` rlibs shows no locally defined `crypto::` symbol. `tls` calls `p256_ecdsa_sign`, `serialize_ecdsa_der`, `hkdf_expand`, `hkdf_extract`, `hmac_sha256`, `p256_ecdh`, `p256_public_key`, `rsa_pss_sha256_sign`, `sha256` as external symbols.
-- **No in-workspace GCM caller:** neither `tls` nor `quic` references `crypto::gcm` or `crypto::aes` in the release objects, so priority 1 is not yet reachable from released code.
+- **GCM callers:** since 3e, `quic` references `crypto::aes::aes128_encrypt_block`, `crypto::gcm::aes128_gcm_open` and `crypto::gcm::aes128_gcm_seal` in its release objects (the `U quic` lines of the digests file); `tls` references none. Priority 1 is reachable from `crates/server`'s binary, which the gate does not check.
 
 ## Coverage: 30 first-party non-RSA functions
 
@@ -268,8 +405,8 @@ The `sext(i1)` select pattern is reachable here too: `select4`, `mont_mul`'s sub
 
 ## Not checked
 
-- Fat or thin LTO, `codegen-units=1` as a real profile (the 1-CGU object is a close stand-in), a linked binary (none exists), other `target-cpu` values, other targets.
-- `tls` key schedule glue, `hkdf_expand_label`, transcript handling, beyond the two spot checks above. `quic` references no `crypto::` symbol in its release objects; `h3` and `wire` were not disassembled.
+- Fat or thin LTO, `codegen-units=1` as a real profile (the 1-CGU object is a close stand-in), a linked binary (`crates/server`'s, since 3e), other `target-cpu` values, other targets.
+- `tls` key schedule glue, `hkdf_expand_label`, transcript handling, beyond the two spot checks above. `quic`'s three `U crypto::` references (AES block encrypt, GCM open, GCM seal) are calls, and quic's own code was not disassembled; `h3` and `wire` were not disassembled.
 - RSA shim beyond F2, and all of crypto-bigint/rsa/sha2 (G1). `sha2::compress256` is only used by the shim.
 - Not dudect: no timing was measured. Nothing about data cache behaviour beyond the indices above, instruction cache, branch predictor state from public branches, speculation (Spectre, including bounds-check bypass), `mul` latency on old CPUs, or flag-dependent `cmov` behaviour on future microarchitectures. `cmov` was taken as data-independent as instructed.
 - No zeroisation check. Secrets on the stack and in freed `Vec`s were not examined.

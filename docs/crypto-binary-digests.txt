@@ -1,0 +1,65 @@
+# crates/crypto object code, one sha256 per normalised function (scripts/ct-binary.sh).
+# Rewrite only with --update, after a fresh read per docs/crypto-binary-audit.md's recipe ("Gate", update protocol).
+units 2
+objdump GNU objdump version 2.46.1-1.fc44
+e72d143ffb143f70e6fa79756f37ee46c890fde9370d9883f8f516c01d4fa371 <alloc::raw_vec::RawVec<u8> as core::ops::drop::Drop>::drop
+c6eb461588a0d389eeb301556ca39faa8f9b4aeb965dea2770ae4e10c4fb0ef0 <alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>
+7000b78931b097005e3406b6dc2ac374fc8b7cf09b13996f711abc6958b10609 <alloc::raw_vec::RawVecInner>::finish_grow
+a8247df1a1bca6fbfa31a8342e6cfd901b2d7d218f6b5b8af671eabdaf42fd46 <alloc::raw_vec::RawVecInner>::try_allocate_in
+23869126c936d164613894a062f0f6b7b5b12f61102ed582b303990d7eb90df9 <alloc::vec::Vec<u8> as core::ops::drop::Drop>::drop
+96859465a572c47a3bfba667115885658ac9208718953eb0183504369edb068d <alloc::vec::Vec<u8> as vstd::pervasive::VecAdditionalExecFns<u8>>::set
+edf90307ccf9bf7d58d3fa3721e3e391a675613f6d00759d274f6913091bf501 <alloc::vec::Vec<u8>>::reserve
+cbc96519f7ef2acc834cde1014281c9fd3368631f9b64fbf42ef82f3b797680f core::ptr::drop_glue::<alloc::vec::Vec<u8>>
+90da2ff6feef039b10296584f4fe476e6e8c740d14b2bec21231f9f42dba6e3b crypto::aes::aes128_encrypt_block
+308bfbab11a3f2d1e1d455ca719279d7370636888b8607dbcfc824ccfb53b645 crypto::aes::encrypt_rk
+de5784bffa40b432393a62549af2c8f5be304afd33953be3218cbde2d4e73994 crypto::aes::expand_key
+3c836cd833921d64455493ea7a4f0de58d0174cf0d19adc6d9a5a5cb669859fe crypto::aes::sbox_ct
+a6cfc82d93543eb506ed03f358352bf66236d73f05c91b8a0145fcfae4377c74 crypto::aes::sub_bytes_exec
+41d5bbfdea88f12ad476e77e87f1f6d039e9ff4f11fb6a70ca59696f1c9cde37 crypto::bignum::cond_sub
+24791671adef229e071825aba4e7752b424e550fe859ce56ca2841cdbdc3f151 crypto::bignum::ct_mask
+36ae219cc75a3ad807621139c71ae3e7dad9aa0473e77634c022cd180e4f062b crypto::bignum::limbs_from_be_n
+fc4a033bc178c3ce35c95c16f9fc286c1650713aa855317a10cacc8a21c1d1f0 crypto::bignum::limbs_to_be_n
+335d9067eae94b8ba40b27590b25942c6e8d7d3589cac87f98568edc6815ffb1 crypto::bignum::mont_mul_n
+0ee06c59c89f8d6a2840785982784563b6200af39f8b275435478b024f6f0074 crypto::bignum::pad_be
+2ea00b74cdfc4dee67e1ac35c06f61f926c45960e735a2d94861843090c4f4af crypto::bignum::pow2_mod
+84de217a73250969431221016e38e6d2251858a2266faeb92b1516d40299bb2c crypto::bignum::select_n
+4d8fa83541f99313205a29963e9e18fd93f53155c2d611163fcb7955e4d4ae9c crypto::ecdsa::p256_ecdsa_sign
+c38a996e074103a5ab6fb9f8520a56499e4642e58c6c00c0b296b2c2d55c31e9 crypto::ecdsa::push_der_uint
+8bbe8575fad8bd8b0f8344e123288ae1b4884f89ea77054e9e0e1eb005ad5912 crypto::ecdsa::serialize_ecdsa_der
+45ef585397743a6582be74a6b7a2676880a7059617f0f59b2e180593d3ab186e crypto::gcm::aes128_gcm_open
+03371f580aa90e7d83c3791b62751c5cfcfc5a634ea948864b2ddf4df5f4ffde crypto::gcm::aes128_gcm_seal
+caead4eec79f4abbace5edb31448b1fbd9896a309c1ce5602515a78f81ee91eb crypto::gcm::gcm_tag_exec
+1ac409c643fb78ceb70f94524d92856e1082e79c53b79ddd3c344e992ee34ecd crypto::gcm::gctr_append
+fe0ea4e02de2e977397a192178a73affbc93a3541bfd9620135ef3062e0a72ab crypto::gcm::ghash_padded
+eb76bdf601553d542a8d05a2aba33bfebc6f86a5ab90bf8f1f9266701d67f0e2 crypto::hkdf::hkdf_expand
+20c082f7069a067f42b01024363ac55075139c88e3b58497fba63e7d5edfe449 crypto::hkdf::hkdf_extract
+98bbe55344b964e93ec31d48890304510fcb5e3ca040ee7c17cde5b11568b7bb crypto::hmac::hmac_sha256
+64a80b8fb21586de15f23ac40b0b668b3bf898611eedb16ae409ef939ab9fd27 crypto::hmac::hmac_sha256_core
+ca31953dd298097ba62f9c825f4d9078c6c177216d04a72c1997c126295729c6 crypto::mont::add_mod
+815590e11f2218197310474f04f2aada7f7d24fdd80a447b5debe6bd1eb524b6 crypto::mont::limbs_from_be
+58c119961cd79fc327aab754a8d843948ceb2adcfd06b3134d5c2131802d874d crypto::mont::load_be64
+143deb468c00ff8bec30c47b9b2eeb70de40caccf326eafcd460919879801ccb crypto::mont::mont_mul
+c2fa8667193782d099ac97bbd476933b2d65831c6ff394cd74e16636edc263db crypto::mont::mont_pow
+22e8881da39ac1c63c0ff4b429ccff407b0139d72dafb1c993d197e017715b4c crypto::mont::sub_mod
+d0e1faeb86b969e9bd46649e06967b85e2f39b6f5f47fab52e365be2f515631a crypto::p256::p256_ecdh
+9c1d4725ad0648d93a60dce3100693368a4365ea338ad09cfa37c3e389cef975 crypto::p256::p256_public_key
+3a93c45a13022549ffd0222759c7f2441d8082e670c4a947b01042cc74a77117 crypto::p256::point_add_ct
+5662c2405ee9a9c5888ca87700213955a7d01abce2bac4387e7d72e5e34e3a4c crypto::p256::scalar_in_range
+4cb88522b7d5608e6d65d19742a17bd47b6100b79f2150821370835d0bff1dc6 crypto::p256::scalar_mult_ct
+47bcb950518b8c3cf4a531f684246bbc96475e7adec9162e25f6a9fce842ebb5 crypto::rsa::rsa_pss_sha256_sign
+bcd558d5ce40d68dd0975c303066dea245b35a03d2f6e8807418a5edec258799 crypto::sha256::compress
+b842fa9ea4331a3bf51316561d9e0915df07befac1892d65fc9912b46c34ccae crypto::sha256::sha256
+749d268541af14ccbd537361a87dda3c984310f7aebfa1e75b503c73d9108c21 crypto::sha256::sha256_cat
+f96f120ac1da8f3d8b8912b8f96a02e291cf160f7c29bae4b4cb404ea67c838e vstd::slice::slice_subrange::<u8>
+U quic crypto::aes::aes128_encrypt_block
+U quic crypto::gcm::aes128_gcm_open
+U quic crypto::gcm::aes128_gcm_seal
+U tls crypto::ecdsa::p256_ecdsa_sign
+U tls crypto::ecdsa::serialize_ecdsa_der
+U tls crypto::hkdf::hkdf_expand
+U tls crypto::hkdf::hkdf_extract
+U tls crypto::hmac::hmac_sha256
+U tls crypto::p256::p256_ecdh
+U tls crypto::p256::p256_public_key
+U tls crypto::rsa::rsa_pss_sha256_sign
+U tls crypto::sha256::sha256

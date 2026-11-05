@@ -12,7 +12,7 @@ fn challenged(t: u64, padded: bool) -> Paths {
     p.set_validated(0);
     assert!(p.insert(1));
     p.start_challenge(1, D(9), t);
-    assert_eq!(p.take_challenge(1, padded), Some(D(9)));
+    assert_eq!(p.take_challenge(1, padded, t), Some(D(9)));
     p
 }
 
@@ -72,9 +72,9 @@ fn unsent_challenge_not_answered() {
     p.start_challenge(0, D(9), 0);
     assert!(p.challenge_owed(0));
     assert_eq!(p.on_response(D(9)), None);
-    assert_eq!(p.take_challenge(0, true), Some(D(9)));
+    assert_eq!(p.take_challenge(0, true, 0), Some(D(9)));
     assert!(!p.challenge_owed(0));
-    assert_eq!(p.take_challenge(0, true), None);
+    assert_eq!(p.take_challenge(0, true, 0), None);
 }
 
 #[test]
@@ -84,7 +84,7 @@ fn mtu_second_validation() {
     assert!(p.needs_mtu_probe(1));
     p.start_challenge(1, D(10), 10);
     assert!(!p.needs_mtu_probe(1));
-    assert_eq!(p.take_challenge(1, true), Some(D(10)));
+    assert_eq!(p.take_challenge(1, true, 10), Some(D(10)));
     assert_eq!(p.on_response(D(10)), Some(1));
     assert!(!p.needs_mtu_probe(1));
     assert_eq!(p.state(1), PathState::Validated);
@@ -107,7 +107,7 @@ fn failed_mtu_probe_keeps_validated() {
     assert_eq!(p.on_response(D(9)), Some(1));
     p.start_challenge(1, D(10), 10);
     assert_eq!(p.deadline(1), None);
-    assert_eq!(p.take_challenge(1, true), Some(D(10)));
+    assert_eq!(p.take_challenge(1, true, 10), Some(D(10)));
     assert_eq!(p.deadline(1), Some(13));
     assert_eq!(p.on_timeout(13, 1), Some(1));
     assert_eq!(p.state(1), PathState::Validated);
@@ -124,7 +124,7 @@ fn failed_mtu_probe_recorded() {
     assert_eq!(p.last_validated(), Some(1));
     assert!(!p.mtu_failed(1));
     p.start_challenge(1, D(10), 10);
-    assert_eq!(p.take_challenge(1, true), Some(D(10)));
+    assert_eq!(p.take_challenge(1, true, 10), Some(D(10)));
     assert_eq!(p.on_timeout(13, 1), Some(1));
     assert!(p.mtu_failed(1));
     assert!(!p.mtu_failed(0));
@@ -133,15 +133,15 @@ fn failed_mtu_probe_recorded() {
     let mut q = Paths::new(0);
     assert!(q.insert(1));
     q.start_challenge(1, D(1), 0);
-    q.take_challenge(1, false);
+    q.take_challenge(1, false, 0);
     assert_eq!(q.on_response(D(1)), Some(1));
     q.start_challenge(1, D(2), 0);
-    q.take_challenge(1, true);
+    q.take_challenge(1, true, 0);
     assert_eq!(q.on_timeout(3, 1), Some(1));
     assert_eq!(q.last_validated(), None);
     // A later padded validation clears the failure.
     q.start_challenge(1, D(3), 5);
-    q.take_challenge(1, true);
+    q.take_challenge(1, true, 5);
     assert_eq!(q.on_response(D(3)), Some(1));
     assert!(!q.mtu_failed(1) && q.mtu_ok(1));
     assert_eq!(q.last_validated(), Some(1));
@@ -153,7 +153,7 @@ fn expired_challenge_mtu_ok_path() {
     let mut p = Paths::new(0);
     p.set_validated(0);
     p.start_challenge(0, D(4), 0);
-    p.take_challenge(0, true);
+    p.take_challenge(0, true, 0);
     assert_eq!(p.on_timeout(3, 1), Some(0));
     assert!(!p.mtu_failed(0));
     assert_eq!(p.last_validated(), Some(0));
@@ -178,9 +178,9 @@ fn timeout_lowest_first() {
     let mut p = Paths::new(0);
     assert!(p.insert(1));
     p.start_challenge(1, D(1), 0);
-    p.take_challenge(1, true);
+    p.take_challenge(1, true, 0);
     p.start_challenge(0, D(2), 5);
-    p.take_challenge(0, true);
+    p.take_challenge(0, true, 5);
     assert_eq!(p.deadline(1), Some(3));
     assert_eq!(p.on_timeout(100, 1), Some(0));
     assert_eq!(p.on_timeout(100, 1), Some(1));
@@ -253,22 +253,11 @@ fn handshake_path_mtu_ok() {
 }
 
 #[test]
-fn rechallenge_keeps_clock() {
-    let mut p = challenged(100, true);
-    p.start_challenge(1, D(10), 5_000);
-    assert_eq!(p.take_challenge(1, true), Some(D(10)));
-    assert_eq!(p.deadline(999_000), Some(2_997_100));
-    assert_eq!(p.on_response(D(9)), None);
-    assert_eq!(p.on_timeout(2_997_100, 999_000), Some(1));
-    assert_eq!(p.state(1), PathState::Unvalidated);
-}
-
-#[test]
 fn unpadded_response_keeps_mtu_ok() {
     let mut p = challenged(0, true);
     assert_eq!(p.on_response(D(9)), Some(1));
     p.start_challenge(1, D(10), 10);
-    assert_eq!(p.take_challenge(1, false), Some(D(10)));
+    assert_eq!(p.take_challenge(1, false, 10), Some(D(10)));
     assert_eq!(p.on_response(D(10)), Some(1));
     assert!(p.mtu_ok(1));
     assert!(!p.needs_mtu_probe(1));

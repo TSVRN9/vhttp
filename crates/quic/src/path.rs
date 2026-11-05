@@ -12,8 +12,10 @@ use crate::lifecycle::*;
 
 verus! {
 
-// ponytail: paths never evicted; datagrams from a 5th distinct path are dropped uncounted; evict a
-// non-active unvalidated path when long-lived rebinding matters.
+// ponytail: paths never evicted. `Connection` adds a path only for a packet that passes its gate, so
+// spoofed garbage and replays take no slot, but an on-path attacker racing first copies of authentic
+// packets from other addresses still can, and then a 5th distinct path is dropped uncounted. Evict
+// a non-active unvalidated path to close it (one with logged sends conflicts with `wf_amp`).
 pub const MAX_PATHS: usize = 4;
 
 //= https://www.rfc-editor.org/rfc/rfc9000#section-21.9
@@ -43,9 +45,10 @@ pub struct Path {
     challenge_owed: bool,
     /// A challenge in a datagram of at least 1200 bytes was answered.
     mtu_ok: bool,
-    /// An MTU probe (a challenge on a Validated path whose MTU is not confirmed) expired:
-    /// the path cannot carry 1200-byte datagrams (§14.2), so only probes and
-    /// CONNECTION_CLOSE may be sent on it.
+    /// A challenge expired on a Validated path whose MTU is not confirmed. That is any such
+    /// challenge, including §9.3.3's old-path challenge in 3d2's `migrate`, not only an MTU
+    /// probe: the path cannot be shown to carry 1200-byte datagrams (§14.2), so only probes
+    /// and CONNECTION_CLOSE may be sent on it.
     mtu_failed: bool,
     /// PATH_RESPONSE data owed, oldest first.
     responses: Vec<[u8; 8]>,
@@ -268,7 +271,7 @@ pub struct Paths {
     prev_validated: Option<PathId>,
 }
 
-/// `b` differs from `a` at most on path `id` and `last_validated`.
+/// `b` differs from `a` at most on path `id`, `last_validated` and `prev_validated`.
 pub open spec fn kept(a: Paths, b: Paths, id: PathId) -> bool {
     &&& b.ids() == a.ids()
     &&& b.active_spec() == a.active_spec()
@@ -777,6 +780,7 @@ impl Paths {
                 budget: final(self).path(id).budget,
                 ..old(self).path(id)
             }),
+            final(self).path(id).budget <= old(self).path(id).budget,
             amp_ok(final(self).amp_trace(id)),
     {
         let i = self.find(id);
@@ -939,9 +943,8 @@ impl Paths {
     //# frame so that it can associate the peer's response with the
     //# corresponding PATH_CHALLENGE.
     /// Start validating path `id` with `data`, drawn from the shell's randomness at `now`. An
-    /// earlier challenge on the path is replaced; while Validating, the new one keeps the
-    /// first one's start time, so the §8.2.4 3·PTO bound runs from the first challenge. A
-    /// Validated path stays Validated (an MTU probe, §8.2.1).
+    /// earlier challenge on the path is replaced. A Validated path stays Validated (an MTU probe,
+    /// §8.2.1).
     pub fn start_challenge(&mut self, id: PathId, data: [u8; 8], now: u64)
         requires
             old(self).wf(),
@@ -952,15 +955,7 @@ impl Paths {
             final(self).last_validated_spec() == old(self).last_validated_spec(),
             final(self).path(id) == (SpecPath {
                 challenge: Some(
-                    (
-                        data,
-                        if old(self).path(id).state is Validating {
-                            old(self).path(id).challenge.unwrap().1
-                        } else {
-                            now
-                        },
-                        false,
-                    ),
+                    (data, now, false),
                 ),
                 owed: true,
                 state: if old(self).path(id).state is Unvalidated {
@@ -976,11 +971,7 @@ impl Paths {
         proof {
             assert(path_wf(self.paths@[i as int]));
         }
-        let t = match (self.paths[i].state, self.paths[i].challenge) {
-            (PathState::Validating, Some((_, t0, _))) => t0,
-            _ => now,
-        };
-        self.paths[i].challenge = Some((data, t, false));
+        self.paths[i].challenge = Some((data, now, false));
         self.paths[i].challenge_owed = true;
         if let PathState::Unvalidated = self.paths[i].state {
             self.paths[i].state = PathState::Validating;
@@ -996,8 +987,9 @@ impl Paths {
     //# unless the anti-amplification limit for the path does not permit
     //# sending a datagram of this size.
     /// The owed challenge's data on path `id`, now being sent; `padded` says whether its
-    /// datagram reached 1200 bytes (3d2 pads it). The challenge's clock stays its start time.
-    pub fn take_challenge(&mut self, id: PathId, padded: bool) -> (r: Option<[u8; 8]>)
+    /// datagram reached 1200 bytes (3d2 pads it). §8.2.4's timer starts here, at the send: one
+    /// that started at `start_challenge` could expire before the peer ever saw the challenge.
+    pub fn take_challenge(&mut self, id: PathId, padded: bool, now: u64) -> (r: Option<[u8; 8]>)
         requires
             old(self).wf(),
             old(self).has(id),
@@ -1005,13 +997,13 @@ impl Paths {
             final(self).wf(),
             r is Some <==> old(self).path(id).owed,
             old(self).path(id).owed ==> {
-                &&& old(self).path(id).challenge matches Some((d, t, _))
+                &&& old(self).path(id).challenge matches Some((d, _, _))
                 &&& r == Some(d)
                 &&& kept(*old(self), *final(self), id)
                 &&& final(self).last_validated_spec() == old(self).last_validated_spec()
                 &&& final(self).path(id) == (SpecPath {
                     owed: false,
-                    challenge: Some((d, t, padded)),
+                    challenge: Some((d, now, padded)),
                     ..old(self).path(id)
                 })
             },
@@ -1026,8 +1018,8 @@ impl Paths {
             assert(path_wf(self.paths@[i as int]));
         }
         match self.paths[i].challenge {
-            Some((d, t, _)) => {
-                self.paths[i].challenge = Some((d, t, padded));
+            Some((d, _, _)) => {
+                self.paths[i].challenge = Some((d, now, padded));
                 self.paths[i].challenge_owed = false;
                 proof {
                     Paths::lemma_set(a, *self, i as int);
@@ -1539,6 +1531,24 @@ impl Paths {
     {
         let i = self.find(id);
         self.paths[i].challenge_owed
+    }
+
+    /// How many paths there are.
+    pub fn len(&self) -> (r: usize)
+        ensures
+            r == self.ids().len(),
+    {
+        self.paths.len()
+    }
+
+    /// The id of entry `i`.
+    pub fn id_at(&self, i: usize) -> (r: PathId)
+        requires
+            i < self.ids().len(),
+        ensures
+            r == self.ids()[i as int],
+    {
+        self.paths[i].id
     }
 }
 

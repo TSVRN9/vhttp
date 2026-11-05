@@ -402,7 +402,7 @@ pub open spec fn spec_short_header_bytes(
 // Proofs
 // =============================================================================
 
-proof fn bv_long_first_byte(t: u8, n: u8)
+pub(crate) proof fn bv_long_first_byte(t: u8, n: u8)
     by (bit_vector)
     requires
         t <= 3,
@@ -416,7 +416,7 @@ proof fn bv_long_first_byte(t: u8, n: u8)
 {
 }
 
-proof fn bv_short_first_byte(s: u8, k: u8, n: u8)
+pub(crate) proof fn bv_short_first_byte(s: u8, k: u8, n: u8)
     by (bit_vector)
     requires
         s == 0 || s == 0x20,
@@ -747,6 +747,7 @@ pub(crate) fn put_slice(s: &[u8], out: &mut Vec<u8>)
 /// Writes a long header through the packet number. `payload_len` counts the protected
 /// payload including the AEAD tag. Returns the packet-number offset from the first byte
 /// written.
+#[verifier::spinoff_prover]
 pub fn serialize_long_header(
     ty: LongType,
     dcid: &[u8],

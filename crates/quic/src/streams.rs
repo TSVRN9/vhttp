@@ -2122,6 +2122,10 @@ proof fn lemma_update(
         ) && resets[t[k].id] == c.0) && (resets.contains_key(t[k].id) ==> p.reset_spec() is Some))
     } by {
         assert(a[k].id == t[k].id);
+        if k != i {
+            assert(t[k] == a[k]);
+            assert(t[k].id != id);
+        }
     }
     assert forall|y: u64| #[trigger] rtr.contains_key(y) == s0.ids.peer_created(y) by {
         assert(rtr.contains_key(y) == s0.rtr@.contains_key(y));
@@ -2407,7 +2411,7 @@ pub open spec fn polled_rule(s: Streams, f: SpecFrame) -> bool {
         SpecFrame::ResetStream { stream_id, error_code, .. } => s.reset_code(stream_id) == Some(
             error_code,
         ),
-        _ => true,
+        _ => is_stream_layer_frame(f),
     }
 }
 
@@ -2475,7 +2479,7 @@ proof fn lemma_vlen_mono(a: u64, b: u64)
 {
 }
 
-proof fn lemma_frames_bytes_push(fs: Seq<SpecFrame>, f: SpecFrame)
+pub proof fn lemma_frames_bytes_push(fs: Seq<SpecFrame>, f: SpecFrame)
     ensures
         spec_frames_bytes(fs.push(f)).len() == spec_frames_bytes(fs).len() + spec_frame_bytes(
             f,

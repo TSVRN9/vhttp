@@ -5,6 +5,7 @@ use vstd::arithmetic::div_mod::*;
 #[allow(unused_imports)]
 use vstd::arithmetic::power2::*;
 use vstd::prelude::*;
+use vstd::slice::slice_subrange;
 
 #[allow(unused_imports)]
 use crate::codes::*;
@@ -121,12 +122,15 @@ pub proof fn lemma_decode_pn_bound(largest: Option<u64>, truncated: u64, pn_len:
             win > 0,
             e >= 0,
     ;
-    assert(q * win <= pow2(62) - win) by (nonlinear_arith)
+    // Two steps: the single query flips past the rlimit when pn_encode_len gains its first outside caller.
+    assert(q < m) by (nonlinear_arith)
         requires
-            q * win <= e,
-            e < m * win,
-            m * win == pow2(62),
-            q >= 0,
+            q * win < m * win,
+            win > 0,
+    ;
+    assert(q * win + win <= m * win) by (nonlinear_arith)
+        requires
+            q + 1 <= m,
             win > 0,
     ;
 }
@@ -209,6 +213,7 @@ pub fn pn_encode_len(full: u64, largest_acked: Option<u64>) -> (r: Option<u8>)
         r matches Some(n) ==> pn_len_ok(full, largest_acked, n as nat) && forall|m: nat|
             1 <= m < n ==> !pn_len_ok(full, largest_acked, m),
         r is None ==> !pn_len_ok(full, largest_acked, 4),
+        r is None ==> forall|m: nat| 1 <= m <= 4 ==> !pn_len_ok(full, largest_acked, m),
 {
     let mut n: u8 = 1;
     while n <= 4
@@ -242,10 +247,85 @@ pub fn pn_encode_len(full: u64, largest_acked: Option<u64>) -> (r: Option<u8>)
     None
 }
 
+proof fn bv_lt_bit(a: u64, b: u64)
+    by (bit_vector)
+    requires
+        a < 0x8000_0000_0000_0000u64,
+        b < 0x8000_0000_0000_0000u64,
+    ensures
+        a.wrapping_sub(b) >> 63u64 <= 1,
+        (a.wrapping_sub(b) >> 63u64 == 1) == (a < b),
+{
+}
+
+proof fn bv_bits(x: u64, y: u64, w: u64)
+    by (bit_vector)
+    requires
+        x <= 1,
+        y <= 1,
+    ensures
+        x & y <= 1,
+        (x & y == 1) == (x == 1 && y == 1),
+        w & 0u64.wrapping_sub(x) == if x == 1 {
+            w
+        } else {
+            0u64
+        },
+{
+}
+
+/// 1 when `a < b`, else 0, without a branch: the borrow out of `a - b`.
+fn lt_bit(a: u64, b: u64) -> (r: u64)
+    requires
+        a < 0x8000_0000_0000_0000u64,
+        b < 0x8000_0000_0000_0000u64,
+    ensures
+        r <= 1,
+        (r == 1) == (a < b),
+{
+    proof {
+        bv_lt_bit(a, b);
+    }
+    a.wrapping_sub(b) >> 63
+}
+
+/// The window `1 << 8n` for `n` packet number bytes, its half, and its low-bits mask.
+proof fn lemma_win(n: u8, e: u64)
+    requires
+        1 <= n <= 4,
+    ensures
+        ({
+            let w = 1u64 << (8 * n) as u64;
+            &&& w == pow2(8 * n as nat)
+            &&& 256 <= w <= 0x1_0000_0000
+            &&& w >> 1u64 == w / 2
+            &&& e & ((w - 1) as u64) == e % w
+        }),
+{
+    lemma2_to64();
+    if n == 1 {
+        assert(1u64 << 8u64 == 0x100u64) by (bit_vector);
+        assert(e & 0xffu64 == e % 0x100u64) by (bit_vector);
+    } else if n == 2 {
+        assert(1u64 << 16u64 == 0x1_0000u64) by (bit_vector);
+        assert(e & 0xffffu64 == e % 0x1_0000u64) by (bit_vector);
+    } else if n == 3 {
+        assert(1u64 << 24u64 == 0x100_0000u64) by (bit_vector);
+        assert(e & 0xff_ffffu64 == e % 0x100_0000u64) by (bit_vector);
+    } else {
+        assert(1u64 << 32u64 == 0x1_0000_0000u64) by (bit_vector);
+        assert(e & 0xffff_ffffu64 == e % 0x1_0000_0000u64) by (bit_vector);
+    }
+    let w = 1u64 << (8 * n) as u64;
+    assert(w >> 1u64 == w / 2) by (bit_vector);
+}
+
 //= https://www.rfc-editor.org/rfc/rfc9000#appendix-A.3
 //# DecodePacketNumber(largest_pn, truncated_pn, pn_nbits):
 /// The `u64` arithmetic never overflows: `expected <= 2^62 - 1` and `candidate <= 2^62 - 1`
-/// (`lemma_decode_pn_bound`).
+/// (`lemma_decode_pn_bound`). No branch on the packet number or its length (RFC 9001 §9.5):
+/// the window is a shift, `expected % win` a mask, and Figure 47's two adjustments are added
+/// under masks from borrow bits (every operand is below 2^63), at most one of them nonzero.
 pub fn decode_pn(largest: Option<u64>, truncated: u64, pn_len: u8) -> (r: u64)
     requires
         1 <= pn_len <= 4,
@@ -255,29 +335,97 @@ pub fn decode_pn(largest: Option<u64>, truncated: u64, pn_len: u8) -> (r: u64)
         r == rfc_decode_pn(largest, truncated, 8 * pn_len as nat),
         r <= PN_MAX,
 {
-    let win = pow2_bytes(pn_len);
-    proof {
-        lemma2_to64();
-        lemma2_to64_rest();
-        lemma_decode_pn_bound(largest, truncated, pn_len);
-    }
-    let hwin = win / 2;
     let expected: u64 = match largest {
         None => 0,
         Some(l) => l + 1,
     };
-    assert(expected % win <= expected) by (nonlinear_arith)
+    proof {
+        lemma2_to64();
+        lemma2_to64_rest();
+        lemma_decode_pn_bound(largest, truncated, pn_len);
+        lemma_win(pn_len, expected);
+    }
+    let win = 1u64 << (8 * pn_len as u64);
+    let hwin = win >> 1;
+    let low = expected & (win - 1);
+    assert(low <= expected) by (nonlinear_arith)
         requires
+            low == expected % win,
             win >= 256,
     ;
-    let candidate = expected - expected % win + truncated;
-    if candidate + hwin <= expected && candidate < 0x4000_0000_0000_0000u64 - win {
-        candidate + win
-    } else if candidate > expected + hwin && candidate >= win {
-        candidate - win
-    } else {
-        candidate
+    let candidate = expected - low + truncated;
+    let a = lt_bit(expected, candidate + hwin);
+    let b = lt_bit(candidate, 0x4000_0000_0000_0000u64 - win);
+    let c = lt_bit(expected + hwin, candidate);
+    let d = lt_bit(candidate, win);
+    proof {
+        bv_bits((1 - a) as u64, b, win);
+        bv_bits(c, (1 - d) as u64, win);
     }
+    let up = (1 - a) & b;
+    let down = c & (1 - d);
+    proof {
+        bv_bits(up, 0, win);
+        bv_bits(down, 0, win);
+    }
+    candidate + (win & 0u64.wrapping_sub(up)) - (win & 0u64.wrapping_sub(down))
+}
+
+/// The big-endian value of the first `pn_len` of the 4 bytes `b`, reading all 4: the packet
+/// number field and the 3 bytes after it (RFC 9001 §9.5; the header protection sample follows
+/// them, so they exist). The shift is `32 - 8 * pn_len`, with no branch or loop on `pn_len`.
+pub fn read_pn_masked(b: &[u8], pn_len: u8) -> (r: u64)
+    requires
+        b.len() == 4,
+        1 <= pn_len <= 4,
+    ensures
+        r as nat == be_val(b@.take(pn_len as int)),
+        r < pow2(8 * pn_len as nat),
+{
+    let v = ((b[0] as u64) << 24u64) | ((b[1] as u64) << 16u64) | ((b[2] as u64) << 8u64) | (
+    b[3] as u64);
+    let r = v >> (32 - 8 * pn_len as u64);
+    proof {
+        let (x0, x1, x2, x3) = (b[0], b[1], b[2], b[3]);
+        let s = b@.take(pn_len as int);
+        reveal_with_fuel(be_val, 5);
+        if pn_len == 1 {
+            assert(r == x0 as u64) by (bit_vector)
+                requires
+                v == ((x0 as u64) << 24u64) | ((x1 as u64) << 16u64) | ((x2 as u64) << 8u64)
+                    | (x3 as u64),
+                    r == v >> 24u64,
+            ;
+            assert(s.drop_last() =~= Seq::<u8>::empty());
+        } else if pn_len == 2 {
+            assert(r == (x0 as u64) * 256 + x1 as u64) by (bit_vector)
+                requires
+                v == ((x0 as u64) << 24u64) | ((x1 as u64) << 16u64) | ((x2 as u64) << 8u64)
+                    | (x3 as u64),
+                    r == v >> 16u64,
+            ;
+            assert(s.drop_last().drop_last() =~= Seq::<u8>::empty());
+        } else if pn_len == 3 {
+            assert(r == ((x0 as u64) * 256 + x1 as u64) * 256 + x2 as u64) by (bit_vector)
+                requires
+                v == ((x0 as u64) << 24u64) | ((x1 as u64) << 16u64) | ((x2 as u64) << 8u64)
+                    | (x3 as u64),
+                    r == v >> 8u64,
+            ;
+            assert(s.drop_last().drop_last().drop_last() =~= Seq::<u8>::empty());
+        } else {
+            assert(r == (((x0 as u64) * 256 + x1 as u64) * 256 + x2 as u64) * 256
+                + x3 as u64) by (bit_vector)
+                requires
+                v == ((x0 as u64) << 24u64) | ((x1 as u64) << 16u64) | ((x2 as u64) << 8u64)
+                    | (x3 as u64),
+                    r == v >> 0u64,
+            ;
+            assert(s.drop_last().drop_last().drop_last().drop_last() =~= Seq::<u8>::empty());
+        }
+        lemma_be_val_bound(s);
+    }
+    r
 }
 
 /// A decoder whose largest-processed packet number is within half a window of `full` recovers
@@ -449,7 +597,9 @@ pub proof fn lemma_pn_roundtrip(full: u64, n: nat)
     }
 }
 
-/// Appends the low `pn_len` bytes of `full`, big-endian.
+/// Appends the low `pn_len` bytes of `full`, big-endian: all 4 low bytes are computed, and the
+/// last `pn_len` of them are copied. No branch on `pn_len` or `full`; the copy length is
+/// `pn_len` (residual, RFC 9001 §9.5).
 pub fn put_pn(full: u64, pn_len: u8, out: &mut Vec<u8>)
     requires
         1 <= pn_len <= 4,
@@ -457,21 +607,28 @@ pub fn put_pn(full: u64, pn_len: u8, out: &mut Vec<u8>)
         final(out)@ == old(out)@ + pn_be(full, pn_len as nat),
 {
     let ghost start = out@;
-    if pn_len >= 4 {
-        out.push((full / 0x100_0000 % 256) as u8);
-    }
-    if pn_len >= 3 {
-        out.push((full / 0x1_0000 % 256) as u8);
-    }
-    if pn_len >= 2 {
-        out.push((full / 0x100 % 256) as u8);
-    }
-    out.push((full % 256) as u8);
+    let be: [u8; 4] = [
+        (full / 0x100_0000 % 256) as u8,
+        (full / 0x1_0000 % 256) as u8,
+        (full / 0x100 % 256) as u8,
+        (full % 256) as u8,
+    ];
+    let tail = slice_subrange(be.as_slice(), 4 - pn_len as usize, 4);
+    out.extend_from_slice(tail);
     proof {
         let n = pn_len as nat;
         reveal_with_fuel(pn_be, 5);
         assert(full / 256 / 256 == full / 0x1_0000) by (nonlinear_arith);
         assert(full / 256 / 256 / 256 == full / 0x100_0000) by (nonlinear_arith);
+        if n == 1 {
+            assert(tail@ =~= pn_be(full, n));
+        } else if n == 2 {
+            assert(tail@ =~= pn_be(full, n));
+        } else if n == 3 {
+            assert(tail@ =~= pn_be(full, n));
+        } else {
+            assert(tail@ =~= pn_be(full, n));
+        }
         assert(out@ =~= start + pn_be(full, n));
     }
 }
