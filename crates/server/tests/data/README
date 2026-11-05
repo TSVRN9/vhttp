@@ -1,0 +1,11 @@
+Test fixtures only, generated for these tests: the keys here are not secrets and must never be used for deployment.
+
+cert.pem, key.pem:
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout key.pem -out cert.pem -days 3650 -subj /CN=localhost -addext subjectAltName=DNS:localhost,IP:127.0.0.1
+ca.pem (its key discarded):
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout ca-key.tmp -out ca.pem -days 3650 -subj "/CN=test-only CA"
+leaf.pem, leaf-key.pem (signed by the CA, ecdsa-with-SHA256):
+  openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout leaf-key.pem -out leaf.csr -subj /CN=localhost
+  openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca-key.tmp -CAcreateserial -out leaf.pem -days 3650 -sha256 -extfile <(echo "subjectAltName=DNS:localhost,IP:127.0.0.1")
+rsa-key.pem:
+  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out rsa-key.pem

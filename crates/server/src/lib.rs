@@ -97,7 +97,7 @@ pub fn bind(addr: SocketAddr) -> io::Result<UdpSocket> {
     Ok(s)
 }
 
-/// Our transport parameters (the interop values: 64 KiB in total, 16 KiB per request stream).
+/// Our transport parameters (the interop values: 64 KiB in total, 16 KiB per request stream, 4 KiB per uni stream), at most about 1 MiB per connection and MAX_CONNS = 102 connections.
 pub fn local_params() -> TransportParams {
     let mut t = default_transport_params();
     t.max_idle_timeout = 30000;
