@@ -41,8 +41,8 @@ analyse() {
         || fail "$run: analysis build failed"
     reports=
     for c in $(printf '%s' "$crates" | tr ',' ' '); do
-        case $mode in selftest) r=selftest- ;; cost) r=cost- ;; *) r=report- ;; esac
-        r=$CT_OUT/$run/$r$c.txt
+        case $mode in selftest) r=selftest-$c.txt ;; cost) r=cost-$c.txt ;; dump) r=mir-$c.json ;; *) r=report-$c.txt ;; esac
+        r=$CT_OUT/$run/$r
         [ -f "$r" ] || fail "$run: no $r"
         reports="$reports $r"
     done
@@ -182,3 +182,22 @@ got=$CT_OUT/negative/verdicts.txt
 verdicts "$report" > "$got"
 no_missing "$cm" "$got"
 echo "ct-check: negative control rejected"
+
+# Semantics conformance (8c): semconf's vectors come from native runs (its tests/vectors.rs) and must
+# equal the committed vectors.txt, so a native change shows up; then its dump (checked by ct-zarr.py)
+# runs through ct-front's verified selftest, and every vector must pass.
+sc=$fx/semconf
+cargo test --release --locked -q --manifest-path "$sc/Cargo.toml" --target-dir "$CT_TARGET_DIR/semconf-native" > /dev/null \
+    || fail "semconf: native vector run failed"
+diff -u "$sc/vectors.txt" "$CT_TARGET_DIR/semconf-native/semconf-vectors.txt" || fail "semconf: native vectors differ from vectors.txt"
+cargo build --release --locked -q --manifest-path "$root/tools/ct-front/Cargo.toml" --target-dir "$CT_TARGET_DIR/front" \
+    || fail "ct-front build failed"
+analyse semconf semconf "$sc/manifest.txt" dump --manifest-path "$sc/Cargo.toml"
+python3 -I "$root/scripts/ct-zarr.py" "$report" > /dev/null || fail "semconf: the dump holds a unit-like array site"
+got=$CT_OUT/semconf/selftest-semconf.txt
+"$CT_TARGET_DIR/front/release/ct-front" "selftest=$sc/vectors.txt" "$report" "$got" "$sc/manifest.txt" || fail "semconf: ct-front failed"
+grep -v '^pass ' "$got" >&2 && fail "semconf: vectors failed (above)"
+v=$(grep -c '^semconf::' "$sc/vectors.txt")
+p=$(grep -c '^pass ' "$got" || true)
+[ "$p" -eq "$v" ] || fail "semconf: $p of $v vectors passed"
+echo "ct-check: semconf $p/$v"

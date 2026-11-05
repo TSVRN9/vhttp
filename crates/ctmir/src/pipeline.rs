@@ -171,10 +171,10 @@ pub open spec fn bounded_ok(m: MirCrate, pol: Policy, l: Seq<u8>) -> bool {
 }
 
 /// A line's first word is one of the report's: `root`, `bounded`, `reject`, `checked`,
-/// `declassify`, `none`.
+/// `declassify`, `none`, or the selftest's `pass`, `fail`.
 pub open spec fn line_kind(l: Seq<u8>) -> bool {
     starts(l, b"root "@) || starts(l, b"bounded "@) || starts(l, b"reject "@) || starts(l, b"checked "@)
-        || starts(l, b"declassify "@) || starts(l, b"none "@)
+        || starts(l, b"declassify "@) || starts(l, b"none "@) || starts(l, b"pass "@) || starts(l, b"fail "@)
 }
 
 /// One report line (`lines` is the whole report): a text without `\n`, then `\n`; a line starting `root ` is a `root <path> ok`
@@ -495,6 +495,7 @@ fn kind_ok(l: &Vec<u8>) -> (r: bool)
 {
     crate::policy::starts_pub(l, b"root ") || crate::policy::starts_pub(l, b"bounded ") || crate::policy::starts_pub(l, b"reject ")
         || crate::policy::starts_pub(l, b"checked ") || crate::policy::starts_pub(l, b"declassify ") || crate::policy::starts_pub(l, b"none ")
+        || crate::policy::starts_pub(l, b"pass ") || crate::policy::starts_pub(l, b"fail ")
 }
 
 /// `l` (with its last `\n`) is not one of the two claim lines.
@@ -1231,6 +1232,107 @@ fn cost_root(m: &MirCrate, pol: &Policy, r: &Vec<u8>, keys: &mut Keys, acc: &mut
     }
 }
 
+/// A translated selftest fn: its program, or why it has none.
+type Lowered = Vec<(Vec<u8>, Result<c::Program, Vec<u8>>)>;
+
+/// The selftest (spec §Verified interpreter): for each vector line of `text` whose path is in the
+/// dump's crate, in file order, `pass <path> steps=<n>` (or `pass <path> panic`) when
+/// `vectors::check_vector` passes on the path's translated program, else `fail <path> <why>`. A
+/// malformed line, or no vector for the crate, is an `Err`. Each path is translated once.
+fn selftest(m: &MirCrate, pol: &Policy, text: &Vec<u8>, keys: &mut Keys, acc: &mut Vec<Vec<u8>>) -> (res: Result<(), Vec<u8>>)
+    requires acc_ok(*m, *pol, old(acc)@),
+    ensures res is Ok ==> acc_ok(*m, *pol, final(acc)@),
+{
+    let mut pre = Vec::new();
+    put(&mut pre, m.crate_name.as_slice());
+    put(&mut pre, b"::");
+    let lines = crate::policy::split_exec(text.as_slice(), 10u8);
+    let mut done: Lowered = Vec::new();
+    let mut any = false;
+    let mut n: usize = 0;
+    while n < lines.len()
+        invariant acc_ok(*m, *pol, acc@),
+        decreases lines.len() - n,
+    {
+        let ws = crate::policy::words_exec(lines[n].as_slice());
+        // a comment starts at a `#` word that a digit does not follow
+        let mut k: usize = 0;
+        while k < ws.len() && !(ws[k].len() > 0 && ws[k][0] == 35u8 && !(ws[k].len() > 1 && 48u8 <= ws[k][1] && ws[k][1] <= 57u8))
+            invariant k <= ws@.len(),
+            decreases ws.len() - k,
+        {
+            k += 1;
+        }
+        if k > 0 && crate::policy::starts_pub(&ws[0], pre.as_slice()) {
+            any = true;
+            let path = &ws[0];
+            let v = match crate::vectors::parse_vector(&ws.as_slice()[1..k]) {
+                Ok(v) => v,
+                Err(e) => {
+                    let mut t = cat(b"vectors:", crate::text::dec(n as u64 + 1).as_slice());
+                    put(&mut t, b": ");
+                    put(&mut t, e.as_slice());
+                    return Err(t);
+                },
+            };
+            let mut q: usize = 0;
+            while q < done.len() && !bytes_eq(done[q].0.as_slice(), path.as_slice())
+                invariant q <= done@.len(),
+                decreases done.len() - q,
+            {
+                q += 1;
+            }
+            if q == done.len() {
+                let lo = match lower(m, pol, path.as_slice(), keys) {
+                    Ok((p, _)) => Ok(p),
+                    Err(es) => {
+                        let mut t = cat(b"translation failed: ", crate::text::dec(es.len() as u64).as_slice());
+                        put(&mut t, b" error(s)");
+                        if es.len() > 0 {
+                            put(&mut t, b", first: ");
+                            put(&mut t, tr_text(&es[0]).as_slice());
+                        }
+                        Err(t)
+                    },
+                };
+                done.push((copy(path), lo));
+            }
+            let mut l = cat(b"", b"");
+            match &done[q].1 {
+                Ok(p) => match crate::vectors::check_vector(p, &v) {
+                    Ok(Some(steps)) => {
+                        put(&mut l, b"pass ");
+                        put(&mut l, path.as_slice());
+                        put(&mut l, b" steps=");
+                        put(&mut l, crate::text::dec(steps).as_slice());
+                    },
+                    Ok(None) => {
+                        put(&mut l, b"pass ");
+                        put(&mut l, path.as_slice());
+                        put(&mut l, b" panic");
+                    },
+                    Err(why) => {
+                        put(&mut l, b"fail ");
+                        put(&mut l, path.as_slice());
+                        put(&mut l, b" ");
+                        put(&mut l, why.as_slice());
+                    },
+                },
+                Err(why) => {
+                    put(&mut l, b"fail ");
+                    put(&mut l, path.as_slice());
+                    put(&mut l, b" ");
+                    put(&mut l, why.as_slice());
+                },
+            }
+            info(Ghost(*m), Ghost(*pol), acc, l.as_slice())?;
+        }
+        n += 1;
+    }
+    if !any { return Err(cat(b"vectors: no selftest vector for analysed crate ", m.crate_name.as_slice())); }
+    Ok(())
+}
+
 /// `a < b`, bytewise (as `String`'s order).
 fn lt_bytes(a: &Vec<u8>, b: &Vec<u8>) -> bool {
     let mut i: usize = 0;
@@ -1288,7 +1390,8 @@ fn insert_sorted(v: &mut Vec<Vec<u8>>, x: Vec<u8>)
 
 /// **The pipeline.** The dump's bytes, the manifests' bytes in order, and the mode in; the
 /// report's bytes out, or why there is no report. (The lines come out sorted bytewise and
-/// distinct, as the old driver's; the ensures does not state the order.)
+/// distinct, as the old driver's, except in selftest mode, which keeps one line per vector in file
+/// order; the ensures does not state the order.)
 pub fn pipeline(dump: &[u8], manifests: &Vec<Vec<u8>>, mode: &Mode) -> (r: Result<Vec<u8>, Vec<u8>>)
     ensures r is Ok ==> report_sound(dump@, manifests@, *mode, r->Ok_0@),
 {
@@ -1346,7 +1449,33 @@ pub fn pipeline(dump: &[u8], manifests: &Vec<Vec<u8>>, mode: &Mode) -> (r: Resul
                 k += 1;
             }
         },
-        Mode::Selftest(_) => return Err(cat(b"selftest: Task 8", b"")),
+        Mode::Selftest(text) => {
+            selftest(&m, &pol, text, &mut keys, &mut acc)?;
+            // in file order, one line per vector (no sort, no dedupe: two vectors may print alike)
+            let mut out: Vec<u8> = Vec::new();
+            let mut k: usize = 0;
+            while k < acc.len()
+                invariant k <= acc@.len(), out@ == views(acc@).subrange(0, k as int).flatten_alt(),
+                decreases acc.len() - k,
+            {
+                put(&mut out, acc[k].as_slice());
+                k += 1;
+                proof { assert(views(acc@).subrange(0, k as int).drop_last() =~= views(acc@).subrange(0, k - 1)); }
+            }
+            proof {
+                let lines = views(acc@);
+                assert(lines.subrange(0, acc@.len() as int) =~= lines);
+                lines.lemma_flatten_and_flatten_alt_are_equivalent();
+                assert forall|q: int| 0 <= q < lines.len() implies line_ok(m, pol, #[trigger] lines[q], lines) by {
+                    assert(lines[q] == acc@[q]@);
+                }
+                assert forall|j2: Json| #[trigger] print(j2) == dump@ implies jeq(j2, jj) by {
+                    crate::json_inj::theorem_print_injective(j2, jj);
+                }
+                assert(report_sound(dump@, manifests@, *mode, out@));
+            }
+            return Ok(out);
+        },
     }
     // sorted, distinct
     let mut sorted: Vec<Vec<u8>> = Vec::new();

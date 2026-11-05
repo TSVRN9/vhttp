@@ -1,0 +1,2 @@
+# Manifest for the semconf conformance fixtures (scripts/ct-check.sh): its vectors need no root,
+# translate-crate, declassify or ghost line.
