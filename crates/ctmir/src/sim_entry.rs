@@ -1,5 +1,5 @@
-//! The simulation, entry frames and the theorem (call-free form): the entry frames are equal on the
-//! MIR locals, and a completed MIR run of a call-free translated fn is core's run of its image.
+//! The simulation, entry frames and the theorem: the entry frames are equal on the MIR locals, and a
+//! completed MIR run of a translated fn is core's run of its image.
 #[allow(unused_imports)]
 use crate::lower::FnInfo;
 #[allow(unused_imports)]

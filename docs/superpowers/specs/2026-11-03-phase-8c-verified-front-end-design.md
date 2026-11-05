@@ -290,6 +290,21 @@ Fixed modelling decisions (the author implements them and does not choose them):
    - a shared reference to a ZST as `Shr` of the ZST's value.
 
    `ZeroSized` constants are their type's unit-like value. Anything else is outside the subset.
+
+   A unit-like (single-inhabitant) value has two forms, and its producer picks one. The
+   canonical `Unit` comes from `ZeroSized` constants, entry locals, ghost and `GhostUnit`
+   results, `()`-returning std rows and a decoded `()`. The structural `Tup`/`Adt`/`Arr`
+   comes from aggregates, `Repeat`, decoded structs and arrays, and `&ZST` constants; a root
+   argument may be either. One exception: a unit-like type holding an array (`[T; 0]`, or
+   `[Z; n]` of a unit-like `Z`, at any depth) is structural from every producer, since `Len`,
+   `PtrMetadata`, `Index`, `ConstantIndex` and the std rows read an array's length.
+   Consumers treat the two forms alike: `Discriminant` reads a one-variant enum's `Unit` as
+   its variant, and navigation and writes go through the shared `get`/`put`, which give and
+   keep `Unit`. The one place the form shows is a `Declass(v)` event, and the translator
+   admits only plain (int, `bool`, nonempty array) declassify arguments. Unit-like aggregates
+   stay aggregates in the translation (no `Lit(Unit)` lowering). The translator rejects
+   (`Unsupported`) any local, `ZeroSized` constant or call destination whose type is unit-like
+   and holds an array, so the simulation meets only the canonical form there.
 6. **Leakage table.** The events per MIR construct:
 
    | MIR construct | Event |
