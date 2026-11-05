@@ -278,7 +278,7 @@ Also read (their Interfaces blocks and binding notes are this plan's contract):
 
 **Files:**
 - Create: `crates/quic/src/pipeline.rs`, `crates/quic/tests/pipeline.rs`
-- Modify: `crates/quic/src/lib.rs`; `crates/quic/src/conn.rs`, **spec only**: `poll_cid_updates` gains `final(self).keeps_later(*old(self))`, proved like `poll_stream_events` with a `lemma_keeps_streams`-style frame lemma (it writes only `cid_updates` and `tokens_registered`, which no timer reads) (Decision 14, revised)
+- Modify: `crates/quic/src/lib.rs`; `crates/quic/src/conn.rs`, **spec only**: `poll_cid_updates` gains `final(self).keeps_later(*old(self))`, proved like `poll_stream_events` with a `lemma_keeps_streams`-style frame lemma (it writes only `cid_updates` and `tokens_registered`, which no timer reads) (Decision 14, revised); and the Task 3 addition already landed: `poll_transmit` ensures every returned packet has `pn < PN_MAX` (private `lemma_transmit_pn_max`), which discharges `protect_ok`'s `p.pn <= PN_MAX` (Decision 14, amended at Task 3 I1)
 
 **Interfaces:**
 - Consumes: `Connection::{accept, on_datagram, poll_transmit, close, on_reset_candidate, largest_pn, handshake_complete, now, on_timeout, poll_cid_updates, next_timeout}`; `transmit_ok` (P7, P16), `lemma_wf_protect_ok`, `out_log`, `timers_later`, `acks_later`, `keeps_later`, `lemma_keeps_elim`, `later`; `rfc_long_header`/`parse_long_header`, `TransportParams`, `RAND_LEN`, `PathId`.
