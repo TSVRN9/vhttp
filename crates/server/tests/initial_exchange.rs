@@ -6,7 +6,7 @@ use quic::datagram::OutPacket;
 use quic::payload::PacketKind;
 use quic::frame::Frame;
 use quic::protect::{protect, unprotect};
-use server::{bind, run};
+use server::{bind, load_config, run};
 use std::net::{SocketAddr, UdpSocket};
 use std::thread;
 use std::time::Duration;
@@ -14,7 +14,10 @@ use std::time::Duration;
 fn start() -> SocketAddr {
     let s = bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let a = s.local_addr().unwrap();
-    thread::spawn(move || run(s));
+    let cfg: &'static _ = Box::leak(Box::new(
+        load_config(include_bytes!("data/cert.pem"), include_bytes!("data/key.pem"), vec![]).unwrap(),
+    ));
+    thread::spawn(move || run(s, cfg));
     a
 }
 
@@ -35,7 +38,6 @@ fn assert_a2_reply(s: &UdpSocket) {
     let kc = [Some(KeyPair { rx: SERVER, tx: CLIENT }), None, None];
     let mut buf = [0u8; 3600];
     let n = s.recv(&mut buf).unwrap();
-    assert_eq!(n, 39);
     let (p, used) = unprotect(&buf[..n], &kc, &[None; 3]).ok().unwrap();
     assert_eq!(used, n);
     let p = p.unwrap();
@@ -43,19 +45,12 @@ fn assert_a2_reply(s: &UdpSocket) {
     assert!(p.dcid.is_empty());
     assert_eq!(p.scid.len(), 8);
     assert_eq!(p.pn, 0);
-    match p.frames.as_slice() {
-        [Frame::Ack(a)] => {
-            assert_eq!((a.largest, a.first_range), (2, 0));
-            assert!(a.ranges.is_empty());
-            assert!(a.ecn.is_none());
-        }
-        f => panic!("frames: {}", f.len()),
-    }
+    assert_eq!(p.frames, [Frame::ConnectionClose { app: false, error_code: 0x178, frame_type: 0, reason: vec![] }]);
     assert_silent(s);
 }
 
 #[test]
-fn a2_gets_one_ack() {
+fn a2_gets_close_0x178() {
     let c = client(start());
     c.send(&A2).unwrap();
     assert_a2_reply(&c);

@@ -110,6 +110,20 @@ pub(crate) fn key_scheme_of(k: &SigningKey) -> (r: u16)
     }
 }
 
+/// The signing key for the P-256 scalar `d` and its public point, or `None` unless
+/// `1 <= d <= n - 1` (the range `ServerConfig::wf` needs; `p256_public_key` checks it).
+pub fn p256_signing_key(d: [u8; 32]) -> (r: Option<(SigningKey, [u8; 65])>)
+    ensures
+        r is Some <==> scalar_valid(d@),
+        r matches Some((k, q)) ==> k@ == SpecSigningKey::EcdsaP256(d@) && key_wf(k@)
+            && spec_p256_public_key(d@) == Some(q@),
+{
+    match p256_public_key(&d) {
+        None => None,
+        Some(q) => Some((SigningKey::EcdsaP256(d), q)),
+    }
+}
+
 /// Checks every chain's size (`cert_chain_fits`, the `serialize_certificate` precondition);
 /// the keys arrive well formed from the trusted loader.
 pub fn build_config(chains: Vec<CertChain>) -> (r: Option<ServerConfig>)
