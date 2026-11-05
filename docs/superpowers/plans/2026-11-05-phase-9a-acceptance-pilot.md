@@ -28,10 +28,7 @@
   - (a) the error path leaves the connection Closing with that exact code (`close_spec`);
   - (b) in Closing, if a datagram is emitted, it contains CONNECTION_CLOSE with that code at the right key level (RFC 9000 §10.2.3). The words are "if emitted" because amplification and pacing can block sends. (b) is 9b's; 9a does not touch it.
 - **Rule 3, forward:** every future plan's Global Constraints carry rules 1 and 2. An error path without an acceptance clause, or a close without a proved code, is an **Important** review finding.
-- **rlimit:**
-  - Verify everything at `--rlimit 4`. A fresh target fails in vstd at rlimit 4, so run a default verify first.
-  - Force a real re-run by deleting the crate's fingerprint, deps and verus-partial dirs under target.
-  - Record the measured rlimit of every touched fn.
+- Verify everything at `--rlimit 4`; a fresh target fails in vstd at rlimit 4, so run a default verify first. Force a real re-run by deleting the crate's fingerprint, deps and verus-partial dirs under target. Record the measured rlimit of every touched fn.
   - Recipe, per crate `<c>`, with `CARGO_TARGET_DIR=<scratch>/vt-9a-evidence/tN/target`:
     ```bash
     (cd crates/<c> && cargo verus verify)                     # default rlimit, warms vstd (first run on a target only)
@@ -41,15 +38,18 @@
     ```
   - quictls depends on quic: after any quic edit, run the recipe for quic and then for quictls.
   - Use `#[verifier::spinoff_prover]` and split lemmas; never raise the rlimit.
-- **Must not be touched:** `RecvStream::on_data` (11.79M), `datagram::pick` (12.10M), `Paths::on_timeout` (11.04M). Any change to `poll_transmit` (7.13M) is a closed-predicate swap only (9b), and 9a makes none.
-  - reassembly.rs is not edited, so `on_data`, which calls `insert`, sees no new conjunct.
+  - In every new proof context that mentions `rfc_received`, start with `hide(crate::reassembly::rfc_received); hide(crate::reassembly::rfc_contiguous);` (quictls: `hide(quic::reassembly::…)`), as `Connection::crypto_read` does (conn.rs:3106-3108). The facts needed come from `lemma_received_push`, `lemma_wf` and `lemma_contiguous_exists`; reveal only inside a lemma that needs the definition. Unhidden, the recursive spec would inflate the very numbers design §4 reports.
+- Must not be touched: `RecvStream::on_data` (11.79M), `datagram::pick` (12.10M), `Paths::on_timeout` (11.04M). Any change to `poll_transmit` (7.13M) is a closed-predicate swap only (9b).
+  - 9a makes no change to `poll_transmit`. reassembly.rs is not edited, so `on_data`, which calls `insert`, sees no new conjunct.
   - Every task prints `on_data` and `poll_transmit` from `rl.py`. Each must stay within ±5% of Task 1's "before" value. A larger move is a stop: report it.
-- Never edit `crates/crypto/src`, `crates/ctcore/src` or `crates/ctmir/src/sem.rs`.
-- No `assume(`, `external_body`, `verifier::external` or `axiom` anywhere under `crates/` outside `crates/crypto/src`, in code or comments.
-  - Check with the line grep and `grep -Pz` from `<scratch>/vt-4c-evidence/t3/final.sh` (its `escape` loop), run over every crate directory except `crypto`. It must report 0.
-- vest_lib's default broadcast lemmas leak into any crate importing quic; tls stays free of quic. 9a edits no tls file.
-- `scripts/verify.sh`'s final line stays byte-identical: `verify.sh: all crates verified, duvet ok, ct ok (10 declassify), cost 19/36, escapes accounted (0), binary ok (49 fns)`.
-- `cargo test --workspace` stays green: 902 tests at main 73cc244, plus this plan's new tests (909 after Task 4). 0 warnings in `cargo build` and `cargo test`.
+- Never edit crates/crypto/src, crates/ctcore/src, crates/ctmir/src/sem.rs.
+- No `assume(`, `external_body`, `verifier::external`, `axiom` anywhere under crates/ outside crates/crypto/src, in code or comments.
+  - Check: the line grep `grep -rnE 'assume[[:space:]]*\(|external_body|verifier[[:space:]]*(::|\()[[:space:]]*external|\baxiom\b' crates --include='*.rs' | grep -v '^crates/crypto/src/'` and the multi-line `grep -rlPz '\bassume\s*\(' crates --include='*.rs' | grep -v '^crates/crypto/src/'` both print nothing. Both print nothing on 73cc244 (checked 2026-11-05).
+- vest_lib's default broadcast lemmas leak into any crate importing quic; tls stays free of quic.
+  - 9a edits no tls file.
+- verify.sh's final line stays byte-identical: `verify.sh: all crates verified, duvet ok, ct ok (10 declassify), cost 19/36, escapes accounted (0), binary ok (49 fns)`.
+- cargo test --workspace stays green (902 tests at main 73cc244).
+  - Plus this plan's new tests: 904 after Task 1, 907 after Task 3, 909 after Task 4. 0 warnings in `cargo build` and `cargo test`.
 - No attribution lines in commits.
 - **Duvet:** every new spec fn and ensures that states an RFC condition carries `//= https://www.rfc-editor.org/rfc/rfcNNNN#section-X` plus a contiguous `//#` quote copied verbatim from `.duvet/specifications/www.rfc-editor.org/rfc/`.
   - `.duvet/specifications` and `.duvet/requirements` are git-ignored and missing in wt-9a. Copy both once from `/home/tavern/Projects/rust/web-server/.duvet/`.
@@ -292,6 +292,7 @@
 - [ ] **Step 4: Verify.**
   - Run the recipe for `quic` then `quictls` (`E=…/t3`). Expected: 0 errors.
   - Record `on_crypto`, `read`, `lemma_insert_tight`, `crypto_read`, `on_crypto_frame`, `discard`, `on_data`, `poll_transmit`.
+  - Expect a small rise in `poll_transmit` and the other conn.rs fns that unfold `Connection::wf`: `wf_parts` now carries three opaque `tight()` atoms (`crx_i`, `crx_h`, `crx_1`). `on_data` should not move. A breach of the ±5% guard is still a stop.
 - [ ] **Step 5: Full checks, then commit.**
   - Checks: tests 907, 0 warnings; `verify.sh`'s exact line; escape grep 0; quote check on crypto_stream.rs and conn.rs; `duvet report` exit 0.
   ```bash
@@ -414,7 +415,7 @@
   ```
 - [ ] **Step 6: Mutations.** Each alone, then `git checkout -- crates/quictls/src/server.rs`.
   - **T4-M1:** in `superseded`, `if e >= self.init_end`. Expected: the `past_received` postcondition fails (`e - 1 < init_end`), and `cargo test` fails `initial_tail_retransmit_after_switch_ok`.
-  - **T4-M2:** in `key_changes`' first check, replace `self.unconsumed(Level::Initial, PacketKind::Initial)` with `self.h3.conn().crypto_end(PacketKind::Initial) > 0`. Expected: the `tls_unconsumed` postcondition fails.
+  - **T4-M2:** in `key_changes`' first check, replace `self.unconsumed(Level::Initial, PacketKind::Initial)` with `self.h3.conn().crypto_end(PacketKind::Initial) > 0`. Expected: the `tls_unconsumed` postcondition fails. It may also fail `lemma_push`'s `unread == 0` precondition, since the `KeyChange` push is now reachable with `unread > 0`. Both failures belong to this mutation.
   - **T4-M3:** in `on_params`' `Err` arm, `shut(…, PROTOCOL_VIOLATION, now)`. Expected: the `close_spec` postcondition fails.
   - **T4-M4:** restore the deleted block verbatim, from main's numbering (Task 2 shifted the file): `git show 73cc244:crates/quictls/src/server.rs | sed -n 607,613p`, pasted back between `superseded`'s `e > init_end` block and its final `sync_keys()`. Expected: the `!cont ==> … crypto_end_spec(Initial) > init_end` postcondition fails. This is the evidence for design §5.2: the old close cannot carry an acceptance clause without the invariant.
 

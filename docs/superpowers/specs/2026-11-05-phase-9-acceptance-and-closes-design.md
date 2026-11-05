@@ -170,4 +170,7 @@ rlimit as reported by `--output-json --time-expanded` at `--rlimit 4`, ranked wi
 ## 6. Fidelity notes (trusted-base items, unchanged by 9a)
 
 - `past_received` reads `crypto_inserted(k)`. After an Initial discard, `crx_i` is `CryptoStream::new_at(end)`, whose ghost record is `end` zero bytes at offset 0. So "received" after the discard means "below the end that was tight before the discard". The offsets are right; the byte values are not. No clause reads the values.
+- `superseded`'s clause `past_received(conn, Initial, init_end)` is stated over received bytes, but its threshold is the quictls field `init_end`.
+  - What makes `init_end` the RFC's "end of previously received data" is that it is written only in `on_secrets(Handshake)`, from a tight `crypto_end`, in the same `apply` as `key_changes`' unread == 0 check. That link is not proved.
+  - Proving it is the same two-state frame as §5 item 2. So the clause is exact about bytes past `init_end`, and trusted on what `init_end` is.
 - `allowed_*` predicates are hand-written readings of RFC text, like every `rfc_*` spec (TRUSTED.md, "hand-written formalization"). Rule 1 makes the reading explicit and reviewable per handler. It does not remove the trust.
