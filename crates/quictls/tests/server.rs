@@ -339,7 +339,7 @@ fn gapped_initial_at_key_change_pv() {
 fn empty_gapped_initial_ok() {
     let ch = h3ch(id);
     let l = ch.len();
-    let mut s = accept(&ini(&qc::S1, 0, || vec![cr(0, &ch), cr(l + 100, &[])]));
+    let s = accept(&ini(&qc::S1, 0, || vec![cr(0, &ch), cr(l + 100, &[])]));
     assert_eq!(s.conn().phase(), Phase::Open);
     assert_eq!(s.key_slots(), [true, true, true]);
 }
