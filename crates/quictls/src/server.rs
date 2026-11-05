@@ -509,17 +509,21 @@ impl<'a> QuicServer<'a> {
         let was = self.h3.conn().handshake_complete();
         let left = !matches!(self.level, Level::Initial);
         if !self.superseded(now) {
+            self.sync_keys();
             return ;
         }
         if was {
             if !self.feed(Level::OneRtt, now, r, was) {
+                self.sync_keys();
                 return ;
             }
         } else {
             if rank(self.level) == 0 && !self.feed(Level::Initial, now, r, was) {
+                self.sync_keys();
                 return ;
             }
             if rank(self.level) <= 1 && !self.feed(Level::Handshake, now, r, was) {
+                self.sync_keys();
                 return ;
             }
         }
@@ -646,6 +650,7 @@ impl<'a> QuicServer<'a> {
             final(self).hs == old(self).hs,
     {
         if !self.key_changes(&ev, now) {
+            self.sync_keys();
             return false;
         }
         let mut i: usize = 0;
@@ -671,6 +676,7 @@ impl<'a> QuicServer<'a> {
                 TlsEvent::Complete => self.on_complete(now, r),
             };
             if !ok {
+                self.sync_keys();
                 return false;
             }
             i += 1;
