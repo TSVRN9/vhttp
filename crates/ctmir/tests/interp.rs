@@ -240,10 +240,13 @@ fn vector_checks() {
     assert!(chk(&p, "0x1u128 => ()").unwrap_err().contains("param #1"));
     assert!(chk(&p, "0x1usize => ()").unwrap_err().contains("param #1"));
     assert!(chk(&p, "0x1u8 0x1u8 => ()").unwrap_err().contains("2 args for 1 params"));
+    assert!(chk(&p, "0x1u8 => 0x0u16").unwrap_err().contains("want #1: a 16-bit value for a 8-bit result"));
+    assert!(chk(&p, "0x1u8 => () ()").unwrap_err().contains("2 expected values for 1 return value and 0 &mut params"));
     let p = prog(1, vec![Ty::Unit, mutt(int(T::U8))], ret());
     assert_eq!(chk(&p, "mut:0x7u8 => () 0x7u8"), Ok(Some(1)));
     assert!(chk(&p, "0x7u8 => () 0x7u8").unwrap_err().contains("`mut:`"));
     assert!(chk(&p, "mut:0x7u32 => () 0x7u8").unwrap_err().contains("param #1"));
+    assert!(chk(&p, "mut:0x7u8 => () 0x7u16").unwrap_err().contains("want #2: a 16-bit value for a 8-bit result"));
     let abort = prog(0, units(1), vec![blk(vec![], Term::Abort)]);
     assert_eq!(chk(&abort, "=> panic"), Ok(None));
     assert!(chk(&abort, "=> ()").unwrap_err().contains("gave None"));

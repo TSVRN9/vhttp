@@ -1,7 +1,9 @@
 //! The selftest vector grammar (`tools/ct-driver/selftest.txt`, `tools/ct-fixtures/semconf/
 //! vectors.txt`) as a spec, its verified parser, and the verified vector check over `interp`.
-//! A line is `<path> <arg>... => <ret> <mut-out>...` or `<path> <arg>... => panic`, its words
-//! split at ASCII whitespace; a word starting `#` and not then a digit starts a comment.
+//! A line is `<path> <arg>... => <ret> <mut-out>...` or `<path> <arg>... => panic`. `vector_spec`
+//! is the grammar of the words after the path; the line's split into words at ASCII whitespace,
+//! and its cut at the first comment word (one starting `#` and not then a digit), are done by
+//! `pipeline::selftest`, outside this grammar.
 //! Values (`value`):
 //! - hex bytes (an `Arr` of byte `Int`s; `-` is the empty one);
 //! - `0x<hex><suffix>` (an `Int`, the suffix one of `u8`..`u128`, `usize`, `i8`..`i128`, `isize`,
@@ -20,7 +22,7 @@ use crate::policy::sub;
 #[cfg(verus_keep_ghost)]
 use crate::rel::views;
 #[cfg(verus_keep_ghost)]
-use ctcore::sem::{init_entry, nth, run_fn};
+use ctcore::sem::{bits, init_entry, nth, run_fn};
 use ctcore::sem::Val;
 use ctcore::syntax::{Program, Ty};
 use vstd::prelude::*;
@@ -166,7 +168,8 @@ pub open spec fn value_top(t: Seq<u8>) -> Option<Val> { value(t, t.len() + 1) }
 
 // ------------------------------------------------------------------ vectors
 
-pub struct VSpec { pub args: Seq<(bool, Val)>, pub want: Seq<Val>, pub bits: Seq<Option<nat>>, pub panic: bool }
+/// `bits`/`wbits`: the width suffix of each argument and wanted value that is an int literal.
+pub struct VSpec { pub args: Seq<(bool, Val)>, pub want: Seq<Val>, pub bits: Seq<Option<nat>>, pub wbits: Seq<Option<nat>>, pub panic: bool }
 
 /// The first `=>` at or after `k`, or `toks.len()`.
 pub open spec fn arrow_at(toks: Seq<Seq<u8>>, k: nat) -> nat
@@ -213,21 +216,22 @@ pub open spec fn vector_spec(toks: Seq<Seq<u8>>) -> Option<VSpec> {
             None => None,
             Some(args) => {
                 let bits = Seq::new(a.len(), |j: int| bits_of(a[j]));
-                if w == seq![b"panic"@] { Some(VSpec { args, want: seq![], bits, panic: true }) }
-                else { match wants_of(w) { Some(want) => Some(VSpec { args, want, bits, panic: false }), None => None } }
+                if w == seq![b"panic"@] { Some(VSpec { args, want: seq![], bits, wbits: seq![], panic: true }) }
+                else { match wants_of(w) { Some(want) => Some(VSpec { args, want, bits, wbits: Seq::new(w.len(), |k: int| bits_of(w[k])), panic: false }), None => None } }
             },
         }
     }
 }
 
 /// The exec vector; `args.0` marks a `mut:` argument.
-pub struct Vector { pub args: Vec<(bool, CVal)>, pub want: Vec<CVal>, pub bits: Vec<Option<u32>>, pub panic: bool }
+pub struct Vector { pub args: Vec<(bool, CVal)>, pub want: Vec<CVal>, pub bits: Vec<Option<u32>>, pub wbits: Vec<Option<u32>>, pub panic: bool }
 
 pub open spec fn vector_v(v: Vector) -> VSpec {
     VSpec {
         args: Seq::new(v.args@.len(), |j: int| (v.args@[j].0, cv(v.args@[j].1))),
         want: cvs(v.want@),
         bits: Seq::new(v.bits@.len(), |j: int| match v.bits@[j] { Some(w) => Some(w as nat), None => None }),
+        wbits: Seq::new(v.wbits@.len(), |j: int| match v.wbits@[j] { Some(w) => Some(w as nat), None => None }),
         panic: v.panic,
     }
 }
@@ -653,24 +657,30 @@ pub fn parse_vector(toks: &[Vec<u8>]) -> (r: Result<Vector, Vec<u8>>)
     proof { assert(nb =~= Seq::new(a.len(), |q: int| bits_of(a[q]))); }
     if toks.len() - at == 2 && eq_bytes(toks[at + 1].as_slice(), b"panic") {
         proof { assert(w =~= seq![b"panic"@]); }
-        let v = Vector { args, want: Vec::new(), bits, panic: true };
-        proof { assert(cvs(Seq::<CVal>::empty()) =~= Seq::<Val>::empty()); }
+        let v = Vector { args, want: Vec::new(), bits, wbits: Vec::new(), panic: true };
+        proof {
+            assert(cvs(Seq::<CVal>::empty()) =~= Seq::<Val>::empty());
+            assert(vector_v(v).wbits =~= Seq::<Option<nat>>::empty());
+        }
         return Ok(v);
     }
     proof { if w == seq![b"panic"@] { assert(w.len() == 1); assert(toks@[at + 1]@ == w[0]); } }
     let mut want: Vec<CVal> = Vec::new();
+    let mut wbits: Vec<Option<u32>> = Vec::new();
     let mut k: usize = at + 1;
     while k < toks.len()
         invariant at + 1 <= k <= toks@.len(), tv == views(toks@), w == tv.subrange(at + 1, tv.len() as int), arrow_at(tv, 0) == at as nat,
             a == tv.subrange(0, at as int), args_of(a) == Some(Seq::new(args@.len(), |q: int| (args@[q].0, cv(args@[q].1)))), w != seq![b"panic"@],
-            wants_of(w.subrange(0, k - at - 1)) == Some(cvs(want@)),
+            wants_of(w.subrange(0, k - at - 1)) == Some(cvs(want@)), wbits@.len() == k - at - 1,
+            forall|q: int| 0 <= q < k - at - 1 ==> (match #[trigger] wbits@[q] { Some(x) => Some(x as nat), None => None }) == bits_of(w[q]),
         decreases toks.len() - k,
     {
         proof { assert(w.subrange(0, k - at).drop_last() =~= w.subrange(0, k - at - 1)); assert(w.subrange(0, k - at).last() == toks@[k as int]@); }
         match parse_value_top(toks[k].as_slice()) {
             Some(x) => {
-                proof { lemma_cvs_push(want@, x); }
+                proof { lemma_cvs_push(want@, x); assert(w[k - at - 1] == toks@[k as int]@); }
                 want.push(x);
+                wbits.push(bits_exec(toks[k].as_slice()));
             },
             None => {
                 proof { lemma_wants_none(w, k - at); }
@@ -679,8 +689,12 @@ pub fn parse_vector(toks: &[Vec<u8>]) -> (r: Result<Vector, Vec<u8>>)
         }
         k += 1;
     }
-    proof { assert(w.subrange(0, w.len() as int) =~= w); }
-    Ok(Vector { args, want, bits, panic: false })
+    let v = Vector { args, want, bits, wbits, panic: false };
+    proof {
+        assert(w.subrange(0, w.len() as int) =~= w);
+        assert(vector_v(v).wbits =~= Seq::new(w.len(), |q: int| bits_of(w[q])));
+    }
+    Ok(v)
 }
 
 proof fn lemma_args_none(a: Seq<Seq<u8>>, k: int)
@@ -722,9 +736,49 @@ pub open spec fn mouts(args: Seq<(bool, Val)>, slots: Seq<Val>, n: nat) -> Seq<V
     if n == 0 { seq![] } else { mouts(args, slots, (n - 1) as nat) + if args[n - 1].0 { seq![nth(slots, (n - 1) as nat)] } else { Seq::<Val>::empty() } }
 }
 
+/// An int type's width, through one `Mut`.
+pub open spec fn wint(t: Ty) -> Option<nat> {
+    match t {
+        Ty::Int(it) => Some(bits(it)),
+        Ty::Mut(inner) => match *inner { Ty::Int(it) => Some(bits(it)), _ => None },
+        _ => None,
+    }
+}
+
+/// A width suffix `w` (if any) is the width of `t`.
+pub open spec fn wok(t: Ty, w: Option<nat>) -> bool { w is None || wint(t) == w }
+
+/// Parameter `j`'s type (`Unit` past the locals).
+pub open spec fn arg_ty(b: ctcore::syntax::Body, j: int) -> Ty { if 1 + j < b.locals@.len() { b.locals@[1 + j] } else { Ty::Unit } }
+
+/// The types of the `mut:` parameters among the first `n`, in order (as `mouts`).
+pub open spec fn otys(b: ctcore::syntax::Body, args: Seq<(bool, Val)>, n: nat) -> Seq<Ty>
+    decreases n,
+{
+    if n == 0 { seq![] } else { otys(b, args, (n - 1) as nat) + if args[n - 1].0 { seq![arg_ty(b, n - 1)] } else { Seq::<Ty>::empty() } }
+}
+
+proof fn lemma_otys_len(b: ctcore::syntax::Body, args: Seq<(bool, Val)>, n: nat)
+    ensures otys(b, args, n).len() <= n,
+    decreases n,
+{
+    if n > 0 { lemma_otys_len(b, args, (n - 1) as nat); }
+}
+
+/// Every width suffix fits: an argument's its parameter's type, a wanted value's the return
+/// local's or its `mut:` parameter's pointee type.
+pub open spec fn widths_ok(b: ctcore::syntax::Body, v: VSpec) -> bool {
+    &&& v.bits.len() == v.args.len() && forall|j: int| 0 <= j < v.args.len() ==> wok(arg_ty(b, j), #[trigger] v.bits[j])
+    &&& v.wbits.len() == v.want.len()
+    &&& b.locals@.len() > 0
+    &&& forall|k: int| 0 <= k < v.want.len() && k < 1 + otys(b, v.args, v.args.len()).len() ==>
+            wok((seq![b.locals@[0]] + otys(b, v.args, v.args.len()))[k], #[trigger] v.wbits[k])
+}
+
 /// The vector's shape fits fn 0: one argument per parameter, `mut:` exactly at the `&mut` ones.
 pub open spec fn shape_ok(p: Program, v: VSpec) -> bool {
-    p.fns@.len() > 0 && v.args.len() == p.fns@[0].nargs && forall|j: int| 0 <= j < v.args.len() ==> (#[trigger] v.args[j]).0 == mut_param(p.fns@[0], j)
+    p.fns@.len() > 0 && v.args.len() == p.fns@[0].nargs && (forall|j: int| 0 <= j < v.args.len() ==> (#[trigger] v.args[j]).0 == mut_param(p.fns@[0], j))
+        && widths_ok(p.fns@[0], v)
 }
 
 pub open spec fn vec_run(p: Program, v: VSpec) -> ctcore::sem::Res {
@@ -739,7 +793,10 @@ pub open spec fn passes(p: Program, v: VSpec, n: nat) -> bool {
         && seq![nth(fr.locals, 0)] + mouts(v.args, fr.slots, v.args.len()) == v.want)
 }
 
-/// **A passing panic vector**: fn 0's run does not complete (within `u64` steps).
+/// **A passing panic vector**: fn 0's run does not complete: it panics (a failed `Assert`,
+/// `Abort`), stops on a Vec overflow, exhausts `FUEL` in some activation, or takes more than `u64`
+/// steps. Fuel exhaustion counts as a panic here; `ct-check.sh` bounds the selftest's time so a
+/// looping vector cannot pass that way.
 pub open spec fn panics(p: Program, v: VSpec) -> bool {
     shape_ok(p, v) && v.panic && (vec_run(p, v) is None || vec_run(p, v)->Some_0.2 > u64::MAX)
 }
@@ -750,11 +807,41 @@ fn is_mut_param(b: &ctcore::syntax::Body, j: usize) -> (r: bool)
     j < b.nargs && b.locals.len() > 0 && j < b.locals.len() - 1 && match &b.locals[1 + j] { Ty::Mut(_) => true, _ => false }
 }
 
-fn int_width(t: &Ty) -> Option<u32> {
+fn int_width(t: &Ty) -> (r: Option<u32>)
+    ensures match r { Some(x) => wint(*t) == Some(x as nat), None => wint(*t) is None },
+{
     match t {
         Ty::Int(it) => Some(crate::interp_arith::bits_exec(it)),
         Ty::Mut(inner) => match &**inner { Ty::Int(it) => Some(crate::interp_arith::bits_exec(it)), _ => None },
         _ => None,
+    }
+}
+
+/// Wanted value `k`'s width suffix `w` fits type `t`.
+fn want_width(t: &Ty, w: Option<u32>, k: usize) -> (r: Result<(), Vec<u8>>)
+    requires k < usize::MAX,
+    ensures r is Ok ==> wok(*t, match w { Some(x) => Some(x as nat), None => None }),
+{
+    match w {
+        None => Ok(()),
+        Some(x) => match int_width(t) {
+            Some(y) => if y == x { Ok(()) } else {
+                let mut e = crate::pipeline::cat(b"want #", crate::text::dec(k as u64 + 1).as_slice());
+                crate::text::put(&mut e, b": a ");
+                crate::text::put(&mut e, crate::text::dec(x as u64).as_slice());
+                crate::text::put(&mut e, b"-bit value for a ");
+                crate::text::put(&mut e, crate::text::dec(y as u64).as_slice());
+                crate::text::put(&mut e, b"-bit result");
+                Err(e)
+            },
+            None => {
+                let mut e = crate::pipeline::cat(b"want #", crate::text::dec(k as u64 + 1).as_slice());
+                crate::text::put(&mut e, b": a ");
+                crate::text::put(&mut e, crate::text::dec(x as u64).as_slice());
+                crate::text::put(&mut e, b"-bit value for a non-int result");
+                Err(e)
+            },
+        },
     }
 }
 
@@ -788,12 +875,16 @@ pub fn check_vector(p: &Program, v: &Vector) -> (r: Result<Option<u64>, Vec<u8>>
         }
         j += 1;
     }
+    if v.bits.len() != v.args.len() { return Err(crate::pipeline::cat(b"a width per argument", b"")); }
     let mut j: usize = 0;
     while j < v.bits.len()
+        invariant p.fns@.len() > 0, b == p.fns@[0], vs == vector_v(*v), j <= v.bits@.len() == v.args@.len(),
+            forall|q: int| 0 <= q < j ==> wok(arg_ty(*b, q), #[trigger] vs.bits[q]),
         decreases v.bits.len() - j,
     {
         if let Some(w) = v.bits[j] {
             let pw = if b.locals.len() > 0 && j < b.locals.len() - 1 { int_width(&b.locals[1 + j]) } else { None };
+            proof { if !(1 + j < b.locals@.len()) { assert(wint(arg_ty(*b, j as int)) is None); } }
             match pw {
                 Some(x) => if x != w {
                     let mut e = crate::pipeline::cat(b"param #", crate::text::dec(j as u64 + 1).as_slice());
@@ -815,6 +906,35 @@ pub fn check_vector(p: &Program, v: &Vector) -> (r: Result<Option<u64>, Vec<u8>>
         }
         j += 1;
     }
+    // the wanted values' widths: the return local's type, then each `mut:` parameter's
+    if b.locals.len() == 0 { return Err(crate::pipeline::cat(b"no return local", b"")); }
+    if v.wbits.len() != v.want.len() { return Err(crate::pipeline::cat(b"a width per wanted value", b"")); }
+    if v.want.len() > 0 { want_width(&b.locals[0], v.wbits[0], 0)?; }
+    let ghost l0 = b.locals@[0];
+    let mut c: usize = 1;
+    let mut j: usize = 0;
+    while j < v.args.len()
+        invariant p.fns@.len() > 0, b == p.fns@[0], vs == vector_v(*v), j <= v.args@.len() == b.nargs, l0 == b.locals@[0],
+            b.locals@.len() > 0, vs.wbits.len() == vs.want.len(), c as int == 1 + otys(*b, vs.args, j as nat).len(),
+            forall|q: int| (0 <= q < vs.want.len() && q < c) ==> wok((seq![l0] + otys(*b, vs.args, j as nat))[q], #[trigger] vs.wbits[q]),
+            forall|q: int| 0 <= q < v.args@.len() ==> (#[trigger] vs.args[q]).0 == mut_param(*b, q),
+        decreases v.args.len() - j,
+    {
+        let ghost t0 = seq![l0] + otys(*b, vs.args, j as nat);
+        let ghost t1 = seq![l0] + otys(*b, vs.args, (j + 1) as nat);
+        proof {
+            assert(otys(*b, vs.args, (j + 1) as nat) == otys(*b, vs.args, j as nat) + if vs.args[j as int].0 { seq![arg_ty(*b, j as int)] } else { Seq::<Ty>::empty() });
+            assert(forall|q: int| 0 <= q < t0.len() ==> t1[q] == t0[q]);
+        }
+        if v.args[j].0 {
+            proof { assert(t1[c as int] == arg_ty(*b, j as int)); assert(mut_param(*b, j as int)); }
+            if c < v.want.len() { want_width(&b.locals[1 + j], v.wbits[c], c)?; }
+            if c == usize::MAX { return Err(crate::pipeline::cat(b"too many wanted values", b"")); }
+            c = c + 1;
+        }
+        j += 1;
+    }
+    proof { assert(otys(*b, vs.args, vs.args.len()) == otys(*b, vs.args, j as nat)); }
     // the entry arguments and slots
     let mut args: Vec<CVal> = Vec::new();
     let mut slots: Vec<CVal> = Vec::new();
@@ -838,6 +958,13 @@ pub fn check_vector(p: &Program, v: &Vector) -> (r: Result<Option<u64>, Vec<u8>>
     proof {
         assert(cvs(args@) =~= entry_args(*b, vs));
         assert(cvs(slots@) =~= entry_slots(*b, entry_args(*b, vs)));
+    }
+    if !v.panic && (nm >= usize::MAX || v.want.len() != nm + 1) {
+        let mut e = crate::text::dec(v.want.len() as u64);
+        crate::text::put(&mut e, b" expected values for 1 return value and ");
+        crate::text::put(&mut e, crate::text::dec(nm as u64).as_slice());
+        crate::text::put(&mut e, b" &mut params");
+        return Err(e);
     }
     let r = interp(p, 0, &args, &slots, FUEL);
     if v.panic {
