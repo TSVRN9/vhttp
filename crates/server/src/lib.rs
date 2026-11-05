@@ -2,7 +2,8 @@
 //! verified sans-IO pipelines in `quic`. Every `quic` function it calls requires at most the
 //! receiver's `wf()`, which Verus does not check at an unverified call site; every `Connection`
 //! constructor and method ensures `wf()` over private fields.
-use quic::aead::{KeyPair, PacketKeys, MAX_UDP_PAYLOAD};
+use quic::aead::{KeyPair, MAX_UDP_PAYLOAD};
+use quic::codes::MAX_CID_LEN;
 use quic::conn::{Connection, RAND_LEN};
 use quic::pipeline::{accept_datagram, initial_dcid, receive, transmit};
 use quic::route::{route, CidTable, ConnId, Route};
@@ -90,24 +91,6 @@ pub fn bind(addr: SocketAddr) -> io::Result<UdpSocket> {
     Ok(s)
 }
 
-const A1_DCID: [u8; 8] = [0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
-const A1_CLIENT: PacketKeys = PacketKeys {
-    key: [0x1f, 0x36, 0x96, 0x13, 0xdd, 0x76, 0xd5, 0x46, 0x77, 0x30, 0xef, 0xcb, 0xe3, 0xb1, 0xa2, 0x2d],
-    iv: [0xfa, 0x04, 0x4b, 0x2f, 0x42, 0xa3, 0xfd, 0x3b, 0x46, 0xfb, 0x25, 0x5c],
-    hp: [0x9f, 0x50, 0x44, 0x9e, 0x04, 0xa0, 0xe8, 0x10, 0x28, 0x3a, 0x1e, 0x99, 0x33, 0xad, 0xed, 0xd2],
-};
-const A1_SERVER: PacketKeys = PacketKeys {
-    key: [0xcf, 0x3a, 0x53, 0x31, 0x65, 0x3c, 0x36, 0x4c, 0x88, 0xf0, 0xf3, 0x79, 0xb6, 0x06, 0x7e, 0x37],
-    iv: [0x0a, 0xc1, 0x49, 0x3c, 0xa1, 0x90, 0x58, 0x53, 0xb0, 0xbb, 0xa0, 0x3e],
-    hp: [0xc2, 0x06, 0xb8, 0xd9, 0xb9, 0xf0, 0xf3, 0x76, 0x44, 0x43, 0x0b, 0x49, 0x0e, 0xea, 0xa3, 0x14],
-};
-
-/// The Initial keys for `dcid`: RFC 9001 A.1's, for its DCID only.
-// ponytail: RFC constants stand in for Initial secret derivation (RFC 9001 §5.2); Phase 4 derives the keys for any DCID.
-pub fn initial_keys(dcid: &[u8]) -> Option<KeyPair> {
-    (dcid == A1_DCID).then_some(KeyPair { rx: A1_CLIENT, tx: A1_SERVER })
-}
-
 /// Our transport parameters.
 pub fn local_params() -> TransportParams {
     let mut t = default_transport_params();
@@ -157,7 +140,7 @@ struct Conn {
 type Outbox = Vec<(Vec<u8>, SocketAddr)>;
 
 /// The socket-free server: datagrams and wake-ups in, datagrams out.
-// ponytail: linear scans over conns and route's CID/token lists (<= MAX_CONNS = 102 connections; route costs <= 512 CID and 816 CT token comparisons per datagram); a random-keyed SipHash index before production, never a sorted Vec (it leaks token order, §10.3.1). Connections are capped by route's has_room (MAX_CONNS), counted at the first applied Add, which service applies before the next datagram; nothing is evicted, and RFC 9000 §10.1's 3*PTO floor lets a peer hold a slot up to 55.6 min (3d2 note), which admission must plan for. A.1-only keys allow one connection in 3e.
+// ponytail: linear scans over conns and route's CID/token lists (<= MAX_CONNS = 102 connections; route costs <= 512 CID and 816 CT token comparisons per datagram); a random-keyed SipHash index before production, never a sorted Vec (it leaks token order, §10.3.1). Connections are capped by route's has_room (MAX_CONNS), counted at the first applied Add, which service applies before the next datagram; nothing is evicted, and RFC 9000 §10.1's 3*PTO floor lets a peer hold a slot up to 55.6 min (3d2 note), which admission must plan for. every DCID is keyed (4c): MAX_CONNS is reachable; see the 3e binding note.
 pub struct Server {
     table: CidTable,
     conns: Vec<Conn>,
@@ -215,7 +198,7 @@ impl Server {
                 }
             }
             Route::NewInitial => {
-                if let Some(kp) = initial_dcid(d).and_then(|x| initial_keys(&x)) {
+                if let Some(kp) = initial_dcid(d).filter(|x| x.len() <= MAX_CID_LEN).map(|x| quictls::keys::initial_keys(&x)) {
                     let keys = [Some(kp), None, None];
                     let r = (self.rng)()?;
                     if let Some(conn) = accept_datagram(d, 0, now, &r, &local_params(), &keys) {

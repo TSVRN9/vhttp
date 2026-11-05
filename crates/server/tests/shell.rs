@@ -42,15 +42,6 @@ fn df_set_v6() {
 }
 
 #[test]
-fn a1_keys_only() {
-    let k = initial_keys(&S1).unwrap();
-    assert_eq!(k.rx, CLIENT);
-    assert_eq!(k.tx, SERVER);
-    assert!(initial_keys(&[0x83; 8]).is_none());
-    assert!(initial_keys(&[]).is_none());
-}
-
-#[test]
 fn read_timeout_floor() {
     use std::time::Duration;
     let ms = Some(Duration::from_millis(1));
