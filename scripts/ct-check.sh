@@ -8,7 +8,8 @@
 # (all must be ok) with every `checked` line pinned by tools/ct-driver/expected-labels.txt; the
 # negative control (--cfg ct_negative; exactly its one reject); and the semconf conformance check:
 # its native vectors (tools/ct-fixtures/semconf) are regenerated and diffed against vectors.txt,
-# and every vector must pass ct-front's verified selftest within a time bound; finally every dump
+# and every vector must pass ct-front's verified selftest (which runs ctmir::sem through the
+# verified evaluator) within a time bound; finally every dump
 # must parse and decode with no `Unknown` (ctmir's `dumps` tests). Every ct-front run
 # is under `timeout` and must exit 0 and write its report into a freshly emptied run dir. Target
 # dirs live under CT_TARGET_DIR (default $root/target/ct), one subdir per run; dumps and reports
@@ -120,8 +121,9 @@ dump parsers wire,h3,quic "$encode"
 export RUSTFLAGS='--cfg ct_negative'
 dump negative crypto ""
 unset RUSTFLAGS
-# The selftest of crypto (p256_ecdsa_sign runs 1.5e8 core steps) takes about 20 s; the other runs
-# take seconds. 300 s only bounds a hang.
+# The other runs take seconds; 300 s only bounds a hang. The crypto selftest runs every vector on
+# ctmir::sem through the verified evaluator (p256_ecdsa_sign is 1.5e8 MIR steps); it takes about a
+# minute and gets its own 150 s bound (8d addendum decision 5), so the bound is enforced.
 t=300
 
 front $t check "$CT_OUT/fixtures/mir-ct_fixtures.json" "$CT_OUT/fixtures/report-ct_fixtures.txt" "$fx/manifest.txt"
@@ -134,7 +136,7 @@ echo "ct-check: fixtures $n/$n"
 
 # Selftest: every vector line of selftest.txt must report `pass`; counted per crate prefix.
 r=$CT_OUT/crypto/selftest-crypto.txt
-front $t "selftest=$st" "$CT_OUT/crypto/mir-crypto.json" "$r" "$cm"
+front 150 "selftest=$st" "$CT_OUT/crypto/mir-crypto.json" "$r" "$cm"
 grep -v '^pass ' "$r" >&2 && fail "selftest: vectors failed (above)"
 v=$(grep -c '^crypto::' "$st")
 p=$(grep -c "^pass " "$r" || true)
@@ -178,6 +180,9 @@ got=$CT_OUT/parsers/cost-verdicts.txt
 cat $reports | sed -E 's/ NotCounted\([0-9]+\)$/ NotCounted/' > "$CT_OUT/parsers/cost-all.txt"
 cost_verdicts "$CT_OUT/parsers/cost-all.txt" atoms > "$got"
 diff -u "$ct/expected-cost.txt" "$got" || fail "cost parsers: verdicts differ from tools/ct-driver/expected-cost.txt"
+if grep -qvE '^[[:space:]]*(#|$|cost-root[[:space:]])' "$ct/cost-targets.txt"; then
+    fail "cost-targets.txt holds a line that is not a cost-root line (the selftest and the cost run must share one cpol)"
+fi
 nt=$(grep -c -E '^[[:space:]]*cost-root[[:space:]]' "$ct/cost-targets.txt")
 [ "$nt" -eq 36 ] || fail "cost targets: $nt roots, the pre-registered denominator is 36"
 for p in $(sed -nE 's/^[[:space:]]*cost-root[[:space:]]+([^ ]+)[[:space:]]+# predicted: bounded.*/\1/p' "$ct/cost-targets.txt"); do
@@ -206,6 +211,37 @@ r=$(grep -c '^root ' "$cm")
 d=$(grep -c '^declassify ' "$report" || true)
 echo "ct-check: crypto ok ($f fns, $r roots, $d declassify)"
 
+# Coverage (8d): every crypto `root .. ok` and every parser `bounded` root has a `pass <path> steps=<n>`
+# line, i.e. (report_sound's pass_ok) a vector on which mir_run reaches Done. The join is on the path,
+# awk `$2`, so a premise is checked first and the run fails closed if it breaks: no root, bounded or
+# pass line carries a path with a space (such a path would shift the fields and drop out of the awk
+# selections below). The reports line up because the selftest and the check/cost runs read the same
+# dump under the same cpol (cost-targets.txt holds only `cost-root` lines, and cpol reads only
+# declassify and ghost lines, so adding it to the selftest's manifests changes nothing).
+# cover <label> <paths file> <selftest report>..: the number of paths, failing unless each has a pass line.
+cover() {
+    label=$1 paths=$2
+    shift 2
+    cat "$@" > "$paths.sel"
+    awk '$1 == "pass" && NF != 3 { bad = 1 } END { exit bad }' "$paths.sel" || fail "$label: a pass line is not 3 fields (a path with a space?)"
+    awk '$1 == "pass" && $3 ~ /^steps=[0-9]+$/ { print $2 }' "$paths.sel" | LC_ALL=C sort -u > "$paths.pass"
+    LC_ALL=C sort -u "$paths" > "$paths.sorted"
+    missing=$(LC_ALL=C comm -23 "$paths.sorted" "$paths.pass")
+    [ -z "$missing" ] || fail "$label: no vector reaches Done (a 'pass .. steps=' line) for: $missing"
+    wc -l < "$paths.sorted" | tr -d ' '
+}
+awk '$1 == "root" && NF != 3 { bad = 1 } END { exit bad }' "$report" || fail "coverage: a crypto root line is not 3 fields (a path with a space?)"
+awk '$1 == "bounded" && $3 !~ /^deg=[0-9]+$/ { bad = 1 } END { exit bad }' "$CT_OUT/parsers/cost-all.txt" || fail "coverage: a bounded line has a path with a space"
+awk '$1 == "root" && $3 == "ok" { print $2 }' "$report" > "$CT_OUT/crypto/ok-roots.txt"
+awk '$1 == "bounded" { print $2 }' "$CT_OUT/parsers/cost-all.txt" > "$CT_OUT/parsers/bounded-roots.txt"
+R=$(wc -l < "$CT_OUT/crypto/ok-roots.txt" | tr -d ' ')
+B=$(wc -l < "$CT_OUT/parsers/bounded-roots.txt" | tr -d ' ')
+a=$(cover "coverage crypto" "$CT_OUT/crypto/ok-roots.txt" "$CT_OUT/crypto/selftest-crypto.txt") || exit 1
+b=$(cover "coverage parsers" "$CT_OUT/parsers/bounded-roots.txt" "$CT_OUT/parsers/selftest.txt") || exit 1
+[ "$R" -gt 0 ] && [ "$B" -gt 0 ] || fail "coverage: no root or bounded lines in the reports"
+[ "$a" -eq "$R" ] && [ "$b" -eq "$B" ] || fail "coverage: $a of $R ok roots, $b of $B bounded roots have a vector"
+echo "ct-check: done roots $a/$R, bounded $b/$B"
+
 # Negative control: crypto::ct_negative::secret_branch (compiled only with --cfg ct_negative) is
 # the one reject, as SecretSwitch; every manifest.txt root stays ok.
 report=$CT_OUT/negative/report-crypto.txt
@@ -230,15 +266,25 @@ cargo test --release --locked -q --manifest-path "$sc/Cargo.toml" --target-dir "
 diff -u "$sc/vectors.txt" "$CT_TARGET_DIR/semconf-native/semconf-vectors.txt" || fail "semconf: native vectors differ from vectors.txt"
 dump semconf semconf "" --manifest-path "$sc/Cargo.toml"
 got=$CT_OUT/semconf/selftest-semconf.txt
-# A `=> panic` vector passes when the core run does not complete, and running out of fuel (2^32
-# blocks per activation) would count; the whole run takes well under a second, so a 60 s bound
-# keeps a looping vector from passing that way.
+# A `=> panic` vector passes only when the MIR run panics (running out of fuel, 2^32 blocks per
+# activation, is a `fail`); the whole run takes well under a second, and the 60 s bound stops a
+# looping vector.
 front 60 "selftest=$sc/vectors.txt" "$CT_OUT/semconf/mir-semconf.json" "$got" "$sc/manifest.txt"
 grep -v '^pass ' "$got" >&2 && fail "semconf: vectors failed (above)"
 v=$(grep -c '^semconf::' "$sc/vectors.txt")
 p=$(grep -c '^pass ' "$got" || true)
 [ "$p" -eq "$v" ] || fail "semconf: $p of $v vectors passed"
 echo "ct-check: semconf $p/$v"
+
+# The evaluator's and the selftest's own tests (tiny.json fixtures; not part of verify.sh's proofs),
+# then eval_probe over the crypto dump: sha256 and p256_public_key on mir_eval must take the step
+# counts the deleted core interpreter took (about 16 s).
+timeout 600 cargo test --release --locked -q -p ctmir --test eval --test interp --target-dir "$CT_TARGET_DIR/ctmir-tests" > "$CT_OUT/ctmir-tests.log" 2>&1 \
+    || { cat "$CT_OUT/ctmir-tests.log" >&2; fail "ctmir: the eval/interp tests failed or ran past 600 s"; }
+CT_DUMP_DIR=$CT_OUT timeout 300 cargo test --release --locked -q -p ctmir --test eval --target-dir "$CT_TARGET_DIR/ctmir-tests" \
+    -- --ignored --exact eval_probe > "$CT_OUT/eval-probe.log" 2>&1 \
+    || { cat "$CT_OUT/eval-probe.log" >&2; fail "ctmir: eval_probe (MIR steps equal the core's) failed or ran past 300 s"; }
+grep -q '^test result: ok. 1 passed' "$CT_OUT/eval-probe.log" || { cat "$CT_OUT/eval-probe.log" >&2; fail "ctmir: eval_probe did not run exactly one passing test"; }
 
 # Every dump above parses with the verified reader and decodes with no `Unknown` variant (a
 # rustc_public variant the schema does not mirror): ctmir's `dumps` tests over $CT_OUT.

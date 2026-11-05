@@ -14,7 +14,7 @@ in row 44, trust these parts:
 - `main.rs`'s `cost_verdict`, `poly_text` and `atom_text`. The text of a `bounded` line comes
   from these, and no code instantiates `theorem_cost`;
 - `interp.rs`, the core interpreter behind the selftest. It is unverified, so the selftest tests
-  the interpreter, not `sem.rs`.
+  the interpreter, not `sem.rs`. (Superseded by Phase 8d: deleted; the selftest runs `ctmir::sem` through the verified MIR evaluator.)
 
 The user asked for this front end to be proved, reducing the trust base "pretty much as much as
 possible until it practically only depends on the same things verus depends on".
@@ -84,7 +84,7 @@ that says why.
    differences.
 4. The trusted MIR semantics is tested against rustc. A verified interpreter is proved equal to
    the semantics. It runs the selftest vectors, and also semantic-conformance vectors that native
-   execution of the compiled Rust produces.
+   execution of the compiled Rust produces. (Superseded by Phase 8d: the verified MIR evaluator `ctmir::eval` replaces the interpreter.)
 
 ## Non-goals
 
@@ -443,6 +443,8 @@ report. It contains no `verus!` code and no logic.
 
 ## Verified interpreter and conformance tests (`ctmir::interp`, verified)
 
+*Superseded by Phase 8d: the core interpreter described here is deleted; the selftest and semconf vectors run `ctmir::sem` through the verified MIR evaluator (`ctmir::eval`).*
+
 `pub fn interp(p: &ctcore::Program, f: usize, args: …, fuel: u64) -> (r: Option<…>) ensures r ==
 ctcore::run_fn(...) mapped`. The interpreter is exec and works over a concrete value type with a
 proved view into `Val`. It interprets core rather than MIR. The simulation is one-directional (a
@@ -540,16 +542,13 @@ verified interpreter, proved equal to `ctcore::sem::run_fn`. As built, the pipel
 with `ensures r is Ok ==> report_sound(dump@, manifests@, *mode, r->Ok_0@)` (§Pipeline shows
 the planned one).
 
-**Goal 4 is partly met.** The interpreter is proved equal to core's `run_fn`, and every selftest
-and semconf vector passes. But the vectors run core, and `theorem_sim` goes from MIR to core
-only, so they show that `ctmir::sem` never completes with a value different from native's on
-those inputs; they do not test that it completes. Never-Stuck (no `Panic`/`None` on rustc-typed
-in-subset MIR where Rust completes) rests only on the two clean-room audits and `sem_sanity`'s
-synthetic facts, and no crypto root is shown to reach `Done` under `mir_run_fn`. If `ctmir::sem`
-wrongly panicked on a construct a root uses, that root's `ok` line would be vacuous with every
-gate green. The follow-up is Phase 8d: an exec MIR evaluator proved equal to `mir_run_fn`, run
-on the crypto roots (the selftest inputs) and the semconf vectors (alternative: a backward
-simulation, core `Some` implies MIR `Done`).
+**Goal 4 is met for the exercised inputs** (Phase 8d). The selftest and semconf vectors run
+`ctmir::sem` itself, through the verified exec evaluator `ctmir::eval` (its `Done`, `Panic` and
+`Fuel` are `mir_run`'s), and a `pass <path> steps=<n>` line is a proved claim (`pass_ok`): the
+root has a well-typed input on which `mir_run` reaches `Done` in `n` steps. ct-check fails unless
+every crypto `root .. ok` and every parser `bounded` root has such a line. Never-Stuck (no
+`Panic`/`None` on rustc-typed in-subset MIR where Rust completes) stays trusted for inputs no
+vector exercises, and for the fixtures and the negative control; see the 8d addendum's "8d result".
 
 **The trust table, as built.**
 
@@ -592,8 +591,6 @@ these differences. Final numbers: fixtures 59/59, selftest 22/22 and parsers 15/
 12/12, cost 19/36 bounded, crypto ok (105 fns, 11 roots, 10 declassify), negative control
 rejected, semconf 31723/31723, dumps 7/7 (every dump parses and decodes with no `Unknown`).
 
-**Follow-ups.** Phase 8d: an exec MIR evaluator proved equal to `mir_run_fn`, run on the crypto
-roots and the semconf vectors, so each `ok` root is shown to reach `Done` on real inputs (or a
-backward simulation; either way toward never-Stuck, whose proof as type soundness of `ctmir::sem`
-on rustc-typed MIR stays open). Prove `decode_crate` functional up to views and delete its
+**Follow-ups.** A never-Stuck proof (type soundness, or a backward simulation with typing
+premises), and `lemma_mir_run_fuel_mono` with `ct_mir` over two fuels. Prove `decode_crate` functional up to views and delete its
 TRUSTED.md row. Add quic's send and receive paths as CT roots (RFC 9001 §9.5).

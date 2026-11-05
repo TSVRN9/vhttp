@@ -1,9 +1,9 @@
 # Selftest vectors (ct-front selftest=<this file>; grammar in crates/ctmir/src/vectors.rs):
 #   <def-path> <arg>... => <ret> <mut-out>...
 # A `#` token starts a comment unless a digit follows it (`#1(..)`, an enum value).
-# Each fn's translated closure runs in the verified core interpreter (ctmir::interp); the return
-# value and the final pointee of every `mut:` (&mut) param must equal these exactly. Every expected
-# value is also checked against the compiled Rust by its crate's own tests (named per line). ct-check.sh counts
+# Each fn's translated closure runs on ctmir::sem through the verified evaluator (ctmir::eval); the
+# return value and the final pointee of every `mut:` (&mut) param must equal these exactly. Every expected
+# value is checked against the compiled Rust by its crate's own tests (named per line), or derived by hand from them where the line says so. ct-check.sh counts
 # the crypto:: lines and the parser (wire::, h3::, quic::) lines separately.
 
 # FIPS 197 Appendix C.1 (crates/crypto/tests/aes_gcm.rs)
@@ -49,6 +49,11 @@ crypto::gcm::aes128_gcm_open 00000000000000000000000000000000 000000000000000000
 crypto::bignum::neg_inv64 0x1u64 => 0xffffffffffffffffu64
 # Bit length of n, top octet 0x01 then 0xff (modulus_bits_edges in crates/crypto/src/rsa.rs)
 crypto::rsa::modulus_bits 01ff => 0x9usize
+# RSASSA-PSS-SHA256 with the RFC 9500 2048-bit key (p, q of pss_rfc9500_2048 in crates/crypto/tests/rsa_pss.rs):
+# n and d are the bytes rsa_pss_sha256_sign hands rsa_pss_sign_inner (pss_rfc9500_2048_inner_args, same
+# file), msg "TLS 1.3, server CertificateVerify", salt 00..1f, the Ghost<RsaKeySpec> argument written
+# `()` (a ghost parameter is a Unit local); the signature is the one pss_rfc9500_2048 asserts and RustCrypto verifies
+crypto::rsa::rsa_pss_sign_inner b0f9e81943a7ae9892aade17ca7c40f8744fed2f8148e6c8eaa27b7d001548fb5192ab28b56c5060b118ccd131e594874c6ca989b56c27296f09fb93a034df32e97c6ff0998cfd8e6f42dda58acd1fa97986f144f3d154d67650175e6854b3a952003bc06887b8455ac2b19f7b2f76504ebc98ec945571b07892150ddc6a74ca0fbcd35497ce81534daf9418844b13aea31f9d5a6b9557bbdf619efd4e887f2d42b8dd8bc987eae1bf89cab85ee21e356305df6c07a8838e3ef41c595dcce43dafc49123ef4d8abba93d3905e4028d7ba91484a27596e07b4b6ed992f077b524d3dcfe7ddd5549be7cce8da035cfa0b3fb8f9e46f732b2a86b460165c08f5313 061a931863f94c3a9e3c5f17ea4cea1f67963b73a5a8325ad59f85ab79ad979720be1d41c9d812d6f2e4b713b3fe86113b353837b4012741f4e9743ad2e35ff0ad4034757e3b9af726fbe311cae8138d25d033516728b3735e2099b310dd7300dbaa29babe2032de797de38b16403c7abd41cb48703e98d836f5b0323530456cdaa2afd4edb75478f3ea60342662e493734b2b6c42a1c36d2b33ebffec76079daa507059e8148498758095fe9f2460bfd95715404884240ac1607a1de13a9e52601e0152a136da9226341bf827c85595116120ef202c8d42c44ca47babdd33ab7755885008bbe8cb5ec6d25180f1bf0dcace91972544ea44bc4a13b59b74d6f9 544c5320312e332c20736572766572204365727469666963617465566572696679 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f () => 8febad92958e60a78526f46a4054d7f864a71c7821b5a320dd941eaffdd8c1aa9c910479b6d778a02f388c942fefd72065b0f105fd5a2b4f9fdfb394a007967926a39a8700f5e9c504078b12d90c8cf5a8c259b9b292bb69c9bd6b2d9f2c141ba8a8f64fa49da75b4c790d82231d0109ae243b1bdd2789c8d9a8a1775f5a201ad6858474c811a379b7df3ec17d906420f67faa09ed0a35325166251371b83fd97404bb646280cdbe3b34d24b0412f56809644d4ffa5cb0806bb05a5e37ccc4319c9dd13763ade7d9c893681d5fc968460373a9ec382a642c25e340616ad7584745e4adc67a649ef63d11221f45b39c82869ce96f4ebf97fb4efb2e15eb57286b
 
 # ---- parser crates (8b): translator coverage for the cost targets
 # RFC 9000 A.1: 0x9d.. is a 4-byte varint (rfc_a1_samples in crates/wire/tests/varint.rs)
@@ -81,3 +86,34 @@ quic::frame::vint_at 0404075234 0x3usize => Some((0x1234u64,0x5usize))
 # CONNECTION_CLOSE reason "hi"; a reason length past the end => FRAME_ENCODING_ERROR (close_frames, same file)
 quic::frame::bytes_at 1c0a06026869 0x4usize 0x2u64 => Some((6869,0x6usize))
 quic::frame::bytes_at 1c00000568 0x4usize 0x5u64 => None
+# ---- the parser roots with no vector above (8d coverage gate); each value is the call's input and result on
+# the path of the named public test
+# minimal_rejects_overlong in crates/wire/tests/varint.rs: QuicVarInt::<true> parses [40 25] to v = 0x25 and
+# compares its 2-byte length with exec_min_len(0x25)
+wire::varint::exec_min_len 0x25u64 => 0x1usize
+# header_incomplete_vs_complete in crates/h3/tests/frame.rs: parse_frame_header([04 00]) calls parse_varint on
+# the whole buffer, a 1-byte type 4
+wire::varint::parse_varint 0400 => Some((0x1usize,0x4u64))
+# the same test's parse_frame_header([04 00]) == Complete { ty: 4, len: 0, hdr_len: 2 }
+h3::frame::parse_frame_header 0400 => #1(0x4u64,0x0u64,0x2usize)
+# hand-traced (no public test shows this state): rfc7541_c4_strings in crates/h3/tests/huffman.rs, www.example.com = f1 e3 ..: the 7th bit of f1 completes
+# 'w' (code 1111000): the state after bits 111100 is acc 0x3c, len 6, not all ones; bit 0 appends 0x77 and resets it
+h3::qpack::huffman::feed_bit mut:- mut:0x3cu32 mut:0x6u32 mut:false false () () => true 77 0x0u32 0x0u32 true
+# hand-traced (no public test shows this state): the same decode at 'w', the lookup of the completed code (acc 0x78, len 7) hits 'w'
+h3::qpack::huffman::lookup 0x78u32 0x7u32 => Some(0x77u8)
+# small_frames in crates/quic/tests/frame.rs: parse_frame([04 04 07 52 34]) hands parse_reset_stream the body 04 07 52 34
+quic::frame::parse_reset_stream 04075234 => Some((#3(0x4u64,0x7u64,0x1234u64),0x4usize))
+# small_frames: parse_frame([05 04 07]) is STOP_SENDING (type 5), body 04 07
+quic::frame::parse_two_varints 0x5u64 0407 => Some((#4(0x4u64,0x7u64),0x2usize))
+# offset_limit in crates/quic/tests/frame.rs, crypto_ok: body = the 8-byte maximum offset, then length 0
+quic::frame::parse_crypto ffffffffffffffff00 => Some((#5(0x3fffffffffffffffu64,-),0x9usize))
+# the same body inside parse_crypto: stream_data_at(body, 9, VMAX, 0) is an empty slice at 9
+quic::frame::stream_data_at ffffffffffffffff00 0x9usize 0x3fffffffffffffffu64 0x0u64 => Some((-,0x9usize))
+# stream_variants in crates/quic/tests/frame.rs: parse_frame([08 04 61 62]) is type 8 (no OFF, no LEN, no FIN), body 04 61 62
+quic::frame::parse_stream 0x8u64 046162 => Some((#6(0x4u64,0x0u64,6162,false),0x3usize))
+# small_frames: parse_frame([10 05]) is MAX_DATA (type 0x10), body 05
+quic::frame::parse_one_varint 0x10u64 05 => Some((#7(0x5u64),0x1usize))
+# close_frames in crates/quic/tests/frame.rs: parse_frame([1c 0a 06 02 68 69]) is type 0x1c, body 0a 06 02 68 69
+quic::frame::parse_close 0x1cu64 0a06026869 => Some((#17(false,0xau64,0x6u64,6869),0x5usize))
+# frame_type_encoding in crates/quic/tests/frame.rs: parse_frame_type([01]) == Ok((1, 1))
+quic::frame::parse_frame_type 01 => #0((0x1u64,0x1usize))

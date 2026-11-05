@@ -1,4 +1,4 @@
-//! The verified interpreter's values (`CVal`, viewed as `ctcore::sem::Val` by `cv`), frames, and
+//! The verified evaluator's values (`CVal`, viewed as `ctcore::sem::Val` by `cv`), frames, and
 //! the in-place navigation and writes it runs `ctcore::sem`'s `read_at`/`write_at` with.
 //! - A read navigates by reference and clones only the leaf (`nav`, `take`).
 //! - A write takes the root value out of its frame slot, rebuilds along the path moving each

@@ -1,8 +1,8 @@
 //! Semantics conformance fixtures (spec §Verified interpreter and conformance tests): one small fn
 //! per construct the front end supports. `tests/vectors.rs` runs each natively and writes
 //! `semconf-vectors.txt` in `tools/ct-driver/selftest.txt`'s format; the selftest runs the same fns
-//! through the dump, `ctmir`'s translator and the verified core interpreter, and every vector must
-//! match. Built without overflow checks (Cargo.toml), as the dumped MIR is.
+//! through the dump and `ctmir::sem`, run by the verified evaluator (`ctmir::eval_run`), and every
+//! vector must match. Built without overflow checks (Cargo.toml), as the dumped MIR is.
 
 /// Per int type `T`: each binary operator, the shifts by a `u32` and by a `T` amount, `!`.
 macro_rules! int_ops {
