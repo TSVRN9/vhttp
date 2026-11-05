@@ -85,9 +85,9 @@ fn not_serde_shape_is_none() {
     }
 }
 
-/// Every `mir-*.json` under `$CT_DUMP_DIR`, recursively: decodes each and lists the bodies that hold
-/// an `Unknown`, by variant name. `CT_DUMP_DIR=$CT_OUT cargo test -p ctmir --release --test schema
-/// -- --ignored --nocapture`.
+/// Every `mir-*.json` under `$CT_DUMP_DIR`, recursively: decodes each, lists the bodies that hold
+/// an `Unknown`, by variant name, and fails if any dump holds one. `CT_DUMP_DIR=$CT_OUT cargo test
+/// -p ctmir --release --test schema -- --ignored --nocapture`.
 #[test]
 #[ignore]
 fn dumps() {
@@ -100,7 +100,7 @@ fn dumps() {
         }
     }
     paths.sort();
-    let mut n = 0;
+    let (mut n, mut bad) = (0, Vec::new());
     for p in paths {
         let file = p.file_name().unwrap().to_string_lossy().into_owned();
         if !(file.starts_with("mir-") && file.ends_with(".json")) { continue; }
@@ -112,10 +112,14 @@ fn dumps() {
         eprintln!("{name}: {:?}, {} insts, {} bodies, {} with Unknown", t.elapsed(), m.insts.len(), bodies.len(), unk.len());
         for (i, d) in unk { eprintln!("  {}: {:?}", String::from_utf8_lossy(i), unknown_names(d)); }
         let d = format!("{m:?}");
-        if d.contains("Unknown(") { eprintln!("  whole crate (bodies and tables): {:?}", unknown_names(&d)); }
+        if d.contains("Unknown(") {
+            eprintln!("  whole crate (bodies and tables): {:?}", unknown_names(&d));
+            bad.push(name);
+        }
         n += 1;
     }
     assert!(n > 0, "no mir-*.json under {}", dir.display());
+    assert!(bad.is_empty(), "dumps holding an Unknown: {bad:?}");
 }
 
 /// The variant names held by the `Unknown(Str(..))`/`Unknown(Obj([(..` values in a Debug string.

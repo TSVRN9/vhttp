@@ -1,4 +1,4 @@
-# The fixtures' step-bound roots (TRUSTED format: tools/ct-driver/src/manifest.rs), read with
+# The fixtures' step-bound roots (TRUSTED grammar: crates/ctmir/src/policy.rs), read with
 # manifest.txt by scripts/ct-check.sh's cost run. Verdicts: expected-cost.txt.
 cost-root ct_fixtures::fx::cost_pos_straight
 cost-root ct_fixtures::fx::cost_pos_loop_const

@@ -1,4 +1,4 @@
-//! ct-dump (TRUSTED, unverified, decision-free): `CT_MODE=dump` writes `$CT_OUT/mir-<crate>.json`, the spec's §Dump
+//! ct-dump (TRUSTED, unverified, decision-free): the driver writes `$CT_OUT/mir-<crate>.json`, the spec's §Dump
 //! object: rustc_public values and query answers, each `serde_json::to_string`'d, plus the tables that say what an
 //! integer id denotes. Bodies: the closure from every monomorphic local fn item over every resolved callee and drop
 //! glue, in any crate. Value conditions are only "already visited?", `null` for `None`/`Err`, the spec's selections,

@@ -1,3 +1,4 @@
+ok ct_fixtures::fx::neg_drop_user_impl
 ok ct_fixtures::fx::pos_bare_public
 ok ct_fixtures::fx::pos_call_chain
 ok ct_fixtures::fx::pos_const_direct_tag
@@ -5,7 +6,6 @@ ok ct_fixtures::fx::pos_const_niche
 ok ct_fixtures::fx::pos_const_ref_zst
 ok ct_fixtures::fx::pos_declassified_branch
 ok ct_fixtures::fx::pos_drop_bounded
-ok ct_fixtures::fx::pos_drop_secret_option
 ok ct_fixtures::fx::pos_ghost_arg
 ok ct_fixtures::fx::pos_key_first_root
 ok ct_fixtures::fx::pos_label_line
@@ -27,8 +27,7 @@ reject ct_fixtures::fx::neg_closure_call Unsupported
 reject ct_fixtures::fx::neg_const_pointer_tag Unsupported
 reject ct_fixtures::fx::neg_const_ref_non_zst Unsupported
 reject ct_fixtures::fx::neg_const_signed_tag Unsupported
-reject ct_fixtures::fx::neg_drop_non_vec Unsupported
-reject ct_fixtures::fx::neg_drop_user_impl Unsupported
+reject ct_fixtures::fx::neg_drop_non_vec Unresolved,Unsupported
 reject ct_fixtures::fx::neg_duplicate_param_name Attr
 reject ct_fixtures::fx::neg_dyn Unsupported
 reject ct_fixtures::fx::neg_enum_discriminant Unsupported
@@ -57,3 +56,4 @@ reject ct_fixtures::fx::neg_str_len Unresolved
 reject ct_fixtures::fx::neg_unknown_attr Attr
 reject ct_fixtures::fx::neg_unknown_param_name Attr
 reject ct_fixtures::fx::neg_unresolved_callee Unresolved
+reject ct_fixtures::fx::pos_drop_secret_option ArgLabel,MutLabel

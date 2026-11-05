@@ -1,6 +1,6 @@
-//! A debug printer of `ctcore::Program` (test tooling, not trusted): one block per fn, fns sorted by
-//! path, a `Fn` callee printed as its path, so programs from the old translator (`CT_MODE=program`)
-//! and from `ctmir::lower` (crates/ctmir/tests/lower.rs includes this file) diff line by line.
+//! A debug printer of `ctcore::Program` (test tooling, not trusted) for `tests/lower.rs`: one block
+//! per fn, fns sorted by path, a `Fn` callee printed as its path, so two lowered programs diff line
+//! by line.
 use ctcore::{AggKind, BinOp, Block, Body, Callee, ConstVal, IntTy, Intrinsic, Operand, Place, Program, Proj, Rvalue, Stmt, Term, Ty, UnOp};
 use std::fmt::Write;
 

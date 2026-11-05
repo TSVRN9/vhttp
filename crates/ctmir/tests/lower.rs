@@ -5,7 +5,6 @@ use ctmir::mir::*;
 use ctmir::policy::Policy;
 use ctmir::schema::decode;
 
-#[path = "../../../tools/ct-driver/src/pprint.rs"]
 mod pprint;
 
 const TINY: &[u8] = include_bytes!("data/tiny.json");
@@ -42,80 +41,6 @@ fn text_k(m: &MirCrate, pol: &Policy, root: &str, keys: &mut ctmir::lower_term::
             lines.sort();
             lines.dedup();
             lines.concat()
-        }
-    }
-}
-
-/// The manifests of one comparison run, read the way the old `manifest.rs` reads them, as a
-/// `Policy` for crate `krate`: `intr .. Declassify` is a `declassify` line, `intr .. GhostUnit` a
-/// `ghost` line unless the std model has the key, other `intr` lines are the std model's; vest_lib's
-/// `Ghost::assume_new_fallback` is a `ghost` line (8c ruling).
-fn policy(files: &[std::path::PathBuf], krate: &str) -> Policy {
-    let mut p = pol0();
-    p.internal_crates.push(v(krate));
-    p.ghost_unit.push(v("vest_lib::prelude::Ghost::assume_new_fallback"));
-    for f in files {
-        for line in std::fs::read_to_string(f).unwrap().lines() {
-            let line = line.split(" #").next().unwrap().trim();
-            let w: Vec<&str> = line.split_whitespace().collect();
-            match w.first().copied() {
-                Some("root") => p.roots.push(v(w[1])),
-                Some("cost-root") => p.cost_roots.push(v(w[1])),
-                Some("translate-crate") => p.translate_crates.push(v(w[1])),
-                Some("intr") => {
-                    let k = w[1..w.len() - 1].join(" ");
-                    let kind = *w.last().unwrap();
-                    let (k, kind) = if ["Wrapping"].contains(&w[w.len() - 3]) { (w[1..w.len() - 3].join(" "), "Wrapping") } else { (k, kind) };
-                    match kind {
-                        "Declassify" => p.declassify.push(v(&k)),
-                        "GhostUnit" if k != "vstd::prelude::Ghost::assume_new_fallback" => p.ghost_unit.push(v(&k)),
-                        _ => {}
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    p
-}
-
-/// Step 3 of Task 5: for every run under `$CT_T5_OUT` (written by the evidence `runs.sh`: a dump and
-/// the old translator's `program-<crate>.txt` per run), lower every root and cost root of each
-/// dumped crate and write `new-program-<crate>.txt` beside the old one, in the same format.
-/// `CT_T5_OUT=<dir> cargo test -p ctmir --release --test lower -- --ignored --nocapture`.
-#[test]
-#[ignore]
-fn compare_runs() {
-    let out = std::path::PathBuf::from(std::env::var("CT_T5_OUT").expect("CT_T5_OUT"));
-    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let ct = root.join("tools/ct-driver");
-    let fx = root.join("tools/ct-fixtures");
-    let runs: Vec<(&str, Vec<std::path::PathBuf>)> = vec![
-        ("crypto", vec![ct.join("manifest.txt")]),
-        ("fixtures", vec![fx.join("manifest.txt"), fx.join("cost-manifest.txt")]),
-        ("negative", vec![ct.join("manifest.txt"), ct.join("manifest-negative.txt")]),
-        ("parsers", vec![ct.join("manifest.txt"), ct.join("manifest-parsers.txt"), ct.join("cost-targets.txt")]),
-    ];
-    for (run, files) in runs {
-        for e in std::fs::read_dir(out.join(run)).unwrap() {
-            let path = e.unwrap().path();
-            let file = path.file_name().unwrap().to_string_lossy().into_owned();
-            let Some(krate) = file.strip_prefix("mir-").and_then(|f| f.strip_suffix(".json")) else { continue };
-            let t = std::time::Instant::now();
-            let m = dec(&std::fs::read(&path).unwrap());
-            let pol = policy(&files, krate);
-            let prefix = format!("{krate}::");
-            let mut txt = String::new();
-            for (list, roots) in [("root", &pol.roots), ("cost-root", &pol.cost_roots)] {
-                // one key map per list, in manifest order, as the old driver's check and cost modes
-                let mut keys = Vec::new();
-                for r in roots.iter().map(|r| s(r)).filter(|r| r.starts_with(&prefix)) {
-                    txt += &format!("=== {list} {r}\n");
-                    txt += &text_k(&m, &pol, &r, &mut keys);
-                }
-            }
-            std::fs::write(out.join(run).join(format!("new-program-{krate}.txt")), txt).unwrap();
-            eprintln!("{run}/{krate}: {:?}", t.elapsed());
         }
     }
 }

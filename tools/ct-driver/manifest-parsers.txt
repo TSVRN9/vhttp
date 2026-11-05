@@ -1,11 +1,9 @@
-# Parser-only mappings (8b), loaded after manifest.txt by the parsers and cost-parsers runs of
-# scripts/ct-check.sh only, so crypto's runs never see them.
-# Parser crates (8b cost targets: wire, h3, quic). Their bodies reach wire's and vest_lib's,
-# which compile with -Zalways-encode-mir (main.rs `encode_mir`) so the bodies are available.
+# Parser-only lines (8b), loaded after manifest.txt by the parser runs of scripts/ct-check.sh
+# only, so crypto's runs never see them.
+# Parser crates (8b cost targets: wire, h3, quic). Their bodies reach wire's and vest_lib's;
+# ct-check.sh compiles wire with -Zalways-encode-mir (CT_ENCODE_MIR) so its bodies are dumped, and
+# vest_lib's come from rustc's cross-crate encoding.
 translate-crate wire
 translate-crate vest_lib
-# From `CT_MODE=census` over the parser roots (8b Task 1); existing intrinsics only. The
-# translator admits each at its declared element types (`intr_types`).
-intr std::vec::Vec::new VecNew
-intr vstd::slice::slice_to_vec SliceToVec
-intr <std::vec::Vec<(u64, u64)> as std::ops::Index<usize>>::index VecIndex
+# vest_lib's Ghost fallback returns a ghost value: a call that returns () and does nothing.
+ghost vest_lib::prelude::Ghost::assume_new_fallback

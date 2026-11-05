@@ -3,7 +3,7 @@ name = "semconf"
 version = "0.1.0"
 edition = "2021"
 
-# own workspace: dumped by scripts/ct-dump.sh, its vectors written by `cargo test`
+# own workspace: dumped by scripts/ct-check.sh, its vectors written by `cargo test`
 [workspace]
 
 # the dump is a --release build without overflow checks; the native runs must wrap the same way
