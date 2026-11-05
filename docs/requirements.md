@@ -12,7 +12,7 @@ Columns: `§` section, `Topic`, `#MUST/MUST NOT` (MUST, MUST NOT, REQUIRED, SHAL
 |---|---|
 | 1 | `wire`: QUIC variable-length integers (RFC 9000 §16 only) — proven: `theorem_matches_rfc`, `theorem_serialize_matches_rfc` in crates/wire/src/varint.rs |
 | 2 | `h3`: HTTP/3 framing, streams, settings, errors (RFC 9114), QPACK (RFC 9204), HTTP message validation |
-| 3 | `quic`: QUIC transport (RFC 9000 except §16), incl. anti-amplification, connection IDs, path validation, stateless reset, version negotiation |
+| 3 | `quic`: QUIC transport (RFC 9000 except §16), incl. anti-amplification, connection IDs, path validation, stateless reset, version negotiation; RFC 9001 §5.4.1–§5.4.2 header protection (3e) |
 | 4 | `tls`: TLS 1.3 server handshake, key schedule, record/AEAD use (RFC 8446) and QUIC-TLS (RFC 9001) |
 | 5 | `crypto`: requirements on the primitive algorithms themselves |
 | 6 | `recovery`: loss detection and congestion control (RFC 9002) |
@@ -263,7 +263,7 @@ Total keyword count: 44 across 22 sections.
 | 9.6.2 (req) | Client does not reuse preferred addresses for other connections | 1 | no | N/A (client-only) | "A client MUST NOT use these for other connections, including connections that are resumed from the current connection." |
 | 9.6.3 | Interaction of client migration and preferred address | 2 | no | Declined (optional: connection migration) | Client-only abandon rule is the row below; server protection rule only for preferred_address. |
 | 9.6.3 (req) | Client abandons original-address validation once the preferred address validates | 1 | no | N/A (client-only) | "the client MUST abandon validation of the original address and migrate to using the server's preferred address" |
-| 9.7 | Use of IPv6 flow label and migration | 1 | yes | 3 | Conditional on setting IPv6 flow labels; shell leaves kernel default. |
+| 9.7 | Use of IPv6 flow label and migration | 1 | yes | 3 | Conditional on setting IPv6 flow labels; shell leaves kernel default. ✅ 3e: crates/server/src/lib.rs (flow label never set; kernel default) |
 | 10.1 | Idle timeout | 1 | yes | 3 | Idle timeout at least 3x PTO. ✅ 3d: crates/quic/src/lifecycle.rs |
 | 10.2.1 | Closing connection state | 2 | yes | 3 | Limit closing-state sends to 3x received / unvalidated address. Byte cap only; the rate SHOULD is not implemented. ✅ 3d: crates/quic/src/conn.rs |
 | 10.2.2 | Draining connection state | 2 | yes | 3 | No packets sent while draining. ✅ 3d: crates/quic/src/conn.rs |
@@ -289,16 +289,16 @@ Total keyword count: 44 across 22 sections.
 | 13.4.1 | Reporting ECN counts | 1 | yes | 3 | Provide ECN feedback if accessible; needs IP_RECVTOS in shell (otherwise relies on "if accessible"). ✅ 3d: exception — ECN not accessible, no ECT set (ack_track.rs ecn: None) |
 | 13.4.2.1 | Receiving ACK frames with ECN counts | 1 | yes | 3 | Only if we send ECT; vacuous otherwise. ✅ 3d: exception — ECN not accessible, no ECT set (ack_track.rs ecn: None) |
 | 13.4.2.2 | ECN validation outcomes | 2 | yes | 3 | Only if we send ECT; vacuous otherwise. ✅ 3d: exception — ECN not accessible, no ECT set (ack_track.rs ecn: None) |
-| 14 | Datagram size | 4 | yes | 3 | 1200-byte minimum path; no IP fragmentation; DF where possible; never close on bad-size datagram. |
+| 14 | Datagram size | 4 | yes | 3 | 1200-byte minimum path; no IP fragmentation; DF where possible; never close on bad-size datagram. ✅ 3e: crates/server/src/lib.rs (bind: DF via PMTUDISC_PROBE) + quic/src/pipeline.rs (no close on size); 1200-byte path via 3d2 P17 |
 | 14.1 | Initial datagram size | 4 | partial | 3 | Server rows below; client padding is client-only. ✅ 3d: crates/quic/src/conn.rs |
 | 14.1 (req) | Client expands Initial datagrams to 1200 | 1 | no | N/A (client-only) |  |
 | 14.1 (req) | Server expands ack-eliciting Initial datagrams to 1200 | 1 | yes | 3 | ✅ 3d: crates/quic/src/conn.rs |
 | 14.1 (req) | Server discards Initial in datagram < 1200 bytes | 1 | yes | 3 | "A server MUST discard an Initial packet that is carried in a UDP datagram with a payload that is smaller than ... 1200 bytes." Do not close the connection (see 14). ✅ 3d: crates/quic/src/conn.rs |
 | 14.1 (req) | Server limits bytes sent before address validation | 1 | yes | 3 | See 8.1 3x row. ✅ 3d: crates/quic/src/conn.rs |
 | 14.2 | Path maximum transmission unit | 1 | yes | 3 | Cease sending if PMTU < 1200 (except probes/CONNECTION_CLOSE). ✅ 3d: crates/quic/src/conn.rs (P17 send gate) + path.rs (mtu_failed) |
-| 14.2.1 | Handling of ICMP messages by PMTUD | 3 | yes | 3 | Only if shell processes ICMP; vacuous otherwise. |
+| 14.2.1 | Handling of ICMP messages by PMTUD | 3 | yes | 3 | Only if shell processes ICMP; vacuous otherwise. ✅ 3e: crates/server/src/lib.rs (no ICMP read; PMTUDISC_PROBE ignores kernel PMTU; vacuous) |
 | 17.1 | Packet number encoding and decoding | 2 | yes | 3 | Full PN before first ACK; size covers > 2x range. ✅ 3b: crates/quic/src/pn.rs; A.2 pseudocode under-sizes at exact powers of two; §17.1 prose used. Decoding is A.3 (`decode_pn`, result <= PN_MAX); `theorem_pn_len_decodes` proves a `pn_len_ok` length decodes back at a receiver that has seen the acknowledged packet; `pn_encode_len` None (more than 2^31 unacked) is a 3d internal limit |
-| 17.2 | Long header packets | 7 | yes | 3 | Fixed bit; CID length <= 20 (drop); reserved bits PROTOCOL_VIOLATION. 3b codec: crates/quic/src/header.rs (closed in 3e) |
+| 17.2 | Long header packets | 7 | yes | 3 | Fixed bit; CID length <= 20 (drop); reserved bits PROTOCOL_VIOLATION. ✅ 3e: crates/quic/src/protect.rs + pipeline.rs (reserved bits after AEAD); other MUSTs in header.rs (3b) |
 | 17.2.1 | Version Negotiation packet | 6 | partial | 3 | Server rows are phase 3; one client-only. ✅ 3b: crates/quic/src/stateless.rs |
 | 17.2.1 (req) | Client ignores Unused field | 1 | no | N/A (client-only) |  |
 | 17.2.1 (req) | VN: Version 0, CIDs echoed, no version-specific CID influence, one VN per datagram | 5 | yes | 3 | Includes DCID from client SCID, SCID from client DCID, at most one VN per datagram. ✅ 3b: crates/quic/src/stateless.rs (caller binding: 3d route) |
@@ -311,7 +311,7 @@ Total keyword count: 44 across 22 sections.
 | 17.2.5.1 | Sending a Retry packet | 4 | no | Declined (optional: Retry) | Server MUSTs (SCID differs, at most one Retry) not applicable; 2 client rows client-only. |
 | 17.2.5.2 | Handling a Retry packet | 5 | no | N/A (client-only) |  |
 | 17.2.5.3 | Continuing a handshake after Retry | 2 | no | N/A (client-only) |  |
-| 17.3.1 | 1-RTT packet | 3 | yes | 3 | Fixed bit; reserved bits PROTOCOL_VIOLATION. 3b codec: crates/quic/src/header.rs (closed in 3e) |
+| 17.3.1 | 1-RTT packet | 3 | yes | 3 | Fixed bit; reserved bits PROTOCOL_VIOLATION. ✅ 3e: crates/quic/src/protect.rs + pipeline.rs (reserved bits after AEAD); other MUSTs in header.rs (3b) |
 | 17.4 | Latency spin bit | 4 | yes | 3 | Simplest compliance: not support it and keep it disabled (set arbitrary, ignore incoming). ✅ 3b: crates/quic/src/header.rs; spin bit unsupported, so always disabled: serializer takes a caller-chosen `spin` (RECOMMENDED random per packet or per CID, supplied by 3e), never read on parse; no admin switch is needed for a feature that cannot be enabled |
 | 18.2 | Transport parameter definitions | 9 | partial | 3 | Rows below. ✅ 3b: crates/quic/src/tp.rs |
 | 18.2 (req) | stateless_reset_token not sent by clients | 1 | yes | 3 | Server sends it; receipt from a client is an error (see server-only row). ✅ 3b: crates/quic/src/tp.rs |
@@ -381,7 +381,7 @@ Total keyword count: 307 across 115 sections.
 | 4.4 (req) | Client reaction to post-handshake CertificateRequest | 1 | no | N/A (client-only) | "clients MUST treat receipt of such messages as a connection error of type PROTOCOL_VIOLATION." |
 | 4.6.1 | Enabling 0-RTT | 2 | no | Declined (optional: 0-RTT) | Server MUST NOT send early_data in NewSessionTicket with max_early_data_size other than 0xffffffff. We send no NewSessionTicket and no early_data (EncryptedExtensions has none), so this holds vacuously. |
 | 4.6.1 (req) | Client treatment of bad early_data in NewSessionTicket | 1 | no | N/A (client-only) | "A client MUST treat receipt of a NewSessionTicket that contains an early_data extension with any other value as a connection error of type PROTOCOL_VIOLATION." |
-| 4.6.2 | Accepting and Rejecting 0-RTT | 2 | partial | 4 | "When rejecting 0-RTT, a server MUST NOT process any 0-RTT packets, even if it could." We always reject: discard all 0-RTT packets. |
+| 4.6.2 | Accepting and Rejecting 0-RTT | 2 | partial | 4 | "When rejecting 0-RTT, a server MUST NOT process any 0-RTT packets, even if it could." We always reject: discard all 0-RTT packets. 3e: 0-RTT packets dropped unprocessed (protect.rs) |
 | 4.6.2 (req) | Client resets stream state on rejection | 1 | no | N/A (client-only) | "The client therefore MUST reset the state of all streams, including application state bound to those streams." |
 | 4.8 | TLS Errors | 1 | yes | 4 | Any TLS alert MUST be treated as fatal. 4b: crates/tls/src/server.rs: every TLS failure is `CRYPTO_ERROR_BASE + AlertDescription` (closed in 4c) |
 | 4.9 | Discarding Unused Keys | 2 | yes | 4 | CRYPTO retransmissions MUST be sent at the same encryption level as the original; new data MUST be sent at the highest available level. |
@@ -391,16 +391,16 @@ Total keyword count: 307 across 115 sections.
 | 4.9.3 | Discarding 0-RTT Keys | 1 | yes | 4 | "servers MUST discard 0-RTT keys within a short time" after a 1-RTT packet. We never derive 0-RTT keys, so vacuous. |
 | 5.1 | Packet Protection Keys | 1 | no | N/A (binds spec authors) | "Other versions of TLS MUST provide a similar function in order to be used with QUIC." Requirement on specs for other TLS versions; we implement TLS 1.3 only, so it does not apply to an implementation. |
 | 5.2 | Initial Secrets | 1 | yes | 4 | HKDF-Expand-Label from TLS 1.3 MUST be used for Initial packets. The HKDF primitive itself is Phase 5. |
-| 5.3 | AEAD Usage | 3 | yes | 4 | Cipher suite MUST NOT be negotiated without a header protection scheme (we offer only AES-128-GCM); MUST NOT reject a ClientHello offering unsupported suites; MUST initiate key update before exceeding AEAD limits (see 6.6). |
-| 5.4.1 | Header Protection Application | 1 | yes | 4 | A header protection algorithm MUST be specified for each AEAD; we use the AES-128 HP defined in §5.4.3. |
-| 5.4.2 | Header Protection Sample | 1 | yes | 4 | Endpoint MUST discard packets too short to contain a complete sample. |
-| 5.5 | Receiving Protected Packets | 2 | yes | 4 | Discard higher-numbered packets that cannot be unprotected with the same or a subsequent key; discard packets that appear to trigger a key update but fail to unprotect. |
+| 5.3 | AEAD Usage | 3 | yes | 4 | Cipher suite MUST NOT be negotiated without a header protection scheme (we offer only AES-128-GCM); MUST NOT reject a ClientHello offering unsupported suites; MUST initiate key update before exceeding AEAD limits (see 6.6). 3e: nonce and AAD construction proven in crates/quic/src/aead.rs; the three MUSTs (suite/HP negotiation, unsupported-suite ClientHello, AEAD-limit key update) close in 4 |
+| 5.4.1 | Header Protection Application | 1 | yes | 3 | A header protection algorithm MUST be specified for each AEAD; we use the AES-128 HP defined in §5.4.3. ✅ 3e: crates/quic/src/hp.rs (AES-128 HP per §5.4.3, the HP of our only AEAD) |
+| 5.4.2 | Header Protection Sample | 1 | yes | 3 | Endpoint MUST discard packets too short to contain a complete sample. ✅ 3e: crates/quic/src/protect.rs |
+| 5.5 | Receiving Protected Packets | 2 | yes | 4 | Discard higher-numbered packets that cannot be unprotected with the same or a subsequent key; discard packets that appear to trigger a key update but fail to unprotect. 3e: every packet that fails AEAD is discarded (protect.rs); key-update half closes in 4 |
 | 5.6 | Use of 0-RTT Keys | 6 | partial | 4 | Server MUST NOT use 0-RTT keys to protect packets (never has them). Remaining rules are client-side or application profile. |
 | 5.6 (req) | Client 0-RTT use policy | 1 | no | N/A (client-only) | "A client therefore MUST NOT use 0-RTT for application data unless specifically requested by the application" |
 | 5.6 (req) | Application protocol 0-RTT profile | 1 | no | Declined (optional: 0-RTT) | "An application protocol that uses QUIC MUST include a profile that defines acceptable use of 0-RTT" Applies to the application protocol spec (HTTP/3), not enforced by an implementation that has no 0-RTT. |
 | 5.6 (req) | Client MUST NOT decrypt 0-RTT it receives | 2 | no | N/A (client-only) | "A client MUST NOT attempt to decrypt 0-RTT packets it receives and instead MUST discard them." |
 | 5.6 (req) | Client stops 0-RTT once 1-RTT installed | 1 | no | N/A (client-only) | "Once a client has installed 1-RTT keys, it MUST NOT send any more 0-RTT packets." |
-| 5.7 | Receiving Out-of-Order Protected Packets | 3 | partial | 4 | Endpoints MUST NOT decrypt 1-RTT packets before the handshake completes; server MUST NOT process incoming 1-RTT packets before the TLS handshake is complete (buffer or drop; no ACKs for them). |
+| 5.7 | Receiving Out-of-Order Protected Packets | 3 | partial | 4 | Endpoints MUST NOT decrypt 1-RTT packets before the handshake completes; server MUST NOT process incoming 1-RTT packets before the TLS handshake is complete (buffer or drop; no ACKs for them). 3e: 1-RTT keys masked until handshake_complete in crates/quic/src/pipeline.rs; the re-feed of a 1-RTT packet coalesced with the client Finished is Phase 4 |
 | 5.7 (req) | Client MUST NOT process 1-RTT before handshake complete | 1 | no | N/A (client-only) | "a client MUST NOT process incoming 1-RTT protected packets before the TLS handshake is complete." |
 | 6 | Key Update | 2 | yes | 4 | Endpoints MUST NOT send a TLS KeyUpdate message and MUST treat receipt as connection error 0x010a (unexpected_message). ✅ 4b: crates/tls/src/server.rs (no KeyUpdate serializer; a KeyUpdate at Handshake or 1-RTT is 0x10a) |
 | 6.1 | Initiating a Key Update | 3 | yes | 4 | MUST NOT initiate before handshake confirmed; MUST NOT initiate again until an ACK for a packet in the current phase; MUST retain old receive keys until a packet with the new keys is unprotected. |
@@ -419,7 +419,7 @@ Total keyword count: 307 across 115 sections.
 | 9.2 (req) | QUIC extensions / application protocols describe replay handling | 2 | no | N/A (binds spec authors) | "QUIC extensions MUST either describe how replay attacks affect their operation or prohibit the use of the extension in 0-RTT." Requirement on specification authors. |
 | 9.3 | Packet Reflection Attack Mitigation | 1 | no | N/A (client-only) | "the packet containing a ClientHello MUST be padded to a minimum size." Client sends it; server-side enforcement (drop Initial datagrams under 1200 bytes, 3x limit) is RFC 9000 §14.1/§8.1, Phase 3. |
 | 9.4 | Header Protection Analysis | 1 | no | N/A (binds spec authors) | "Future header protection variants based on this construction MUST use a PRF." Requirement on future specs; AES-ECB (§5.4.3) is the PRF here. |
-| 9.5 | Header Protection Timing Side Channels | 2 | yes | 4 | HP removal, PN recovery and unprotect MUST be applied together without timing side channels, and sending MUST not leak PN or encoded size. Known gap: constant-time is a non-goal (unverified check later); crypto primitives in Phase 5 follow constant-time style. |
+| 9.5 | Header Protection Timing Side Channels | 2 | yes | 4 | HP removal, PN recovery and unprotect MUST be applied together without timing side channels, and sending MUST not leak PN or encoded size. Known gap: constant-time is a non-goal (unverified check later); crypto primitives in Phase 5 follow constant-time style. 3e: HP removal, PN decoding and AEAD are applied together in protect.rs, constant time in style only in part (HP masks over all 4 candidate PN bytes, branch-free PN encode and decode, no duplicate check before AEAD); not met: the send padding loop count depends on the PN length, `put_pn` copies PN-length bytes, `open_one`'s AAD/ciphertext split at `pn_offset + pn_len` is a subslice bound, and the GCM work and output size depend on the payload length (packet length minus PN length), so a GCM block boundary can show the PN length; no MIR- or binary-level check covers quic; known gap |
 | 2 | Notational Conventions | 5 | no | N/A (boilerplate) | BCP 14 boilerplate listing the keywords; not a requirement. (The extraction omitted this row; added so totals match the raw grep.) |
 
 Total keyword count: 88 across 35 sections.

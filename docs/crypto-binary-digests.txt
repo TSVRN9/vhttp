@@ -51,6 +51,9 @@ bcd558d5ce40d68dd0975c303066dea245b35a03d2f6e8807418a5edec258799 crypto::sha256:
 b842fa9ea4331a3bf51316561d9e0915df07befac1892d65fc9912b46c34ccae crypto::sha256::sha256
 749d268541af14ccbd537361a87dda3c984310f7aebfa1e75b503c73d9108c21 crypto::sha256::sha256_cat
 f96f120ac1da8f3d8b8912b8f96a02e291cf160f7c29bae4b4cb404ea67c838e vstd::slice::slice_subrange::<u8>
+U quic crypto::aes::aes128_encrypt_block
+U quic crypto::gcm::aes128_gcm_open
+U quic crypto::gcm::aes128_gcm_seal
 U tls crypto::ecdsa::p256_ecdsa_sign
 U tls crypto::ecdsa::serialize_ecdsa_der
 U tls crypto::hkdf::hkdf_expand
