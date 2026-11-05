@@ -838,7 +838,7 @@ pub open spec fn callc_ok(m: MirCrate) -> bool {
     }
 }
 
-fn zst_fn(ty: Ty) -> (op: Operand) ensures op matches Operand::Constant(k) && k.const_.ty == ty {
+fn zst_fn(ty: Ty) -> (op: Operand) ensures op matches Operand::Constant(k) && k.const_.ty == ty && k.const_.kind is ZeroSized {
     Operand::Constant(ConstOperand { span: 0, user_ty: Json::Null, const_: MirConst { kind: ConstantKind::ZeroSized, ty, id: 0 } })
 }
 
@@ -1696,7 +1696,7 @@ pub open spec fn g_val() -> Val { Val::Adt(0, seq![Val::Adt(0, seq![])]) }
 /// is `Adt(0, [Adt(0, [])])`.
 proof fn order_g(m: MirCrate)
     requires order_ok(m),
-    ensures zst_dest(m, 30), unit_like(m, 30, tfuel(m), false) == Some((g_val(), 2nat)), !is_zst(m, 30),
+    ensures zst_dest(m, 30), unit_like(m, 30, tfuel(m), false) == Some((g_val(), 2nat)), !is_zst(m, 30), !ul_arr(m, 30),
 {
     reveal_with_fuel(find_from, 3);
     let fs = m.adts@[0].variants@[0].fields@;
@@ -1707,6 +1707,8 @@ proof fn order_g(m: MirCrate)
     assert(seq![].push(Val::Adt(0, seq![])) =~= seq![Val::Adt(0, seq![])]);
     assert(unit_likes(m, fs, 2, 1, false) == Some((seq![Val::Adt(0, seq![])], 1nat)));
     assert(tfuel(m) == 3);
+    assert(!has_arr(m, 31, 2));
+    assert(!has_arr(m, 30, 3));
 }
 
 /// **Fact 4c.** The ghost call writes the canonical `Unit` for G, with no events, cost 1.
@@ -1734,7 +1736,6 @@ pub proof fn fact_ghost(m: MirCrate, pol: CallPolicy, a: Seq<Val>, i: u128, x: u
 /// (core's walk would read `Unit` there).
 pub proof fn fact_snap_mut(fr: Frame, l: Loc)
     ensures proj_step(fr, PRes::Snap(Val::Mut(l)), ProjectionElem::Deref) is None,
-        proj_step(fr, PRes::At(l), ProjectionElem::Deref) is Some ==> true,
 {
 }
 
@@ -1789,32 +1790,35 @@ pub proof fn fact_tiny_in_subset(m: MirCrate, pol: CallPolicy)
 #[test]
 fn sanity_builders() {
     let _ = (tiny_crate(), drop_crate(), niche_crate(), direct_crate(), str_crate(), str_const_alloc(), optref_crate(), order_crate(), empty_crate(),
-        call_crate(), index2_place());
+        call_crate(), index2_place(), ext_crate());
 }
 
 
 // ================================================================== 7. the canonical `Unit` (Task 6 alignment)
 //
 // Each fact pins one producer of a unit-like value to `Val::Unit`, written literally, so a revert
-// of the alignment edit in sem.rs fails it.
+// of the alignment edit in sem.rs fails it. (A unit-like type holding an array keeps its
+// structural value: section 8.)
 
-/// **Fact 7a.** An entry local that is not a parameter starts as `Unit`.
+/// **Fact 7a.** An entry local that is not a parameter starts as `Unit`, unless its type is
+/// unit-like and holds an array.
 pub proof fn fact_entry_unit(m: MirCrate, i: nat, args: Seq<Val>, slots: Seq<Val>, k: int)
     requires inst_body(m, i) is Some, 0 <= k < inst_body(m, i)->Some_0.locals@.len(), !(1 <= k <= inst_body(m, i)->Some_0.arg_count),
+        !ul_arr(m, inst_body(m, i)->Some_0.locals@[k].ty),
     ensures mir_entry(m, i, args, slots).locals[k] == Val::Unit,
 {
 }
 
-/// **Fact 7b.** A `ZeroSized` constant of a unit-like type is `Unit`, with no charge.
+/// **Fact 7b.** A `ZeroSized` constant of a unit-like type without an array is `Unit`, with no charge.
 pub proof fn fact_zst_const_unit(m: MirCrate, c: ConstOperand)
-    requires c.const_.kind is ZeroSized, unit_like(m, c.const_.ty, tfuel(m), true) is Some,
+    requires c.const_.kind is ZeroSized, unit_like(m, c.const_.ty, tfuel(m), true) is Some, !ul_arr(m, c.const_.ty),
     ensures const_val(m, c) == Some((Val::Unit, 0nat)),
 {
 }
 
-/// **Fact 7c.** `Ghost::assume_new_fallback` (the std row) gives `Unit`.
+/// **Fact 7c.** `Ghost::assume_new_fallback` (the std row) gives `Unit` at a type without an array.
 pub proof fn fact_ghost_new_unit(m: MirCrate, t: Ty, vs: Seq<Val>, fr: Frame)
-    requires zst_dest(m, t),
+    requires zst_dest(m, t), !ul_arr(m, t),
     ensures std_apply(m, StdFn::GhostNew, Some(t), vs, fr) == Some((Val::Unit, fr, Seq::<Event>::empty(), 0nat)),
 {
 }
@@ -1835,11 +1839,773 @@ pub proof fn fact_slice_to_vec_bound(m: MirCrate, xs: Seq<Val>, fr: Frame)
 {
 }
 
-/// **Fact 7f.** The canonical `Unit` of a one-variant enum has that variant's discriminant.
+/// **Fact 7f.** The canonical `Unit` of a unit-like one-variant enum has that variant's discriminant.
 pub proof fn fact_discr_unit(m: MirCrate, b: Body, fr: Frame, p: Place)
     requires read_place(fr, p) matches Some((v, _)) && v is Unit,
-        place_ty(m, b, p) matches Some(t) && adt_row(m, t) matches Some(a) && a.kind is Enum && a.variants@.len() == 1 && a.variants@[0].discr == Some(0u128),
+        place_ty(m, b, p) matches Some(t) && adt_row(m, t) matches Some(a) && a.kind is Enum && a.variants@.len() == 1 && a.variants@[0].discr == Some(0u128)
+            && unit_like(m, t, tfuel(m), true) is Some,
     ensures rv_discr(m, b, fr, p) == Some((Val::Int(0), read_place(fr, p)->Some_0.1, 0nat)),
+{
+}
+
+
+// ================================================================== 8. unit-like types holding an array (Task 6 fix round 1)
+//
+// A unit-like type holding an array keeps its structural value from every producer, so the
+// array reads that rustc's optimized MIR does on it complete. The crate (seat B's CE-A and CE-B):
+//   tys: 2 u8, 10 (), 20 Vec<u8>, 21 &mut Vec<u8>, 22 [u8; 0], 23 &[u8], 24 &[u8; 0], 25 [u8]
+//   insts[0] f(_1: &mut Vec<u8>) { let e: [u8; 0] = []; _1.extend_from_slice(&e) }  (CE-A: e is _2)
+//   insts[1] `std::vec::Vec::extend_from_slice` (the std row), fn type 8, generic arg u8
+//   insts[2] h(_1: [u8; 0], _2: &mut Vec<u8>) { _2.extend_from_slice(&_1) }           (CE-B's callee)
+//   insts[3] root(_1: &mut Vec<u8>) { h(const ZeroSized: [u8; 0], move _1) }          (CE-B), fn type 9
+// rustc's RemoveZsts deletes `e = []` (an assignment to a ZST place) and turns `h(e, v)`'s first
+// argument into a `ZeroSized` constant. f's and h's bodies are one shape, `ext_body(b, a, v)`:
+//   bb0: _4 = &_a; _3 = move _4 as &[u8] (PointerCoercion(Unsize));
+//        _0 = extend_from_slice(move _v, move _3) -> bb1
+//   bb1: return
+// Steps: 2 assignments + the leaf call (1, plus `len(&[])` = 0) + the Return = 4; no events. The
+// extend appends nothing, so the Vec is unchanged.
+
+pub open spec fn ext_key() -> Seq<u8> { b"std::vec::Vec::extend_from_slice"@ }
+
+pub open spec fn ext_body(b: Body, a: nat, v: nat) -> bool {
+    b.locals@.len() == 5 && b.locals@[0].ty == 10 && b.locals@[3].ty == 23 && b.locals@[4].ty == 24
+    && b.locals@[a as int].ty == 22 && b.locals@[v as int].ty == 21 && b.blocks@.len() == 2 && b.spread_arg is None
+    && b.blocks@[0].statements@.len() == 2
+    && (b.blocks@[0].statements@[0].kind matches StatementKind::Assign(p, rv) && local0(p, 4)
+        && (rv matches Rvalue::Ref(_, bk, q) && bk is Shared && local0(q, a)))
+    && (b.blocks@[0].statements@[1].kind matches StatementKind::Assign(p, rv) && local0(p, 3)
+        && (rv matches Rvalue::Cast(ck, x, to) && (ck matches CastKind::PointerCoercion(PointerCoercion::Unsize)) && move_of(x, 4) && to == 23))
+    && (b.blocks@[0].terminator.kind matches TerminatorKind::Call { func, args, destination, target, .. }
+        && (func matches Operand::Constant(k) && k.const_.ty == 8) && args@.len() == 2 && move_of(args@[0], v) && move_of(args@[1], 3)
+        && local0(destination, 0) && target == Some(1usize))
+    && b.blocks@[1].statements@.len() == 0 && b.blocks@[1].terminator.kind is Return
+}
+
+pub open spec fn root_body(b: Body) -> bool {
+    b.arg_count == 1 && b.locals@.len() == 2 && b.locals@[0].ty == 10 && b.locals@[1].ty == 21 && b.blocks@.len() == 2
+    && b.blocks@[0].statements@.len() == 0
+    && (b.blocks@[0].terminator.kind matches TerminatorKind::Call { func, args, destination, target, .. }
+        && (func matches Operand::Constant(k) && k.const_.ty == 9) && args@.len() == 2
+        && (args@[0] matches Operand::Constant(k) && k.const_.ty == 22 && k.const_.kind is ZeroSized) && move_of(args@[1], 1)
+        && local0(destination, 0) && target == Some(1usize))
+    && b.blocks@[1].statements@.len() == 0 && b.blocks@[1].terminator.kind is Return
+}
+
+pub open spec fn ext_ok(m: MirCrate) -> bool {
+    m.insts@.len() == 4 && m.insts@[0].id == 0 && m.insts@[1].id == 1 && m.insts@[2].id == 2 && m.insts@[3].id == 3
+    && m.insts@[0].kind is Item && m.insts@[2].kind is Item && m.insts@[3].kind is Item
+    && m.insts@[1].key@ == ext_key() && m.insts@[2].key@.len() == 0
+    && (m.insts@[0].body matches Some(b) && b.arg_count == 1 && ext_body(b, 2, 1))
+    && (m.insts@[2].body matches Some(b) && b.arg_count == 2 && ext_body(b, 1, 2))
+    && (m.insts@[3].body matches Some(b) && root_body(b))
+    && m.tys@.len() == 8
+    && m.tys@[0].id == 2 && (m.tys@[0].kind matches TyKind::RigidTy(RigidTy::Uint(UintTy::U8)))
+    && m.tys@[1].id == 10 && (m.tys@[1].kind matches TyKind::RigidTy(RigidTy::Tuple(ts)) && ts@.len() == 0)
+    && m.tys@[2].id == 20 && (m.tys@[2].kind matches TyKind::RigidTy(RigidTy::Adt(_, ga)) && ga.0@.len() == 1 && (ga.0@[0] matches GenericArgKind::Type(e) && e == 2))
+    && m.tys@[3].id == 21 && (m.tys@[3].kind matches TyKind::RigidTy(RigidTy::Ref(_, p, mu)) && p == 20 && mu is Mut)
+    && m.tys@[4].id == 22 && (m.tys@[4].kind matches TyKind::RigidTy(RigidTy::Array(e, c)) && e == 2 && c.id == 0)
+    && m.tys@[5].id == 23 && (m.tys@[5].kind matches TyKind::RigidTy(RigidTy::Ref(_, p, mu)) && p == 25 && mu is Not)
+    && m.tys@[6].id == 24 && (m.tys@[6].kind matches TyKind::RigidTy(RigidTy::Ref(_, p, mu)) && p == 22 && mu is Not)
+    && m.tys@[7].id == 25 && (m.tys@[7].kind matches TyKind::RigidTy(RigidTy::Slice(e)) && e == 2)
+    && m.adts@.len() == 1 && m.adts@[0].ty == 20 && m.adts@[0].name@ == b"std::vec::Vec"@
+    && m.consts@.len() == 1 && m.consts@[0].id == 0 && m.consts@[0].usize == Some(0u64)
+    && m.calls@.len() == 2 && m.calls@[0].fn_ty == 8 && m.calls@[0].resolved == Some(1usize)
+    && m.calls@[0].args.0@.len() == 1 && (m.calls@[0].args.0@[0] matches GenericArgKind::Type(e) && e == 2)
+    && m.calls@[1].fn_ty == 9 && m.calls@[1].resolved == Some(2usize)
+    && m.layouts@.len() == 0 && m.allocs@.len() == 0
+}
+
+fn ext_blocks(a: usize, v: usize) -> (bs: Vec<BasicBlock>)
+    ensures bs@.len() == 2, bs@[0].statements@.len() == 2,
+        bs@[0].statements@[0].kind matches StatementKind::Assign(p, rv) && local0(p, 4)
+            && (rv matches Rvalue::Ref(_, bk, q) && bk is Shared && local0(q, a as nat)),
+        bs@[0].statements@[1].kind matches StatementKind::Assign(p, rv) && local0(p, 3)
+            && (rv matches Rvalue::Cast(ck, x, to) && (ck matches CastKind::PointerCoercion(PointerCoercion::Unsize)) && move_of(x, 4) && to == 23),
+        bs@[0].terminator.kind matches TerminatorKind::Call { func, args, destination, target, .. }
+            && (func matches Operand::Constant(k) && k.const_.ty == 8) && args@.len() == 2 && move_of(args@[0], v as nat) && move_of(args@[1], 3)
+            && local0(destination, 0) && target == Some(1usize),
+        bs@[1].statements@.len() == 0, bs@[1].terminator.kind is Return,
+{
+    let mut s0 = Vec::new();
+    s0.push(stmt(StatementKind::Assign(place0(4), Rvalue::Ref(Json::Null, BorrowKind::Shared, place0(a)))));
+    s0.push(stmt(StatementKind::Assign(place0(3), Rvalue::Cast(CastKind::PointerCoercion(PointerCoercion::Unsize), Operand::Move(place0(4)), 23))));
+    let mut args = Vec::new();
+    args.push(Operand::Move(place0(v)));
+    args.push(Operand::Move(place0(3)));
+    let mut bs = Vec::new();
+    bs.push(BasicBlock { statements: s0, terminator: term(call_to(8, args, place0(0), 1)) });
+    bs.push(BasicBlock { statements: Vec::new(), terminator: term(TerminatorKind::Return) });
+    bs
+}
+
+/// The locals of f (`a == 2`) or h (`a == 1`): the `&mut Vec` is the other of `_1`, `_2`.
+fn ext_locals(a: usize) -> (ls: Vec<LocalDecl>)
+    requires a == 1 || a == 2,
+    ensures ls@.len() == 5, ls@[0].ty == 10, ls@[3].ty == 23, ls@[4].ty == 24, ls@[a as int].ty == 22, ls@[3 - a].ty == 21,
+{
+    let mut ls = Vec::new();
+    ls.push(ldecl(10));
+    if a == 1 { ls.push(ldecl(22)); ls.push(ldecl(21)); } else { ls.push(ldecl(21)); ls.push(ldecl(22)); }
+    ls.push(ldecl(23));
+    ls.push(ldecl(24));
+    ls
+}
+
+pub fn ext_crate() -> (m: MirCrate) ensures ext_ok(m) {
+    let mut ra = Vec::new();
+    ra.push(zst_fn(22));
+    ra.push(Operand::Move(place0(1)));
+    let mut rb = Vec::new();
+    rb.push(BasicBlock { statements: Vec::new(), terminator: term(call_to(9, ra, place0(0), 1)) });
+    rb.push(BasicBlock { statements: Vec::new(), terminator: term(TerminatorKind::Return) });
+    let mut rl = Vec::new();
+    rl.push(ldecl(10));
+    rl.push(ldecl(21));
+    let key: &[u8] = b"std::vec::Vec::extend_from_slice";
+    let mut insts = Vec::new();
+    insts.push(inst(0, body(ext_blocks(2, 1), ext_locals(2), 1)));
+    insts.push(bare_inst(1, vstd::slice::slice_to_vec(key)));
+    insts.push(inst(2, body(ext_blocks(1, 2), ext_locals(1), 2)));
+    insts.push(inst(3, body(rb, rl, 1)));
+    let mut ga = Vec::new();
+    ga.push(GenericArgKind::Type(2));
+    let mut ga2 = Vec::new();
+    ga2.push(GenericArgKind::Type(2));
+    let mut calls = Vec::new();
+    calls.push(Call { fn_ty: 8, def: 1, def_name: Vec::new(), args: GenericArgs(ga), resolved: Some(1) });
+    calls.push(Call { fn_ty: 9, def: 2, def_name: Vec::new(), args: GenericArgs(Vec::new()), resolved: Some(2) });
+    let mut tys = Vec::new();
+    tys.push(uint(2, UintTy::U8));
+    tys.push(TyRow { id: 10, kind: TyKind::RigidTy(RigidTy::Tuple(Vec::new())) });
+    tys.push(TyRow { id: 20, kind: TyKind::RigidTy(RigidTy::Adt(0, GenericArgs(ga2))) });
+    tys.push(ref_row(21, 20, Mutability::Mut));
+    tys.push(arr_row(22, 2));
+    tys.push(ref_row(23, 25, Mutability::Not));
+    tys.push(ref_row(24, 22, Mutability::Not));
+    tys.push(TyRow { id: 25, kind: TyKind::RigidTy(RigidTy::Slice(2)) });
+    let name: &[u8] = b"std::vec::Vec";
+    let mut adts = Vec::new();
+    adts.push(Adt { ty: 20, name: vstd::slice::slice_to_vec(name), kind: AdtKind::Struct, is_box: false, variants: Vec::new() });
+    let mut consts = Vec::new();
+    consts.push(ConstRow { id: 0, usize: Some(0) });
+    MirCrate {
+        crate_name: Vec::new(), items: Vec::new(), insts, calls, drops: Vec::new(), tys, adts, consts, layouts: Vec::new(),
+        allocs: Vec::new(), spans: Vec::new(),
+    }
+}
+
+/// The crate's types: `[u8; 0]` is unit-like and holds an array, so its producers give `Arr([])`;
+/// `()` is `Unit`; the references are not unit-like.
+proof fn ext_tys(m: MirCrate)
+    requires ext_ok(m),
+    ensures tfuel(m) == 9, ul_val(m, 22) == Val::Arr(seq![]),
+        unit_like(m, 22, 9, true) is Some, ul_val(m, 10) == Val::Unit, ul_val(m, 23) == Val::Unit,
+        ul_val(m, 24) == Val::Unit, is_mut_ref(m, 21), !is_mut_ref(m, 22), !is_mut_ref(m, 10),
+        !is_mut_ref(m, 23), !is_mut_ref(m, 24),
+        rigid(m, 24) matches Some(RigidTy::Ref(_, p, mu)) && p == 22 && mu is Not,
+        rigid(m, 23) matches Some(RigidTy::Ref(_, p, mu)) && p == 25 && mu is Not,
+        rigid(m, 22) matches Some(RigidTy::Array(_, _)), rigid(m, 25) matches Some(RigidTy::Slice(_)),
+        rigid(m, 21) matches Some(RigidTy::Ref(_, p, mu)) && p == 20 && mu is Mut,
+        vec_elem(m, 20) == Some(2usize), int_ty(m, 2) == Some(CTy::U8),
+        std_model(m, ext_key(), m.calls@[0].args) == Some(StdFn::VecExtendFromSlice),
+{
+    reveal_with_fuel(find_from, 9);
+    assert(const_usize(m, 0) == Some(0u64));
+    assert(unit_like(m, 22, 9, true) == Some((Val::Arr(seq![]), 0nat)));
+    assert(unit_like(m, 22, 9, false) == Some((Val::Arr(seq![]), 0nat)));
+    assert(has_arr(m, 22, 9));
+    let ts = (m.tys@[1].kind->RigidTy_0)->Tuple_0@;
+    assert(unit_likes(m, ts, 8, 0, true) == Some((Seq::<Val>::empty(), 0nat)));
+    assert(!has_arr(m, 10, 9));
+    assert(unit_like(m, 23, 9, true) is None);
+    assert(unit_like(m, 24, 9, true) is None);
+    assert(b"std::vec::Vec::new"@.len() == 18);
+    assert(b"std::vec::Vec::with_capacity"@.len() == 28);
+    assert(b"std::vec::Vec::push"@.len() == 19);
+    assert(ext_key().len() == 32);
+    assert(is_u8(garg0(m, m.calls@[0].args)));
+}
+
+/// f's and h's blocks pass the static subset gate.
+proof fn ext_blocks_ok(m: MirCrate, pol: CallPolicy, b: Body, a: nat, v: nat)
+    requires ext_ok(m), ext_body(b, a, v), (a == 1 && v == 2) || (a == 2 && v == 1),
+        !pol.declassify.contains(ext_key()), !pol.ghost_unit.contains(ext_key()),
+    ensures block_ok(m, pol, b, b.blocks@[0]), block_ok(m, pol, b, b.blocks@[1]),
+{
+    reveal(block_ok);
+    reveal_with_fuel(find_from, 9);
+    ext_tys(m);
+    let ss = b.blocks@[0].statements@;
+    assert(stmt_ok(m, b, ss[0]));
+    assert(op_ty(m, b, ss[1].kind->Assign_1->Cast_1) == Some(24usize));
+    assert(stmt_ok(m, b, ss[1]));
+    let t = b.blocks@[0].terminator.kind;
+    assert(callee_of(m, t->Call_func) == Some((1nat, m.calls@[0].args)));
+    assert(is_leaf(m, pol, m.insts@[1].key@, m.calls@[0].args));
+    assert(ops_ok(m, b, t->Call_args@));
+    assert(term_ok(m, pol, b, t));
+}
+
+pub open spec fn ext_out(fr: Frame) -> Frame {
+    Frame { locals: fr.locals.update(4, Val::Shr(Box::new(Val::Arr(seq![])))).update(3, Val::Shr(Box::new(Val::Arr(seq![])))).update(0, Val::Unit), slots: fr.slots }
+}
+
+/// bb0's statements: `_4 = &_a` and the Unsize cast, both `Shr(Arr([]))`; 2 steps.
+proof fn ext_stmts(m: MirCrate, b: Body, a: nat, v: nat, fr: Frame)
+    requires ext_ok(m), ext_body(b, a, v), (a == 1 && v == 2) || (a == 2 && v == 1), fr.locals.len() == 5,
+        fr.locals[a as int] == Val::Arr(seq![]),
+    ensures exec_stmts(m, b, fr, b.blocks@[0].statements@, 2)
+        == Some((Frame { locals: fr.locals.update(4, Val::Shr(Box::new(Val::Arr(seq![])))).update(3, Val::Shr(Box::new(Val::Arr(seq![])))), slots: fr.slots },
+            Seq::<Event>::empty(), 2nat)),
+{
+    reveal(exec_stmt);
+    ext_tys(m);
+    let ss = b.blocks@[0].statements@;
+    let e = Seq::<Event>::empty();
+    let r = Val::Shr(Box::new(Val::Arr(seq![])));
+    assert(e + e =~= e);
+    tiny_store0(fr, ss[0].kind->Assign_1->Ref_2, a, Val::Unit);
+    tiny_store0(fr, ss[0].kind->Assign_0, 4, r);
+    let f1 = put_local(fr, 4, r);
+    assert(exec_stmt(m, b, fr, ss[0]) == Some((f1, e, 1nat)));
+    tiny_store0(f1, ss[1].kind->Assign_1->Cast_1->Move_0, 4, Val::Unit);
+    tiny_store0(f1, ss[1].kind->Assign_0, 3, r);
+    assert(op_ty(m, b, ss[1].kind->Assign_1->Cast_1) == Some(24usize));
+    let f2 = put_local(f1, 3, r);
+    assert(exec_stmt(m, b, f1, ss[1]) == Some((f2, e, 1nat)));
+    assert(exec_stmts(m, b, fr, ss, 0) == Some((fr, e, 0nat)));
+    assert(exec_stmts(m, b, fr, ss, 1) == Some((f1, e, 1nat)));
+}
+
+/// f's or h's run: `&mut` Vec at a slot location holding `xs`; done in 4 steps, no events, the
+/// Vec unchanged.
+proof fn ext_run(m: MirCrate, pol: CallPolicy, b: Body, a: nat, v: nat, fr: Frame, n: nat, xs: Seq<Val>, fuel: nat)
+    requires ext_ok(m), ext_body(b, a, v), (a == 1 && v == 2) || (a == 2 && v == 1), fr.locals.len() == 5,
+        fr.locals[a as int] == Val::Arr(seq![]), fr.locals[v as int] == Val::Mut(Loc { root: Root::Slot(n), path: seq![] }),
+        n < fr.slots.len(), fr.slots[n as int] == Val::Arr(xs), xs.len() <= USZ, fuel >= 2,
+        !pol.declassify.contains(ext_key()), !pol.ghost_unit.contains(ext_key()),
+    ensures run_block(m, pol, b, 0, fr, fuel) == Out::Done(ext_out(fr), Seq::<Event>::empty(), 4nat),
+{
+    ext_blocks_ok(m, pol, b, a, v);
+    ext_stmts(m, b, a, v, fr);
+    let e = Seq::<Event>::empty();
+    let r = Val::Shr(Box::new(Val::Arr(seq![])));
+    let f2 = Frame { locals: fr.locals.update(4, r).update(3, r), slots: fr.slots };
+    ext_call(m, pol, b, a, v, f2, n, xs, fuel);
+    assert(put_local(f2, 0, Val::Unit) == ext_out(fr));
+    assert(e + e =~= e);
+    assert(e + e + e =~= e);
+    assert(exec_stmts(m, b, ext_out(fr), b.blocks@[1].statements@, 0) == Some((ext_out(fr), e, 0nat)));
+    assert(step_term(m, pol, b, b.blocks@[1].terminator.kind, ext_out(fr), (fuel - 1) as nat) == Step::Stop(Out::Done(ext_out(fr), e, 1nat)));
+    assert(run_block(m, pol, b, 1, ext_out(fr), (fuel - 1) as nat) == Out::Done(ext_out(fr), e, 1nat));
+}
+
+/// The extend row on `[Mut(slot n), Shr(Arr([]))]`: `()`, the Vec unchanged, no events, cost 0.
+proof fn ext_leaf(m: MirCrate, pol: CallPolicy, dty: Option<Ty>, f2: Frame, n: nat, xs: Seq<Val>)
+    requires ext_ok(m), n < f2.slots.len(), f2.slots[n as int] == Val::Arr(xs), xs.len() <= USZ,
+        !pol.declassify.contains(ext_key()), !pol.ghost_unit.contains(ext_key()),
+    ensures is_leaf(m, pol, m.insts@[1].key@, m.calls@[0].args),
+        leaf_call(m, pol, m.insts@[1].key@, m.calls@[0].args, dty, seq![Val::Mut(s_at(n)), Val::Shr(Box::new(Val::Arr(seq![])))], f2)
+            == Some((Val::Unit, f2, Seq::<Event>::empty(), 0nat)),
+{
+    ext_tys(m);
+    let l = s_at(n);
+    assert(xs + Seq::<Val>::empty() =~= xs);
+    assert(store(f2, l, Val::Arr(xs + Seq::<Val>::empty())) == Some(f2)) by { assert(f2.slots.update(n as int, Val::Arr(xs)) =~= f2.slots); };
+}
+
+/// bb0's call (the extend row) from the frame after the statements: on to bb1, cost 1.
+proof fn ext_call(m: MirCrate, pol: CallPolicy, b: Body, a: nat, v: nat, f2: Frame, n: nat, xs: Seq<Val>, fuel: nat)
+    requires ext_ok(m), ext_body(b, a, v), (a == 1 && v == 2) || (a == 2 && v == 1), f2.locals.len() == 5,
+        f2.locals[3] == Val::Shr(Box::new(Val::Arr(seq![]))), f2.locals[v as int] == Val::Mut(s_at(n)),
+        n < f2.slots.len(), f2.slots[n as int] == Val::Arr(xs), xs.len() <= USZ,
+        !pol.declassify.contains(ext_key()), !pol.ghost_unit.contains(ext_key()),
+    ensures step_term(m, pol, b, b.blocks@[0].terminator.kind, f2, fuel) == Step::Jump(1, put_local(f2, 0, Val::Unit), Seq::<Event>::empty(), 1nat),
+{
+    hide(leaf_call);
+    hide(is_leaf);
+    hide(body_call);
+    let e = Seq::<Event>::empty();
+    let r = Val::Shr(Box::new(Val::Arr(seq![])));
+    let t = b.blocks@[0].terminator.kind;
+    let vs = seq![Val::Mut(s_at(n)), r];
+    ext_leaf(m, pol, place_ty(m, b, t->Call_destination), f2, n, xs);
+    assert(callee_of(m, t->Call_func) == Some((1nat, m.calls@[0].args))) by { reveal_with_fuel(find_from, 3); };
+    assert(eval_ops(m, f2, t->Call_args@, 2) == Some((vs, e, 0nat))) by {
+        reveal_with_fuel(eval_ops, 3);
+        assert(seq![Val::Mut(s_at(n))] =~= seq![].push(Val::Mut(s_at(n))));
+        assert(vs =~= seq![Val::Mut(s_at(n))].push(r));
+        assert(e + e =~= e);
+    };
+    tiny_store0(f2, t->Call_destination, 0, Val::Unit);
+    assert(e + e + e =~= e);
+}
+
+pub open spec fn s_at(n: nat) -> Loc { Loc { root: Root::Slot(n), path: seq![] } }
+
+pub open spec fn cea_out(xs: Seq<Val>) -> Frame {
+    Frame { locals: seq![Val::Unit, Val::Mut(s_at(0)), Val::Arr(seq![]), Val::Shr(Box::new(Val::Arr(seq![]))), Val::Shr(Box::new(Val::Arr(seq![])))],
+        slots: seq![Val::Arr(xs)] }
+}
+
+/// **Fact 8a (CE-A).** f completes, with the Vec unchanged: its never-assigned `[u8; 0]` local
+/// `_2` holds `Arr([])`, so `&_2` unsized is the empty slice. 4 steps, no events.
+pub proof fn fact_ce_a(m: MirCrate, pol: CallPolicy, args: Seq<Val>, xs: Seq<Val>, fuel: nat)
+    requires ext_ok(m), args.len() == 1, xs.len() <= USZ, fuel >= 2,
+        !pol.declassify.contains(ext_key()), !pol.ghost_unit.contains(ext_key()),
+    ensures mir_run(m, pol, 0, mir_entry(m, 0, args, seq![Val::Arr(xs)]), fuel) == Out::Done(cea_out(xs), Seq::<Event>::empty(), 4nat),
+{
+    hide(mir_entry);
+    hide(mir_run);
+    cea_entry(m, args, xs);
+    cea_run(m, pol, xs, fuel);
+    assert(ext_out(cea_in(xs)).locals =~= cea_out(xs).locals);
+}
+
+pub open spec fn cea_in(xs: Seq<Val>) -> Frame {
+    Frame { locals: seq![Val::Unit, Val::Mut(s_at(0)), Val::Arr(seq![]), Val::Unit, Val::Unit], slots: seq![Val::Arr(xs)] }
+}
+
+/// f's entry frame: `_1` the slot location; the never-assigned `_2: [u8; 0]` is `Arr([])`.
+proof fn cea_entry(m: MirCrate, args: Seq<Val>, xs: Seq<Val>)
+    requires ext_ok(m), args.len() == 1,
+    ensures mir_entry(m, 0, args, seq![Val::Arr(xs)]) == cea_in(xs),
+{
+    ext_tys(m);
+    assert(mir_entry(m, 0, args, seq![Val::Arr(xs)]).locals =~= cea_in(xs).locals);
+}
+
+proof fn cea_run(m: MirCrate, pol: CallPolicy, xs: Seq<Val>, fuel: nat)
+    requires ext_ok(m), xs.len() <= USZ, fuel >= 2, !pol.declassify.contains(ext_key()), !pol.ghost_unit.contains(ext_key()),
+    ensures mir_run(m, pol, 0, cea_in(xs), fuel) == Out::Done(ext_out(cea_in(xs)), Seq::<Event>::empty(), 4nat),
+{
+    ext_run(m, pol, m.insts@[0].body->Some_0, 2, 1, cea_in(xs), 0, xs, fuel);
+}
+
+/// The root's call of h passes the static subset gate (a body call: `h`'s signature, and the
+/// arguments have its parameters' types).
+proof fn root_blocks_ok(m: MirCrate, pol: CallPolicy)
+    requires ext_ok(m), !pol.declassify.contains(Seq::<u8>::empty()), !pol.ghost_unit.contains(Seq::<u8>::empty()),
+    ensures block_ok(m, pol, m.insts@[3].body->Some_0, (m.insts@[3].body->Some_0).blocks@[0]),
+        block_ok(m, pol, m.insts@[3].body->Some_0, (m.insts@[3].body->Some_0).blocks@[1]),
+{
+    reveal(block_ok);
+    reveal_with_fuel(find_from, 9);
+    ext_tys(m);
+    let c = m.insts@[3].body->Some_0;
+    let h = m.insts@[2].body->Some_0;
+    let t = c.blocks@[0].terminator.kind;
+    call_not_std(m, m.calls@[1].args);
+    assert(m.insts@[2].key@ =~= Seq::<u8>::empty());
+    assert(callee_of(m, t->Call_func) == Some((2nat, m.calls@[1].args)));
+    assert(ty_free(m, 10, 9, false));
+    assert(ty_free(m, 2, 8, false));
+    assert(ty_free(m, 22, 9, false));
+    assert(ty_free(m, 20, 9, false));
+    assert(sig_ok(m, h));
+    let args = t->Call_args@;
+    assert(op_ty(m, c, args[0]) == Some(22usize));
+    assert(op_ty(m, c, args[1]) == Some(21usize));
+    assert(args_typed(m, c, args, h));
+    assert(ops_ok(m, c, args));
+    assert(term_ok(m, pol, c, t));
+}
+
+pub open spec fn ceb_root(xs: Seq<Val>) -> Frame { Frame { locals: seq![Val::Unit, Val::Mut(s_at(0))], slots: seq![Val::Arr(xs)] } }
+
+pub open spec fn ceb_h0(xs: Seq<Val>) -> Frame {
+    Frame { locals: seq![Val::Unit, Val::Arr(seq![]), Val::Mut(s_at(1)), Val::Unit, Val::Unit], slots: seq![Val::Unit, Val::Arr(xs)] }
+}
+
+/// The root's call: the `ZeroSized` argument is `Arr([])`; h runs (4 steps) and its slot is
+/// written back unchanged. 1 + 4 steps.
+proof fn ceb_call(m: MirCrate, pol: CallPolicy, xs: Seq<Val>, fuel: nat)
+    requires ext_ok(m), xs.len() <= USZ, fuel >= 3, forall|i: int| 0 <= i < xs.len() ==> mut_free(#[trigger] xs[i]),
+        !pol.declassify.contains(ext_key()), !pol.ghost_unit.contains(ext_key()),
+        !pol.declassify.contains(Seq::<u8>::empty()), !pol.ghost_unit.contains(Seq::<u8>::empty()),
+    ensures step_term(m, pol, m.insts@[3].body->Some_0, (m.insts@[3].body->Some_0).blocks@[0].terminator.kind, ceb_root(xs), fuel)
+        == Step::Jump(1, ceb_root(xs), Seq::<Event>::empty(), 5nat),
+{
+    hide(leaf_call);
+    hide(is_leaf);
+    hide(eval_ops);
+    hide(callee_of);
+    let c = m.insts@[3].body->Some_0;
+    let t = c.blocks@[0].terminator.kind;
+    let fr = ceb_root(xs);
+    let e = Seq::<Event>::empty();
+    assert(e + e =~= e);
+    assert(e + e + e =~= e);
+    ceb_ops(m, pol, xs);
+    tiny_store0(fr, t->Call_destination, 0, Val::Unit);
+    ceb_body(m, pol, xs, fuel);
+    assert(put_local(fr, 0, Val::Unit) == fr) by { assert(fr.locals.update(0, Val::Unit) =~= fr.locals); };
+}
+
+/// The root's call: the callee is h (a body), and the arguments are the `ZeroSized` constant's
+/// `Arr([])` and `_1`'s location.
+proof fn ceb_ops(m: MirCrate, pol: CallPolicy, xs: Seq<Val>)
+    requires ext_ok(m), !pol.declassify.contains(Seq::<u8>::empty()), !pol.ghost_unit.contains(Seq::<u8>::empty()),
+    ensures ({
+        let t = (m.insts@[3].body->Some_0).blocks@[0].terminator.kind;
+        &&& callee_of(m, t->Call_func) == Some((2nat, m.calls@[1].args))
+        &&& eval_ops(m, ceb_root(xs), t->Call_args@, 2) == Some((seq![Val::Arr(seq![]), Val::Mut(s_at(0))], Seq::<Event>::empty(), 0nat))
+        &&& !is_leaf(m, pol, m.insts@[2].key@, m.calls@[1].args)
+    }),
+{
+    reveal_with_fuel(find_from, 9);
+    ext_tys(m);
+    let t = (m.insts@[3].body->Some_0).blocks@[0].terminator.kind;
+    let e = Seq::<Event>::empty();
+    let vs = seq![Val::Arr(seq![]), Val::Mut(s_at(0))];
+    assert(e + e =~= e);
+    assert(const_val(m, t->Call_args@[0]->Constant_0) == Some((Val::Arr(seq![]), 0nat)));
+    assert(eval_ops(m, ceb_root(xs), t->Call_args@, 2) == Some((vs, e, 0nat))) by {
+        reveal_with_fuel(eval_ops, 3);
+        assert(seq![Val::Arr(seq![])] =~= seq![].push(Val::Arr(seq![])));
+        assert(vs =~= seq![Val::Arr(seq![])].push(Val::Mut(s_at(0))));
+    };
+    call_not_std(m, m.calls@[1].args);
+    assert(m.insts@[2].key@ =~= Seq::<u8>::empty());
+}
+
+pub open spec fn ceb_vs() -> Seq<Val> { seq![Val::Arr(seq![]), Val::Mut(s_at(0))] }
+pub open spec fn ceb_cs(xs: Seq<Val>) -> Seq<Val> { seq![Val::Unit, Val::Arr(xs)] }
+
+/// Entering h from the root: `_1` is the constant's `Arr([])`, `_2` the location of slot 1, which
+/// holds the root's Vec.
+proof fn ceb_enter(m: MirCrate, xs: Seq<Val>)
+    requires ext_ok(m), forall|i: int| 0 <= i < xs.len() ==> mut_free(#[trigger] xs[i]),
+    ensures args_ok(m, m.insts@[2].body->Some_0, ceb_root(xs), ceb_vs()),
+        call_slots(m, m.insts@[2].body->Some_0, ceb_root(xs), ceb_vs()) == ceb_cs(xs),
+        mir_entry(m, 2, ceb_vs(), ceb_cs(xs)) == ceb_h0(xs),
+{
+    ext_tys(m);
+    let h = m.insts@[2].body->Some_0;
+    let fr = ceb_root(xs);
+    let vs = ceb_vs();
+    assert(mut_free(Val::Arr(xs)));
+    assert(arg_ok(m, h, fr, vs, 0));
+    assert(arg_ok(m, h, fr, vs, 1));
+    assert(call_slots(m, h, fr, vs) =~= ceb_cs(xs));
+    assert(mir_entry(m, 2, vs, ceb_cs(xs)).locals =~= ceb_h0(xs).locals);
+}
+
+/// Leaving h: `_0` is `Unit`; slot 1 is written back to the root's slot 0, unchanged.
+proof fn ceb_leave(m: MirCrate, xs: Seq<Val>)
+    requires ext_ok(m), forall|i: int| 0 <= i < xs.len() ==> mut_free(#[trigger] xs[i]),
+    ensures return_to(m, m.insts@[2].body->Some_0, ceb_root(xs), ceb_vs(), ext_out(ceb_h0(xs))) == Some((Val::Unit, ceb_root(xs))),
+{
+    ext_tys(m);
+    let h = m.insts@[2].body->Some_0;
+    let fr = ceb_root(xs);
+    let vs = ceb_vs();
+    let hf = ext_out(ceb_h0(xs));
+    assert(mut_free(Val::Arr(xs)));
+    assert(write_back(m, h, fr, vs, hf.slots, 0) == Some(fr));
+    assert(write_back(m, h, fr, vs, hf.slots, 1) == Some(fr));
+    assert(store(fr, s_at(0), Val::Arr(xs)) == Some(fr)) by { assert(fr.slots.update(0, Val::Arr(xs)) =~= fr.slots); };
+    assert(write_back(m, h, fr, vs, hf.slots, 2) == Some(fr));
+}
+
+/// The body call of h from the root's frame: h runs its 4 steps and returns `Unit`.
+proof fn ceb_body(m: MirCrate, pol: CallPolicy, xs: Seq<Val>, fuel: nat)
+    requires ext_ok(m), xs.len() <= USZ, fuel >= 3, forall|i: int| 0 <= i < xs.len() ==> mut_free(#[trigger] xs[i]),
+        !pol.declassify.contains(ext_key()), !pol.ghost_unit.contains(ext_key()),
+    ensures body_call(m, pol, 2, m.insts@[2].body->Some_0, ceb_vs(), ceb_root(xs), fuel)
+        == Ok::<(Val, Frame, Seq<Event>, nat), Out>((Val::Unit, ceb_root(xs), Seq::<Event>::empty(), 4nat)),
+{
+    hide(mir_entry);
+    hide(args_ok);
+    hide(call_slots);
+    hide(return_to);
+    ceb_enter(m, xs);
+    ceb_leave(m, xs);
+    ceb_hrun(m, pol, xs, (fuel - 1) as nat);
+}
+
+/// h's run from its entry frame.
+proof fn ceb_hrun(m: MirCrate, pol: CallPolicy, xs: Seq<Val>, fuel: nat)
+    requires ext_ok(m), xs.len() <= USZ, fuel >= 2, !pol.declassify.contains(ext_key()), !pol.ghost_unit.contains(ext_key()),
+    ensures mir_run(m, pol, 2, ceb_h0(xs), fuel) == Out::Done(ext_out(ceb_h0(xs)), Seq::<Event>::empty(), 4nat),
+{
+    ext_run(m, pol, m.insts@[2].body->Some_0, 1, 2, ceb_h0(xs), 1, xs, fuel);
+}
+
+/// **Fact 8b (CE-B).** The root completes, with the Vec unchanged: the `ZeroSized` `[u8; 0]`
+/// argument is `Arr([])`, so h's `&_1` unsized is the empty slice. 1 + 4 + 1 = 6 steps, no events.
+pub proof fn fact_ce_b(m: MirCrate, pol: CallPolicy, args: Seq<Val>, xs: Seq<Val>, fuel: nat)
+    requires ext_ok(m), args.len() == 1, xs.len() <= USZ, fuel >= 3, forall|i: int| 0 <= i < xs.len() ==> mut_free(#[trigger] xs[i]),
+        !pol.declassify.contains(ext_key()), !pol.ghost_unit.contains(ext_key()),
+        !pol.declassify.contains(Seq::<u8>::empty()), !pol.ghost_unit.contains(Seq::<u8>::empty()),
+    ensures mir_run(m, pol, 3, mir_entry(m, 3, args, seq![Val::Arr(xs)]), fuel) == Out::Done(ceb_root(xs), Seq::<Event>::empty(), 6nat),
+{
+    hide(mir_entry);
+    let c = m.insts@[3].body->Some_0;
+    let e = Seq::<Event>::empty();
+    assert(e + e =~= e);
+    assert(e + e + e =~= e);
+    ceb_entry(m, args, xs);
+    root_blocks_ok(m, pol);
+    ceb_call(m, pol, xs, fuel);
+    assert(step_term(m, pol, c, c.blocks@[1].terminator.kind, ceb_root(xs), (fuel - 1) as nat) == Step::Stop(Out::Done(ceb_root(xs), e, 1nat)));
+    assert(exec_stmts(m, c, ceb_root(xs), c.blocks@[0].statements@, 0) == Some((ceb_root(xs), e, 0nat)));
+    assert(exec_stmts(m, c, ceb_root(xs), c.blocks@[1].statements@, 0) == Some((ceb_root(xs), e, 0nat)));
+    assert(run_block(m, pol, c, 1, ceb_root(xs), (fuel - 1) as nat) == Out::Done(ceb_root(xs), e, 1nat));
+}
+
+proof fn ceb_entry(m: MirCrate, args: Seq<Val>, xs: Seq<Val>)
+    requires ext_ok(m), args.len() == 1,
+    ensures mir_entry(m, 3, args, seq![Val::Arr(xs)]) == ceb_root(xs),
+{
+    ext_tys(m);
+    assert(mir_entry(m, 3, args, seq![Val::Arr(xs)]).locals =~= ceb_root(xs).locals);
+}
+
+/// `[T; 0]` at type `t`: unit-like, holding an array, value `Arr([])`.
+proof fn arr0_ul(m: MirCrate, t: Ty)
+    requires rigid(m, t) matches Some(RigidTy::Array(_, n)) && const_usize(m, n.id) == Some(0u64), m.tys@.len() >= 1,
+    ensures ul_arr(m, t), ul_val(m, t) == Val::Arr(seq![]),
+        unit_like(m, t, tfuel(m), true) is Some,
+{
+}
+
+/// **Fact 8c.** `PtrMetadata` of `&` a `ZeroSized` `[u8; 0]` (held by `_1`, as a parameter it was
+/// passed to), through `Unsize` to `&[u8]`, is 0: `_2 = &_1` is `Shr(Arr([]))`, the cast keeps it.
+pub proof fn fact_ptrmeta_zst(m: MirCrate, b: Body, fr: Frame, c: ConstOperand, p1: Place, x: Operand, to: Ty, y: Operand)
+    requires c.const_.kind is ZeroSized, m.tys@.len() >= 1,
+        rigid(m, c.const_.ty) matches Some(RigidTy::Array(_, n)) && const_usize(m, n.id) == Some(0u64),
+        local0(p1, 1), move_of(x, 2), copy_of(y, 3), fr.locals.len() == 4, b.locals@.len() == 4,
+        fr.locals[1] == const_val(m, c)->Some_0.0,
+        fr.locals[2] == Val::Shr(Box::new(fr.locals[1])),
+        rigid(m, b.locals@[2].ty) matches Some(RigidTy::Ref(_, p, _)) && p == c.const_.ty,
+        rigid(m, to) matches Some(RigidTy::Ref(_, q, _)) && rigid(m, q) matches Some(RigidTy::Slice(_)),
+        b.locals@[3].ty == to, fr.locals[3] == rv_cast(m, b, fr, CastKind::PointerCoercion(PointerCoercion::Unsize), x, to)->Some_0.0,
+    ensures rv_ref(fr, BorrowKind::Shared, p1) == Some((fr.locals[2], Seq::<Event>::empty(), 0nat)),
+        rv_cast(m, b, fr, CastKind::PointerCoercion(PointerCoercion::Unsize), x, to) == Some((fr.locals[2], Seq::<Event>::empty(), 0nat)),
+        rv_un(m, b, fr, UnOp::PtrMetadata, y) == Some((Val::Int(0), Seq::<Event>::empty(), 0nat)),
+{
+    arr0_ul(m, c.const_.ty);
+}
+
+/// **Fact 8d.** An in-bounds `Index` of a never-assigned `[(); 3]` local keeps its `Idx(i)` event:
+/// the local holds `Arr([Unit; 3])`.
+pub proof fn fact_unit_arr_index(m: MirCrate, i: nat, args: Seq<Val>, slots: Seq<Val>, q: Place, j: u128)
+    requires inst_body(m, i) matches Some(b) && b.arg_count == 0 && b.locals@.len() == 3
+            && (rigid(m, b.locals@[1].ty) matches Some(RigidTy::Array(e, n)) && const_usize(m, n.id) == Some(3u64)
+            && (rigid(m, e) matches Some(RigidTy::Tuple(ts)) && ts@.len() == 0)),
+        m.tys@.len() >= 2, q.local == 1, q.projection@.len() == 1, q.projection@[0] matches ProjectionElem::Index(x) && x == 2, j < 3,
+    ensures read_place(put_local(mir_entry(m, i, args, slots), 2, Val::Int(j)), q) == Some((Val::Unit, seq![Event::Idx(j)])),
+{
+    let b = inst_body(m, i)->Some_0;
+    let t = b.locals@[1].ty;
+    let e = rigid(m, t)->Some_0->Array_0;
+    let tf = tfuel(m);
+    let ts = match rigid(m, e) { Some(RigidTy::Tuple(ts)) => ts@, _ => seq![] };
+    assert(unit_likes(m, ts, (tf - 2) as nat, 0, false) == Some((Seq::<Val>::empty(), 0nat)));
+    assert(unit_like(m, e, (tf - 1) as nat, false) == Some((Val::Unit, 0nat)));
+    assert(unit_likes(m, ts, (tf - 2) as nat, 0, true) == Some((Seq::<Val>::empty(), 0nat)));
+    assert(unit_like(m, e, (tf - 1) as nat, true) == Some((Val::Unit, 0nat)));
+    let fr = put_local(mir_entry(m, i, args, slots), 2, Val::Int(j));
+    let u = fr.locals[1];
+    assert(u == unit_like(m, t, tf, true)->Some_0.0);
+    assert(u is Arr && u->Arr_0.len() == 3 && u->Arr_0[j as int] == Val::Unit);
+    let l0 = Loc { root: Root::Local(1), path: seq![] };
+    assert(places(fr, PRes::At(l0), q.projection@, 0) == Some((PRes::At(l0), Seq::<Event>::empty())));
+    assert(Seq::<Event>::empty() + seq![Event::Idx(j)] =~= seq![Event::Idx(j)]);
+    let l1 = Loc { root: Root::Local(1), path: seq![PE::Index(j as nat)] };
+    assert(seq![].push(PE::Index(j as nat)) =~= seq![PE::Index(j as nat)]);
+    assert(eval_place(fr, q) == Some((PRes::At(l1), seq![Event::Idx(j)])));
+    assert(seq![PE::Index(j as nat)].drop_first() =~= Seq::<PE>::empty());
+    reveal_with_fuel(read_at, 2);
+    assert(read_at(u, l1.path) == Val::Unit);
+}
+
+/// **Fact 8e.** A ghost result (the std row and a `ghost` policy key) at `[T; 0]` is `Arr([])`.
+pub proof fn fact_ghost_arr(m: MirCrate, pol: CallPolicy, key: Seq<u8>, g: GenericArgs, t: Ty, vs: Seq<Val>, fr: Frame)
+    requires m.tys@.len() >= 1, rigid(m, t) matches Some(RigidTy::Array(_, n)) && const_usize(m, n.id) == Some(0u64), zst_dest(m, t),
+        pol.ghost_unit.contains(key), !pol.declassify.contains(key),
+    ensures std_apply(m, StdFn::GhostNew, Some(t), vs, fr) == Some((Val::Arr(seq![]), fr, Seq::<Event>::empty(), 0nat)),
+        leaf_call(m, pol, key, g, Some(t), vs, fr) == Some((Val::Arr(seq![]), fr, Seq::<Event>::empty(), 0nat)),
+{
+    arr0_ul(m, t);
+}
+
+/// **Fact 8f.** `Discriminant` of `Unit` at a one-variant enum that is not unit-like (`enum E {
+/// A(u8) }`: a `Unit` there is uninitialized) is `None`.
+pub proof fn fact_discr_unit_guard(m: MirCrate, b: Body, fr: Frame, p: Place)
+    requires read_place(fr, p) matches Some((v, _)) && v is Unit,
+        place_ty(m, b, p) matches Some(t) && rigid(m, t) matches Some(RigidTy::Adt(_, _)) && adt_row(m, t) matches Some(a)
+            && a.kind is Enum && a.variants@.len() == 1 && a.variants@[0].discr == Some(0u128)
+            && a.variants@[0].fields@.len() == 1 && rigid(m, a.variants@[0].fields@[0]) matches Some(RigidTy::Uint(UintTy::U8)),
+    ensures rv_discr(m, b, fr, p) is None,
+{
+    let t = place_ty(m, b, p)->Some_0;
+    let a = adt_row(m, t)->Some_0;
+    let fs = a.variants@[0].fields@;
+    let f = (tfuel(m) - 1) as nat;
+    assert(unit_like(m, fs[0], f, true) is None);
+    assert(unit_likes(m, fs, f, 1, true) is None);
+    assert(unit_like(m, t, tfuel(m), true) is None);
+}
+
+/// **Fact 8g.** `wt_val`'s `wt_rec` takes both forms of `()` and only `Arr([])` for `[T; 0]`.
+pub proof fn fact_wt_forms(m: MirCrate, u: Ty, t: Ty)
+    requires m.tys@.len() >= 1, rigid(m, u) matches Some(RigidTy::Tuple(ts)) && ts@.len() == 0,
+        rigid(m, t) matches Some(RigidTy::Array(_, n)) && const_usize(m, n.id) == Some(0u64),
+    ensures wt_rec(m, u, Val::Unit), wt_rec(m, u, Val::Tup(seq![])), wt_rec(m, t, Val::Arr(seq![])), !wt_rec(m, t, Val::Unit),
+{
+    let ts = rigid(m, u)->Some_0->Tuple_0@;
+    assert(unit_likes(m, ts, (tfuel(m) - 1) as nat, 0, true) == Some((Seq::<Val>::empty(), 0nat)));
+    assert(!has_arr(m, u, tfuel(m)));
+    arr0_ul(m, t);
+}
+
+// ------------------------------------------------------------------ 8h. consumers see both forms alike
+//
+// A one-variant enum `E { A = 5 }` (unit-like, no array) has two forms: the canonical `Unit` (a
+// `ZeroSized` constant, an entry local, a ghost result) and `Adt(0, [])` (an aggregate, a decoded
+// constant). `F { A(E) }` likewise: `Unit` or `Adt(0, [Adt(0, [])])`. Each fact runs one consumer
+// on both forms and ends in the same observable. (A `Declass(v)` event carries the form; the
+// translator admits only plain declassify arguments, `declass_arg_ok`.)
+
+pub open spec fn e_ok(m: MirCrate, e: Ty) -> bool {
+    m.tys@.len() >= 1 && (rigid(m, e) matches Some(RigidTy::Adt(_, _))) && (adt_row(m, e) matches Some(a) && !a.is_box && a.kind is Enum
+        && a.variants@.len() == 1 && a.variants@[0].discr == Some(5u128) && a.variants@[0].fields@.len() == 0)
+}
+
+pub open spec fn f_ok(m: MirCrate, f: Ty, e: Ty) -> bool {
+    e_ok(m, e) && m.tys@.len() >= 2 && (rigid(m, f) matches Some(RigidTy::Adt(_, _))) && (adt_row(m, f) matches Some(a) && !a.is_box && a.kind is Enum
+        && a.variants@.len() == 1 && a.variants@[0].fields@.len() == 1 && a.variants@[0].fields@[0] == e)
+}
+
+proof fn e_ul(m: MirCrate, e: Ty)
+    requires e_ok(m, e),
+    ensures unit_like(m, e, tfuel(m), true) is Some,
+{
+    let a = adt_row(m, e)->Some_0;
+    assert(unit_likes(m, a.variants@[0].fields@, (tfuel(m) - 1) as nat, 0, true) == Some((Seq::<Val>::empty(), 0nat)));
+}
+
+/// **Fact 8h-1 (Discriminant).** `Discriminant` of either form of E is 5.
+pub proof fn fact_discr_forms(m: MirCrate, b: Body, f1: Frame, f2: Frame, p: Place, ev: Seq<Event>)
+    requires read_place(f1, p) == Some((Val::Unit, ev)), read_place(f2, p) == Some((Val::Adt(0, seq![]), ev)),
+        place_ty(m, b, p) matches Some(e) && e_ok(m, e),
+    ensures rv_discr(m, b, f1, p) == Some((Val::Int(5), ev, 0nat)), rv_discr(m, b, f2, p) == Some((Val::Int(5), ev, 0nat)),
+{
+    e_ul(m, place_ty(m, b, p)->Some_0);
+}
+
+/// **Fact 8h-2 (Downcast and Field navigation).** `(_1 as A).0` of either form of F, then its
+/// `Discriminant`: no events, and 5 on both.
+pub proof fn fact_nav_forms(m: MirCrate, b: Body, fr: Frame, q: Place, f: Ty, e: Ty)
+    requires f_ok(m, f, e), q.local == 1, q.projection@.len() == 2, q.projection@[0] matches ProjectionElem::Downcast(k) && k == 0,
+        q.projection@[1] matches ProjectionElem::Field(i, ft) && i == 0 && ft == e, b.locals@.len() == 2, b.locals@[1].ty == f,
+        fr.locals.len() == 2,
+    ensures ({
+        let s = put_local(fr, 1, Val::Adt(0, seq![Val::Adt(0, seq![])]));
+        let u = put_local(fr, 1, Val::Unit);
+        &&& read_place(s, q) == Some((Val::Adt(0, seq![]), Seq::<Event>::empty()))
+        &&& read_place(u, q) == Some((Val::Unit, Seq::<Event>::empty()))
+        &&& rv_discr(m, b, s, q) == Some((Val::Int(5), Seq::<Event>::empty(), 0nat))
+        &&& rv_discr(m, b, u, q) == Some((Val::Int(5), Seq::<Event>::empty(), 0nat))
+    }),
+{
+    let e0 = Seq::<Event>::empty();
+    assert(e0 + e0 =~= e0);
+    let ps = q.projection@;
+    let pv = seq![PE::Variant(0)];
+    let pf = seq![PE::Variant(0), PE::Field(0)];
+    assert(seq![].push(PE::Variant(0)) =~= pv);
+    assert(pv.push(PE::Field(0)) =~= pf);
+    assert(pf.drop_first() =~= seq![PE::Field(0)]);
+    assert(seq![PE::Field(0)].drop_first() =~= Seq::<PE>::empty());
+    let l0 = Loc { root: Root::Local(1), path: seq![] };
+    let lf = Loc { root: Root::Local(1), path: pf };
+    let s = put_local(fr, 1, Val::Adt(0, seq![Val::Adt(0, seq![])]));
+    let u = put_local(fr, 1, Val::Unit);
+    assert(places(s, PRes::At(l0), ps, 0) == Some((PRes::At(l0), e0)));
+    assert(places(u, PRes::At(l0), ps, 0) == Some((PRes::At(l0), e0)));
+    let lv = Loc { root: Root::Local(1), path: pv };
+    assert(places(s, PRes::At(l0), ps, 1) == Some((PRes::At(lv), e0)));
+    assert(places(u, PRes::At(l0), ps, 1) == Some((PRes::At(lv), e0)));
+    assert(places(s, PRes::At(l0), ps, 2) == Some((PRes::At(lf), e0)));
+    assert(places(u, PRes::At(l0), ps, 2) == Some((PRes::At(lf), e0)));
+    reveal_with_fuel(read_at, 3);
+    assert(read_at(Val::Adt(0, seq![Val::Adt(0, seq![])]), pf) == Val::Adt(0, seq![]));
+    assert(read_at(Val::Unit, pf) == Val::Unit);
+    assert(tys_along(m, f, ps, 0) == Some(f));
+    assert(tys_along(m, f, ps, 1) == Some(f));
+    assert(place_ty(m, b, q) == Some(e));
+    e_ul(m, e);
+}
+
+/// **Fact 8h-3 (Copy and Move).** Reading either form has no events and no charge: the operand
+/// is the form, unchanged.
+pub proof fn fact_copy_forms(m: MirCrate, fr: Frame, p: Place)
+    requires local0(p, 1), fr.locals.len() == 2,
+    ensures eval_op(m, put_local(fr, 1, Val::Unit), Operand::Copy(p)) == Some((Val::Unit, Seq::<Event>::empty(), 0nat)),
+        eval_op(m, put_local(fr, 1, Val::Adt(0, seq![])), Operand::Copy(p)) == Some((Val::Adt(0, seq![]), Seq::<Event>::empty(), 0nat)),
+        eval_op(m, put_local(fr, 1, Val::Unit), Operand::Move(p)) == Some((Val::Unit, Seq::<Event>::empty(), 0nat)),
+        eval_op(m, put_local(fr, 1, Val::Adt(0, seq![])), Operand::Move(p)) == Some((Val::Adt(0, seq![]), Seq::<Event>::empty(), 0nat)),
+{
+}
+
+/// **Fact 8h-4 (Ref and Deref).** `_2 = &_1` of either form of E, then `Discriminant(*_2)`: 5 on both.
+pub proof fn fact_ref_forms(m: MirCrate, b: Body, fr: Frame, p1: Place, q: Place, e: Ty)
+    requires e_ok(m, e), local0(p1, 1), q.local == 2, q.projection@.len() == 1, q.projection@[0] is Deref, fr.locals.len() == 3,
+        b.locals@.len() == 3, rigid(m, b.locals@[2].ty) matches Some(RigidTy::Ref(_, pt, _)) && pt == e,
+    ensures ({
+        let su = put_local(fr, 1, Val::Unit);
+        let ss = put_local(fr, 1, Val::Adt(0, seq![]));
+        &&& rv_ref(su, BorrowKind::Shared, p1) == Some((Val::Shr(Box::new(Val::Unit)), Seq::<Event>::empty(), 0nat))
+        &&& rv_ref(ss, BorrowKind::Shared, p1) == Some((Val::Shr(Box::new(Val::Adt(0, seq![]))), Seq::<Event>::empty(), 0nat))
+        &&& rv_discr(m, b, put_local(su, 2, Val::Shr(Box::new(Val::Unit))), q) == Some((Val::Int(5), Seq::<Event>::empty(), 0nat))
+        &&& rv_discr(m, b, put_local(ss, 2, Val::Shr(Box::new(Val::Adt(0, seq![])))), q) == Some((Val::Int(5), Seq::<Event>::empty(), 0nat))
+    }),
+{
+    let e0 = Seq::<Event>::empty();
+    assert(e0 + e0 =~= e0);
+    let l2 = Loc { root: Root::Local(2), path: seq![] };
+    let fu = put_local(put_local(fr, 1, Val::Unit), 2, Val::Shr(Box::new(Val::Unit)));
+    let fs = put_local(put_local(fr, 1, Val::Adt(0, seq![])), 2, Val::Shr(Box::new(Val::Adt(0, seq![]))));
+    assert(places(fu, PRes::At(l2), q.projection@, 0) == Some((PRes::At(l2), e0)));
+    assert(places(fs, PRes::At(l2), q.projection@, 0) == Some((PRes::At(l2), e0)));
+    assert(tys_along(m, b.locals@[2].ty, q.projection@, 0) == Some(b.locals@[2].ty));
+    assert(place_ty(m, b, q) == Some(e));
+    e_ul(m, e);
+}
+
+/// **Fact 8h-5 (call-argument passing).** Either form passes to a non-`&mut` parameter, with the
+/// same (`Unit`) slot: the callee's entry differs only in the parameter holding the form.
+pub proof fn fact_arg_forms(m: MirCrate, cb: Body, fr: Frame)
+    requires cb.arg_count == 1, cb.locals@.len() >= 2, !is_mut_ref(m, cb.locals@[1].ty),
+    ensures args_ok(m, cb, fr, seq![Val::Unit]), args_ok(m, cb, fr, seq![Val::Adt(0, seq![])]),
+        call_slots(m, cb, fr, seq![Val::Unit]) == call_slots(m, cb, fr, seq![Val::Adt(0, seq![])]),
+        call_slots(m, cb, fr, seq![Val::Unit]) == seq![Val::Unit],
+{
+    assert(arg_ok(m, cb, fr, seq![Val::Unit], 0));
+    assert(arg_ok(m, cb, fr, seq![Val::Adt(0, seq![])], 0));
+    assert(call_slots(m, cb, fr, seq![Val::Unit]) =~= seq![Val::Unit]);
+    assert(call_slots(m, cb, fr, seq![Val::Adt(0, seq![])]) =~= seq![Val::Unit]);
+}
+
+/// **Fact 8h-6 (Drop).** Dropping a place of a type whose drop shim is empty: on either form a
+/// jump with the place's events and cost 1, the frame unchanged.
+pub proof fn fact_drop_forms(m: MirCrate, pol: CallPolicy, b: Body, fr: Frame, p: Place, tb: nat, fuel: nat)
+    requires local0(p, 1), fr.locals.len() == 2, b.locals@.len() == 2, drop_row(m, b.locals@[1].ty) matches Some(d) && d.empty,
+    ensures drop_step(m, pol, b, p, tb, put_local(fr, 1, Val::Unit), fuel) == Step::Jump(tb, put_local(fr, 1, Val::Unit), Seq::<Event>::empty(), 1),
+        drop_step(m, pol, b, p, tb, put_local(fr, 1, Val::Adt(0, seq![])), fuel)
+            == Step::Jump(tb, put_local(fr, 1, Val::Adt(0, seq![])), Seq::<Event>::empty(), 1),
+{
+}
+
+/// **Fact 8h-7 (a std row given a unit-like value).** `Ghost::assume_new_fallback` given either
+/// form gives the same result.
+pub proof fn fact_std_forms(m: MirCrate, t: Ty, fr: Frame)
+    requires zst_dest(m, t),
+    ensures std_apply(m, StdFn::GhostNew, Some(t), seq![Val::Unit], fr) == std_apply(m, StdFn::GhostNew, Some(t), seq![Val::Adt(0, seq![])], fr),
 {
 }
 
