@@ -500,6 +500,46 @@ pub proof fn lemma_unit_likes_none(m: MirCrate, ts: Seq<Ty>, fuel: nat, k: nat, 
     if k < n { lemma_unit_likes_none(m, ts, fuel, k, (n - 1) as nat, clos); }
 }
 
+pub fn x_has_arr(m: &MirCrate, t: Ty, fuel: usize) -> (r: bool)
+    ensures r == has_arr(*m, t, fuel as nat),
+    decreases fuel, 0nat,
+{
+    if fuel == 0 { return false; }
+    let f = fuel - 1;
+    match x_rigid(m, t) {
+        Some(RigidTy::Tuple(ts)) => x_has_arrs(m, ts, f),
+        Some(RigidTy::Adt(_, _)) => match x_adt_row(m, t) {
+            Some(a) => a.variants.len() == 1 && x_has_arrs(m, &a.variants[0].fields, f),
+            None => false,
+        },
+        Some(RigidTy::Array(_, _)) => true,
+        _ => false,
+    }
+}
+
+fn x_has_arrs(m: &MirCrate, ts: &Vec<Ty>, fuel: usize) -> (r: bool)
+    ensures r == exists|k: int| 0 <= k < ts@.len() && has_arr(*m, #[trigger] ts@[k], fuel as nat),
+    decreases fuel, 1nat,
+{
+    let mut k: usize = 0;
+    while k < ts.len()
+        invariant k <= ts@.len(), forall|i: int| 0 <= i < k ==> !has_arr(*m, #[trigger] ts@[i], fuel as nat),
+        decreases ts.len() - k,
+    {
+        if x_has_arr(m, ts[k], fuel) { return true; }
+        k += 1;
+    }
+    false
+}
+
+/// `ul_arr(m, t)`.
+pub fn x_ul_arr(m: &MirCrate, t: Ty, tf: usize) -> (r: bool)
+    requires tf as nat == tfuel(*m),
+    ensures r == ul_arr(*m, t),
+{
+    x_unit_like(m, t, tf, true) && x_has_arr(m, t, tf)
+}
+
 pub fn x_zst_dest(m: &MirCrate, t: Ty) -> (r: bool)
     ensures r ==> zst_dest(*m, t),
 {

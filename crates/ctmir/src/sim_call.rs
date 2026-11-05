@@ -112,6 +112,7 @@ pub proof fn lemma_arg_mut(m: MirCrate, cb: Body, fr: Frame, vs: Seq<Val>, j: in
 pub proof fn lemma_call_entry(m: MirCrate, j: nat, cb: Body, p: c::Program, h: nat, fr: Frame, fc: Frame, cargs: Seq<c::Operand>, vs: Seq<Val>)
     requires inst_body(m, j) == Some(cb), args_ok(m, cb, fr, vs), fr_rel(fr, fc), ctcore::sem::op_vals(fc, cargs) == vs,
         h < p.fns@.len(), cb.locals@.len() <= p.fns@[h as int].locals@.len(),
+        forall|k: int| 0 <= k < cb.locals@.len() ==> !ul_arr(m, #[trigger] cb.locals@[k].ty),
     ensures ({
         let (cf, wb, ae) = ctcore::sem::call_enter(p, h, fc, cargs);
         &&& fr_rel(mir_entry(m, j, vs, call_slots(m, cb, fr, vs)), cf) && wb == wb_of(vs) && ae == ctcore::sem::ops_ev(fc, cargs)
@@ -269,7 +270,7 @@ proof fn lemma_row_vec(m: MirCrate, f: StdFn, dty: Option<Ty>, vs: Seq<Val>, fr:
 }
 
 proof fn lemma_row_pure(m: MirCrate, f: StdFn, dty: Option<Ty>, vs: Seq<Val>, fr: Frame, fc: Frame)
-    requires fr_rel(fr, fc), std_apply(m, f, dty, vs, fr) is Some,
+    requires fr_rel(fr, fc), std_apply(m, f, dty, vs, fr) is Some, !(dty matches Some(t) && ul_arr(m, t)),
         !(f is VecPush || f is VecExtendFromSlice || f is VecSet),
         f is Wrapping ==> (f->Wrapping_0 is Add || f->Wrapping_0 is Sub),
     ensures leaf_sim(std_intr(f), std_apply(m, f, dty, vs, fr)->Some_0, fc, vs),
@@ -288,6 +289,7 @@ proof fn lemma_row_pure(m: MirCrate, f: StdFn, dty: Option<Ty>, vs: Seq<Val>, fr
 /// The std rows.
 pub proof fn lemma_std_row(m: MirCrate, key: Seq<u8>, gargs: GenericArgs, dty: Option<Ty>, vs: Seq<Val>, fr: Frame, fc: Frame)
     requires fr_rel(fr, fc), std_model(m, key, gargs) is Some, std_apply(m, std_model(m, key, gargs)->Some_0, dty, vs, fr) is Some,
+        !(dty matches Some(t) && ul_arr(m, t)),
     ensures leaf_sim(std_intr(std_model(m, key, gargs)->Some_0), std_apply(m, std_model(m, key, gargs)->Some_0, dty, vs, fr)->Some_0, fc, vs),
 {
     let f = std_model(m, key, gargs)->Some_0;
@@ -299,6 +301,7 @@ pub proof fn lemma_std_row(m: MirCrate, key: Seq<u8>, gargs: GenericArgs, dty: O
 /// A leaf call (policy or std): its intrinsic, run on the related frame.
 pub proof fn lemma_leaf(m: MirCrate, pol: CallPolicy, key: Seq<u8>, gargs: GenericArgs, dty: Option<Ty>, vs: Seq<Val>, fr: Frame, fc: Frame)
     requires fr_rel(fr, fc), leaf_call(m, pol, key, gargs, dty, vs, fr) is Some, intr_of(m, pol, key, gargs) is Some,
+        !(dty matches Some(t) && ul_arr(m, t)),
     ensures leaf_sim(intr_of(m, pol, key, gargs)->Some_0, leaf_call(m, pol, key, gargs, dty, vs, fr)->Some_0, fc, vs),
 {
     if !pol.declassify.contains(key) && !pol.ghost_unit.contains(key) {

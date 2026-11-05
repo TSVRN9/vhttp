@@ -581,13 +581,13 @@ proof fn lemma_body_close(m: MirCrate, pol: Policy, ord: Seq<usize>, j: nat, b: 
         inst_body(m, j) == Some(b), b.spread_arg is None, sig_ok(m, b), locals_ok(m, b),
         cb.nargs == b.arg_count, locals.len() == b.locals@.len(), cb.locals@.len() >= b.locals@.len(),
         cb.locals@.subrange(0, locals.len() as int) == locals,
-        forall|i: int| 0 <= i < b.locals@.len() ==> lowers_ty(m, #[trigger] b.locals@[i].ty, locals[i], tyf()),
+        forall|i: int| 0 <= i < b.locals@.len() ==> lowers_ty(m, #[trigger] b.locals@[i].ty, locals[i], tyf()) && !ul_arr(m, b.locals@[i].ty),
         r.len() == b.blocks@.len(), r.len() > 0, r[0], cb.blocks@.len() == b.blocks@.len(),
         blocks_rel(m, pol, ord, b, b.locals@.len(), cb.locals@.len(), r, cb.blocks@, b.blocks@.len()),
     ensures lowers_body(m, pol, ord, j, cb, r),
 {
     reveal(blocks_rel);
-    assert forall|k: int| 0 <= k < b.locals@.len() implies lowers_ty(m, #[trigger] b.locals@[k].ty, cb.locals@[k], tyf()) by {
+    assert forall|k: int| 0 <= k < b.locals@.len() implies lowers_ty(m, #[trigger] b.locals@[k].ty, cb.locals@[k], tyf()) && !ul_arr(m, b.locals@[k].ty) by {
         assert(cb.locals@[k] == cb.locals@.subrange(0, locals.len() as int)[k]);
     };
 }
@@ -771,15 +771,21 @@ pub fn lower_body(m: &MirCrate, pol: &Policy, order: &Vec<usize>, keys: &mut Key
     let mut bad = false;
     if b.spread_arg.is_some() { errs.push(err_at(&path, b"a rust-call (closure) body", copy_bytes(&bsite))); bad = true; }
     if !x_sig_ok(m, b) || !x_locals_ok(m, b) { errs.push(err_at(&path, b"a local type outside the subset", copy_bytes(&bsite))); bad = true; }
+    let tf = match x_tfuel(m) { Some(tf) => tf, None => { errs.push(err_at(&path, b"too many types", copy_bytes(&bsite))); return None; } };
     let mut locals: Vec<c::Ty> = Vec::new();
     let mut k: usize = 0;
     while k < b.locals.len()
-        invariant k <= b.locals@.len(), !bad ==> locals@.len() == k && forall|i: int| 0 <= i < k ==> lowers_ty(*m, #[trigger] b.locals@[i].ty, locals@[i], tyf()),
+        invariant k <= b.locals@.len(), tf as nat == tfuel(*m),
+            !bad ==> locals@.len() == k && forall|i: int| 0 <= i < k ==> lowers_ty(*m, #[trigger] b.locals@[i].ty, locals@[i], tyf()) && !ul_arr(*m, b.locals@[i].ty),
             !bad ==> b.spread_arg is None && sig_ok(*m, *b) && locals_ok(*m, *b),
         decreases b.locals.len() - k,
     {
         match lower_ty(m, b.locals[k].ty, TYF) {
-            Ok(t) => locals.push(t),
+            // its entry value is structural in sem, `Unit` in core
+            Ok(t) => if x_ul_arr(m, b.locals[k].ty, tf) {
+                errs.push(Reject::Unsupported { path: copy_bytes(&path), what: msg(b"a local of a unit-like type holding an array"), site: site(m, b.locals[k].span) });
+                bad = true;
+            } else { locals.push(t) },
             Err(e) => { errs.push(Reject::Unsupported { path: copy_bytes(&path), what: e, site: site(m, b.locals[k].span) }); bad = true; },
         }
         k += 1;
@@ -800,7 +806,7 @@ pub fn lower_body(m: &MirCrate, pol: &Policy, order: &Vec<usize>, keys: &mut Key
             bb <= b.blocks@.len(), seen@.len() == b.blocks@.len(), tmp.nloc == nloc, tmp.pre@.len() == 0, nloc == b.locals@.len(),
             seen@.len() > 0, seen@[0], forall|k: int| 0 <= k < seen@.len() && #[trigger] seen@[k] ==> succs_in(b.blocks@[k].terminator.kind, marks(seen@)),
             !bad ==> blocks_rel(*m, *pol, order@, *b, nloc, tbase(tmp), seen@, blocks@, bb as nat) && blocks@.len() == bb,
-            !bad ==> locals@.len() == nloc && forall|i: int| 0 <= i < nloc ==> lowers_ty(*m, #[trigger] b.locals@[i].ty, locals@[i], tyf()),
+            !bad ==> locals@.len() == nloc && forall|i: int| 0 <= i < nloc ==> lowers_ty(*m, #[trigger] b.locals@[i].ty, locals@[i], tyf()) && !ul_arr(*m, b.locals@[i].ty),
             !bad ==> b.spread_arg is None && sig_ok(*m, *b) && locals_ok(*m, *b),
         decreases b.blocks.len() - bb,
     {
