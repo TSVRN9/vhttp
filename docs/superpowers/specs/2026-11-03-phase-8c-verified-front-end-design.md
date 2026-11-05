@@ -289,7 +289,8 @@ Fixed modelling decisions (the author implements them and does not choose them):
    - a shared reference to an array through the provenance pointer to a `GlobalAlloc::Memory`;
    - a shared reference to a ZST as `Shr` of the ZST's value.
 
-   `ZeroSized` constants are their type's unit-like value. Anything else is outside the subset.
+   A `ZeroSized` constant decodes to its type's single value, in the form the next paragraph
+   gives. Anything else is outside the subset.
 
    A unit-like (single-inhabitant) value has two forms, and its producer picks one. The
    canonical `Unit` comes from `ZeroSized` constants, entry locals, ghost and `GhostUnit`
