@@ -12,6 +12,7 @@ use crate::cid::{eq_bytes, LOCAL_CID_LEN};
 use crate::conn::*;
 use crate::datagram::*;
 use crate::header::*;
+use crate::lifecycle::Phase;
 use crate::payload::PacketKind;
 use crate::protect::*;
 use crate::route::CidUpdate;
@@ -234,7 +235,7 @@ fn all_to(rx: &Rx, dcid: &[u8]) -> bool {
 /// unopened, and TLS has since completed on the Finished in front of it. Only the 1-RTT packet
 /// can open, and it is processed only if it, and any error, has the first header's DCID. The
 /// datagram was already counted (§8.1), so it counts 0 bytes; its reset tail was the first
-/// pass's to handle.
+/// pass's to handle. Only an open connection is refed.
 #[verifier::spinoff_prover]
 pub fn refeed_one_rtt(
     c: &mut Connection,
@@ -253,6 +254,11 @@ pub fn refeed_one_rtt(
 {
     hide(rfc_open_datagram);
     if !c.handshake_complete() {
+        return;
+    }
+    // In Closing, `on_datagram` would count the datagram again as a closing-state arrival and
+    // owe one more CONNECTION_CLOSE.
+    if !matches!(c.phase(), Phase::Open) {
         return;
     }
     let first = match parse_header(d, LOCAL_CID_LEN) {
