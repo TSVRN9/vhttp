@@ -333,6 +333,25 @@ fn gapped_initial_at_key_change_pv() {
     assert_eq!(s.key_slots(), [true, false, false]);
 }
 
+/// An empty CRYPTO frame past the ClientHello carries no data: nothing is unread at the key change
+/// (and, in the next test, nothing past `init_end`).
+#[test]
+fn empty_gapped_initial_ok() {
+    let ch = h3ch(id);
+    let l = ch.len();
+    let mut s = accept(&ini(&qc::S1, 0, || vec![cr(0, &ch), cr(l + 100, &[])]));
+    assert_eq!(s.conn().phase(), Phase::Open);
+    assert_eq!(s.key_slots(), [true, true, true]);
+}
+
+#[test]
+fn empty_initial_after_switch_ok() {
+    let l = h3ch(id).len();
+    let mut s = flight();
+    receive(&mut s, &ini(&qc::S1, 1, || vec![cr(l + 100, &[])]), 2);
+    assert_eq!(s.conn().phase(), Phase::Open);
+}
+
 #[test]
 fn error_ranges() {
     let code = |ch: &[u8]| {

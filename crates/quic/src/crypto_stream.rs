@@ -61,9 +61,9 @@ impl CryptoStream {
             final(self).wf(),
             r is Err <==> offset + data@.len() > old(self).reassembly().base() + MAX_CRYPTO_BUFFER,
             r is Err ==> r == Err::<(), u64>(CRYPTO_BUFFER_EXCEEDED),
-            (r is Err || offset + data@.len() <= old(self).reassembly().base()) ==> *final(self)
-                == *old(self),
-            (r is Ok && offset + data@.len() > old(self).reassembly().base()) ==> {
+            (r is Err || offset + data@.len() <= old(self).reassembly().base() || data@.len() == 0)
+                ==> *final(self) == *old(self),
+            (r is Ok && offset + data@.len() > old(self).reassembly().base() && data@.len() > 0) ==> {
                 &&& final(self).reassembly().inserted() == old(self).reassembly().inserted().push(
                     (offset as nat, data@),
                 )
@@ -91,6 +91,10 @@ impl CryptoStream {
             //# If an endpoint does not expand its buffer, it MUST close
             //# the connection with a CRYPTO_BUFFER_EXCEEDED error code.
             return Err(CRYPTO_BUFFER_EXCEEDED);
+        }
+        if data.len() == 0 {
+            // No bytes: the window is not extended past what was received (RFC 9001 §4.1.3).
+            return Ok(());
         }
         self.re.insert(offset, data);
         Ok(())
