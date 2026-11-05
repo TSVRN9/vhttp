@@ -56,4 +56,4 @@ export RUSTFLAGS='--cfg ct_negative'
 dump negative crypto "$ct/manifest.txt:$ct/manifest-negative.txt"
 unset RUSTFLAGS
 dump parsers wire,h3,quic "$ct/manifest.txt:$ct/manifest-parsers.txt"
-dump semconf semconf "$ct/manifest.txt" --manifest-path "$fx/semconf/Cargo.toml"
+dump semconf semconf "$fx/semconf/manifest.txt" --manifest-path "$fx/semconf/Cargo.toml"
