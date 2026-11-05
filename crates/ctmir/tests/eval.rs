@@ -166,9 +166,10 @@ fn eval_panic() {
     assert!(matches!(run(&m, "tiny::tiny", tiny_args(abcd()), FUEL), Ev::Panic));
 }
 
-/// The timing probe (Task 3's 150 s bound): `CT_DUMP_DIR` is a ct-check output dir; `CT_PROBE_EXTRA`
-/// optionally names a file of more crypto vectors (the RSA spike vector). Each vector runs on
-/// `mir_eval` and, for comparison, on the core interpreter (`check_vector`). Arguments are shaped
+/// The timing probe: `CT_DUMP_DIR` is a ct-check output dir; `CT_PROBE_EXTRA` optionally names a
+/// file of more crypto vectors (the RSA spike vector, `CT_PROBE_EXTRA_STEPS` its core step count).
+/// Each runs on `mir_eval`, and its steps must equal the deleted core interpreter's for the same
+/// vector (recorded at 0b0061c: vt-8d-evidence/t2/probe.txt, spike/out-w.txt). Arguments are shaped
 /// by hand: a non-`Shr` value at a `&` parameter is wrapped in `Shr`.
 #[test]
 #[ignore]
@@ -178,19 +179,20 @@ fn eval_probe() {
     let pol = ctmir::policy::parse_manifests(&vec![std::fs::read("../../tools/ct-driver/manifest.txt").unwrap()]).unwrap();
     let tb = tabs(&m).unwrap();
     let st = std::fs::read_to_string("../../tools/ct-driver/selftest.txt").unwrap();
-    let mut lines: Vec<String> = vec![
-        st.lines().find(|l| l.starts_with("crypto::sha256::sha256 616263 ")).unwrap().into(),
-        st.lines().find(|l| l.starts_with("crypto::p256::p256_public_key 0000000000000000000000000000000000000000000000000000000000000003 ")).unwrap().into(),
+    let mut lines: Vec<(String, Option<u64>)> = vec![
+        (st.lines().find(|l| l.starts_with("crypto::sha256::sha256 616263 ")).unwrap().into(), Some(9591)),
+        (st.lines().find(|l| l.starts_with("crypto::p256::p256_public_key 0000000000000000000000000000000000000000000000000000000000000003 ")).unwrap().into(), Some(149653114)),
     ];
     if let Ok(p) = std::env::var("CT_PROBE_EXTRA") {
-        lines.extend(std::fs::read_to_string(p).unwrap().lines().filter(|l| !l.trim().is_empty() && !l.starts_with('#')).map(String::from));
+        let want = std::env::var("CT_PROBE_EXTRA_STEPS").ok().map(|s| s.parse::<u64>().unwrap());
+        lines.extend(std::fs::read_to_string(p).unwrap().lines().filter(|l| !l.trim().is_empty() && !l.starts_with('#')).map(|l| (l.to_string(), want)));
     }
-    for line in &lines {
+    for (line, want) in &lines {
         let ws: Vec<Vec<u8>> = line.split_whitespace().map(|w| w.as_bytes().to_vec()).collect();
         let path = std::str::from_utf8(&ws[0]).unwrap();
         let v = ctmir::vectors::parse_vector(&ws[1..]).ok().expect("vector");
         let i = ctmir::lower_fn::root_inst(&m, path.as_bytes()).ok().expect("root");
-        let (p, _) = lower(&m, &pol, path.as_bytes(), &mut Vec::new()).ok().expect("lower");
+        assert!(lower(&m, &pol, path.as_bytes(), &mut Vec::new()).is_ok(), "{path} does not lower");
         let b = m.insts[i].body.as_ref().unwrap();
         let args: Vec<CVal> = v.args.iter().enumerate().map(|(j, (_, x))| {
             let shr = matches!(t_rigid(&m, &tb, b.locals[j + 1].ty), Some(RigidTy::Ref(_, _, Mutability::Not)));
@@ -206,12 +208,9 @@ fn eval_probe() {
             Ev::Fuel => ("Fuel", 0, String::new()),
             Ev::GaveUp => ("GaveUp", 0, String::new()),
         };
-        let t1 = std::time::Instant::now();
-        let core = ctmir::vectors::check_vector(&p, &v);
-        let dc = t1.elapsed();
-        let core = match core { Ok(Some(n)) => format!("pass steps={n}"), Ok(None) => "panic".into(), Err(e) => format!("fail {}", String::from_utf8_lossy(&e)) };
         let ret = if ret.len() > 60 { format!("{}..", &ret[..60]) } else { ret };
-        println!("probe {path} mir={kind} steps={n} time={:.2}s core: {core} time={:.2}s ret={ret}", dt.as_secs_f64(), dc.as_secs_f64());
+        println!("probe {path} mir={kind} steps={n} time={:.2}s ret={ret}", dt.as_secs_f64());
+        if let Some(w) = want { assert_eq!((kind, n), ("Done", *w), "{path}: MIR steps differ from core's"); }
     }
 }
 

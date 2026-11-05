@@ -8,7 +8,8 @@
 # (all must be ok) with every `checked` line pinned by tools/ct-driver/expected-labels.txt; the
 # negative control (--cfg ct_negative; exactly its one reject); and the semconf conformance check:
 # its native vectors (tools/ct-fixtures/semconf) are regenerated and diffed against vectors.txt,
-# and every vector must pass ct-front's verified selftest within a time bound; finally every dump
+# and every vector must pass ct-front's verified selftest (which runs ctmir::sem through the
+# verified evaluator) within a time bound; finally every dump
 # must parse and decode with no `Unknown` (ctmir's `dumps` tests). Every ct-front run
 # is under `timeout` and must exit 0 and write its report into a freshly emptied run dir. Target
 # dirs live under CT_TARGET_DIR (default $root/target/ct), one subdir per run; dumps and reports
@@ -120,8 +121,9 @@ dump parsers wire,h3,quic "$encode"
 export RUSTFLAGS='--cfg ct_negative'
 dump negative crypto ""
 unset RUSTFLAGS
-# The selftest of crypto (p256_ecdsa_sign runs 1.5e8 core steps) takes about 20 s; the other runs
-# take seconds. 300 s only bounds a hang.
+# The other runs take seconds; 300 s only bounds a hang. The crypto selftest runs every vector on
+# ctmir::sem through the verified evaluator (p256_ecdsa_sign is 1.5e8 MIR steps); it takes about a
+# minute and gets its own 150 s bound (8d addendum decision 5), so the bound is enforced.
 t=300
 
 front $t check "$CT_OUT/fixtures/mir-ct_fixtures.json" "$CT_OUT/fixtures/report-ct_fixtures.txt" "$fx/manifest.txt"
@@ -134,7 +136,7 @@ echo "ct-check: fixtures $n/$n"
 
 # Selftest: every vector line of selftest.txt must report `pass`; counted per crate prefix.
 r=$CT_OUT/crypto/selftest-crypto.txt
-front $t "selftest=$st" "$CT_OUT/crypto/mir-crypto.json" "$r" "$cm"
+front 150 "selftest=$st" "$CT_OUT/crypto/mir-crypto.json" "$r" "$cm"
 grep -v '^pass ' "$r" >&2 && fail "selftest: vectors failed (above)"
 v=$(grep -c '^crypto::' "$st")
 p=$(grep -c "^pass " "$r" || true)
@@ -230,15 +232,19 @@ cargo test --release --locked -q --manifest-path "$sc/Cargo.toml" --target-dir "
 diff -u "$sc/vectors.txt" "$CT_TARGET_DIR/semconf-native/semconf-vectors.txt" || fail "semconf: native vectors differ from vectors.txt"
 dump semconf semconf "" --manifest-path "$sc/Cargo.toml"
 got=$CT_OUT/semconf/selftest-semconf.txt
-# A `=> panic` vector passes when the core run does not complete, and running out of fuel (2^32
-# blocks per activation) would count; the whole run takes well under a second, so a 60 s bound
-# keeps a looping vector from passing that way.
+# A `=> panic` vector passes only when the MIR run panics (running out of fuel, 2^32 blocks per
+# activation, is a `fail`); the whole run takes well under a second, and the 60 s bound stops a
+# looping vector.
 front 60 "selftest=$sc/vectors.txt" "$CT_OUT/semconf/mir-semconf.json" "$got" "$sc/manifest.txt"
 grep -v '^pass ' "$got" >&2 && fail "semconf: vectors failed (above)"
 v=$(grep -c '^semconf::' "$sc/vectors.txt")
 p=$(grep -c '^pass ' "$got" || true)
 [ "$p" -eq "$v" ] || fail "semconf: $p of $v vectors passed"
 echo "ct-check: semconf $p/$v"
+
+# The evaluator's and the selftest's own tests (tiny.json fixtures; not part of verify.sh's proofs).
+cargo test --release --locked -q -p ctmir --test eval --test interp --target-dir "$CT_TARGET_DIR/ctmir-tests" > "$CT_OUT/ctmir-tests.log" 2>&1 \
+    || { cat "$CT_OUT/ctmir-tests.log" >&2; fail "ctmir: the eval/interp tests failed"; }
 
 # Every dump above parses with the verified reader and decodes with no `Unknown` variant (a
 # rustc_public variant the schema does not mirror): ctmir's `dumps` tests over $CT_OUT.

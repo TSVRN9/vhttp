@@ -44,7 +44,11 @@ use ctcore::cost::{atom_val, atoms_val, cert_for, monos_val, poly_val, Atom, Cer
 #[cfg(verus_keep_ghost)]
 use ctcore::ct::{diverge, ok_prog, val_rel, FnLab};
 #[cfg(verus_keep_ghost)]
-use ctcore::sem::{nth, Frame, Res, Val};
+use ctcore::sem::{nth, Frame, Res};
+use ctcore::sem::Val;
+use crate::eval_tab::{tabs, Tabs};
+#[cfg(verus_keep_ghost)]
+use crate::eval_tab::tabs_ok;
 #[allow(unused_imports)]
 use ctcore::syntax as c;
 use vstd::prelude::*;
@@ -177,14 +181,34 @@ pub open spec fn line_kind(l: Seq<u8>) -> bool {
         || starts(l, b"declassify "@) || starts(l, b"none "@) || starts(l, b"pass "@) || starts(l, b"fail "@)
 }
 
+/// What a selftest `pass ..` line claims (addendum decision 4): for some root `insts[i]` of the
+/// path and well-typed arguments, the MIR run at `FUEL` completes in the printed steps
+/// (`pass <path> steps=<n>`) or panics (`pass <path> panic`).
+pub open spec fn pass_ok(m: MirCrate, pol: Policy, l: Seq<u8>) -> bool {
+    exists|path: Seq<u8>, i: nat, args: Seq<Val>, slots: Seq<Val>, n: nat|
+        #![trigger root_of(m, path, i), wt_args(m, i, args, slots), pass_steps_line(path, n)]
+        root_of(m, path, i) && wt_args(m, i, args, slots) && {
+            let o = mir_run(m, cpol(pol), i, mir_entry(m, i, args, slots), crate::vectors::FUEL as nat);
+            (l == pass_steps_line(path, n) && (o matches Out::Done(_, _, k) && k == n))
+            || (l == pass_panic_line(path) && o is Panic)
+        }
+}
+
+/// `pass <path> steps=<n>`, as the report prints it.
+pub open spec fn pass_steps_line(path: Seq<u8>, n: nat) -> Seq<u8> { clean(b"pass "@ + path + b" steps="@ + digits(n)) + seq![10u8] }
+
+/// `pass <path> panic`, as the report prints it.
+pub open spec fn pass_panic_line(path: Seq<u8>) -> Seq<u8> { clean(b"pass "@ + path + b" panic"@) + seq![10u8] }
+
 /// One report line (`lines` is the whole report): a text without `\n`, then `\n`; a line starting `root ` is a `root <path> ok`
-/// line whose claim holds, and one starting `bounded ` is a `bounded` line whose claim holds.
-/// Every other line (`reject`, `checked`, `declassify`, `none`, `pass`, `fail`) is
-/// informational.
+/// line whose claim holds, one starting `bounded ` is a `bounded` line whose claim holds, and one
+/// starting `pass ` is a selftest `pass` line whose claim holds. Every other line (`reject`,
+/// `checked`, `declassify`, `none`, `fail`) is informational.
 pub open spec fn line_ok(m: MirCrate, pol: Policy, l: Seq<u8>, lines: Seq<Seq<u8>>) -> bool {
     &&& l.len() > 0 && l.last() == 10u8 && no_nl(l.drop_last()) && line_kind(l)
     &&& starts(l, b"root "@) ==> exists|path: Seq<u8>| l == root_line(path) && #[trigger] root_ok(m, pol, path, lines)
     &&& starts(l, b"bounded "@) ==> bounded_ok(m, pol, l)
+    &&& starts(l, b"pass "@) ==> pass_ok(m, pol, l)
 }
 
 /// **The report is sound.**
@@ -498,11 +522,11 @@ fn kind_ok(l: &Vec<u8>) -> (r: bool)
         || crate::policy::starts_pub(l, b"pass ") || crate::policy::starts_pub(l, b"fail ")
 }
 
-/// `l` (with its last `\n`) is not one of the two claim lines.
+/// `l` (with its last `\n`) is not one of the three claim lines.
 fn no_claim(l: &Vec<u8>) -> (r: bool)
-    ensures r == (!starts(l@, b"root "@) && !starts(l@, b"bounded "@)),
+    ensures r == (!starts(l@, b"root "@) && !starts(l@, b"bounded "@) && !starts(l@, b"pass "@)),
 {
-    !crate::policy::starts_pub(l, b"root ") && !crate::policy::starts_pub(l, b"bounded ")
+    !crate::policy::starts_pub(l, b"root ") && !crate::policy::starts_pub(l, b"bounded ") && !crate::policy::starts_pub(l, b"pass ")
 }
 
 /// Adds the informational line `clean(body)` + `\n`.
@@ -1117,6 +1141,7 @@ fn check_root(m: &MirCrate, pol: &Policy, r: &Vec<u8>, keys: &mut Keys, acc: &mu
     let ghost body = l@;
     l.push(10u8);
     if crate::policy::starts_pub(&l, b"bounded ") { return Err(cat(b"a root line looks like a bound: ", r.as_slice())); }
+    if crate::policy::starts_pub(&l, b"pass ") { return Err(cat(b"a root line looks like a pass line: ", r.as_slice())); }
     proof {
         assert(l@ =~= root_line(r@));
         assert(l@.drop_last() =~= body);
@@ -1213,6 +1238,7 @@ fn cost_root(m: &MirCrate, pol: &Policy, r: &Vec<u8>, keys: &mut Keys, acc: &mut
             let ghost body = l@;
             l.push(10u8);
             if crate::policy::starts_pub(&l, b"root ") { return Err(cat(b"a bounded line looks like a root line: ", r.as_slice())); }
+            if crate::policy::starts_pub(&l, b"pass ") { return Err(cat(b"a bounded line looks like a pass line: ", r.as_slice())); }
             proof {
                 assert(l@ =~= bounded_line(r@, deg_spec(*poly), poly_text_spec(*poly, pnames(inst_body(*m, i)->Some_0))));
                 assert(l@.subrange(0, 8) =~= b"bounded "@);
@@ -1232,17 +1258,183 @@ fn cost_root(m: &MirCrate, pol: &Policy, r: &Vec<u8>, keys: &mut Keys, acc: &mut
     }
 }
 
-/// A translated selftest fn: its program, or why it has none.
-type Lowered = Vec<(Vec<u8>, Result<c::Program, Vec<u8>>)>;
+/// A translated selftest root: its program and instance, or why it has none.
+type Lowered = Vec<(Vec<u8>, Result<(c::Program, usize), Vec<u8>>)>;
 
-/// The selftest (spec §Verified interpreter): for each vector line of `text` whose path is in the
-/// dump's crate, in file order, `pass <path> steps=<n>` (or `pass <path> panic`) when
-/// `vectors::check_vector` passes on the path's translated program, else `fail <path> <why>`. A
-/// malformed line, or no vector for the crate, is an `Err`. Each path is translated once.
+/// What the selftest's cache knows of a translated root.
+pub open spec fn lowered_ok(m: MirCrate, pol: Policy, path: Seq<u8>, lo: Result<(c::Program, usize), Vec<u8>>) -> bool {
+    lo matches Ok((p, i)) ==> root_of(m, path, i as nat) && in_subset(m, cpol(pol), i as nat) && p.fns@.len() > 0
+}
+
+/// A lowered root is in the subset, and its program's fn 0 is its image.
+proof fn lemma_lowered(m: MirCrate, pol: Policy, root: Seq<u8>, p: c::Program, infos: Seq<FnInfo>)
+    requires lowers(m, pol, root, p, infos),
+    ensures infos.len() >= 1, root_of(m, root, infos[0].inst as nat), in_subset(m, cpol(pol), infos[0].inst as nat), p.fns@.len() > 0,
+{
+    let rs = choose|rs: Seq<Seq<bool>>| lowers_rs(m, pol, root, p, infos, rs);
+    assert(lowers_rs(m, pol, root, p, infos, rs));
+    crate::lower_fn::theorem_lowers_in_subset(m, pol, root, p, infos, 0);
+}
+
+/// The witness of a `pass .. steps=` line's claim.
+proof fn lemma_pass_steps(m: MirCrate, pol: Policy, path: Seq<u8>, i: nat, args: Seq<Val>, slots: Seq<Val>, n: nat, o: Out)
+    requires root_of(m, path, i), wt_args(m, i, args, slots), o == mir_run(m, cpol(pol), i, mir_entry(m, i, args, slots), crate::vectors::FUEL as nat),
+        o matches Out::Done(_, _, k) && k == n,
+    ensures pass_ok(m, pol, pass_steps_line(path, n)),
+{
+}
+
+/// The witness of a `pass .. panic` line's claim.
+proof fn lemma_pass_panic(m: MirCrate, pol: Policy, path: Seq<u8>, i: nat, args: Seq<Val>, slots: Seq<Val>, o: Out)
+    requires root_of(m, path, i), wt_args(m, i, args, slots), o == mir_run(m, cpol(pol), i, mir_entry(m, i, args, slots), crate::vectors::FUEL as nat),
+        o is Panic,
+    ensures pass_ok(m, pol, pass_panic_line(path)),
+{
+    assert(pass_steps_line(path, 0) == pass_steps_line(path, 0));
+}
+
+/// Adds the claim line `pass <path> steps=<n>` (`Some(n)`) or `pass <path> panic` (`None`).
+fn pass_line(Ghost(m): Ghost<MirCrate>, Ghost(pol): Ghost<Policy>, Ghost(i): Ghost<nat>, Ghost(args): Ghost<Seq<Val>>,
+    Ghost(slots): Ghost<Seq<Val>>, acc: &mut Vec<Vec<u8>>, path: &Vec<u8>, steps: Option<u64>) -> (r: Result<(), Vec<u8>>)
+    requires acc_ok(m, pol, old(acc)@), root_of(m, path@, i), wt_args(m, i, args, slots),
+        ({
+            let o = mir_run(m, cpol(pol), i, mir_entry(m, i, args, slots), crate::vectors::FUEL as nat);
+            match steps { Some(n) => (o matches Out::Done(_, _, k) && k == n as nat), None => o is Panic }
+        }),
+    ensures r is Ok ==> acc_ok(m, pol, final(acc)@),
+{
+    let l = pass_text(path, steps);
+    if !crate::policy::starts_pub(&l, b"pass ") || crate::policy::starts_pub(&l, b"root ") || crate::policy::starts_pub(&l, b"bounded ") {
+        return Err(cat(b"a pass line does not start `pass `: ", path.as_slice()));
+    }
+    proof {
+        assert(line_kind(l@));
+        let o = mir_run(m, cpol(pol), i, mir_entry(m, i, args, slots), crate::vectors::FUEL as nat);
+        match steps {
+            Some(n) => lemma_pass_steps(m, pol, path@, i, args, slots, n as nat, o),
+            None => lemma_pass_panic(m, pol, path@, i, args, slots, o),
+        }
+        lemma_acc_mono(m, pol, old(acc)@, l);
+    }
+    let ghost a0 = acc@;
+    acc.push(l);
+    proof { lemma_sub_push(a0, acc@.last()); assert(acc@ == a0.push(acc@.last())); }
+    Ok(())
+}
+
+/// The text of a `pass` line, with its `\n`.
+fn pass_text(path: &Vec<u8>, steps: Option<u64>) -> (l: Vec<u8>)
+    ensures l@ == match steps { Some(n) => pass_steps_line(path@, n as nat), None => pass_panic_line(path@) },
+        l@.len() > 0, l@.last() == 10u8, no_nl(l@.drop_last()),
+{
+    let mut b = Vec::new();
+    put(&mut b, b"pass ");
+    put(&mut b, path.as_slice());
+    match steps {
+        Some(n) => { put(&mut b, b" steps="); put(&mut b, dec(n).as_slice()); },
+        None => put(&mut b, b" panic"),
+    }
+    let ghost bb = match steps { Some(n) => b"pass "@ + path@ + b" steps="@ + digits(n as nat), None => b"pass "@ + path@ + b" panic"@ };
+    proof { assert(b@ =~= bb); }
+    let mut l = Vec::new();
+    put_clean(&mut l, b.as_slice());
+    let ghost c0 = l@;
+    l.push(10u8);
+    proof {
+        lemma_clean_no_nl(b@);
+        assert(c0 =~= clean(bb));
+        assert(l@ =~= clean(bb) + seq![10u8]);
+        assert(l@.drop_last() =~= c0);
+    }
+    l
+}
+
+/// A `fail <path> <why>` line.
+fn fail_line(Ghost(m): Ghost<MirCrate>, Ghost(pol): Ghost<Policy>, acc: &mut Vec<Vec<u8>>, path: &Vec<u8>, why: &[u8]) -> (r: Result<(), Vec<u8>>)
+    requires acc_ok(m, pol, old(acc)@),
+    ensures r is Ok ==> acc_ok(m, pol, final(acc)@),
+{
+    let mut l = cat(b"fail ", path.as_slice());
+    put(&mut l, b" ");
+    put(&mut l, why);
+    info(Ghost(m), Ghost(pol), acc, l.as_slice())
+}
+
+/// What a passing vector gives a `pass .. steps=` line: well-typed arguments and the run's steps.
+proof fn lemma_passes(m: MirCrate, pol: Policy, i: nat, p: c::Program, v: crate::vectors::VSpec, n: nat)
+    requires crate::vectors::passes(m, pol, i, p, v, n),
+    ensures crate::vectors::vec_wt(m, i, p, v), crate::vectors::vec_run(m, pol, i, p, v) matches Out::Done(_, _, k) && k == n,
+{
+    hide(crate::vectors::shape_ok);
+}
+
+/// What a passing panic vector gives a `pass .. panic` line.
+proof fn lemma_panics(m: MirCrate, pol: Policy, i: nat, p: c::Program, v: crate::vectors::VSpec)
+    requires crate::vectors::panics(m, pol, i, p, v),
+    ensures crate::vectors::vec_wt(m, i, p, v), crate::vectors::vec_run(m, pol, i, p, v) is Panic,
+{
+    hide(crate::vectors::shape_ok);
+}
+
+/// One vector's line: `pass` when `vectors::check_vector` passes on the root's MIR, else `fail`.
+fn selftest_one(m: &MirCrate, pol: &Policy, tb: &Tabs, acc: &mut Vec<Vec<u8>>, path: &Vec<u8>, lo: &Result<(c::Program, usize), Vec<u8>>,
+    v: &crate::vectors::Vector) -> (r: Result<(), Vec<u8>>)
+    requires acc_ok(*m, *pol, old(acc)@), tabs_ok(*m, *tb), lowered_ok(*m, *pol, path@, *lo),
+    ensures r is Ok ==> acc_ok(*m, *pol, final(acc)@),
+{
+    match lo {
+        Ok((p, i)) => {
+            let ghost vs = crate::vectors::vector_v(*v);
+            let ghost a = crate::vectors::mir_args(p.fns@[0], vs);
+            let ghost sl = crate::vectors::mir_slots(p.fns@[0], vs);
+            match crate::vectors::check_vector(m, tb, pol, *i, p, v) {
+                Ok(Some(steps)) => {
+                    proof { lemma_passes(*m, *pol, *i as nat, *p, vs, steps as nat); reveal(crate::vectors::vec_wt); reveal(crate::vectors::vec_run); }
+                    pass_line(Ghost(*m), Ghost(*pol), Ghost(*i as nat), Ghost(a), Ghost(sl), acc, path, Some(steps))
+                },
+                Ok(None) => {
+                    proof { lemma_panics(*m, *pol, *i as nat, *p, vs); reveal(crate::vectors::vec_wt); reveal(crate::vectors::vec_run); }
+                    pass_line(Ghost(*m), Ghost(*pol), Ghost(*i as nat), Ghost(a), Ghost(sl), acc, path, None)
+                },
+                Err(why) => fail_line(Ghost(*m), Ghost(*pol), acc, path, why.as_slice()),
+            }
+        },
+        Err(why) => fail_line(Ghost(*m), Ghost(*pol), acc, path, why.as_slice()),
+    }
+}
+
+/// A root's translation for the selftest cache.
+fn lower_root(m: &MirCrate, pol: &Policy, path: &Vec<u8>, keys: &mut Keys) -> (r: Result<(c::Program, usize), Vec<u8>>)
+    ensures lowered_ok(*m, *pol, path@, r),
+{
+    match lower(m, pol, path.as_slice(), keys) {
+        Ok((p, infos)) => {
+            proof { lemma_lowered(*m, *pol, path@, p, infos@); }
+            let i = infos[0].inst;
+            Ok((p, i))
+        },
+        Err(es) => {
+            let mut t = cat(b"translation failed: ", crate::text::dec(es.len() as u64).as_slice());
+            put(&mut t, b" error(s)");
+            if es.len() > 0 {
+                put(&mut t, b", first: ");
+                put(&mut t, tr_text(&es[0]).as_slice());
+            }
+            Err(t)
+        },
+    }
+}
+
+/// The selftest: for each vector line of `text` whose path is in the dump's crate, in file order,
+/// `pass <path> steps=<n>` (or `pass <path> panic`) when `vectors::check_vector` passes on the
+/// path's root, run on `ctmir::sem` by the verified evaluator, else `fail <path> <why>`. A
+/// `pass` line is a claim (`pass_ok`). A malformed line, no vector for the crate, or a dump table
+/// id past `ID_CAP` is an `Err`. Each path is translated once.
 fn selftest(m: &MirCrate, pol: &Policy, text: &Vec<u8>, keys: &mut Keys, acc: &mut Vec<Vec<u8>>) -> (res: Result<(), Vec<u8>>)
     requires acc_ok(*m, *pol, old(acc)@),
     ensures res is Ok ==> acc_ok(*m, *pol, final(acc)@),
 {
+    let tb = match tabs(m) { Some(t) => t, None => return Err(cat(b"dump: a table id past ID_CAP", b"")) };
     let mut pre = Vec::new();
     put(&mut pre, m.crate_name.as_slice());
     put(&mut pre, b"::");
@@ -1251,7 +1443,8 @@ fn selftest(m: &MirCrate, pol: &Policy, text: &Vec<u8>, keys: &mut Keys, acc: &m
     let mut any = false;
     let mut n: usize = 0;
     while n < lines.len()
-        invariant acc_ok(*m, *pol, acc@),
+        invariant acc_ok(*m, *pol, acc@), tabs_ok(*m, tb),
+            forall|q: int| 0 <= q < done@.len() ==> lowered_ok(*m, *pol, (#[trigger] done@[q]).0@, done@[q].1),
         decreases lines.len() - n,
     {
         let ws = crate::policy::words_exec(lines[n].as_slice());
@@ -1283,49 +1476,11 @@ fn selftest(m: &MirCrate, pol: &Policy, text: &Vec<u8>, keys: &mut Keys, acc: &m
                 q += 1;
             }
             if q == done.len() {
-                let lo = match lower(m, pol, path.as_slice(), keys) {
-                    Ok((p, _)) => Ok(p),
-                    Err(es) => {
-                        let mut t = cat(b"translation failed: ", crate::text::dec(es.len() as u64).as_slice());
-                        put(&mut t, b" error(s)");
-                        if es.len() > 0 {
-                            put(&mut t, b", first: ");
-                            put(&mut t, tr_text(&es[0]).as_slice());
-                        }
-                        Err(t)
-                    },
-                };
+                let lo = lower_root(m, pol, path, keys);
                 done.push((copy(path), lo));
             }
-            let mut l = cat(b"", b"");
-            match &done[q].1 {
-                Ok(p) => match crate::vectors::check_vector(p, &v) {
-                    Ok(Some(steps)) => {
-                        put(&mut l, b"pass ");
-                        put(&mut l, path.as_slice());
-                        put(&mut l, b" steps=");
-                        put(&mut l, crate::text::dec(steps).as_slice());
-                    },
-                    Ok(None) => {
-                        put(&mut l, b"pass ");
-                        put(&mut l, path.as_slice());
-                        put(&mut l, b" panic");
-                    },
-                    Err(why) => {
-                        put(&mut l, b"fail ");
-                        put(&mut l, path.as_slice());
-                        put(&mut l, b" ");
-                        put(&mut l, why.as_slice());
-                    },
-                },
-                Err(why) => {
-                    put(&mut l, b"fail ");
-                    put(&mut l, path.as_slice());
-                    put(&mut l, b" ");
-                    put(&mut l, why.as_slice());
-                },
-            }
-            info(Ghost(*m), Ghost(*pol), acc, l.as_slice())?;
+            proof { assert(lowered_ok(*m, *pol, done@[q as int].0@, done@[q as int].1)); }
+            selftest_one(m, pol, &tb, acc, path, &done[q].1, &v)?;
         }
         n += 1;
     }
