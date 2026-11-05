@@ -92,13 +92,13 @@ fn first_frames() -> Vec<Frame> {
 
 fn conn() -> Connection {
     let mut c = Connection::accept(&ini(2, first_frames()), 1200, 0, 0, &rnd(1), &ltp()).unwrap();
-    c.on_datagram(0, 1200, vec![ini(2, first_frames())], 0, &rnd(1));
+    c.on_datagram(0, 1200, vec![ini(2, first_frames())], None, 0, &rnd(1));
     c
 }
 
 fn established_with(p: TransportParams) -> Connection {
     let mut c = conn();
-    c.on_datagram(0, 1200, vec![hs(0, vec![Frame::Ping])], 10, &rnd(9));
+    c.on_datagram(0, 1200, vec![hs(0, vec![Frame::Ping])], None, 10, &rnd(9));
     c.on_peer_params(&p, 10);
     c.on_handshake_complete(b"h3", 10, &rnd(2));
     c
@@ -428,7 +428,7 @@ fn too_small_never_drains() {
     let mut p = ptp();
     p.initial_max_streams_uni = 2;
     let mut c = established_with(p);
-    c.on_datagram(0, 300, vec![one(0, vec![stream(0, 0, &get(), true)])], 40, &rnd(3));
+    c.on_datagram(0, 300, vec![one(0, vec![stream(0, 0, &get(), true)])], None, 40, &rnd(3));
     let mut s = H3Server::new(c);
     let mut app = Vec::new();
     s.pump(&mut app);
@@ -444,7 +444,7 @@ fn shutdown_before_started_keeps_settings() {
     let mut app = Vec::new();
     s.shutdown(&mut app);
     assert!(s.can_send());
-    s.conn_mut().on_datagram(0, 1200, vec![hs(0, vec![Frame::Ping])], 10, &rnd(9));
+    s.conn_mut().on_datagram(0, 1200, vec![hs(0, vec![Frame::Ping])], None, 10, &rnd(9));
     s.conn_mut().on_peer_params(&ptp(), 10);
     s.conn_mut().on_handshake_complete(b"h3", 10, &rnd(2));
     s.pump(&mut app);

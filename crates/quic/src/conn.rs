@@ -524,7 +524,7 @@ impl Connection {
 
     /// What `gate_packet` accepts. Biconditional, so what is absent is proved absent: no size rule
     /// on 1-RTT (§8.2.1's MUST NOT). An absent path has all its response room.
-    closed spec fn gate_spec(&self, path: PathId, len: usize, p: &PlainPacket) -> bool {
+    pub closed spec fn gate_spec(&self, path: PathId, len: usize, p: &PlainPacket) -> bool {
         &&& match p.kind {
             PacketKind::Initial => len >= MIN_INITIAL_DATAGRAM && self.live_i && path == self.hs_path
                 && p.scid@ == self.ids@.client_scid && (p.dcid@ == self.ids@.odcid || local_has_cid(
@@ -562,22 +562,32 @@ impl Connection {
     //# discard or buffer the packet for later processing and MUST attempt to
     //# process the remaining packets.
     /// A datagram of `datagram_len` bytes on `path`, with its decrypted packets in order: 3e discards
-    /// a packet it cannot decrypt and hands over the rest.
+    /// a packet it cannot decrypt and hands over the rest. `error` is the connection error that
+    /// stopped the datagram, with its packet's header (frames empty): after the packets, it closes
+    /// the connection only if that header passes the gate a packet would (`close_on_error`).
     #[verifier::spinoff_prover]
     pub fn on_datagram(
         &mut self,
         path: PathId,
         datagram_len: usize,
         packets: Vec<PlainPacket>,
+        error: Option<(u64, PlainPacket)>,
         now: u64,
         rand: &[u8; RAND_LEN],
     )
         requires
             old(self).wf(),
             forall|i: int| 0 <= i < packets@.len() ==> plain_wf(#[trigger] packets@[i]@),
+            error matches Some((c, h)) ==> c <= VARINT_MAX && plain_wf(h@),
         ensures
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
+            // An error alone: it closes the connection iff its header passes the gate.
+            packets@.len() == 0 && old(self).phase_spec() is Open ==> (error matches Some((_, h)) && old(
+                self,
+            ).gate_spec(path, datagram_len, &h) && old(self).has_path(path) ==> final(self).phase_spec() is Closing),
+            packets@.len() == 0 && old(self).phase_spec() is Open ==> (!(error matches Some((_, h))
+                && old(self).gate_spec(path, datagram_len, &h)) ==> final(self).phase_spec() is Open),
     {
         if now > self.now {
             self.now = now;
@@ -601,11 +611,17 @@ impl Connection {
             }
             return;
         }
-        if packets.len() == 0 {
-            return;
-        }
+        let ghost np = packets@.len();
         // §12.2: the first packet's DCID, even if the gate drops that packet.
-        let first = slice_to_vec(packets[0].dcid.as_slice());
+        let first = if packets.len() > 0 {
+            slice_to_vec(packets[0].dcid.as_slice())
+        } else {
+            match &error {
+                Some((_, h)) => slice_to_vec(h.dcid.as_slice()),
+                None => return ,
+            }
+        };
+        let ghost s1 = *self;
         let now = self.now;
         //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
         //# Receivers MUST be able to
@@ -616,44 +632,92 @@ impl Connection {
         //# individually process each QUIC packet and separately acknowledge
         //# them, as if they were received as the payload of different UDP
         //# datagrams.
-        for p in it: packets
-            invariant
-                self.wf(),
-                self.out_log() == old(self).out_log(),
-                known ==> self.paths.has(path),
-                self.phase_spec() is Open,
-                forall|j: int| 0 <= j < it.seq().len() ==> plain_wf(#[trigger] it.seq()[j]@),
-        {
-            proof {
-                assert(it.seq()[it.index()] == p);
-                assert(plain_wf(it.seq()[it.index()]@));
-            }
-            // §12.2: a packet with another DCID is ignored.
-            if eq_bytes(p.dcid.as_slice(), first.as_slice()) && self.gate_packet(path, datagram_len, &p) {
-                if !known {
-                    // §9: at `MAX_PATHS` the datagram is dropped uncounted.
-                    if !self.ensure_path(path) {
+        if packets.len() > 0 {
+            for p in it: packets
+                invariant
+                    self.wf(),
+                    self.out_log() == old(self).out_log(),
+                    known == self.paths.has(path),
+                    self.phase_spec() is Open,
+                    forall|j: int| 0 <= j < it.seq().len() ==> plain_wf(#[trigger] it.seq()[j]@),
+            {
+                proof {
+                    assert(it.seq()[it.index()] == p);
+                    assert(plain_wf(it.seq()[it.index()]@));
+                }
+                // §12.2: a packet with another DCID is ignored.
+                if eq_bytes(p.dcid.as_slice(), first.as_slice()) && self.gate_packet(path, datagram_len, &p) {
+                    if !known {
+                        // §9: at `MAX_PATHS` the datagram is dropped uncounted.
+                        if !self.ensure_path(path) {
+                            return;
+                        }
+                        // §8.1: the whole datagram, including packets the gate already dropped.
+                        self.count_recv(path, datagram_len as u64);
+                        known = true;
+                    }
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2
+                    //# An
+                    //# endpoint MUST generate a connection error if processing the contents
+                    //# of these packets prior to discovering an error, or fully revert any
+                    //# changes made during that processing.
+                    if let Err(c) = self.on_packet(path, p, now, rand) {
+                        self.close_internal(c);
                         return;
                     }
-                    // §8.1: the whole datagram, including packets the gate already dropped.
-                    self.count_recv(path, datagram_len as u64);
-                    known = true;
-                }
-                //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2
-                //# An
-                //# endpoint MUST generate a connection error if processing the contents
-                //# of these packets prior to discovering an error, or fully revert any
-                //# changes made during that processing.
-                if let Err(c) = self.on_packet(path, p, now, rand) {
-                    self.close_internal(c);
-                    return;
-                }
-                // CONNECTION_CLOSE, or a closed connection.
-                if !matches!(self.lc.phase(), Phase::Open) {
-                    return;
+                    // CONNECTION_CLOSE, or a closed connection.
+                    if !matches!(self.lc.phase(), Phase::Open) {
+                        return;
+                    }
                 }
             }
         }
+        if let Some((code, h)) = error {
+            proof {
+                if np == 0 {
+                    assert(*self == s1);
+                }
+            }
+            self.close_on_error(path, datagram_len, first.as_slice(), known, code, &h);
+        }
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14
+    //# Therefore, an endpoint MUST NOT close a connection
+    //# when it receives a datagram that does not meet size constraints; the
+    //# endpoint MAY discard such datagrams.
+    /// The connection error of the packet with header `h`, which stopped its datagram: it closes
+    /// the connection only if `h` passes `gate_packet` and the §12.2 DCID check, as a packet must
+    /// to be processed. Otherwise the packet is discarded like any gated-out packet.
+    #[verifier::spinoff_prover]
+    fn close_on_error(&mut self, path: PathId, len: usize, first: &[u8], known: bool, code: u64, h: &PlainPacket)
+        requires
+            old(self).wf(),
+            old(self).phase_spec() is Open,
+            known == old(self).paths.has(path),
+            code <= VARINT_MAX,
+            plain_wf(h@),
+        ensures
+            final(self).wf(),
+            final(self).out_log() == old(self).out_log(),
+            !(h.dcid@ == first@ && old(self).gate_spec(path, len, h)) ==> *final(self) == *old(self),
+            h.dcid@ == first@ && old(self).gate_spec(path, len, h) && old(self).paths.has(path)
+                ==> final(self).phase_spec() is Closing,
+    {
+        if !(eq_bytes(h.dcid.as_slice(), first) && self.gate_packet(path, len, h)) {
+            return;
+        }
+        if !known {
+            // §9: at `MAX_PATHS` the datagram is dropped uncounted.
+            if !self.ensure_path(path) {
+                return;
+            }
+            // §8.1: the whole datagram, as for a packet that admits the path.
+            self.count_recv(path, len as u64);
+        }
+        let now = self.now;
+        let reason: Vec<u8> = Vec::new();
+        self.close(code, false, reason.as_slice(), now);
     }
 
     /// `path` is known, or now added; false at `MAX_PATHS`.
@@ -745,6 +809,8 @@ impl Connection {
             final(self).paths.amp_trace(path) == old(self).paths.amp_trace(path).push(
                 AmpEv::Recv(n as nat),
             ),
+            *final(self) == (Connection { paths: final(self).paths, ..*old(self) }),
+            final(self).paths.path(path).responses == old(self).paths.path(path).responses,
     {
         let ghost s0 = *self;
         self.paths.on_recv(path, n);
@@ -3304,7 +3370,7 @@ impl Connection {
                     s1.len() <= w < s2.len() && #[trigger] s2[w] == CidUpdate::AddToken(used@[i]);
                 assert(s[w - n0] == s2[w]);
             }
-            self.lemma_keeps_cids(o);
+            self.lemma_keeps_streams(o);
         }
     }
 
@@ -4984,6 +5050,11 @@ impl Connection {
     /// Whether `paths.mtu_failed` holds for `q`.
     pub closed spec fn mtu_failed_at(&self, q: PathId) -> bool {
         self.paths.mtu_failed_spec(q)
+    }
+
+    /// Path `q` is in the path table.
+    pub closed spec fn has_path(&self, q: PathId) -> bool {
+        self.paths.has(q)
     }
 
     /// How many bytes path `q` may be sent.
@@ -6935,29 +7006,17 @@ impl Connection {
     {
     }
 
-    /// Only `streams` and `events` moved, and no timer reads them.
+    /// Only `streams`, `events`, `cid_updates` and `tokens_registered` moved, and no timer reads
+    /// them.
     proof fn lemma_keeps_streams(&self, o: Connection)
         requires
-            *self == (Connection { streams: self.streams, events: self.events, ..o }),
-        ensures
-            self.keeps_later(o),
-    {
-        assert forall|t: u64| t < u64::MAX && t <= o.now && #[trigger] o.timers_later(t) implies self.timers_later(t) by {
-            assert(self.pto_spec() == o.pto_spec());
-            if self.lc.phase_spec() is Open {
-                assert(self.idle_term() == o.idle_term());
-                assert forall|k: PacketKind| later(#[trigger] self.pto_term(k), t) by {
-                    assert(self.pto_term(k) == o.pto_term(k));
-                    assert(later(o.pto_term(k), t));
-                }
-            }
-        }
-    }
-
-    /// Only `cid_updates` and `tokens_registered` moved, and no timer reads them.
-    proof fn lemma_keeps_cids(&self, o: Connection)
-        requires
-            *self == (Connection { cid_updates: self.cid_updates, tokens_registered: self.tokens_registered, ..o }),
+            *self == (Connection {
+                streams: self.streams,
+                events: self.events,
+                cid_updates: self.cid_updates,
+                tokens_registered: self.tokens_registered,
+                ..o
+            }),
         ensures
             self.keeps_later(o),
     {

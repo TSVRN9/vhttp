@@ -1135,7 +1135,7 @@ impl H3Server {
             final(self).started_spec() ==> final(self).conn_spec().events_spec().len() == 0,
             app_grew(old(app)@, final(app)@),
     {
-        self.conn.on_datagram(path, datagram_len, packets, now, rand);
+        self.conn.on_datagram(path, datagram_len, packets, None, now, rand);
         self.pump(app);
     }
 
