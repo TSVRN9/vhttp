@@ -87,7 +87,8 @@ mir_eval(m, tabs, pol, i, args, slots, fuel) -> (r: Ev)
 - **Equal on every outcome it reports, not total.** `GaveUp` makes no claim. It is used for:
   - a step count or a count that passes `u64`;
   - an allocation past a cap;
-  - an arm a mirror leaves out.
+  - an arm a mirror leaves out, such as `CheckedBinaryOp` and the `*Unchecked` binops, which the
+    translator never lowers (preflight C4).
 
   Exact equality everywhere would need exact versions of `look.rs`'s one-way predicates
   (`x_ty_free`, `x_zst_dest`, `x_sig_ok`) and of every `Unsup` arm, and the gate would gain
@@ -141,9 +142,12 @@ fuels. Cost if wrong: TRUSTED keeps "at a common fuel" one phase longer.
    || (l == clean("pass " + path + " panic") + "\n" && o is Panic)
   ```
 
-  (`clean` and `digits` are `text.rs`'s, as `info` writes a line.) So the report says what the
+  (`clean` and `digits` are `text.rs`'s. A dedicated `pass_line` writer emits these lines; `info`'s
+  `no_claim` excludes the `pass ` prefix, and the root and bounded writers refute it; preflight C3.) So the report says what the
   gate reads. The match with native's value stays in
   `check_vector`'s ensures (`passes`/`panics`), next to the vector it is about.
+- A `pass .. panic` line is not never-Stuck evidence: `Out::Panic` also covers a stuck state
+  (sem.rs:1163-1166, :1225). Only `steps=` lines are (preflight C6).
 
 ## Decision 5: performance
 
@@ -160,11 +164,13 @@ Rulings:
   to `find` (`tabs_ok`), is built once per pipeline call. Ids are not dense in row order but are
   below a few thousand. An id past 2^24 makes `tabs` give `None`, and the selftest then fails
   closed.
-- The step loop's lookups go through the tables. Cold paths (entry, `unit_like`) may keep
-  `look.rs`'s linear mirrors.
-- **Acceptance.** The crypto selftest, including the RSA vector, runs within 150 s on the
-  development machine. Otherwise:
-  1. memoize `const_val` per constant operand;
+- The step loop's lookups go through the tables, and so do `ul_val`'s, since every body call
+  enters through `mir_entry`. `mir_entry`'s mirror takes its arguments by value, so no call
+  deep-clones them (preflight M1).
+- **Acceptance.** The crypto selftest, including the RSA vector, runs under its own 150 s `front`
+  bound in ct-check, so the bound is enforced, not just measured (preflight M1). Otherwise:
+  1. add a per-type `ul_val` table, or one entry template per instance. Memoizing `const_val` is
+     unlikely to pay: crypto's largest in-body constant is 32 bytes (preflight M1);
   2. failing that, give the RSA vector its own `front` run with its own bound.
 
   Never shrink the inputs.
@@ -207,13 +213,22 @@ When the evaluator gives `Panic` or a wrong value where native completes, that i
 
 ## What changes in TRUSTED.md
 
-- **Row 45**: the vectors run `ctmir::sem` itself, through `ctmir::eval`. A `pass` line is proved
-  (`pass_ok`): the root's MIR run on well-typed arguments reaches `Done` (or `Panic`), and its
-  values equal the vector's native ones.
-- **Row 48**: never-Stuck is no longer "no executable evidence". Every crypto `ok` root and every
-  parser `bounded` root reaches `Done` under `mir_run` on at least one native input. So do the
-  31723 semconf vectors, each with native's value or panic. Never-Stuck stays trusted for inputs
-  not exercised, and for the fixtures and the negative control.
+- **Row 45** (preflight C5): the vectors run `ctmir::sem` itself, through `ctmir::eval`. A
+  `pass` line is a proved claim (`pass_ok`): the root's MIR run on well-typed arguments reaches
+  `Done` in the printed steps, or `Panic`. The match with the vector's values is in
+  `check_vector`'s ensures.
+  - Both sentences that call `pass` lines informational go.
+  - `pass_ok` joins the row's statements, and `vectors.rs` (for `FUEL`) its file column.
+  - The awk-prefix sentence adds `pass `.
+- **Row 48** (preflight C6): never-Stuck is no longer "no executable evidence". In three parts:
+  - **proved**: every crypto `ok` root and every parser `bounded` root reaches `Done` under
+    `mir_run` on at least one `wt_args` input (`pass_ok` on a `steps=` line);
+  - **verified, outside `report_sound`**: the values equal the vector's;
+  - **trusted**: that the vector's values are native's.
+
+  Only `steps=` lines are never-Stuck evidence. `pass .. panic` lines are not, since
+  `Out::Panic` includes stuck states. Never-Stuck stays trusted for inputs not exercised, and for
+  the fixtures and the negative control.
 - **§8c result**: Goal 4 is met for the exercised inputs, with a pointer to this file's "8d
   result" section.
 
