@@ -40,6 +40,18 @@ impl CryptoStream {
         CryptoStream { re: Reassembly::new() }
     }
 
+    /// Nothing buffered, and everything below `base` read.
+    pub fn new_at(base: u64) -> (r: CryptoStream)
+        requires
+            base <= VARINT_MAX,
+        ensures
+            r.wf(),
+            r.reassembly().base() == base,
+            r.reassembly().buf_len() == 0,
+    {
+        CryptoStream { re: Reassembly::new_at(base) }
+    }
+
     /// A CRYPTO frame's `offset` and `data`.
     pub fn on_crypto(&mut self, offset: u64, data: &[u8]) -> (r: Result<(), u64>)
         requires
@@ -109,6 +121,14 @@ impl CryptoStream {
             self.re.lemma_wf();
         }
         self.re.pop(out);
+    }
+
+    /// The read offset.
+    pub fn start(&self) -> (r: u64)
+        ensures
+            r == self.reassembly().base(),
+    {
+        self.re.base_exec()
     }
 
     /// The end of the received data: the read offset plus the buffered window.

@@ -315,9 +315,22 @@ fn initial_data_after_switch_pv() {
     let mut s = flight();
     receive(&mut s, &ini(&qc::S1, 1, || vec![cr(l + 100, &[7; 10])]), 2);
     assert_eq!(close_code(&mut s), 0x0a);
+    // Closed before completion: the 1-RTT keys are gone (RFC 8446 §6).
+    assert_eq!(s.key_slots(), [true, true, false]);
     let mut s = flight();
     receive(&mut s, &ini(&qc::S1, 1, || vec![cr(l, &[7; 10])]), 2);
     assert_eq!(close_code(&mut s), 0x0a);
+}
+
+/// The ClientHello and, in the same datagram, an out-of-order Initial CRYPTO frame past it: at the
+/// key change TLS has not consumed it (RFC 9001 §4.1.3).
+#[test]
+fn gapped_initial_at_key_change_pv() {
+    let ch = h3ch(id);
+    let l = ch.len();
+    let mut s = accept(&ini(&qc::S1, 0, || vec![cr(0, &ch), cr(l + 100, &[7; 10])]));
+    assert_eq!(close_code(&mut s), 0x0a);
+    assert_eq!(s.key_slots(), [true, false, false]);
 }
 
 #[test]

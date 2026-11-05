@@ -173,7 +173,7 @@ pub struct QuicServer<'a> {
     keys: [Option<KeyPair>; 3],
     /// TLS's receive level: Initial; Handshake at `Secrets { Handshake }`; OneRtt at `Complete`.
     level: Level,
-    /// `crypto_end(Initial)` when `level` left Initial.
+    /// `crypto_end(Initial)` when `level` left Initial (`on_secrets`).
     init_end: u64,
     /// Only `wf` and `tls_log()` read it, which a plain `cargo build` erases.
     #[allow(dead_code)]
@@ -216,6 +216,29 @@ impl<'a> QuicServer<'a> {
     spec fn keys_ok(&self) -> bool {
         &&& self.keys@[0] is Some ==> self.h3.conn_spec().live(PacketKind::Initial)
         &&& self.keys@[1] is Some ==> self.h3.conn_spec().live(PacketKind::Handshake)
+    }
+
+    /// Before completion, a connection that is no longer open holds no 1-RTT key (RFC 8446 §6).
+    pub closed spec fn one_rtt_forgotten(&self) -> bool {
+        !self.h3.conn_spec().live(PacketKind::OneRtt) && !(self.h3.conn_spec().phase_spec() is Open)
+            ==> self.keys@[2] is None
+    }
+
+    /// Drops the 1-RTT keys of a connection that closed before completion.
+    #[verifier::spinoff_prover]
+    fn forget_failed(&mut self)
+        requires
+            old(self).core_ok(),
+        ensures
+            final(self).core_ok(),
+            final(self).one_rtt_forgotten(),
+            final(self).h3 == old(self).h3,
+            final(self).keys@[0] == old(self).keys@[0],
+            final(self).keys@[1] == old(self).keys@[1],
+    {
+        if !self.h3.conn().is_live(PacketKind::OneRtt) && !matches!(self.h3.conn().phase(), Phase::Open) {
+            self.keys[2] = None;
+        }
     }
 
     pub closed spec fn wf(&self) -> bool {
@@ -288,6 +311,7 @@ impl<'a> QuicServer<'a> {
     }
 
     /// The connection for the client Initial `d`, with TLS run on its CRYPTO data.
+    #[verifier::spinoff_prover]
     pub fn accept(
         cfg: &'a ServerConfig,
         d: &[u8],
@@ -300,7 +324,7 @@ impl<'a> QuicServer<'a> {
         requires
             cfg.wf(),
         ensures
-            s matches Some(q) ==> q.wf(),
+            s matches Some(q) ==> q.wf() && q.one_rtt_forgotten(),
             app_grew(old(app)@, final(app)@),
     {
         let dcid = match initial_dcid(d) {
@@ -330,6 +354,7 @@ impl<'a> QuicServer<'a> {
         s.sync_keys();
         s.tls_step(now, r);
         s.h3.pump(app);
+        s.forget_failed();
         s.sync_keys();
         Some(s)
     }
@@ -341,6 +366,7 @@ impl<'a> QuicServer<'a> {
             old(self).wf(),
         ensures
             final(self).wf(),
+            final(self).one_rtt_forgotten(),
             app_grew(old(app)@, final(app)@),
     {
         let was = self.h3.conn().handshake_complete();
@@ -355,6 +381,7 @@ impl<'a> QuicServer<'a> {
         }
         // SETTINGS goes out once 1-RTT is live.
         self.h3.pump(app);
+        self.forget_failed();
         self.sync_keys();
     }
 
@@ -365,6 +392,7 @@ impl<'a> QuicServer<'a> {
             old(self).wf(),
         ensures
             final(self).wf(),
+            final(self).one_rtt_forgotten(),
             r matches Some(q) ==> {
                 let l = final(self).conn_spec().out_log().last();
                 &&& final(self).conn_spec().out_log() == old(self).conn_spec().out_log().push(l)
@@ -378,6 +406,7 @@ impl<'a> QuicServer<'a> {
             now < u64::MAX && old(self).conn_spec().timers_later(now) ==> final(self).conn_spec().timers_later(now),
     {
         let r = quic::pipeline::transmit(self.h3.conn_mut(), now, &self.keys, out);
+        self.forget_failed();
         self.sync_keys();
         r
     }
@@ -387,11 +416,13 @@ impl<'a> QuicServer<'a> {
             old(self).wf(),
         ensures
             final(self).wf(),
+            final(self).one_rtt_forgotten(),
             app_grew(old(app)@, final(app)@),
             now < u64::MAX ==> final(self).conn_spec().timers_later(now),
             now <= final(self).conn_spec().now_spec(),
     {
         self.h3.on_timeout(now, rand, app);
+        self.forget_failed();
         self.sync_keys();
     }
 
@@ -400,9 +431,11 @@ impl<'a> QuicServer<'a> {
             old(self).wf(),
         ensures
             final(self).wf(),
+            final(self).one_rtt_forgotten(),
             final(self).conn_spec().keeps_later(old(self).conn_spec()),
     {
         self.h3.conn_mut().poll_cid_updates(out);
+        self.forget_failed();
         self.sync_keys();
     }
 
@@ -411,10 +444,12 @@ impl<'a> QuicServer<'a> {
             old(self).wf(),
         ensures
             final(self).wf(),
+            final(self).one_rtt_forgotten(),
             app_grew(old(app)@, final(app)@),
     {
         self.h3.conn_mut().on_reset_candidate(tail, now);
         self.h3.pump(app);
+        self.forget_failed();
         self.sync_keys();
     }
 
@@ -426,9 +461,11 @@ impl<'a> QuicServer<'a> {
             old(self).wf(),
         ensures
             final(self).wf(),
+            final(self).one_rtt_forgotten(),
             app_grew(old(app)@, final(app)@),
     {
         let r = self.h3.send_response(id, resp, app);
+        self.forget_failed();
         self.sync_keys();
         r
     }
@@ -507,7 +544,6 @@ impl<'a> QuicServer<'a> {
                 > old(self).init_end && old(self).conn_spec().phase_spec() is Open ==> !(final(self).conn_spec().phase_spec() is Open),
     {
         let was = self.h3.conn().handshake_complete();
-        let left = !matches!(self.level, Level::Initial);
         if !self.superseded(now) {
             self.sync_keys();
             return ;
@@ -526,9 +562,6 @@ impl<'a> QuicServer<'a> {
                 self.sync_keys();
                 return ;
             }
-        }
-        if !left && !matches!(self.level, Level::Initial) {
-            self.init_end = self.h3.conn().crypto_end(PacketKind::Initial);
         }
         self.sync_keys();
     }
@@ -705,6 +738,27 @@ impl<'a> QuicServer<'a> {
     //# messages can immediately precede a key change, implementations
     //# MUST send these messages in alignment with a record boundary.
     // Each `Send` carries whole messages of one level, so ours always end at a key change.
+    /// The bytes of level `l` (space `k`) TLS has not consumed: in its reader, and still in QUIC's
+    /// reassembly buffer out of order.
+    spec fn unread(&self, l: Level, k: PacketKind) -> nat {
+        let c = self.h3.conn_spec();
+        spec_reader(self.hs@, l).len() + if c.crypto_end_spec(k) > c.crypto_base_spec(k) {
+            (c.crypto_end_spec(k) - c.crypto_base_spec(k)) as nat
+        } else {
+            0
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    fn unconsumed(&self, l: Level, k: PacketKind) -> (r: bool)
+        requires
+            self.core_ok(),
+        ensures
+            r == (self.unread(l, k) > 0),
+    {
+        self.hs.pending(l) || self.h3.conn().crypto_end(k) > self.h3.conn().crypto_base(k)
+    }
+
     /// The pre-checks: none of `ev` is applied if TLS moves past a level with bytes unread there.
     #[verifier::spinoff_prover]
     fn key_changes(&mut self, ev: &Vec<TlsEvent>, now: u64) -> (ok: bool)
@@ -716,25 +770,25 @@ impl<'a> QuicServer<'a> {
             final(self).hs == old(self).hs,
     {
         let (to_hs, done) = key_events(ev);
-        if to_hs && self.hs.pending(Level::Initial) {
+        if to_hs && self.unconsumed(Level::Initial, PacketKind::Initial) {
             shut(self.h3.conn_mut(), PROTOCOL_VIOLATION, now);
             self.sync_keys();
             return false;
         }
-        if done && self.hs.pending(Level::Handshake) {
+        if done && self.unconsumed(Level::Handshake, PacketKind::Handshake) {
             shut(self.h3.conn_mut(), PROTOCOL_VIOLATION, now);
             self.sync_keys();
             return false;
         }
         if to_hs {
-            let ghost c = TlsCall::KeyChange { lower: Level::Initial, unread: spec_reader(self.hs@, Level::Initial).len() };
+            let ghost c = TlsCall::KeyChange { lower: Level::Initial, unread: self.unread(Level::Initial, PacketKind::Initial) };
             proof {
                 self.lemma_push(c);
             }
             self.log = Ghost(self.log@.push(c));
         }
         if done {
-            let ghost c = TlsCall::KeyChange { lower: Level::Handshake, unread: spec_reader(self.hs@, Level::Handshake).len() };
+            let ghost c = TlsCall::KeyChange { lower: Level::Handshake, unread: self.unread(Level::Handshake, PacketKind::Handshake) };
             proof {
                 self.lemma_push(c);
             }
@@ -819,6 +873,10 @@ impl<'a> QuicServer<'a> {
         match l {
             Level::Initial => self.keys[0] = Some(kp),
             Level::Handshake => {
+                if matches!(self.level, Level::Initial) {
+                    // Everything TLS had at Initial (`key_changes` saw nothing unread there).
+                    self.init_end = self.h3.conn().crypto_end(PacketKind::Initial);
+                }
                 self.keys[1] = Some(kp);
                 self.level = Level::Handshake;
             },
