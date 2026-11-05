@@ -2601,9 +2601,11 @@ pub proof fn fact_drop_forms(m: MirCrate, pol: CallPolicy, b: Body, fr: Frame, p
 {
 }
 
-/// **Fact 8h-7 (std rows).** No std row takes a unit-like value: each reads its arguments through
-/// `shr_arr`, `mut_arr` or `int_arg`, which reject both forms (and `&` of either) alike; only
-/// `Ghost::assume_new_fallback` takes any argument, and ignores it.
+/// **Fact 8h-7 (std rows).** No std row takes a unit-like value. `std_model` admits only `u8` and
+/// `(u64, u64)` elements, so the rows that store an argument as it is (`VecPush`'s `vs[1]`,
+/// `VecSet`'s `vs[2]`) never get one; every other argument is read through `shr_arr`, `mut_arr`
+/// or `int_arg`, which reject both forms (and `&` of either) alike; `Ghost::assume_new_fallback`
+/// ignores its arguments.
 pub proof fn fact_std_forms(m: MirCrate, t: Ty, fr: Frame, l: Loc)
     requires zst_dest(m, t), load(fr, l) == Some(Val::Unit) || load(fr, l) == Some(Val::Adt(0, seq![])),
     ensures shr_arr(Val::Shr(Box::new(Val::Unit))) is None, shr_arr(Val::Shr(Box::new(Val::Adt(0, seq![])))) is None,
@@ -2612,6 +2614,112 @@ pub proof fn fact_std_forms(m: MirCrate, t: Ty, fr: Frame, l: Loc)
         int_arg(Val::Unit) is None, int_arg(Val::Adt(0, seq![])) is None,
         std_apply(m, StdFn::GhostNew, Some(t), seq![Val::Unit], fr) == std_apply(m, StdFn::GhostNew, Some(t), seq![Val::Adt(0, seq![])], fr),
 {
+}
+
+// ------------------------------------------------------------------ 8i. nested unit-like arrays (fix round 2)
+//
+// The array may sit inside a tuple or a one-variant struct (`has_arr`'s Tuple and ADT arms), and
+// beside a closure (`ul_arr` decides with `unit_like`'s `clos = true`): those producers stay
+// structural too.
+
+/// `[T; 0]` inside `(.., [T; 0], ..)` at type `u`: `([T; 0],)`'s value.
+proof fn arr0_in_tuple(m: MirCrate, u: Ty, t: Ty)
+    requires m.tys@.len() >= 2, rigid(m, u) matches Some(RigidTy::Tuple(ts)) && ts@.len() == 1 && ts@[0] == t,
+        rigid(m, t) matches Some(RigidTy::Array(_, n)) && const_usize(m, n.id) == Some(0u64),
+    ensures ul_arr(m, u), unit_like(m, u, tfuel(m), true) == Some((Val::Tup(seq![Val::Arr(seq![])]), 0nat)),
+{
+    let ts = match rigid(m, u) { Some(RigidTy::Tuple(ts)) => ts@, _ => seq![] };
+    let f = (tfuel(m) - 1) as nat;
+    assert(unit_like(m, t, f, true) == Some((Val::Arr(seq![]), 0nat)));
+    assert(unit_likes(m, ts, f, 0, true) == Some((Seq::<Val>::empty(), 0nat)));
+    assert(seq![].push(Val::Arr(seq![])) =~= seq![Val::Arr(seq![])]);
+    assert(unit_likes(m, ts, f, 1, true) == Some((seq![Val::Arr(seq![])], 0nat)));
+    assert(has_arr(m, ts[0], f));
+}
+
+/// **Fact 8i-1.** A `ZeroSized` `([T; 0],)` is `Tup([Arr([])])`.
+pub proof fn fact_zst_tuple_arr(m: MirCrate, c: ConstOperand, t: Ty)
+    requires c.const_.kind is ZeroSized, m.tys@.len() >= 2,
+        rigid(m, c.const_.ty) matches Some(RigidTy::Tuple(ts)) && ts@.len() == 1 && ts@[0] == t,
+        rigid(m, t) matches Some(RigidTy::Array(_, n)) && const_usize(m, n.id) == Some(0u64),
+    ensures const_val(m, c) == Some((Val::Tup(seq![Val::Arr(seq![])]), 0nat)),
+{
+    arr0_in_tuple(m, c.const_.ty, t);
+}
+
+/// **Fact 8i-2.** A never-assigned local of a one-variant struct `S { a: [T; 0] }` is
+/// `Adt(0, [Arr([])])`.
+pub proof fn fact_entry_struct_arr(m: MirCrate, i: nat, args: Seq<Val>, slots: Seq<Val>, t: Ty)
+    requires m.tys@.len() >= 2,
+        inst_body(m, i) matches Some(b) && b.arg_count == 0 && b.locals@.len() >= 2
+            && (rigid(m, b.locals@[1].ty) matches Some(RigidTy::Adt(_, _)))
+            && (adt_row(m, b.locals@[1].ty) matches Some(a) && !a.is_box && a.kind is Struct && a.variants@.len() == 1
+                && a.variants@[0].fields@.len() == 1 && a.variants@[0].fields@[0] == t),
+        rigid(m, t) matches Some(RigidTy::Array(_, n)) && const_usize(m, n.id) == Some(0u64),
+    ensures mir_entry(m, i, args, slots).locals[1] == Val::Adt(0, seq![Val::Arr(seq![])]),
+{
+    let b = inst_body(m, i)->Some_0;
+    let s = b.locals@[1].ty;
+    let fs = adt_row(m, s)->Some_0.variants@[0].fields@;
+    let f = (tfuel(m) - 1) as nat;
+    assert(unit_like(m, t, f, true) == Some((Val::Arr(seq![]), 0nat)));
+    assert(unit_likes(m, fs, f, 0, true) == Some((Seq::<Val>::empty(), 0nat)));
+    assert(seq![].push(Val::Arr(seq![])) =~= seq![Val::Arr(seq![])]);
+    assert(unit_likes(m, fs, f, 1, true) == Some((seq![Val::Arr(seq![])], 0nat)));
+    assert(has_arr(m, fs[0], f));
+    assert(ul_arr(m, s));
+}
+
+/// **Fact 8i-3.** `PtrMetadata` of `&(_1.0)`, `_1` holding a `ZeroSized` `([T; 0],)` (as a
+/// parameter it was passed to), through `Unsize` to `&[T]`, is 0: `_2 = &(_1.0)` is `Shr(Arr([]))`.
+pub proof fn fact_ptrmeta_nested(m: MirCrate, b: Body, fr: Frame, c: ConstOperand, t: Ty, q: Place, x: Operand, to: Ty, y: Operand)
+    requires c.const_.kind is ZeroSized, m.tys@.len() >= 2,
+        rigid(m, c.const_.ty) matches Some(RigidTy::Tuple(ts)) && ts@.len() == 1 && ts@[0] == t,
+        rigid(m, t) matches Some(RigidTy::Array(_, n)) && const_usize(m, n.id) == Some(0u64),
+        q.local == 1, q.projection@.len() == 1, q.projection@[0] matches ProjectionElem::Field(i, ft) && i == 0 && ft == t,
+        move_of(x, 2), copy_of(y, 3), fr.locals.len() == 4, b.locals@.len() == 4,
+        fr.locals[1] == const_val(m, c)->Some_0.0,
+        fr.locals[2] == Val::Shr(Box::new(Val::Arr(seq![]))),
+        rigid(m, b.locals@[2].ty) matches Some(RigidTy::Ref(_, p, _)) && p == t,
+        rigid(m, to) matches Some(RigidTy::Ref(_, s, _)) && rigid(m, s) matches Some(RigidTy::Slice(_)),
+        b.locals@[3].ty == to, fr.locals[3] == rv_cast(m, b, fr, CastKind::PointerCoercion(PointerCoercion::Unsize), x, to)->Some_0.0,
+    ensures rv_ref(fr, BorrowKind::Shared, q) == Some((fr.locals[2], Seq::<Event>::empty(), 0nat)),
+        rv_cast(m, b, fr, CastKind::PointerCoercion(PointerCoercion::Unsize), x, to) == Some((fr.locals[2], Seq::<Event>::empty(), 0nat)),
+        rv_un(m, b, fr, UnOp::PtrMetadata, y) == Some((Val::Int(0), Seq::<Event>::empty(), 0nat)),
+{
+    fact_zst_tuple_arr(m, c, t);
+    let e0 = Seq::<Event>::empty();
+    assert(e0 + e0 =~= e0);
+    let l0 = Loc { root: Root::Local(1), path: seq![] };
+    let lf = Loc { root: Root::Local(1), path: seq![PE::Field(0)] };
+    assert(seq![].push(PE::Field(0)) =~= seq![PE::Field(0)]);
+    assert(places(fr, PRes::At(l0), q.projection@, 0) == Some((PRes::At(l0), e0)));
+    assert(places(fr, PRes::At(l0), q.projection@, 1) == Some((PRes::At(lf), e0)));
+    assert(seq![PE::Field(0)].drop_first() =~= Seq::<PE>::empty());
+    reveal_with_fuel(read_at, 2);
+    assert(read_at(fr.locals[1], lf.path) == Val::Arr(seq![]));
+}
+
+/// **Fact 8i-4.** A `ZeroSized` `(closure, [T; 0])` stays structural, `Tup([Unit, Arr([])])`:
+/// `ul_arr` decides with `clos = true`, so a captureless closure beside the array is unit-like.
+pub proof fn fact_zst_closure_arr(m: MirCrate, c: ConstOperand, k: Ty, t: Ty)
+    requires c.const_.kind is ZeroSized, m.tys@.len() >= 3,
+        rigid(m, c.const_.ty) matches Some(RigidTy::Tuple(ts)) && ts@.len() == 2 && ts@[0] == k && ts@[1] == t,
+        rigid(m, k) matches Some(RigidTy::Closure(_, _)),
+        rigid(m, t) matches Some(RigidTy::Array(_, n)) && const_usize(m, n.id) == Some(0u64),
+    ensures const_val(m, c) == Some((Val::Tup(seq![Val::Unit, Val::Arr(seq![])]), 0nat)),
+{
+    let ts = match rigid(m, c.const_.ty) { Some(RigidTy::Tuple(ts)) => ts@, _ => seq![] };
+    let f = (tfuel(m) - 1) as nat;
+    assert(unit_like(m, k, f, true) == Some((Val::Unit, 0nat)));
+    assert(unit_like(m, t, f, true) == Some((Val::Arr(seq![]), 0nat)));
+    assert(unit_likes(m, ts, f, 0, true) == Some((Seq::<Val>::empty(), 0nat)));
+    assert(seq![].push(Val::Unit) =~= seq![Val::Unit]);
+    assert(unit_likes(m, ts, f, 1, true) == Some((seq![Val::Unit], 0nat)));
+    assert(seq![Val::Unit].push(Val::Arr(seq![])) =~= seq![Val::Unit, Val::Arr(seq![])]);
+    assert(unit_likes(m, ts, f, 2, true) == Some((seq![Val::Unit, Val::Arr(seq![])], 0nat)));
+    assert(has_arr(m, ts[1], f));
+    assert(ul_arr(m, c.const_.ty));
 }
 
 } // verus!
