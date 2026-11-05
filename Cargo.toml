@@ -33,3 +33,6 @@ overflow-checks = false
 # verified: Verus proves exec arithmetic does not overflow
 [profile.release.package.quictls]
 overflow-checks = false
+
+[profile.release.package.ctmir]
+overflow-checks = false
