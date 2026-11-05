@@ -582,6 +582,14 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
+            // §8.1: a datagram on a known path is counted, and nothing after undoes the count.
+            old(self).has_path(path) && !(old(self).phase_spec() is Draining) && !(old(
+                self,
+            ).phase_spec() is Closed) ==> recv_counted(
+                old(self).amp_trace(path),
+                final(self).amp_trace(path),
+                datagram_len as nat,
+            ),
             // An error alone: it closes the connection iff its header passes the gate.
             packets@.len() == 0 && old(self).phase_spec() is Open ==> (error matches Some((_, h)) && old(
                 self,
@@ -599,15 +607,63 @@ impl Connection {
         // A path is added only by a packet that passes the gate: slots never free, and a garbage or
         // replayed datagram from a spoofed address must not take one. Nothing is ever sent to an
         // absent path, so §8.1 loses nothing by not counting its datagrams.
-        let mut known = self.paths.index(path).is_some();
+        let known = self.paths.index(path).is_some();
         if known {
             // §8.1: counted even if every packet is dropped.
             self.count_recv(path, datagram_len as u64);
+        }
+        let ghost sc = *self;
+        self.on_counted(path, datagram_len, known, packets, error, rand);
+        proof {
+            reveal(recv_counted);
+            if known {
+                let t0 = old(self).paths.amp_trace(path);
+                assert(self.paths.amp_trace(path).take(t0.len() + 1 as int) =~= t0.push(AmpEv::Recv(datagram_len as nat))) by {
+                    assert(sc.paths.has(path));
+                    assert(sc.paths.amp_trace(path) == t0.push(AmpEv::Recv(datagram_len as nat)));
+                }
+            }
+        }
+    }
+
+    /// `on_datagram` once the datagram is counted: `known` is whether `path` was in the table.
+    #[verifier::spinoff_prover]
+    fn on_counted(
+        &mut self,
+        path: PathId,
+        datagram_len: usize,
+        known: bool,
+        packets: Vec<PlainPacket>,
+        error: Option<(u64, PlainPacket)>,
+        rand: &[u8; RAND_LEN],
+    )
+        requires
+            old(self).wf(),
+            !(old(self).phase_spec() is Draining) && !(old(self).phase_spec() is Closed),
+            known == old(self).paths.has(path),
+            forall|i: int| 0 <= i < packets@.len() ==> plain_wf(#[trigger] packets@[i]@),
+            error matches Some((c, h)) ==> c <= VARINT_MAX && plain_wf(h@),
+        ensures
+            final(self).wf(),
+            final(self).out_log() == old(self).out_log(),
+            final(self).amp_grew(*old(self)),
+            packets@.len() == 0 && old(self).phase_spec() is Open ==> (error matches Some((_, h)) && old(
+                self,
+            ).gate_spec(path, datagram_len, &h) && old(self).paths.has(path) ==> final(self).phase_spec() is Closing),
+            packets@.len() == 0 && old(self).phase_spec() is Open ==> (!(error matches Some((_, h))
+                && old(self).gate_spec(path, datagram_len, &h)) ==> *final(self) == *old(self)),
+    {
+        let mut known = known;
+        proof {
+            self.lemma_grew_same(*self);
         }
         if matches!(self.lc.phase(), Phase::Closing) {
             // §10.2.1: packets are not processed.
             if known {
                 self.lc.on_recv_closing(datagram_len as u64);
+            }
+            proof {
+                self.lemma_grew_same(*old(self));
             }
             return;
         }
@@ -639,6 +695,8 @@ impl Connection {
                     self.out_log() == old(self).out_log(),
                     known == self.paths.has(path),
                     self.phase_spec() is Open,
+                    self.amp_grew(s1),
+                    s1 == *old(self),
                     forall|j: int| 0 <= j < it.seq().len() ==> plain_wf(#[trigger] it.seq()[j]@),
             {
                 proof {
@@ -648,21 +706,40 @@ impl Connection {
                 // §12.2: a packet with another DCID is ignored.
                 if eq_bytes(p.dcid.as_slice(), first.as_slice()) && self.gate_packet(path, datagram_len, &p) {
                     if !known {
+                        let ghost b0 = *self;
                         // §9: at `MAX_PATHS` the datagram is dropped uncounted.
-                        if !self.ensure_path(path) {
+                        let ok = self.ensure_path(path);
+                        proof {
+                            self.lemma_grew_trans(b0, s1);
+                        }
+                        if !ok {
                             return;
                         }
+                        let ghost b1 = *self;
                         // §8.1: the whole datagram, including packets the gate already dropped.
                         self.count_recv(path, datagram_len as u64);
+                        proof {
+                            self.lemma_grew_trans(b1, s1);
+                        }
                         known = true;
                     }
+                    let ghost b2 = *self;
                     //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2
                     //# An
                     //# endpoint MUST generate a connection error if processing the contents
                     //# of these packets prior to discovering an error, or fully revert any
                     //# changes made during that processing.
-                    if let Err(c) = self.on_packet(path, p, now, rand) {
+                    let r = self.on_packet(path, p, now, rand);
+                    proof {
+                        self.lemma_grew_trans(b2, s1);
+                    }
+                    if let Err(c) = r {
+                        let ghost b3 = *self;
                         self.close_internal(c);
+                        proof {
+                            self.lemma_grew_same(b3);
+                            self.lemma_grew_trans(b3, s1);
+                        }
                         return;
                     }
                     // CONNECTION_CLOSE, or a closed connection.
@@ -678,7 +755,11 @@ impl Connection {
                     assert(*self == s1);
                 }
             }
+            let ghost b4 = *self;
             self.close_on_error(path, datagram_len, first.as_slice(), known, code, &h);
+            proof {
+                self.lemma_grew_trans(b4, s1);
+            }
         }
     }
 
@@ -698,6 +779,7 @@ impl Connection {
             code <= VARINT_MAX,
             plain_wf(h@),
         ensures
+            final(self).amp_grew(*old(self)),
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
             !(h.dcid@ == first@ && old(self).gate_spec(path, len, h)) ==> *final(self) == *old(self),
@@ -726,6 +808,7 @@ impl Connection {
         requires
             old(self).wf(),
         ensures
+            final(self).amp_grew(*old(self)),
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
             final(self).phase_spec() == old(self).phase_spec(),
@@ -801,6 +884,7 @@ impl Connection {
             old(self).wf(),
             old(self).paths.has(path),
         ensures
+            final(self).amp_grew(*old(self)),
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
             final(self).phase_spec() == old(self).phase_spec(),
@@ -826,6 +910,7 @@ impl Connection {
         requires
             old(self).wf(),
         ensures
+            final(self).amp_grew(*old(self)),
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
             final(self).paths.ids() == old(self).paths.ids(),
@@ -1023,6 +1108,7 @@ impl Connection {
             !old(self).recv(p.kind).is_duplicate_spec(p.pn),
             p.kind is OneRtt ==> old(self).complete,
         ensures
+            final(self).amp_grew(*old(self)),
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
             final(self).paths.has(path),
@@ -1085,6 +1171,7 @@ impl Connection {
             dcid@.len() <= MAX_CID_LEN,
             k is OneRtt ==> old(self).complete,
         ensures
+            final(self).amp_grew(*old(self)),
             final(self).wf(),
             final(self).frames_kept(*old(self)),
             r matches Err(c) ==> c <= VARINT_MAX,
@@ -1092,6 +1179,7 @@ impl Connection {
         let ghost fs = frames@;
         for f in it: frames
             invariant
+                self.amp_grew(*old(self)),
                 self.wf(),
                 self.frames_kept(*old(self)),
                 self.phase_spec() is Open,
@@ -1138,6 +1226,7 @@ impl Connection {
             dcid@.len() <= MAX_CID_LEN,
             k is OneRtt ==> old(self).complete,
         ensures
+            final(self).amp_grew(*old(self)),
             final(self).wf(),
             final(self).frames_kept(*old(self)),
             r matches Err(c) ==> c <= VARINT_MAX,
@@ -1193,6 +1282,7 @@ impl Connection {
             old(self).wf(),
             rfc_ack_ranges_valid(a.largest, a.first_range, a.ranges@),
         ensures
+            final(self).paths == old(self).paths,
             final(self).wf(),
             final(self).frames_kept(*old(self)),
             r matches Err(c) ==> c <= VARINT_MAX,
@@ -1215,6 +1305,7 @@ impl Connection {
         let mut i: usize = 0;
         while i < acked.len()
             invariant
+                self.paths == old(self).paths,
                 i <= acked@.len(),
                 self.wf(),
                 self.frames_kept(*old(self)),
@@ -1233,12 +1324,14 @@ impl Connection {
         requires
             old(self).wf(),
         ensures
+            final(self).paths == old(self).paths,
             final(self).wf(),
             final(self).frames_kept(*old(self)),
     {
         let mut j: usize = 0;
         while j < frames.len()
             invariant
+                self.paths == old(self).paths,
                 j <= frames@.len(),
                 self.wf(),
                 self.frames_kept(*old(self)),
@@ -1265,6 +1358,7 @@ impl Connection {
             old(self).wf(),
             offset + data@.len() <= VARINT_MAX,
         ensures
+            final(self).paths == old(self).paths,
             final(self).wf(),
             final(self).frames_kept(*old(self)),
             r matches Err(c) ==> c <= VARINT_MAX,
@@ -1289,6 +1383,7 @@ impl Connection {
             frame_wf(f@),
             is_stream_layer_frame(f@),
         ensures
+            final(self).paths == old(self).paths,
             final(self).wf(),
             final(self).frames_kept(*old(self)),
             r matches Err(c) ==> c <= VARINT_MAX,
@@ -1322,6 +1417,7 @@ impl Connection {
             f@ is NewConnectionId || f@ is RetireConnectionId,
             dcid@.len() <= MAX_CID_LEN,
         ensures
+            final(self).amp_grew(*old(self)),
             final(self).wf(),
             final(self).frames_kept(*old(self)),
             r matches Err(c) ==> c <= VARINT_MAX,
@@ -1531,6 +1627,7 @@ impl Connection {
             old(self).paths.has(q),
             d matches Some(c) ==> c@.len() <= MAX_CID_LEN,
         ensures
+            final(self).amp_grew(*old(self)),
             final(self).wf_rest(),
             final(self).frames_kept(*old(self)),
             final(self).peer_cids == old(self).peer_cids,
@@ -1571,6 +1668,7 @@ impl Connection {
                     ) ==> old(self).paths.path(r).peer_used == old(self).paths.path(q).peer_used
             },
         ensures
+            final(self).amp_grew(*old(self)),
             final(self).wf_rest(),
             final(self).dcids_weak(),
             final(self).frames_kept(*old(self)),
@@ -1672,6 +1770,7 @@ impl Connection {
             old(self).dcids_weak(),
             old(self).paths.has(q),
         ensures
+            final(self).amp_grew(*old(self)),
             final(self).wf_rest(),
             final(self).dcids_weak(),
             final(self).frames_kept(*old(self)),
@@ -1719,6 +1818,7 @@ impl Connection {
             old(self).wf(),
             old(self).paths.has(q),
         ensures
+            final(self).amp_grew(*old(self)),
             final(self).wf(),
             final(self).frames_kept(*old(self)),
             final(self).paths.active_spec() == old(self).paths.active_spec(),
@@ -1759,6 +1859,7 @@ impl Connection {
         requires
             old(self).wf(),
         ensures
+            final(self).amp_grew(*old(self)),
             final(self).wf(),
             final(self).frames_kept(*old(self)),
     {
@@ -1766,6 +1867,7 @@ impl Connection {
         let mut i: usize = 0;
         while i < n
             invariant
+                self.amp_grew(*old(self)),
                 self.wf(),
                 self.frames_kept(*old(self)),
                 n == self.paths.ids().len(),
@@ -1830,6 +1932,7 @@ impl Connection {
             old(self).pairs_except(path),
             old(self).paths.has(path),
         ensures
+            final(self).amp_grew(*old(self)),
             final(self).wf_rest(),
             final(self).dcids_weak(),
             final(self).frames_kept(*old(self)),
@@ -1847,6 +1950,7 @@ impl Connection {
         let mut i: usize = 0;
         while i < n
             invariant
+                self.amp_grew(*old(self)),
                 n == ids.len(),
                 i <= n,
                 self.wf_rest(),
@@ -1901,6 +2005,7 @@ impl Connection {
             old(self).paths.ids()[i] == q,
             0 <= i < old(self).paths.ids().len(),
         ensures
+            final(self).amp_grew(*old(self)),
             final(self).wf_rest(),
             final(self).frames_kept(*old(self)),
             final(self).peer_cids == old(self).peer_cids,
@@ -1991,6 +2096,7 @@ impl Connection {
             old(self).paths.has(path),
             dcid@.len() <= MAX_CID_LEN,
         ensures
+            final(self).amp_grew(*old(self)),
             final(self).wf(),
             final(self).frames_kept(*old(self)),
             final(self).paths.path(path).peer_used == Some(dcid@),
@@ -2001,6 +2107,13 @@ impl Connection {
         }
         self.paths.set_peer_used(path, dcid);
         proof {
+            assert forall|q: PathId| #[trigger] s0.paths.has(q) implies self.paths.has(q)
+                && self.paths.amp_trace(q) == s0.paths.amp_trace(q) by {
+                if q != path {
+                    assert(self.paths.path(q) == s0.paths.path(q));
+                }
+            }
+            self.lemma_grew_same(s0);
             self.lemma_path_edit(s0, path);
             self.lemma_unheld_edit(s0, path);
             assert forall|q1: PathId, q2: PathId|
@@ -2013,8 +2126,10 @@ impl Connection {
                 assert(s0.not_stale(q));
             }
         }
+        let ghost s1 = *self;
         self.repair_pairs(path);
         proof {
+            self.lemma_grew_trans(s1, s0);
             assert forall|q: PathId| #[trigger] self.paths.has(q) implies self.not_stale(q) by {
                 assert(s0.paths.has(q));
                 assert(s0.not_stale(q));
@@ -2081,6 +2196,7 @@ impl Connection {
             old(self).dcids_weak(),
             a == old(self).paths.active_spec(),
         ensures
+            final(self).amp_grew(*old(self)),
             final(self).wf_rest(),
             final(self).dcids_weak(),
             final(self).frames_kept(*old(self)),
@@ -2155,6 +2271,7 @@ impl Connection {
             a == old(self).paths.active_spec(),
             old(self).not_stale(a),
         ensures
+            final(self).amp_grew(*old(self)),
             final(self).wf_rest(),
             final(self).dcids_weak(),
             final(self).frames_kept(*old(self)),
@@ -2192,6 +2309,7 @@ impl Connection {
             old(self).wf_rest(),
             old(self).dcids_weak(),
         ensures
+            final(self).amp_grew(*old(self)),
             final(self).wf(),
             final(self).frames_kept(*old(self)),
     {
@@ -2208,6 +2326,7 @@ impl Connection {
         let mut i: usize = 0;
         while i < n
             invariant
+                self.amp_grew(*old(self)),
                 n == ids.len(),
                 i <= n,
                 self.paths.ids() == ids,
@@ -2262,6 +2381,7 @@ impl Connection {
             frame_wf(f@),
             f@ is PathChallenge || f@ is PathResponse,
         ensures
+            final(self).amp_grew(*old(self)),
             final(self).wf(),
             final(self).frames_kept(*old(self)),
             r matches Err(c) ==> c <= VARINT_MAX,
@@ -2302,6 +2422,7 @@ impl Connection {
         requires
             old(self).wf(),
         ensures
+            final(self).amp_grew(*old(self)),
             final(self).wf(),
             final(self).frames_kept(*old(self)),
             final(self).recovery != old(self).recovery ==> exists|q: PathId|
@@ -2379,6 +2500,7 @@ impl Connection {
         requires
             old(self).wf(),
         ensures
+            final(self).paths == old(self).paths,
             final(self).wf(),
             final(self).frames_kept(*old(self)),
             final(self).paths == old(self).paths,
@@ -2411,6 +2533,7 @@ impl Connection {
             old(self).wf(),
             old(self).paths.has(q),
         ensures
+            final(self).amp_grew(*old(self)),
             final(self).wf(),
             final(self).frames_kept(*old(self)),
             final(self).paths.active_spec() == old(self).paths.active_spec(),
@@ -2451,6 +2574,7 @@ impl Connection {
             old(self).wf(),
             old(self).paths.has(path),
         ensures
+            final(self).amp_grew(*old(self)),
             final(self).wf(),
             final(self).frames_kept(*old(self)),
             final(self).peer_used_kept(*old(self)),
@@ -2539,6 +2663,7 @@ impl Connection {
             old(self).wf(),
             old(self).paths.has(path),
         ensures
+            final(self).amp_grew(*old(self)),
             final(self).wf(),
             final(self).frames_kept(*old(self)),
             final(self).paths.path(path).dcid is Some ==> forall|q: PathId|
@@ -2586,21 +2711,26 @@ impl Connection {
         self.paths.set_active(path);
         proof {
             self.lemma_active_set(s0, path);
+            self.lemma_grew_same(s0);
         }
+        let ghost s1 = *self;
         // §9, §9.3: not if validation is already underway (preflight M9).
         if matches!(self.paths.state(path), PathState::Unvalidated) {
             self.challenge_path(path, now, rand);
         }
         proof {
+            self.lemma_grew_trans(s1, s0);
             s0.paths.lemma_wf();
             assert(self.paths.has(old_path)) by {
                 assert(s0.paths.has(old_path));
             }
         }
+        let ghost s2 = *self;
         if matches!(self.paths.state(old_path), PathState::Validated) {
             self.challenge_path(old_path, now, rand);
         }
         proof {
+            self.lemma_grew_trans(s2, s0);
             assert(self.paths.has(path));
             assert forall|q: PathId|
                 #[trigger] self.paths.has(q) && q != path && self.paths.path(q).dcid
@@ -2659,6 +2789,7 @@ impl Connection {
         requires
             old(self).wf(),
         ensures
+            final(self).paths == old(self).paths,
             final(self).wf(),
             final(self).frames_kept(*old(self)),
             final(self).hs_done == (if f@ is HandshakeDone {
@@ -2786,6 +2917,7 @@ impl Connection {
             old(self).wf(),
             !(k is OneRtt),
         ensures
+            final(self).paths == old(self).paths,
             final(self).wf(),
             !final(self).live(k),
             k is Initial ==> final(self).live(PacketKind::Handshake) == old(self).live(
@@ -2848,6 +2980,7 @@ impl Connection {
             old(self).wf(),
             code <= VARINT_MAX,
         ensures
+            final(self).paths == old(self).paths,
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
     {
@@ -2863,6 +2996,7 @@ impl Connection {
             old(self).wf(),
             code <= VARINT_MAX,
         ensures
+            final(self).paths_kept(*old(self)),
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
             old(self).phase_spec() is Open ==> final(self).phase_spec() is Closing,
@@ -3054,6 +3188,7 @@ impl Connection {
         requires
             old(self).wf(),
         ensures
+            final(self).paths == old(self).paths,
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
             final(self).frames_kept(*old(self)),
@@ -3219,6 +3354,7 @@ impl Connection {
             old(self).reset_matches(tail@) && old(self).phase_spec() is Open ==> final(self).phase_spec() is Draining,
             old(self).reset_matches(tail@) ==> !(final(self).phase_spec() is Open),
             !old(self).reset_matches(tail@) ==> final(self).phase_spec() == old(self).phase_spec(),
+            forall|q: PathId| #[trigger] final(self).amp_trace(q) == old(self).amp_trace(q),
     {
         if now > self.now {
             self.now = now;
@@ -5055,6 +5191,16 @@ impl Connection {
     /// Path `q` is in the path table.
     pub closed spec fn has_path(&self, q: PathId) -> bool {
         self.paths.has(q)
+    }
+
+    /// The path table is `o`'s.
+    pub closed spec fn paths_kept(&self, o: Connection) -> bool {
+        self.paths == o.paths
+    }
+
+    /// Path `q`'s amplification trace: its receives, sends and validation, in order (§8.1).
+    pub closed spec fn amp_trace(&self, q: PathId) -> Seq<AmpEv> {
+        self.paths.amp_trace(q)
     }
 
     /// How many bytes path `q` may be sent.
@@ -7032,6 +7178,51 @@ impl Connection {
         }
     }
 
+    /// Every path `o` had is still here, its amplification trace only extended: the §8.1 counts
+    /// of a datagram are never undone by what processing its packets does.
+    closed spec fn amp_grew(&self, o: Connection) -> bool {
+        forall|q: PathId| #[trigger] o.paths.has(q) ==> {
+            &&& self.paths.has(q)
+            &&& o.paths.amp_trace(q).len() <= self.paths.amp_trace(q).len()
+            &&& forall|i: int|
+                0 <= i < o.paths.amp_trace(q).len() ==> #[trigger] self.paths.amp_trace(q)[i]
+                    == o.paths.amp_trace(q)[i]
+        }
+    }
+
+    /// `amp_grew` composes.
+    proof fn lemma_grew_trans(&self, m: Connection, o: Connection)
+        requires
+            self.amp_grew(m),
+            m.amp_grew(o),
+        ensures
+            self.amp_grew(o),
+    {
+        assert forall|q: PathId| #[trigger] o.paths.has(q) implies {
+            &&& self.paths.has(q)
+            &&& o.paths.amp_trace(q).len() <= self.paths.amp_trace(q).len()
+            &&& forall|i: int|
+                0 <= i < o.paths.amp_trace(q).len() ==> #[trigger] self.paths.amp_trace(q)[i]
+                    == o.paths.amp_trace(q)[i]
+        } by {
+            assert(m.paths.has(q));
+            assert forall|i: int| 0 <= i < o.paths.amp_trace(q).len() implies #[trigger] self.paths.amp_trace(q)[i]
+                == o.paths.amp_trace(q)[i] by {
+                assert(m.paths.amp_trace(q)[i] == o.paths.amp_trace(q)[i]);
+            }
+        }
+    }
+
+    /// `o`'s paths are all here with their traces unchanged.
+    proof fn lemma_grew_same(&self, o: Connection)
+        requires
+            forall|q: PathId| #[trigger] o.paths.has(q) ==> self.paths.has(q) && self.paths.amp_trace(q)
+                == o.paths.amp_trace(q),
+        ensures
+            self.amp_grew(o),
+    {
+    }
+
     /// Every ACK timer is later than `now`: what draining `poll_transmit` leaves.
     pub closed spec fn acks_later(&self, now: u64) -> bool {
         self.lc.phase_spec() is Open ==> forall|k: PacketKind| later(#[trigger] self.ack_term(k), now)
@@ -7902,6 +8093,13 @@ impl Connection {
 // =============================================================================
 // Helpers
 // =============================================================================
+
+/// §8.1: trace `t1` starts with `t0` and then the receipt of an `n`-byte datagram. Opaque, so a
+/// caller forwards it without unfolding sequence equality.
+#[verifier::opaque]
+pub open spec fn recv_counted(t0: Seq<AmpEv>, t1: Seq<AmpEv>, n: nat) -> bool {
+    t1.len() > t0.len() && t1.take(t0.len() + 1 as int) == t0.push(AmpEv::Recv(n))
+}
 
 /// `a`, if any, is later than `now`.
 pub open spec fn later(a: Option<u64>, now: u64) -> bool {
