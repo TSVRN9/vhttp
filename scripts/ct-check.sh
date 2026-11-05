@@ -8,7 +8,8 @@
 # (all must be ok) with every `checked` line pinned by tools/ct-driver/expected-labels.txt; the
 # negative control (--cfg ct_negative; exactly its one reject); and the semconf conformance check:
 # its native vectors (tools/ct-fixtures/semconf) are regenerated and diffed against vectors.txt,
-# and every vector must pass ct-front's verified selftest within a time bound. Every ct-front run
+# and every vector must pass ct-front's verified selftest within a time bound; finally every dump
+# must parse and decode with no `Unknown` (ctmir's `dumps` tests). Every ct-front run
 # is under `timeout` and must exit 0 and write its report into a freshly emptied run dir. Target
 # dirs live under CT_TARGET_DIR (default $root/target/ct), one subdir per run; dumps and reports
 # under $CT_OUT/<run>.
@@ -238,3 +239,12 @@ v=$(grep -c '^semconf::' "$sc/vectors.txt")
 p=$(grep -c '^pass ' "$got" || true)
 [ "$p" -eq "$v" ] || fail "semconf: $p of $v vectors passed"
 echo "ct-check: semconf $p/$v"
+
+# Every dump above parses with the verified reader and decodes with no `Unknown` variant (a
+# rustc_public variant the schema does not mirror): ctmir's `dumps` tests over $CT_OUT.
+n=$(find "$CT_OUT" -name 'mir-*.json' | wc -l | tr -d ' ')
+CT_DUMP_DIR=$CT_OUT cargo test --release --locked -q -p ctmir --test json --test schema --target-dir "$CT_TARGET_DIR/ctmir-tests" \
+    -- --ignored --exact --nocapture dumps > "$CT_OUT/dumps-test.log" 2>&1 || { cat "$CT_OUT/dumps-test.log" >&2; fail "dumps: a dump does not parse or holds an Unknown"; }
+k=$(grep -c ' 0 with Unknown$' "$CT_OUT/dumps-test.log" || true)
+[ "$k" -eq "$n" ] || fail "dumps: $k of $n dumps decoded with no Unknown"
+echo "ct-check: dumps $k/$n"
