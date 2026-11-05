@@ -544,6 +544,44 @@ proof fn lemma_skip_discard(skip: u64, st: CtrlState, b: Seq<u8>, d: nat, t: Seq
     }
 }
 
+/// `v[n..]` (split out of `determine` for the rlimit).
+fn skip_vec(v: &Vec<u8>, n: usize) -> (r: Vec<u8>)
+    requires
+        n <= v@.len(),
+    ensures
+        r@ == v@.skip(n as int),
+{
+    let r = slice_to_vec(slice_subrange(v.as_slice(), n, v.len()));
+    proof {
+        assert(r@ =~= v@.skip(n as int));
+    }
+    r
+}
+
+/// A stream whose type varint decodes from `b`, with `b[n..]` still to feed (split out of
+/// `determine` for the rlimit).
+proof fn lemma_determined(b: Seq<u8>, n: nat, ty: u64, seen0: SeenUni)
+    requires
+        n <= b.len(),
+        forall|t: Seq<u8>| #[trigger] rfc_varint_decode(b + t) == Some((n, ty)),
+        ty != STREAM_PUSH,
+        !rfc_duplicate(seen0, ty),
+    ensures
+        split_ok(b, seen0, Seq::empty(), rfc_kind_of(ty), ctrl_init(), 0, b.skip(n as int)),
+{
+    assert forall|t: Seq<u8>, f: bool| #[trigger]
+        rfc_uni_stream(b + t, f, seen0) == prepend(
+            Seq::empty(),
+            tail_of(rfc_kind_of(ty), ctrl_init(), 0, b.skip(n as int) + t, f),
+        ) by {
+        assert(rfc_varint_decode(b + t) == Some((n, ty)));
+        assert((b + t).skip(n as int) =~= b.skip(n as int) + t);
+        lemma_skipping_zero(ctrl_init(), b.skip(n as int) + t, f);
+        let x = tail_of(rfc_kind_of(ty), ctrl_init(), 0, b.skip(n as int) + t, f);
+        assert(Seq::<SpecUniEvent>::empty() + x.0 =~= x.0);
+    }
+}
+
 proof fn lemma_skipping_zero(st: CtrlState, b: Seq<u8>, f: bool)
     ensures
         skipping(0, st, b, f) == rfc_control(b, st, f),
@@ -1144,6 +1182,7 @@ impl UniStream {
 
     /// Reads the stream type from at most the 8 bytes a varint can take. `Ok(Some(i))`: a
     /// critical stream, with `data[i..]` still to feed; `Ok(None)`: all of `data` is consumed.
+    #[verifier::spinoff_prover]
     fn determine(&mut self, data: &[u8], seen: &mut SeenUni) -> (r: Result<Option<usize>, u64>)
         requires
             old(self).kind is Undetermined,
@@ -1254,19 +1293,9 @@ impl UniStream {
             }
             return Ok(None);
         }
-        self.buf = slice_to_vec(slice_subrange(self.buf.as_slice(), n, self.buf.len()));
+        self.buf = skip_vec(&self.buf, n);
         proof {
-            assert forall|t: Seq<u8>, f: bool| #[trigger]
-                rfc_uni_stream(self.all@ + t, f, self.seen0@) == prepend(
-                    em0,
-                    tail_of(self.kind, self.ctrl, self.skip, self.buf@ + t, f),
-                ) by {
-                assert(rfc_varint_decode(b + t) == Some((n as nat, ty)));
-                assert((b + t).skip(n as int) =~= self.buf@ + t);
-                lemma_skipping_zero(self.ctrl, self.buf@ + t, f);
-                let x = tail_of(self.kind, self.ctrl, self.skip, self.buf@ + t, f);
-                assert(em0 + x.0 =~= x.0);
-            }
+            lemma_determined(b, n as nat, ty, self.seen0@);
         }
         Ok(Some(i))
     }

@@ -632,7 +632,7 @@ pub open spec fn frame_received(ty: u64, f: SpecFrame) -> bool {
 // Proofs
 // =============================================================================
 
-proof fn lemma_stream_type_bits(o: u64, f: u64) by (bit_vector)
+pub proof fn lemma_stream_type_bits(o: u64, f: u64) by (bit_vector)
     requires
         o == 0 || o == 4,
         f == 0 || f == 1,

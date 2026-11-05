@@ -7,6 +7,8 @@ edition = "2021"
 vstd = "=0.0.0-2026-10-04-0306"
 vest_lib = "=0.2.2"
 wire = { path = "../wire" }
+h3 = { path = "../h3" }
+crypto = { path = "../crypto" }
 
 [package.metadata.verus]
 verify = true

@@ -228,6 +228,7 @@ impl AmpBudget {
             final(self).wf(),
             final(self).trace() == old(self).trace().push(AmpEv::Sent(n as nat)),
             amp_ok(final(self).trace()),
+            final(self).budget_spec() <= old(self).budget_spec(),
     {
         let ghost t = self.trace@;
         proof {

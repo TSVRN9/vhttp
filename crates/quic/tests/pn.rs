@@ -44,4 +44,6 @@ fn pn_bytes() {
     put_pn(0x2700bff4, 3, &mut v);
     assert_eq!(v, [0x00, 0xbf, 0xf4]);
     assert_eq!(read_pn(&v), 0x00bff4);
+    let w = [0x00, 0xbf, 0xf4, 0x99];
+    assert_eq!([1, 2, 3, 4].map(|n| read_pn_masked(&w, n)), [0x00, 0x00bf, 0x00bff4, 0x00bff499]);
 }

@@ -21,6 +21,8 @@ Download `verus-0.2026.10.04.426d8b0-x86-linux.zip` from the GitHub release `rel
 
     scripts/verify.sh
 
+verify.sh also needs binutils (`objdump`, `nm`, `ar`): its binary gate (`scripts/ct-binary.sh`) pins the `objdump --version` line, so a different binutils fails it until update protocol step 7 in `docs/crypto-binary-audit.md` is followed.
+
 `cargo build` and `cargo test` work with plain stable Rust.
 
 ## Requirements coverage (Duvet)
