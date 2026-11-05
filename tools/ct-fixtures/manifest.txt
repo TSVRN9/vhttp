@@ -1,15 +1,7 @@
-# ct-driver manifest for the fixtures (TRUSTED format: tools/ct-driver/src/manifest.rs), used
-# only by scripts/ct-check.sh. Every fixture is a root; the helper_* fns are reached, not roots.
-intr ct_fixtures::ct::declassify Declassify
-intr ct_fixtures::ct::ghost_fallback GhostUnit
-# Declared at Vec<u8>, the only element type of the crypto census; neg_intr_type_args reaches
-# the same key at Vec<u64>, which the translator's type-arg guard rejects.
-intr std::vec::Vec::push VecPush
-# The keys of the parser crates' manifest lines that pos_vec_elem_pair and pos_vec_new_pair reach
-# at (u64, u64).
-intr std::vec::Vec::len VecLen
-intr std::vec::Vec::new VecNew
-intr <std::vec::Vec<(u64, u64)> as std::ops::Index<usize>>::index VecIndex
+# CT manifest for the fixtures (TRUSTED grammar: crates/ctmir/src/policy.rs), used only by
+# scripts/ct-check.sh. Every fixture is a root; the helper_* fns are reached, not roots.
+declassify ct_fixtures::ct::declassify
+ghost ct_fixtures::ct::ghost_fallback
 # Label lines pass the same naming check as attributes.
 label ct_fixtures::fx::pos_label_line secret(k) public(n)
 label ct_fixtures::fx::neg_label_line_missing_param secret(a)

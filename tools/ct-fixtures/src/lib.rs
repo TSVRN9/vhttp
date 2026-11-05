@@ -201,7 +201,7 @@ pub mod fx {
 
     #[cfg_attr(ct_check, ct::public(x))]
     pub fn neg_unresolved_callee(x: u64) -> u32 {
-        // Unresolved: no manifest line maps u64::count_ones
+        // Unresolved: u64::count_ones is not in ctmir::sem's std model
         x.count_ones()
     }
 
@@ -254,8 +254,8 @@ pub mod fx {
 
     #[cfg_attr(ct_check, ct::public(v, x))]
     pub fn neg_intr_type_args(v: &mut Vec<u64>, x: u64) {
-        // Unsupported: `Vec::push` is keyed without its type args, and its `intr` line is
-        // declared at u8 (the census); this call reaches it at u64
+        // Unsupported: ctmir::sem's std model admits `Vec::push` at u8 and (u64, u64) only; this
+        // call reaches it at u64
         v.push(x)
     }
 
@@ -406,7 +406,7 @@ pub mod fx {
 
     #[cfg_attr(ct_check, ct::public)]
     pub fn neg_str_len(s: &str) -> usize {
-        // Unresolved: `str::len` has no intr line, so no read of a `str` translates
+        // Unresolved: `str::len` is not in the std model, so no read of a `str` translates
         s.len()
     }
 
@@ -664,12 +664,12 @@ pub mod fx {
     }
 
     pub fn cost_neg_not_typed(x: &mut u8) -> &mut u8 {
-        // translates, but returning a `&mut` breaks `wf_body`: no bound without `check_program` `Ok`
+        // Unsupported: a `&mut` return local is a local type outside the subset
         x
     }
 
     pub fn cost_neg_not_typed_declassify(x: &mut u8) -> u8 {
-        // `Mut` locals pass wf; `Declassify` of a `Mut` operand fails `ok_intr`
+        // Unsupported: a declassify argument must be an int, bool or array of them
         let y = crate::ct::declassify(x);
         *y
     }
