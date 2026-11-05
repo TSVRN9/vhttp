@@ -127,7 +127,7 @@ fn deferred() -> H3Server {
     let mut app = Vec::new();
     s.pump(&mut app);
     let f = vec![Frame::Stream { stream_id: 0, offset: 0, data: get(), fin: true }];
-    s.on_datagram(0, 300, vec![one(0, f)], 40, &rnd(0), &mut app);
+    s.on_datagram(0, 300, vec![one(0, f)], None, 40, &rnd(0), &mut app);
     assert_eq!(app.len(), 2);
     let r = Response { status: 200, headers: vec![], body: vec![0x5a; 3 << 20] };
     assert_eq!(s.send_response(0, &r, &mut app), Ok(()));
@@ -143,7 +143,7 @@ fn zero_room_ping_copies_nothing() {
     let p = vec![one(1, vec![Frame::Ping])];
     let r = rnd(1);
     let before = allocated();
-    s.on_datagram(0, 300, p, 41, &r, &mut app);
+    s.on_datagram(0, 300, p, None, 41, &r, &mut app);
     let n = allocated() - before;
     assert_eq!(s.pending_bytes(), queued);
     assert!(n < LIMIT, "{n} bytes allocated around one PING");
