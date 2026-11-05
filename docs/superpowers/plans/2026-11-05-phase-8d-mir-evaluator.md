@@ -212,7 +212,7 @@
   - `selftest_panic_vector_needs_panic`: `tiny::opt true => panic` is a `fail` with `the run completed (want panic)`, and `pass` is never printed for it.
 - [ ] **Step 2:** Run `cargo test -p ctmir --test interp`. Expected: the new tests fail.
 - [ ] **Step 3: Implement the Produces block.**
-  - `check_vector` keeps today's shape and width checks. It builds `args`/`slots` as today, requires `x_wt_args`, runs `mir_eval(.., FUEL)`, and reads the return local and the `mut:` slots out of `Ev::Done`'s frame.
+  - `check_vector` keeps today's shape and width checks. It builds `slots` as today and `args` per `mir_args` (a `Mut(Slot(j))` at each `mut:` parameter), requires `x_wt_args`, runs `mir_eval(.., FUEL)`, and reads the return local and the `mut:` slots out of `Ev::Done`'s frame.
   - `selftest` prints `pass <path> steps=<n>` with the MIR step count.
   - Prove `pass_ok` for each `pass` line from `check_vector`'s ensures. `lowers` gives `root_of(m, path, infos[0].inst)`.
   - Delete `interp.rs` and the `lib.rs` line.

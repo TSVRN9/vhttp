@@ -128,7 +128,8 @@ fuels. Cost if wrong: TRUSTED keeps "at a common fuel" one phase longer.
   - A `=> panic` vector passes only on `Panic`. `Fuel` and `GaveUp` no longer count; before, core
     `None` included fuel.
   - The arguments must also pass `x_wt_args`, which implies `wt_args`. That puts the run inside
-    the theorems' domain.
+    the theorems' domain. At a `&mut` parameter the argument is `Mut(Slot(j))`, not the raw
+    pointee: `wt_rec` accepts only a `Mut` there, and `entry_local` reads the slot.
 - **`line_ok` gains `pass_ok`.** Formats stay byte-identical: `pass <path> steps=<n>` and
   `pass <path> panic`. `pass_ok` reads:
 
