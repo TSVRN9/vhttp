@@ -257,7 +257,8 @@ impl Connection {
         }
     }
 
-    /// The end of the received CRYPTO data at level `k` (RFC 9001 §4.1.3).
+    /// The end of the received CRYPTO data at level `k` (RFC 9001 §4.1.3), kept for Initial
+    /// across its discard.
     pub closed spec fn crypto_end_spec(&self, k: PacketKind) -> nat {
         let s = match k {
             PacketKind::Initial => self.crx_i,
@@ -265,6 +266,15 @@ impl Connection {
             PacketKind::OneRtt => self.crx_1,
         };
         (s.reassembly().base() + s.reassembly().buf_len()) as nat
+    }
+
+    /// How far level `k`'s CRYPTO data has been read (`crypto_read`).
+    pub closed spec fn crypto_base_spec(&self, k: PacketKind) -> nat {
+        match k {
+            PacketKind::Initial => self.crx_i.reassembly().base(),
+            PacketKind::Handshake => self.crx_h.reassembly().base(),
+            PacketKind::OneRtt => self.crx_1.reassembly().base(),
+        }
     }
 
     /// The client's original Destination Connection ID.
@@ -2948,6 +2958,7 @@ impl Connection {
             final(self).complete == old(self).complete,
             final(self).peer_tp == old(self).peer_tp,
             final(self).streams == old(self).streams,
+            final(self).crypto_end_spec(PacketKind::Initial) == old(self).crypto_end_spec(PacketKind::Initial),
     {
         let mut lost: Vec<SentPacket> = Vec::new();
         match k {
@@ -2957,7 +2968,11 @@ impl Connection {
                 }
                 self.live_i = false;
                 self.sent_i.drain_inflight(&mut lost);
-                self.crx_i = CryptoStream::new();
+                // Restarted empty at its end, which the glue still checks (RFC 9001 §4.1.3).
+                proof {
+                    self.crx_i.reassembly().lemma_wf();
+                }
+                self.crx_i = CryptoStream::new_at(self.crx_i.end());
                 self.ctx_i = SendStream::new(VARINT_MAX);
                 self.recv_i = RecvPns::new(k);
                 self.cid_updates.push(CidUpdate::Remove(slice_to_vec(self.ids.odcid())));
@@ -8038,6 +8053,21 @@ impl Connection {
             PacketKind::Initial => self.crx_i.end(),
             PacketKind::Handshake => self.crx_h.end(),
             PacketKind::OneRtt => self.crx_1.end(),
+        }
+    }
+
+    /// How far level `k`'s CRYPTO data has been read: with `crypto_end`, what is buffered out of
+    /// order (RFC 9001 §4.1.3).
+    pub fn crypto_base(&self, k: PacketKind) -> (r: u64)
+        requires
+            self.wf(),
+        ensures
+            r == self.crypto_base_spec(k),
+    {
+        match k {
+            PacketKind::Initial => self.crx_i.start(),
+            PacketKind::Handshake => self.crx_h.start(),
+            PacketKind::OneRtt => self.crx_1.start(),
         }
     }
 
