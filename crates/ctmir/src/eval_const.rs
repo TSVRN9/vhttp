@@ -169,7 +169,7 @@ fn e_unit_likes(m: &MirCrate, tb: &Tabs, ts: &Vec<Ty>, fuel: usize, clos: bool) 
 /// `ul_val(m, t)`: the structural value of a unit-like type holding an array, else `Unit`.
 pub fn e_ul_val(m: &MirCrate, tb: &Tabs, t: Ty) -> (r: R<CVal>)
     requires tabs_ok(*m, *tb),
-    ensures r matches Ok(v) ==> cv(v) == ul_val(*m, t),
+    ensures r matches Ok(v) ==> cv(v) == ul_val(*m, t), !(r matches Err(Halt::Panic)),
 {
     let tf = match x_tfuel(m) { Some(f) => f, None => return Err(Halt::GaveUp) };
     if !t_has_arr(m, tb, t, tf) { return Ok(CVal::Unit); }
