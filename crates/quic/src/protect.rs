@@ -846,6 +846,15 @@ pub proof fn lemma_unprotect_wf(
         rfc_unprotect(b, keys, largest) matches Ok((Some(p), n)) ==> plain_wf(p)
             && (p.kind is OneRtt ==> n == b.len()),
         rfc_unprotect(b, keys, largest) matches Err((c, h)) ==> c <= VARINT_MAX && plain_wf(h),
+        // A long header within a UDP payload: any packet or drop consumes exactly `packet_end`
+        // (RFC 9000 §12.2), and 0-RTT is dropped whatever the keys (RFC 9001 §4.6.2).
+        b.len() <= MAX_UDP_PAYLOAD ==> (rfc_header(b, LOCAL_CID_LEN as nat) matches Some(
+            SpecHeader::Long { ty, packet_end, .. },
+        ) ==> (rfc_unprotect(b, keys, largest) matches Ok((_, n)) ==> n == packet_end) && (ty
+            is ZeroRtt ==> rfc_unprotect(b, keys, largest) == Ok::<
+            (Option<SpecPlain>, nat),
+            (u64, SpecPlain),
+        >((None, packet_end)))),
 {
     hide(rfc_open);
     hide(rfc_header);
@@ -1416,6 +1425,12 @@ pub fn unprotect(b: &[u8], keys: &[Option<KeyPair>; 3], largest: &[Option<u64>; 
         r matches Ok((_, n)) ==> (b.len() > 0 ==> 0 < n <= b.len()),
         r matches Ok((Some(p), n)) ==> plain_wf(p@) && (p.kind is OneRtt ==> n == b.len()),
         r matches Err((c, h)) ==> c <= VARINT_MAX && plain_wf(h@),
+        b.len() <= MAX_UDP_PAYLOAD ==> (rfc_header(b@, LOCAL_CID_LEN as nat) matches Some(
+            SpecHeader::Long { ty, packet_end, .. },
+        ) ==> (r matches Ok((_, n)) ==> n == packet_end) && (ty is ZeroRtt
+            ==> unprotect_view(r) == Ok::<(Option<SpecPlain>, nat), (u64, SpecPlain)>(
+            (None, packet_end),
+        ))),
 {
     hide(rfc_unprotect_at);
     hide(rfc_header);
