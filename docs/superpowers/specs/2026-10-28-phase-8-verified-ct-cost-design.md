@@ -423,6 +423,13 @@ unless they first differ at a declassified value.
 
 ## Front end (tools/ct-driver; trusted, kept 1:1)
 
+**Superseded by Phase 8c.** This section describes the unverified translator as 8a and 8b built
+it. Since 8c, `tools/ct-driver` only dumps MIR, and the translator, the manifest and attribute
+readers, the report text and the selftest interpreter are verified code in `crates/ctmir`, with
+the CT and cost theorems stated over a MIR semantics (`ctmir::sem`). See
+`docs/superpowers/specs/2026-11-03-phase-8c-verified-front-end-design.md`, §8c result, and
+TRUSTED.md's CT rows.
+
 **Invocation.**
 - The driver runs as `RUSTC_WORKSPACE_WRAPPER` under `RUSTC_BOOTSTRAP=1 cargo build --release -p <crate>`, with its own target dir.
 - For target crates it appends `-Zinline-mir=no`, `--cfg ct_check`, `-Zcrate-attr=feature(register_tool)` and `-Zcrate-attr=register_tool(ct)`.
