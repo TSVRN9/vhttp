@@ -402,7 +402,7 @@ pub open spec fn spec_short_header_bytes(
 // Proofs
 // =============================================================================
 
-proof fn bv_long_first_byte(t: u8, n: u8)
+pub(crate) proof fn bv_long_first_byte(t: u8, n: u8)
     by (bit_vector)
     requires
         t <= 3,
@@ -416,7 +416,7 @@ proof fn bv_long_first_byte(t: u8, n: u8)
 {
 }
 
-proof fn bv_short_first_byte(s: u8, k: u8, n: u8)
+pub(crate) proof fn bv_short_first_byte(s: u8, k: u8, n: u8)
     by (bit_vector)
     requires
         s == 0 || s == 0x20,
