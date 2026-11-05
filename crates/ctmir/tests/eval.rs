@@ -109,3 +109,59 @@ fn const_opt() {
         Err(_) => panic!("const"),
     }
 }
+
+// ------------------------------------------------------------------ Task 2: runs
+
+use ctmir::eval_run::{mir_eval, Ev};
+use ctmir::lower_fn::lower;
+use ctmir::policy::Policy;
+use ctmir::vectors::FUEL;
+
+fn pol0() -> Policy {
+    Policy {
+        roots: vec![], cost_roots: vec![], labels: vec![], internal_crates: vec![], translate_crates: vec![],
+        declassify: vec![], ghost_unit: vec![],
+    }
+}
+
+/// `mir_eval` of `root` (which must lower, so it is in the subset) with `Unit` slots.
+fn run(m: &MirCrate, root: &str, args: Vec<CVal>, fuel: u64) -> Ev {
+    assert!(lower(m, &pol0(), root.as_bytes(), &mut Vec::new()).is_ok(), "{root} does not lower");
+    let tb = tabs(m).unwrap();
+    let slots: Vec<CVal> = args.iter().map(|_| CVal::Unit).collect();
+    mir_eval(m, &tb, &pol0(), inst(m, root), &args, &slots, fuel)
+}
+
+fn done(e: Ev) -> (String, u64) {
+    match e {
+        Ev::Done(fr, n) => (show(&fr.locals[0]), n),
+        Ev::Panic => ("panic".into(), 0),
+        Ev::Fuel => ("fuel".into(), 0),
+        Ev::GaveUp => ("gave up".into(), 0),
+    }
+}
+
+fn abcd() -> CVal { CVal::Shr(Box::new(bytes(&[0x0a, 0x0b, 0x0c, 0x0d]))) }
+
+/// The step counts are the core interpreter's `steps=` for the same vectors (selftest at 0b0061c's
+/// core path, vt-8d-evidence/t2/core-steps.txt).
+#[test]
+fn eval_tiny() {
+    let m = dec(TINY);
+    assert_eq!(done(run(&m, "tiny::tiny", tiny_args(abcd()), FUEL)), ("9".into(), 7));
+    assert_eq!(done(run(&m, "tiny::opt", vec![CVal::Int(1)], FUEL)), ("Adt1[3]".into(), 5));
+    assert_eq!(done(run(&m, "tiny::opt", vec![CVal::Int(0)], FUEL)), ("Adt0[]".into(), 5));
+    assert_eq!(done(run(&m, "tiny::call", vec![abcd()], FUEL)), ("14".into(), 9));
+}
+
+#[test]
+fn eval_fuel() {
+    let m = dec(TINY);
+    assert!(matches!(run(&m, "tiny::call", vec![abcd()], 1), Ev::Fuel));
+}
+
+#[test]
+fn eval_panic() {
+    let m = dec(&edit(TINY, r#""expected":true"#, r#""expected":false"#));
+    assert!(matches!(run(&m, "tiny::tiny", tiny_args(abcd()), FUEL), Ev::Panic));
+}

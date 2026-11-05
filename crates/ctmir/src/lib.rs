@@ -14,6 +14,7 @@ global size_of usize == 8;
 
 pub mod eval;
 pub mod eval_const;
+pub mod eval_run;
 pub mod eval_tab;
 pub mod interp;
 pub mod interp_arith;
