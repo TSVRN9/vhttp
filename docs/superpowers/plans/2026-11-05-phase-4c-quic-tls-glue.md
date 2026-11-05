@@ -14,15 +14,16 @@
 - 4c closes 22 of its 30 rows; the other 8 are listed under "Matrix rows".
 
 **Architecture:**
-- **`tls::quic_keys`** (verified): RFC 9001 §5.1–§5.2 key derivation over 4b's `spec_hkdf_expand_label`, producing 3e's `quic::aead::{PacketKeys, KeyPair}`.
-- **`tls::quic_server::QuicServer<'a>`** (verified): the glue. It owns an `H3Server` (which owns the `Connection`), a `ServerHandshake<'a>` and the three key slots.
+- **A new verified crate, `crates/quictls`** (ruling: quictls crate), holds all QUIC-TLS code. Importing any `quic` item into `tls` pulls `vest_lib`'s default broadcast lemmas into every tls module, and tls then fails at rlimit 4: `spec_drain` goes from 0.45M to 19.1M, and `build_flight` from 11.65M to 16.5M. So `tls` stays free of `quic`.
+- **`quictls::keys`** (verified): RFC 9001 §5.1–§5.2 key derivation over 4b's `spec_hkdf_expand_label`, producing 3e's `quic::aead::{PacketKeys, KeyPair}`.
+- **`quictls::server::QuicServer<'a>`** (verified): the glue. It owns an `H3Server` (which owns the `Connection`), a `ServerHandshake<'a>` and the three key slots.
   - After the pipeline has handed a datagram's packets to the connection, it reads `crypto_read` per level and feeds `on_crypto`. Then it applies the events in order: `Send` becomes `crypto_write`, `Secrets` become key slots, `PeerParams` go to `on_peer_params`, `Complete` goes to `on_handshake_complete`, and an `Err` becomes a close.
   - It clears a key slot in the same call in which the connection discards that space.
-  - The module is `quic_server`, not the outline's `quic`. Inside `tls`, a module named `quic` would make `quic::…` paths ambiguous with the `quic` crate.
+  - It lives in `quictls::server`, not the outline's `tls::quic` (ruling: quictls crate).
 - **TLS between packets** (Decision 8 as built; Ruling D1): a datagram's 1-RTT packet is always its last packet. Before completion it is gated by `pipeline::receive` (RFC 9001 §5.7).
   - If TLS completes while that datagram is being processed, `pipeline::refeed_one_rtt` opens the same datagram again with only the 1-RTT slot keyed. It hands the 1-RTT packet to the connection with length 0 (the bytes were already counted), but only if its DCID equals the datagram's first header's (RFC 9000 §12.2).
   - No other packet in a client datagram can depend on TLS output from the same datagram: a client has no Handshake keys before it has read our ServerHello. So this is "TLS after each packet" for every datagram a client can send. It is also the 3e binding note's hold-and-re-feed (3e Decision 20).
-- **Dependency direction:** `tls → quic`, for `quic_keys` and `quic_server` only. `quic` never depends on `tls`. `server → tls, quic, h3` (preflight I5).
+- **Dependency direction** (ruling: quictls crate): `quictls → tls, quic, crypto`. `tls` does not depend on `quic`, and `quic` does not depend on `tls`. `server → quictls, tls, quic, h3`: `tls` for `ServerConfig`, `CertChain`, `build_config` and `p256_signing_key`; `h3` per preflight I5.
 - **The shell** drives `QuicServer` instead of `Connection`. It loads a PEM chain and a PKCS#8 P-256 key, and answers every request with one static response. The ServerConfig it builds outlives the run loop, so `Server<'a>` borrows it.
 
 **Tech Stack:** Verus 0.2026.10.04.426d8b0 (rustc 1.98.1), vstd `=0.0.0-2026-10-04-0306`, duvet 0.4.3. Test-only: rustls `=0.23.45` with ring `=0.17.14` (tls dev-dependencies since 4b), curl 8.18.0 (ngtcp2 1.22.1, OpenSSL 3.5.9), and quiche-client built from a pinned release tag outside the workspace. No new normal dependency.
@@ -52,21 +53,37 @@ Also read (their Interfaces and binding notes are this plan's contract):
   - `duvet report` exits 0. `.duvet/specifications` and `.duvet/requirements` are git-ignored: copy both from the main checkout into the worktree once (already done in `wt-4c` on 2026-11-05).
 - **Evidence recipe (3e's), per task N:**
   - With `CARGO_TARGET_DIR=<scratch>/vt-4c-tN/target` and `CT_TARGET_DIR=$CARGO_TARGET_DIR/ct`, run build, test, `verify.sh` and `duvet report`.
-  - Then, on that warm target, run `cargo clean -p <crate>` and `rm -rf $CARGO_TARGET_DIR/verus-partial/*/.fingerprint/<crate>-*`, followed by `(cd crates/<crate> && cargo verus verify -- --rlimit 4)` for every verified crate the task edits: `tls` in Tasks 1, 3 and 5; `quic` in Task 2. Print each `… 0 errors` line.
+  - Then, on that warm target, run `cargo clean -p <crate>` and `rm -rf $CARGO_TARGET_DIR/verus-partial/*/.fingerprint/<crate>-*`, followed by `(cd crates/<crate> && cargo verus verify -- --rlimit 4)` for every verified crate the task edits (ruling: quictls crate):
+    - `quictls` in Tasks 1 and 3;
+    - `tls` in Task 3 (`server.rs`'s lemma) and Task 5 (`config.rs`);
+    - `quic` in Task 2, and then `quictls` too, since it depends on quic.
+
+    Print each `… 0 errors` line.
+  - `scripts/verify.sh` needs no edit for the new crate: it loops over `crates/*/`. `ct-binary.sh` reads every workspace rlib as a dependent (ruling: quictls crate).
   - The tls run also re-checks 4b's `build_flight`, which sat at 1.03× of rlimit 4. Rank by `--output-json --time-expanded` `rlimit`. If it trips, split; never raise.
 - **Quote and MUST checks:**
   - `python3 -I <scratch>/qchk/check_quotes.py --spec-dir .duvet/specifications/www.rfc-editor.org/rfc <files>` must print `N citations, 0 bad` for every file the task touched.
   - `python3 -I <scratch>/duvet_q.py <report.json> <sections>` covers the task's sections; the expected residue is named per task.
   - The baseline on `main` is 91 uncovered MUSTs across the 29 sections the 4c rows name (`<scratch>/vt-4c-evidence/duvet-base.json`). The "MUST assignment" table says which task covers each.
 - **Mutations, every task with proofs:** each listed mutation, applied alone, must fail verification on a named postcondition, invariant or assertion, not on rlimit.
-- **Binary gate:** `tls` already has `U` lines for `crypto::hkdf::{hkdf_extract, hkdf_expand}`, so Task 1 should add none.
-  - If `scripts/ct-binary.sh` reports a new `U tls crypto::…` or `U server crypto::…` line (rustc inlines small cross-crate leaf fns), follow `docs/crypto-binary-audit.md` update protocol step 2: confirm it is `U` with no `D` line, record a Gate record ("this commit on base c1329b9", toolchain, the line), run `--update`, and commit the digests and the record in the same feat commit.
+- **Binary gate** (ruling: quictls crate): `quictls` is a new dependent, whose `U` lines the gate records.
+  - Task 1 adds `U quictls crypto::hkdf::hkdf_extract`, and any tls-inlined `crypto::hkdf` reference. Record them by the procedure below, in Task 1's feat commit.
+  - If `scripts/ct-binary.sh` reports any other new `U quictls crypto::…`, `U tls crypto::…` or `U server crypto::…` line (rustc inlines small cross-crate leaf fns), follow `docs/crypto-binary-audit.md` update protocol step 2: confirm it is `U` with no `D` line, record a Gate record ("this commit on base c1329b9", toolchain, the line), run `--update`, and commit the digests and the record in the same feat commit.
   - Any `D <crate> crypto::…` line or digest change is a stop: report it.
   - Never edit `crates/crypto/src`.
-- **Branch and parallel work:** `phase-4c` from `main` at c1329b9. Phase 8c runs in `wt-8c` and edits the root `Cargo.toml`, `Cargo.lock` and `scripts/verify.sh`'s final line. 4c edits neither the root `Cargo.toml` nor `verify.sh`; it changes `Cargo.lock` (Task 1: `tls → quic`, `server → tls`).
-  - Whichever of the two merges second regenerates `Cargo.lock` with `cargo build`, keeps both sets of edges, and takes 8c's final line. 8c's line today lacks `binary ok`, so that conflict exists whatever 4c does.
+- **Branch and parallel work:** `phase-4c` from `main` at c1329b9. Phase 8c runs in `wt-8c` and edits the root `Cargo.toml`, `Cargo.lock` and `scripts/verify.sh`'s final line.
+  - 4c does not edit `verify.sh`.
+  - 4c adds one root `Cargo.toml` block, `[profile.release.package.quictls] overflow-checks = false`, with the usual "verified" comment (ruling: quictls crate).
+  - 4c changes `Cargo.lock`: Task 1 adds the `quictls` package and `server → quictls, tls`.
+  - Whichever of the two merges second regenerates `Cargo.lock` with `cargo build`, keeps both sets of edges and both profile blocks, and takes 8c's final line. 8c's line today lacks `binary ok`, so that conflict exists whatever 4c does.
 - **Dependencies:**
-  - Task 1 adds `quic = { path = "../quic" }` to `crates/tls/Cargo.toml`, and `tls = { path = "../tls" }` to `crates/server/Cargo.toml`.
+  - Task 1 creates `crates/quictls/Cargo.toml` (ruling: quictls crate):
+    - `[dependencies]`: `vstd = "=0.0.0-2026-10-04-0306"`, `tls`, `quic` and `crypto` (path deps);
+    - `[dev-dependencies]`: rustls `=0.23.45` (`default-features = false`, features `ring`, `std`) and ring `=0.17.14`, copied from tls's;
+    - `[package.metadata.verus] verify = true`, and tls's `[lints.rust]` block.
+  - Task 1 also adds `quictls = { path = "../quictls" }` and `tls = { path = "../tls" }` to `crates/server/Cargo.toml`.
+  - `crates/tls/Cargo.toml` is not edited.
+  - `quictls` modules see `vest_lib`'s default broadcast lemmas (through `quic`). Keep each fn small and spun off.
   - Task 5 adds `h3 = { path = "../h3" }` to `crates/server/Cargo.toml` (and `Cargo.lock`), for `Response`, `FieldLine` and `Output`, which `quic` does not re-export (preflight I5).
   - `crypto`'s normal dependencies stay exactly `vstd`; verify.sh checks this.
 - **Consumed from 4b** (`crates/tls/src`; exact names):
@@ -94,8 +111,10 @@ Also read (their Interfaces and binding notes are this plan's contract):
 
   `on_timeout` takes a fresh `[u8; RAND_LEN]`. No random array is passed to two `Connection` calls (3e shell rule).
 - **Shared test data:**
-  - tls tests load quic's `crates/quic/tests/common/mod.rs` with `#[path = "../../quic/tests/common/mod.rs"] mod qc;`, for `A2`, `A3`, `A2_CRYPTO`, `A3_PAYLOAD`, `CLIENT`, `SERVER`, `S1`, `C1`, `L0`, `rnd`, `ltp` and `ptp`. That file uses only `quic` items, which tls tests can reach.
-  - tls's own `tests/common/mod.rs` supplies `CURL_CH`, `A2_CH`, `h3_ch`, `P256_SHARE`, `X25519_SHARE`, `ecdsa_cfg()`, `ECDSA_CERT` and `ECDSA_D`.
+  - quictls tests (ruling: quictls crate) load quic's `crates/quic/tests/common/mod.rs` with `#[path = "../../quic/tests/common/mod.rs"] mod qc;`, for `A2`, `A3`, `A2_CRYPTO`, `A3_PAYLOAD`, `CLIENT`, `SERVER`, `S1`, `C1`, `L0`, `rnd`, `ltp` and `ptp`.
+  - They load tls's `crates/tls/tests/common/mod.rs` with `#[path = "../../tls/tests/common/mod.rs"] mod tc;`, for `CURL_CH`, `A2_CH`, `split_ch`, `join_ch`, `head`, `h3_ch`, `P256_SHARE`, `X25519_SHARE`, `ecdsa_cfg()`, `ECDSA_CERT` and `ECDSA_D`.
+    - Its `include_bytes!("../data/…")` resolves relative to that file, so it still finds tls's `tests/data`.
+    - It names `crypto::rsa`, so `crypto` is a normal dependency of quictls, which its tests can use.
 
 ## Matrix rows
 
@@ -134,9 +153,9 @@ After Task 4, `duvet_q.py` over the 29 sections prints exactly the 22 lines of t
 
 ## File Structure
 
-- `crates/tls/src/quic_keys.rs` (Task 1, new): Initial secrets and packet keys, spec and exec.
+- `crates/quictls/src/keys.rs` (Task 1, new): Initial secrets and packet keys, spec and exec.
 - `crates/tls/src/codes.rs` (Task 1): `INITIAL_SALT` and five labels.
-- `crates/tls/src/quic_server.rs` (Task 3, new): `QuicServer`, `Rand`, `TlsCall`, the TLS step and the event application; Task 4 adds its exception block.
+- `crates/quictls/src/server.rs` (Task 3, new): `QuicServer`, `Rand`, `TlsCall`, the TLS step and the event application; Task 4 adds its exception block.
 - `crates/tls/src/config.rs` (Task 5): `p256_signing_key`.
 - `crates/tls/src/server.rs` (Task 3): the `fail` comment, and `pub proof fn lemma_ok_not_failed` (preflight I2).
 - `crates/quic/src/pipeline.rs` (Task 2): `refeed_one_rtt`; `accept_datagram`'s odcid check.
@@ -145,33 +164,34 @@ After Task 4, `duvet_q.py` over the 29 sections prints exactly the 22 lines of t
 - `crates/quic/src/h3_server.rs` (Task 2): `on_datagram` takes the datagram's error; `on_timeout` ensures `now <= now_spec` (preflight C8).
 - `crates/server/Cargo.toml` (Tasks 1, 5): `tls`, then `h3` (preflight I5).
 - `crates/server/src/{lib.rs, main.rs}` (Tasks 1, 5): keys from tls in Task 1; `QuicServer`, the config loader and the static response in Task 5.
-- Tests: `crates/tls/tests/{quic_keys.rs, quic_server.rs, quic_e2e.rs}`, `crates/quic/tests/{pipeline.rs, h3_server.rs, h3_alloc.rs}`, `crates/server/tests/{shell.rs, initial_exchange.rs, interop.rs, data/*}`.
+- Tests: `crates/quictls/tests/{keys.rs, server.rs, e2e.rs}, crates/tls/tests/config.rs`, `crates/quic/tests/{pipeline.rs, h3_server.rs, h3_alloc.rs}`, `crates/server/tests/{shell.rs, initial_exchange.rs, interop.rs, data/*}`.
 
 ---
 
-### Task 1: Initial secrets and packet keys (`tls::quic_keys`) — suggested model: sonnet
+### Task 1: Initial secrets and packet keys (`quictls::keys`) — suggested model: sonnet
 
 **Files:**
-- Create: `crates/tls/src/quic_keys.rs`, `crates/tls/tests/quic_keys.rs`
+- Create: `crates/quictls/src/keys.rs`, `crates/quictls/tests/keys.rs`
 - Modify:
-  - `crates/tls/src/codes.rs`, `crates/tls/src/lib.rs` (`pub mod quic_keys;` and the doc line);
-  - `crates/tls/Cargo.toml` (`quic`), `crates/server/Cargo.toml` (`tls`), `Cargo.lock`;
-  - `crates/server/src/lib.rs`: delete `A1_DCID`, `A1_CLIENT`, `A1_SERVER`, `initial_keys` and its ponytail; `Route::NewInitial` uses `tls::quic_keys::initial_keys`;
-  - `crates/server/tests/shell.rs`: delete `a1_keys_only`; its vector moves to `tests/quic_keys.rs`;
+  - (ruling: quictls crate) create `crates/quictls/{Cargo.toml, src/lib.rs}` (`pub mod keys;` and the crate doc line);
+  - the root `Cargo.toml` (the quictls profile block), `crates/server/Cargo.toml` (`quictls`, `tls`), `Cargo.lock`;
+  - `docs/crypto-binary-digests.txt` and `docs/crypto-binary-audit.md` (the new `U quictls …` lines, per the binary gate);
+  - `crates/server/src/lib.rs`: delete `A1_DCID`, `A1_CLIENT`, `A1_SERVER`, `initial_keys` and its ponytail; `Route::NewInitial` uses `quictls::keys::initial_keys`;
+  - `crates/server/tests/shell.rs`: delete `a1_keys_only`; its vector moves to `crates/quictls/tests/keys.rs`;
   - `TRUSTED.md`: delete the row "RFC 9001 A.1 Initial keys hard-coded in server::initial_keys …";
   - `docs/requirements.md`.
 
 **Interfaces:**
 - Consumes: `hkdf_expand_label`, `hkdf_expand_label_32`, `spec_hkdf_expand_label`, `label_ok`; `crypto::hkdf::{hkdf_extract, spec_hkdf_extract}`; `quic::aead::{PacketKeys, KeyPair, SpecKeys, SpecKeyPair}`; `quic::codes::MAX_CID_LEN`.
-- Produces (`tls::codes`): `INITIAL_SALT: [u8; 20] = 38 76 2c f7 f5 59 34 b3 4d 17 9a e6 a4 c8 0c ad cc bb 7f 0a` (rfc9001.txt:1066), `LABEL_CLIENT_IN = *b"client in"`, `LABEL_SERVER_IN = *b"server in"`, `LABEL_QUIC_KEY = *b"quic key"`, `LABEL_QUIC_IV = *b"quic iv"`, `LABEL_QUIC_HP = *b"quic hp"`. (`"quic ku"` is 4d's.)
-- Produces (`tls::quic_keys`):
+- Produces (`quictls::keys`, constants; tls's `codes.rs` is not edited (ruling: quictls crate)): `INITIAL_SALT: [u8; 20] = 38 76 2c f7 f5 59 34 b3 4d 17 9a e6 a4 c8 0c ad cc bb 7f 0a` (rfc9001.txt:1066), `LABEL_CLIENT_IN = *b"client in"`, `LABEL_SERVER_IN = *b"server in"`, `LABEL_QUIC_KEY = *b"quic key"`, `LABEL_QUIC_IV = *b"quic iv"`, `LABEL_QUIC_HP = *b"quic hp"`. (`"quic ku"` is 4d's.)
+- Produces (`quictls::keys`):
   - `pub open spec fn rfc_initial_secret(dcid: Seq<u8>) -> Seq<u8>` = `spec_hkdf_extract(INITIAL_SALT@, dcid)`.
   - `pub open spec fn rfc_packet_keys(secret: Seq<u8>) -> SpecKeys` = `SpecKeys { key: spec_hkdf_expand_label(secret, LABEL_QUIC_KEY@, seq![], 16), iv: …(LABEL_QUIC_IV@, …, 12), hp: …(LABEL_QUIC_HP@, …, 16) }` (§5.1).
   - `pub open spec fn rfc_initial_keys(dcid: Seq<u8>) -> SpecKeyPair`, the server's view: `rx` = `rfc_packet_keys(spec_hkdf_expand_label(rfc_initial_secret(dcid), LABEL_CLIENT_IN@, seq![], 32))`, and `tx` the same with `LABEL_SERVER_IN` (§5.2).
   - `pub fn packet_keys(secret: &[u8; 32]) -> (r: PacketKeys)`: ensures `r@ == rfc_packet_keys(secret@)`.
   - `pub fn initial_keys(dcid: &[u8]) -> (r: KeyPair)`: requires `dcid@.len() <= MAX_CID_LEN`; ensures `r@ == rfc_initial_keys(dcid@)`.
 
-- [ ] **Step 1: Failing tests** in `tests/quic_keys.rs`. Values are from rfc9001.txt §A.1, lines 2334–2380.
+- [ ] **Step 1: Failing tests** in `crates/quictls/tests/keys.rs`. Values are from rfc9001.txt §A.1, lines 2334–2380.
   - **`a1_labels`:** `hkdf_label(b"client in", &[], 32) == 00200f746c73313320636c69656e7420696e00`. Likewise `server in` gives `00200f746c7331332073657276657220696e00`, `(quic key, 16)` gives `00100e746c7331332071756963206b657900`, `(quic iv, 12)` gives `000c0d746c733133207175696320697600`, and `(quic hp, 16)` gives `00100d746c733133207175696320687000`.
   - **`a1_secrets`:**
     - `hkdf_extract(&INITIAL_SALT, &S1) == 7db5df06e7a69e432496adedb00851923595221596ae2ae9fb8115c1e9ed0a44`;
@@ -181,21 +201,21 @@ After Task 4, `duvet_q.py` over the 29 sections prints exactly the 22 lines of t
   - **`a2_a3_under_derived_keys`** (Phase 4 exit, "A.2/A.3 protect under the derived keys"):
     - `protect(&OutPacket{Initial, S1, [], 2, 4, [Crypto{0, A2_CRYPTO}], 917, false}, &initial_keys(&S1).rx, &mut out)` writes exactly `qc::A2`;
     - `protect(&OutPacket{Initial, [], f067a5502a4262b5, 1, 2, [Ack(AckFrame{0, 0, 0, [], None}), Crypto{0, A3_PAYLOAD[9..]}], 0, false}, &initial_keys(&S1).tx, …)` writes exactly `qc::A3`.
-  - **`codes_agree`** (outline 4c Task 1):
+  - **`codes_agree`** (outline 4c Task 1; in quictls, because tls cannot see quic (ruling: quictls crate)):
     - `tls::codes::{PROTOCOL_VIOLATION, CRYPTO_BUFFER_EXCEEDED, CRYPTO_ERROR_BASE}` each equal `quic::codes`' constant of the same name;
     - `tls::codes::H3_ALPN == quic::conn::H3_ALPN`;
     - every `tls::codes::ALERT_*` lies in `CRYPTO_ERROR_BASE..=CRYPTO_ERROR_BASE + 0xff`.
   - **`any_dcid`:** `initial_keys(&[0x83; 8]) != initial_keys(&S1)`; `initial_keys(&[0u8; 20])` and `initial_keys(&[])` return without panicking.
-- [ ] **Step 2:** `cargo test -p tls --test quic_keys` fails to compile.
+- [ ] **Step 2:** `cargo test -p quictls --test keys` fails to compile.
 - [ ] **Step 3: Implement.**
   - Duvet-cite RFC 9001 §5.2 "The HKDF-Expand-Label function defined in TLS 1.3 MUST be used for Initial packets even where the TLS versions offered do not include TLS 1.3." at `rfc_initial_keys`.
   - Comment-cite the §5.2 `initial_salt` line at `INITIAL_SALT`.
   - Each 16- or 12-byte output comes from `hkdf_expand_label(_, _, &[], n)` (len `n`), copied into its array as `hkdf_expand_label_32` does.
   - In the shell, `Route::NewInitial` becomes `initial_dcid(d).filter(|x| x.len() <= MAX_CID_LEN).map(|x| initial_keys(&x))`, and the rest is unchanged. From here on every client's Initial is keyed, so the shell's ponytail line "A.1-only keys allow one connection in 3e" becomes "every DCID is keyed (4c): MAX_CONNS is reachable; see the 3e binding note".
-- [ ] **Step 4:** The four checks; the tls rlimit-4 run; `cargo test -p server` (both 3e suites still pass, since A.2's DCID derives the A.1 keys). Binary gate: no new `U` line is expected; otherwise follow the Global Constraints procedure.
+- [ ] **Step 4:** The four checks; the quictls rlimit-4 run (ruling: quictls crate); `cargo test -p server` (both 3e suites still pass, since A.2's DCID derives the A.1 keys). Binary gate: the new `U quictls crypto::…` line(s) are recorded per the Global Constraints procedure (ruling: quictls crate).
   - **Mutations:** `initial_keys` uses `LABEL_SERVER_IN` for `rx` (fails its ensures); `packet_keys` derives `key` with `LABEL_QUIC_HP` (fails its ensures).
 - [ ] **Step 5: Commit:** `feat(tls): verified RFC 9001 §5.1-§5.2 Initial secrets and packet keys for any DCID; the A.1-only shim retired`
-- [ ] **Step 6: Matrix commit.** RFC 9001 §5.2: `✅ 4c: crates/tls/src/quic_keys.rs (rfc_initial_keys over spec_hkdf_expand_label; A.1 byte-exact, A.2/A.3 reproduced under derived keys)`. Commit: `docs: mark RFC 9001 §5.2 closed in 4c`.
+- [ ] **Step 6: Matrix commit.** RFC 9001 §5.2: `✅ 4c: crates/quictls/src/keys.rs (rfc_initial_keys over spec_hkdf_expand_label; A.1 byte-exact, A.2/A.3 reproduced under derived keys)`. Commit: `docs: mark RFC 9001 §5.2 closed in 4c`.
 
 ---
 
@@ -275,12 +295,12 @@ After Task 4, `duvet_q.py` over the 29 sections prints exactly the 22 lines of t
 
 ---
 
-### Task 3: The glue (`tls::quic_server::QuicServer`) — suggested model: opus
+### Task 3: The glue (`quictls::server::QuicServer`) — suggested model: opus
 
 **Files:**
-- Create: `crates/tls/src/quic_server.rs`, `crates/tls/tests/quic_server.rs`
+- Create: `crates/quictls/src/server.rs`, `crates/quictls/tests/server.rs`
 - Modify:
-  - `crates/tls/src/lib.rs`;
+  - `crates/quictls/src/lib.rs` (`pub mod server;`) (ruling: quictls crate);
   - `crates/tls/src/server.rs`:
     - the comment at `fail` (`// ponytail: secrets not wiped; zeroize on Failed/Complete when 4c owns key lifetime`) becomes `// Secrets are dropped from the state here; memory is not zeroised (TRUSTED: secret lifetime).`;
     - add `pub proof fn lemma_ok_not_failed`, which needs 4b's private `lemma_drain_events` and `spec_call_shape` (preflight I2);
@@ -289,7 +309,7 @@ After Task 4, `duvet_q.py` over the 29 sections prints exactly the 22 lines of t
 
 **Interfaces:**
 - Consumes: Task 1 (`initial_keys`, `packet_keys`), Task 2 (`refeed_one_rtt`, `accept_datagram`'s odcid ensures, `is_live`, `crypto_end`, `crypto_read`'s bound), and the Global Constraints lists.
-- Produces (`tls::quic_server`):
+- Produces (`quictls::server`):
   - `pub struct Rand { pub conn: [u8; RAND_LEN], pub refeed: [u8; RAND_LEN], pub complete: [u8; RAND_LEN], pub tls: [u8; TLS_RAND_LEN] }` (`refeed`: preflight I1). `tls` holds the ECDHE scalar and the PSS salt, so `Rand` gets no derived `Debug` (3e's `PacketKeys` ruling). `QuicServer` gets no derives. Any derive a task adds goes on TRUSTED's derived-impl tls row (4b's).
   - `pub enum TlsCall { Fed { level: Level, current: Level }, KeyChange { lower: Level, unread: nat } }` (ghost log entries), with `pub open spec fn level_rank(l: Level) -> nat` (Initial 0, Handshake 1, OneRtt 2).
   - `pub struct QuicServer<'a> { h3: H3Server, hs: ServerHandshake<'a>, keys: [Option<KeyPair>; 3], level: Level, init_end: u64, log: Ghost<Seq<TlsCall>> }`:
@@ -370,7 +390,7 @@ After Task 4, `duvet_q.py` over the 29 sections prints exactly the 22 lines of t
       Finally `sync_keys()`, then return `true`.
     - **`fn report(&mut self, code: u64, now: u64)`**: `CRYPTO_ERROR_BASE <= code <= CRYPTO_ERROR_BASE + 0xff` → `on_tls_alert((code - CRYPTO_ERROR_BASE) as u8, now)`; else `code <= VARINT_MAX` → `close(code, false, &[], now)`; else `close(INTERNAL_ERROR, …)`. This keeps the 4b binding: `on_crypto` also returns 0x0a and 0x0d.
 
-- [ ] **Step 1: Failing tests** in `tests/quic_server.rs`. Setup:
+- [ ] **Step 1: Failing tests** in `crates/quictls/tests/server.rs`. Setup:
   - `R(n)` is `Rand { conn: rnd(n), refeed: rnd(n + 50), complete: rnd(n + 100), tls: [n; 96] }`, and `cfg = ecdsa_cfg()`.
   - `ini(dcid, pn, frames, _)` = `protect(&OutPacket{Initial, dcid, C1, pn, 4, frames, padding, false}, &initial_keys(dcid).rx)`, with `padding` chosen so the datagram is exactly 1200 bytes unless a test says otherwise.
   - The curl tests use `ini` with DCID `S1` and SCID `curl_scid()` instead of `C1` (preflight M1). `curl_scid()` is the `initial_source_connection_id` of `CURL_CH`'s 0x39 extension, read with `parse_transport_params(_, true)`; otherwise `on_peer_params`' §7.3 check closes the connection at the ServerHello.
@@ -417,16 +437,16 @@ After Task 4, `duvet_q.py` over the 29 sections prints exactly the 22 lines of t
   - RFC 9001 §4.9.1's server MUST at `sync_keys`, its "MUST NOT send Initial packets after this point" there too (an Initial packet has no key once the space is discarded), and §4.9.2 there.
   - Call `theorem_reader_bound` in a comment at `tls_step`: with `crypto_read`'s `MAX_CRYPTO_BUFFER` bound, each `on_crypto` gets at most 16384 bytes and each reader stays under `4 + MAX_HS_BODY` (the controller's push-bound ruling).
   - TRUSTED.md:
-    - "CT check scope" row: add `tls::quic_keys` and `tls::quic_server` (traffic secrets and packet keys handled outside crypto, not CT-checked);
-    - a new row: `| Secret lifetime (RFC 8446 §6 "forget"): QuicServer holds no traffic secret after deriving packet keys; ServerHandshake drops transcript, CH1 and client_vd on Failed (4b), and keeps client_vd after Complete (preflight M6); the 1-RTT key slot is cleared on a TLS failure before completion, and kept after completion, because the CONNECTION_CLOSE then goes out under 1-RTT keys (preflight C9); Initial and Handshake packet keys stay until their space is discarded or the connection is dropped, because CONNECTION_CLOSE needs them. Memory is not zeroised: freed buffers, the TlsEvent secrets and stack copies keep their bytes until reused, so a memory disclosure exposes them (Task 5 adds the shell's PEM/DER buffers and scalar copies) | crates/tls/src/quic_server.rs, crates/tls/src/server.rs | Verus cannot express erasure, and plain overwrites are dead stores the optimiser may drop | never (known gap) |`.
-- [ ] **Step 4:** The four checks; the tls rlimit-4 run (and `build_flight`'s margin). Binary gate per the Global Constraints. The `U tls crypto::…` block may grow if quic's small fns are inlined into tls.
+    - "CT check scope" row: add `quictls::keys` and `quictls::server` (traffic secrets and packet keys handled outside crypto, not CT-checked);
+    - a new row: `| Secret lifetime (RFC 8446 §6 "forget"): QuicServer holds no traffic secret after deriving packet keys; ServerHandshake drops transcript, CH1 and client_vd on Failed (4b), and keeps client_vd after Complete (preflight M6); the 1-RTT key slot is cleared on a TLS failure before completion, and kept after completion, because the CONNECTION_CLOSE then goes out under 1-RTT keys (preflight C9); Initial and Handshake packet keys stay until their space is discarded or the connection is dropped, because CONNECTION_CLOSE needs them. Memory is not zeroised: freed buffers, the TlsEvent secrets and stack copies keep their bytes until reused, so a memory disclosure exposes them (Task 5 adds the shell's PEM/DER buffers and scalar copies) | crates/quictls/src/server.rs, crates/tls/src/server.rs | Verus cannot express erasure, and plain overwrites are dead stores the optimiser may drop | never (known gap) |`.
+- [ ] **Step 4:** The four checks; the quictls and tls rlimit-4 runs (and `build_flight`'s margin) (ruling: quictls crate). Binary gate per the Global Constraints. The `U tls crypto::…` block may grow if quic's small fns are inlined into tls.
   - **Mutations:** drop the `pending(Initial)` pre-check (fails `wf`'s `KeyChange` clause); drop the `pending(Handshake)` pre-check (same); delete step 1's close (fails the §4.1.3 close ensures); feed step 1's bytes to `on_crypto(Initial)` instead of closing (fails `wf`'s `Fed` clause); `sync_keys` keeps `keys[0]` (fails `wf`'s Initial clause); drop `keys[2] = None` on `Err` (fails the `tls_step` 1-RTT ensures); clear `keys[2]` on `Err` also after completion (fails no proof: the ensures only constrains before completion, so it is caught by Task 4's `post_handshake_error_closes_under_one_rtt`; preflight C9); drop `sync_keys()` after `pump` in `receive` (fails `wf`'s key clauses; preflight C1); drop `apply`'s post-`on_peer_params` Open check (caught by `peer_tp_mismatch_no_keys` below; preflight I7).
   - Residual, as in 3e's C4: a body that skips a `KeyChange`/`Fed` push still verifies. It goes in the report as one line.
 - [ ] **Step 5: Commit:** `feat(tls): verified QUIC-TLS glue (RFC 9001 §4, §4.1.3, §4.8, §4.9): events to the connection, key slots in lockstep with discard, alerts to CONNECTION_CLOSE`
 - [ ] **Step 6: Matrix commit.**
-  - RFC 9001 §4, §4.1.3, §4.8, §4.9: `✅ 4c: crates/tls/src/quic_server.rs (…)`, each naming its fn.
-  - RFC 8446 §5.1 (req): `✅ 4c: crates/tls/src/quic_server.rs (apply's pending pre-checks; PROTOCOL_VIOLATION per RFC 9001 §4.1.3)`.
-  - RFC 8446 §6, §6.2: `✅ 4c: crates/tls/src/quic_server.rs (report, tls_step's Err arm; memory zeroisation is a TRUSTED known gap)`.
+  - RFC 9001 §4, §4.1.3, §4.8, §4.9: `✅ 4c: crates/quictls/src/server.rs (…)`, each naming its fn.
+  - RFC 8446 §5.1 (req): `✅ 4c: crates/quictls/src/server.rs (apply's pending pre-checks; PROTOCOL_VIOLATION per RFC 9001 §4.1.3)`.
+  - RFC 8446 §6, §6.2: `✅ 4c: crates/quictls/src/server.rs (report, tls_step's Err arm; memory zeroisation is a TRUSTED known gap)`.
 
   Each replaces the 4a/4b touched note. Commit: `docs: mark RFC 9001 §4, §4.1.3, §4.8, §4.9 and RFC 8446 §5.1 (req), §6, §6.2 closed in 4c`.
 
@@ -435,17 +455,17 @@ After Task 4, `duvet_q.py` over the 29 sections prints exactly the 22 lines of t
 ### Task 4: The handshake end to end in memory; discard, 0-RTT and replaced-by-QUIC rows — suggested model: sonnet
 
 **Files:**
-- Create: `crates/tls/tests/quic_e2e.rs`
+- Create: `crates/quictls/tests/e2e.rs`
 - Modify:
-  - `crates/tls/src/quic_server.rs`: comments only. These are the exception block at the end of the file, and the §4.1.2 citation in `apply`'s `Complete` arm (preflight M7);
+  - `crates/quictls/src/server.rs`: comments only. These are the exception block at the end of the file, and the §4.1.2 citation in `apply`'s `Complete` arm (preflight M7);
   - `docs/requirements.md`.
 
 **Interfaces:**
 - Consumes: Task 3's `QuicServer` API, `Rand`, `key_slots`; Task 1's `initial_keys`, `packet_keys`; `quic::protect::{protect, open_datagram}`; `quic::datagram::OutPacket`.
-- Consumes: rustls `quic::ClientConnection`. `tests/rustls_e2e.rs`'s `client`, `Log`, `Verifier` and `drain` are private to that file, so copy them. Construct the client with transport parameters `0f08 <scid> 0e0104 090103 040480010000 070480004000` (preflight C2): `initial_source_connection_id` scid, `active_connection_id_limit` 4, `initial_max_streams_uni` 3, `initial_max_data` 65536, `initial_max_stream_data_uni` 16384.
+- Consumes: rustls `quic::ClientConnection`. `crates/tls/tests/rustls_e2e.rs`'s `client`, `Log`, `Verifier` and `drain` are private to that file, so copy them. Construct the client with transport parameters `0f08 <scid> 0e0104 090103 040480010000 070480004000` (preflight C2): `initial_source_connection_id` scid, `active_connection_id_limit` 4, `initial_max_streams_uni` 3, `initial_max_data` 65536, `initial_max_stream_data_uni` 16384.
   - Without the uni-stream limit, `H3Server::pump` closes with H3_GENERAL_PROTOCOL_ERROR right after completion (h3_server.rs:1029-1033), and no HANDSHAKE_DONE is sent.
   - Not 4b's `client_tp()`, whose `initial_source_connection_id` would fail `on_peer_params`' §7.3 check.
-- Produces: a test-only client in `quic_e2e.rs`:
+- Produces: a test-only client in `crates/quictls/tests/e2e.rs`:
   - `struct Client { tls: ClientConnection, log: Arc<Log>, odcid: [u8; 8], scid: [u8; 8] (= C1), dcid: Vec<u8>, keys: [Option<KeyPair>; 3], pn: [u64; 3], rx: [Reader; 3], tx_off: [u64; 3] }`, where `keys` is the client view (`rx` = the server's).
   - Initial keys come from `initial_keys(&odcid)`, swapped. The Handshake and 1-RTT keys are `packet_keys` over the KeyLog secrets `CLIENT_HANDSHAKE_TRAFFIC_SECRET`/`SERVER_HANDSHAKE_TRAFFIC_SECRET` and `CLIENT_TRAFFIC_SECRET_0`/`SERVER_TRAFFIC_SECRET_0`, installed when `write_hs` reports the matching `KeyChange`.
   - `dcid` becomes the server's SCID from its first Initial (RFC 9000 §7.2).
@@ -459,7 +479,7 @@ After Task 4, `duvet_q.py` over the 29 sections prints exactly the 22 lines of t
     Each level's CRYPTO goes in order to `read_hs`; it returns the frames.
   - `fn run(server, client, max_rounds)` shuttles both ways: `transmit` until `None`, asserting **every `Some` has a non-empty `out`**. That is the 3e binding note "no keyless ack-eliciting packet": `protect_datagram`'s write-nothing branch never fires.
 
-- [ ] **Step 1: Tests** in `tests/quic_e2e.rs`, each against `QuicServer::accept(&ecdsa_cfg(), …)`. rustls's default key share is X25519, so every handshake here takes the HRR path.
+- [ ] **Step 1: Tests** in `crates/quictls/tests/e2e.rs`, each against `QuicServer::accept(&ecdsa_cfg(), …)`. rustls's default key share is X25519, so every handshake here takes the HRR path.
   - **`rustls_quic_handshake`:**
     - `run` until `!client.tls.is_handshaking()` and `server.conn().handshake_complete()`, within 6 rounds;
     - the first server datagram after completion holds a 1-RTT packet with `HandshakeDone` (§4.1.2);
@@ -471,8 +491,8 @@ After Task 4, `duvet_q.py` over the 29 sections prints exactly the 22 lines of t
   - **`tampered_finished_0x133`:** flip the last verify_data byte; the close code is `0x133` (decrypt_error), in a Handshake packet. Afterwards `key_slots()[2] == false`.
   - **`zero_rtt_dropped`** (§4.6.2, §8.3): a 0-RTT long header (type `0xd0`, DCID `odcid`, a Length covering 30 bytes of `[0x06; 30]`, so it looks like CRYPTO) is coalesced *after* the client's first Initial in the same datagram (RFC 9000 §12.2 order). It must go after: `accept` keys by the first header, which must be an Initial. `accept` succeeds, the handshake completes, and no close happens. A second case does the same in front of the client's CH2 Initial, through `receive`. That makes the first packet a drop, so `receive` calls `on_reset_candidate` with CH2's last 16 bytes (harmless: no reset token exists yet); assert `phase()` is Open right after (preflight M10).
   - **`post_handshake_error_closes_under_one_rtt`** (preflight C9): after `rustls_quic_handshake`, the client sends a 1-RTT packet with `Crypto{0, [0x18, 0, 0, 1, 0]}` (a TLS KeyUpdate). The server closes with 0x10a; its next datagram is non-empty and holds a 1-RTT packet with `ConnectionClose{false, 0x10a, …}`; and `key_slots() == [false, false, true]`.
-- [ ] **Step 2:** `cargo test -p tls --test quic_e2e`. Tasks 1–3 exist, so this is a check, not a red step; on a failure, fix the glue (Task 3's file) and say so in the report.
-- [ ] **Step 3: Annotations**, at the end of `quic_server.rs`, under the heading comment `// Requirements on clients, on specification authors, and on TLS records, which QUIC replaces`. Each is a `type=exception` with a reason, unless it says "cite":
+- [ ] **Step 2:** `cargo test -p quictls --test e2e`. Tasks 1–3 exist, so this is a check, not a red step; on a failure, fix the glue (Task 3's file) and say so in the report.
+- [ ] **Step 3: Annotations**, at the end of `crates/quictls/src/server.rs`, under the heading comment `// Requirements on clients, on specification authors, and on TLS records, which QUIC replaces`. Each is a `type=exception` with a reason, unless it says "cite":
   - RFC 9001:
     - §4.1.2: cite at `apply`'s `Complete` arm, outside this block (`on_handshake_complete` sets HANDSHAKE_DONE owed in the call that completes; `rustls_quic_handshake` sees it in the next datagram);
     - §4.6.2's server MUST: cite here, with the comment "0-RTT packets are dropped unopened by quic::protect::rfc_unprotect (3e); no 0-RTT keys exist". Its client MUST is client-only;
@@ -483,14 +503,14 @@ After Task 4, `duvet_q.py` over the 29 sections prints exactly the 22 lines of t
   - RFC 8446:
     - §5's five, §5.1's other twelve, §5.2's five, §5.3's three and §5.4's five: `reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).`;
     - §6.1's four: `reason=Replaced by QUIC: closure is CONNECTION_CLOSE (RFC 9001 §4.8, RFC 9000 §10.2); no close_notify is sent or read.`
-- [ ] **Step 4:** The four checks; `check_quotes.py` on `quic_server.rs`; `duvet_q.py` over the 29 sections prints exactly the 22 lines named in "MUST assignment". No proof changes.
+- [ ] **Step 4:** The four checks; `check_quotes.py` on `crates/quictls/src/server.rs`; `duvet_q.py` over the 29 sections prints exactly the 22 lines named in "MUST assignment". No proof changes.
   - **Mutation (test):** `sync_keys` keeps `keys[0]` (a Task 3 proof mutation too) also makes `initial_keys_dropped_on_first_handshake_packet` fail; drop `refeed_one_rtt` from `receive`, and `finished_coalesced_with_one_rtt` fails.
 - [ ] **Step 5: Commit:** `test(tls): in-memory QUIC handshake against rustls through QuicServer (HRR, discard, HANDSHAKE_DONE, coalesced Finished + 1-RTT); 0-RTT and replaced-by-QUIC annotations`
 - [ ] **Step 6: Matrix commit.**
-  - RFC 9001 §4.1.2, §4.9.1, §4.9.2: `✅ 4c: crates/tls/src/quic_server.rs (…) + crates/tls/tests/quic_e2e.rs`.
-  - §4.6.2, §4.9.3, §5.6, §8.3: `✅ 4c: vacuous or client-only (crates/tls/src/quic_server.rs exceptions); 0-RTT dropped unopened (3e)`.
-  - RFC 8446 §5, §5.1, §5.2, §5.3, §5.4, §6.1: `✅ 4c: replaced by QUIC (crates/tls/src/quic_server.rs exceptions, RFC 9001 §4)`.
-  - Retag RFC 9001 §5.3, §5.5, §6.1, §6.2, §6.3, §6.4, §6.6 Phase `4` → `4d`, with touched notes. §5.3: `4c: suite/HP and unsupported-suite MUSTs cited in quic_server.rs; the AEAD-limit key update is 4d`.
+  - RFC 9001 §4.1.2, §4.9.1, §4.9.2: `✅ 4c: crates/quictls/src/server.rs (…) + crates/quictls/tests/e2e.rs`.
+  - §4.6.2, §4.9.3, §5.6, §8.3: `✅ 4c: vacuous or client-only (crates/quictls/src/server.rs exceptions); 0-RTT dropped unopened (3e)`.
+  - RFC 8446 §5, §5.1, §5.2, §5.3, §5.4, §6.1: `✅ 4c: replaced by QUIC (crates/quictls/src/server.rs exceptions, RFC 9001 §4)`.
+  - Retag RFC 9001 §5.3, §5.5, §6.1, §6.2, §6.3, §6.4, §6.6 Phase `4` → `4d`, with touched notes. §5.3: `4c: suite/HP and unsupported-suite MUSTs cited in crates/quictls/src/server.rs; the AEAD-limit key update is 4d`.
   - Retag RFC 9001 §9.5 Phase `4` → `7`, with the note `not met: quic CT roots after 8c` ahead of its 3e note (Ruling D3; preflight I3).
   - Add a Legend row: `| 4d | QUIC key update and AEAD limits (RFC 9001 §5.3 third MUST, §5.5, §6.1–§6.4, §6.6) |`.
 
@@ -503,7 +523,7 @@ After Task 4, `duvet_q.py` over the 29 sections prints exactly the 22 lines of t
 **Files:**
 - Modify:
   - `crates/server/src/lib.rs`, `crates/server/src/main.rs`;
-  - `crates/tls/src/config.rs` (`p256_signing_key`), `crates/tls/tests/quic_server.rs` (one test);
+  - `crates/tls/src/config.rs` (`p256_signing_key`; it needs no quic item), and a new `crates/tls/tests/config.rs` (one test) (ruling: quictls crate);
   - `crates/server/tests/shell.rs`, `crates/server/tests/initial_exchange.rs`;
   - `crates/server/Cargo.toml` (`h3 = { path = "../h3" }`) and `Cargo.lock` (preflight I5);
   - `TRUSTED.md`;
@@ -556,7 +576,7 @@ After Task 4, `duvet_q.py` over the 29 sections prints exactly the 22 lines of t
   - `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out rsa-key.pem`.
 
   TRUSTED.md:
-  - shell row (preflight M5): "drives tls::quic_server::QuicServer. It calls quic and tls fns whose requires is the receiver's wf(), plus:
+  - shell row (preflight M5): "drives quictls::server::QuicServer. It calls quic, tls and quictls fns whose requires is the receiver's wf(), plus:
     - `QuicServer::accept`'s `cfg.wf()`, which `build_config` ensures for the only ServerConfig the shell makes;
     - `build_config`'s `key_wf` for every chain, which `p256_signing_key` ensures.
 
@@ -570,7 +590,7 @@ After Task 4, `duvet_q.py` over the 29 sections prints exactly the 22 lines of t
   - the Task 3 secret-lifetime row gains "the shell's PEM/DER buffers and scalar copies are not zeroised either" (preflight M6);
   - trusted-base bullet: the shell's PEM/PKCS#8 parsing.
 
-  **Call check:** list every `quic` and `tls` fn `crates/server/src` calls, with its `requires`, in the report.
+  **Call check:** list every `quic`, `tls` and `quictls` fn `crates/server/src` calls, with its `requires`, in the report.
 - [ ] **Step 4:** The four checks; the tls rlimit-4 run (`config.rs`); `cargo test -p server`; the binary gate (a `U server crypto::…` line goes through the procedure).
   - **Mutation:** `p256_signing_key` returns `Some` without the `p256_public_key` check (fails its ensures).
 - [ ] **Step 5: Commit:** `feat(server): shell over the verified QUIC-TLS glue (PEM chain, PKCS#8 P-256 key with a proved scalar range, static HTTP/3 response)`
@@ -623,12 +643,13 @@ After Task 4, `duvet_q.py` over the 29 sections prints exactly the 22 lines of t
 
 | Pair | Shared | Producer gives | Consumer needs | Found |
 |---|---|---|---|---|
+| T1 ↔ all (ruling: quictls crate) | `crates/quictls` (crate, manifest, root profile block); `crates/tls` untouched by T1 and T3's glue | T1 creates the crate with `keys`; T3 adds `server` | T2 changes quic (quictls re-verifies); T3 edits `crates/tls/src/server.rs` only for `lemma_ok_not_failed`; T5 edits `crates/tls/src/config.rs` only for `p256_signing_key`; neither imports a quic item into tls | Consistent: tls never names `quic`, so tls's rlimit margins (`spec_drain`, `build_flight`) are unaffected. The binary gate gains a `quictls` dependent (T1 records its `U` lines). |
 | T1 ↔ T3 | `initial_keys`, `packet_keys` | `initial_keys(dcid)` requires `|dcid| ≤ MAX_CID_LEN`; `packet_keys(&[u8; 32])` | `accept` derives from `initial_dcid(d)`; `apply` turns `Secrets { client, server: [u8; 32] }` into slots | Consistent: `accept` checks the length before the call (`initial_dcid`'s ensures give no bound). |
 | T1 ↔ T5 | `crates/server/Cargo.toml` (`tls`), `Cargo.lock`, `lib.rs`, `tests/shell.rs` | T1 adds the dependency, replaces the shim's call site, and deletes `a1_keys_only` | T5 replaces `Connection` with `QuicServer`, adds `h3` (preflight I5), and rewrites every remaining shell test (preflight M2) | Consistent: T5 rewrites the call site T1 touched. T1's interim shell keys every DCID with no TLS, which is fine for one task. |
-| T1 ↔ T3/T4 | `#[path]` test module | T1 introduces `mod qc` in tls tests | T3, T4 reuse `qc::{A2, S1, C1, rnd, ltp}` | Consistent; each test file declares the module itself. |
+| T1 ↔ T3/T4 | `#[path]` test module | T1 introduces `mod qc` and `mod tc` in quictls tests (ruling: quictls crate) | T3, T4 reuse `qc::{A2, S1, C1, rnd, ltp}` | Consistent; each test file declares the module itself. |
 | T2 ↔ T3 | `refeed_one_rtt`, `accept_datagram`'s DCID check, `is_live`, `crypto_end` (via `CryptoStream::end`), `crypto_read`'s bound, `H3Server::on_timeout`'s `now <= now_spec` | names and contracts in T2's Interfaces | `receive`'s body (with `r.refeed`), `sync_keys`, `tls_step` steps 1–3, `QuicServer::on_timeout`/`settled_later` | Consistent after the amendments:<br>• `refeed_one_rtt` masks the slots itself, so T3 passes `&self.keys` unchanged;<br>• `crypto_end` reads a new `CryptoStream::end` (preflight C6);<br>• step 1 reads `crypto_end` before `crypto_read`, so no `crypto_read` frame is needed (preflight C7);<br>• T3 consumes no odcid fact after `on_datagram`, and T2 states only the provable ensures (preflight C5);<br>• `settled_later` gets `now <= now_spec` from T2's `H3Server::on_timeout` ensures, and `acks_later` from `transmit`'s forwarded `None` clause (preflight C8). |
 | T2 ↔ T5 | `H3Server::on_datagram` signature | `error` parameter added | the shell uses `QuicServer`, not `H3Server` | Consistent; `h3_alloc.rs` and `h3_server.rs` callers are updated in T2. |
-| T3 ↔ T4 | `QuicServer` API, `Rand`, `key_slots`; `quic_server.rs` | T3 creates the file and the API | T4 drives it and adds comments (the exception block, and §4.1.2 at `Complete`; preflight M7) | Consistent: comments only, so no proof re-run beyond the checks.<br>• T4's client sends a uni-stream limit, so the connection survives `pump` and HANDSHAKE_DONE is sent (preflight C2).<br>• T4 opens server packets with a client-side opener (preflight C3).<br>• After completion the 1-RTT keys survive a TLS failure (preflight C9), which `post_handshake_error_closes_under_one_rtt` checks. |
+| T3 ↔ T4 | `QuicServer` API, `Rand`, `key_slots`; `crates/quictls/src/server.rs` | T3 creates the file and the API | T4 drives it and adds comments (the exception block, and §4.1.2 at `Complete`; preflight M7) | Consistent: comments only, so no proof re-run beyond the checks.<br>• T4's client sends a uni-stream limit, so the connection survives `pump` and HANDSHAKE_DONE is sent (preflight C2).<br>• T4 opens server packets with a client-side opener (preflight C3).<br>• After completion the 1-RTT keys survive a TLS failure (preflight C9), which `post_handshake_error_closes_under_one_rtt` checks. |
 | T3 ↔ T5 | `QuicServer::accept` (`requires cfg.wf()`), `receive`, `transmit`, `on_timeout`, `poll_cid_updates`, `on_reset_candidate`, `send_response`, `conn`; `Rand` with four arrays | T3 | the shell's `Server`, which fills `Rand` fresh, `refeed` included (preflight I1) | Consistent. The shell gets `cfg` only from `build_config`, and its keys from `p256_signing_key`, which discharges `build_config`'s `key_wf` (TRUSTED row amended; preflight M5). |
 | T5 ↔ T6 | `bind(SocketAddr)`, `run(sock, &ServerConfig)`, flags, `RESPONSE_BODY`, fixtures | T5 | T6's tests (a leaked `&'static` config; `"127.0.0.1:0".parse()`, preflight M1) and manual run | Consistent. |
 | T1/T3/T5 | `TRUSTED.md` | T1 deletes the A.1 row. T3 adds the CT-scope and secret-lifetime rows (C9, M6). T5 updates the shell row, the `ServerConfig::wf` row (D4, M5), the trusted-base bullet, and one clause of the secret-lifetime row (M6) | — | Sequential; T5's edit to T3's row is additive. |
