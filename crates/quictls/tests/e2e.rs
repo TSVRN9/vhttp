@@ -496,6 +496,7 @@ fn rustls_quic_handshake() {
     let (mut s, mut log) = accept(&mut c);
     log.extend(run(&mut s, &mut c, 6));
     assert!(!c.tls.is_handshaking());
+    assert_eq!(c.tls.alpn_protocol(), Some(&b"h3"[..]));
     assert!(s.conn().handshake_complete());
     // §4.1.2: the first datagram after completion holds HANDSHAKE_DONE.
     let after: Vec<_> = log.iter().filter(|(c, _)| *c).collect();
@@ -636,11 +637,8 @@ fn initial_data_past_end_with_handshake_pv() {
     assert_eq!(d.len(), 1200);
     send(&mut s, &d, 3);
     pull_server(&mut s, &mut c, &mut log);
-    assert!(
-        close_in(&log, PacketKind::Handshake, 0x0a) || close_in(&log, PacketKind::Initial, 0x0a),
-        "{:?}",
-        log
-    );
+    assert!(close_in(&log, PacketKind::Handshake, 0x0a), "{:?}", log);
+    assert!(!close_in(&log, PacketKind::Initial, 0x0a), "{:?}", log);
     assert!(!done(&log));
 }
 

@@ -7,4 +7,5 @@ edition = "2021"
 quic = { path = "../quic" }
 quictls = { path = "../quictls" }
 tls = { path = "../tls" }
+h3 = { path = "../h3" }
 libc = "=0.2.191"
