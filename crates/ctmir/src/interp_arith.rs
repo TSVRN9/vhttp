@@ -1,5 +1,5 @@
 //! Exec integer arithmetic proved equal to `ctcore::sem`'s opaque `binop`, `unop` and `cast`, for
-//! the verified interpreter (`interp`). Every op works on the unsigned readings `uval` of its
+//! the verified MIR evaluator (`eval`). Every op works on the unsigned readings `uval` of its
 //! operands modulo `md(t) = 2^bits(t)`; a signed reading `ival` is `uval` or `uval - md(t)`, so
 //! each spec formula reduces to one on the unsigned readings.
 #[cfg(verus_keep_ghost)]

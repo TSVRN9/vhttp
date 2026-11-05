@@ -3,7 +3,7 @@
 # A `#` token starts a comment unless a digit follows it (`#1(..)`, an enum value).
 # Each fn's translated closure runs on ctmir::sem through the verified evaluator (ctmir::eval); the
 # return value and the final pointee of every `mut:` (&mut) param must equal these exactly. Every expected
-# value is also checked against the compiled Rust by its crate's own tests (named per line). ct-check.sh counts
+# value is checked against the compiled Rust by its crate's own tests (named per line), or derived by hand from them where the line says so. ct-check.sh counts
 # the crypto:: lines and the parser (wire::, h3::, quic::) lines separately.
 
 # FIPS 197 Appendix C.1 (crates/crypto/tests/aes_gcm.rs)
