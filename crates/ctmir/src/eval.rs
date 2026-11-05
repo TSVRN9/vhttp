@@ -780,7 +780,7 @@ pub fn e_exec_stmts(m: &MirCrate, tb: &Tabs, b: &Body, fr: &mut CFrame, ss: &Vec
 /// `&mut` type; every other local holds `ul_val` of its type.
 pub fn e_mir_entry(m: &MirCrate, tb: &Tabs, i: usize, args: Vec<CVal>, slots: Vec<CVal>) -> (r: R<CFrame>)
     requires tabs_ok(*m, *tb),
-    ensures r matches Ok(fr) ==> fv(fr) == mir_entry(*m, i as nat, cvs(args@), cvs(slots@)),
+    ensures r matches Ok(fr) ==> fv(fr) == mir_entry(*m, i as nat, cvs(args@), cvs(slots@)), !(r matches Err(Halt::Panic)),
 {
     let b = match t_inst_body(m, tb, i) {
         Some(b) => b,
