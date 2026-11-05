@@ -88,13 +88,13 @@ fn first_frames() -> Vec<Frame> {
 
 fn conn() -> Connection {
     let mut c = Connection::accept(&ini(2, first_frames()), 1200, 0, 0, &rnd(1), &ltp()).unwrap();
-    c.on_datagram(0, 1200, vec![ini(2, first_frames())], 0, &rnd(1));
+    c.on_datagram(0, 1200, vec![ini(2, first_frames())], None, 0, &rnd(1));
     c
 }
 
 fn established_with(p: TransportParams) -> Connection {
     let mut c = conn();
-    c.on_datagram(0, 1200, vec![hs(0, vec![Frame::Ping])], 10, &rnd(9));
+    c.on_datagram(0, 1200, vec![hs(0, vec![Frame::Ping])], None, 10, &rnd(9));
     c.on_peer_params(&p, 10);
     c.on_handshake_complete(b"h3", 10, &rnd(2));
     c
@@ -186,7 +186,7 @@ fn settle(c: &mut Connection, now: u64) -> Vec<OutDatagram> {
 /// `established()`, then a non-probing packet from path 1, and the polls that follow it.
 fn rebound() -> (Connection, Vec<OutDatagram>) {
     let mut c = established();
-    c.on_datagram(1, 100, vec![one(1, vec![stream(0, 0, b"GET", true)])], 30, &rnd(5));
+    c.on_datagram(1, 100, vec![one(1, vec![stream(0, 0, b"GET", true)])], None, 30, &rnd(5));
     let v = drain(&mut c, 30);
     (c, v)
 }
@@ -215,7 +215,7 @@ fn close_deadline() {
 #[test]
 fn draining_deadline() {
     let mut c = established();
-    c.on_datagram(0, 50, vec![one(0, vec![CC(false, 0, &[])])], 20, &rnd(3));
+    c.on_datagram(0, 50, vec![one(0, vec![CC(false, 0, &[])])], None, 20, &rnd(3));
     assert_eq!(c.next_timeout(), Some(3_072_020));
     c.on_timeout(3_072_020, &rnd(3));
     assert!(c.is_closed());
@@ -236,7 +236,7 @@ fn idle_timeout() {
 #[test]
 fn idle_refreshed_by_packet() {
     let mut c = established();
-    c.on_datagram(0, 50, vec![one(0, vec![Frame::Ping])], 20_000_000, &rnd(3));
+    c.on_datagram(0, 50, vec![one(0, vec![Frame::Ping])], None, 20_000_000, &rnd(3));
     c.on_timeout(30_000_010, &rnd(3));
     assert_eq!(c.phase(), Phase::Open);
 }
@@ -244,7 +244,7 @@ fn idle_refreshed_by_packet() {
 #[test]
 fn idle_refreshed_by_send() {
     let mut c = established();
-    c.on_datagram(0, 50, vec![one(0, vec![stream(0, 0, b"GET", true)])], 1_000_000, &rnd(3));
+    c.on_datagram(0, 50, vec![one(0, vec![stream(0, 0, b"GET", true)])], None, 1_000_000, &rnd(3));
     assert_eq!(c.stream_write(0, b"ok", true), Ok(2));
     assert!(c.poll_transmit(20_000_000).is_some());
     c.on_timeout(31_000_010, &rnd(3));
@@ -261,7 +261,7 @@ fn idle_refreshed_by_send() {
 #[test]
 fn ping_probe() {
     let mut c = established();
-    c.on_datagram(0, 50, vec![one(0, vec![Frame::Ack(A(0, 0, 0, vec![]))])], 30, &rnd(3));
+    c.on_datagram(0, 50, vec![one(0, vec![Frame::Ack(A(0, 0, 0, vec![]))])], None, 30, &rnd(3));
     assert_eq!(c.sent_inflight_len(PacketKind::OneRtt), 0);
     assert_eq!(c.stream_write(3, b"x", false), Ok(1));
     let a = c.poll_transmit(40).unwrap();
@@ -271,7 +271,7 @@ fn ping_probe() {
     assert!(frames_on(&b).iter().any(|f| matches!(f, Frame::ResetStream { .. })));
     assert_eq!(c.sent_inflight_len(PacketKind::OneRtt), 2);
     let pn = b.packets[0].pn;
-    c.on_datagram(0, 50, vec![one(1, vec![Frame::Ack(A(pn, 0, 0, vec![]))])], 42, &rnd(3));
+    c.on_datagram(0, 50, vec![one(1, vec![Frame::Ack(A(pn, 0, 0, vec![]))])], None, 42, &rnd(3));
     assert_eq!(c.sent_inflight_len(PacketKind::OneRtt), 1);
 
     // The STREAM record's time, not the acked RESET_STREAM's: the last in flight.
@@ -298,7 +298,7 @@ fn acked_crypto_not_resent() {
     c.crypto_write(PacketKind::Initial, &[0xbb; 10]);
     let d2 = c.poll_transmit(0).unwrap();
     assert!(has_crypto(&d2));
-    c.on_datagram(0, 1200, vec![ini(3, vec![Frame::Ack(A(pn, 0, 0, vec![]))])], 1, &rnd(3));
+    c.on_datagram(0, 1200, vec![ini(3, vec![Frame::Ack(A(pn, 0, 0, vec![]))])], None, 1, &rnd(3));
     let t = c.next_timeout().unwrap();
     c.on_timeout(t, &rnd(3));
     let v = drain(&mut c, t);
@@ -311,7 +311,7 @@ fn acked_crypto_not_resent() {
 #[test]
 fn acked_stream_not_resent_after_pto() {
     let mut c = established();
-    c.on_datagram(0, 50, vec![one(0, vec![stream(0, 0, b"GET", true)])], 30, &rnd(3));
+    c.on_datagram(0, 50, vec![one(0, vec![stream(0, 0, b"GET", true)])], None, 30, &rnd(3));
     assert_eq!(c.stream_write(0, b"ok", true), Ok(2));
     let d = c.poll_transmit(30).unwrap();
     assert!(d.packets[0].frames.contains(&stream(0, 0, b"ok", true)));
@@ -319,7 +319,7 @@ fn acked_stream_not_resent_after_pto() {
     let d2 = c.poll_transmit(30).unwrap();
     assert!(has_stream(&d2));
     let pn = d.packets[0].pn;
-    c.on_datagram(0, 50, vec![one(1, vec![Frame::Ack(A(pn, 0, 0, vec![]))])], 31, &rnd(3));
+    c.on_datagram(0, 50, vec![one(1, vec![Frame::Ack(A(pn, 0, 0, vec![]))])], None, 31, &rnd(3));
     let t = c.next_timeout().unwrap();
     c.on_timeout(t, &rnd(3));
     let v = drain(&mut c, t);
@@ -363,7 +363,7 @@ fn handshake_done_retransmitted() {
     let d = c.poll_transmit(1_024_010).unwrap();
     assert_eq!(d.packets[0].pn, 1);
     assert_eq!(d.packets[0].frames, four());
-    c.on_datagram(0, 50, vec![one(0, vec![Frame::Ack(A(1, 0, 0, vec![]))])], 1_024_020, &rnd(2));
+    c.on_datagram(0, 50, vec![one(0, vec![Frame::Ack(A(1, 0, 0, vec![]))])], None, 1_024_020, &rnd(2));
     assert_eq!(c.poll_transmit(1_024_020), None);
     assert_eq!(c.next_timeout(), Some(1_024_020 + 30_000_000));
 }
@@ -374,7 +374,7 @@ fn pto_halves_cwnd() {
     p.initial_max_data = 1 << 30;
     p.initial_max_stream_data_bidi_local = 1 << 30;
     let mut c = established_tx_with(p);
-    c.on_datagram(0, 1200, vec![one(0, vec![stream(0, 0, b"GET", true)])], 30, &rnd(3));
+    c.on_datagram(0, 1200, vec![one(0, vec![stream(0, 0, b"GET", true)])], None, 30, &rnd(3));
     assert_eq!(c.stream_write(0, &[7; 100_000], true), Ok(100_000));
     let v = drain(&mut c, 30);
     assert_eq!(v.iter().filter(|d| eliciting(d)).count(), 9);
@@ -421,8 +421,8 @@ fn no_validated_path_closes() {
     let mut c = conn();
     c.on_peer_params(&ptp(), 10);
     c.on_handshake_complete(b"h3", 10, &rnd(2));
-    c.on_datagram(0, 100, vec![one(0, vec![Frame::Ping])], 20, &rnd(3));
-    c.on_datagram(1, 100, vec![one(1, vec![Frame::Ping])], 20, &rnd(4));
+    c.on_datagram(0, 100, vec![one(0, vec![Frame::Ping])], None, 20, &rnd(3));
+    c.on_datagram(1, 100, vec![one(1, vec![Frame::Ping])], None, 20, &rnd(4));
     assert_eq!(c.active_path(), 1);
     let v = drain(&mut c, 20);
     assert!(v.iter().any(|d| d.path == 1 && has_challenge(d)));
@@ -437,19 +437,19 @@ fn no_validated_path_closes() {
 /// path 2's challenge sent and everything else quiet.
 fn fallback_lost_its_cid() -> Connection {
     let mut c = four_cid_conn();
-    c.on_datagram(0, 1200, vec![one(1, vec![new_cid(1, 0, 0xd1), new_cid(2, 0, 0xd2)])], 20, &rnd(5));
+    c.on_datagram(0, 1200, vec![one(1, vec![new_cid(1, 0, 0xd1), new_cid(2, 0, 0xd2)])], None, 20, &rnd(5));
     drain(&mut c, 20);
     let r = rnd(2);
-    c.on_datagram(1, 1200, vec![one_on(2, &r[0..8], vec![Frame::Ping])], 21, &rnd(6));
+    c.on_datagram(1, 1200, vec![one_on(2, &r[0..8], vec![Frame::Ping])], None, 21, &rnd(6));
     drain(&mut c, 21);
-    c.on_datagram(1, 1200, vec![one_on(3, &r[0..8], vec![Frame::PathResponse(slice8(&rnd(6), 96))])], 22, &rnd(7));
+    c.on_datagram(1, 1200, vec![one_on(3, &r[0..8], vec![Frame::PathResponse(slice8(&rnd(6), 96))])], None, 22, &rnd(7));
     assert_eq!(c.path_state(1), Some(quic::path::PathState::Validated));
     drain(&mut c, 22);
-    c.on_datagram(2, 1200, vec![one_on(4, &r[24..32], vec![Frame::Ping])], 30, &rnd(8));
+    c.on_datagram(2, 1200, vec![one_on(4, &r[24..32], vec![Frame::Ping])], None, 30, &rnd(8));
     assert_eq!(c.active_path(), 2);
     drain(&mut c, 30);
     // Retires seq 0 and seq 1: path 0 takes d3, the last unused one, and path 1 has none.
-    c.on_datagram(2, 1200, vec![one_on(5, &r[24..32], vec![new_cid(3, 2, 0xd3)])], 31, &rnd(9));
+    c.on_datagram(2, 1200, vec![one_on(5, &r[24..32], vec![new_cid(3, 2, 0xd3)])], None, 31, &rnd(9));
     drain(&mut c, 31);
     assert_eq!(c.path_dcid(1), None);
     c
@@ -459,7 +459,7 @@ fn fallback_lost_its_cid() -> Connection {
 #[test]
 fn fallback_takes_unused_cid() {
     let mut c = fallback_lost_its_cid();
-    c.on_datagram(2, 1200, vec![one_on(6, &rnd(2)[24..32], vec![new_cid(4, 2, 0xd4)])], 32, &rnd(10));
+    c.on_datagram(2, 1200, vec![one_on(6, &rnd(2)[24..32], vec![new_cid(4, 2, 0xd4)])], None, 32, &rnd(10));
     assert_eq!(c.path_dcid(1), None);
     drain(&mut c, 32);
     c.on_timeout(30 + 3 * PTO, &rnd(11));
@@ -508,7 +508,7 @@ fn closing_reverts() {
     assert_eq!(c.phase(), Phase::Closing);
     assert_eq!(c.active_path(), 0);
     // A packet from the failed address is answered on the validated one.
-    c.on_datagram(1, 100, vec![one(2, vec![Frame::Ping])], e, &rnd(7));
+    c.on_datagram(1, 100, vec![one(2, vec![Frame::Ping])], None, e, &rnd(7));
     let v = drain(&mut c, e);
     assert!(!v.is_empty());
     assert!(v.iter().all(|d| d.path == 0 && has_close(d)));
@@ -525,8 +525,8 @@ fn closing_no_validated_path_closes() {
     let mut c = conn();
     c.on_peer_params(&ptp(), 10);
     c.on_handshake_complete(b"h3", 10, &rnd(2));
-    c.on_datagram(0, 100, vec![one(0, vec![Frame::Ping])], 20, &rnd(3));
-    c.on_datagram(1, 100, vec![one(1, vec![Frame::Ping])], 20, &rnd(4));
+    c.on_datagram(0, 100, vec![one(0, vec![Frame::Ping])], None, 20, &rnd(3));
+    c.on_datagram(1, 100, vec![one(1, vec![Frame::Ping])], None, 20, &rnd(4));
     drain(&mut c, 20);
     c.close(0, false, b"", 21);
     drain(&mut c, 21);
@@ -535,7 +535,7 @@ fn closing_no_validated_path_closes() {
     c.on_timeout(e, &rnd(5));
     assert!(c.is_closed());
     assert_eq!(c.next_timeout(), None);
-    c.on_datagram(1, 100, vec![one(2, vec![Frame::Ping])], e, &rnd(6));
+    c.on_datagram(1, 100, vec![one(2, vec![Frame::Ping])], None, e, &rnd(6));
     assert_eq!(c.poll_transmit(e), None);
 }
 
@@ -543,7 +543,7 @@ fn closing_no_validated_path_closes() {
 fn mtu_probe_failure_moves_off() {
     let (mut c, _) = rebound();
     let r5 = rnd(5);
-    c.on_datagram(1, 1200, vec![one(2, vec![Frame::PathResponse(slice8(&r5, 96))])], 40, &rnd(6));
+    c.on_datagram(1, 1200, vec![one(2, vec![Frame::PathResponse(slice8(&r5, 96))])], None, 40, &rnd(6));
     let v = drain(&mut c, 40);
     assert!(v.iter().any(|d| d.path == 1 && has_challenge(d)));
     assert_eq!(c.active_path(), 1);
@@ -559,7 +559,7 @@ fn mtu_probe_failure_moves_off() {
     assert!(!v.iter().any(|d| d.path == 1));
 
     // The peer sends from there: one probe, §14.2's only traffic, and it stays off the path.
-    c.on_datagram(1, 1200, vec![one(3, vec![Frame::Ping])], t + 1, &rnd(8));
+    c.on_datagram(1, 1200, vec![one(3, vec![Frame::Ping])], None, t + 1, &rnd(8));
     assert_eq!(c.active_path(), 0);
     c.stream_write(3, b"more", false).unwrap();
     let v = drain(&mut c, t + 1);
@@ -569,8 +569,8 @@ fn mtu_probe_failure_moves_off() {
     assert!(has_frame(probes[0], &Frame::PathChallenge(slice8(&rnd(8), 96))));
     assert_eq!(datagram_len(probes[0]), 1200);
     // Its answer restores the path, and the peer's next packet migrates back.
-    c.on_datagram(1, 1200, vec![one(4, vec![Frame::PathResponse(slice8(&rnd(8), 96))])], t + 2, &rnd(9));
-    c.on_datagram(1, 1200, vec![one(5, vec![Frame::Ping])], t + 3, &rnd(9));
+    c.on_datagram(1, 1200, vec![one(4, vec![Frame::PathResponse(slice8(&rnd(8), 96))])], None, t + 2, &rnd(9));
+    c.on_datagram(1, 1200, vec![one(5, vec![Frame::Ping])], None, t + 3, &rnd(9));
     assert_eq!(c.active_path(), 1);
 }
 
@@ -581,9 +581,9 @@ fn validation_resets_recovery() {
     let t = 10 + PTO;
     drain(&mut c, t);
     assert_eq!(c.next_timeout(), Some(t + 2 * PTO));
-    c.on_datagram(1, 1200, vec![one(1, vec![stream(0, 0, b"GET", true)])], t + 1, &rnd(5));
+    c.on_datagram(1, 1200, vec![one(1, vec![stream(0, 0, b"GET", true)])], None, t + 1, &rnd(5));
     drain(&mut c, t + 1);
-    c.on_datagram(1, 1200, vec![one(2, vec![Frame::PathResponse(slice8(&rnd(5), 96))])], t + 2, &rnd(6));
+    c.on_datagram(1, 1200, vec![one(2, vec![Frame::PathResponse(slice8(&rnd(5), 96))])], None, t + 2, &rnd(6));
     assert_eq!(c.stream_write(0, b"ok", true), Ok(2));
     let v = drain(&mut c, t + 2);
     assert!(v.iter().any(has_stream));
@@ -594,7 +594,7 @@ fn validation_resets_recovery() {
 #[test]
 fn revalidation_keeps_pto_mtu_probe() {
     let (mut c, _) = rebound();
-    c.on_datagram(1, 1200, vec![one(2, vec![Frame::PathResponse(slice8(&rnd(5), 96))])], 40, &rnd(6));
+    c.on_datagram(1, 1200, vec![one(2, vec![Frame::PathResponse(slice8(&rnd(5), 96))])], None, 40, &rnd(6));
     c.stream_write(0, b"ok", true).unwrap();
     drain(&mut c, 40);
     // on_path_validated left `pto_count` at 0.
@@ -602,7 +602,7 @@ fn revalidation_keeps_pto_mtu_probe() {
     assert_eq!(c.next_timeout(), Some(t));
     c.on_timeout(t, &rnd(7));
     assert!(drain(&mut c, t).iter().any(has_stream));
-    c.on_datagram(1, 1200, vec![one(3, vec![Frame::PathResponse(slice8(&rnd(6), 96))])], t + 1, &rnd(8));
+    c.on_datagram(1, 1200, vec![one(3, vec![Frame::PathResponse(slice8(&rnd(6), 96))])], None, t + 1, &rnd(8));
     // Past the ACK timer, so only the PTO is left.
     drain(&mut c, t + 25_001);
     assert_eq!(c.next_timeout(), Some(t + 2 * PTO));
@@ -612,14 +612,14 @@ fn revalidation_keeps_pto_mtu_probe() {
 #[test]
 fn revalidation_keeps_pto_old_path() {
     let mut c = established();
-    c.on_datagram(1, 1200, vec![one(1, vec![stream(0, 0, b"GET", true)])], 30, &rnd(5));
+    c.on_datagram(1, 1200, vec![one(1, vec![stream(0, 0, b"GET", true)])], None, 30, &rnd(5));
     drain(&mut c, 30);
     drain(&mut c, 25_030);
     let t = 10 + PTO;
     assert_eq!(c.next_timeout(), Some(t));
     c.on_timeout(t, &rnd(7));
     drain(&mut c, t);
-    c.on_datagram(0, 1200, vec![one(2, vec![Frame::PathResponse(slice8(&rnd(5), 104))])], t + 1, &rnd(8));
+    c.on_datagram(0, 1200, vec![one(2, vec![Frame::PathResponse(slice8(&rnd(5), 104))])], None, t + 1, &rnd(8));
     drain(&mut c, t + 25_001);
     assert_eq!(c.next_timeout(), Some(t + 2 * PTO));
 }
@@ -628,8 +628,8 @@ fn four_cid_conn() -> Connection {
     let mut l = ltp();
     l.active_connection_id_limit = 4;
     let mut c = Connection::accept(&ini(2, first_frames()), 1200, 0, 0, &rnd(1), &l).unwrap();
-    c.on_datagram(0, 1200, vec![ini(2, first_frames())], 0, &rnd(1));
-    c.on_datagram(0, 1200, vec![hs(0, vec![Frame::Ping])], 10, &rnd(9));
+    c.on_datagram(0, 1200, vec![ini(2, first_frames())], None, 0, &rnd(1));
+    c.on_datagram(0, 1200, vec![hs(0, vec![Frame::Ping])], None, 10, &rnd(9));
     c.on_peer_params(&ptp(), 10);
     c.on_handshake_complete(b"h3", 10, &rnd(2));
     drain(&mut c, 10);
@@ -641,16 +641,16 @@ fn four_cid_conn() -> Connection {
 /// comes back the challenge goes. Returns at that send, with its time.
 fn owed_challenge_sent_late() -> (Connection, u64) {
     let mut c = four_cid_conn();
-    c.on_datagram(0, 1200, vec![one(1, vec![new_cid(1, 0, 0xd1), new_cid(2, 0, 0xd2)])], 20, &rnd(5));
+    c.on_datagram(0, 1200, vec![one(1, vec![new_cid(1, 0, 0xd1), new_cid(2, 0, 0xd2)])], None, 20, &rnd(5));
     drain(&mut c, 20);
     let r = rnd(2);
     // Two migrations, unpolled: path 0's recheck and path 1's challenge are both owed.
-    c.on_datagram(1, 1200, vec![one_on(2, &r[0..8], vec![Frame::Ping])], 30, &rnd(6));
-    c.on_datagram(2, 1200, vec![one_on(3, &r[24..32], vec![Frame::Ping])], 30, &rnd(7));
+    c.on_datagram(1, 1200, vec![one_on(2, &r[0..8], vec![Frame::Ping])], None, 30, &rnd(6));
+    c.on_datagram(2, 1200, vec![one_on(3, &r[24..32], vec![Frame::Ping])], None, 30, &rnd(7));
     assert_eq!(c.active_path(), 2);
     assert!(c.challenge_owed(1));
     // Retires seq 0 and seq 1: path 0 takes d3, path 1 is left with no CID.
-    c.on_datagram(2, 1200, vec![one_on(4, &r[24..32], vec![new_cid(3, 2, 0xd3)])], 30, &rnd(8));
+    c.on_datagram(2, 1200, vec![one_on(4, &r[24..32], vec![new_cid(3, 2, 0xd3)])], None, 30, &rnd(8));
     assert_eq!(c.path_dcid(1), None);
     assert!(c.challenge_owed(1));
     let v = settle(&mut c, 30);
@@ -665,7 +665,7 @@ fn owed_challenge_sent_late() -> (Connection, u64) {
     assert!(v.iter().all(|d| d.path != 1));
 
     // A CID for path 1: its challenge goes out now.
-    c.on_datagram(0, 1200, vec![one_on(5, &L0, vec![new_cid(4, 2, 0xd4)])], t + 1, &rnd(10));
+    c.on_datagram(0, 1200, vec![one_on(5, &L0, vec![new_cid(4, 2, 0xd4)])], None, t + 1, &rnd(10));
     assert_eq!(c.path_dcid(1), Some(D(0xd4).to_vec()));
     let v = drain(&mut c, t + 1);
     assert!(v.iter().any(|d| d.path == 1 && has_challenge(d)));
@@ -704,7 +704,7 @@ fn has_ack(d: &OutDatagram) -> bool {
 /// A rebind on so small a datagram that its challenge spends the budget: no ACK can follow.
 fn ack_stalled() -> (Connection, u64) {
     let mut c = established();
-    c.on_datagram(1, 15, vec![one(1, vec![stream(0, 0, b"GET", true)])], 30, &rnd(5));
+    c.on_datagram(1, 15, vec![one(1, vec![stream(0, 0, b"GET", true)])], None, 30, &rnd(5));
     let v = drain(&mut c, 30);
     assert!(v.iter().any(|d| d.path == 1 && has_challenge(d)));
     assert!(!v.iter().any(has_ack));
@@ -726,12 +726,12 @@ fn ack_placed_within_small_budget() {
 fn ack_is_full_or_withheld() {
     let mut c = established();
     for n in (1..=41).step_by(2) {
-        c.on_datagram(0, 1200, vec![one(n, vec![Frame::Ping])], 20, &rnd(3));
+        c.on_datagram(0, 1200, vec![one(n, vec![Frame::Ping])], None, 20, &rnd(3));
         drain(&mut c, 20);
     }
     drain(&mut c, 25_020);
     let t = 25_030;
-    c.on_datagram(1, 30, vec![one(43, vec![stream(0, 0, b"GET", true)])], t, &rnd(5));
+    c.on_datagram(1, 30, vec![one(43, vec![stream(0, 0, b"GET", true)])], None, t, &rnd(5));
     let v = settle(&mut c, t + 25_000);
     assert!(v.iter().any(|d| d.path == 1 && has_challenge(d)));
     assert!(!v.iter().any(has_ack));
@@ -747,7 +747,7 @@ fn ack_stalled_by_budget_no_wake_loop() {
     c.on_timeout(t, &rnd(7));
     assert_eq!(c.active_path(), 0);
     settle(&mut c, t);
-    c.on_datagram(1, 1, vec![one(2, vec![Frame::Ping])], t + 1, &rnd(8));
+    c.on_datagram(1, 1, vec![one(2, vec![Frame::Ping])], None, t + 1, &rnd(8));
     assert_eq!(c.active_path(), 1);
     settle(&mut c, t + 1 + 25_000);
 }
@@ -774,7 +774,7 @@ fn ack_after_budget() {
     let (mut c, t0) = ack_stalled();
     let t = t0 + 25_000;
     settle(&mut c, t);
-    c.on_datagram(1, 200, vec![one(2, vec![Frame::Padding])], t + 1, &rnd(7));
+    c.on_datagram(1, 200, vec![one(2, vec![Frame::Padding])], None, t + 1, &rnd(7));
     assert!(settle(&mut c, t + 1).iter().any(|d| d.path == 1 && has_ack(d)));
 }
 
@@ -783,7 +783,7 @@ fn ack_after_budget() {
 fn ack_after_validation() {
     let (mut c, t0) = ack_stalled();
     settle(&mut c, t0);
-    c.on_datagram(1, 25, vec![one(2, vec![Frame::PathResponse(slice8(&rnd(5), 96))])], t0 + 1, &rnd(7));
+    c.on_datagram(1, 25, vec![one(2, vec![Frame::PathResponse(slice8(&rnd(5), 96))])], None, t0 + 1, &rnd(7));
     assert!(settle(&mut c, t0 + 1).iter().any(|d| d.path == 1 && has_ack(d)));
 }
 
@@ -865,7 +865,7 @@ fn alternate_ack_range_growth() {
     let mut c = established_tx_with(p);
     let mut t = 1_000u64;
     let mut peer_pn = 0u64;
-    c.on_datagram(0, 1200, vec![one(peer_pn, vec![stream(0, 0, b"GET", true)])], t, &rnd(3));
+    c.on_datagram(0, 1200, vec![one(peer_pn, vec![stream(0, 0, b"GET", true)])], None, t, &rnd(3));
     peer_pn += 1;
     assert_eq!(c.stream_write(0, &[9; 10_000], true), Ok(10_000));
     let cap = 2 * MAX_SEND_RANGES + 1;
@@ -883,7 +883,7 @@ fn alternate_ack_range_growth() {
         }
         f.push(Frame::MaxStreamData { stream_id: 0, max: r + 2 });
         t += 1_000;
-        c.on_datagram(0, 1200, vec![one(peer_pn, f)], t, &rnd(3));
+        c.on_datagram(0, 1200, vec![one(peer_pn, f)], None, t, &rnd(3));
         peer_pn += 1;
         let (a, _) = c.send_range_counts(0).unwrap();
         let closed = a >= MAX_SEND_RANGES;

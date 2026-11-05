@@ -229,3 +229,27 @@ fn timeout_settles() {
     }
     assert!(c.next_timeout().map_or(true, |u| u > t));
 }
+
+/// An error from a packet the gate would drop does not close: here an Initial on a path other
+/// than the handshake's (Initial keys are public, so anyone can forge one).
+#[test]
+fn off_path_error_ignored() {
+    let mut c = accepted_a2();
+    let mut out = Vec::new();
+    while transmit(&mut c, 0, &K, &mut out).is_some() {}
+    let i3 = ini(&[], 3, vec![Frame::Ping], 1200 - 42 - 39);
+    receive(&mut c, &[i3, reserved_pn4()].concat(), 7, 5, &rnd(2), &K);
+    assert_eq!(c.phase(), Phase::Open);
+    assert_eq!(c.path_state(7), None);
+    assert_eq!(c.largest_pn(PacketKind::Initial), Some(2));
+}
+
+/// §14, §14.1: an Initial in a 42-byte datagram is discarded, so its error does not close.
+#[test]
+fn sub1200_error_ignored() {
+    let mut c = accepted_a2();
+    let mut out = Vec::new();
+    while transmit(&mut c, 0, &K, &mut out).is_some() {}
+    receive(&mut c, &reserved_pn4(), 0, 5, &rnd(2), &K);
+    assert_eq!(c.phase(), Phase::Open);
+}

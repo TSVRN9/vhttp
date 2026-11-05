@@ -78,6 +78,23 @@ fn open_for(c: &Connection, d: &[u8], keys: &[Option<KeyPair>; 3]) -> (rx: Rx)
     rx
 }
 
+/// The datagram that may create a connection, opened with no 1-RTT keys and no largest packet
+/// number in any space.
+#[verifier::spinoff_prover]
+fn open_first(d: &[u8], keys: &[Option<KeyPair>; 3]) -> (rx: Rx)
+    ensures
+        rx@ == rfc_open_datagram(d@, rx_keys(keys.deep_view(), false), seq![None, None, None]),
+        forall|i: int| 0 <= i < rx.packets.len() ==> plain_wf(#[trigger] rx.packets@[i]@),
+        rx.error matches Some((e, h)) ==> e <= VARINT_MAX && plain_wf(h@),
+{
+    hide(rfc_open_datagram);
+    let none = [None, None, None];
+    let gk = gate_keys(keys, false);
+    let rx = open_datagram(d, &gk, &none);
+    assert(none@ =~= seq![None::<u64>, None, None]);
+    rx
+}
+
 /// The Destination Connection ID of a client Initial: what the shell looks keys up by for
 /// `Route::NewInitial`.
 pub fn initial_dcid(d: &[u8]) -> (r: Option<Vec<u8>>)
@@ -100,8 +117,9 @@ pub fn initial_dcid(d: &[u8]) -> (r: Option<Vec<u8>>)
 //# endpoint MAY discard such datagrams.
 /// A connection for the client Initial `d`, or None when nothing in `d` decrypted (no state is
 /// kept) or `Connection::accept` refuses it (§14.1: under 1200 bytes). The whole datagram is
-/// counted before a connection error on its first packet closes it (Decision 5). Sizes only
-/// drop packets: the one `close` is on an authenticated packet's error.
+/// counted before a connection error on its first packet closes it (Decision 5); `on_datagram`
+/// closes only for an error whose header passes the gate a packet would, so sizes only drop
+/// packets.
 #[verifier::spinoff_prover]
 pub fn accept_datagram(
     d: &[u8],
@@ -114,9 +132,7 @@ pub fn accept_datagram(
     ensures
         r matches Some(c) ==> c.wf(),
 {
-    let none = [None, None, None];
-    let gk = gate_keys(keys, false);
-    let rx = open_datagram(d, &gk, &none);
+    let rx = open_first(d, keys);
     let first = if rx.packets.len() > 0 {
         Connection::accept(&rx.packets[0], d.len(), path, now, rand, local_tp)
     } else {
@@ -129,12 +145,7 @@ pub fn accept_datagram(
         Some(c) => c,
         None => return None,
     };
-    c.on_datagram(path, d.len(), rx.packets, now, rand);
-    if let Some((code, _)) = rx.error {
-        let t = c.now();
-        let reason: Vec<u8> = Vec::new();
-        c.close(code, false, reason.as_slice(), t);
-    }
+    c.on_datagram(path, d.len(), rx.packets, rx.error, now, rand);
     Some(c)
 }
 
@@ -143,7 +154,7 @@ pub fn accept_datagram(
 //# when it receives a datagram that does not meet size constraints; the
 //# endpoint MAY discard such datagrams.
 /// A datagram for `c`: always counted by `on_datagram`, even with no packet in it (§8.1); a
-/// connection error closes `c`; a first packet that did not decrypt makes the last 16 bytes a
+/// connection error closes `c` if its header passes the gate a packet would; a first packet that did not decrypt makes the last 16 bytes a
 /// stateless reset candidate (§10.3.1).
 #[verifier::spinoff_prover]
 pub fn receive(
@@ -161,12 +172,7 @@ pub fn receive(
         final(c).out_log() == old(c).out_log(),
 {
     let rx = open_for(c, d, keys);
-    c.on_datagram(path, d.len(), rx.packets, now, rand);
-    if let Some((code, _)) = rx.error {
-        let t = c.now();
-        let reason: Vec<u8> = Vec::new();
-        c.close(code, false, reason.as_slice(), t);
-    }
+    c.on_datagram(path, d.len(), rx.packets, rx.error, now, rand);
     if let Some(tail) = rx.reset_tail {
         c.on_reset_candidate(&tail, now);
     }
