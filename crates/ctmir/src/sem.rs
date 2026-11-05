@@ -1162,8 +1162,8 @@ pub open spec fn callee_of(m: MirCrate, func: Operand) -> Option<(nat, GenericAr
 
 /// A run's outcome. `Panic` is a failed `Assert`, `Unreachable`/`Abort`, UB guarded by rustc's
 /// checks (an index out of bounds, `/ 0`, unchecked overflow), a std precondition, or a value of
-/// the wrong shape for its construct (not proved unreachable: sem is untyped, and that rustc-typed
-/// MIR in the subset never meets one is a TRUSTED assumption, the never-Stuck row).
+/// the wrong shape for its construct (not proved unreachable: sem is untyped; that rustc-typed MIR
+/// in the subset never meets one is the never-Stuck TRUSTED row proposed in Task 6).
 /// `Unsup` is a construct outside the subset, decided statically (`block_ok`, `inst_body`).
 pub enum Out { Done(Frame, Seq<Event>, nat), Panic, Unsup, Fuel }
 

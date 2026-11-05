@@ -2601,11 +2601,16 @@ pub proof fn fact_drop_forms(m: MirCrate, pol: CallPolicy, b: Body, fr: Frame, p
 {
 }
 
-/// **Fact 8h-7 (a std row given a unit-like value).** `Ghost::assume_new_fallback` given either
-/// form gives the same result.
-pub proof fn fact_std_forms(m: MirCrate, t: Ty, fr: Frame)
-    requires zst_dest(m, t),
-    ensures std_apply(m, StdFn::GhostNew, Some(t), seq![Val::Unit], fr) == std_apply(m, StdFn::GhostNew, Some(t), seq![Val::Adt(0, seq![])], fr),
+/// **Fact 8h-7 (std rows).** No std row takes a unit-like value: each reads its arguments through
+/// `shr_arr`, `mut_arr` or `int_arg`, which reject both forms (and `&` of either) alike; only
+/// `Ghost::assume_new_fallback` takes any argument, and ignores it.
+pub proof fn fact_std_forms(m: MirCrate, t: Ty, fr: Frame, l: Loc)
+    requires zst_dest(m, t), load(fr, l) == Some(Val::Unit) || load(fr, l) == Some(Val::Adt(0, seq![])),
+    ensures shr_arr(Val::Shr(Box::new(Val::Unit))) is None, shr_arr(Val::Shr(Box::new(Val::Adt(0, seq![])))) is None,
+        shr_arr(Val::Unit) is None, shr_arr(Val::Adt(0, seq![])) is None,
+        mut_arr(fr, Val::Mut(l)) is None, mut_arr(fr, Val::Unit) is None, mut_arr(fr, Val::Adt(0, seq![])) is None,
+        int_arg(Val::Unit) is None, int_arg(Val::Adt(0, seq![])) is None,
+        std_apply(m, StdFn::GhostNew, Some(t), seq![Val::Unit], fr) == std_apply(m, StdFn::GhostNew, Some(t), seq![Val::Adt(0, seq![])], fr),
 {
 }
 
