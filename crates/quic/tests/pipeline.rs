@@ -202,6 +202,9 @@ fn one_rtt_gated_until_complete() {
     let bad = build(&h, 9, 0, &[0x01, 0, 0, 0], &T);
     receive(&mut c, &bad, 0, 10, &rnd(2), &K1);
     assert_eq!(c.phase(), Phase::Open);
+    // Nor in the datagram that creates the connection.
+    let c2 = accept_datagram(&[d.clone(), bad.clone()].concat(), 0, 0, &rnd(1), &ltp(), &K1).expect("accepted");
+    assert_eq!(c2.phase(), Phase::Open);
     c.on_peer_params(&ptp(), 10);
     c.on_handshake_complete(b"h3", 10, &rnd(3));
     assert!(c.handshake_complete());
