@@ -100,8 +100,8 @@ fn established() -> Connection {
     let first = vec![Frame::Crypto { offset: 0, data: vec![1; 100] }];
     let ini = pkt(PacketKind::Initial, &S1, &C1, 2, first);
     let mut c = Connection::accept(&ini, 1200, 0, 0, &rnd(1), &ltp()).unwrap();
-    c.on_datagram(0, 1200, vec![ini], 0, &rnd(1));
-    c.on_datagram(0, 1200, vec![pkt(PacketKind::Handshake, &L0, &C1, 0, vec![Frame::Ping])], 10, &rnd(9));
+    c.on_datagram(0, 1200, vec![ini], None, 0, &rnd(1));
+    c.on_datagram(0, 1200, vec![pkt(PacketKind::Handshake, &L0, &C1, 0, vec![Frame::Ping])], None, 10, &rnd(9));
     c.on_peer_params(&big_ptp(), 10);
     c.on_handshake_complete(b"h3", 10, &rnd(2));
     c

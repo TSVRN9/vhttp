@@ -19,7 +19,7 @@
   - squeezes blanks.
 
   Opcodes, operands (function-relative jump and call targets included) and relocations stay. Section-symbol relocations (`.text._RNv...`) keep the mangled crate hash, and the `anon.N`/`.Lanon.N` counters stay: both fail closed.
-- Dependents: every other workspace rlib in `target/ct-binary/release/` (its `.rcgu.o` units only) must define no symbol whose path contains `crypto::`, and its sorted `U crypto::` references are tracked as the `U <crate> <symbol>` block of the digests file (9 lines, all `tls`). A reference that disappears means a call became inlined code.
+- Dependents: every other workspace rlib in `target/ct-binary/release/` (its `.rcgu.o` units only) must define no symbol whose path contains `crypto::`, and its sorted `U crypto::` references are tracked as the `U <crate> <symbol>` block of the digests file (12 lines: 9 `tls`, 3 `quic` since Phase 3e). A reference that disappears means a call became inlined code.
 - Structural checks run in every mode, `--update` included, which refuses to write the file if any fails:
   - `crypto::bignum::ct_mask` is one out-of-line function, and its body is `mov`/`neg`/`ret`;
   - `crypto::p256::scalar_in_range` is one out-of-line function (F1);
@@ -33,7 +33,7 @@
 
 - Leaks. A function whose digest is unchanged carries its earlier reading, nothing more. That reading has the limits stated in its section: tiers, loop-shape tracing, not dudect.
 - Data. Only executable sections are hashed. A constant or table in `.rodata` or `.data.rel.ro` is covered only through the relocations that reference it, not by its contents. Contents change values, not which addresses are touched or which branches run; jump tables and indexed lookups show in the hashed code.
-- Other builds: LTO, `codegen-units`, `target-cpu`, other targets, and a linked binary (none exists).
+- Other builds: LTO, `codegen-units`, `target-cpu`, other targets, and a linked binary (`crates/server`'s, since 3e).
 - Code inlined into a dependent from its first build. `nm` sees only out-of-line copies and the references that remain, so a new call to crypto that is inlined from the start leaves no trace. Protocol step 2 covers it.
 - tls's own constant-time sites read above (`ct_eq32` inlined into `on_crypto`, the zero-share check in `build_flight`) are not hashed: a change to them is not detected.
 - Toolchain and profile are not checked separately. A change to either is expected to show as a digest change.
@@ -70,6 +70,9 @@
   | `RawVec<u8>::drop` | 7 | 1 + 1 | `test %rsi,%rsi; je` capacity 0, else a tail jump to `__rust_dealloc` |
   | `Vec<u8>::drop` | 1 | 0 | `ret` |
   | `drop_glue::<Vec<u8>>` | 7 | 1 + 1 | Same instructions as `RawVec<u8>::drop` |
+
+- **2026-11-03, this commit on base 7e95f7f, rustc 1.98.1, GNU objdump 2.46.1.** Dependent added: quic (Phase 3e Task 1, `quic::hp::hp_mask`), 1 `U` line (`U quic crypto::aes::aes128_encrypt_block`), no `D` line, digests unchanged. Protocol step 2: the line is `U`, a call (`nm -C libquic.rlib` shows no defined `crypto::` symbol, so nothing was inlined); no crypto symbol changed, so no symbol read is due.
+- **2026-11-03, this commit on base 7e95f7f, rustc 1.98.1, GNU objdump 2.46.1.** Dependent extended: quic (Phase 3e Task 2, `quic::aead::{seal_packet, open_packet}`), 2 `U` lines (`U quic crypto::gcm::aes128_gcm_open`, `U quic crypto::gcm::aes128_gcm_seal`), no `D` line, digests unchanged. Protocol step 2: both lines are `U`, calls (`nm -C libquic.rlib` shows no defined `crypto::` symbol, so nothing was inlined); no crypto symbol changed, so no symbol read is due.
 
 ## Timing tests (Phase 7a)
 
@@ -287,9 +290,9 @@ The object from the suggested `cargo rustc --release -p crypto --lib -- --emit=o
 - **Primary evidence:** the 5 `.rcgu.o` members of `libcrypto-*.rlib` from a plain workspace `cargo build --release`. All addresses below are from these.
 - **Secondary:** the 1-CGU object was also read. Same verdicts. Functions whose text matched after normalising addresses carry that reading over.
 - **Profile:** `[profile.release]` sets only `overflow-checks`; `crypto` sets it false. No `lto`, `codegen-units` or `opt-level` override, so opt-level 3 and no cross-crate LTO.
-- **Real binary:** none exists on main. The only `main.rs` is `tools/ct-driver`. No `[[bin]]`. With LTO off, a future binary links these objects unchanged, unless its profile changes.
+- **Real binary:** `crates/server`'s binary (since 3e) is the only one besides `tools/ct-driver`'s. With LTO off, it links these objects unchanged, unless its profile changes.
 - **Cross-crate inlining:** `nm` on the `tls` and `quic` rlibs shows no locally defined `crypto::` symbol. `tls` calls `p256_ecdsa_sign`, `serialize_ecdsa_der`, `hkdf_expand`, `hkdf_extract`, `hmac_sha256`, `p256_ecdh`, `p256_public_key`, `rsa_pss_sha256_sign`, `sha256` as external symbols.
-- **No in-workspace GCM caller:** neither `tls` nor `quic` references `crypto::gcm` or `crypto::aes` in the release objects, so priority 1 is not yet reachable from released code.
+- **GCM callers:** since 3e, `quic` references `crypto::aes::aes128_encrypt_block`, `crypto::gcm::aes128_gcm_open` and `crypto::gcm::aes128_gcm_seal` in its release objects (the `U quic` lines of the digests file); `tls` references none. Priority 1 is reachable from `crates/server`'s binary, which the gate does not check.
 
 ## Coverage: 30 first-party non-RSA functions
 
@@ -402,8 +405,8 @@ The `sext(i1)` select pattern is reachable here too: `select4`, `mont_mul`'s sub
 
 ## Not checked
 
-- Fat or thin LTO, `codegen-units=1` as a real profile (the 1-CGU object is a close stand-in), a linked binary (none exists), other `target-cpu` values, other targets.
-- `tls` key schedule glue, `hkdf_expand_label`, transcript handling, beyond the two spot checks above. `quic` references no `crypto::` symbol in its release objects; `h3` and `wire` were not disassembled.
+- Fat or thin LTO, `codegen-units=1` as a real profile (the 1-CGU object is a close stand-in), a linked binary (`crates/server`'s, since 3e), other `target-cpu` values, other targets.
+- `tls` key schedule glue, `hkdf_expand_label`, transcript handling, beyond the two spot checks above. `quic`'s three `U crypto::` references (AES block encrypt, GCM open, GCM seal) are calls, and quic's own code was not disassembled; `h3` and `wire` were not disassembled.
 - RSA shim beyond F2, and all of crypto-bigint/rsa/sha2 (G1). `sha2::compress256` is only used by the shim.
 - Not dudect: no timing was measured. Nothing about data cache behaviour beyond the indices above, instruction cache, branch predictor state from public branches, speculation (Spectre, including bounds-check bypass), `mul` latency on old CPUs, or flag-dependent `cmov` behaviour on future microarchitectures. `cmov` was taken as data-independent as instructed.
 - No zeroisation check. Secrets on the stack and in freed `Vec`s were not examined.
