@@ -235,6 +235,7 @@ R=$(wc -l < "$CT_OUT/crypto/ok-roots.txt" | tr -d ' ')
 B=$(wc -l < "$CT_OUT/parsers/bounded-roots.txt" | tr -d ' ')
 a=$(cover "coverage crypto" "$CT_OUT/crypto/ok-roots.txt" "$CT_OUT/crypto/selftest-crypto.txt") || exit 1
 b=$(cover "coverage parsers" "$CT_OUT/parsers/bounded-roots.txt" "$CT_OUT/parsers/selftest.txt") || exit 1
+[ "$R" -gt 0 ] && [ "$B" -gt 0 ] || fail "coverage: no root or bounded lines in the reports"
 [ "$a" -eq "$R" ] && [ "$b" -eq "$B" ] || fail "coverage: $a of $R ok roots, $b of $B bounded roots have a vector"
 echo "ct-check: done roots $a/$R, bounded $b/$B"
 
