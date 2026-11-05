@@ -11,6 +11,8 @@
 //!   being `poly_text_spec(p)` (`theorem_cost` carried by `theorem_sim` and
 //!   `lemma_entry_premises`).
 use crate::json::{bytes_eq, parse};
+#[cfg(verus_keep_ghost)]
+use crate::json_inj::jeq;
 #[allow(unused_imports)]
 use crate::json::*;
 use crate::lower::{FnInfo, Reject};
@@ -185,13 +187,21 @@ pub open spec fn line_ok(m: MirCrate, pol: Policy, l: Seq<u8>, lines: Seq<Seq<u8
     &&& starts(l, b"bounded "@) ==> bounded_ok(m, pol, l)
 }
 
-/// **The report is sound.** The dump is `print(j)` of a JSON value `j` that decodes (by the
-/// schema spec) to crate `m`; the manifests say policy `pol`; and the report is a sequence of
-/// lines, each `line_ok`. A line holds no `\n` before its last byte, so the lines are the
-/// report's `\n`-terminated pieces. (`mode` names the run; the claims do not depend on it.)
+/// **The report is sound.**
+/// - The dump is `print(j)` of a JSON value `j`, and `j` is the only one: any `j2` that prints
+///   the dump is `j` up to views (`jeq`; `print` is injective, `json_inj::theorem_print_injective`).
+/// - `j` decodes (by the schema spec `decode_crate`) to crate `m`. `decode_crate` is *not* proved
+///   functional: the claims are about the crate the pipeline decoded, which a TRUSTED row (Task 9)
+///   takes to be the one the schema mirror spec gives.
+/// - The manifests say policy `pol` (`policy_of`, determined by the bytes).
+/// - The report is a sequence of lines, each `line_ok`. A line holds no `\n` before its last byte,
+///   so the lines are the report's `\n`-terminated pieces.
+///
+/// (`mode` names the run; the claims do not depend on it.)
 pub open spec fn report_sound(dump: Seq<u8>, manifests: Seq<Vec<u8>>, mode: Mode, out: Seq<u8>) -> bool {
     exists|j: Json, m: MirCrate, pol: Policy, lines: Seq<Seq<u8>>|
-        print(j) == dump && decode_crate(j, m) && policy_of(views(manifests), pol) && out == lines.flatten()
+        print(j) == dump && (forall|j2: Json| #[trigger] print(j2) == dump ==> jeq(j2, j))
+        && decode_crate(j, m) && policy_of(views(manifests), pol) && out == lines.flatten()
         && forall|k: int| 0 <= k < lines.len() ==> line_ok(m, pol, #[trigger] lines[k], lines)
 }
 
@@ -1374,6 +1384,9 @@ pub fn pipeline(dump: &[u8], manifests: &Vec<Vec<u8>>, mode: &Mode) -> (r: Resul
             let a = choose|a: int| 0 <= a < views(acc@).len() && views(acc@)[a] == lines[q];
             assert(line_ok(m, pol, acc@[a]@, views(acc@)));
             lemma_line_mono(m, pol, lines[q], views(acc@), lines);
+        }
+        assert forall|j2: Json| #[trigger] print(j2) == dump@ implies jeq(j2, jj) by {
+            crate::json_inj::theorem_print_injective(j2, jj);
         }
         assert(report_sound(dump@, manifests@, *mode, out@));
     }
