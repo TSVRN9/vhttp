@@ -132,6 +132,7 @@ pub fn accept_datagram(
     ensures
         r matches Some(c) ==> c.wf(),
 {
+    hide(rfc_open_datagram);
     let rx = open_first(d, keys);
     let first = if rx.packets.len() > 0 {
         Connection::accept(&rx.packets[0], d.len(), path, now, rand, local_tp)
@@ -170,7 +171,11 @@ pub fn receive(
     ensures
         final(c).wf(),
         final(c).out_log() == old(c).out_log(),
+        // §8.1: counted on a known path, whatever decrypted.
+        old(c).has_path(path) && !(old(c).phase_spec() is Draining) && !(old(c).phase_spec() is Closed)
+            ==> recv_counted(old(c).amp_trace(path), final(c).amp_trace(path), d.len() as nat),
 {
+    hide(rfc_open_datagram);
     let rx = open_for(c, d, keys);
     c.on_datagram(path, d.len(), rx.packets, rx.error, now, rand);
     if let Some(tail) = rx.reset_tail {
