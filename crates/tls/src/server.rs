@@ -596,6 +596,24 @@ proof fn lemma_drain_events(
     }
 }
 
+/// A call that succeeds leaves the handshake not `Failed` (4c: the glue's 1-RTT key slot).
+pub proof fn lemma_ok_not_failed(
+    cfg: Seq<SpecCertChain>,
+    tp: Seq<u8>,
+    s: SpecServerHs,
+    level: Level,
+    data: Seq<u8>,
+    rand: Seq<u8>,
+)
+    requires
+        !(s.phase is Failed),
+    ensures
+        spec_on_crypto(cfg, tp, s, level, data, rand).1 is Ok ==> !(spec_on_crypto(cfg, tp, s, level, data, rand).0.phase is Failed),
+{
+    hide(spec_step);
+    lemma_drain_events(cfg, tp, spec_with_reader(s, level, spec_reader(s, level) + data), level, rand, seq![]);
+}
+
 /// No `Send` ever follows `Failed`: it is absorbing.
 pub proof fn theorem_failed_absorbing(
     cfg: Seq<SpecCertChain>,
@@ -1197,7 +1215,7 @@ impl<'a> ServerHandshake<'a> {
         }
     }
 
-    // ponytail: secrets not wiped; zeroize on Failed/Complete when 4c owns key lifetime
+    // Secrets are dropped from the state here; memory is not zeroised (TRUSTED: secret lifetime).
     fn fail(&mut self, e: u64)
         ensures
             final(self)@ == spec_failed(old(self)@, e),

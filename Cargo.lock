@@ -470,6 +470,7 @@ name = "quictls"
 version = "0.1.0"
 dependencies = [
  "crypto",
+ "h3",
  "quic",
  "ring",
  "rustls",

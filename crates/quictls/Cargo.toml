@@ -7,6 +7,7 @@ edition = "2021"
 vstd = "=0.0.0-2026-10-04-0306"
 tls = { path = "../tls" }
 quic = { path = "../quic" }
+h3 = { path = "../h3" }
 crypto = { path = "../crypto" }
 
 [package.metadata.verus]
