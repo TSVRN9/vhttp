@@ -263,7 +263,7 @@ Total keyword count: 44 across 22 sections.
 | 9.6.2 (req) | Client does not reuse preferred addresses for other connections | 1 | no | N/A (client-only) | "A client MUST NOT use these for other connections, including connections that are resumed from the current connection." |
 | 9.6.3 | Interaction of client migration and preferred address | 2 | no | Declined (optional: connection migration) | Client-only abandon rule is the row below; server protection rule only for preferred_address. |
 | 9.6.3 (req) | Client abandons original-address validation once the preferred address validates | 1 | no | N/A (client-only) | "the client MUST abandon validation of the original address and migrate to using the server's preferred address" |
-| 9.7 | Use of IPv6 flow label and migration | 1 | yes | 3 | Conditional on setting IPv6 flow labels; shell leaves kernel default. |
+| 9.7 | Use of IPv6 flow label and migration | 1 | yes | 3 | Conditional on setting IPv6 flow labels; shell leaves kernel default. ✅ 3e: crates/server/src/lib.rs (flow label never set; kernel default) |
 | 10.1 | Idle timeout | 1 | yes | 3 | Idle timeout at least 3x PTO. ✅ 3d: crates/quic/src/lifecycle.rs |
 | 10.2.1 | Closing connection state | 2 | yes | 3 | Limit closing-state sends to 3x received / unvalidated address. Byte cap only; the rate SHOULD is not implemented. ✅ 3d: crates/quic/src/conn.rs |
 | 10.2.2 | Draining connection state | 2 | yes | 3 | No packets sent while draining. ✅ 3d: crates/quic/src/conn.rs |
@@ -289,14 +289,14 @@ Total keyword count: 44 across 22 sections.
 | 13.4.1 | Reporting ECN counts | 1 | yes | 3 | Provide ECN feedback if accessible; needs IP_RECVTOS in shell (otherwise relies on "if accessible"). ✅ 3d: exception — ECN not accessible, no ECT set (ack_track.rs ecn: None) |
 | 13.4.2.1 | Receiving ACK frames with ECN counts | 1 | yes | 3 | Only if we send ECT; vacuous otherwise. ✅ 3d: exception — ECN not accessible, no ECT set (ack_track.rs ecn: None) |
 | 13.4.2.2 | ECN validation outcomes | 2 | yes | 3 | Only if we send ECT; vacuous otherwise. ✅ 3d: exception — ECN not accessible, no ECT set (ack_track.rs ecn: None) |
-| 14 | Datagram size | 4 | yes | 3 | 1200-byte minimum path; no IP fragmentation; DF where possible; never close on bad-size datagram. |
+| 14 | Datagram size | 4 | yes | 3 | 1200-byte minimum path; no IP fragmentation; DF where possible; never close on bad-size datagram. ✅ 3e: crates/server/src/lib.rs (bind: DF via PMTUDISC_PROBE) + quic/src/pipeline.rs (no close on size); 1200-byte path via 3d2 P17 |
 | 14.1 | Initial datagram size | 4 | partial | 3 | Server rows below; client padding is client-only. ✅ 3d: crates/quic/src/conn.rs |
 | 14.1 (req) | Client expands Initial datagrams to 1200 | 1 | no | N/A (client-only) |  |
 | 14.1 (req) | Server expands ack-eliciting Initial datagrams to 1200 | 1 | yes | 3 | ✅ 3d: crates/quic/src/conn.rs |
 | 14.1 (req) | Server discards Initial in datagram < 1200 bytes | 1 | yes | 3 | "A server MUST discard an Initial packet that is carried in a UDP datagram with a payload that is smaller than ... 1200 bytes." Do not close the connection (see 14). ✅ 3d: crates/quic/src/conn.rs |
 | 14.1 (req) | Server limits bytes sent before address validation | 1 | yes | 3 | See 8.1 3x row. ✅ 3d: crates/quic/src/conn.rs |
 | 14.2 | Path maximum transmission unit | 1 | yes | 3 | Cease sending if PMTU < 1200 (except probes/CONNECTION_CLOSE). ✅ 3d: crates/quic/src/conn.rs (P17 send gate) + path.rs (mtu_failed) |
-| 14.2.1 | Handling of ICMP messages by PMTUD | 3 | yes | 3 | Only if shell processes ICMP; vacuous otherwise. |
+| 14.2.1 | Handling of ICMP messages by PMTUD | 3 | yes | 3 | Only if shell processes ICMP; vacuous otherwise. ✅ 3e: crates/server/src/lib.rs (no ICMP read; PMTUDISC_PROBE ignores kernel PMTU; vacuous) |
 | 17.1 | Packet number encoding and decoding | 2 | yes | 3 | Full PN before first ACK; size covers > 2x range. ✅ 3b: crates/quic/src/pn.rs; A.2 pseudocode under-sizes at exact powers of two; §17.1 prose used. Decoding is A.3 (`decode_pn`, result <= PN_MAX); `theorem_pn_len_decodes` proves a `pn_len_ok` length decodes back at a receiver that has seen the acknowledged packet; `pn_encode_len` None (more than 2^31 unacked) is a 3d internal limit |
 | 17.2 | Long header packets | 7 | yes | 3 | Fixed bit; CID length <= 20 (drop); reserved bits PROTOCOL_VIOLATION. ✅ 3e: crates/quic/src/protect.rs + pipeline.rs (reserved bits after AEAD); other MUSTs in header.rs (3b) |
 | 17.2.1 | Version Negotiation packet | 6 | partial | 3 | Server rows are phase 3; one client-only. ✅ 3b: crates/quic/src/stateless.rs |
