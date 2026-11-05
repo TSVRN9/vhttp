@@ -54,6 +54,7 @@ f96f120ac1da8f3d8b8912b8f96a02e291cf160f7c29bae4b4cb404ea67c838e vstd::slice::sl
 U quic crypto::aes::aes128_encrypt_block
 U quic crypto::gcm::aes128_gcm_open
 U quic crypto::gcm::aes128_gcm_seal
+U quictls crypto::hkdf::hkdf_extract
 U tls crypto::ecdsa::p256_ecdsa_sign
 U tls crypto::ecdsa::serialize_ecdsa_der
 U tls crypto::hkdf::hkdf_expand
