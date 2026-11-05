@@ -202,7 +202,7 @@ pub struct Connection {
     complete: bool,
     crx_i: CryptoStream,
     crx_h: CryptoStream,
-    /// Post-handshake CRYPTO: buffered, and TLS never asks for it.
+    /// Post-handshake CRYPTO: the 4c glue reads it, and any byte is unexpected_message (0x10a).
     crx_1: CryptoStream,
     ctx_i: SendStream,
     ctx_h: SendStream,
@@ -255,6 +255,21 @@ impl Connection {
             PacketKind::Handshake => self.live_h,
             PacketKind::OneRtt => self.complete,
         }
+    }
+
+    /// The end of the received CRYPTO data at level `k` (RFC 9001 §4.1.3).
+    pub closed spec fn crypto_end_spec(&self, k: PacketKind) -> nat {
+        let s = match k {
+            PacketKind::Initial => self.crx_i,
+            PacketKind::Handshake => self.crx_h,
+            PacketKind::OneRtt => self.crx_1,
+        };
+        (s.reassembly().base() + s.reassembly().buf_len()) as nat
+    }
+
+    /// The client's original Destination Connection ID.
+    pub closed spec fn odcid_spec(&self) -> Seq<u8> {
+        self.ids@.odcid
     }
 
     pub closed spec fn phase_spec(&self) -> Phase {
@@ -415,6 +430,7 @@ impl Connection {
                 || first.dcid@.len() < 8 || first.dcid@.len() > MAX_CID_LEN || first.scid@.len()
                 > MAX_CID_LEN || !local_tp_ok(local_tp@)),
             r matches Some(c) ==> c.wf() && c.out_log() == Seq::<SpecOutDatagram>::empty(),
+            r matches Some(c) ==> c.odcid_spec() == first.dcid@,
     {
         if datagram_len < MIN_INITIAL_DATAGRAM || !is_local_tp_ok(local_tp) {
             return None;
@@ -3070,14 +3086,33 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
+            final(out)@.len() <= old(out)@.len() + MAX_CRYPTO_BUFFER,
     {
+        // The bound needs only `lemma_wf`; unfolded, these make a missing fact an rlimit failure.
+        hide(crate::reassembly::rfc_received);
+        hide(crate::reassembly::rfc_contiguous);
         if !matches!(self.lc.phase(), Phase::Open) {
             return;
         }
         match level {
-            PacketKind::Initial => self.crx_i.read(out),
-            PacketKind::Handshake => self.crx_h.read(out),
-            PacketKind::OneRtt => self.crx_1.read(out),
+            PacketKind::Initial => {
+                proof {
+                    self.crx_i.reassembly().lemma_wf();
+                }
+                self.crx_i.read(out)
+            },
+            PacketKind::Handshake => {
+                proof {
+                    self.crx_h.reassembly().lemma_wf();
+                }
+                self.crx_h.read(out)
+            },
+            PacketKind::OneRtt => {
+                proof {
+                    self.crx_1.reassembly().lemma_wf();
+                }
+                self.crx_1.read(out)
+            },
         }
     }
 
@@ -5278,7 +5313,7 @@ impl Connection {
         &&& o.lc.first_sent_spec() ==> self.lc.budget_trace() == o.lc.budget_trace().push(AmpEv::Sent(n))
     }
 
-    fn is_live(&self, k: PacketKind) -> (r: bool)
+    pub fn is_live(&self, k: PacketKind) -> (r: bool)
         ensures
             r == self.live(k),
     {
@@ -7141,6 +7176,14 @@ impl Connection {
         }
     }
 
+    pub proof fn lemma_keeps_now(&self, o: Connection)
+        requires
+            self.keeps_later(o),
+        ensures
+            o.now_spec() <= self.now_spec(),
+    {
+    }
+
     pub proof fn lemma_keeps_elim(&self, o: Connection, t: u64)
         requires
             self.keeps_later(o),
@@ -7982,6 +8025,20 @@ impl Connection {
             r == self.live(PacketKind::OneRtt),
     {
         self.complete
+    }
+
+    /// The end of the received CRYPTO data at level `k` (RFC 9001 §4.1.3).
+    pub fn crypto_end(&self, k: PacketKind) -> (r: u64)
+        requires
+            self.wf(),
+        ensures
+            r == self.crypto_end_spec(k),
+    {
+        match k {
+            PacketKind::Initial => self.crx_i.end(),
+            PacketKind::Handshake => self.crx_h.end(),
+            PacketKind::OneRtt => self.crx_1.end(),
+        }
     }
 
     /// Our transport parameters, filled in.
