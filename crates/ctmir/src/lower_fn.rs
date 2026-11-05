@@ -624,7 +624,7 @@ proof fn lemma_trim_hi(s: Seq<u8>, lo: nat, j: nat, n: nat)
     if j < n { lemma_trim_hi(s, lo, (j + 1) as nat, n); }
 }
 
-fn trim(s: &Vec<u8>) -> (r: Vec<u8>)
+pub fn trim(s: &Vec<u8>) -> (r: Vec<u8>)
     ensures r@ == trim_spec(s@),
 {
     let mut lo: usize = 0;

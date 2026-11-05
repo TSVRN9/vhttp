@@ -1,0 +1,18 @@
+[package]
+name = "ct-front"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ctmir = { path = "../../crates/ctmir" }
+
+# own workspace, like tools/ct-driver: the root workspace never builds this binary
+[workspace]
+
+# verified: Verus proves exec arithmetic does not overflow
+[profile.release.package.ctcore]
+overflow-checks = false
+
+# verified: Verus proves exec arithmetic does not overflow
+[profile.release.package.ctmir]
+overflow-checks = false
