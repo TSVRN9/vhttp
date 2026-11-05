@@ -1,6 +1,6 @@
-//! The simulation, terminators without calls and the run: by induction on fuel, a completed MIR run
-//! of a reached block whose reached blocks are call-free is matched by core's run of the image block
-//! with the same trace and steps, from related frames to related frames.
+//! The simulation, terminators and the run: by induction on fuel over the whole program, a completed
+//! MIR run of a reached block (jumps, leaf and body calls, drops) is matched by core's run of the
+//! image block with the same trace and steps, from related frames to related frames.
 #[allow(unused_imports)]
 use crate::mir::*;
 #[allow(unused_imports)]
@@ -175,7 +175,7 @@ pub open spec fn run_ok(m: MirCrate, pol: CallPolicy, b: Body, bb: nat, fm: Fram
         && fr_rel(fm2, fc2) && e == ce && s == cn)
 }
 
-/// The run induction (call-free).
+/// The run induction (calls and drop glue by the induction hypothesis at one less fuel).
 pub proof fn lemma_block(m: MirCrate, pol: Policy, ord: Seq<usize>, j: nat, p: c::Program, g: nat, r: Seq<bool>, bb: nat, fm: Frame, fc: Frame, fuel: nat)
     requires body_sim_pre(m, pol, ord, j, p, g, r), bb < r.len(), r[bb as int],
         fr_rel(fm, fc), fm.locals.len() == inst_body(m, j)->Some_0.locals@.len(), fc.locals.len() == p.fns@[g as int].locals@.len(),
@@ -1006,8 +1006,6 @@ proof fn lemma_drop_glue(m: MirCrate, pol: Policy, ord: Seq<usize>, b: Body, nlo
     assert(e + e2 == ae + e2 + Seq::<Event>::empty());
     lemma_body_out(p, ct, fct, fuel, h, wb, ae, cfe, cfc, e2, s2, f2, st, Seq::<Event>::empty(), pre.len());
 }
-
-spec fn reveal_fr_slots(cf: Frame, cfc: Frame) -> bool { fr_rel(cf, cfc) ==> cf.slots == cfc.slots }
 
 /// A drop terminator that jumps.
 proof fn lemma_drop_facts(m: MirCrate, pol: Policy, ord: Seq<usize>, j: nat, p: c::Program, g: nat, r: Seq<bool>, bb: nat, fm: Frame, fc: Frame, fuel: nat) -> (fnext: Frame)

@@ -147,12 +147,6 @@ pub proof fn lemma_same_out_trans(f0: Frame, f1: Frame, f2: Frame, lo: nat, mid:
     }
 }
 
-pub proof fn lemma_same_out_widen(f0: Frame, f1: Frame, lo: nat, hi: nat, lo2: nat, hi2: nat)
-    requires same_out(f0, f1, lo, hi), lo2 <= lo, hi <= hi2,
-    ensures same_out(f0, f1, lo2, hi2),
-{
-}
-
 /// A frame changed only at temps at or after the MIR locals keeps the frame relation.
 pub proof fn lemma_same_out_rel(fm: Frame, f0: Frame, f1: Frame, lo: nat, hi: nat)
     requires fr_rel(fm, f0), same_out(f0, f1, lo, hi), fm.locals.len() <= lo,

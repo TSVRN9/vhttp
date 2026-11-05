@@ -258,3 +258,116 @@ fn probe_secret_option() {
         }
     }
 }
+
+/// The reject messages of root `root` (empty when it lowers).
+fn whats(m: &MirCrate, pol: &Policy, root: &str) -> Vec<String> {
+    match lower(m, pol, root.as_bytes(), &mut Vec::new()) {
+        Ok(_) => vec![],
+        Err(es) => es.iter().map(|r| match r { Reject::Unsupported { what, .. } => s(what), r => reject_line(r) }).collect(),
+    }
+}
+
+fn body_of<'a>(m: &'a mut MirCrate, name: &str) -> &'a mut Body {
+    m.insts.iter_mut().find(|x| s(&x.name) == name).unwrap().body.as_mut().unwrap()
+}
+
+fn local(ty: Ty) -> LocalDecl { LocalDecl { ty, span: 0, mutability: Mutability::Mut } }
+
+/// tiny with `[u8; 0]` (ty 13, const 7), `&[u8; 0]` (14), `([u8; 0],)` (15), `(u8, [u8; 0])` (16)
+/// and `&mut u8` (12).
+fn tiny_plus() -> MirCrate {
+    let mut m = dec(TINY);
+    m.consts.push(ConstRow { id: 7, usize: Some(0) });
+    m.tys.push(TyRow { id: 12, kind: TyKind::RigidTy(RigidTy::Ref(ctmir::json::Json::Null, 2, Mutability::Mut)) });
+    m.tys.push(TyRow { id: 13, kind: TyKind::RigidTy(RigidTy::Array(2, TyConst { kind: ctmir::json::Json::Null, id: 7 })) });
+    m.tys.push(TyRow { id: 14, kind: TyKind::RigidTy(RigidTy::Ref(ctmir::json::Json::Null, 13, Mutability::Not)) });
+    m.tys.push(TyRow { id: 15, kind: TyKind::RigidTy(RigidTy::Tuple(vec![13])) });
+    m.tys.push(TyRow { id: 16, kind: TyKind::RigidTy(RigidTy::Tuple(vec![2, 13])) });
+    m
+}
+
+fn call_term(m: &mut MirCrate) -> &mut TerminatorKind { &mut body_of(m, "tiny::call").blocks[0].terminator.kind }
+
+fn set_dest(m: &mut MirCrate, p: Place) {
+    if let TerminatorKind::Call { destination, .. } = call_term(m) { *destination = p } else { panic!() }
+}
+
+/// Task 6 `dest_ok`: a call destination is evaluated before the call in sem and after the
+/// write-back in core, so one that reads the frame (`Index`, `Deref`) is rejected.
+#[test]
+fn call_dest_reads_reject() {
+    let mut m = tiny_plus();
+    body_of(&mut m, "tiny::call").locals.push(local(12));
+    set_dest(&mut m, Place { local: 2, projection: vec![ProjectionElem::Deref] });
+    assert_eq!(whats(&m, &pol0(), "tiny::call"), ["a call into a place behind a reference"]);
+    let mut m = tiny_plus();
+    body_of(&mut m, "tiny::call").locals.extend([local(11), local(1)]);
+    set_dest(&mut m, Place { local: 2, projection: vec![ProjectionElem::Index(3)] });
+    assert_eq!(whats(&m, &pol0(), "tiny::call"), ["a call into an indexed place"]);
+}
+
+/// Task 6: `Discriminant` of a struct (sem gives 0, core the stored variant).
+#[test]
+fn struct_discriminant_rejects() {
+    let mut m = tiny_plus();
+    let b = body_of(&mut m, "tiny::opt");
+    b.locals.push(local(1));
+    b.blocks[1].statements.push(Statement {
+        kind: StatementKind::Assign(Place { local: 2, projection: vec![] }, Rvalue::Discriminant(Place { local: 0, projection: vec![] })),
+        span: 0,
+    });
+    assert_eq!(whats(&m, &pol0(), "tiny::opt"), Vec::<String>::new(), "an enum's discriminants are its indices");
+    m.adts[0].kind = AdtKind::Struct;
+    assert_eq!(whats(&m, &pol0(), "tiny::opt"), ["discriminant of a struct, of an enum with explicit discriminants, or of a non-ADT"]);
+}
+
+/// Task 6 `plain_ty`: a declassify argument of type `[u8; 0]` (a unit-like value: its trace
+/// event would carry a producer-chosen form).
+#[test]
+fn declassify_empty_array_rejects() {
+    let mut pol = pol0();
+    pol.declassify.push(v("tiny::tiny"));
+    let deref1 = || Operand::Copy(Place { local: 1, projection: vec![ProjectionElem::Deref] });
+    let mut m = tiny_plus();
+    if let TerminatorKind::Call { args, .. } = call_term(&mut m) { *args = vec![deref1()] }
+    assert_eq!(whats(&m, &pol, "tiny::call"), Vec::<String>::new(), "a declassify of `*_1: [u8; 4]` lowers");
+    body_of(&mut m, "tiny::call").locals[1].ty = 14;
+    assert_eq!(whats(&m, &pol, "tiny::call"), ["a declassify of a value that is not an int, bool or array of them"]);
+}
+
+/// Fix round 1: a local, a `ZeroSized` constant or a call destination of a unit-like type holding
+/// an array (sem keeps its structural value; core's is `Unit`).
+#[test]
+fn unit_like_array_rejects() {
+    let local_msg = "a local of a unit-like type holding an array";
+    for ty in [13, 15] {
+        let mut m = tiny_plus();
+        body_of(&mut m, "tiny::tiny").locals.push(local(ty));
+        assert_eq!(whats(&m, &pol0(), "tiny::tiny"), [local_msg], "ty {ty}");
+    }
+    // a parameter too
+    let mut m = tiny_plus();
+    let b = body_of(&mut m, "tiny::call");
+    b.locals.insert(2, local(13));
+    b.arg_count = 2;
+    assert!(whats(&m, &pol0(), "tiny::call").contains(&local_msg.to_string()));
+    // `(u8, [u8; 0])` is not unit-like
+    let mut m = tiny_plus();
+    body_of(&mut m, "tiny::tiny").locals.push(local(16));
+    assert_eq!(whats(&m, &pol0(), "tiny::tiny"), Vec::<String>::new());
+    // a `ZeroSized` `[u8; 0]` written into `_7.1`
+    let zst = Operand::Constant(ConstOperand {
+        span: 0, user_ty: ctmir::json::Json::Null, const_: MirConst { kind: ConstantKind::ZeroSized, ty: 13, id: 0 },
+    });
+    let b = body_of(&mut m, "tiny::tiny");
+    b.blocks[0].statements.push(Statement {
+        kind: StatementKind::Assign(Place { local: 7, projection: vec![ProjectionElem::Field(1, 13)] }, Rvalue::Use(zst, ctmir::json::Json::Null)),
+        span: 0,
+    });
+    assert_eq!(whats(&m, &pol0(), "tiny::tiny"), ["a zero-sized constant of a unit-like type holding an array"]);
+    // a call into `_2.1: [u8; 0]`
+    let mut m = tiny_plus();
+    body_of(&mut m, "tiny::call").locals.push(local(16));
+    set_dest(&mut m, Place { local: 2, projection: vec![ProjectionElem::Field(1, 13)] });
+    assert_eq!(whats(&m, &pol0(), "tiny::call"), ["a call into a place of a unit-like type holding an array"]);
+}
