@@ -14,7 +14,7 @@ in row 44, trust these parts:
 - `main.rs`'s `cost_verdict`, `poly_text` and `atom_text`. The text of a `bounded` line comes
   from these, and no code instantiates `theorem_cost`;
 - `interp.rs`, the core interpreter behind the selftest. It is unverified, so the selftest tests
-  the interpreter, not `sem.rs`.
+  the interpreter, not `sem.rs`. (Superseded by Phase 8d: deleted; the selftest runs `ctmir::sem` through the verified MIR evaluator.)
 
 The user asked for this front end to be proved, reducing the trust base "pretty much as much as
 possible until it practically only depends on the same things verus depends on".
@@ -84,7 +84,7 @@ that says why.
    differences.
 4. The trusted MIR semantics is tested against rustc. A verified interpreter is proved equal to
    the semantics. It runs the selftest vectors, and also semantic-conformance vectors that native
-   execution of the compiled Rust produces.
+   execution of the compiled Rust produces. (Superseded by Phase 8d: the verified MIR evaluator `ctmir::eval` replaces the interpreter.)
 
 ## Non-goals
 
@@ -442,6 +442,8 @@ The report format is today's, byte for byte, so `ct-check.sh`'s parsing is uncha
 report. It contains no `verus!` code and no logic.
 
 ## Verified interpreter and conformance tests (`ctmir::interp`, verified)
+
+*Superseded by Phase 8d: the core interpreter described here is deleted; the selftest and semconf vectors run `ctmir::sem` through the verified MIR evaluator (`ctmir::eval`).*
 
 `pub fn interp(p: &ctcore::Program, f: usize, args: …, fuel: u64) -> (r: Option<…>) ensures r ==
 ctcore::run_fn(...) mapped`. The interpreter is exec and works over a concrete value type with a

@@ -180,6 +180,9 @@ got=$CT_OUT/parsers/cost-verdicts.txt
 cat $reports | sed -E 's/ NotCounted\([0-9]+\)$/ NotCounted/' > "$CT_OUT/parsers/cost-all.txt"
 cost_verdicts "$CT_OUT/parsers/cost-all.txt" atoms > "$got"
 diff -u "$ct/expected-cost.txt" "$got" || fail "cost parsers: verdicts differ from tools/ct-driver/expected-cost.txt"
+if grep -qvE '^[[:space:]]*(#|$|cost-root[[:space:]])' "$ct/cost-targets.txt"; then
+    fail "cost-targets.txt holds a line that is not a cost-root line (the selftest and the cost run must share one cpol)"
+fi
 nt=$(grep -c -E '^[[:space:]]*cost-root[[:space:]]' "$ct/cost-targets.txt")
 [ "$nt" -eq 36 ] || fail "cost targets: $nt roots, the pre-registered denominator is 36"
 for p in $(sed -nE 's/^[[:space:]]*cost-root[[:space:]]+([^ ]+)[[:space:]]+# predicted: bounded.*/\1/p' "$ct/cost-targets.txt"); do
@@ -281,6 +284,7 @@ timeout 600 cargo test --release --locked -q -p ctmir --test eval --test interp 
 CT_DUMP_DIR=$CT_OUT timeout 300 cargo test --release --locked -q -p ctmir --test eval --target-dir "$CT_TARGET_DIR/ctmir-tests" \
     -- --ignored --exact eval_probe > "$CT_OUT/eval-probe.log" 2>&1 \
     || { cat "$CT_OUT/eval-probe.log" >&2; fail "ctmir: eval_probe (MIR steps equal the core's) failed or ran past 300 s"; }
+grep -q '^test result: ok. 1 passed' "$CT_OUT/eval-probe.log" || { cat "$CT_OUT/eval-probe.log" >&2; fail "ctmir: eval_probe did not run exactly one passing test"; }
 
 # Every dump above parses with the verified reader and decodes with no `Unknown` variant (a
 # rustc_public variant the schema does not mirror): ctmir's `dumps` tests over $CT_OUT.

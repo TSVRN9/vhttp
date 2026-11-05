@@ -239,7 +239,7 @@ When the evaluator gives `Panic` or a wrong value where native completes, that i
 - **Vectors**: the crypto selftest has 23 (new: `rsa_pss_sign_inner`, 378 million MIR steps, from the
   RFC 9500 2048-bit key; the signature equals the spike's `8febad92..`), the parser selftest 28 (new: 13,
   one per bounded root that had none), semconf 31723. Every one runs `ctmir::sem` through `ctmir::eval`
-  and passes; none gave `Panic`, `Fuel` or `GaveUp`.
+  and passes; none gave an unwanted outcome (217 semconf `=> panic` vectors gave `Panic`; no `Fuel` or `GaveUp`).
 - **Coverage gate**: `ct-check: done roots 11/11, bounded 19/19`. Removing the RSA vector from
   `selftest.txt` fails the run on that root; so do deleting a parser root's `pass` lines, turning them
   into `pass .. panic`, and a pass path with a space (evidence: `vt-8d-evidence/t4/demo`).
