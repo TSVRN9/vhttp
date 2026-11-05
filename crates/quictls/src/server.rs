@@ -897,6 +897,11 @@ impl<'a> QuicServer<'a> {
             final(self).hs == old(self).hs,
     {
         let alpn: &[u8] = &H3_ALPN;
+        // `on_handshake_complete` sets HANDSHAKE_DONE owed in the call that completes, so the next
+        // `transmit` sends it (`rustls_quic_handshake` sees it in the next datagram).
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-4.1.2
+        //# The server MUST send a
+        //# HANDSHAKE_DONE frame as soon as the handshake is complete.
         self.h3.conn_mut().on_handshake_complete(alpn, now, &r.complete);
         self.level = Level::OneRtt;
         if !matches!(self.h3.conn().phase(), Phase::Open) {
@@ -946,3 +951,271 @@ impl QuicServer<'_> {
         [self.keys[0].is_some(), self.keys[1].is_some(), self.keys[2].is_some()]
     }
 }
+
+
+// Requirements on clients, on specification authors, and on TLS records, which QUIC replaces
+//
+// RFC 9001 §4.6.2, §4.9.3, §5.3, §5.6, §8.3: 0-RTT and the cipher suite. 4b negotiates only
+// TLS_AES_128_GCM_SHA256 (0x1301), whose header protection is 3e's `quic::hp`; a cipher suite
+// outside 4a's parser is skipped, never rejected, and 4b's `negotiate` picks 0x1301 from those
+// that remain. No 0-RTT keys are ever derived (`Level` has no 0-RTT) and HTTP/3 0-RTT is declined.
+
+//= https://www.rfc-editor.org/rfc/rfc9001#section-5.3
+//# A cipher suite MUST NOT be
+//# negotiated unless a header protection scheme is defined for the
+//# cipher suite.
+//= https://www.rfc-editor.org/rfc/rfc9001#section-5.3
+//# An endpoint MUST NOT reject a ClientHello that offers a cipher suite
+//# that it does not support, or it would be impossible to deploy a new
+//# cipher suite.
+// 0-RTT packets are dropped unopened by quic::protect::rfc_unprotect (3e); no 0-RTT keys exist.
+//= https://www.rfc-editor.org/rfc/rfc9001#section-4.6.2
+//# When rejecting 0-RTT, a server MUST NOT
+//# process any 0-RTT packets, even if it could.
+//= https://www.rfc-editor.org/rfc/rfc9001#section-4.6.2
+//= type=exception
+//= reason=Client-only: this endpoint is a server.
+//# The client therefore MUST reset the state of all
+//# streams, including application state bound to those streams.
+//= https://www.rfc-editor.org/rfc/rfc9001#section-4.9.3
+//= type=exception
+//= reason=Vacuous: no 0-RTT keys are ever derived, and `Level` has no 0-RTT, so there are none to discard.
+//# After receiving
+//# a 1-RTT packet, servers MUST discard 0-RTT keys within a short time;
+//# the RECOMMENDED time period is three times the Probe Timeout (PTO,
+//# see [QUIC-RECOVERY]).
+//= https://www.rfc-editor.org/rfc/rfc9001#section-5.6
+//= type=exception
+//= reason=Client-only: this endpoint is a server.
+//# A client
+//# therefore MUST NOT use 0-RTT for application data unless specifically
+//# requested by the application that is in use.
+//= https://www.rfc-editor.org/rfc/rfc9001#section-5.6
+//= type=exception
+//= reason=The application profile is HTTP/3 (RFC 9114), which declines 0-RTT here: 0-RTT packets are dropped unopened (3e) and no early_data is accepted.
+//# An application protocol that uses QUIC MUST include a profile that
+//# defines acceptable use of 0-RTT; otherwise, 0-RTT can only be used to
+//# carry QUIC frames that do not carry application data.
+//= https://www.rfc-editor.org/rfc/rfc9001#section-5.6
+//= type=exception
+//= reason=Vacuous: no 0-RTT keys are ever derived; every packet is protected with Initial, Handshake or 1-RTT keys.
+//# A server MUST NOT use 0-RTT keys to protect packets; it uses 1-RTT
+//# keys to protect acknowledgments of 0-RTT packets.
+//= https://www.rfc-editor.org/rfc/rfc9001#section-5.6
+//= type=exception
+//= reason=Client-only: this endpoint is a server.
+//# A client MUST NOT
+//# attempt to decrypt 0-RTT packets it receives and instead MUST discard
+//# them.
+//= https://www.rfc-editor.org/rfc/rfc9001#section-5.6
+//= type=exception
+//= reason=Client-only: this endpoint is a server.
+//# Once a client has installed 1-RTT keys, it MUST NOT send any more
+//# 0-RTT packets.
+//= https://www.rfc-editor.org/rfc/rfc9001#section-8.3
+//= type=exception
+//= reason=Client-only: this endpoint is a server.
+//# Clients MUST NOT send the EndOfEarlyData message.
+//= https://www.rfc-editor.org/rfc/rfc9001#section-8.3
+//= type=exception
+//= reason=Vacuous: 0-RTT packets are never decrypted (3e), so no frame in one is ever received.
+//# A server MUST
+//# treat receipt of a CRYPTO frame in a 0-RTT packet as a connection
+//# error of type PROTOCOL_VIOLATION.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# An implementation may receive an unencrypted record of type
+//# change_cipher_spec consisting of the single byte value 0x01 at any
+//# time after the first ClientHello message has been sent or received
+//# and before the peer's Finished message has been received and MUST
+//# simply drop it without further processing.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# An
+//# implementation which receives any other change_cipher_spec value or
+//# which receives a protected change_cipher_spec record MUST abort the
+//# handshake with an "unexpected_message" alert.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# If an implementation
+//# detects a change_cipher_spec record received before the first
+//# ClientHello message or after the peer's Finished message, it MUST be
+//# treated as an unexpected record type (though stateless servers may
+//# not be able to distinguish these cases from allowed cases).
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# Implementations MUST NOT send record types not defined in this
+//# document unless negotiated by some extension.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# If a TLS
+//# implementation receives an unexpected record type, it MUST terminate
+//# the connection with an "unexpected_message" alert.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5.1
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# Any future content types MUST specify appropriate
+//# rules.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5.1
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# - Handshake messages MUST NOT be interleaved with other record
+//# types.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5.1
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# That is, if a handshake message is split over two or more
+//# records, there MUST NOT be any other records between them.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5.1
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# Implementations MUST NOT send zero-length fragments of Handshake
+//# types, even if those fragments contain padding.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5.1
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# Alert messages (Section 6) MUST NOT be fragmented across records, and
+//# multiple alert messages MUST NOT be coalesced into a single
+//# TLSPlaintext record.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5.1
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# In other words, a record with an Alert type
+//# MUST contain exactly one message.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5.1
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# legacy_record_version: MUST be set to 0x0303 for all records
+//# generated by a TLS 1.3 implementation other than an initial
+//# ClientHello (i.e., one not generated after a HelloRetryRequest),
+//# where it MAY also be 0x0301 for compatibility purposes.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5.1
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# This
+//# field is deprecated and MUST be ignored for all purposes.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5.1
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# The length MUST NOT exceed 2^14 bytes.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5.1
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# An
+//# endpoint that receives a record that exceeds this length MUST
+//# terminate the connection with a "record_overflow" alert.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5.1
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# In order to maximize backward
+//# compatibility, a record containing an initial ClientHello SHOULD have
+//# version 0x0301 (reflecting TLS 1.0) and a record containing a second
+//# ClientHello or a ServerHello MUST have version 0x0303 (reflecting
+//# TLS 1.2).
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5.1
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# Note that Application Data
+//# records MUST NOT be written to the wire unprotected (see Section 2
+//# for details).
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5.2
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# The length
+//# MUST NOT exceed 2^14 + 256 bytes.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5.2
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# An
+//# endpoint that receives a record that exceeds this length MUST
+//# terminate the connection with a "record_overflow" alert.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5.2
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# If the decryption fails, the receiver MUST terminate the connection
+//# with a "bad_record_mac" alert.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5.2
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# An AEAD algorithm used in TLS 1.3 MUST NOT produce an expansion
+//# greater than 255 octets.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5.2
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# An endpoint that receives a record from its
+//# peer with TLSCiphertext.length larger than 2^14 + 256 octets MUST
+//# terminate the connection with a "record_overflow" alert.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5.3
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# Each sequence number is
+//# set to zero at the beginning of a connection and whenever the key is
+//# changed; the first record transmitted under a particular traffic key
+//# MUST use sequence number 0.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5.3
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# If a TLS implementation would need to wrap a sequence number, it MUST
+//# either rekey (Section 4.6.3) or terminate the connection.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5.3
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# An AEAD algorithm where N_MAX is less than 8 bytes
+//# MUST NOT be used with TLS.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5.4
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# Implementations MUST set the
+//# padding octets to all zeros before encrypting.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5.4
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# Implementations
+//# MUST NOT send Handshake and Alert records that have a zero-length
+//# TLSInnerPlaintext.content; if such a message is received, the
+//# receiving implementation MUST terminate the connection with an
+//# "unexpected_message" alert.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5.4
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# Implementations MUST limit their scanning to the cleartext returned
+//# from the AEAD decryption.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5.4
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# If a receiving implementation does not
+//# find a non-zero octet in the cleartext, it MUST terminate the
+//# connection with an "unexpected_message" alert.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-5.4
+//= type=exception
+//= reason=TLS records are not used by QUIC (RFC 9001 §4): CRYPTO frames carry handshake bytes, packet protection is RFC 9001 §5 (quic::protect), and no change_cipher_spec is sent or accepted (RFC 9001 §8.4).
+//# The presence of padding does not change the overall record size
+//# limitations: the full encoded TLSInnerPlaintext MUST NOT exceed 2^14
+//# + 1 octets.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-6.1
+//= type=exception
+//= reason=Replaced by QUIC: closure is CONNECTION_CLOSE (RFC 9001 §4.8, RFC 9000 §10.2); no close_notify is sent or read.
+//# Any data received
+//# after a closure alert has been received MUST be ignored.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-6.1
+//= type=exception
+//= reason=Replaced by QUIC: closure is CONNECTION_CLOSE (RFC 9001 §4.8, RFC 9000 §10.2); no close_notify is sent or read.
+//# Any data received
+//# after a closure alert has been received MUST be ignored.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-6.1
+//= type=exception
+//= reason=Replaced by QUIC: closure is CONNECTION_CLOSE (RFC 9001 §4.8, RFC 9000 §10.2); no close_notify is sent or read.
+//# Each party MUST send a "close_notify" alert before closing its write
+//# side of the connection, unless it has already sent some error alert.
+//= https://www.rfc-editor.org/rfc/rfc8446#section-6.1
+//= type=exception
+//= reason=Replaced by QUIC: closure is CONNECTION_CLOSE (RFC 9001 §4.8, RFC 9000 §10.2); no close_notify is sent or read.
+//# If the application protocol using TLS provides that any data may be
+//# carried over the underlying transport after the TLS connection is
+//# closed, the TLS implementation MUST receive a "close_notify" alert
+//# before indicating end-of-data to the application layer.
