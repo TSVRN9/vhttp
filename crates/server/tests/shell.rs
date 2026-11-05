@@ -7,11 +7,7 @@ use std::io;
 use std::net::SocketAddr;
 
 fn rng() -> io::Result<[u8; 129]> {
-    let mut r = [0u8; 129];
-    for (j, b) in r.iter_mut().enumerate() {
-        *b = 1u8.wrapping_add(j as u8);
-    }
-    Ok(r)
+    Ok(rnd(1))
 }
 
 fn addr(p: u16) -> SocketAddr {
@@ -42,6 +38,7 @@ fn df_set_v6() {
     };
     assert_eq!(getopt(&s, libc::IPPROTO_IPV6, libc::IPV6_MTU_DISCOVER), libc::IPV6_PMTUDISC_PROBE);
     assert_eq!(getopt(&s, libc::IPPROTO_IPV6, libc::IPV6_DONTFRAG), 1);
+    assert_eq!(getopt(&s, libc::IPPROTO_IPV6, libc::IPV6_V6ONLY), 1);
 }
 
 #[test]
@@ -97,4 +94,9 @@ fn idle_close_frees_slot() {
     assert_eq!(s.conn_count(), 0);
     s.on_datagram(&A2, addr(1), 60_000_001, &mut send).unwrap();
     assert_eq!(s.conn_count(), 1);
+}
+
+#[test]
+fn local_params_are_ltp() {
+    assert_eq!(local_params(), ltp());
 }
