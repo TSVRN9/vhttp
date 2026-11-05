@@ -292,7 +292,7 @@ The object from the suggested `cargo rustc --release -p crypto --lib -- --emit=o
 - **Profile:** `[profile.release]` sets only `overflow-checks`; `crypto` sets it false. No `lto`, `codegen-units` or `opt-level` override, so opt-level 3 and no cross-crate LTO.
 - **Real binary:** `crates/server`'s binary (since 3e) is the only one besides `tools/ct-driver`'s. With LTO off, it links these objects unchanged, unless its profile changes.
 - **Cross-crate inlining:** `nm` on the `tls` and `quic` rlibs shows no locally defined `crypto::` symbol. `tls` calls `p256_ecdsa_sign`, `serialize_ecdsa_der`, `hkdf_expand`, `hkdf_extract`, `hmac_sha256`, `p256_ecdh`, `p256_public_key`, `rsa_pss_sha256_sign`, `sha256` as external symbols.
-- **No in-workspace GCM caller:** neither `tls` nor `quic` references `crypto::gcm` or `crypto::aes` in the release objects, so priority 1 is not yet reachable from released code.
+- **GCM callers:** since 3e, `quic` references `crypto::aes::aes128_encrypt_block`, `crypto::gcm::aes128_gcm_open` and `crypto::gcm::aes128_gcm_seal` in its release objects (the `U quic` lines of the digests file); `tls` references none. Priority 1 is reachable from `crates/server`'s binary, which the gate does not check.
 
 ## Coverage: 30 first-party non-RSA functions
 
@@ -406,7 +406,7 @@ The `sext(i1)` select pattern is reachable here too: `select4`, `mont_mul`'s sub
 ## Not checked
 
 - Fat or thin LTO, `codegen-units=1` as a real profile (the 1-CGU object is a close stand-in), a linked binary (`crates/server`'s, since 3e), other `target-cpu` values, other targets.
-- `tls` key schedule glue, `hkdf_expand_label`, transcript handling, beyond the two spot checks above. `quic` references no `crypto::` symbol in its release objects; `h3` and `wire` were not disassembled.
+- `tls` key schedule glue, `hkdf_expand_label`, transcript handling, beyond the two spot checks above. `quic`'s three `U crypto::` references (AES block encrypt, GCM open, GCM seal) are calls, and quic's own code was not disassembled; `h3` and `wire` were not disassembled.
 - RSA shim beyond F2, and all of crypto-bigint/rsa/sha2 (G1). `sha2::compress256` is only used by the shim.
 - Not dudect: no timing was measured. Nothing about data cache behaviour beyond the indices above, instruction cache, branch predictor state from public branches, speculation (Spectre, including bounds-check bypass), `mul` latency on old CPUs, or flag-dependent `cmov` behaviour on future microarchitectures. `cmov` was taken as data-independent as instructed.
 - No zeroisation check. Secrets on the stack and in freed `Vec`s were not examined.

@@ -278,7 +278,7 @@ Also read (their Interfaces blocks and binding notes are this plan's contract):
 
 **Files:**
 - Create: `crates/quic/src/pipeline.rs`, `crates/quic/tests/pipeline.rs`
-- Modify: `crates/quic/src/lib.rs`; `crates/quic/src/conn.rs`, **spec only**: `poll_cid_updates` gains `final(self).keeps_later(*old(self))`, proved like `poll_stream_events` with a `lemma_keeps_streams`-style frame lemma (it writes only `cid_updates` and `tokens_registered`, which no timer reads) (Decision 14, revised); and the Task 3 addition already landed: `poll_transmit` ensures every returned packet has `pn < PN_MAX` (private `lemma_transmit_pn_max`), which discharges `protect_ok`'s `p.pn <= PN_MAX` (Decision 14, amended at Task 3 I1)
+- Modify: `crates/quic/src/lib.rs`; `crates/quic/src/conn.rs`, **spec only** (amended at Task 5 fix round 1: plus the exec change to `on_datagram` taking the error): `poll_cid_updates` gains `final(self).keeps_later(*old(self))`, proved like `poll_stream_events` with a `lemma_keeps_streams`-style frame lemma (it writes only `cid_updates` and `tokens_registered`, which no timer reads) (Decision 14, revised); and the Task 3 addition already landed: `poll_transmit` ensures every returned packet has `pn < PN_MAX` (private `lemma_transmit_pn_max`), which discharges `protect_ok`'s `p.pn <= PN_MAX` (Decision 14, amended at Task 3 I1)
 
 **Interfaces:**
 - Consumes: `Connection::{accept, on_datagram, poll_transmit, close, on_reset_candidate, largest_pn, handshake_complete, now, on_timeout, poll_cid_updates, next_timeout}`; `transmit_ok` (P7, P16), `lemma_wf_protect_ok`, `out_log`, `timers_later`, `acks_later`, `keeps_later`, `lemma_keeps_elim`, `later`; `rfc_long_header`/`parse_long_header`, `TransportParams`, `RAND_LEN`, `PathId`.
@@ -290,16 +290,14 @@ Also read (their Interfaces blocks and binding notes are this plan's contract):
     rx = open_datagram(d, &gate_keys(keys, false), &[None; 3])
     first = rx.packets[0], else rx.error's packet (frames []), else return None   // nothing decrypted: no state
     c = Connection::accept(&first, d.len(), path, now, rand, local_tp)?              // §14.1 sub-1200 → None
-    c.on_datagram(path, d.len(), rx.packets, now, rand)                              // bytes counted before close (§8.1)
-    if let Some((code, _)) = rx.error { c.close(code, false, &[], c.now()) }         // connection error (Decision 5)
+    c.on_datagram(path, d.len(), rx.packets, rx.error, now, rand)                    // bytes counted, then closes on the error if its header passes the packet gate (§8.1, Decision 5) (amended at Task 5 fix round 1)
     Some(c)
     ```
   - **`pub fn receive(c: &mut Connection, d: &[u8], path: PathId, now: u64, rand: &[u8; RAND_LEN], keys: &[Option<KeyPair>; 3])`**: ensures `final(c).out_log() == old(c).out_log()`. Body order:
     ```
     rx = open_datagram(d, &gate_keys(keys, c.handshake_complete()),
                        &[c.largest_pn(Initial), c.largest_pn(Handshake), c.largest_pn(OneRtt)])
-    c.on_datagram(path, d.len(), rx.packets, now, rand)        // always, even with no packet (3d2 binding)
-    if let Some((code, _)) = rx.error { c.close(code, false, &[], c.now()) }
+    c.on_datagram(path, d.len(), rx.packets, rx.error, now, rand)   // always, even with no packet (3d2 binding); closes on the error inside (amended at Task 5 fix round 1)
     if let Some(t) = rx.reset_tail { c.on_reset_candidate(&t, now) }
     ```
   - **`pub fn transmit(c: &mut Connection, now: u64, keys: &[Option<KeyPair>; 3], out: &mut Vec<u8>) -> (r: Option<PathId>)`**: `out.clear()`, `d = c.poll_transmit(now)?`, `protect_datagram(&d, keys, out)`, `Some(d.path)`. Ensures:
@@ -446,6 +444,8 @@ Also read (their Interfaces blocks and binding notes are this plan's contract):
   - key phase and key update in `rfc_unprotect` (RFC 9001 §5.5, §6); the key-phase bit is ignored today, with one 1-RTT key;
   - with any DCID keyed, `MAX_CONNS` (102) becomes reachable: admission must assume §10.1's 3·PTO floor (a slot held up to 55.6 min, 196 s for a dead peer with defaults), and `route`'s linear scan (≤ 512 CID + 816 CT token comparisons per datagram) needs the random-keyed SipHash index before production (3d final review I3, carried by 3d2);
   - **keep "no keyless ack-eliciting packet":** every space that can carry CRYPTO, ACK or PING has its keys first, so `protect_datagram`'s write-nothing branch stays unreachable outside a misconfiguration; alternatively gate 3d's `close_spaces` on key availability (RFC 9000 §10.2.3).
+  - **pass the datagram's error (final review M2):** `H3Server::on_datagram` (crates/quic/src/h3_server.rs:1138) passes `None` for the error; when the shell switches to `H3Server` it must pass the datagram's error, or §17.2/§17.3.1 connection errors stop closing;
+  - **odcid must equal the keys' DCID (final review M4):** `accept_datagram` builds the connection from the first decrypted packet while the shell picks keys from the datagram's first header, so a crafted datagram can give the connection an odcid different from the DCID its keys came from; make them equal before `original_destination_connection_id` is sent.
 - **Phase 5:** done; `hp`/`aead` already prove against the verified primitives' specs.
 - **Phase 7:** the shipped `server` binary is a linked build the binary gate does not check (audit "What it does not check").
 
@@ -472,7 +472,7 @@ Also read (their Interfaces blocks and binding notes are this plan's contract):
 11. **The shell drives `Connection`, not `H3Server`**: nothing reaches HTTP/3 before Phase 4 completes a handshake. *Accept; Phase 4 switches.*
 12. *(Replaced by 21.)*
 13. **`theorem_unprotect_protect` is in Task 4's scope** (`gctr` involution, HP round trip, header-ignores-masked-bits; trailing padding is 3b's `theorem_payload_padded`). *Keep; drop only if Task 4 overruns.*
-14. **Earlier-crate additions:** none of the draft's fallbacks is needed (3b exports `spec_long_header_bytes`/`spec_short_header_bytes`; 3d2 exports `out_log`, P7 and P16). One spec-only addition remains: `poll_cid_updates` ensures `keeps_later`, so the shell's wake order (I1 needs the updates applied after `on_timeout`) is inside the no-spin proof. No behaviour change. *Accept.*
+14. **Earlier-crate additions:** none of the draft's fallbacks is needed (3b exports `spec_long_header_bytes`/`spec_short_header_bytes`; 3d2 exports `out_log`, P7 and P16). One spec-only addition remains: `poll_cid_updates` ensures `keeps_later`, so the shell's wake order (I1 needs the updates applied after `on_timeout`) is inside the no-spin proof. No behaviour change from this addition. (Amended at Task 5 fix round 1: conn.rs also changed in exec: `on_datagram` takes the datagram's error and closes only if its header passes the packet gate (Task 5 review I1); and in spec: `poll_transmit` ensures `pn < PN_MAX`, and `on_datagram` ensures the §8.1 `recv_counted` trace.) *Accept.*
 15. **`largest == Some(PN_MAX)` drops that space's packets** (outside `decode_pn`'s domain); coalesced same-space packets decode against one pre-datagram `largest`. *Accept (ponytail).*
 16. **The doc fixes ride in Task 1** (3a plan's three "Phase 3b" → 3e; outline row-accounting line). *Accept.*
 17. **The shell is `Server` (socket-free: `on_datagram`, `on_wake`, `deadline`) plus `run`**, replacing the draft's monolithic loop, so the I1 order, the address-slot rule and idle removal are unit-tested. *Accept.*

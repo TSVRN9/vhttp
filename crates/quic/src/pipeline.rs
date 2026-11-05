@@ -155,8 +155,8 @@ pub fn accept_datagram(
 //# when it receives a datagram that does not meet size constraints; the
 //# endpoint MAY discard such datagrams.
 /// A datagram for `c`: always counted by `on_datagram`, even with no packet in it (§8.1); a
-/// connection error closes `c` if its header passes the gate a packet would; a first packet that did not decrypt makes the last 16 bytes a
-/// stateless reset candidate (§10.3.1).
+/// connection error closes `c` if its header passes the gate a packet would; a first packet
+/// that did not decrypt makes the last 16 bytes a stateless reset candidate (§10.3.1).
 #[verifier::spinoff_prover]
 pub fn receive(
     c: &mut Connection,
