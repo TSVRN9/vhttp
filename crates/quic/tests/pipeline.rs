@@ -299,9 +299,11 @@ fn refeed_after_complete() {
 fn refeed_before_complete_is_noop() {
     let d = hs_then_1rtt(&L0);
     let mut c = gated(&d);
-    refeed_one_rtt(&mut c, &d, 0, 10, &rnd(4), &K2);
+    refeed_one_rtt(&mut c, &d, 0, 20, &rnd(4), &K2);
     assert_eq!(c.largest_pn(PacketKind::OneRtt), None);
     assert_eq!(c.phase(), Phase::Open);
+    // Not even the clock moves.
+    assert_eq!(c.now(), 10);
 }
 
 /// A CID issued at completion is valid, but not the first header's (RFC 9000 §12.2).
@@ -342,4 +344,34 @@ fn crypto_end_tracks_received() {
     receive(&mut c, &d, 0, 5, &rnd(2), &K);
     assert_eq!(c.largest_pn(PacketKind::Initial), Some(3));
     assert_eq!(c.crypto_end(PacketKind::Initial), 310);
+}
+
+/// A refeed in Closing owes no second CONNECTION_CLOSE, even with closing-state budget left.
+#[test]
+fn refeed_in_closing_sends_nothing() {
+    let d = hs_then_1rtt(&L0);
+    let mut c = gated(&d);
+    c.on_handshake_complete(b"h3", 10, &rnd(3));
+    let mut buf = Vec::new();
+    while transmit(&mut c, 10, &K2, &mut buf).is_some() {}
+    c.close(0, true, &[], 11);
+    while transmit(&mut c, 11, &K2, &mut buf).is_some() {}
+    let big = protected(&OutPacket { pn: 1, ..out(PacketKind::OneRtt, &L0, &[], 1, 1100) }, &T);
+    receive(&mut c, &big, 0, 12, &rnd(5), &K2);
+    assert_eq!(c.phase(), Phase::Closing);
+    let mut n0 = 0;
+    while transmit(&mut c, 12, &K2, &mut buf).is_some() {
+        if !buf.is_empty() {
+            n0 += 1;
+        }
+    }
+    assert!(n0 >= 1, "a closing-state receive owes a close");
+    refeed_one_rtt(&mut c, &d, 0, 13, &rnd(4), &K2);
+    let mut n1 = 0;
+    while transmit(&mut c, 13, &K2, &mut buf).is_some() {
+        if !buf.is_empty() {
+            n1 += 1;
+        }
+    }
+    assert_eq!(n1, 0, "refeed in Closing sent another CONNECTION_CLOSE");
 }

@@ -251,6 +251,7 @@ pub fn refeed_one_rtt(
         final(c).wf(),
         final(c).out_log() == old(c).out_log(),
         !old(c).live(PacketKind::OneRtt) ==> *final(c) == *old(c),
+        !(old(c).phase_spec() is Open) ==> *final(c) == *old(c),
 {
     hide(rfc_open_datagram);
     if !c.handshake_complete() {
