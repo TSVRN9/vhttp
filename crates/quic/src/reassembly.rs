@@ -262,6 +262,30 @@ impl Reassembly {
     {
     }
 
+    /// Nothing buffered, and everything below `base` delivered (as zeros, in the ghost record).
+    pub fn new_at(base: u64) -> (r: Reassembly)
+        requires
+            base <= VARINT_MAX,
+        ensures
+            r.wf(),
+            r.base() == base,
+            r.buf_len() == 0,
+    {
+        let ghost d = Seq::new(base as nat, |_i: int| 0u8);
+        let r = Reassembly {
+            base,
+            head: 0,
+            buf: Vec::new(),
+            have: Vec::new(),
+            ins: Ghost(Seq::<(nat, Seq<u8>)>::empty().push((0nat, d))),
+        };
+        proof {
+            lemma_received_push(Seq::<(nat, Seq<u8>)>::empty(), 0, d);
+            lemma_contiguous_is(rfc_received(r.ins@), base as nat);
+        }
+        r
+    }
+
     pub fn new() -> (r: Reassembly)
         ensures
             r.wf(),
