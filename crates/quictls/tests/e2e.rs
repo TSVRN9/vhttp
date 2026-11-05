@@ -105,9 +105,9 @@ impl ServerCertVerifier for Verifier {
 
 /// The client's transport parameters (preflight C2): `initial_source_connection_id` C1,
 /// `active_connection_id_limit` 4, `initial_max_streams_uni` 3, `initial_max_data` 65536,
-/// `initial_max_stream_data_uni` 16384.
+/// `initial_max_stream_data_uni` 16384, `initial_max_stream_data_bidi_local` 16384 (so the server can answer a request).
 fn client_tp() -> Vec<u8> {
-    qc::hex("0f08c1c1c1c1c1c1c1c1 0e0104 090103 040480010000 070480004000")
+    qc::hex("0f08c1c1c1c1c1c1c1c1 0e0104 090103 040480010000 070480004000 050480004000")
 }
 
 fn rustls_client() -> (ClientConnection, Arc<Log>) {
@@ -177,7 +177,7 @@ fn kind(l: Level) -> PacketKind {
     }
 }
 
-struct Client {
+pub struct Client {
     tls: ClientConnection,
     log: Arc<Log>,
     odcid: [u8; 8],
@@ -194,12 +194,15 @@ struct Client {
     level: Level,
 }
 
-/// The frames a test client sends are PING and CRYPTO.
+/// The frames a test client sends are PING, CRYPTO and STREAM.
 fn dup(fs: &[Frame]) -> Vec<Frame> {
     fs.iter()
         .map(|f| match f {
             Frame::Ping => Frame::Ping,
             Frame::Crypto { offset, data } => Frame::Crypto { offset: *offset, data: data.clone() },
+            Frame::Stream { stream_id, offset, data, fin } => {
+                Frame::Stream { stream_id: *stream_id, offset: *offset, data: data.clone(), fin: *fin }
+            },
             _ => panic!("dup"),
         })
         .collect()
@@ -210,7 +213,11 @@ fn swapped(k: KeyPair) -> KeyPair {
 }
 
 impl Client {
-    fn new() -> Client {
+    pub fn handshaking(&self) -> bool {
+        self.tls.is_handshaking()
+    }
+
+    pub fn new() -> Client {
         let (tls, log) = rustls_client();
         let odcid = qc::S1;
         let mut c = Client {
@@ -325,7 +332,7 @@ impl Client {
 
     /// Everything pending, as one datagram (none when nothing is pending), with `extra_one_rtt`
     /// last.
-    fn datagrams(&mut self, extra_one_rtt: Option<Vec<Frame>>) -> Vec<Vec<u8>> {
+    pub fn datagrams(&mut self, extra_one_rtt: Option<Vec<Frame>>) -> Vec<Vec<u8>> {
         let mut parts = self.crypto_parts();
         if let Some(f) = extra_one_rtt {
             parts.push((Level::OneRtt, f));
@@ -338,7 +345,7 @@ impl Client {
 
     /// A client-side opener (preflight C3): `open_datagram` parses frames as a server does and
     /// rejects HANDSHAKE_DONE. CRYPTO goes in order to rustls.
-    fn absorb(&mut self, d: &[u8]) -> Vec<(PacketKind, Vec<Frame>)> {
+    pub fn absorb(&mut self, d: &[u8]) -> Vec<(PacketKind, Vec<Frame>)> {
         let mut res = Vec::new();
         let mut i = 0;
         while i < d.len() {
@@ -398,7 +405,7 @@ impl Client {
     }
 }
 
-type Pkts = Vec<(PacketKind, Vec<Frame>)>;
+pub type Pkts = Vec<(PacketKind, Vec<Frame>)>;
 
 /// Server datagrams until `None`, each opened by the client; every `Some` is non-empty (3e: no
 /// keyless ack-eliciting packet).

@@ -161,7 +161,7 @@ fn spoofed_addresses_take_no_slot() {
 }
 
 #[test]
-fn idle_close_frees_slot() {
+fn timeout_close_frees_slot() {
     let mut s = Server::new(cfg(), rng);
     let mut send = Vec::new();
     s.on_datagram(&A2, addr(1), 0, &mut send).unwrap();
