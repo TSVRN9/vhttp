@@ -298,7 +298,7 @@ Total keyword count: 44 across 22 sections.
 | 14.2 | Path maximum transmission unit | 1 | yes | 3 | Cease sending if PMTU < 1200 (except probes/CONNECTION_CLOSE). ✅ 3d: crates/quic/src/conn.rs (P17 send gate) + path.rs (mtu_failed) |
 | 14.2.1 | Handling of ICMP messages by PMTUD | 3 | yes | 3 | Only if shell processes ICMP; vacuous otherwise. |
 | 17.1 | Packet number encoding and decoding | 2 | yes | 3 | Full PN before first ACK; size covers > 2x range. ✅ 3b: crates/quic/src/pn.rs; A.2 pseudocode under-sizes at exact powers of two; §17.1 prose used. Decoding is A.3 (`decode_pn`, result <= PN_MAX); `theorem_pn_len_decodes` proves a `pn_len_ok` length decodes back at a receiver that has seen the acknowledged packet; `pn_encode_len` None (more than 2^31 unacked) is a 3d internal limit |
-| 17.2 | Long header packets | 7 | yes | 3 | Fixed bit; CID length <= 20 (drop); reserved bits PROTOCOL_VIOLATION. 3b codec: crates/quic/src/header.rs (closed in 3e) |
+| 17.2 | Long header packets | 7 | yes | 3 | Fixed bit; CID length <= 20 (drop); reserved bits PROTOCOL_VIOLATION. ✅ 3e: crates/quic/src/protect.rs + pipeline.rs (reserved bits after AEAD); other MUSTs in header.rs (3b) |
 | 17.2.1 | Version Negotiation packet | 6 | partial | 3 | Server rows are phase 3; one client-only. ✅ 3b: crates/quic/src/stateless.rs |
 | 17.2.1 (req) | Client ignores Unused field | 1 | no | N/A (client-only) |  |
 | 17.2.1 (req) | VN: Version 0, CIDs echoed, no version-specific CID influence, one VN per datagram | 5 | yes | 3 | Includes DCID from client SCID, SCID from client DCID, at most one VN per datagram. ✅ 3b: crates/quic/src/stateless.rs (caller binding: 3d route) |
@@ -311,7 +311,7 @@ Total keyword count: 44 across 22 sections.
 | 17.2.5.1 | Sending a Retry packet | 4 | no | Declined (optional: Retry) | Server MUSTs (SCID differs, at most one Retry) not applicable; 2 client rows client-only. |
 | 17.2.5.2 | Handling a Retry packet | 5 | no | N/A (client-only) |  |
 | 17.2.5.3 | Continuing a handshake after Retry | 2 | no | N/A (client-only) |  |
-| 17.3.1 | 1-RTT packet | 3 | yes | 3 | Fixed bit; reserved bits PROTOCOL_VIOLATION. 3b codec: crates/quic/src/header.rs (closed in 3e) |
+| 17.3.1 | 1-RTT packet | 3 | yes | 3 | Fixed bit; reserved bits PROTOCOL_VIOLATION. ✅ 3e: crates/quic/src/protect.rs + pipeline.rs (reserved bits after AEAD); other MUSTs in header.rs (3b) |
 | 17.4 | Latency spin bit | 4 | yes | 3 | Simplest compliance: not support it and keep it disabled (set arbitrary, ignore incoming). ✅ 3b: crates/quic/src/header.rs; spin bit unsupported, so always disabled: serializer takes a caller-chosen `spin` (RECOMMENDED random per packet or per CID, supplied by 3e), never read on parse; no admin switch is needed for a feature that cannot be enabled |
 | 18.2 | Transport parameter definitions | 9 | partial | 3 | Rows below. ✅ 3b: crates/quic/src/tp.rs |
 | 18.2 (req) | stateless_reset_token not sent by clients | 1 | yes | 3 | Server sends it; receipt from a client is an error (see server-only row). ✅ 3b: crates/quic/src/tp.rs |
@@ -400,7 +400,7 @@ Total keyword count: 307 across 115 sections.
 | 5.6 (req) | Application protocol 0-RTT profile | 1 | no | Declined (optional: 0-RTT) | "An application protocol that uses QUIC MUST include a profile that defines acceptable use of 0-RTT" Applies to the application protocol spec (HTTP/3), not enforced by an implementation that has no 0-RTT. |
 | 5.6 (req) | Client MUST NOT decrypt 0-RTT it receives | 2 | no | N/A (client-only) | "A client MUST NOT attempt to decrypt 0-RTT packets it receives and instead MUST discard them." |
 | 5.6 (req) | Client stops 0-RTT once 1-RTT installed | 1 | no | N/A (client-only) | "Once a client has installed 1-RTT keys, it MUST NOT send any more 0-RTT packets." |
-| 5.7 | Receiving Out-of-Order Protected Packets | 3 | partial | 4 | Endpoints MUST NOT decrypt 1-RTT packets before the handshake completes; server MUST NOT process incoming 1-RTT packets before the TLS handshake is complete (buffer or drop; no ACKs for them). |
+| 5.7 | Receiving Out-of-Order Protected Packets | 3 | partial | 4 | Endpoints MUST NOT decrypt 1-RTT packets before the handshake completes; server MUST NOT process incoming 1-RTT packets before the TLS handshake is complete (buffer or drop; no ACKs for them). 3e: 1-RTT keys masked until handshake_complete in crates/quic/src/pipeline.rs; the re-feed of a 1-RTT packet coalesced with the client Finished is Phase 4 |
 | 5.7 (req) | Client MUST NOT process 1-RTT before handshake complete | 1 | no | N/A (client-only) | "a client MUST NOT process incoming 1-RTT protected packets before the TLS handshake is complete." |
 | 6 | Key Update | 2 | yes | 4 | Endpoints MUST NOT send a TLS KeyUpdate message and MUST treat receipt as connection error 0x010a (unexpected_message). ✅ 4b: crates/tls/src/server.rs (no KeyUpdate serializer; a KeyUpdate at Handshake or 1-RTT is 0x10a) |
 | 6.1 | Initiating a Key Update | 3 | yes | 4 | MUST NOT initiate before handshake confirmed; MUST NOT initiate again until an ACK for a packet in the current phase; MUST retain old receive keys until a packet with the new keys is unprotected. |
