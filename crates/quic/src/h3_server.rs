@@ -1120,6 +1120,7 @@ impl H3Server {
         path: PathId,
         datagram_len: usize,
         packets: Vec<PlainPacket>,
+        error: Option<(u64, PlainPacket)>,
         now: u64,
         rand: &[u8; RAND_LEN],
         app: &mut Vec<AppEvent>,
@@ -1128,6 +1129,7 @@ impl H3Server {
             old(self).wf(),
             old(self).history_ok(),
             forall|i: int| 0 <= i < packets@.len() ==> plain_wf(#[trigger] packets@[i]@),
+            error matches Some((c, h)) ==> c <= VARINT_MAX && plain_wf(h@),
         ensures
             final(self).wf(),
             final(self).history_ok(),
@@ -1135,7 +1137,7 @@ impl H3Server {
             final(self).started_spec() ==> final(self).conn_spec().events_spec().len() == 0,
             app_grew(old(app)@, final(app)@),
     {
-        self.conn.on_datagram(path, datagram_len, packets, None, now, rand);
+        self.conn.on_datagram(path, datagram_len, packets, error, now, rand);
         self.pump(app);
     }
 
@@ -1153,11 +1155,13 @@ impl H3Server {
             app_grew(old(app)@, final(app)@),
             // `Connection::on_timeout`'s, kept by `pump`.
             now < u64::MAX ==> final(self).conn_spec().timers_later(now),
+            now <= final(self).conn_spec().now_spec(),
     {
         self.conn.on_timeout(now, rand);
         let ghost c0 = self.conn;
         self.pump(app);
         proof {
+            self.conn.lemma_keeps_now(c0);
             if now < u64::MAX {
                 self.conn.lemma_keeps_elim(c0, now);
             }
