@@ -545,7 +545,7 @@ verified interpreter, proved equal to `ctcore::sem::run_fn`.
 | `ct-dump` (`tools/ct-driver`): calls rustc_public queries and serializes their answers with rustc's own derives; decides nothing | rust_verify's HIR reader | ≤ 300 lines | decision-free: the closure walk, `ct_key`, the `dangling` check. 466 lines outside tests (`main.rs` 105, `dump.rs` 361 with `dangling`), over the target. `-Zalways-encode-mir` comes from `CT_ENCODE_MIR`, which ct-check.sh takes from the `translate-crate` lines |
 | The JSON grammar spec (`print`) and the schema spec (`decode_crate`) | — | small, beside rustc_public's definitions | `json.rs` 430 lines, `schema.rs` 2340, `mir.rs` 428. `print` is proved injective up to views; `decode_crate` is not proved functional (reviewed by inspection; TRUSTED.md row; follow-up) |
 | `ctmir::sem`: value model, leakage table, cost table (with the constant charge), std model | Verus's encoding of Rust, plus vstd's `assume_specification`s | about the size of `ctcore::sem` | `sem.rs` 1608 lines and `sem_subset.rs` 154, against `ctcore::sem`'s 616, plus the shared vocabulary it imports from `ctcore::sem` (`binop`, `cast`, `get`, `put`, …). Never-Stuck (no `Panic`/`None` on rustc-typed in-subset MIR where Rust completes) is trusted, not proved; `size_of::<usize>() == 8` is assumed |
-| Policy inputs: roots, `ct::secret`/`ct::public` labels, `declassify` and `ghost` lines | the user's specs | — | read by the verified parser against `policy_of`; `intr` lines are rejected; crypto's `checked` lines are pinned by `tools/ct-driver/expected-labels.txt`; `report_sound` proves declared secrets secret in the labels used. A `ghost` line is checked only against the dump's own crate |
+| Policy inputs: roots, `ct::secret`/`ct::public` labels, `declassify` and `ghost` lines | the user's specs | — | read by the verified parser against `policy_of`; `intr` lines are rejected; crypto's `checked` lines are pinned by `tools/ct-driver/expected-labels.txt`; `report_sound` proves declared secrets secret in the labels used. the `ghost` grammar admits only the two paths in use, whose unit, effect-free result is trusted (reviewed) |
 | `main` of `ct-front`: reads files, calls one verified function, writes its result | Verus's driver | ≤ 80 lines | 37 lines. The statements it relies on (`report_sound` and the line specs) are read as the claim; ct-check.sh (unverified shell) reads the claims by their `root `/`bounded ` prefixes |
 | Everything below MIR: LLVM and the CPU (Phase 7a) | rustc codegen | — | unchanged |
 
@@ -575,5 +575,4 @@ these differences. Final numbers: fixtures 59/59, selftest 22/22 and parsers 15/
 rejected, semconf 31723/31723.
 
 **Follow-ups.** Prove `decode_crate` functional up to views and delete its TRUSTED.md row; prove
-never-Stuck (type soundness of `ctmir::sem` on rustc-typed MIR), or narrow it; check `ghost` lines
-against every analysed and translate crate.
+never-Stuck (type soundness of `ctmir::sem` on rustc-typed MIR), or narrow it.
