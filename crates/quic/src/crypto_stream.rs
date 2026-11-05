@@ -110,6 +110,19 @@ impl CryptoStream {
         }
         self.re.pop(out);
     }
+
+    /// The end of the received data: the read offset plus the buffered window.
+    pub fn end(&self) -> (r: u64)
+        requires
+            self.wf(),
+        ensures
+            r == self.reassembly().base() + self.reassembly().buf_len(),
+    {
+        proof {
+            self.re.lemma_wf();
+        }
+        self.re.base_exec() + self.re.buf_len() as u64
+    }
 }
 
 } // verus!

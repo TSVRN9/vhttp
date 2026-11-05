@@ -211,7 +211,7 @@ fn big_ptp() -> TransportParams {
 }
 
 fn dgram(s: &mut H3Server, pn: u64, f: Vec<Frame>, now: u64, app: &mut Vec<AppEvent>) {
-    s.on_datagram(0, 300, vec![one(pn, f)], now, &rnd(pn as u8), app);
+    s.on_datagram(0, 300, vec![one(pn, f)], None, now, &rnd(pn as u8), app);
 }
 
 fn poll_all(s: &mut H3Server, now: u64) -> Vec<OutDatagram> {
@@ -544,4 +544,22 @@ fn close_frees_pending() {
     s.pump(&mut app);
     assert!(s.can_send());
     assert_eq!(s.pending_bytes(), 0);
+}
+
+/// Phase 4c Task 2 (preflight C8): the clock reaches `now`.
+#[test]
+fn h3_on_timeout_now() {
+    let mut s = H3Server::new(established());
+    let mut app = Vec::new();
+    s.on_timeout(50, &rnd(4), &mut app);
+    assert!(s.conn().now() >= 50);
+}
+
+/// A connection error alone closes (RFC 9000 §17.2, §17.3.1).
+#[test]
+fn h3_on_datagram_passes_error() {
+    let mut s = H3Server::new(established());
+    let mut app = Vec::new();
+    s.on_datagram(0, 100, vec![], Some((0x0a, one(5, vec![]))), 30, &rnd(3), &mut app);
+    assert_eq!(s.conn().phase(), Phase::Closing);
 }

@@ -253,3 +253,93 @@ fn sub1200_error_ignored() {
     receive(&mut c, &reserved_pn4(), 0, 5, &rnd(2), &K);
     assert_eq!(c.phase(), Phase::Open);
 }
+
+// Phase 4c Task 2: the glue's hooks.
+
+/// Arbitrary Handshake keys, the same both ways.
+const HK: PacketKeys = PacketKeys { key: [4; 16], iv: [5; 12], hp: [6; 16] };
+/// Server view with Initial, Handshake and 1-RTT keys.
+const K2: [Option<KeyPair>; 3] = [K[0], Some(KeyPair { rx: HK, tx: HK }), K1[2]];
+
+fn out(kind: PacketKind, dcid: &[u8], scid: &[u8], pn_len: u8, padding: usize) -> OutPacket {
+    OutPacket { kind, dcid: dcid.to_vec(), scid: scid.to_vec(), pn: 0, pn_len, frames: vec![Frame::Ping], padding, spin: false }
+}
+
+/// The client's Handshake packet to L0.
+fn hs_l0() -> Vec<u8> {
+    protected(&out(PacketKind::Handshake, &L0, &C1, 1, 30), &HK)
+}
+
+/// A 1-RTT PING to `dcid`, coalesced after `hs_l0()`.
+fn hs_then_1rtt(dcid: &[u8]) -> Vec<u8> {
+    [hs_l0(), protected(&out(PacketKind::OneRtt, dcid, &[], 1, 2), &T)].concat()
+}
+
+/// Accepted with all keys and the peer's parameters; `d` received before completion.
+fn gated(d: &[u8]) -> Connection {
+    let mut c = accept_datagram(&ini_c1(2, crypto(), 909), 0, 0, &rnd(1), &ltp(), &K2).expect("accepted");
+    c.on_peer_params(&ptp(), 10);
+    receive(&mut c, d, 0, 10, &rnd(2), &K2);
+    assert_eq!(c.largest_pn(PacketKind::Handshake), Some(0));
+    assert_eq!(c.largest_pn(PacketKind::OneRtt), None);
+    c
+}
+
+#[test]
+fn refeed_after_complete() {
+    let d = hs_then_1rtt(&L0);
+    let mut c = gated(&d);
+    c.on_handshake_complete(b"h3", 10, &rnd(3));
+    refeed_one_rtt(&mut c, &d, 0, 10, &rnd(4), &K2);
+    assert_eq!(c.largest_pn(PacketKind::OneRtt), Some(0));
+    assert_eq!(c.phase(), Phase::Open);
+}
+
+#[test]
+fn refeed_before_complete_is_noop() {
+    let d = hs_then_1rtt(&L0);
+    let mut c = gated(&d);
+    refeed_one_rtt(&mut c, &d, 0, 10, &rnd(4), &K2);
+    assert_eq!(c.largest_pn(PacketKind::OneRtt), None);
+    assert_eq!(c.phase(), Phase::Open);
+}
+
+/// A CID issued at completion is valid, but not the first header's (RFC 9000 §12.2).
+#[test]
+fn refeed_other_dcid_ignored() {
+    let d = hs_then_1rtt(&rnd(3)[0..8]);
+    let mut c = gated(&d);
+    c.on_handshake_complete(b"h3", 10, &rnd(3));
+    refeed_one_rtt(&mut c, &d, 0, 10, &rnd(4), &K2);
+    assert_eq!(c.largest_pn(PacketKind::OneRtt), None);
+    // The same packet alone is processed: its CID is active.
+    receive(&mut c, &d[hs_l0().len()..], 0, 10, &rnd(5), &K2);
+    assert_eq!(c.largest_pn(PacketKind::OneRtt), Some(0));
+}
+
+/// The odcid is the first header's DCID, which the caller's Initial keys come from.
+#[test]
+fn accept_odcid_is_first_header() {
+    let mut bad = A2;
+    bad[1199] ^= 1;
+    let p2 = protected(&out(PacketKind::Initial, &[0x99; 8], &C1, 4, 1150), &CLIENT);
+    assert!(accept_datagram(&[&bad[..], &p2].concat(), 0, 0, &rnd(1), &ltp(), &K).is_none());
+    let c = accepted_a2();
+    assert_eq!(c.local_params().original_destination_connection_id, Some(S1.to_vec()));
+}
+
+#[test]
+fn crypto_end_tracks_received() {
+    let mut c = accepted_a2();
+    assert_eq!(c.crypto_end(PacketKind::Initial), 241);
+    assert!(c.is_live(PacketKind::Initial));
+    assert!(c.is_live(PacketKind::Handshake));
+    assert!(!c.is_live(PacketKind::OneRtt));
+    let f = || vec![Frame::Crypto { offset: 300, data: vec![7; 10] }];
+    let n = ini(&[], 3, f(), 1000).len();
+    let d = ini(&[], 3, f(), 1000 + 1200 - n);
+    assert_eq!(d.len(), 1200);
+    receive(&mut c, &d, 0, 5, &rnd(2), &K);
+    assert_eq!(c.largest_pn(PacketKind::Initial), Some(3));
+    assert_eq!(c.crypto_end(PacketKind::Initial), 310);
+}

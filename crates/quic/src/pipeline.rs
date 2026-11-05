@@ -3,10 +3,12 @@
 //! closing it on a connection error; `transmit` protects what `poll_transmit` returns
 //! (`protect_datagram`). Verified glue, so `plain_wf`, `close`'s code bound and `protect`'s
 //! precondition are discharged here and the shell calls only fns whose `requires` is `wf()`.
-//! The 1-RTT keys are masked until the handshake completes (RFC 9001 §5.7).
+//! The 1-RTT keys are masked until the handshake completes (RFC 9001 §5.7); `refeed_one_rtt`
+//! then opens the 1-RTT packet of the datagram that completed it.
 use vstd::prelude::*;
 
 use crate::aead::*;
+use crate::cid::{eq_bytes, LOCAL_CID_LEN};
 use crate::conn::*;
 use crate::datagram::*;
 use crate::header::*;
@@ -119,7 +121,8 @@ pub fn initial_dcid(d: &[u8]) -> (r: Option<Vec<u8>>)
 /// kept) or `Connection::accept` refuses it (§14.1: under 1200 bytes). The whole datagram is
 /// counted before a connection error on its first packet closes it (Decision 5); `on_datagram`
 /// closes only for an error whose header passes the gate a packet would, so sizes only drop
-/// packets.
+/// packets. The accepting packet's DCID must be the first header's, `initial_dcid(d)`, which the
+/// caller's Initial keys come from: then the odcid is the keys' DCID.
 #[verifier::spinoff_prover]
 pub fn accept_datagram(
     d: &[u8],
@@ -131,21 +134,32 @@ pub fn accept_datagram(
 ) -> (r: Option<Connection>)
     ensures
         r matches Some(c) ==> c.wf(),
+        r is Some ==> rfc_long_header(d@) matches Some(SpecHeader::Long { ty: LongType::Initial, .. }),
 {
     hide(rfc_open_datagram);
+    let dcid = match initial_dcid(d) {
+        Some(x) => x,
+        None => return None,
+    };
     let rx = open_first(d, keys);
-    let first = if rx.packets.len() > 0 {
-        Connection::accept(&rx.packets[0], d.len(), path, now, rand, local_tp)
+    let p = if rx.packets.len() > 0 {
+        &rx.packets[0]
     } else {
         match &rx.error {
-            Some((_, h)) => Connection::accept(h, d.len(), path, now, rand, local_tp),
-            None => None,
+            Some((_, h)) => h,
+            None => return None,
         }
     };
-    let mut c = match first {
+    if !eq_bytes(p.dcid.as_slice(), dcid.as_slice()) {
+        return None;
+    }
+    let mut c = match Connection::accept(p, d.len(), path, now, rand, local_tp) {
         Some(c) => c,
         None => return None,
     };
+    proof {
+        assert(c.odcid_spec() == dcid@);
+    }
     c.on_datagram(path, d.len(), rx.packets, rx.error, now, rand);
     Some(c)
 }
@@ -180,6 +194,76 @@ pub fn receive(
     c.on_datagram(path, d.len(), rx.packets, rx.error, now, rand);
     if let Some(tail) = rx.reset_tail {
         c.on_reset_candidate(&tail, now);
+    }
+}
+
+/// Whether every packet of `rx`, and its error's header, has Destination Connection ID `dcid`.
+fn all_to(rx: &Rx, dcid: &[u8]) -> bool {
+    let mut i: usize = 0;
+    while i < rx.packets.len()
+        decreases rx.packets.len() - i,
+    {
+        if !eq_bytes(rx.packets[i].dcid.as_slice(), dcid) {
+            return false;
+        }
+        i += 1;
+    }
+    match &rx.error {
+        Some((_, h)) => eq_bytes(h.dcid.as_slice(), dcid),
+        None => true,
+    }
+}
+
+//= https://www.rfc-editor.org/rfc/rfc9001#section-5.7
+//# Received
+//# packets protected with 1-RTT keys MAY be stored and later decrypted
+//# and used once the handshake is complete.
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+//# Receivers
+//# SHOULD ignore any subsequent packets with a different Destination
+//# Connection ID than the first packet in the datagram.
+//
+//= https://www.rfc-editor.org/rfc/rfc9001#section-5.7
+//= type=exception
+//= reason=Binds clients; the server's half is gate_keys (3e) and conn.rs's 1-RTT gate.
+//# Even if it has 1-RTT secrets, a client MUST NOT
+//# process incoming 1-RTT protected packets before the TLS handshake is
+//# complete.
+/// The datagram `d` again, once the handshake is complete: `receive` dropped its 1-RTT packet
+/// unopened, and TLS has since completed on the Finished in front of it. Only the 1-RTT packet
+/// can open, and it is processed only if it, and any error, has the first header's DCID. The
+/// datagram was already counted (§8.1), so it counts 0 bytes; its reset tail was the first
+/// pass's to handle.
+#[verifier::spinoff_prover]
+pub fn refeed_one_rtt(
+    c: &mut Connection,
+    d: &[u8],
+    path: PathId,
+    now: u64,
+    rand: &[u8; RAND_LEN],
+    keys: &[Option<KeyPair>; 3],
+)
+    requires
+        old(c).wf(),
+    ensures
+        final(c).wf(),
+        final(c).out_log() == old(c).out_log(),
+        !old(c).live(PacketKind::OneRtt) ==> *final(c) == *old(c),
+{
+    hide(rfc_open_datagram);
+    if !c.handshake_complete() {
+        return;
+    }
+    let first = match parse_header(d, LOCAL_CID_LEN) {
+        Some(Header::Long { dcid, .. }) => dcid,
+        Some(Header::Short { dcid, .. }) => dcid,
+        Some(Header::UnsupportedVersion { dcid, .. }) => dcid,
+        None => return,
+    };
+    let rx = open_for(c, d, &[None, None, keys[2]]);
+    if all_to(&rx, first.as_slice()) {
+        c.on_datagram(path, 0, rx.packets, rx.error, now, rand);
     }
 }
 
