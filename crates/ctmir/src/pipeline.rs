@@ -19,6 +19,8 @@ use crate::lower_term::Keys;
 #[allow(unused_imports)]
 use crate::mir::*;
 use crate::policy::{decl_exec, has_bytes, parse_manifests};
+#[cfg(verus_keep_ghost)]
+use crate::policy::{decl_spec, label_view};
 #[allow(unused_imports)]
 use crate::policy::*;
 #[allow(unused_imports)]
@@ -95,12 +97,66 @@ pub open spec fn cost_mir(m: MirCrate, cp: CallPolicy, i: nat, b: Poly) -> bool 
             (mir_run_fn(m, cp, i, mir_entry(m, i, args, slots), fuel) matches Some((f, t, n)) ==> n <= poly_val(mir_entry(m, i, args, slots), b))
 }
 
-/// What a `root <path> ok` line claims: `path` is `insts[i]`, and some labels `lab` that the
-/// report prints in `i`'s `checked` line make the CT theorem hold.
+/// A MIR type whose core image is `Unit` (`lowers_ty`): `()`, `str` and `&str`, fn items,
+/// closures and fn pointers, `vstd`'s `Ghost`/`Tracked`. Such a parameter takes no label.
+pub open spec fn unit_ty(m: MirCrate, t: Ty) -> bool {
+    match rigid(m, t) {
+        Some(RigidTy::Tuple(ts)) => ts@.len() == 0,
+        Some(RigidTy::Str) => true,
+        Some(RigidTy::Ref(_, q, _)) => rigid(m, q) matches Some(RigidTy::Str),
+        Some(RigidTy::FnDef(_, _)) | Some(RigidTy::Closure(_, _)) | Some(RigidTy::FnPtr(_)) => true,
+        Some(RigidTy::Adt(_, _)) => adt_row(m, t) matches Some(a) && (a.name@ == b"vstd::prelude::Ghost"@ || a.name@ == b"vstd::prelude::Tracked"@),
+        _ => false,
+    }
+}
+
+/// Per parameter of `b`, whether it takes no label (`unit_ty`).
+pub open spec fn ghost_params(m: MirCrate, b: Body) -> Seq<bool> { Seq::new(b.arg_count as nat, |j: int| unit_ty(m, b.locals@[j + 1].ty)) }
+
+/// The first `label` line (as `policy_of` gives them) for `path`, from `k` on.
+pub open spec fn label_at(ls: Seq<(Seq<u8>, Seq<Seq<u8>>, Seq<Seq<u8>>)>, path: Seq<u8>, k: nat) -> Option<(Seq<u8>, Seq<Seq<u8>>, Seq<Seq<u8>>)>
+    decreases ls.len() - k,
+{
+    if k >= ls.len() { None } else if ls[k as int].0 == path { Some(ls[k as int]) } else { label_at(ls, path, k + 1) }
+}
+
+/// A `label` line as `ct::` attributes: `#[ct::secret(<secret,..>)]`, `#[ct::public(<public,..>)]`.
+pub open spec fn label_attrs(sec: Seq<Seq<u8>>, pb: Seq<Seq<u8>>) -> Seq<Seq<u8>> {
+    seq![b"#[ct::secret("@ + join(sec, b","@) + b")]"@, b"#[ct::public("@ + join(pb, b","@) + b")]"@]
+}
+
+/// The labels source of fn `path` with attributes `attrs`: its `label` line rendered as attributes,
+/// or its attributes; `None` when it has both.
+pub open spec fn attrs_src(ls: Seq<(Seq<u8>, Seq<Seq<u8>>, Seq<Seq<u8>>)>, path: Seq<u8>, attrs: Seq<Seq<u8>>) -> Option<Seq<Seq<u8>>> {
+    match label_at(ls, path, 0) {
+        Some(l) => if attrs.len() > 0 { None } else { Some(label_attrs(l.1, l.2)) },
+        None => Some(attrs),
+    }
+}
+
+/// The labels `insts[i]` declares (`decl_spec` of its attributes or `label` line).
+pub open spec fn declared(m: MirCrate, pol: Policy, i: nat) -> Option<Option<Seq<bool>>> {
+    let b = inst_body(m, i)->Some_0;
+    match attrs_src(pol.labels@.map_values(|l: (Vec<u8>, Vec<Vec<u8>>, Vec<Vec<u8>>)| label_view(l)), fn_path(m, i), item_attrs(m, m.insts@[i as int].def)) {
+        Some(src) => decl_spec(src, pnames(b), ghost_params(m, b)),
+        None => None,
+    }
+}
+
+/// What a `root <path> ok` line claims: `path` is `insts[i]`; some labels `lab` make the CT
+/// theorem hold; every parameter the root's `ct::` attributes (or `label` line) declare secret is
+/// secret in `lab`; and the report prints `lab` in `i`'s `checked` line (which fixes the return's
+/// and the other parameters' labels, conclusions of label inference).
 pub open spec fn root_ok(m: MirCrate, pol: Policy, path: Seq<u8>, lines: Seq<Seq<u8>>) -> bool {
     exists|i: nat, lab: Seq<bool>| #![trigger root_of(m, path, i), ct_mir(m, cpol(pol), i, lab)]
         root_of(m, path, i) && inst_body(m, i) is Some && lab.len() > inst_body(m, i)->Some_0.arg_count
         && ct_mir(m, cpol(pol), i, lab) && lines.contains(checked_line(fn_path(m, i), pnames(inst_body(m, i)->Some_0), lab))
+        && secrets_in(declared(m, pol, i), lab)
+}
+
+/// The labels were declared (`Some(Some(d))`), and each declared-secret parameter is secret in `lab`.
+pub open spec fn secrets_in(dec: Option<Option<Seq<bool>>>, lab: Seq<bool>) -> bool {
+    dec matches Some(Some(d)) && forall|j: int| 0 <= j < d.len() && #[trigger] d[j] ==> lab[1 + j]
 }
 
 /// What a `bounded ..` line claims: it is `bounded <path> deg=<d> steps <= <text>` for a root
@@ -112,12 +168,19 @@ pub open spec fn bounded_ok(m: MirCrate, pol: Policy, l: Seq<u8>) -> bool {
         && l == bounded_line(path, deg_spec(b), poly_text_spec(b, pnames(inst_body(m, i)->Some_0)))
 }
 
+/// A line's first word is one of the report's: `root`, `bounded`, `reject`, `checked`,
+/// `declassify`, `none`.
+pub open spec fn line_kind(l: Seq<u8>) -> bool {
+    starts(l, b"root "@) || starts(l, b"bounded "@) || starts(l, b"reject "@) || starts(l, b"checked "@)
+        || starts(l, b"declassify "@) || starts(l, b"none "@)
+}
+
 /// One report line (`lines` is the whole report): a text without `\n`, then `\n`; a line starting `root ` is a `root <path> ok`
 /// line whose claim holds, and one starting `bounded ` is a `bounded` line whose claim holds.
 /// Every other line (`reject`, `checked`, `declassify`, `none`, `pass`, `fail`) is
 /// informational.
 pub open spec fn line_ok(m: MirCrate, pol: Policy, l: Seq<u8>, lines: Seq<Seq<u8>>) -> bool {
-    &&& l.len() > 0 && l.last() == 10u8 && no_nl(l.drop_last())
+    &&& l.len() > 0 && l.last() == 10u8 && no_nl(l.drop_last()) && line_kind(l)
     &&& starts(l, b"root "@) ==> exists|path: Seq<u8>| l == root_line(path) && #[trigger] root_ok(m, pol, path, lines)
     &&& starts(l, b"bounded "@) ==> bounded_ok(m, pol, l)
 }
@@ -157,6 +220,36 @@ proof fn lemma_root_shape(m: MirCrate, pol: Policy, root: Seq<u8>, p: c::Program
     assert forall|k: int| 0 <= k < b.locals@.len() implies (#[trigger] cb.locals@[k] is Mut) == is_mut_ref(m, b.locals@[k].ty) by {
         assert(lowers_ty(m, b.locals@[k].ty, cb.locals@[k], tyf()));
         lemma_lowers_ty_mut(m, b.locals@[k].ty, cb.locals@[k], tyf());
+    }
+}
+
+/// The core image of a type is `Unit` exactly when the type is `unit_ty`.
+pub proof fn lemma_unit_ty(m: MirCrate, t: Ty, ct: c::Ty, fuel: nat)
+    requires lowers_ty(m, t, ct, fuel),
+    ensures (ct is Unit) == unit_ty(m, t),
+{
+    if rigid(m, t) matches Some(RigidTy::Adt(_, _)) {
+        assert(lowers_adt_ty(m, t, ct, (fuel - 1) as nat));
+    }
+}
+
+/// The root's image's parameter locals are `Unit` exactly at `ghost_params`.
+proof fn lemma_root_ghost(m: MirCrate, pol: Policy, root: Seq<u8>, p: c::Program, infos: Seq<FnInfo>)
+    requires lowers(m, pol, root, p, infos),
+    ensures ({
+        let b = inst_body(m, infos[0].inst as nat)->Some_0;
+        forall|j: int| 0 <= j < b.arg_count ==> (#[trigger] p.fns@[0].locals@[j + 1] is Unit) == ghost_params(m, b)[j]
+    }),
+{
+    let rs = choose|rs: Seq<Seq<bool>>| lowers_rs(m, pol, root, p, infos, rs);
+    let i = infos[0].inst as nat;
+    assert(lowers_body(m, pol, ords(infos), i, p.fns@[0], rs[0]));
+    let b = inst_body(m, i)->Some_0;
+    let cb = p.fns@[0];
+    assert(sig_ok(m, b));
+    assert forall|j: int| 0 <= j < b.arg_count implies (#[trigger] cb.locals@[j + 1] is Unit) == ghost_params(m, b)[j] by {
+        assert(lowers_ty(m, b.locals@[j + 1].ty, cb.locals@[j + 1], tyf()));
+        lemma_unit_ty(m, b.locals@[j + 1].ty, cb.locals@[j + 1], tyf());
     }
 }
 
@@ -387,6 +480,13 @@ proof fn lemma_acc_mono(m: MirCrate, pol: Policy, a: Seq<Vec<u8>>, x: Vec<u8>)
     }
 }
 
+fn kind_ok(l: &Vec<u8>) -> (r: bool)
+    ensures r == line_kind(l@),
+{
+    crate::policy::starts_pub(l, b"root ") || crate::policy::starts_pub(l, b"bounded ") || crate::policy::starts_pub(l, b"reject ")
+        || crate::policy::starts_pub(l, b"checked ") || crate::policy::starts_pub(l, b"declassify ") || crate::policy::starts_pub(l, b"none ")
+}
+
 /// `l` (with its last `\n`) is not one of the two claim lines.
 fn no_claim(l: &Vec<u8>) -> (r: bool)
     ensures r == (!starts(l@, b"root "@) && !starts(l@, b"bounded "@)),
@@ -403,7 +503,7 @@ fn info(Ghost(m): Ghost<MirCrate>, Ghost(pol): Ghost<Policy>, acc: &mut Vec<Vec<
     put_clean(&mut l, body);
     let ghost c = l@;
     l.push(10u8);
-    if !no_claim(&l) { return Err(cat(b"report line looks like a claim: ", body)); }
+    if !no_claim(&l) || !kind_ok(&l) { return Err(cat(b"report line looks like a claim or has no known kind: ", body)); }
     proof {
         lemma_clean_no_nl(body@);
         assert(l@.drop_last() =~= c);
@@ -526,25 +626,39 @@ fn rejects(Ghost(m): Ghost<MirCrate>, Ghost(pol): Ghost<Policy>, acc: &mut Vec<V
     requires acc_ok(m, pol, old(acc)@),
     ensures r is Ok ==> acc_ok(m, pol, final(acc)@),
 {
+    let ts = dedupe(texts);
+    let mut k: usize = 0;
+    while k < ts.len()
+        invariant acc_ok(m, pol, acc@),
+        decreases ts.len() - k,
+    {
+        let mut b = Vec::new();
+        put(&mut b, b"reject ");
+        put(&mut b, root.as_slice());
+        put(&mut b, b" ");
+        put(&mut b, ts[k].as_slice());
+        info(Ghost(m), Ghost(pol), acc, b.as_slice())?;
+        k += 1;
+    }
+    Ok(())
+}
+
+/// The texts whose first two words no earlier text has, in order.
+pub fn dedupe(texts: &Vec<Vec<u8>>) -> Vec<Vec<u8>> {
     let mut seen: Vec<Vec<u8>> = Vec::new();
+    let mut out: Vec<Vec<u8>> = Vec::new();
     let mut k: usize = 0;
     while k < texts.len()
-        invariant acc_ok(m, pol, acc@),
         decreases texts.len() - k,
     {
         let key = key2(&texts[k]);
         if !has_bytes(&seen, &key) {
             seen.push(key);
-            let mut b = Vec::new();
-            put(&mut b, b"reject ");
-            put(&mut b, root.as_slice());
-            put(&mut b, b" ");
-            put(&mut b, texts[k].as_slice());
-            info(Ghost(m), Ghost(pol), acc, b.as_slice())?;
+            out.push(copy(&texts[k]));
         }
         k += 1;
     }
-    Ok(())
+    out
 }
 
 fn has_prefix_root(r: &Vec<u8>, krate: &Vec<u8>) -> bool {
@@ -555,7 +669,7 @@ fn has_prefix_root(r: &Vec<u8>, krate: &Vec<u8>) -> bool {
 }
 
 /// `true` when `path` has a `c::` segment that starts a path (not `xc::` or `c_x::`).
-fn names_crate(path: &Vec<u8>, c: &Vec<u8>) -> bool {
+pub fn names_crate(path: &Vec<u8>, c: &Vec<u8>) -> bool {
     let mut pre = Vec::new();
     put(&mut pre, c.as_slice());
     put(&mut pre, b"::");
@@ -658,7 +772,7 @@ fn glue_sites(m: &MirCrate, pol: &Policy, root: &Vec<u8>) -> Vec<(Vec<u8>, Vec<u
 
 /// A reject in fn `path` at `site`, as reported: inside a drop glue, at the `Drop`'s site in the
 /// fn that drops.
-fn at_drop(gs: &Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>, path: &Vec<u8>, site: &Vec<u8>) -> (Vec<u8>, Vec<u8>) {
+pub fn at_drop(gs: &Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>, path: &Vec<u8>, site: &Vec<u8>) -> (Vec<u8>, Vec<u8>) {
     let mut q: usize = 0;
     while q < gs.len()
         decreases gs.len() - q,
@@ -670,7 +784,7 @@ fn at_drop(gs: &Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>, path: &Vec<u8>, site: &Vec<u8>
 }
 
 /// `e` with a glue fn's path and site replaced by its `Drop`'s (`at_drop`).
-fn remap(gs: &Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>, e: &Reject) -> Reject {
+pub fn remap(gs: &Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>, e: &Reject) -> Reject {
     match e {
         Reject::Unsupported { path, what, site } => { let (p, s) = at_drop(gs, path, site); Reject::Unsupported { path: p, what: copy(what), site: s } },
         Reject::Unresolved { path, callee, site } => { let (p, s) = at_drop(gs, path, site); Reject::Unresolved { path: p, callee: copy(callee), site: s } },
@@ -680,11 +794,17 @@ fn remap(gs: &Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>, e: &Reject) -> Reject {
 }
 
 /// The labels source of fn `info`: its attributes, or its `label` line rendered as attributes.
-fn attrs_for(pol: &Policy, info: &FnInfo) -> Result<Vec<Vec<u8>>, Vec<u8>> {
+fn attrs_for(pol: &Policy, info: &FnInfo) -> (r: Result<Vec<Vec<u8>>, Vec<u8>>)
+    ensures r matches Ok(a) ==> attrs_src(pol.labels@.map_values(|l: (Vec<u8>, Vec<Vec<u8>>, Vec<Vec<u8>>)| label_view(l)), info.path@, views(info.attrs@)) == Some(views(a@)),
+{
+    let ghost lv = pol.labels@.map_values(|l: (Vec<u8>, Vec<Vec<u8>>, Vec<Vec<u8>>)| label_view(l));
     let mut k: usize = 0;
     while k < pol.labels.len()
+        invariant k <= pol.labels@.len(), lv == pol.labels@.map_values(|l: (Vec<u8>, Vec<Vec<u8>>, Vec<Vec<u8>>)| label_view(l)),
+            label_at(lv, info.path@, 0) == label_at(lv, info.path@, k as nat),
         decreases pol.labels.len() - k,
     {
+        proof { assert(lv[k as int] == label_view(pol.labels@[k as int])); }
         if bytes_eq(pol.labels[k].0.as_slice(), info.path.as_slice()) {
             if info.attrs.len() > 0 { return Err(cat(b"both ct:: attributes and a manifest label line", b"")); }
             let mut a = Vec::new();
@@ -693,13 +813,19 @@ fn attrs_for(pol: &Policy, info: &FnInfo) -> Result<Vec<Vec<u8>>, Vec<u8>> {
             let j = join_exec(&pol.labels[k].1, b",");
             put(&mut s, j.as_slice());
             put(&mut s, b")]");
-            a.push(s);
             let mut q = Vec::new();
             put(&mut q, b"#[ct::public(");
-            let j = join_exec(&pol.labels[k].2, b",");
-            put(&mut q, j.as_slice());
+            let j2 = join_exec(&pol.labels[k].2, b",");
+            put(&mut q, j2.as_slice());
             put(&mut q, b")]");
+            let ghost (sv, qv) = (s@, q@);
+            a.push(s);
             a.push(q);
+            proof {
+                assert(views(a@) =~= seq![sv, qv]);
+                assert(views(a@) =~= label_attrs(lv[k as int].1, lv[k as int].2));
+                assert(views(info.attrs@).len() == 0);
+            }
             return Ok(a);
         }
         k += 1;
@@ -707,49 +833,110 @@ fn attrs_for(pol: &Policy, info: &FnInfo) -> Result<Vec<Vec<u8>>, Vec<u8>> {
     let mut a = Vec::new();
     let mut k: usize = 0;
     while k < info.attrs.len()
+        invariant k <= info.attrs@.len(), views(a@) =~= views(info.attrs@).subrange(0, k as int),
         decreases info.attrs.len() - k,
     {
+        let ghost o = a@;
         a.push(copy(&info.attrs[k]));
+        proof { crate::policy::lemma_views_push(o, a@.last()); assert(a@ == o.push(a@.last())); }
         k += 1;
     }
+    proof { assert(views(a@) =~= views(info.attrs@)); }
     Ok(a)
 }
 
+proof fn lemma_info0(m: MirCrate, infos: Seq<FnInfo>, b0: Body)
+    requires infos.len() >= 1, info_ok(m, infos[0], 0), b0 == inst_body(m, infos[0].inst as nat)->Some_0,
+    ensures views(infos[0].param_names@) == pnames(b0), infos[0].path@ == fn_path(m, infos[0].inst as nat),
+        views(infos[0].attrs@) == item_attrs(m, m.insts@[infos[0].inst as int].def), pnames(b0).len() == b0.arg_count,
+{}
+
+/// Fn `infos[0]`'s declared labels are `d`, as `declared` says.
+pub open spec fn root_decl(m: MirCrate, pol: Policy, i: nat, d: Option<Vec<bool>>) -> bool {
+    d matches Some(v) && declared(m, pol, i) == Some(Some(v@))
+}
+
 /// The declared labels of every fn (`decl` for `check_program`), or the attribute and root rejects.
-fn decls(p: &c::Program, pol: &Policy, infos: &Vec<FnInfo>) -> Result<Vec<Option<Vec<bool>>>, Vec<Vec<u8>>> {
+fn decls(Ghost(m): Ghost<MirCrate>, Ghost(root): Ghost<Seq<u8>>, p: &c::Program, pol: &Policy, infos: &Vec<FnInfo>)
+    -> (r: Result<Vec<Option<Vec<bool>>>, Vec<Vec<u8>>>)
+    requires lowers(m, *pol, root, *p, infos@),
+    ensures r matches Ok(d) ==> d@.len() == infos@.len() && infos@.len() >= 1 && root_decl(m, *pol, infos@[0].inst as nat, d@[0]),
+{
+    proof { lemma_root_shape(m, *pol, root, *p, infos@); lemma_root_ghost(m, *pol, root, *p, infos@); }
+    let ghost i0 = infos@[0].inst as nat;
+    let ghost b0 = inst_body(m, i0)->Some_0;
     let mut out: Vec<Option<Vec<bool>>> = Vec::new();
     let mut errs: Vec<Vec<u8>> = Vec::new();
     let mut g: usize = 0;
     while g < infos.len()
+        invariant g <= infos@.len(), errs@.len() == 0 ==> out@.len() == g,
+            infos@.len() >= 1, info_ok(m, infos@[0], 0), i0 == infos@[0].inst as nat, inst_body(m, i0) is Some, b0 == inst_body(m, i0)->Some_0,
+            p.fns@.len() >= 1, b0.arg_count < b0.locals@.len(), b0.locals@.len() <= p.fns@[0].locals@.len(),
+            forall|j: int| 0 <= j < b0.arg_count ==> (#[trigger] p.fns@[0].locals@[j + 1] is Unit) == ghost_params(m, b0)[j],
+            errs@.len() == 0 && g > 0 ==> root_decl(m, *pol, i0, out@[0]),
         decreases infos.len() - g,
     {
         let info = &infos[g];
         let mut ghost: Vec<bool> = Vec::new();
         let mut j: usize = 0;
         while j < info.param_names.len()
-            invariant ghost@.len() == j, j <= info.param_names@.len(),
+            invariant ghost@.len() == j, j <= info.param_names@.len(), info == &infos@[g as int],
+                g == 0 ==> forall|k: int| 0 <= k < j ==> ghost@[k] == ghost_params(m, b0)[k],
+                infos@.len() >= 1, info_ok(m, infos@[0], 0), i0 == infos@[0].inst as nat, b0 == inst_body(m, i0)->Some_0,
+                p.fns@.len() >= 1, b0.arg_count < b0.locals@.len(), b0.locals@.len() <= p.fns@[0].locals@.len(),
+                forall|j: int| 0 <= j < b0.arg_count ==> (#[trigger] p.fns@[0].locals@[j + 1] is Unit) == ghost_params(m, b0)[j],
             decreases info.param_names.len() - j,
         {
+            proof { if g == 0 { lemma_info0(m, infos@, b0); } }
             let u = g < p.fns.len() && j + 1 < p.fns[g].locals.len() && matches!(p.fns[g].locals[j + 1], c::Ty::Unit);
+            proof { if g == 0 { assert(p.fns@[0].locals@[j + 1] is Unit == ghost_params(m, b0)[j as int]); } }
             ghost.push(u);
             j += 1;
         }
+        proof {
+            if g == 0 {
+                lemma_info0(m, infos@, b0);
+                assert(ghost@ =~= ghost_params(m, b0));
+            }
+        }
         let d = match attrs_for(pol, info) {
             Err(e) => Err(e),
-            Ok(a) => decl_exec(&a, &info.param_names, &ghost),
+            Ok(a) => {
+                let d = decl_exec(&a, &info.param_names, &ghost);
+                proof {
+                    if g == 0 && d is Ok {
+                        assert(declared(m, *pol, i0) == decl_spec(views(a@), pnames(b0), ghost_params(m, b0)));
+                    }
+                }
+                d
+            },
         };
         match d {
             Err(e) => errs.push(tr_text(&Reject::Attr { path: copy(&info.path), msg: e })),
             Ok(d) => {
-                if info.is_root && d.is_none() {
+                // `is_root` is `g == 0` (`info_ok`)
+                if (info.is_root || g == 0) && d.is_none() {
                     errs.push(tr_text(&Reject::Root { path: copy(&info.path), msg: cat(b"a root needs a ct:: attribute", b"") }));
                 }
+                let ghost o = out@;
                 out.push(d);
+                proof { if errs@.len() == 0 && g > 0 { assert(out@[0] == o[0]); } if errs@.len() == 0 { assert(out@[g as int] == d); } }
             },
         }
         g += 1;
     }
     if errs.len() > 0 { Err(errs) } else { Ok(out) }
+}
+
+/// `check_program`'s `decl_ok` on the root's declared labels: each declared secret is secret.
+proof fn lemma_root_decl(m: MirCrate, pol: Policy, i: nat, decl: Seq<Option<Vec<bool>>>, ls: Seq<FnLab>)
+    requires decl.len() >= 1, root_decl(m, pol, i, decl[0]), ctcore::ct::decl_ok(decl, ls),
+    ensures secrets_in(declared(m, pol, i), ls[0].locals@),
+{
+    let v = decl[0]->Some_0;
+    assert forall|j: int| 0 <= j < v@.len() && #[trigger] v@[j] implies ls[0].locals@[1 + j] by {
+        assert(decl[0]->Some_0@[j]);
+    }
 }
 
 proof fn lemma_root_claim(m: MirCrate, pol: Policy, root: Seq<u8>, p: c::Program, infos: Seq<FnInfo>, ls: Seq<FnLab>)
@@ -764,14 +951,13 @@ proof fn lemma_root_claim(m: MirCrate, pol: Policy, root: Seq<u8>, p: c::Program
 {
     lemma_root_shape(m, pol, root, p, infos);
     assert(ctcore::ct::ok_body(p, ls, 0nat));
-    let rs = choose|rs: Seq<Seq<bool>>| lowers_rs(m, pol, root, p, infos, rs);
     theorem_ct_mir(m, pol, root, p, infos, ls);
 }
 
 /// Per-fn declassify sites across the ok roots: path, sites (sorted, distinct).
-type Declass = Vec<(Vec<u8>, Vec<Vec<u8>>)>;
+pub type Declass = Vec<(Vec<u8>, Vec<Vec<u8>>)>;
 
-fn add_site(ds: &mut Declass, path: &Vec<u8>, site: &Vec<u8>) {
+pub fn add_site(ds: &mut Declass, path: &Vec<u8>, site: &Vec<u8>) {
     let mut k: usize = 0;
     while k < ds.len()
         decreases ds.len() - k,
@@ -790,8 +976,54 @@ fn add_site(ds: &mut Declass, path: &Vec<u8>, site: &Vec<u8>) {
     ds.push((copy(path), v));
 }
 
+/// Records fn `path`'s `checked` line `l`; a second, different `checked` line for one path is an
+/// error (the root line's labels would be ambiguous).
+pub fn one_checked(cks: &mut Vec<(Vec<u8>, Vec<u8>)>, path: &Vec<u8>, l: &Vec<u8>) -> Result<(), Vec<u8>> {
+    let mut k: usize = 0;
+    while k < cks.len()
+        decreases cks.len() - k,
+    {
+        if bytes_eq(cks[k].0.as_slice(), path.as_slice()) {
+            if bytes_eq(cks[k].1.as_slice(), l.as_slice()) { return Ok(()); }
+            return Err(cat(b"two different checked lines for ", path.as_slice()));
+        }
+        k += 1;
+    }
+    cks.push((copy(path), copy(l)));
+    Ok(())
+}
+
+/// `declassify <fn>#<k> <site>` per fn, its sites numbered from 1 in their (sorted) order.
+pub fn declass_bodies(ds: &Declass) -> Vec<Vec<u8>> {
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    let mut k: usize = 0;
+    while k < ds.len()
+        decreases ds.len() - k,
+    {
+        let mut q: usize = 0;
+        while q < ds[k].1.len()
+            invariant k < ds@.len(),
+            decreases ds@[k as int].1@.len() - q,
+        {
+            let mut b = Vec::new();
+            put(&mut b, b"declassify ");
+            put(&mut b, ds[k].0.as_slice());
+            put(&mut b, b"#");
+            let d = dec((if q < usize::MAX { q + 1 } else { q }) as u64);
+            put(&mut b, d.as_slice());
+            put(&mut b, b" ");
+            put(&mut b, ds[k].1[q].as_slice());
+            out.push(b);
+            q += 1;
+        }
+        k += 1;
+    }
+    out
+}
+
 /// One CT root's lines.
-fn check_root(m: &MirCrate, pol: &Policy, r: &Vec<u8>, keys: &mut Keys, acc: &mut Vec<Vec<u8>>, ds: &mut Declass) -> (res: Result<(), Vec<u8>>)
+fn check_root(m: &MirCrate, pol: &Policy, r: &Vec<u8>, keys: &mut Keys, acc: &mut Vec<Vec<u8>>, ds: &mut Declass,
+    cks: &mut Vec<(Vec<u8>, Vec<u8>)>) -> (res: Result<(), Vec<u8>>)
     requires acc_ok(*m, *pol, old(acc)@),
     ensures res is Ok ==> acc_ok(*m, *pol, final(acc)@),
 {
@@ -805,7 +1037,7 @@ fn check_root(m: &MirCrate, pol: &Policy, r: &Vec<u8>, keys: &mut Keys, acc: &mu
             return rejects(Ghost(*m), Ghost(*pol), acc, r, &ts);
         },
     };
-    let decl = match decls(&p, pol, &infos) { Ok(d) => d, Err(ts) => return rejects(Ghost(*m), Ghost(*pol), acc, r, &ts) };
+    let decl = match decls(Ghost(*m), Ghost(r@), &p, pol, &infos) { Ok(d) => d, Err(ts) => return rejects(Ghost(*m), Ghost(*pol), acc, r, &ts) };
     let ls = match ctcore::check_program(&p, &decl) {
         Ok(ls) => ls,
         Err(rs) => {
@@ -816,15 +1048,16 @@ fn check_root(m: &MirCrate, pol: &Policy, r: &Vec<u8>, keys: &mut Keys, acc: &mu
             return rejects(Ghost(*m), Ghost(*pol), acc, r, &ts);
         },
     };
-    proof { lemma_root_claim(*m, *pol, r@, p, infos@, ls@); }
+    proof { lemma_root_claim(*m, *pol, r@, p, infos@, ls@); lemma_root_decl(*m, *pol, infos@[0].inst as nat, decl@, ls@); }
     let ghost i = infos@[0].inst as nat;
     let ghost lab = ls@[0].locals@;
     let ghost a0 = acc@;
     // the root's `checked` line first: the root line's claim names it
     let c0 = checked_text(&infos[0].path, &infos[0].param_names, &ls[0].locals);
-    if has_nl(crate::policy::sub(c0.as_slice(), 0, c0.len() - 1).as_slice()) || !no_claim(&c0) {
+    if has_nl(crate::policy::sub(c0.as_slice(), 0, c0.len() - 1).as_slice()) || !no_claim(&c0) || !kind_ok(&c0) {
         return Err(cat(b"a checked line holds a newline: ", infos[0].path.as_slice()));
     }
+    one_checked(cks, &infos[0].path, &c0)?;
     proof {
         assert(c0@ == checked_line(fn_path(*m, i), pnames(inst_body(*m, i)->Some_0), lab));
         assert(c0@.drop_last() =~= c0@.subrange(0, c0@.len() - 1));
@@ -839,9 +1072,10 @@ fn check_root(m: &MirCrate, pol: &Policy, r: &Vec<u8>, keys: &mut Keys, acc: &mu
         decreases infos.len() - g,
     {
         let cg = checked_text(&infos[g].path, &infos[g].param_names, &ls[g].locals);
-        if cg.len() == 0 || has_nl(crate::policy::sub(cg.as_slice(), 0, cg.len() - 1).as_slice()) || !no_claim(&cg) {
+        if cg.len() == 0 || has_nl(crate::policy::sub(cg.as_slice(), 0, cg.len() - 1).as_slice()) || !no_claim(&cg) || !kind_ok(&cg) {
             return Err(cat(b"a checked line holds a newline: ", infos[g].path.as_slice()));
         }
+        one_checked(cks, &infos[g].path, &cg)?;
         proof {
             assert(cg@.drop_last() =~= cg@.subrange(0, cg@.len() - 1));
             lemma_acc_mono(*m, *pol, acc@, cg);
@@ -876,6 +1110,7 @@ fn check_root(m: &MirCrate, pol: &Policy, r: &Vec<u8>, keys: &mut Keys, acc: &mu
         assert(l@ =~= root_line(r@));
         assert(l@.drop_last() =~= body);
         assert(l@.subrange(0, 5) =~= b"root "@);
+        assert(line_kind(l@));
         lemma_sub_push(acc@, l);
         assert(root_ok(*m, *pol, r@, views(acc@.push(l))));
         lemma_acc_mono(*m, *pol, acc@, l);
@@ -969,6 +1204,8 @@ fn cost_root(m: &MirCrate, pol: &Policy, r: &Vec<u8>, keys: &mut Keys, acc: &mut
             if crate::policy::starts_pub(&l, b"root ") { return Err(cat(b"a bounded line looks like a root line: ", r.as_slice())); }
             proof {
                 assert(l@ =~= bounded_line(r@, deg_spec(*poly), poly_text_spec(*poly, pnames(inst_body(*m, i)->Some_0))));
+                assert(l@.subrange(0, 8) =~= b"bounded "@);
+                assert(line_kind(l@));
                 assert(l@.drop_last() =~= body);
                 assert(bounded_ok(*m, *pol, l@));
                 lemma_acc_mono(*m, *pol, acc@, l);
@@ -1040,7 +1277,8 @@ fn insert_sorted(v: &mut Vec<Vec<u8>>, x: Vec<u8>)
 }
 
 /// **The pipeline.** The dump's bytes, the manifests' bytes in order, and the mode in; the
-/// report's bytes out (its lines sorted bytewise and distinct), or why there is no report.
+/// report's bytes out, or why there is no report. (The lines come out sorted bytewise and
+/// distinct, as the old driver's; the ensures does not state the order.)
 pub fn pipeline(dump: &[u8], manifests: &Vec<Vec<u8>>, mode: &Mode) -> (r: Result<Vec<u8>, Vec<u8>>)
     ensures r is Ok ==> report_sound(dump@, manifests@, *mode, r->Ok_0@),
 {
@@ -1062,6 +1300,7 @@ pub fn pipeline(dump: &[u8], manifests: &Vec<Vec<u8>>, mode: &Mode) -> (r: Resul
     match mode {
         Mode::Check => {
             let mut ds: Declass = Vec::new();
+            let mut cks: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
             let mut any = false;
             let mut k: usize = 0;
             while k < pol.roots.len()
@@ -1070,32 +1309,18 @@ pub fn pipeline(dump: &[u8], manifests: &Vec<Vec<u8>>, mode: &Mode) -> (r: Resul
             {
                 if has_prefix_root(&pol.roots[k], &m.crate_name) {
                     any = true;
-                    check_root(&m, &pol, &pol.roots[k], &mut keys, &mut acc, &mut ds)?;
+                    check_root(&m, &pol, &pol.roots[k], &mut keys, &mut acc, &mut ds, &mut cks)?;
                 }
                 k += 1;
             }
             if !any { return Err(cat(b"no manifest root for analysed crate ", m.crate_name.as_slice())); }
+            let bs = declass_bodies(&ds);
             let mut k: usize = 0;
-            while k < ds.len()
+            while k < bs.len()
                 invariant acc_ok(m, pol, acc@),
-                decreases ds.len() - k,
+                decreases bs.len() - k,
             {
-                let mut q: usize = 0;
-                while q < ds[k].1.len()
-                    invariant acc_ok(m, pol, acc@), k < ds@.len(),
-                    decreases ds@[k as int].1@.len() - q,
-                {
-                    let mut b = Vec::new();
-                    put(&mut b, b"declassify ");
-                    put(&mut b, ds[k].0.as_slice());
-                    put(&mut b, b"#");
-                    let d = dec((if q < usize::MAX { q + 1 } else { q }) as u64);
-                    put(&mut b, d.as_slice());
-                    put(&mut b, b" ");
-                    put(&mut b, ds[k].1[q].as_slice());
-                    info(Ghost(m), Ghost(pol), &mut acc, b.as_slice())?;
-                    q += 1;
-                }
+                info(Ghost(m), Ghost(pol), &mut acc, bs[k].as_slice())?;
                 k += 1;
             }
         },

@@ -3,7 +3,8 @@
 //! `poly_text` tests, ported to the verified implementations.
 use ctcore::cost::{Atom, Mono, Poly};
 use ctcore::IntTy;
-use ctmir::pipeline::{pipeline, Mode};
+use ctmir::lower::Reject;
+use ctmir::pipeline::{add_site, at_drop, declass_bodies, dedupe, names_crate, one_checked, pipeline, remap, Declass, Mode};
 use ctmir::policy::{decl_exec, parse_manifests, Policy};
 use ctmir::text::poly_text;
 
@@ -33,7 +34,8 @@ fn parses_every_kind() {
                  cost-root <a::B as a::C>::parse   # predicted: bounded\n\
                  root std::array::<impl [u8; 16]>::as_slice\n\
                  declassify crypto::ct::declassify\n\
-                 ghost vstd::prelude::Ghost::assume_new_fallback\n\
+                 ghost vest_lib::prelude::Ghost::assume_new_fallback\n\
+                 ghost ct_fixtures::ct::ghost_fallback\n\
                  label foo::bar secret(a,b) public(c)\n\
                  label foo::baz public()\n\
                  translate-crate vstd\n\
@@ -43,7 +45,7 @@ fn parses_every_kind() {
     assert_eq!(m.roots, vs(&["crypto::aes::aes128_encrypt_block", "std::array::<impl [u8; 16]>::as_slice"]));
     assert_eq!(m.cost_roots, vs(&["<a::B as a::C>::parse"]));
     assert_eq!(m.declassify, vs(&["crypto::ct::declassify"]));
-    assert_eq!(m.ghost_unit, vs(&["vstd::prelude::Ghost::assume_new_fallback"]));
+    assert_eq!(m.ghost_unit, vs(&["vest_lib::prelude::Ghost::assume_new_fallback", "ct_fixtures::ct::ghost_fallback"]));
     assert_eq!(m.labels.len(), 2);
     assert_eq!(m.labels[0], (v("foo::bar"), vs(&["a", "b"]), vs(&["c"])));
     assert_eq!(m.labels[1], (v("foo::baz"), vec![], vec![]));
@@ -83,7 +85,10 @@ fn errors_name_manifest_and_line() {
         ("\ndeclassify crypto::x::ct::declassify\n", "declassify names only"),
         ("\ndeclassify crypto::ct::declassify\ndeclassify crypto::ct::declassify\n", "duplicate"),
         ("\nghost\n", "malformed"),
-        ("\nghost a::f\nghost a::f\n", "duplicate"),
+        ("\nghost a::f\n", "ghost names only"),
+        ("\nghost vstd::prelude::Ghost::assume_new_fallback\n", "ghost names only"),
+        ("\nghost crypto::ct::ghost_fallback\n", "ghost names only"),
+        ("\nghost ct_fixtures::ct::ghost_fallback\nghost ct_fixtures::ct::ghost_fallback\n", "duplicate"),
         ("\nroot crypto::a\nroot crypto::a\n", "duplicate"),
     ] {
         let e = err(text);
@@ -205,7 +210,7 @@ fn check_report() {
 #[test]
 fn hard_errors() {
     assert!(run(TINY, &["root other::f\n"], Mode::Check).unwrap_err().contains("no manifest root for analysed crate tiny"));
-    assert!(run(TINY, &["root tiny::tiny\nghost tiny::opt\n"], Mode::Check).unwrap_err().contains("a ghost line inside the analysed crate"));
+    assert!(run(TINY, &["root tiny::tiny\nghost tiny::opt\n"], Mode::Check).unwrap_err().contains("ghost names only"));
     assert!(run(b"{", &["root tiny::tiny\n"], Mode::Check).unwrap_err().starts_with("dump:"));
     assert!(run(TINY, &["intr a::b VecLen\n"], Mode::Check).unwrap_err().contains("obsolete"));
     // a cost root that names no fn is a hard error; none at all is an empty report
@@ -220,4 +225,72 @@ fn cost_report() {
     let ls: Vec<&str> = r.lines().collect();
     assert_eq!(ls.len(), 2, "{r}");
     assert!(ls.iter().all(|l| l.starts_with("bounded tiny::") && l.contains(" deg=0 steps <= ")), "{r}");
+}
+
+// ------------------------------------------------------------------ report helpers (review M5)
+
+/// `tiny.json` renamed to crate `c` (its fns keep their `tiny::` paths).
+fn tiny_as(c: &str) -> Vec<u8> {
+    let t = std::str::from_utf8(TINY).unwrap();
+    assert!(t.starts_with("{\"crate\":\"tiny\""));
+    t.replacen("{\"crate\":\"tiny\"", &format!("{{\"crate\":\"{c}\""), 1).into_bytes()
+}
+
+#[test]
+fn ghost_line_crate_rule() {
+    // the fixtures' shim is allowed in its own crate; vest_lib's line is not allowed in vest_lib
+    assert_eq!(run(&tiny_as("ct_fixtures"), &["ghost ct_fixtures::ct::ghost_fallback\n"], Mode::Cost).unwrap(), "");
+    let e = run(&tiny_as("vest_lib"), &["ghost vest_lib::prelude::Ghost::assume_new_fallback\n"], Mode::Cost).unwrap_err();
+    assert!(e.contains("a ghost line inside the analysed crate"), "{e}");
+    assert_eq!(run(TINY, &["ghost vest_lib::prelude::Ghost::assume_new_fallback\n"], Mode::Cost).unwrap(), "");
+}
+
+#[test]
+fn names_crate_boundaries() {
+    let n = |p: &str, c: &str| names_crate(&v(p), &v(c));
+    assert!(n("crypto::f", "crypto"));
+    assert!(n("<std::vec::Vec<u8> as crypto::T>::f", "crypto"));
+    assert!(!n("notcrypto::f", "crypto"));
+    assert!(!n("crypto_x::f", "crypto"));
+    assert!(!n("xcrypto::f", "crypto"));
+    assert!(!n("crypto", "crypto"));
+}
+
+#[test]
+fn reject_dedupe_keeps_first_per_two_words() {
+    let ts = vs(&["Unsupported a.rs:1 f: x", "Unsupported a.rs:1 f: y", "Unsupported a.rs:2 f: x", "Unresolved a.rs:1 f calls g"]);
+    assert_eq!(dedupe(&ts), vs(&["Unsupported a.rs:1 f: x", "Unsupported a.rs:2 f: x", "Unresolved a.rs:1 f calls g"]));
+}
+
+#[test]
+fn declassify_numbering_per_fn() {
+    let mut ds: Declass = Vec::new();
+    for (f, site) in [("f", "x.rs:9"), ("g", "y.rs:1"), ("f", "x.rs:10"), ("f", "x.rs:9")] {
+        add_site(&mut ds, &v(f), &v(site));
+    }
+    let mut got: Vec<String> = declass_bodies(&ds).iter().map(|b| s(b)).collect();
+    got.sort();
+    // sites sorted bytewise (as the old BTreeSet), distinct, numbered per fn
+    assert_eq!(got, ["declassify f#1 x.rs:10", "declassify f#2 x.rs:9", "declassify g#1 y.rs:1"]);
+}
+
+#[test]
+fn glue_rejects_at_the_drop_site() {
+    let gs = vec![(v("std::ptr::drop_glue::<T>"), v("src/lib.rs:7"), v("c::f"))];
+    let (p, site) = at_drop(&gs, &v("std::ptr::drop_glue::<T>"), &v("ptr/mod.rs:823"));
+    assert_eq!((s(&p), s(&site)), ("c::f".to_string(), "src/lib.rs:7".to_string()));
+    let (p, site) = at_drop(&gs, &v("c::g"), &v("src/lib.rs:3"));
+    assert_eq!((s(&p), s(&site)), ("c::g".to_string(), "src/lib.rs:3".to_string()));
+    match remap(&gs, &Reject::Unresolved { path: v("std::ptr::drop_glue::<T>"), callee: v("<T as Drop>::drop"), site: v("ptr/mod.rs:823") }) {
+        Reject::Unresolved { path, callee, site } => assert_eq!((s(&path), s(&callee), s(&site)), ("c::f".into(), "<T as Drop>::drop".into(), "src/lib.rs:7".into())),
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn two_checked_lines_for_one_path_is_an_error() {
+    let mut cks = Vec::new();
+    assert!(one_checked(&mut cks, &v("c::f"), &v("checked c::f secret=k ret=p\n")).is_ok());
+    assert!(one_checked(&mut cks, &v("c::f"), &v("checked c::f secret=k ret=p\n")).is_ok());
+    assert!(one_checked(&mut cks, &v("c::f"), &v("checked c::f secret= ret=p\n")).unwrap_err().starts_with(b"two different checked lines"));
 }
