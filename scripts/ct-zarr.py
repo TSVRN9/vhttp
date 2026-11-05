@@ -7,7 +7,7 @@
 # hit, or when it cannot decide: no file given, an instance row without a `body` key, a ZeroSized
 # constant without an int `ty`, or an array whose length it cannot read inside a possibly unit-like
 # type at one of those sites (counted as a hit). The JSON is walked, not matched as text. Called by
-# scripts/ct-dump.sh after each dump and by scripts/ct-check.sh on semconf's.
+# scripts/ct-check.sh after each dump.
 import json, sys
 
 def die(msg):

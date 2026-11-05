@@ -254,8 +254,8 @@ pub mod fx {
 
     #[cfg_attr(ct_check, ct::public(v, x))]
     pub fn neg_intr_type_args(v: &mut Vec<u64>, x: u64) {
-        // Unsupported: `Vec::push` is keyed without its type args, and its `intr` line is
-        // declared at u8 (the census); this call reaches it at u64
+        // Unsupported: ctmir::sem's std model admits `Vec::push` at u8 and (u64, u64) only; this
+        // call reaches it at u64
         v.push(x)
     }
 

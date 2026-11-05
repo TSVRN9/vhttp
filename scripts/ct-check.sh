@@ -1,14 +1,17 @@
 #!/bin/sh
-# Constant-time checker runs: build tools/ct-driver, then analyse the fixtures under it and diff
-# their verdicts against tools/ct-fixtures/expected.txt, then run the interpreter selftest
-# (tools/ct-driver/selftest.txt) over crates/crypto and over the parser crates (wire, h3, quic),
-# then diff the fixtures' and the parser targets' step bounds against their expected-cost.txt, then
-# check crypto's roots (all must be ok) and the negative control (--cfg ct_negative; exactly its one reject), then
-# run the semconf conformance check: its native vectors (tools/ct-fixtures/semconf) are regenerated
-# and diffed against vectors.txt, its dump is checked by scripts/ct-zarr.py, and every vector must
-# pass ct-front's verified selftest within a time bound. Target dirs
-# live under CT_TARGET_DIR (default $root/target/ct), one subdir per run, except that selftest
-# shares crypto's (same flags); reports under $CT_OUT/<run>.
+# Constant-time and step-bound checks through the verified front end. Builds tools/ct-driver (the
+# decision-free MIR dumper) and tools/ct-front (I/O around the verified ctmir::pipeline), then
+# dumps each run's crates (scripts/ct-zarr.py checks every dump) and runs ct-front over the dumps:
+# the fixtures' verdicts against tools/ct-fixtures/expected.txt; the selftest vectors
+# (tools/ct-driver/selftest.txt) over crypto and over the parser crates (wire, h3, quic); the
+# fixtures' and the parser targets' step bounds against their expected-cost.txt; crypto's roots
+# (all must be ok) with every `checked` line pinned by tools/ct-driver/expected-labels.txt; the
+# negative control (--cfg ct_negative; exactly its one reject); and the semconf conformance check:
+# its native vectors (tools/ct-fixtures/semconf) are regenerated and diffed against vectors.txt,
+# and every vector must pass ct-front's verified selftest within a time bound. Every ct-front run
+# is under `timeout` and must exit 0 and write its report into a freshly emptied run dir. Target
+# dirs live under CT_TARGET_DIR (default $root/target/ct), one subdir per run; dumps and reports
+# under $CT_OUT/<run>.
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root" # rust-toolchain.toml pins rustc 1.98.1, the one ct-driver links against
@@ -23,34 +26,42 @@ RUSTC_BOOTSTRAP=1 RUSTFLAGS="-L $sr/lib -C link-args=-Wl,-rpath,$sr/lib" \
     cargo build --release --locked -q --manifest-path "$root/tools/ct-driver/Cargo.toml" \
     --target-dir "$CT_TARGET_DIR/driver" || fail "driver build failed"
 driver=$CT_TARGET_DIR/driver/release/ct-driver
+cargo build --release --locked -q --manifest-path "$root/tools/ct-front/Cargo.toml" --target-dir "$CT_TARGET_DIR/front" \
+    || fail "ct-front build failed"
+front_bin=$CT_TARGET_DIR/front/release/ct-front
 
-# analyse <run> <crates> <manifest> <mode> <cargo args..>: a fresh <mode> build of each of the
-# comma-separated <crates> (cargo skips fresh crates, and manifests and CT_* are not cargo inputs,
-# so clean them first); sets $reports to their output files, one per crate, and $report to the
-# first.
-analyse() {
-    run=$1 crates=$2 manifest=$3 mode=$4
-    shift 4
-    case $run in selftest) td=$CT_TARGET_DIR/crypto ;; *) td=$CT_TARGET_DIR/$run ;; esac
+# dump <run> <crates> <encode> <cargo args..>: a fresh dump build of each of the comma-separated
+# <crates> (cargo skips fresh crates, and CT_* are not cargo inputs, so clean them first), the
+# comma-separated <encode> crates with -Zalways-encode-mir; empties $CT_OUT/<run>, fails unless
+# each crate's mir-<crate>.json exists and passes ct-zarr.py.
+dump() {
+    run=$1 crates=$2 em=$3
+    shift 3
+    td=$CT_TARGET_DIR/$run
     rm -rf "${CT_OUT:?}/$run"
     pkgs=$(printf '%s' "$crates" | tr ',' '\n' | sed 's/^/-p /' | tr '\n' ' ')
     for c in $(printf '%s' "$crates" | tr ',' ' '); do
         cargo clean --release -q -p "$c" "$@" --target-dir "$td"
     done
     # shellcheck disable=SC2086 # $pkgs is the word list `-p a -p b ..`
-    RUSTC_WORKSPACE_WRAPPER=$driver RUSTC_BOOTSTRAP=1 CT_CRATES=$crates CT_MANIFEST=$manifest \
-        CT_OUT=$CT_OUT/$run CT_MODE=$mode CT_SELFTEST=$root/tools/ct-driver/selftest.txt \
+    RUSTC_WORKSPACE_WRAPPER=$driver RUSTC_BOOTSTRAP=1 CT_CRATES=$crates CT_ENCODE_MIR=$em CT_OUT=$CT_OUT/$run \
         cargo build --release --locked -q $pkgs "$@" --target-dir "$td" \
-        || fail "$run: analysis build failed"
-    reports=
+        || fail "$run: dump build failed"
     for c in $(printf '%s' "$crates" | tr ',' ' '); do
-        case $mode in selftest) r=selftest-$c.txt ;; cost) r=cost-$c.txt ;; dump) r=mir-$c.json ;; *) r=report-$c.txt ;; esac
-        r=$CT_OUT/$run/$r
-        [ -f "$r" ] || fail "$run: no $r"
-        reports="$reports $r"
+        f=$CT_OUT/$run/mir-$c.json
+        [ -f "$f" ] || fail "$run: no $f"
+        python3 -I "$root/scripts/ct-zarr.py" "$f" >&2 || fail "$run: $f holds a unit-like array site (above)"
     done
-    report=${reports# }
-    report=${report%% *}
+}
+
+# front <secs> <mode> <dump> <out> <manifest>..: ct-front under a <secs> time bound; fails unless
+# it exits 0 and writes <out> (an Err writes no out-file, and <out> is removed first).
+front() {
+    secs=$1 mode=$2 d=$3 o=$4
+    shift 4
+    rm -f "$o"
+    timeout "$secs" "$front_bin" "$mode" "$d" "$o" "$@" || fail "ct-front $mode $d failed or ran past $secs s"
+    [ -f "$o" ] || fail "ct-front $mode $d wrote no $o"
 }
 
 # verdicts <report>: one line per root, `ok <path>` or `reject <path> <K1,K2,..>` (kinds sorted
@@ -94,39 +105,58 @@ cost_no_missing() {
     done < "$CT_OUT/cost-roots.txt"
 }
 
+ct=$root/tools/ct-driver
 fx=$root/tools/ct-fixtures
-analyse fixtures ct_fixtures "$fx/manifest.txt" check --manifest-path "$fx/Cargo.toml"
+cm=$ct/manifest.txt
+pm=$ct/manifest-parsers.txt
+st=$ct/selftest.txt
+# The parser crates' translate-crate lines name the crates compiled with -Zalways-encode-mir
+# (vest_lib, a registry dependency, is outside the wrapper and keeps rustc's own encoding).
+encode=$(sed -nE 's/^[[:space:]]*translate-crate[[:space:]]+([^[:space:]#]+).*/\1/p' "$pm" | paste -sd, -)
+dump fixtures ct_fixtures "" --manifest-path "$fx/Cargo.toml"
+dump crypto crypto ""
+dump parsers wire,h3,quic "$encode"
+export RUSTFLAGS='--cfg ct_negative'
+dump negative crypto ""
+unset RUSTFLAGS
+# The selftest of crypto (p256_ecdsa_sign runs 1.5e8 core steps) takes about 20 s; the other runs
+# take seconds. 300 s only bounds a hang.
+t=300
+
+front $t check "$CT_OUT/fixtures/mir-ct_fixtures.json" "$CT_OUT/fixtures/report-ct_fixtures.txt" "$fx/manifest.txt"
 got=$CT_OUT/fixtures/verdicts.txt
-verdicts "$report" > "$got"
+verdicts "$CT_OUT/fixtures/report-ct_fixtures.txt" > "$got"
 no_missing "$fx/manifest.txt" "$got"
 diff -u "$fx/expected.txt" "$got" || fail "fixtures: verdicts differ from expected.txt"
 n=$(wc -l < "$fx/expected.txt" | tr -d ' ')
 echo "ct-check: fixtures $n/$n"
 
 # Selftest: every vector line of selftest.txt must report `pass`; counted per crate prefix.
-st=$root/tools/ct-driver/selftest.txt
-analyse selftest crypto "$root/tools/ct-driver/manifest.txt" selftest
-grep -v '^pass ' "$report" >&2 && fail "selftest: vectors failed (above)"
+r=$CT_OUT/crypto/selftest-crypto.txt
+front $t "selftest=$st" "$CT_OUT/crypto/mir-crypto.json" "$r" "$cm"
+grep -v '^pass ' "$r" >&2 && fail "selftest: vectors failed (above)"
 v=$(grep -c '^crypto::' "$st")
-p=$(grep -c "^pass " "$report" || true)
+p=$(grep -c "^pass " "$r" || true)
 [ "$p" -eq "$v" ] || fail "selftest: $p of $v vectors passed"
 echo "ct-check: selftest $p/$v"
 
-# The parser crates' vectors, under their own target dir (wire compiles with -Zalways-encode-mir).
-analyse parsers wire,h3,quic "$root/tools/ct-driver/manifest.txt:$root/tools/ct-driver/manifest-parsers.txt" selftest
-# shellcheck disable=SC2086 # $reports is a list of paths without spaces
-cat $reports > "$CT_OUT/parsers/selftest.txt"
-grep -v '^pass ' "$CT_OUT/parsers/selftest.txt" >&2 && fail "selftest parsers: vectors failed (above)"
+for c in wire h3 quic; do
+    front $t "selftest=$st" "$CT_OUT/parsers/mir-$c.json" "$CT_OUT/parsers/selftest-$c.txt" "$cm" "$pm"
+done
+r=$CT_OUT/parsers/selftest.txt
+cat "$CT_OUT/parsers/selftest-wire.txt" "$CT_OUT/parsers/selftest-h3.txt" "$CT_OUT/parsers/selftest-quic.txt" > "$r"
+grep -v '^pass ' "$r" >&2 && fail "selftest parsers: vectors failed (above)"
 v=$(grep -c -E '^(wire|h3|quic)::' "$st")
-p=$(grep -c "^pass " "$CT_OUT/parsers/selftest.txt" || true)
+p=$(grep -c "^pass " "$r" || true)
 [ "$p" -eq "$v" ] || fail "selftest parsers: $p of $v vectors passed"
 echo "ct-check: selftest parsers $p/$v"
 
 # The fixtures' step bounds.
-analyse cost-fixtures ct_fixtures "$fx/manifest.txt:$fx/cost-manifest.txt" cost --manifest-path "$fx/Cargo.toml"
-cost_no_missing "$fx/cost-manifest.txt" "$report"
-got=$CT_OUT/cost-fixtures/verdicts.txt
-cost_verdicts "$report" > "$got"
+r=$CT_OUT/fixtures/cost-ct_fixtures.txt
+front $t cost "$CT_OUT/fixtures/mir-ct_fixtures.json" "$r" "$fx/manifest.txt" "$fx/cost-manifest.txt"
+cost_no_missing "$fx/cost-manifest.txt" "$r"
+got=$CT_OUT/fixtures/cost-verdicts.txt
+cost_verdicts "$r" > "$got"
 diff -u "$fx/expected-cost.txt" "$got" || fail "cost fixtures: verdicts differ from expected-cost.txt"
 n=$(wc -l < "$fx/expected-cost.txt" | tr -d ' ')
 echo "ct-check: cost fixtures $n/$n"
@@ -136,13 +166,16 @@ echo "ct-check: cost fixtures $n/$n"
 # fixtures keep theirs); the gate is about verdicts and the atoms of each bound. Any difference
 # fails. Re-recording expected-cost.txt cannot hide a lost bound: every `# predicted: bounded`
 # target must still be bounded, and the root count is the pre-registered 36.
-ct=$root/tools/ct-driver
-analyse cost-parsers wire,h3,quic "$ct/manifest.txt:$ct/manifest-parsers.txt:$ct/cost-targets.txt" cost
-cost_no_missing "$ct/cost-targets.txt" $reports
-got=$CT_OUT/cost-parsers/verdicts.txt
+for c in wire h3 quic; do
+    front $t cost "$CT_OUT/parsers/mir-$c.json" "$CT_OUT/parsers/cost-$c.txt" "$cm" "$pm" "$ct/cost-targets.txt"
+done
+reports="$CT_OUT/parsers/cost-wire.txt $CT_OUT/parsers/cost-h3.txt $CT_OUT/parsers/cost-quic.txt"
 # shellcheck disable=SC2086 # $reports is a list of paths without spaces
-cat $reports | sed -E 's/ NotCounted\([0-9]+\)$/ NotCounted/' > "$CT_OUT/cost-parsers/all.txt"
-cost_verdicts "$CT_OUT/cost-parsers/all.txt" atoms > "$got"
+cost_no_missing "$ct/cost-targets.txt" $reports
+got=$CT_OUT/parsers/cost-verdicts.txt
+# shellcheck disable=SC2086 # $reports is a list of paths without spaces
+cat $reports | sed -E 's/ NotCounted\([0-9]+\)$/ NotCounted/' > "$CT_OUT/parsers/cost-all.txt"
+cost_verdicts "$CT_OUT/parsers/cost-all.txt" atoms > "$got"
 diff -u "$ct/expected-cost.txt" "$got" || fail "cost parsers: verdicts differ from tools/ct-driver/expected-cost.txt"
 nt=$(grep -c -E '^[[:space:]]*cost-root[[:space:]]' "$ct/cost-targets.txt")
 [ "$nt" -eq 36 ] || fail "cost targets: $nt roots, the pre-registered denominator is 36"
@@ -152,19 +185,21 @@ done
 nb=$(grep -c '^bounded ' "$got" || true)
 echo "ct-check: cost $nb/$nt bounded"
 
-# The driver keys declassify sites by file:line, so a second call on a line would go uncounted.
+# The pipeline keys declassify sites by file:line, so a second call on a line would go uncounted.
 calls=$(grep -rho --include='*.rs' 'declassify(' "$root/crates/crypto/src" | wc -l)
 lines=$(grep -rh --include='*.rs' 'declassify(' "$root/crates/crypto/src" | wc -l)
 [ "$calls" -eq "$lines" ] || fail "one declassify per line"
 
-# Crypto: every manifest root ok, no reject. F = distinct checked fns, R = manifest roots, D =
-# declassify sites.
-cm=$root/tools/ct-driver/manifest.txt
-analyse crypto crypto "$cm" check
+# Crypto: every manifest root ok, no reject, and every `checked` line (each fn's labels) as pinned.
+# F = distinct checked fns, R = manifest roots, D = declassify sites. verify.sh reads this report.
+report=$CT_OUT/crypto/report-crypto.txt
+front $t check "$CT_OUT/crypto/mir-crypto.json" "$report" "$cm"
 grep '^reject ' "$report" >&2 && fail "crypto: rejects (above)"
 got=$CT_OUT/crypto/verdicts.txt
 verdicts "$report" > "$got"
 no_missing "$cm" "$got"
+grep '^checked ' "$report" > "$CT_OUT/crypto/labels.txt" || true
+diff -u "$ct/expected-labels.txt" "$CT_OUT/crypto/labels.txt" || fail "crypto: checked lines differ from tools/ct-driver/expected-labels.txt"
 f=$(awk '$1 == "checked" { print $2 }' "$report" | LC_ALL=C sort -u | wc -l | tr -d ' ')
 r=$(grep -c '^root ' "$cm")
 d=$(grep -c '^declassify ' "$report" || true)
@@ -172,9 +207,8 @@ echo "ct-check: crypto ok ($f fns, $r roots, $d declassify)"
 
 # Negative control: crypto::ct_negative::secret_branch (compiled only with --cfg ct_negative) is
 # the one reject, as SecretSwitch; every manifest.txt root stays ok.
-export RUSTFLAGS='--cfg ct_negative'
-analyse negative crypto "$cm:$root/tools/ct-driver/manifest-negative.txt" check
-unset RUSTFLAGS
+report=$CT_OUT/negative/report-crypto.txt
+front $t check "$CT_OUT/negative/mir-crypto.json" "$report" "$cm" "$ct/manifest-negative.txt"
 rj=$(grep '^reject ' "$report" || true)
 case $rj in
     "reject crypto::ct_negative::secret_branch SecretSwitch "*) ;;
@@ -187,22 +221,18 @@ no_missing "$cm" "$got"
 echo "ct-check: negative control rejected"
 
 # Semantics conformance (8c): semconf's vectors come from native runs (its tests/vectors.rs) and must
-# equal the committed vectors.txt, so a native change shows up; then its dump (checked by ct-zarr.py)
-# runs through ct-front's verified selftest, and every vector must pass.
+# equal the committed vectors.txt, so a native change shows up; then its dump runs through
+# ct-front's verified selftest, and every vector must pass.
 sc=$fx/semconf
 cargo test --release --locked -q --manifest-path "$sc/Cargo.toml" --target-dir "$CT_TARGET_DIR/semconf-native" > /dev/null \
     || fail "semconf: native vector run failed"
 diff -u "$sc/vectors.txt" "$CT_TARGET_DIR/semconf-native/semconf-vectors.txt" || fail "semconf: native vectors differ from vectors.txt"
-cargo build --release --locked -q --manifest-path "$root/tools/ct-front/Cargo.toml" --target-dir "$CT_TARGET_DIR/front" \
-    || fail "ct-front build failed"
-analyse semconf semconf "$sc/manifest.txt" dump --manifest-path "$sc/Cargo.toml"
-python3 -I "$root/scripts/ct-zarr.py" "$report" >&2 || fail "semconf: the dump holds a unit-like array site (above)"
+dump semconf semconf "" --manifest-path "$sc/Cargo.toml"
 got=$CT_OUT/semconf/selftest-semconf.txt
 # A `=> panic` vector passes when the core run does not complete, and running out of fuel (2^32
 # blocks per activation) would count; the whole run takes well under a second, so a 60 s bound
 # keeps a looping vector from passing that way.
-timeout 60 "$CT_TARGET_DIR/front/release/ct-front" "selftest=$sc/vectors.txt" "$report" "$got" "$sc/manifest.txt" \
-    || fail "semconf: ct-front failed or ran past 60 s"
+front 60 "selftest=$sc/vectors.txt" "$CT_OUT/semconf/mir-semconf.json" "$got" "$sc/manifest.txt"
 grep -v '^pass ' "$got" >&2 && fail "semconf: vectors failed (above)"
 v=$(grep -c '^semconf::' "$sc/vectors.txt")
 p=$(grep -c '^pass ' "$got" || true)

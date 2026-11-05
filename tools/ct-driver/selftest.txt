@@ -1,9 +1,9 @@
-# ct-driver selftest vectors (CT_MODE=selftest; format in tools/ct-driver/src/interp.rs):
+# Selftest vectors (ct-front selftest=<this file>; grammar in crates/ctmir/src/vectors.rs):
 #   <def-path> <arg>... => <ret> <mut-out>...
 # A `#` token starts a comment unless a digit follows it (`#1(..)`, an enum value).
-# Each fn's translated closure runs in the core interpreter; the return value and the final
-# pointee of every `mut:` (&mut) param must equal these exactly. Every expected value is also
-# checked against the compiled Rust by its crate's own tests (named per line). ct-check.sh counts
+# Each fn's translated closure runs in the verified core interpreter (ctmir::interp); the return
+# value and the final pointee of every `mut:` (&mut) param must equal these exactly. Every expected
+# value is also checked against the compiled Rust by its crate's own tests (named per line). ct-check.sh counts
 # the crypto:: lines and the parser (wire::, h3::, quic::) lines separately.
 
 # FIPS 197 Appendix C.1 (crates/crypto/tests/aes_gcm.rs)
