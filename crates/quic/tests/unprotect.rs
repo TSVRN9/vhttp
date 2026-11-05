@@ -181,3 +181,36 @@ fn oversized() {
     let rx = open_datagram(&vec![0; 65536], &KR, &NL);
     assert_eq!(rx, Rx { packets: vec![], error: None, reset_tail: None });
 }
+
+// A 0-RTT packet (type 0x1) sealed with the Handshake key is still dropped, consuming exactly
+// its `packet_end` (54 bytes: header 16 + pn 1, payload 21, tag 16), with Handshake keyed.
+#[test]
+fn zero_rtt_not_opened_with_handshake_keys() {
+    let mut pt = vec![0x01];
+    pt.extend([0u8; 20]);
+    let b = cat(&[&build(&hex("d000000001088394c8f03e515708002600"), 16, 0, &pt, &CLIENT), &[0xaa; 10]]);
+    let hs = [None, Some(KeyPair { rx: CLIENT, tx: SERVER }), None];
+    assert_eq!(unprotect(&b, &hs, &NL), Ok((None, 54)));
+}
+
+// §5.4.2 on a long header: Length 16 puts `packet_end` (33) below pn_offset 17 + 20, so the
+// first packet is dropped consuming only its 33 bytes, and the coalesced Initial after it opens.
+#[test]
+fn short_long_packet_skipped() {
+    let first = cat(&[&hex("c000000001088394c8f03e515708000010"), &[0x55; 16]]);
+    assert_eq!(unprotect(&first, &KR, &NL), Ok((None, 33)));
+    let d = cat(&[&first, &initial(4)]);
+    let rx = open_datagram(&d, &KR, &NL);
+    assert_eq!(rx.packets, vec![initial_plain(4)]);
+    assert_eq!(rx.error, None);
+    assert_eq!(rx.reset_tail, Some(d[d.len() - 16..].try_into().unwrap()));
+}
+
+#[test]
+fn tiny_datagrams() {
+    let none = Rx { packets: vec![], error: None, reset_tail: None };
+    assert_eq!(unprotect(&[], &KR, &NL), Ok((None, 0)));
+    assert_eq!(open_datagram(&[], &KR, &NL), none);
+    assert_eq!(unprotect(&[0xc0], &KR, &NL), Ok((None, 1)));
+    assert_eq!(open_datagram(&[0xc0], &KR, &NL), none);
+}
