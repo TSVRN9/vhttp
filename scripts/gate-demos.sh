@@ -4,7 +4,7 @@ set -o pipefail
 # gate-demos.sh: each cheap gate gets a canned bad input (a temp copy of a fixture in
 # tools/gate-demos/ with one change applied) and must exit non-zero with its message; every fixture
 # first passes unchanged, so a demo cannot fail for the wrong reason. Covers lint-scripts,
-# check-quotes, acceptance (thirteen bad changes) and escape-gate (three). Takes a few seconds.
+# check-quotes, acceptance (many bad changes, including real-git runs) and escape-gate (three). Takes a few seconds.
 root=$(cd "$(dirname "$0")/.." && pwd)
 fx=$root/tools/gate-demos
 tmp=$(mktemp -d)
@@ -150,6 +150,73 @@ split_name(n: u64) -> (r: u64)
     n
 }'
 expect_fail "acceptance: cross-count mismatch" "independent scan counts" acc
+
+# N1: a clause line ending in `{` with forall, whose body mentions an allowed_ name, followed by an impl, must not credit the fn.
+afresh
+addfn 'pub fn probe_err(n: u64) -> (r: Result<(), u64>) ensures forall|i: int| i == 0 ==> r is Ok ==> n == 0 {
+    proof { assert(allowed_demo_err(n, 1) || !allowed_demo_err(n, 1)); }
+    Ok(())
+}
+impl S {
+    pub fn z(&self) {}
+}'
+expect_fail "acceptance: body read as clause text" "not indented under the fn" acc
+# a defaulted generic in an alias declaration, a `use .. Result as ..` rename, an `ensures_` identifier
+afresh
+addfn 'pub type D<T = ()> = Result<T, u64>;
+
+pub fn dflt_err(n: u64) -> (r: D)
+    ensures
+        r is Ok ==> n == 0,
+{
+    if n == 0 { Ok(()) } else { Err(1) }
+}'
+expect_fail "acceptance: alias with a defaulted generic" "demo::dflt_err" acc
+afresh
+sed -i '1i use std::result::Result as Ret;' "$lib"
+expect_fail "acceptance: use .. Result as .." "renames an error type" acc
+afresh
+addfn 'pub fn sub_err(n: u64) -> (r: Result<(), u64>)
+    requires
+        ensures_ok(n) || allowed_demo_err(n, 1),
+{
+    if n == 0 { Ok(()) } else { Err(1) }
+}'
+expect_fail "acceptance: ensures_ok is not the ensures clause" "demo::sub_err" acc
+afresh
+echo "demo::dup" > "$tmp/acceptance/baseline.txt"; echo "demo::dup" >> "$tmp/acceptance/baseline.txt"; cp "$tmp/acceptance/baseline.txt" "$tmp/acceptance/old-baseline.txt"
+expect_fail "acceptance: duplicate baseline line" "duplicate baseline lines" acc
+
+# check-quotes without a spec dir
+expect_fail "check-quotes: no spec dir" "check-quotes: no" "$root/scripts/check-quotes.sh" "$tmp/quotes/crates" "$tmp/nonexistent"
+
+# acceptance.sh's real git path, in a throwaway repo: a branch that appends a baseline line; main appending one; no main.
+gitrepo() {  # gitrepo <dir>: scripts and tools of the repo plus the acceptance fixture, one commit on main
+    rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/tools"
+    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/acceptance.py" "$tmp/$1/tools/"
+    cp -r "$fx/acceptance/crates" "$tmp/$1/crates"; cp "$fx/acceptance/baseline.txt" "$tmp/$1/tools/acceptance-baseline.txt"
+    git -C "$tmp/$1" init -q -b main
+    git -C "$tmp/$1" add -A
+    gitc "$1" commit -qm base
+}
+gitc() { d=$1; shift; git -C "$tmp/$d" -c user.email=d@d -c user.name=d -c commit.gpgsign=false "$@"; }
+gaccept() { "$tmp/$1/scripts/acceptance.sh"; }
+gitrepo g1
+gitc g1 checkout -qb feat
+echo "demo::extra" >> "$tmp/g1/tools/acceptance-baseline.txt"
+gitc g1 commit -qam grow
+expect_fail "acceptance.sh git: branch appends a baseline line" "not in the merge-base baseline" gaccept g1
+gitrepo g2
+echo "demo::extra" >> "$tmp/g2/tools/acceptance-baseline.txt"
+gitc g2 commit -qam grow
+expect_fail "acceptance.sh git: main appends a baseline line (compared with HEAD^1)" "not in the merge-base baseline" gaccept g2
+gitrepo g3
+gitc g3 branch -m main trunk
+expect_fail "acceptance.sh git: no main" "cannot resolve the merge-base" gaccept g3
+gitrepo g4
+gitc g4 checkout -qb feat
+touch "$tmp/g4/x"; gitc g4 add x; gitc g4 commit -qm noop
+expect_pass "acceptance.sh git: unchanged baseline on a branch" gaccept g4
 
 # escape-gate: assume( in a temp crate (the whole-file scan reports it, as it does for a split one); assume split across lines; external_body outside crypto.
 esc() { "$root/scripts/escape-gate.sh" "$tmp/escape"; }
