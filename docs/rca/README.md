@@ -29,4 +29,5 @@ A catch lower in the list needs a stated reason why a higher one is not possible
 
 - `catalog.md`: root causes of every bug found by review so far, the 18 classes with their catches and owners.
 - `2026-11-06-empty-crypto.md`: first RCA entry.
-- Tools: `tools/check_quotes.py`, `tools/rl.py`, `tools/mut.py`; gates: `scripts/lint-scripts.sh`, `scripts/acceptance.sh`, `scripts/gate-demos.sh`.
+- Tools: `tools/check_quotes.py`, `tools/rl.py`, `tools/mut.py`; gates: `scripts/lint-scripts.sh`, `scripts/check-quotes.sh`, `scripts/escape-gate.sh`, `scripts/acceptance.sh`, `scripts/gate-demos.sh`.
+- `2026-11-06-acceptance-parser.md`: RCA of the R4 parser's own bugs.
