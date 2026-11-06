@@ -301,6 +301,11 @@ impl Connection {
         self.ids@.client_scid
     }
 
+    /// TLS has delivered the client's transport parameters and they were accepted.
+    pub closed spec fn peer_tp_known_spec(&self) -> bool {
+        self.peer_tp is Some
+    }
+
     pub closed spec fn events_spec(&self) -> Seq<StreamEvent> {
         self.events@
     }
@@ -3187,6 +3192,13 @@ impl Connection {
     //# a mismatch between values received from a peer in these transport
     //# parameters and the value sent in the corresponding Destination or
     //# Source Connection ID fields of Initial packets.
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+    //# An endpoint MUST treat the absence of the
+    //# initial_source_connection_id transport parameter from either endpoint
+    //# or the absence of the original_destination_connection_id transport
+    //# parameter from the server as a connection error of type
+    //# TRANSPORT_PARAMETER_ERROR.
     /// TLS delivered the client's transport parameters.
     #[verifier::spinoff_prover]
     pub fn on_peer_params(&mut self, tp: &TransportParams, now: u64)
@@ -3201,6 +3213,11 @@ impl Connection {
                 &&& final(self).close_spec() == Some((false, TRANSPORT_PARAMETER_ERROR, Seq::<u8>::empty()))
                 &&& tp@.initial_source_connection_id != Some(old(self).client_scid_spec())
             },
+            old(self).phase_spec() is Open && !old(self).peer_tp_known_spec() ==> (!(final(self).phase_spec() is Open)
+                <==> tp@.initial_source_connection_id != Some(old(self).client_scid_spec())),
+            old(self).phase_spec() is Open && !old(self).peer_tp_known_spec() && tp@.initial_source_connection_id is None
+                ==> final(self).phase_spec() is Closing
+                && final(self).close_spec() == Some((false, TRANSPORT_PARAMETER_ERROR, Seq::<u8>::empty())),
             !(old(self).phase_spec() is Open) ==> final(self).phase_spec() == old(self).phase_spec()
                 && final(self).close_spec() == old(self).close_spec(),
     {
@@ -3260,7 +3277,8 @@ impl Connection {
     //# A TLS alert is converted into a QUIC connection error.  The
     //# AlertDescription value is added to 0x0100 to produce a QUIC error
     //# code from the range reserved for CRYPTO_ERROR; see Section 20.1 of
-    //# [QUIC-TRANSPORT].
+    //# [QUIC-TRANSPORT].  The resulting value is sent in a QUIC
+    //# CONNECTION_CLOSE frame of type 0x1c.
     /// TLS failed with this alert (RFC 9001 §4.8).
     #[verifier::spinoff_prover]
     pub fn on_tls_alert(&mut self, alert: u8, now: u64)
