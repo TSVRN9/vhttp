@@ -283,9 +283,9 @@ pub open spec fn tp_bit(id: u64) -> u32 {
 //# have no semantics and can carry arbitrary values.
 /// One parameter `id` with value `v` applied to `t`, whose known IDs seen so far are the
 /// bits of `seen`; `None` is TRANSPORT_PARAMETER_ERROR. Any ID above 0x10 is ignored,
-/// including every reserved `31 * N + 27`. preferred_address (0x0d) and
-/// retry_source_connection_id (0x10) are errors from either side: we never send them, so
-/// they are not modelled.
+/// including every reserved `31 * N + 27`. With `from_client == false` this only reads
+/// back our own parameters: 0x0d and 0x10 are refused because we never send them. That is
+/// stricter than §18.2 for a real server's parameters, so do not use it as a client.
 // ponytail: unknown-ID duplicates are not detected; add a seen-set if a peer abuses it.
 pub open spec fn rfc_tp_apply(id: u64, v: Seq<u8>, from_client: bool, t: SpecTp, seen: u32) -> Option<
     (SpecTp, u32),
@@ -726,8 +726,8 @@ proof fn lemma_server_tail(b: Seq<u8>, p: int, s: SpecTp, t: SpecTp)
     }
 }
 
-/// Parsing what `serialize_server_params` wrote, as if received by a client, recovers the
-/// parameters.
+/// Parsing what `serialize_server_params` wrote, read back with `from_client == false`,
+/// recovers the parameters.
 pub proof fn theorem_server_tp_roundtrip(p: SpecTp)
     requires
         server_tp_wf(p),
@@ -913,8 +913,12 @@ pub proof fn theorem_peer_tp_wf(b: Seq<u8>)
 //# Section 10.2.
 //
 //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2
-//# In QUIC version 1, this value MUST NOT
-//# exceed 20 bytes.
+//# Endpoints that receive a version 1 long header with a
+//# value larger than 20 MUST drop the packet.
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-17.2
+//# Endpoints that receive a version 1 long header
+//# with a value larger than 20 MUST drop the packet.
 //
 //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
 //# An endpoint MUST treat the following as a connection error of type
@@ -933,9 +937,11 @@ pub proof fn theorem_peer_tp_wf(b: Seq<u8>)
 //# This
 //# parameter is a zero-length value.
 /// Value `v` is invalid for known parameter `id` (§18.2), written from the RFC text, not
-/// from `rfc_tp_value`. The integers are 0x01 and 0x03 to 0x0b and 0x0e. A connection ID over
-/// 20 bytes cannot equal the Source or Destination Connection ID of a version 1 Initial
-/// packet (§17.2), so it is a §7.3 mismatch.
+/// from `rfc_tp_value`. The integers are 0x01 and 0x03 to 0x0b and 0x0e. A version 1 Initial
+/// with a longer connection ID is dropped (§17.2), so the connection's IDs are at most 20
+/// bytes, and a longer connection-ID parameter is a §7.3 mismatch. preferred_address (0x0d) is
+/// not modelled: it is server-only, and this crate acts only as a server; a client reading
+/// of 0x0d must add Figure 22's format and the zero-length connection ID rule.
 pub open spec fn tp_value_invalid(id: u64, v: Seq<u8>) -> bool {
     if id == TP_MAX_IDLE_TIMEOUT || id == TP_MAX_UDP_PAYLOAD_SIZE || id == TP_INITIAL_MAX_DATA
         || id == TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL || id
@@ -993,11 +999,12 @@ pub open spec fn tp_server_only(id: u64) -> bool {
 //# An endpoint MUST treat receipt of a transport parameter with an
 //# invalid value as a connection error of type
 //# TRANSPORT_PARAMETER_ERROR.
-/// From offset `p`, reached by parsing `b[..p]` into `t` with mask `seen`, a client's
-/// parameters hold one the RFC lets a server refuse: a parameter that is badly formatted
-/// (§18, §20.1), a duplicate (§7.4 SHOULD, which we chose), server-only (§18.2), or an
-/// invalid value (§7.4).
-pub open spec fn allowed_tp_err_from(b: Seq<u8>, p: int, t: SpecTp, seen: u32) -> bool
+/// From offset `p`, reached by parsing `b[..p]`, whose parameter IDs are `ids`, into `t`
+/// with mask `seen`, a client's parameters hold one the RFC lets a server refuse: a
+/// parameter that is badly formatted (§18, §20.1), a known ID already in `ids` (§7.4
+/// SHOULD, which we chose), server-only (§18.2), or an invalid value (§7.4). `ids` is the
+/// RFC quantity (the IDs earlier in `b`); `t` and `seen` only follow the parse.
+pub open spec fn allowed_tp_err_from(b: Seq<u8>, p: int, ids: Set<u64>, t: SpecTp, seen: u32) -> bool
     decreases (if p < b.len() {
         b.len() - p
     } else {
@@ -1015,11 +1022,11 @@ pub open spec fn allowed_tp_err_from(b: Seq<u8>, p: int, t: SpecTp, seen: u32) -
                 Some((len, r)) => match rfc_bytes(b, r, len as int) {
                     None => true,
                     Some((v, s)) => {
-                        ||| id <= TP_RETRY_SOURCE_CONNECTION_ID && seen & tp_bit(id) != 0
+                        ||| id <= TP_RETRY_SOURCE_CONNECTION_ID && ids.contains(id)
                         ||| tp_server_only(id)
                         ||| id <= TP_RETRY_SOURCE_CONNECTION_ID && tp_value_invalid(id, v)
                         ||| match rfc_tp_apply(id, v, true, t, seen) {
-                            Some((t2, seen2)) => allowed_tp_err_from(b, s, t2, seen2),
+                            Some((t2, seen2)) => allowed_tp_err_from(b, s, ids.insert(id), t2, seen2),
                             None => false,
                         }
                     },
@@ -1030,17 +1037,91 @@ pub open spec fn allowed_tp_err_from(b: Seq<u8>, p: int, t: SpecTp, seen: u32) -
 }
 
 #[verifier::decreases_by]
-proof fn allowed_tp_err_decreases(b: Seq<u8>, p: int, t: SpecTp, seen: u32) {
+proof fn allowed_tp_err_decreases(b: Seq<u8>, p: int, ids: Set<u64>, t: SpecTp, seen: u32) {
     lemma_decode_len_bounds(b.skip(p));
     if let Some((n, _)) = rfc_varint_decode(b.skip(p)) {
         lemma_decode_len_bounds(b.skip(p + n));
     }
 }
 
+//= https://www.rfc-editor.org/rfc/rfc9000#section-20.1
+//# TRANSPORT_PARAMETER_ERROR (0x08):  An endpoint received transport
+//# parameters that were badly formatted, included an invalid value,
+//# omitted a mandatory transport parameter, included a forbidden
+//# transport parameter, or were otherwise in error.
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-7.4
+//# An endpoint SHOULD treat receipt of
+//# duplicate transport parameters as a connection error of type
+//# TRANSPORT_PARAMETER_ERROR.
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-7.4
+//# An endpoint MUST treat receipt of a transport parameter with an
+//# invalid value as a connection error of type
+//# TRANSPORT_PARAMETER_ERROR.
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+//# A client MUST NOT include any server-only transport parameter:
+//# original_destination_connection_id, preferred_address,
+//# retry_source_connection_id, or stateless_reset_token.  A server MUST
+//# treat receipt of any of these transport parameters as a connection
+//# error of type TRANSPORT_PARAMETER_ERROR.
 /// A client's transport parameters extension value holds a parameter the RFC lets a server
 /// refuse with TRANSPORT_PARAMETER_ERROR.
 pub open spec fn allowed_tp_err(b: Seq<u8>) -> bool {
-    allowed_tp_err_from(b, 0, spec_default_tp(), 0)
+    allowed_tp_err_from(b, 0, Set::empty(), spec_default_tp(), 0)
+}
+
+/// The mask `seen` marks exactly the known IDs in `ids`.
+spec fn tp_seen_is(seen: u32, ids: Set<u64>) -> bool {
+    forall|i: u64| i <= TP_RETRY_SOURCE_CONNECTION_ID ==> (#[trigger] ids.contains(i) <==> seen
+        & tp_bit(i) != 0)
+}
+
+/// Bit `j` of `seen | (1 << a)`, for `a` and `j` at most 16.
+proof fn lemma_tp_bit_or(seen: u32, a: u32, j: u32)
+    by (bit_vector)
+    requires
+        a <= 16,
+        j <= 16,
+    ensures
+        ((seen | (1u32 << a)) & (1u32 << j) != 0) == ((seen & (1u32 << j) != 0) || a == j),
+        0u32 & (1u32 << j) == 0,
+{
+}
+
+/// The mask matches the IDs seen: empty at the start, and after each parameter.
+proof fn lemma_tp_seen_step(seen: u32, ids: Set<u64>, id: u64)
+    ensures
+        tp_seen_is(0, Set::empty()),
+        tp_seen_is(seen, ids) && id <= TP_RETRY_SOURCE_CONNECTION_ID ==> tp_seen_is(
+            seen | tp_bit(id),
+            ids.insert(id),
+        ),
+        tp_seen_is(seen, ids) && id > TP_RETRY_SOURCE_CONNECTION_ID ==> tp_seen_is(
+            seen,
+            ids.insert(id),
+        ),
+{
+    assert forall|i: u64| i <= TP_RETRY_SOURCE_CONNECTION_ID implies (
+    #[trigger] Set::<u64>::empty().contains(i) <==> 0u32 & tp_bit(i) != 0) by {
+        lemma_tp_bit_or(0, 0, i as u32);
+    }
+    if tp_seen_is(seen, ids) && id <= TP_RETRY_SOURCE_CONNECTION_ID {
+        assert forall|i: u64| i <= TP_RETRY_SOURCE_CONNECTION_ID implies (#[trigger] ids.insert(
+            id,
+        ).contains(i) <==> (seen | tp_bit(id)) & tp_bit(i) != 0) by {
+            lemma_tp_bit_or(seen, id as u32, i as u32);
+            assert(ids.contains(i) <==> seen & tp_bit(i) != 0);
+        }
+    }
+    if tp_seen_is(seen, ids) && id > TP_RETRY_SOURCE_CONNECTION_ID {
+        assert forall|i: u64| i <= TP_RETRY_SOURCE_CONNECTION_ID implies (#[trigger] ids.insert(
+            id,
+        ).contains(i) <==> seen & tp_bit(i) != 0) by {
+            assert(ids.contains(i) <==> seen & tp_bit(i) != 0);
+        }
+    }
 }
 
 /// For a parameter a client may send, `rfc_tp_value` refuses exactly the §18.2-invalid values.
@@ -1057,9 +1138,11 @@ proof fn lemma_tp_value_allowed(id: u64, v: Seq<u8>, t: SpecTp)
 /// From offset `p`, a client's parameters are refused exactly when `allowed_tp_err_from`
 /// holds.
 #[verifier::spinoff_prover]
-proof fn lemma_tp_err_allowed_from(b: Seq<u8>, p: int, t: SpecTp, seen: u32)
+proof fn lemma_tp_err_allowed_from(b: Seq<u8>, p: int, ids: Set<u64>, t: SpecTp, seen: u32)
+    requires
+        tp_seen_is(seen, ids),
     ensures
-        rfc_tp_from(b, p, true, t, seen) is Err <==> allowed_tp_err_from(b, p, t, seen),
+        rfc_tp_from(b, p, true, t, seen) is Err <==> allowed_tp_err_from(b, p, ids, t, seen),
     decreases (if p < b.len() {
         b.len() - p
     } else {
@@ -1075,11 +1158,15 @@ proof fn lemma_tp_err_allowed_from(b: Seq<u8>, p: int, t: SpecTp, seen: u32)
             lemma_decode_len_bounds(b.skip(q));
             if let Some((len, r)) = rfc_vint(b, q) {
                 if let Some((v, s)) = rfc_bytes(b, r, len as int) {
-                    if id <= TP_RETRY_SOURCE_CONNECTION_ID && !tp_server_only(id) {
-                        lemma_tp_value_allowed(id, v, t);
+                    if id <= TP_RETRY_SOURCE_CONNECTION_ID {
+                        assert(ids.contains(id) <==> seen & tp_bit(id) != 0);
+                        if !tp_server_only(id) {
+                            lemma_tp_value_allowed(id, v, t);
+                        }
                     }
                     if let Some((t2, seen2)) = rfc_tp_apply(id, v, true, t, seen) {
-                        lemma_tp_err_allowed_from(b, s, t2, seen2);
+                        lemma_tp_seen_step(seen, ids, id);
+                        lemma_tp_err_allowed_from(b, s, ids.insert(id), t2, seen2);
                     }
                 }
             }
@@ -1094,7 +1181,8 @@ pub proof fn lemma_tp_err_allowed(b: Seq<u8>)
         rfc_transport_params(b, true) is Err ==> allowed_tp_err(b),
         allowed_tp_err(b) ==> rfc_transport_params(b, true) is Err,
 {
-    lemma_tp_err_allowed_from(b, 0, spec_default_tp(), 0);
+    lemma_tp_seen_step(0, Set::empty(), 0);
+    lemma_tp_err_allowed_from(b, 0, Set::empty(), spec_default_tp(), 0);
 }
 
 /// `allowed_tp_err` is not vacuous: a block holding only a valid one-byte
