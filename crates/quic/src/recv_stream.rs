@@ -1261,6 +1261,50 @@ impl RecvStream {
                 data: data@,
                 fin,
             });
+        }
+        let n_new = match self.data_gate(off, data, fin, conn_room) {
+            Ok(n) => n,
+            Err(c) => {
+                return Err(c);
+            },
+        };
+        if self.is_terminal() {
+            self.trace = Ghost(t2);
+            proof {
+                assert(rfc_recv(self.id, self.credit.window_spec(), t2).events.skip(
+                    s1.events.len() as int,
+                ) =~= Seq::<SpecStreamEvent>::empty());
+                assert(event_views(ev@) =~= event_views(ev@) + Seq::<SpecStreamEvent>::empty());
+            }
+            return Ok(0);
+        }
+        self.data_buffer(off, data, fin, ev);
+        Ok(n_new)
+    }
+
+    /// `on_data`'s flow-control and final-size half: the error the frame raises, else the
+    /// connection credit it consumes (split from `on_data` for the rlimit).
+    #[verifier::spinoff_prover]
+    fn data_gate(&self, off: u64, data: &[u8], fin: bool, conn_room: u64) -> (r: Result<u64, u64>)
+        requires
+            self.wf(),
+            off + data@.len() <= VARINT_MAX,
+        ensures
+            ({
+                let s1 = self.rfc();
+                let s2 = recv_data(self.id_spec(), s1, off as nat, data@, fin);
+                &&& s2.err matches Some(c) ==> r == Err::<u64, u64>(c)
+                &&& (s2.err is None && counted(s2) - counted(s1) > conn_room) ==> r == Err::<
+                    u64,
+                    u64,
+                >(FLOW_CONTROL_ERROR)
+                &&& (s2.err is None && counted(s2) - counted(s1) <= conn_room) ==> r == Ok::<
+                    u64,
+                    u64,
+                >((counted(s2) - counted(s1)) as u64)
+            }),
+    {
+        proof {
             self.credit.lemma_wf();
         }
         let end = off + data.len() as u64;
@@ -1298,13 +1342,6 @@ impl RecvStream {
             return Err(FLOW_CONTROL_ERROR);
         }
         if self.is_terminal() {
-            self.trace = Ghost(t2);
-            proof {
-                assert(rfc_recv(self.id, self.credit.window_spec(), t2).events.skip(
-                    s1.events.len() as int,
-                ) =~= Seq::<SpecStreamEvent>::empty());
-                assert(event_views(ev@) =~= event_views(ev@) + Seq::<SpecStreamEvent>::empty());
-            }
             return Ok(0);
         }
         let fs = if fin {
@@ -1325,6 +1362,62 @@ impl RecvStream {
         if n_new > conn_room {
             return Err(FLOW_CONTROL_ERROR);
         }
+        Ok(n_new)
+    }
+
+    /// `on_data`'s buffering half: the frame passed `data_gate` and the stream is not
+    /// terminal; its bytes are reassembled and the newly contiguous ones delivered (split from
+    /// `on_data` for the rlimit).
+    #[verifier::spinoff_prover]
+    fn data_buffer(&mut self, off: u64, data: &[u8], fin: bool, ev: &mut Vec<StreamEvent>)
+        requires
+            old(self).wf(),
+            off + data@.len() <= VARINT_MAX,
+            !terminal(old(self).rfc().state),
+            recv_data(old(self).id_spec(), old(self).rfc(), off as nat, data@, fin).err is None,
+        ensures
+            final(self).id_spec() == old(self).id_spec(),
+            final(self).window_spec() == old(self).window_spec(),
+            final(self).wf(),
+            ({
+                let t2 = old(self).trace().push(
+                    SpecRecvIn::Data { off: off as nat, data: data@, fin },
+                );
+                let s1 = old(self).rfc();
+                let s2 = rfc_recv(old(self).id_spec(), old(self).window_spec(), t2);
+                &&& final(self).trace() == t2
+                &&& event_views(final(ev)@) == event_views(old(ev)@) + s2.events.skip(
+                    s1.events.len() as int,
+                )
+            }),
+            final(self).stop_code() == old(self).stop_code(),
+            final(self).pending_stop() == if terminal(final(self).rfc().state) {
+                None
+            } else {
+                old(self).pending_stop()
+            },
+    {
+        let ghost t2 = self.trace@.push(SpecRecvIn::Data { off: off as nat, data: data@, fin });
+        let ghost s1 = self.rfc();
+        proof {
+            lemma_recv_push(self.id, self.credit.window_spec(), self.trace@, SpecRecvIn::Data {
+                off: off as nat,
+                data: data@,
+                fin,
+            });
+            self.credit.lemma_wf();
+        }
+        let end = off + data.len() as u64;
+        let fs = if fin {
+            Some(end)
+        } else {
+            self.final_size
+        };
+        let high = if end > self.high {
+            end
+        } else {
+            self.high
+        };
         let mut re = match self.re.take() {
             Some(r) => r,
             None => Reassembly::new(),  // unreachable: `re` is Some unless ResetRead
@@ -1382,7 +1475,6 @@ impl RecvStream {
         proof {
             assert(self.wf());
         }
-        Ok(n_new)
     }
 
     /// A RESET_STREAM frame's error code and final size, with `conn_room` bytes of connection

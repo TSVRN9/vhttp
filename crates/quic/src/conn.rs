@@ -6359,6 +6359,40 @@ impl Connection {
         }
     }
 
+    /// `send_path_datagram`'s timers: only the idle timer moved since `c2`, to `now` at the latest
+    /// (split from `send_path_datagram` for the rlimit).
+    #[verifier::spinoff_prover]
+    proof fn lemma_idle_timers(&self, c2: Connection, s0: Connection, now: u64)
+        requires
+            c2.tx_timers(s0, now),
+            *self == (Connection { idle: self.idle, ..c2 }),
+            self.idle.last == c2.idle.last || self.idle.last == now,
+        ensures
+            self.tx_timers(s0, now),
+    {
+        reveal(Connection::tx_timers);
+        if !(self.lc.phase_spec() is Closed) {
+            assert forall|k: PacketKind|
+                #[trigger] self.sent(k).inflight_spec() == s0.sent(k).inflight_spec() || (self.sent(k).inflight_spec().len() > 0
+                    && now <= self.sent(k).inflight_spec().last().time) by {
+                assert(c2.sent(k).inflight_spec() == s0.sent(k).inflight_spec() || (c2.sent(k).inflight_spec().len() > 0
+                    && now <= c2.sent(k).inflight_spec().last().time));
+                assert(self.sent(k) == c2.sent(k)) by {
+                    match k {
+                        PacketKind::Initial => {},
+                        PacketKind::Handshake => {},
+                        PacketKind::OneRtt => {},
+                    }
+                }
+            }
+            assert forall|r: PathId|
+                #[trigger] self.paths.has(r) && timed(self.paths.path(r)) implies s0.paths.has(r) && (self.paths.path(r).challenge
+                    == s0.paths.path(r).challenge && timed(s0.paths.path(r)) || now <= self.paths.path(r).challenge.unwrap().1) by {
+                assert(c2.paths.has(r) && timed(c2.paths.path(r)));
+            }
+        }
+    }
+
     /// Takes the frames owed on `q`, builds their packet and commits it. `q`'s budget was checked by
     /// `choose_path`, before anything was taken.
     #[verifier::spinoff_prover]
@@ -6447,29 +6481,7 @@ impl Connection {
         proof {
             assert(c2.tx_timers(c, now));
             c2.lemma_tx_trans(c, s0, now);
-            assert(self.tx_timers(s0, now)) by {
-              reveal(Connection::tx_timers);
-              if !(self.lc.phase_spec() is Closed) {
-                assert forall|k: PacketKind|
-                    #[trigger] self.sent(k).inflight_spec() == s0.sent(k).inflight_spec() || (self.sent(k).inflight_spec().len() > 0
-                        && now <= self.sent(k).inflight_spec().last().time) by {
-                    assert(c2.sent(k).inflight_spec() == s0.sent(k).inflight_spec() || (c2.sent(k).inflight_spec().len() > 0
-                        && now <= c2.sent(k).inflight_spec().last().time));
-                    assert(self.sent(k) == c2.sent(k)) by {
-                        match k {
-                            PacketKind::Initial => {},
-                            PacketKind::Handshake => {},
-                            PacketKind::OneRtt => {},
-                        }
-                    }
-                }
-                assert forall|r: PathId|
-                    #[trigger] self.paths.has(r) && timed(self.paths.path(r)) implies s0.paths.has(r) && (self.paths.path(r).challenge
-                        == s0.paths.path(r).challenge && timed(s0.paths.path(r)) || now <= self.paths.path(r).challenge.unwrap().1) by {
-                    assert(c2.paths.has(r) && timed(c2.paths.path(r)));
-                }
-              }
-            }
+            self.lemma_idle_timers(c2, s0, now);
             reveal(Connection::path_rules);
             self.lemma_one_sent(o, d@, w);
             lemma_path_frames_of(o.paths.path(q));
