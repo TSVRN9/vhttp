@@ -3937,6 +3937,7 @@ impl Streams {
     }
 
     /// The pending MAX_DATA.
+    #[verifier::spinoff_prover]
     fn poll_max_data(
         &mut self,
         room: &mut usize,
