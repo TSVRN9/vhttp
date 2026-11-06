@@ -282,6 +282,20 @@ impl Connection {
         }
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-4.1.3
+    //# *  If the packet is from a previously installed encryption level, it
+    //# MUST NOT contain data that extends past the end of previously
+    //# received data in that flow.
+    /// Byte `p` of level `k`'s CRYPTO stream has been received.
+    pub closed spec fn crypto_received(&self, k: PacketKind, p: nat) -> bool {
+        let s = match k {
+            PacketKind::Initial => self.crx_i,
+            PacketKind::Handshake => self.crx_h,
+            PacketKind::OneRtt => self.crx_1,
+        };
+        crate::reassembly::rfc_received(s.reassembly().inserted()).contains_key(p)
+    }
+
     /// The client's original Destination Connection ID.
     pub closed spec fn odcid_spec(&self) -> Seq<u8> {
         self.ids@.odcid
@@ -338,9 +352,7 @@ impl Connection {
         &&& self.sent_i.wf()
         &&& self.sent_h.wf()
         &&& self.sent_1.wf()
-        &&& self.crx_i.wf()
-        &&& self.crx_h.wf()
-        &&& self.crx_1.wf()
+        &&& crx_ok(self.crx_i, self.crx_h, self.crx_1)
         &&& self.ctx_i.wf()
         &&& self.ctx_h.wf()
         &&& self.local_cids.wf()
@@ -538,6 +550,7 @@ impl Connection {
                 assert(ids_seq[0] == path);
             }
             assert(c.wf_parts()) by {
+                reveal(crx_ok);
                 assert(c.cid_updates@.len() == 2);
             }
             assert(c.wf_amp());
@@ -1408,7 +1421,17 @@ impl Connection {
             final(self).wf(),
             final(self).frames_kept(*old(self)),
             r matches Err(c) ==> c <= VARINT_MAX,
+            r matches Err(c) ==> c == CRYPTO_BUFFER_EXCEEDED && crypto_window_exceeded(
+                old(self).crypto_base_spec(k),
+                offset,
+                data@.len(),
+            ),
+            crypto_window_exceeded(old(self).crypto_base_spec(k), offset, data@.len()) ==> r
+                == Err::<(), u64>(CRYPTO_BUFFER_EXCEEDED),
     {
+        proof {
+            reveal(crx_ok);
+        }
         match k {
             PacketKind::Initial => self.crx_i.on_crypto(offset, data),
             PacketKind::Handshake => self.crx_h.on_crypto(offset, data),
@@ -2980,6 +3003,9 @@ impl Connection {
             final(self).streams == old(self).streams,
             final(self).crypto_end_spec(PacketKind::Initial) == old(self).crypto_end_spec(PacketKind::Initial),
     {
+        proof {
+            reveal(crx_ok);
+        }
         let mut lost: Vec<SentPacket> = Vec::new();
         match k {
             PacketKind::Initial => {
@@ -3135,6 +3161,9 @@ impl Connection {
         // The bound needs only `lemma_wf`; unfolded, these make a missing fact an rlimit failure.
         hide(crate::reassembly::rfc_received);
         hide(crate::reassembly::rfc_contiguous);
+        proof {
+            reveal(crx_ok);
+        }
         if !matches!(self.lc.phase(), Phase::Open) {
             return;
         }
@@ -8126,7 +8155,17 @@ impl Connection {
             self.wf(),
         ensures
             r == self.crypto_end_spec(k),
+            self.crypto_base_spec(k) <= r,
+            r > 0 ==> self.crypto_received(k, (r - 1) as nat),
     {
+        proof {
+            reveal(crx_ok);
+            match k {
+                PacketKind::Initial => self.crx_i.lemma_end_received(),
+                PacketKind::Handshake => self.crx_h.lemma_end_received(),
+                PacketKind::OneRtt => self.crx_1.lemma_end_received(),
+            }
+        }
         match k {
             PacketKind::Initial => self.crx_i.end(),
             PacketKind::Handshake => self.crx_h.end(),
@@ -8258,6 +8297,13 @@ impl Connection {
 // =============================================================================
 // Helpers
 // =============================================================================
+
+/// The three CRYPTO streams' `wf`. Opaque, so fns that do not touch a CRYPTO stream carry it by
+/// field congruence without unfolding it.
+#[verifier::opaque]
+spec fn crx_ok(i: CryptoStream, h: CryptoStream, o: CryptoStream) -> bool {
+    i.wf() && h.wf() && o.wf()
+}
 
 /// §8.1: trace `t1` starts with `t0` and then the receipt of an `n`-byte datagram. Opaque, so a
 /// caller forwards it without unfolding sequence equality.

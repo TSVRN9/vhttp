@@ -167,8 +167,8 @@ rlimit as reported by `--output-json --time-expanded` at `--rlimit 4`. The per-f
 | `quic::datagram::pick` | 12095817 | 2730524 (T0) | 0 |
 | `quic::path::Paths::on_timeout` | 11043766 | 1573567 (T0) | 0 |
 | `quic::reassembly::Reassembly::insert` | 6848875 | 2077934 (T0) | 0 |
-| `quic::conn::Connection::poll_transmit` | 7133799 | | 3, 3b |
-| `quic::conn::Connection::on_datagram` | 1717635 | | 3, 3b |
+| `quic::conn::Connection::poll_transmit` | 7133799 | 5762297 (T3) | 3, 3b |
+| `quic::conn::Connection::on_datagram` | 1717635 | 2823844 (T3) | 3, 3b |
 | `quic::conn::Connection::close` | 743986 | 688163 (T1) | 1 |
 | `quic::conn::Connection::close_internal` | 45734 | 86724 (T1) | 1 |
 | `quic::conn::Connection::on_tls_alert` | 226738 | 193172 (T1) | 1 |
@@ -180,13 +180,13 @@ rlimit as reported by `--output-json --time-expanded` at `--rlimit 4`. The per-f
 | `quic::h3_server::H3Server::pump` | 183852 | 184389 (T1) | 1, 3b |
 | `quictls::server::shut` | 4171 | 7833 (T2) | 2 |
 | `quictls::server::report` | 6447 | 15511 (T2) | 2 |
-| `quic::crypto_stream::CryptoStream::on_crypto` | 42037 | | 3 |
-| `quic::crypto_stream::CryptoStream::read` | 14538 | | 3 |
-| `quic::reassembly::lemma_insert_tight` (new) | — | | 3 |
-| `quic::conn::Connection::crypto_read` | 1407354 | | 3, 3b |
-| `quic::conn::Connection::crypto_end` | 42704 | | 3 |
-| `quic::conn::Connection::on_crypto_frame` | 356795 | | 3 |
-| `quic::conn::Connection::discard` | 464457 | | 3, 3b |
+| `quic::crypto_stream::CryptoStream::on_crypto` | 42037 | 57284 (T3) | 3 |
+| `quic::crypto_stream::CryptoStream::read` | 14538 | 15576 (T3) | 3 |
+| `quic::reassembly::Reassembly::lemma_insert_tight` (new) | — | 266316 (T3) | 3 |
+| `quic::conn::Connection::crypto_read` | 1407354 | 1404386 (T3) | 3, 3b |
+| `quic::conn::Connection::crypto_end` | 42704 | 65508 (T3) | 3 |
+| `quic::conn::Connection::on_crypto_frame` | 356795 | 375682 (T3) | 3 |
+| `quic::conn::Connection::discard` | 464457 | 537731 (T3) | 3, 3b |
 | `quic::conn::Connection::crypto_write` | 261459 | | 3b |
 | `quic::pipeline::{receive, transmit, refeed_one_rtt}` | 37596, 124540, 44385 | | 3b |
 | `quic::h3_server::H3Server::{on_timeout, send_response}` | 31317, 203780 | | 3b |
@@ -205,6 +205,8 @@ quic top 8 after Task 0 (`--rlimit 4`, 1212 verified, 0 errors): `Connection::ad
 Task 1 (close code at the `Connection` boundary) evidence: `vt-9a-evidence/t1` (before: `t1/base` at bbb5d1d, identical to T0's after; after: `t1/after`). quic top 8 after Task 1 (`--rlimit 4`, 1212 verified, 0 errors; quictls 43 verified, 0 errors): `Connection::add_space_packet` 7595647, `Streams::poll_max_data` 7553000, `streams::poll_stream` 7402168, `Connection::poll_transmit` 7133799, `Streams::recv_op_at` 6812261, `recv_stream::lemma_same_ranges` 6750564, `header::serialize_long_header` 6542112, `RecvStream::data_buffer` 6321936 (unchanged from T0). `on_counted` rose 1078483 → 1399145, as the preflight measured. T0 review m1: without the `forall|q2|` ensures of `Paths::lemma_lowest_expired` (and its `assert forall`), `abandon_at` rises 4220291 → 5033281 (`lemma_lowest_expired` 165595 → 34993, `on_timeout` 1573567 → 1228638), so the conjunct stays: it carries `abandon_at`'s rlimit, not its provability (`t1/m1-noforall`). T1 fix round (review I1): `on_peer_params` gained the converse (`old Open && !peer_tp_known ==> (!final Open <==> isci != Some(client_scid))`) and the §7.3 absence clause; quic top 8 unchanged (`t1/fix1`).
 
 Task 2 (close sinks `shut` and `report`) evidence: `vt-9a-evidence/t2` (`run1`). quictls 43 verified, 0 errors; top 8: `QuicServer::accept` 3631736, `on_secrets` 1153995, `feed` 608838, `receive` 341945, `lemma_fed` 327287, `transmit` 274321, `send_response` 255725, `lemma_push` 252882; `shut` 7833, `report` 15511. quic re-run (1212 verified, 0 errors): top 8 unchanged from T1.
+
+Task 3 (tight CRYPTO end, `crypto_allowed_err`, the empty-CRYPTO fix, opaque `crx_ok`) evidence: `vt-9a-evidence/t3` (`final`). quic 1219 verified, 0 errors; quictls 43 verified, 0 errors. quic top 8 after Task 3: `Streams::poll_max_data` 7553000, `streams::poll_stream` 7402168, `Connection::add_space_packet` 7185031, `Streams::recv_op_at` 6812261, `recv_stream::lemma_same_ranges` 6750564, `header::serialize_long_header` 6542112, `RecvStream::data_buffer` 6321936, `Reassembly::fill` 6116767. `poll_transmit` falls 7133799 → 5762297 and `on_datagram` rises 1717635 → 2823844, both as the preflight's `opaque` run measured; `Reassembly::insert` 2077934 → 1816357, `RecvStream::on_data` 2202435 (unchanged), `Connection::accept` 368325 → 334867. New proof fns: `Reassembly::{lemma_new_tight, lemma_pop_tight, lemma_end_received}` 6532/9923/9490, `CryptoStream::lemma_end_received` 4914, `crypto_stream::lemma_crypto_floor` 4893, `crypto_stream::lemma_crypto_allowed_err_rejects` 4294. `lemma_insert_tight` needs `hide(Reassembly::wf)`, `hide(rfc_received)` and `hide(rfc_contiguous)`: with none it exceeds rlimit 4 (`t3/try1`), and so it does with only the `wf` hide (`t3/try3`).
 
 ## 5. Inventory claims corrected
 

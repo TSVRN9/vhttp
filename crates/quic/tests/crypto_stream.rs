@@ -30,6 +30,25 @@ fn crypto_limit() {
 }
 
 #[test]
+fn crypto_empty_past_window_ok() {
+    let mut c = CryptoStream::new();
+    assert_eq!(c.on_crypto(16385, &[]), Ok(()));
+    assert_eq!(c.on_crypto(1 << 40, &[]), Ok(()));
+    assert_eq!(c.end(), 0);
+    assert_eq!(c.on_crypto(16384, &[1]), Err(CRYPTO_BUFFER_EXCEEDED));
+}
+
+#[test]
+fn crypto_empty_keeps_end() {
+    let mut c = CryptoStream::new();
+    assert_eq!(c.on_crypto(0, &[1; 10]), Ok(()));
+    assert_eq!(c.on_crypto(100, &[]), Ok(()));
+    assert_eq!(c.end(), 10);
+    assert_eq!(read(&mut c), [1; 10]);
+    assert_eq!(c.end(), 10);
+}
+
+#[test]
 fn crypto_duplicate() {
     let mut c = CryptoStream::new();
     let d: Vec<u8> = (1..=10).collect();

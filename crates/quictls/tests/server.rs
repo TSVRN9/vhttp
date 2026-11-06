@@ -344,6 +344,15 @@ fn empty_gapped_initial_ok() {
     assert_eq!(s.key_slots(), [true, true, true]);
 }
 
+/// An empty CRYPTO frame past the 16 KiB window buffers nothing: not CRYPTO_BUFFER_EXCEEDED (RFC 9000 §7.5).
+#[test]
+fn empty_initial_past_window_ok() {
+    let ch = h3ch(id);
+    let s = accept(&ini(&qc::S1, 0, || vec![cr(0, &ch), cr(20000, &[])]));
+    assert_eq!(s.conn().phase(), Phase::Open);
+    assert_eq!(s.key_slots(), [true, true, true]);
+}
+
 #[test]
 fn empty_initial_after_switch_ok() {
     let l = h3ch(id).len();
