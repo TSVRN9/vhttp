@@ -3193,6 +3193,13 @@ impl Connection {
             final(out)@.len() <= old(out)@.len() + old(self).crypto_end_spec(level) - old(
                 self,
             ).crypto_base_spec(level),
+            // A read drains the in-order data: nothing received in order stays unread.
+            old(self).phase_spec() is Open ==> final(self).crypto_base_spec(level) == old(
+                self,
+            ).crypto_contiguous_spec(level),
+            old(self).phase_spec() is Open ==> final(out)@.len() == old(out)@.len() + old(
+                self,
+            ).crypto_contiguous_spec(level) - old(self).crypto_base_spec(level),
     {
         // The bound needs only `lemma_wf`; unfolded, these make a missing fact an rlimit failure.
         hide(crate::reassembly::rfc_received);
