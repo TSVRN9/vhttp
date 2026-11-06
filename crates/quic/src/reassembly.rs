@@ -262,6 +262,85 @@ impl Reassembly {
     {
     }
 
+    /// The window ends at a received byte: no unreceived slot past the last byte held. Not part
+    /// of `wf`; a stream that keeps it carries it in its own `wf`.
+    pub closed spec fn tight(&self) -> bool {
+        self.buf_len() > 0 ==> rfc_received(self.inserted()).contains_key(
+            (self.base() + self.buf_len() - 1) as nat,
+        )
+    }
+
+    pub proof fn lemma_new_tight(&self)
+        requires
+            self.wf(),
+            self.buf_len() == 0,
+        ensures
+            self.tight(),
+    {
+    }
+
+    /// `insert` of non-empty data keeps the window tight: its new end is the old end or
+    /// `off + d.len()`, and the last byte of each is received.
+    pub proof fn lemma_insert_tight(a: Reassembly, b: Reassembly, off: u64, d: Seq<u8>)
+        requires
+            a.wf(),
+            a.tight(),
+            b.wf(),
+            d.len() > 0,
+            off + d.len() > a.base(),
+            b.inserted() == a.inserted().push((off as nat, d)),
+            b.base() == a.base(),
+            b.base() + b.buf_len() <= if a.base() + a.buf_len() >= off + d.len() {
+                a.base() + a.buf_len()
+            } else {
+                off + d.len()
+            },
+        ensures
+            b.tight(),
+    {
+        // Only `lemma_wf` and `lemma_received_push` are needed; with `wf` or the two RFC fns
+        // unfolded, this exceeds rlimit 4.
+        hide(Reassembly::wf);
+        hide(rfc_received);
+        hide(rfc_contiguous);
+        lemma_received_push(a.inserted(), off as nat, d);
+        a.lemma_wf();
+        b.lemma_wf();
+        let mb = rfc_received(b.inserted());
+        assert(mb.contains_key((off + d.len() - 1) as nat));
+        if a.buf_len() > 0 {
+            assert(mb.contains_key((a.base() + a.buf_len() - 1) as nat));
+        }
+    }
+
+    /// `pop` keeps the window tight: the same insertions and end, and `base` not lowered.
+    pub proof fn lemma_pop_tight(a: Reassembly, b: Reassembly)
+        requires
+            a.wf(),
+            a.tight(),
+            b.wf(),
+            b.inserted() == a.inserted(),
+            b.base() + b.buf_len() == a.base() + a.buf_len(),
+            b.base() >= a.base(),
+        ensures
+            b.tight(),
+    {
+    }
+
+    /// The byte before the window's end is received: the last byte held, or, with nothing
+    /// held, the byte before `base`, which is below `rfc_contiguous`.
+    pub proof fn lemma_end_received(&self)
+        requires
+            self.wf(),
+            self.tight(),
+        ensures
+            self.base() + self.buf_len() > 0 ==> rfc_received(self.inserted()).contains_key(
+                (self.base() + self.buf_len() - 1) as nat,
+            ),
+    {
+        lemma_contiguous_exists(rfc_received(self.inserted()));
+    }
+
     /// Nothing buffered, and everything below `base` delivered (as zeros, in the ghost record).
     pub fn new_at(base: u64) -> (r: Reassembly)
         requires

@@ -16,6 +16,47 @@ verus! {
 /// Data ending within `read offset + MAX_CRYPTO_BUFFER` is always accepted.
 pub const MAX_CRYPTO_BUFFER: u64 = 16384;
 
+/// Our own limit: a frame with data ending past `base + MAX_CRYPTO_BUFFER` overflows the window.
+/// An empty frame buffers nothing, so it never does.
+pub open spec fn crypto_window_exceeded(base: nat, offset: u64, len: nat) -> bool {
+    len > 0 && offset + len > base + MAX_CRYPTO_BUFFER
+}
+
+/// The errors `on_crypto` may return: CRYPTO_BUFFER_EXCEEDED on the window overflow. During the
+/// handshake the close is required; after it, closing is the chosen one of two MAYs.
+//= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
+//# If an endpoint does not expand its buffer, it MUST close
+//# the connection with a CRYPTO_BUFFER_EXCEEDED error code.
+//= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
+//# Once the handshake completes, if an endpoint is unable to buffer all
+//# data in a CRYPTO frame, it MAY discard that CRYPTO frame and all
+//# CRYPTO frames received in the future, or it MAY close the connection
+//# with a CRYPTO_BUFFER_EXCEEDED error code.
+pub open spec fn crypto_allowed_err(s: CryptoStream, offset: u64, len: nat, c: u64) -> bool {
+    c == CRYPTO_BUFFER_EXCEEDED && crypto_window_exceeded(s.reassembly().base(), offset, len)
+}
+
+/// `crypto_allowed_err` is not vacuous: an empty frame is never a window error, and no other
+/// code is allowed.
+proof fn lemma_crypto_allowed_err_rejects(s: CryptoStream, offset: u64)
+    ensures
+        !crypto_allowed_err(s, offset, 0, CRYPTO_BUFFER_EXCEEDED),
+        !crypto_allowed_err(s, offset, 1, PROTOCOL_VIOLATION),
+{
+}
+
+//= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
+//# Implementations MUST support buffering at least 4096 bytes of data
+//# received in out-of-order CRYPTO frames.
+/// The floor: data ending within 4096 bytes of the read offset never overflows the window.
+pub proof fn lemma_crypto_floor(base: nat, offset: u64, len: nat)
+    requires
+        offset + len <= base + 4096,
+    ensures
+        !crypto_window_exceeded(base, offset, len),
+{
+}
+
 /// The CRYPTO stream of one encryption level.
 pub struct CryptoStream {
     re: Reassembly,
@@ -29,6 +70,19 @@ impl CryptoStream {
     pub open spec fn wf(&self) -> bool {
         &&& self.reassembly().wf()
         &&& self.reassembly().buf_len() <= MAX_CRYPTO_BUFFER
+        &&& self.reassembly().tight()
+    }
+
+    /// The byte before `end()` has been received.
+    pub proof fn lemma_end_received(&self)
+        requires
+            self.wf(),
+        ensures
+            self.reassembly().base() + self.reassembly().buf_len() > 0 ==> rfc_received(
+                self.reassembly().inserted(),
+            ).contains_key((self.reassembly().base() + self.reassembly().buf_len() - 1) as nat),
+    {
+        self.re.lemma_end_received();
     }
 
     pub fn new() -> (r: CryptoStream)
@@ -37,7 +91,11 @@ impl CryptoStream {
             r.reassembly().inserted() == Seq::<(nat, Seq<u8>)>::empty(),
             r.reassembly().base() == 0,
     {
-        CryptoStream { re: Reassembly::new() }
+        let r = CryptoStream { re: Reassembly::new() };
+        proof {
+            r.re.lemma_new_tight();
+        }
+        r
     }
 
     /// Nothing buffered, and everything below `base` read.
@@ -49,7 +107,11 @@ impl CryptoStream {
             r.reassembly().base() == base,
             r.reassembly().buf_len() == 0,
     {
-        CryptoStream { re: Reassembly::new_at(base) }
+        let r = CryptoStream { re: Reassembly::new_at(base) };
+        proof {
+            r.re.lemma_new_tight();
+        }
+        r
     }
 
     /// A CRYPTO frame's `offset` and `data`.
@@ -59,8 +121,9 @@ impl CryptoStream {
             offset + data@.len() <= VARINT_MAX,
         ensures
             final(self).wf(),
-            r is Err <==> offset + data@.len() > old(self).reassembly().base() + MAX_CRYPTO_BUFFER,
+            r is Err <==> crypto_window_exceeded(old(self).reassembly().base(), offset, data@.len()),
             r is Err ==> r == Err::<(), u64>(CRYPTO_BUFFER_EXCEEDED),
+            r matches Err(c) ==> crypto_allowed_err(*old(self), offset, data@.len(), c),
             (r is Err || offset + data@.len() <= old(self).reassembly().base() || data@.len() == 0)
                 ==> *final(self) == *old(self),
             (r is Ok && offset + data@.len() > old(self).reassembly().base() && data@.len() > 0) ==> {
@@ -86,17 +149,22 @@ impl CryptoStream {
             // frame past the window always closes the connection, below.
             return Ok(());
         }
+        if data.len() == 0 {
+            // No bytes: nothing is buffered, so the buffer is not exceeded at any offset
+            // (RFC 9000 §7.5), and the window is not extended past what was received (RFC 9001
+            // §4.1.3). Checked before the window.
+            return Ok(());
+        }
         if end > base + MAX_CRYPTO_BUFFER {
             //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
             //# If an endpoint does not expand its buffer, it MUST close
             //# the connection with a CRYPTO_BUFFER_EXCEEDED error code.
             return Err(CRYPTO_BUFFER_EXCEEDED);
         }
-        if data.len() == 0 {
-            // No bytes: the window is not extended past what was received (RFC 9001 §4.1.3).
-            return Ok(());
-        }
         self.re.insert(offset, data);
+        proof {
+            Reassembly::lemma_insert_tight(old(self).re, self.re, offset, data@);
+        }
         Ok(())
     }
 
@@ -125,6 +193,9 @@ impl CryptoStream {
             self.re.lemma_wf();
         }
         self.re.pop(out);
+        proof {
+            Reassembly::lemma_pop_tight(old(self).re, self.re);
+        }
     }
 
     /// The read offset.
