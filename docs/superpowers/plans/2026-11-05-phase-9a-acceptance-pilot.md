@@ -361,7 +361,8 @@ The lift through `on_frame`/`on_counted` and quictls `apply`/`feed`/`tls_step` i
     5. Delete the `crypto_allowed_err` line.
     - Expected: `on_crypto`'s `final(self).wf()` postcondition fails (the `tight` conjunct). `cargo test` also fails `crypto_empty_keeps_end`, `empty_gapped_initial_ok` and `empty_initial_after_switch_ok`.
   - **M2:** move the `data.len() == 0` block after the window check. Expected: the iff and `crypto_allowed_err` postconditions fail, and so does `crypto_empty_past_window_ok`.
-  - **M3:** in conn.rs, remove `reveal(crx_ok)` from `crypto_end`. Expected: `crypto_end`'s `crypto_received` postcondition fails. This shows the opaque wrapper actually hides the conjunct.
+  - **M3:** in conn.rs, remove `reveal(crx_ok)` from `crypto_end`. Expected: the `self.wf()` precondition of `crx_k.lemma_end_received()`/`crx_k.end()` fails (corrected after the run; the `crypto_received` postcondition is M3b's). This shows the opaque wrapper actually hides the conjunct.
+  - **M3b [T3 review m3]:** keep `reveal(crx_ok)` and delete the three `lemma_end_received()` calls. Expected: `crypto_end`'s `r > 0 ==> crypto_received(..)` postcondition fails.
 
 ### Task 3b: the Initial CRYPTO invariant across the `Connection` boundary [I1]
 

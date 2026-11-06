@@ -78,11 +78,11 @@ A clause stated over an implementation number does not meet rule 1. The 753ec2d 
 - **Opaque CRYPTO wf in `Connection` [I2].**
   - The tight atoms alone cost `poll_transmit` +17.9% (7.13M → 8.41M).
   - `wf_parts`' three `crx_*.wf()` conjuncts become one `#[verifier::opaque] spec fn crx_ok(i, h, o)` over the three fields, revealed only in the fns that touch a CRYPTO stream. Measured: `poll_transmit` 5.76M.
-- **Acceptance for `on_crypto`.** `crypto_allowed_err(s, offset, len, c)`: `c == CRYPTO_BUFFER_EXCEEDED && len > 0 && offset + len > s.base + MAX_CRYPTO_BUFFER`.
+- **Acceptance for `on_crypto`.** `crypto_allowed_err(s, offset, len, c)`: `c == CRYPTO_BUFFER_EXCEEDED && len > 0 && offset + len > crypto_contiguous(s) + MAX_CRYPTO_BUFFER`, where `crypto_contiguous(s) = rfc_contiguous(rfc_received(s.inserted))` is the end of the in-order data received. The window was first anchored at the read offset `base`; T3 review I2 showed that over-strict (unread in-order bytes used up the out-of-order window, so a datagram with CRYPTO[0,13000) and CRYPTO[16000,16500) closed with 0x0d holding 500 out-of-order bytes), and it now counts only bytes past the contiguous end. The buffer bound is `base + buf_len <= crypto_contiguous + MAX_CRYPTO_BUFFER`: unread in-order bytes plus the window. The unread in-order part has no bound of its own in `quic`; quictls drains it after every datagram.
   - RFC 9000 §7.5: a MUST during the handshake, and a MAY after it [m7]. The window is a named own-limit.
-  - A spec lemma proves the §7.5 floor: data ending within `base + 4096` is never refused [m9].
+  - A spec lemma proves the §7.5 floor over the RFC quantity: a frame whose out-of-order part ends within `crypto_contiguous + 4096` is never refused, whatever is unread [m9, T3 review I2]. The limit is a span past the contiguous end, not a byte count: a single byte more than 16384 past it is still refused (a named own-limit).
   - The `len > 0` conjunct is a **bug the pilot finds** (§5, item 1), fixed by checking for empty data before the window check.
-- **`on_crypto_frame` acceptance [I4].** `r matches Err(c) ==> c == CRYPTO_BUFFER_EXCEEDED && crypto_window_exceeded(old.crypto_base_spec(k), offset, len)`. The lift through `on_frame`/`on_counted` is **scheduled in 9c (P5)**, with the other frame errors.
+- **`on_crypto_frame` acceptance [I4] and close [T3 review I1].** `r matches Err(c) ==> c == CRYPTO_BUFFER_EXCEEDED && crypto_window_exceeded(old.crypto_contiguous_spec(k), offset, len)`; rule 1b's converse `old Open && crypto_window_exceeded(..) ==> final Closing && close_spec == Some((false, 0x0d, []))`; and `r is Err ==> !final Open`. It closes in place as `on_stream_frame` does, so `on_counted`'s later `close_internal` is a no-op for this path (by `close_internal`'s `!old Open ==> unchanged`); that call stays, since other frame errors still rely on it. The lift of the forward clause through `on_frame`/`on_counted` is **scheduled in 9c (P5)**, with the other frame errors.
 - **`Connection` exports [C1].**
   - `pub closed spec fn crypto_received(&self, k, p: nat) -> bool`.
   - `crypto_end`'s ensures adds `crypto_base_spec(k) <= r` and `r > 0 ==> crypto_received(k, r - 1)`.
@@ -180,13 +180,13 @@ rlimit as reported by `--output-json --time-expanded` at `--rlimit 4`. The per-f
 | `quic::h3_server::H3Server::pump` | 183852 | 184389 (T1) | 1, 3b |
 | `quictls::server::shut` | 4171 | 7833 (T2) | 2 |
 | `quictls::server::report` | 6447 | 15511 (T2) | 2 |
-| `quic::crypto_stream::CryptoStream::on_crypto` | 42037 | 57284 (T3) | 3 |
-| `quic::crypto_stream::CryptoStream::read` | 14538 | 15576 (T3) | 3 |
-| `quic::reassembly::Reassembly::lemma_insert_tight` (new) | — | 266316 (T3) | 3 |
-| `quic::conn::Connection::crypto_read` | 1407354 | 1404386 (T3) | 3, 3b |
-| `quic::conn::Connection::crypto_end` | 42704 | 65508 (T3) | 3 |
-| `quic::conn::Connection::on_crypto_frame` | 356795 | 375682 (T3) | 3 |
-| `quic::conn::Connection::discard` | 464457 | 537731 (T3) | 3, 3b |
+| `quic::crypto_stream::CryptoStream::on_crypto` | 42037 | 57284 (T3), 90495 (T3 fix 1) | 3 |
+| `quic::crypto_stream::CryptoStream::read` | 14538 | 15576 (T3), 17427 (T3 fix 1) | 3 |
+| `quic::reassembly::Reassembly::lemma_insert_tight` (new) | — | 266316 (T3), 266942 (T3 fix 1) | 3 |
+| `quic::conn::Connection::crypto_read` | 1407354 | 1404386 (T3), 1576750 (T3 fix 1) | 3, 3b |
+| `quic::conn::Connection::crypto_end` | 42704 | 65508 (T3), 69433 (T3 fix 1) | 3 |
+| `quic::conn::Connection::on_crypto_frame` | 356795 | 375682 (T3), 4611934 (T3 fix 1) | 3 |
+| `quic::conn::Connection::discard` | 464457 | 537731 (T3), 1427784 (T3 fix 1) | 3, 3b |
 | `quic::conn::Connection::crypto_write` | 261459 | | 3b |
 | `quic::pipeline::{receive, transmit, refeed_one_rtt}` | 37596, 124540, 44385 | | 3b |
 | `quic::h3_server::H3Server::{on_timeout, send_response}` | 31317, 203780 | | 3b |
@@ -206,7 +206,9 @@ Task 1 (close code at the `Connection` boundary) evidence: `vt-9a-evidence/t1` (
 
 Task 2 (close sinks `shut` and `report`) evidence: `vt-9a-evidence/t2` (`run1`). quictls 43 verified, 0 errors; top 8: `QuicServer::accept` 3631736, `on_secrets` 1153995, `feed` 608838, `receive` 341945, `lemma_fed` 327287, `transmit` 274321, `send_response` 255725, `lemma_push` 252882; `shut` 7833, `report` 15511. quic re-run (1212 verified, 0 errors): top 8 unchanged from T1.
 
-Task 3 (tight CRYPTO end, `crypto_allowed_err`, the empty-CRYPTO fix, opaque `crx_ok`) evidence: `vt-9a-evidence/t3` (`final`). quic 1219 verified, 0 errors; quictls 43 verified, 0 errors. quic top 8 after Task 3: `Streams::poll_max_data` 7553000, `streams::poll_stream` 7402168, `Connection::add_space_packet` 7185031, `Streams::recv_op_at` 6812261, `recv_stream::lemma_same_ranges` 6750564, `header::serialize_long_header` 6542112, `RecvStream::data_buffer` 6321936, `Reassembly::fill` 6116767. `poll_transmit` falls 7133799 → 5762297 and `on_datagram` rises 1717635 → 2823844, both as the preflight's `opaque` run measured; `Reassembly::insert` 2077934 → 1816357, `RecvStream::on_data` 2202435 (unchanged), `Connection::accept` 368325 → 334867. New proof fns: `Reassembly::{lemma_new_tight, lemma_pop_tight, lemma_end_received}` 6532/9923/9490, `CryptoStream::lemma_end_received` 4914, `crypto_stream::lemma_crypto_floor` 4893, `crypto_stream::lemma_crypto_allowed_err_rejects` 4294. `lemma_insert_tight` needs `hide(Reassembly::wf)`, `hide(rfc_received)` and `hide(rfc_contiguous)`: with none it exceeds rlimit 4 (`t3/try1`), and so it does with only the `wf` hide (`t3/try3`); with only the two RFC hides it verifies at 323849 (`t3/try4`), so the `wf` hide stays because it lowers the cost.
+Task 3 (tight CRYPTO end, `crypto_allowed_err`, the empty-CRYPTO fix, opaque `crx_ok`) evidence: `vt-9a-evidence/t3` (`final`). quic 1219 verified, 0 errors; quictls 43 verified, 0 errors. quic top 8 after Task 3: `Streams::poll_max_data` 7553000, `streams::poll_stream` 7402168, `Connection::add_space_packet` 7185031, `Streams::recv_op_at` 6812261, `recv_stream::lemma_same_ranges` 6750564, `header::serialize_long_header` 6542112, `RecvStream::data_buffer` 6321936, `Reassembly::fill` 6116767. `poll_transmit` falls 7133799 → 5762297 and `on_datagram` rises 1717635 → 2823844, both as the preflight's `opaque` run measured; `Reassembly::insert` 2077934 → 1816357, `RecvStream::on_data` 2202435 (unchanged), `Connection::accept` 368325 → 334867. New proof fns: `Reassembly::{lemma_new_tight, lemma_pop_tight, lemma_end_received}` 6532/9923/9490, `CryptoStream::lemma_end_received` 4914, `crypto_stream::lemma_crypto_floor` 4893, `crypto_stream::lemma_crypto_allowed_err_rejects` 4294. `lemma_insert_tight` needs `hide(rfc_contiguous)` and keeps `hide(Reassembly::wf)` and `hide(rfc_received)`, which each lower it by about 18%. Drop-one-hide matrix on the committed fix-round tree (`t3/mut/H4`–`H7`, patches saved): without the `wf` hide 324829; without both RFC hides, rlimit exceeded; without `rfc_received`'s 324352; without `rfc_contiguous`'s, rlimit exceeded; all three 266942.
+
+Task 3 fix round 1 (review I1: `on_crypto_frame` closes in place; I2: the window is anchored at the contiguous end) evidence: `vt-9a-evidence/t3` (`fix1-final`). quic 1223 verified, 0 errors; quictls 43 verified, 0 errors. quic top 8: `Streams::poll_max_data` 7553000, `recv_stream::lemma_same_ranges` 7432523 (untouched; module-state perturbation, as in T0), `streams::poll_stream` 7402168, `Connection::add_space_packet` 7185031, `Streams::recv_op_at` 6812261, `header::serialize_long_header` 6542112, `RecvStream::data_buffer` 6323915, `Reassembly::fill` 6116768. Callers: `on_frame` 1053319 → 893943, `on_frames` 428997 (unchanged), `on_counted` 1120390 (unchanged). New: `Reassembly::contiguous_from` 191335, `Reassembly::lemma_contiguous_le_end` 16245, `reassembly::lemma_contiguous_mono` 6054. The "before" column is 73cc244 throughout, as the table's header says (the T3 report's own table uses T2's numbers).
 
 ## 5. Inventory claims corrected
 
