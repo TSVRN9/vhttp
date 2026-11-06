@@ -175,6 +175,11 @@ pub open spec fn tokens_covered(s: Seq<CidUpdate>, before: Seq<[u8; 16]>, after:
         )
 }
 
+/// The reason phrase a close keeps: its first 64 bytes (`Lifecycle::enter_closing`'s cap).
+pub open spec fn reason_cap(r: Seq<u8>) -> Seq<u8> {
+    r.take(if r.len() > 64 { 64int } else { r.len() as int })
+}
+
 // =============================================================================
 // The connection
 // =============================================================================
@@ -284,6 +289,16 @@ impl Connection {
 
     pub closed spec fn phase_spec(&self) -> Phase {
         self.lc.phase_spec()
+    }
+
+    /// The close being sent: application or transport, code, reason.
+    pub closed spec fn close_spec(&self) -> Option<(bool, u64, Seq<u8>)> {
+        self.lc.close_spec()
+    }
+
+    /// The Source Connection ID of the client's first Initial.
+    pub closed spec fn client_scid_spec(&self) -> Seq<u8> {
+        self.ids@.client_scid
     }
 
     pub closed spec fn events_spec(&self) -> Seq<StreamEvent> {
@@ -3014,12 +3029,19 @@ impl Connection {
             final(self).paths == old(self).paths,
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
+            old(self).phase_spec() is Open ==> final(self).phase_spec() is Closing
+                && final(self).close_spec() == Some((false, code, Seq::<u8>::empty())),
+            !(old(self).phase_spec() is Open) ==> final(self).phase_spec() == old(self).phase_spec()
+                && final(self).close_spec() == old(self).close_spec(),
     {
         let now = self.now;
         let none: Vec<u8> = Vec::new();
         self.close(code, false, none.as_slice(), now);
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.1
+    //# An endpoint enters the closing state after initiating an immediate
+    //# close.
     /// Enters the closing state (the first error wins, §11.1) and drops the streams.
     #[verifier::spinoff_prover]
     pub fn close(&mut self, code: u64, app: bool, reason: &[u8], now: u64)
@@ -3032,6 +3054,8 @@ impl Connection {
             final(self).out_log() == old(self).out_log(),
             old(self).phase_spec() is Open ==> final(self).phase_spec() is Closing,
             !(old(self).phase_spec() is Open) ==> final(self).phase_spec() == old(self).phase_spec(),
+            old(self).phase_spec() is Open ==> final(self).close_spec() == Some((app, code, reason_cap(reason@))),
+            !(old(self).phase_spec() is Open) ==> final(self).close_spec() == old(self).close_spec(),
             final(self).events_spec() == old(self).events_spec(),
             final(self).keeps_later(*old(self)),
     {
@@ -3155,6 +3179,14 @@ impl Connection {
         }
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+    //# An endpoint MUST treat the following as a connection error of type
+    //# TRANSPORT_PARAMETER_ERROR or PROTOCOL_VIOLATION:
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+    //# a mismatch between values received from a peer in these transport
+    //# parameters and the value sent in the corresponding Destination or
+    //# Source Connection ID fields of Initial packets.
     /// TLS delivered the client's transport parameters.
     #[verifier::spinoff_prover]
     pub fn on_peer_params(&mut self, tp: &TransportParams, now: u64)
@@ -3164,6 +3196,13 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
+            old(self).phase_spec() is Open && !(final(self).phase_spec() is Open) ==> {
+                &&& final(self).phase_spec() is Closing
+                &&& final(self).close_spec() == Some((false, TRANSPORT_PARAMETER_ERROR, Seq::<u8>::empty()))
+                &&& tp@.initial_source_connection_id != Some(old(self).client_scid_spec())
+            },
+            !(old(self).phase_spec() is Open) ==> final(self).phase_spec() == old(self).phase_spec()
+                && final(self).close_spec() == old(self).close_spec(),
     {
         if now > self.now {
             self.now = now;
@@ -3217,6 +3256,11 @@ impl Connection {
         self.issue_cids(rand);
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-4.8
+    //# A TLS alert is converted into a QUIC connection error.  The
+    //# AlertDescription value is added to 0x0100 to produce a QUIC error
+    //# code from the range reserved for CRYPTO_ERROR; see Section 20.1 of
+    //# [QUIC-TRANSPORT].
     /// TLS failed with this alert (RFC 9001 §4.8).
     #[verifier::spinoff_prover]
     pub fn on_tls_alert(&mut self, alert: u8, now: u64)
@@ -3225,6 +3269,10 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
+            old(self).phase_spec() is Open ==> final(self).phase_spec() is Closing
+                && final(self).close_spec() == Some((false, (CRYPTO_ERROR_BASE + alert as u64) as u64, Seq::<u8>::empty())),
+            !(old(self).phase_spec() is Open) ==> final(self).phase_spec() == old(self).phase_spec()
+                && final(self).close_spec() == old(self).close_spec(),
     {
         if now > self.now {
             self.now = now;
