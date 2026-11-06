@@ -82,6 +82,8 @@ bin=$(printf '%s\n' "$bin" | sed -n 's/^ct-binary: ok (\([0-9]*\) fns)$/\1/p')
 [ -n "$bin" ] || { echo "verify.sh: no ok line in ct-binary's output" >&2; exit 1; }
 # Quote gate: duvet report exits 0 on a `//#` quote that is not in the RFC text.
 "$root/scripts/check-quotes.sh" || exit 1
+# Acceptance ratchet: every error-returning exec fn in verus! carries an allowed_ clause or is in the shrinking baseline.
+"$root/scripts/acceptance.sh" || exit 1
 # Script hygiene: every scripts/*.sh has set -eu and pipefail.
 "$root/scripts/lint-scripts.sh" || exit 1
 echo "verify.sh: all crates verified, duvet ok, ct ok ($d declassify), cost $cost, escapes accounted ($attrs), binary ok ($bin fns)"
