@@ -15,6 +15,7 @@
 # dirs live under CT_TARGET_DIR (default $root/target/ct), one subdir per run; dumps and reports
 # under $CT_OUT/<run>.
 set -eu
+set -o pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root" # rust-toolchain.toml pins rustc 1.98.1, the one ct-driver links against
 CT_TARGET_DIR=${CT_TARGET_DIR:-$root/target/ct}
@@ -192,8 +193,8 @@ nb=$(grep -c '^bounded ' "$got" || true)
 echo "ct-check: cost $nb/$nt bounded"
 
 # The pipeline keys declassify sites by file:line, so a second call on a line would go uncounted.
-calls=$(grep -rho --include='*.rs' 'declassify(' "$root/crates/crypto/src" | wc -l)
-lines=$(grep -rh --include='*.rs' 'declassify(' "$root/crates/crypto/src" | wc -l)
+calls=$({ grep -rho --include='*.rs' 'declassify(' "$root/crates/crypto/src" || [ $? -eq 1 ]; } | wc -l)
+lines=$({ grep -rh --include='*.rs' 'declassify(' "$root/crates/crypto/src" || [ $? -eq 1 ]; } | wc -l)
 [ "$calls" -eq "$lines" ] || fail "one declassify per line"
 
 # Crypto: every manifest root ok, no reject, and every `checked` line (each fn's labels) as pinned.
