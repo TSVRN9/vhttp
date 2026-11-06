@@ -13,6 +13,7 @@ written `NAME(`. Fns without the clause must be listed in the baseline, one
     lines), or (--old-baseline FILE, the baseline at the merge-base with main) a line absent from FILE;
   - an allowed spec fn body is literally `true` (parentheses and braces stripped), a match with
     all arms `true`, or a match with a `_` or `Err(..)` arm that is `true`; or has no body;
+  - a `use .. as ..` renames Result, an Err/Error name or an alias (not resolved: refused);
   - no verus! block, no error-returning fn, a `verus!(..)`/`verus![..]` block, or an fn whose
     signature this parser cannot split (fail closed).
 `--count` prints the number of fn items examined (exec, spec and proof); scripts/acceptance.sh
@@ -21,7 +22,8 @@ compares it with an independent awk count.
 Parser limits (a line-based scan of comment- and string-stripped text, not a Rust parser): the
 `verus!` block, `impl`/`trait`/`mod` scopes and fn bodies are found by brace matching; with
 requires/ensures present the body brace is the first `{` that starts a line at the fn line's own
-indentation, else the first `{` outside brackets whose line (from the clause keyword) has no
+indentation, else (raising if that line is not indented deeper than the fn line, which means the fn body
+was read as clause text) the first `{` outside brackets whose line (from the clause keyword) has no
 match/if/forall/`=>` and no struct-literal name before it, searched only up to the next fn item;
 anything else raises. A fn is named by its crate, file module path, enclosing impl/trait/mod names
 (`Type as Trait` for a trait impl) and its own name; two fns with one path count as one (annotated
@@ -104,16 +106,6 @@ def top_semi(s, a, b):
     return -1
 
 
-def top_semi(s, a, b):
-    """Index of the first `;` in s[a:b] outside brackets, or -1."""
-    d = 0
-    for j in range(a, b):
-        if s[j] in '([{': d += 1
-        elif s[j] in ')]}': d -= 1
-        elif s[j] == ';' and d == 0: return j
-    return -1
-
-
 def scopes(s, lo, hi):
     """(start, end, name) of every impl/trait/mod item in s[lo:hi]."""
     out = []
@@ -137,7 +129,7 @@ def scopes(s, lo, hi):
     return out
 
 
-def body_brace(s, c0, limit, indent):
+def body_brace(s, c0, limit, indent, fn_ls):
     """(index of the body `{` or of the `;` ending a bodyless declaration, bodyless), searching s[c0:limit]."""
     for lm in re.finditer(r'(?m)^([ \t]*)\{', s[c0:limit]):
         if len(lm.group(1)) == indent:
@@ -155,6 +147,9 @@ def body_brace(s, c0, limit, indent):
                 if (not re.search(r'\b(match|if|else|forall|exists|let)\b|(?<!=)=>', before)
                         and not re.match(r'\s*(\w+\s*:(?!:)|\.\.)', s[j + 1:j + 80])
                         and not (re.match(r'\s*\}', s[j + 1:j + 80]) and re.search(r'[A-Z][A-Za-z0-9_]*\s*$', before))):
+                    line = s[ls:s.find('\n', j) if s.find('\n', j) >= 0 else len(s)]
+                    if ls != fn_ls and len(line) - len(line.lstrip(' \t')) <= indent:
+                        raise ValueError('the body brace is on a line not indented under the fn (the fn body was probably read as clause text)')
                     return j, False
             bd += 1
         elif ch == '}': bd -= 1
@@ -184,7 +179,10 @@ def fns(s, lo, hi, path):
         limit = nxt.start() if nxt else hi
         c = CLAUSE.search(s, q, limit)
         if c and s.find('{', q, c.start()) < 0 and top_semi(s, q, c.start()) < 0:
-            end, bodyless = body_brace(s, c.start(), limit, indent)
+            try:
+                end, bodyless = body_brace(s, c.start(), limit, indent, ls)
+            except ValueError as e:
+                raise ValueError(f'{path}: fn {name}: {e}')
             if end is None: raise ValueError(f'{path}: fn {name}: cannot find the end of the signature')
             sig_head, clauses = s[q:c.start()], s[c.start():end]
         else:
@@ -223,8 +221,20 @@ def scan(root):
     for crate, rel, full in rs_files(root):
         s = strip(open(full, encoding='utf-8').read())
         texts.append((crate, rel, full, s))
-        for m in re.finditer(r'(?<![A-Za-z0-9_])type\s+(\w+)\s*(?:<[^=;{]*>)?\s*=\s*([^;]+);', s):
-            aliases[m.group(1)] = m.group(2)
+        for m in re.finditer(r'(?<![A-Za-z0-9_])type\s+(\w+)', s):
+            j = m.end()
+            while s[j:j + 1].isspace(): j += 1
+            if s[j:j + 1] == '<':
+                dd = 0
+                while j < len(s):
+                    dd += (s[j] == '<') - (s[j] == '>' and s[j - 1] != '-')
+                    j += 1
+                    if dd == 0: break
+            while s[j:j + 1].isspace(): j += 1
+            if s[j:j + 1] != '=': continue  # an associated type declaration
+            e = s.find(';', j)
+            if e < 0: raise ValueError(f'{full}: type {m.group(1)}: no `;`')
+            aliases[m.group(1)] = s[j + 1:e]
         for sm in re.finditer(r'(?<![A-Za-z0-9_])spec(?:\(\w+\))?\s+fn\s+(\w+)', s):
             if not ALLOWED_NAME.match(sm.group(1)): continue
             j = sm.end()
@@ -235,7 +245,13 @@ def scan(root):
             if e >= len(s) or s[e] == ';': raise ValueError(f'{full}: spec fn {sm.group(1)} has no body')
             k = match_brace(s, e)
             if k < 0: raise ValueError(f'{full}: spec fn {sm.group(1)}: unbalanced body')
-            allowed.append((f'{crate}::{rel}', sm.group(1), s[e + 1:k - 1]))
+            allowed.append((f'{crate}/{rel}', sm.group(1), s[e + 1:k - 1]))
+    ere0, _ = error_re(aliases)
+    for crate, rel, full, s in texts:
+        # a `use .. Result as X;` rename hides an error type: fail closed rather than resolve it
+        for u in re.finditer(r'(?<![A-Za-z0-9_])use\b([^;]*);', s):
+            for r in re.finditer(r'([A-Za-z0-9_]+)\s+as\s+[A-Za-z0-9_]+', u.group(1)):
+                if ere0.search(r.group(1)): raise ValueError(f'{full}: `use {r.group(0)}` renames an error type or alias')
     for crate, rel, full, s in texts:
         if crate == 'crypto' and rel.startswith('src' + os.sep): continue
         if re.search(r'(?<![A-Za-z0-9_])verus!\s*[(\[]', s): raise ValueError(f'{full}: a verus!(..) or verus![..] block is not scanned')
@@ -313,7 +329,9 @@ def main(argv):
     call = re.compile(r'(?<![A-Za-z0-9_.])(?:%s)\s*\(' % '|'.join(map(re.escape, sorted(names)))) if names else None
     err = {p: v for p, v in found.items() if any(ere.search(r) for r, _ in v)}
     if not err: print('acceptance: no error-returning fn found', file=sys.stderr); return 1
-    def carries_one(cl): return bool(call and 'ensures' in cl and call.search(cl[cl.find('ensures'):]))
+    def carries_one(cl):
+        e = re.search(r'\bensures\b', cl)
+        return bool(call and e and call.search(cl[e.start():]))
     carries = {p for p, v in err.items() if all(carries_one(cl) for r, cl in v if ere.search(r))}
     if not os.path.isfile(base): print(f'acceptance: no baseline {base}', file=sys.stderr); return 1
     bl = [l.strip() for l in open(base, encoding='utf-8') if l.strip() and not l.lstrip().startswith('#')]
