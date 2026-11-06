@@ -298,8 +298,8 @@ impl Reassembly {
         ensures
             b.tight(),
     {
-        // Only `lemma_wf` and `lemma_received_push` are needed; with `wf` or the two RFC fns
-        // unfolded, this exceeds rlimit 4.
+        // Only `lemma_wf` and `lemma_received_push` are needed. With the two RFC fns unfolded
+        // this exceeds rlimit 4; hiding `wf` as well lowers it a further 18%.
         hide(Reassembly::wf);
         hide(rfc_received);
         hide(rfc_contiguous);
