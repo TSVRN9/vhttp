@@ -81,6 +81,12 @@ fn kind(l: Level) -> (k: PacketKind)
     }
 }
 
+//= https://www.rfc-editor.org/rfc/rfc9000#section-16
+//# This means that integers are encoded on 1, 2, 4, or 8 bytes and can
+//# encode 6-, 14-, 30-, or 62-bit values, respectively.
+//= https://www.rfc-editor.org/rfc/rfc9000#section-20.1
+//# INTERNAL_ERROR (0x01):  The endpoint encountered an internal error
+//# and cannot continue with the connection.
 /// The close code `report` passes to the connection.
 spec fn report_code(code: u64) -> u64 {
     if code <= 0x3fff_ffff_ffff_ffff { code } else { INTERNAL_ERROR }
@@ -104,6 +110,12 @@ fn shut(c: &mut Connection, code: u64, now: u64)
     c.close(code, false, none.as_slice(), now);
 }
 
+//= https://www.rfc-editor.org/rfc/rfc9001#section-4.8
+//# A TLS alert is converted into a QUIC connection error.  The
+//# AlertDescription value is added to 0x0100 to produce a QUIC error
+//# code from the range reserved for CRYPTO_ERROR; see Section 20.1 of
+//# [QUIC-TRANSPORT].  The resulting value is sent in a QUIC
+//# CONNECTION_CLOSE frame of type 0x1c.
 //= https://www.rfc-editor.org/rfc/rfc9001#section-4.8
 //# As QUIC provides
 //# alternative mechanisms for connection termination and the TLS
