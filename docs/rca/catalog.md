@@ -1,6 +1,6 @@
 # Root-cause catalog of review / test / interop findings
 
-Status as of Phase 9r (2026-11-06). Each entry ends with its class and that class's status; a status is one of: caught now (a gate in scripts/ fails on the class), partial, scheduled (owner phase named), open. Owners: C5/C7 9a, 9b, 9c; C12/C14 design section 7 of 9a; C6/C8/C10/C11 "9r2" (a later phase to be planned). Spot-check results are in section 5.
+Status as of Phase 9r (2026-11-06). Each entry ends with its class and that class's status; a status is one of: caught now (a gate in scripts/ fails on the class), partial, scheduled (owner phase named), open. Owners: C5/C7 9a, 9b, 9c; C12/C14 design section 7 of 9a; C4 (gates without demos) and C6/C8/C10/C11 "9r2" (a later phase to be planned). Spot-check results are in section 5.
 
 Sources read in full: `.superpowers/archive/{3d2,3e,4c,5e,7a,8b,8c,8d}-final-review.md` and `-ledger.md` (the ledgers carry every task-review verdict and ruling), `wt-9a/.../{progress,preflight}.md`, and `git log main | grep -iE 'fix|review'` (175 commits). Task-level review files in `archive/<phase>/` were NOT opened; their findings enter only as the ledgers summarise them (finding ids are the ledger's: "T3 I1" = Task 3 review Important 1). Older phases (1-5d) appear only as subject-line group entries (S1-S6).
 
@@ -44,7 +44,7 @@ Existing-gate abbreviations: V = `scripts/verify.sh` (verus verify of all crates
 - **3e T3 M1** (M): protect.rs doc and report misstated the padding-loop CT residual. Fix 4077ed6. -> C1 [partial]
 - **3e T3 M2** (M): `protect_datagram` §14.1 length ensures missing; mutation 2 survived verification. Fix 4077ed6. -> C6 [scheduled 9r2]
 - **3e T4 M1-M3** (M x3): long-header `consumed`/ZeroRtt ensures missing so the m4 and ZeroRtt->Handshake remap mutants survived; coalesced §5.4.2 and tiny-datagram tests missing. Fix 998ab72. -> C6 [scheduled 9r2]
-- **3e T5 I1** (I, security): `receive` closed on `rx.error` without the error packet passing the gate; any off-path or 42-byte Initial (public Initial keys) with a frame error closed a live connection; regressed the closed §14.1 row. Fix 88c25aa (error moved into `on_datagram`, gated like a packet). ESCAPE: the brief mandated it; ensures said only "closes with this code"; no clause "close requires gated". -> C5 [caught now (ratchet); proofs 9a/9b/9c]
+- **3e T5 I1** (I, security): `receive` closed on `rx.error` without the error packet passing the gate; any off-path or 42-byte Initial (public Initial keys) with a frame error closed a live connection; regressed the closed §14.1 row. Fix 88c25aa (error moved into `on_datagram`, gated like a packet). ESCAPE: the brief mandated it; ensures said only "closes with this code"; no clause "close requires gated". -> C5 [partial; scheduled 9a/9b/9c]
 - **3e T5 C1** (R, MUST): RFC 9000 §8.1 counting of every datagram byte was pinned only by test; mutant "skip on_datagram for empty list" survived the proof. Fix cdbfe74 (`recv_counted` prefix property on amp trace). -> C6 [scheduled 9r2]
 - **3e T5 C4** (R): `accept_datagram`'s §5.7 gate in no contract; residual bypass via a body not using `open_first` remains (accepted). Fix 88c25aa. -> C6 [scheduled 9r2]
 - **3e T6 M1-M8** (M): `IPV6_V6ONLY` set after bind in the first cut, Outbox, shared `rnd(1)`, stale audit line, TRUSTED wording. Fix 7e66875. ESCAPE: shell is unverified Rust, only reviewer probes (spoofing, 200k fuzz) caught these. -> C18 [open]
@@ -61,10 +61,10 @@ Existing-gate abbreviations: V = `scripts/verify.sh` (verus verify of all crates
 - **4c T3 M1** (R, MUST gap): RFC 9001 §4.1.3 "unread data" ignored out-of-order bytes. Fix 6fa13ef. ESCAPE: `unread` was reader-only; no completeness (violation ==> close) lemma. -> C7 [scheduled 9a, 9b, 9c]
 - **4c T3 M2** (R, MUST gap): Initial CRYPTO end forgotten across discard, so Initial data past the end was not seen by `superseded`. Fix 6fa13ef (`new_at`). -> C7 [scheduled 9a, 9b, 9c]
 - **4c T3 M3-M5** (M x3): `init_end` set late; matrix row hid the log-push gap; 1-RTT keys retained on a pre-completion close. Fix 6fa13ef. -> C1 [partial], C8 [scheduled 9r2]
-- **4c T3 re-review** (new M): a legal zero-length CRYPTO frame past the consumed end closed with PROTOCOL_VIOLATION (reassembly insert grew the window for empty data). Fix 753ec2d. ESCAPE: close not proved RFC-required; over-strictness is invisible to safety ensures. -> C5 [caught now (ratchet); proofs 9a/9b/9c]
+- **4c T3 re-review** (new M): a legal zero-length CRYPTO frame past the consumed end closed with PROTOCOL_VIOLATION (reassembly insert grew the window for empty data). Fix 753ec2d. ESCAPE: close not proved RFC-required; over-strictness is invisible to safety ensures. -> C5 [partial; scheduled 9a/9b/9c]
 - **4c preflight C9 / T3 C1** (pre): a TLS failure cleared the 1-RTT slot even after completion; tls_step snapshot. Fix 80c63cc (proved post-completion half). -> C6 [scheduled 9r2]
-- **4c final I1** (I): nothing merged recorded that the Phase 4 exit was half met; `quiche_fetches` printed `ok` when it skipped; stop-at-first-Busy untested. Fix a327d2d (strict mode panics, docs); quiche half met later d06282e. Busy path declared dead under config (carried). ESCAPE: skip is a pass; ledger rulings are in gitignored `.superpowers/`. -> C4 [caught now], C3 [partial]
-- **4c final M1** (M): "every TLS error closes" and §4.1.3 PROTOCOL_VIOLATION code stated as proved; only test-pinned (`report`/`on_tls_alert`/`feed` ensures omit phase). Fix a327d2d (wording). Proof not added. -> C5 [caught now (ratchet); proofs 9a/9b/9c], C1 [partial]
+- **4c final I1** (I): nothing merged recorded that the Phase 4 exit was half met; `quiche_fetches` printed `ok` when it skipped; stop-at-first-Busy untested. Fix a327d2d (strict mode panics, docs); quiche half met later d06282e. Busy path declared dead under config (carried). ESCAPE: skip is a pass; ledger rulings are in gitignored `.superpowers/`. -> C4 [partial; open, owner 9r2], C3 [partial]
+- **4c final M1** (M): "every TLS error closes" and §4.1.3 PROTOCOL_VIOLATION code stated as proved; only test-pinned (`report`/`on_tls_alert`/`feed` ensures omit phase). Fix a327d2d (wording). Proof not added. -> C5 [partial; scheduled 9a/9b/9c], C1 [partial]
 - **4c final M2** (M): §9.5 owner Phase 7 in matrix vs "never" in TRUSTED. Fix 3c25636. -> C1 [partial]
 - **4c final M3** (M): `Rand` doc "no array goes to two calls" false in `accept`. Fix a327d2d. -> C1 [partial]
 - **4c T5 M1-M3** (M): no Server-level handshake test, test fixtures lacked README, TRUSTED wording. Fix 4fee0da. -> C1 [partial]
@@ -76,28 +76,28 @@ Existing-gate abbreviations: V = `scripts/verify.sh` (verus verify of all crates
 - **5e final I1** (I): the RSA object read lives only in a gitignored report; the audit doc cited for it says RSA was not read. Fix: docs-only (4ac8251 merge). ESCAPE: evidence in `.superpowers/`. -> C3 [partial], C1 [partial]
 - **5e final I2** (I): TRUSTED implied only a toolchain change voids the object read; any `crates/crypto` edit can (rlib 5 -> 2 units); `ct_mask` read as a guarantee. Fix: docs. Later 7a digests gate closes part. -> C1 [partial], C14 [scheduled 9a design section 7]
 - **5e final I3** (I): RSA signing 7-8x slower than the shim (6 ms at 2048, 45 ms at 4096), one unauthenticated Initial triggers it, no Retry; plan D2's "no worse off" wrong. Fix: docs (spec line 22, TRUSTED). ESCAPE: no measurement in any gate. -> C10 [scheduled 9r2], C1 [partial]
-- **5e final m1** (M): crypto dependency gate was a denylist of 3 names. Fix: exact `vstd` compare (verify.sh:34-35 now). -> C4 [caught now]
+- **5e final m1** (M): crypto dependency gate was a denylist of 3 names. Fix: exact `vstd` compare (verify.sh:34-35 now). -> C4 [partial; open, owner 9r2]
 - **5e final m2-m6** (M): `(0)` counts tokens not trust; "later item" stale; zero-pad loader option only in plan; requirements row claims "verified and CT-checked" with no limit; stale lock text; Wycheproof licence copy missing. -> C1 [partial], C2 [open]
 - **5e T5 M3** (M): `sha256_cat` at 1.49x, `build_flight` 1.03x of rlimit 4 carried. -> C11 [scheduled 9r2]
 - **5e T5 carry** (R): loader must size-check a short modulus (panics/exhausts memory on first ClientHello). -> C3 [partial]
 
 ### Phase 7a (binary CT gate, timing tests)
-- **7a T1 I1-I2** (I x2): `CT_BINARY_TARGET_DIR` could point the stamp anywhere; 9 alloc/vstd instantiations hashed but unread. Fix 0b846ce. -> C4 [caught now], C14 [scheduled 9a design section 7]
-- **7a T1 re-review N1-N3** (M x3): `find|sort` masks find failure; `--update` with no U block; objdump version pipe. Fix cefd566. ESCAPE: shell pipelines without pipefail semantics. -> C4 [caught now]
+- **7a T1 I1-I2** (I x2): `CT_BINARY_TARGET_DIR` could point the stamp anywhere; 9 alloc/vstd instantiations hashed but unread. Fix 0b846ce. -> C4 [partial; open, owner 9r2], C14 [scheduled 9a design section 7]
+- **7a T1 re-review N1-N3** (M x3): `find|sort` masks find failure; `--update` with no U block; objdump version pipe. Fix cefd566. ESCAPE: shell pipelines without pipefail semantics. -> C4 [partial; open, owner 9r2]
 - **7a T2 I1-I2** (I x2): timing tests overclaimed: tag compare cannot see a byte-wise leak (planted, missed); RSA test not shown to catch the historical `ct_mask` failure; per-row 10 SE floors. Fix 94b91b5 (docs, pinning assert). -> C1 [partial], C14 [scheduled 9a design section 7]
-- **7a final I1** (I): the objdump-bump advice ("compare raw .text") cannot distinguish code (relocations are zero displacements). Fix a36a8e8 (step 7: cmp whole .rcgu.o units of the commit that last wrote digests). -> C4 [caught now]
-- **7a final m1-m6** (M): TRUSTED says gate "fails until re-read" (it fails until `--update`, on trust); disappearing U line not handled; tier pointers; digest update not linked to timing rerun; RSA key size; README binutils. Fix a36a8e8. -> C1 [partial], C4 [caught now]
+- **7a final I1** (I): the objdump-bump advice ("compare raw .text") cannot distinguish code (relocations are zero displacements). Fix a36a8e8 (step 7: cmp whole .rcgu.o units of the commit that last wrote digests). -> C4 [partial; open, owner 9r2]
+- **7a final m1-m6** (M): TRUSTED says gate "fails until re-read" (it fails until `--update`, on trust); disappearing U line not handled; tier pointers; digest update not linked to timing rerun; RSA key size; README binutils. Fix a36a8e8. -> C1 [partial], C4 [partial; open, owner 9r2]
 
 ### Phase 8b (cost analyser)
 - **8b pre C1, C2** (pre): option A (Mut provenance) unsound as worded; untyped Val atom. Fix: option B, typed atom. -> C12 [scheduled 9a design section 7]
 - **8b T1b I1** (I): drop-impl cache keyed on crate name. Fix c93823d. -> C13 [open]
 - **8b T1b I2** (I): vest_lib exception to `-Zinline-mir=no` missing from TRUSTED. Fix c93823d. -> C1 [partial]
 - **8b T2 C1** (C): about to freeze a `len_nat` that cannot reach parse's double-ref input (theorem would not accept real loops); I1 "19/36" recorded as measured but was a hand read. Fix b6beb17, 18b0726. ESCAPE: found by reviewer discharging `theorem_cost` on a real loop; no in-repo sanity of that kind existed. -> C12 [scheduled 9a design section 7], C1 [partial]
-- **8b T4/T6 M6, I1** (I): `check_cert` true says nothing for an ill-typed program; a wf-only gate mutant gave `bounded` on `cost_neg_not_typed_declassify`. Fix adc350e (fixture), cc1cf85. -> C4 [caught now]
+- **8b T4/T6 M6, I1** (I): `check_cert` true says nothing for an ill-typed program; a wf-only gate mutant gave `bounded` on `cost_neg_not_typed_declassify`. Fix adc350e (fixture), cc1cf85. -> C4 [partial; open, owner 9r2]
 - **8b final I1** (I): nothing says no packet/request-level function is bounded; the 19 are helpers; DoS aim unmet and unstated. Fix 83c93b0. -> C1 [partial]
 - **8b final I2** (I): Task 8 not-attempted record only in gitignored ledger; "13 translator gaps" overstated (2 of 13 predicted bounded). Fix 83c93b0. -> C3 [partial], C1 [partial]
-- **8b final I3** (I): re-recording `expected-cost.txt` waved through a lost bound (18/35 passes). Fix 83c93b0 (CC:171-190 pins predicted-bounded and 36). -> C4 [caught now]
-- **8b final I4** (I): gate kept only `deg`, not the atoms; a bound in `len(..)` could become `k*n` unseen. Fix 83c93b0. -> C4 [caught now]
+- **8b final I3** (I): re-recording `expected-cost.txt` waved through a lost bound (18/35 passes). Fix 83c93b0 (CC:171-190 pins predicted-bounded and 36). -> C4 [partial; open, owner 9r2]
+- **8b final I4** (I): gate kept only `deg`, not the atoms; a bound in `len(..)` could become `k*n` unseen. Fix 83c93b0. -> C4 [partial; open, owner 9r2]
 - **8b final M1-M3, M5, M6** (M): "terminating run"; stale spec example; TRUSTED omitted vest_lib; no fixture for dropping a secret enum; script tidying. Fix 83c93b0. -> C1 [partial], C2 [open]
 - **8b final M4** (M): parser-only manifest lines sat in the file crypto's check loads (widens crypto rules for future code). Fix 83c93b0 (manifest-parsers.txt). -> C13 [open]
 
@@ -108,7 +108,7 @@ Existing-gate abbreviations: V = `scripts/verify.sh` (verus verify of all crates
 - **8c T6 seat B C1** (C): H5/H11 made unit-like arrays ([T;0], [ZST;n]) Panic where Rust completes; `ok` would be vacuous; no test caught it, only the clean-room audit. Fix dad19a5, b6bdb1b, 60d9a59 (+ lowers reject). -> C12 [scheduled 9a design section 7]
 - **8c T6 BLOCKED** (R): exact simulation false on ill-typed dumps; two representations of unit-like values. Fix: align producers (8a5a37e etc.). -> C12 [scheduled 9a design section 7]
 - **8c T7 C1, I1** (I): decoding existential (report_sound about some j, m); labels tied to printed line not `decl_spec`. Fix 13f6ad1, 53efee3 (print injective); decode functionality left as TRUSTED row. -> C12 [scheduled 9a design section 7]
-- **8c T8 M2, M4, M6** (M): ct-front without timeout, wanted-value widths unchecked, ct-zarr failed open. Fix 5e1c405. -> C4 [caught now]
+- **8c T8 M2, M4, M6** (M): ct-front without timeout, wanted-value widths unchecked, ct-zarr failed open. Fix 5e1c405. -> C4 [partial; open, owner 9r2]
 - **8c T9 I1** (I): TRUSTED list of unfolded spec fns incomplete. Fix 4479e5b. -> C1 [partial]
 - **8c final I1** (I): no check exercised `ctmir::sem` (interp ran core; theorem_sim one-directional); three docs said vectors test it; never-Stuck had no executable evidence. Fix 908c3c4 (text), 8d (evaluator). ESCAPE: doc claim by construction; Task 6 C1 had already shown the risk. -> C12 [scheduled 9a design section 7], C1 [partial]
 - **8c final M1-M4** (M): "listed in this row" incomplete; `policy_of` exec-only restrictions (label_spec Some, declassify shape) absent from spec; step-count wording; nits. Fix 908c3c4. -> C1 [partial], C12 [scheduled 9a design section 7]
@@ -116,25 +116,25 @@ Existing-gate abbreviations: V = `scripts/verify.sh` (verus verify of all crates
 ### Phase 8d (MIR evaluator)
 - **8d preflight** (pre, 2 C, 4 I, 10 M): e.g. panic vectors are no never-Stuck evidence (Out::Panic includes stuck), mir_entry totality. Fix 6124c84, fe7adf3. -> C12 [scheduled 9a design section 7], C16 [open]
 - **8d T4 I1** (I): hand-traced Huffman vectors not labelled. Fix 63f8ec9. -> C1 [partial]
-- **8d T4 M2** (M): coverage gate passed with zero roots. Fix 63f8ec9 (`-gt 0`). -> C4 [caught now]
+- **8d T4 M2** (M): coverage gate passed with zero roots. Fix 63f8ec9 (`-gt 0`). -> C4 [partial; open, owner 9r2]
 - **8d final I1** (I): TRUSTED rows 45/48 and selftest.txt header say all non-Huffman parser values are native; 9 of 13 are derived from enclosing-call assertions. Fix 14a7ded. ESCAPE: provenance is free text in vectors file; hand-typed claim. -> C1 [partial]
 - **8d final I2** (I): spec said "none gave Panic" while 217 semconf vectors pass through `Panic`. Fix 14a7ded. -> C1 [partial]
-- **8d final M3, M4** (M): cost-targets.txt non-`cost-root` lines would split cpol; `eval_probe --exact` could run 0 tests. Fix 14a7ded (guards, demos fail closed). -> C4 [caught now]
+- **8d final M3, M4** (M): cost-targets.txt non-`cost-root` lines would split cpol; `eval_probe --exact` could run 0 tests. Fix 14a7ded (guards, demos fail closed). -> C4 [partial; open, owner 9r2]
 - **8d final M1, M2, M5, M6** (M): stale semconf header, stale `interp` mentions in code and 8c spec, wording. Fix 14a7ded. -> C2 [open]
 
 ### Phase 9a (pilot, in flight; fixes pending in wt-9a)
-- **9a plan finding 1** (new bug on main): an empty CRYPTO frame ending past base+16384 closes CRYPTO_BUFFER_EXCEEDED (window checked before the empty filter); sibling of 753ec2d. Fix: pending (Task 3). ESCAPE: 753ec2d fixed the instance; no ensures says which codes are allowed. -> C5 [caught now (ratchet); proofs 9a/9b/9c]
+- **9a plan finding 1** (new bug on main): an empty CRYPTO frame ending past base+16384 closes CRYPTO_BUFFER_EXCEEDED (window checked before the empty filter); sibling of 753ec2d. Fix: pending (Task 3). ESCAPE: 753ec2d fixed the instance; no ensures says which codes are allowed. -> C5 [partial; scheduled 9a/9b/9c]
 - **9a pre C1** (C): the planned `Connection::lemma_crypto_end_received` pushes `RecvStream::on_data` past rlimit 4 (4 reproductions; 98.3% before). Fix: pending (Task 0 restructuring, varB shape). -> C11 [scheduled 9r2]
 - **9a pre I1** (I, directive): deleting `superseded`'s second close rested on an argued, not proved, invariant; needs `crypto_kept` + base-monotonic ensures on every call. Pending (Task 3b). -> C6 [scheduled 9r2]
 - **9a pre I2** (I): tight atoms +17.9% in `poll_transmit`; plan's ±5% guard trips; Z3 perturbs untouched fns (`Reassembly::insert` 6.85M..11.54M). Pending. -> C11 [scheduled 9r2]
-- **9a pre I3** (I): RecvStream empty STREAM insert grows the window (audit item "no fix"). Pending (Task 6). -> C5 [caught now (ratchet); proofs 9a/9b/9c], C10 [scheduled 9r2]
-- **9a pre I4** (I): acceptance clauses stop at `on_crypto`; `on_crypto_frame`/`on_frame`/`on_counted`/`apply` carry none, so "end to end" untrue. Pending/9c. -> C5 [caught now (ratchet); proofs 9a/9b/9c]
-- **9a pre I6** (I): `tp_allowed_err` `Err(_) => true` makes the clause vacuous on the parse-error path. Pending (Task 4). -> C5 [caught now (ratchet); proofs 9a/9b/9c]
+- **9a pre I3** (I): RecvStream empty STREAM insert grows the window (audit item "no fix"). Pending (Task 6). -> C5 [partial; scheduled 9a/9b/9c], C10 [scheduled 9r2]
+- **9a pre I4** (I): acceptance clauses stop at `on_crypto`; `on_crypto_frame`/`on_frame`/`on_counted`/`apply` carry none, so "end to end" untrue. Pending/9c. -> C5 [partial; scheduled 9a/9b/9c]
+- **9a pre I6** (I): `tp_allowed_err` `Err(_) => true` makes the clause vacuous on the parse-error path. Pending (Task 4). -> C5 [partial; scheduled 9a/9b/9c]
 - **9a pre m3, m4, m11** (M): mutants fail on the plan's own precondition rather than the claim; duplicate test; no mutation shows `trailing_bytes_before_bad_tp_pv` can fail. -> C6 [scheduled 9r2]
-- **9a pre m9** (M): span window vs RFC "4096 bytes of data" floor undecided (set possibly wider/narrower than RFC). -> C5 [caught now (ratchet); proofs 9a/9b/9c]
+- **9a pre m9** (M): span window vs RFC "4096 bytes of data" floor undecided (set possibly wider/narrower than RFC). -> C5 [partial; scheduled 9a/9b/9c]
 
 ### Older phases, from the fix-commit log only (subject lines; severity unknown)
-- **S1** (Phases 1-2, h3/QPACK): 6ac2563 sender MUSTs in serializers; ca6c1b7 message validation hardening; d2576fb `te` connection-specific, CONNECT authority-form; ea6a38a HEAD + content-length per status; 52e8122 final responses only; e4ed141 skip unknown control frames without buffering; 1d1831e GOAWAY highest. ESCAPE (shared): ensures/matrix claimed clauses the code did not enforce until a task review. -> C7 [scheduled 9a, 9b, 9c], C5 [caught now (ratchet); proofs 9a/9b/9c]
+- **S1** (Phases 1-2, h3/QPACK): 6ac2563 sender MUSTs in serializers; ca6c1b7 message validation hardening; d2576fb `te` connection-specific, CONNECT authority-form; ea6a38a HEAD + content-length per status; 52e8122 final responses only; e4ed141 skip unknown control frames without buffering; 1d1831e GOAWAY highest. ESCAPE (shared): ensures/matrix claimed clauses the code did not enforce until a task review. -> C7 [scheduled 9a, 9b, 9c], C5 [partial; scheduled 9a/9b/9c]
 - **S2** (3a-3c, quic): 6e458fb spin bit missing in short-header serializer; a2a92f0 poll_frames not tied to bytes sent/credit; 3889c1c, ceb1fa1, 0db5249 send/reassembly copies O(n) per ack/pop (algorithmic cost). -> C6 [scheduled 9r2], C15 [open]
 - **S3** (3d, quic): e6b31c7/f6debe4 repeated NEW_CONNECTION_ID with raised RPT not acted on / replay an error; 7be9295 reset-token check after routing; 327cf4c handshake path not MTU-validated; 57eb957/a240cc0 an ack-eliciting range could be dropped unreported; b74be1b unbounded CID table admission; 5c173cc retire backlog budget. -> C7 [scheduled 9a, 9b, 9c], C10 [scheduled 9r2]
 - **S4** (4a-4b, tls): 03a25b2 SHA-1-free chain pass; 31add70 offered-scheme MUST; 4b27342 ClientHello extension floor; d73bad6 reserved scheme/group preconditions; e587b9e TlsEvent Debug printed traffic secrets. -> C7 [scheduled 9a, 9b, 9c], C17 [open]
@@ -162,12 +162,12 @@ Existing-gate abbreviations: V = `scripts/verify.sh` (verus verify of all crates
 **C4 GATE-FAIL-OPEN** (gate or test can pass with nothing checked, can be re-recorded, or masks a failing pipeline).
  EXISTING NOW: instance fixes only: CC:171-190 (lost-bound, 36 pin), CC:183 (cost-targets only cost-root), `-gt 0` coverage guard, eval_probe "1 passed", verify.sh:34-35 exact deps, ct-binary stamp/pre-checks, strict-quiche panic.
  PROPOSED: (1) `scripts/gate-demos.sh` in V (or CI): for each gate, apply a canned mutation (drop a root, empty a list, rename a test, delete a TRUSTED row) and assert non-zero exit; 8d did this by hand per task (M). (2) `shellcheck` + require `set -eu` and no unguarded `|` in scripts/ (S). (3) Test-skip policy: `#[ignore = "reason"]` only; an early `return` on missing env must `panic!` under `STRICT` (S).
- STATUS: caught now (R2, R5; shellcheck out of scope)
+ STATUS: partial (R2 set -eu/pipefail lint; R5 demos for lint-scripts, check-quotes, acceptance, escape-gate; ct-check, ct-binary, the declassify gate and the deps gate have no demo: open, owner 9r2)
 
 **C5 ERROR-PATH NOT PROVED RFC-REQUIRED** (a close/Err is unrestricted or over-strict: any code, any trigger; includes vacuous allowed-sets).
  EXISTING NOW: only the 9a pilot design (not merged): `allowed_err` predicates for `on_crypto`, `close_spec`; elsewhere tests and reviewer reading. Closed-instance fixes (88c25aa, 753ec2d).
  PROPOSED: proof obligation. Every exec `Err(c)` return and `close(code)` call site in verus! fns must have `ensures Err(c) ==> allowed_<site>_err(inputs, c)` where `allowed_*` is a spec fn whose body lists RFC conditions with `//#` duvet citations and is never `true`/`Err(_)=>true`. Enforce by a lint in V that greps `close(`/`Err(` inside `verus!` blocks and requires the enclosing fn's ensures to mention an `allowed_` name or a `//# allowed_err_exempt:` reason (M, scheduled as 9a-9c; L to cover all of quic/quictls/h3).
- STATUS: caught now (R4 ratchet); proofs scheduled 9a, 9b, 9c
+ STATUS: partial (R4 ratchet blocks new unannotated Result-returning fns; 194 baselined, on_crypto among them; class scheduled 9a, 9b, 9c)
 
 **C6 MUST ONLY TEST-PINNED / MUTANT SURVIVES THE PROOF** (ensures weaker than behaviour or RFC; a deletion/inversion still verifies).
  EXISTING NOW: manual mutation sweeps recorded in ledgers ("all N mutants fail"), scripts untracked (`mut.py` in evidence dirs); some residuals documented in TRUSTED.
@@ -243,9 +243,9 @@ Existing-gate abbreviations: V = `scripts/verify.sh` (verus verify of all crates
 | C1 DOC-OVERCLAIM | 24 | 3d2 T3 I4, final I1, M2; 3e T3 M1, final I1; 4c T3 M3-5, final M1-M3, T5; 5e I1, I2, I3, m2-m6; 7a T2, m1-m6; 8b T1b I2, T2 C1, final I1, I2, M1-M3; 8c T9 I1, final I1, M1-M4; 8d T4 I1, final I1, I2 | none for prose (V checks declassify/escape rows only) | generated-claim markers + evidence-tagged rows + vector provenance column | M | partial (R3: quote existence caught now; prose claims open) |
 | C12 SEMANTICS UNFAITHFUL/UNEXERCISED | 13 | 8b pre C1/C2, T2 C1; 8c T1, T4, T5, T6 x2, T7, final I1, M1-M4; 8d pre | 8d evaluator, semconf, sem_sanity, audits | backward simulation / never-Stuck proof; decode functional proof; differential fuzz | L | scheduled 9a design section 7 |
 | C6 MUST ONLY TEST-PINNED | 20 | 3d2 1a-ii I2, 1b I1-I3, 2a-i, 2b, 3 M3, 4 I1; 3e T1, T2 M1, T3 I1, M2, T4, T5 C1, C4; 4c T2, preflight C9; 9a I1, m3/m4/m11; S2 | manual mutation sweeps (untracked) | tracked mutant registry + `mutate.sh` at merge; iff-form ensures | M-L | scheduled 9r2 |
-| C5 ERROR PATH NOT PROVED REQUIRED | 9 | 3e T5 I1; 4c T3 re-review, final M1; 9a f1, I3, I4, I6, m9; S1 | 9a pilot design only | `allowed_*_err` ensures on every Err/close site + lint | L | caught now (R4 ratchet); proofs scheduled 9a, 9b, 9c |
+| C5 ERROR PATH NOT PROVED REQUIRED | 9 | 3e T5 I1; 4c T3 re-review, final M1; 9a f1, I3, I4, I6, m9; S1 | 9a pilot design only | `allowed_*_err` ensures on every Err/close site + lint | L | partial (R4 ratchet blocks new unannotated Result-returning fns; 194 baselined, on_crypto among them; class scheduled 9a, 9b, 9c) |
 | C7 REQUIRED CLOSE MISSING (MUST gap) | 8 | 4c T3 M1, M2; S1, S3, S4 | duvet annotations, tests | `violates ==> closed_with(X)` + duvet proved-by tags | M-L | scheduled 9a, 9b, 9c |
-| C4 GATE FAIL-OPEN | 17 | 4c final I1; 5e m1; 7a T1 I1, N1-N3, final I1, m1-m6 (as group); 8b T4/T6, final I3, I4; 8c T8; 8d T4 M2, final M3, M4 | instance guards (CC:171-190, 183, `-gt 0`, deps gate) | gate-demos.sh, shellcheck/pipefail, no-skip-as-pass policy | M | caught now (R2, R5; shellcheck out of scope) |
+| C4 GATE FAIL-OPEN | 17 | 4c final I1; 5e m1; 7a T1 I1, N1-N3, final I1, m1-m6 (as group); 8b T4/T6, final I3, I4; 8c T8; 8d T4 M2, final M3, M4 | instance guards (CC:171-190, 183, `-gt 0`, deps gate) | gate-demos.sh, shellcheck/pipefail, no-skip-as-pass policy | M | partial (R2 set -eu/pipefail lint; R5 demos for lint-scripts, check-quotes, acceptance, escape-gate; ct-check, ct-binary, the declassify gate and the deps gate have no demo: open, owner 9r2) |
 | C8 INVARIANT TOO WEAK / STATE GATING | 7 | 3d2-pre C1, 1a-i, 1b I4, T3 I5; 4c T3 M3-5; S5 | review by reading | separate `rfc_inv()` + `wf ==> rfc_inv`, random-op test | M | scheduled 9r2 |
 | C9 COMPOSITION GAP | 6 | 3d2 T3 I1-I3, final I1, M1; 3e preflight C4 | `settled_later`, timers_cover/later | shell-call whitelist lint, wake-at-next_timeout lint | S | open |
 | C10 UNAUTH RESOURCE EXHAUSTION | 7 | 3d2 1a-ii I1; 3e preflight C1; 5e I3; 9a I3; S3 | slot gating, capacity tests | grow-only-on-gated ensures, tracked fuzz, CPU benchmark claim | M | scheduled 9r2 |
