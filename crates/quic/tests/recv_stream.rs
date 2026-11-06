@@ -201,3 +201,12 @@ fn empty_stream_frame_keeps_window() {
     assert_eq!(data(&mut s, 90, &[], false, 1000).0, Ok(80));
     assert_eq!(s.capacities(), (0, 0));
 }
+
+/// An empty STREAM frame's offset is the next byte its sender would send (RFC 9000 §19.8), so a
+/// later FIN below it lowers the final size under the largest received offset.
+#[test]
+fn empty_frame_offset_bounds_final_size() {
+    let mut s = RecvStream::new(0, 100);
+    assert_eq!(data(&mut s, 90, &[], false, 1000).0, Ok(90));
+    assert_eq!(data(&mut s, 0, &[1; 50], true, 1000).0, Err(FINAL_SIZE_ERROR));
+}

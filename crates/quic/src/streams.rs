@@ -2915,6 +2915,7 @@ fn fit(room: usize, hdr: usize, w: usize, want: u64) -> (r: Option<u64>)
 /// STREAM chunks of sending part `p` (stream `id`) while they fit in `room`: `poll_data` stays
 /// under the stream's limit and, with `cs.available()`, the connection's, and `cs` is charged
 /// each chunk's new bytes.
+#[verifier::spinoff_prover]
 fn poll_stream(
     p: &mut SendStream,
     id: u64,
