@@ -67,7 +67,7 @@ The lift through `on_frame`/`on_counted` and quictls `apply`/`feed`/`tls_step` i
 - No attribution lines in commits.
 - **Duvet:** every new spec fn and ensures that states an RFC condition carries `//= https://www.rfc-editor.org/rfc/rfcNNNN#section-X` plus a contiguous `//#` quote copied verbatim from `.duvet/specifications/www.rfc-editor.org/rfc/`.
   - `.duvet/specifications` and `.duvet/requirements` are git-ignored and missing in wt-9a. Copy both once from `/home/tavern/Projects/rust/web-server/.duvet/`.
-  - Per task: `python3 -I <scratch>/qchk/check_quotes.py --spec-dir .duvet/specifications/www.rfc-editor.org/rfc <touched files>` prints `N citations, 0 bad` (run it explicitly on line-split quotes [m8]), and `duvet report` exits 0.
+  - Per task: `python3 -I <scratch>/qchk/check_quotes.py --spec-dir .duvet/specifications <touched files>` prints `N citations, 0 bad` (run it explicitly on line-split quotes [m8]), and `duvet report` exits 0.
 - **Mutations:** each listed mutation, applied alone to the committed tree, must fail on the named postcondition, precondition, assertion or test, not on rlimit. Restore with `git checkout -- <file>`, then re-run the default verify of that crate.
 - **Spec fns on `Connection` are `closed`** (as `phase_spec`, `out_log`). quictls sees them through ensures on exec fns.
   - Prefer a fact on an exec accessor's ensures over a `pub proof fn` in conn.rs [C1]. A `pub proof fn` requiring `Connection::wf` was measured to push `RecvStream::on_data` over the cap.
@@ -297,6 +297,8 @@ The lift through `on_frame`/`on_counted` and quictls `apply`/`feed`/`tls_step` i
   - `crypto_end(&self, k) -> (r: u64)` adds `self.crypto_base_spec(k) <= r` and `r > 0 ==> self.crypto_received(k, (r - 1) as nat)` (proof: `crx_k.lemma_end_received()`).
   - `on_crypto_frame` adds `r matches Err(c) ==> c == CRYPTO_BUFFER_EXCEEDED && crypto_window_exceeded(old(self).crypto_base_spec(k), offset, data@.len())`.
 
+- **Non-vacuity [9r, 2026-11-06 ruling]:** add `proof fn lemma_crypto_allowed_err_rejects(s: CryptoStream, offset: u64)` ensuring `!crypto_allowed_err(s, offset, 0, CRYPTO_BUFFER_EXCEEDED)` (an empty frame is never a window error) and, for some `c != CRYPTO_BUFFER_EXCEEDED`, `!crypto_allowed_err(s, offset, 1, c)`. Mutation: replace the predicate body with `true`; the lemma must fail.
+
 - [ ] **Step 1: Failing tests.**
   - In `crates/quic/tests/crypto_stream.rs`:
     ```rust
@@ -457,6 +459,7 @@ The lift through `on_frame`/`on_counted` and quictls `apply`/`feed`/`tls_step` i
     - `id <= TP_RETRY_SOURCE_CONNECTION_ID && tp_value_invalid(id, v)` (§7.4 MUST).
     - Define it with a recursive `allowed_tp_err_from(b, p, t, seen)` mirroring `rfc_tp_from`'s shape (same `decreases_by`).
   - `pub proof fn lemma_tp_err_allowed(b: Seq<u8>)`: ensures `rfc_transport_params(b, true) is Err ==> allowed_tp_err(b)`. Induction on `rfc_tp_from`. Its sub-lemma `rfc_tp_value(id, v, t) is None && id <= TP_RETRY_SOURCE_CONNECTION_ID && !tp_server_only(id) ==> tp_value_invalid(id, v)` is where a spec stricter than §18.2 would show up. If it does not prove, report the parameter. Do not widen `tp_value_invalid`.
+  - **Non-vacuity [9r, 2026-11-06 ruling]:** `proof fn lemma_allowed_tp_err_rejects()` exhibits a concrete well-formed client parameter block `b` (e.g. the empty block, or one valid `max_idle_timeout`) with `!allowed_tp_err(b)`. Mutation: replace `allowed_tp_err`'s body with `true`; the lemma must fail.
 
 - [ ] **Step 1: Write the spec fns and the lemma.** Spin the lemma off. It is a proof fn, so it adds no exec VC.
 - [ ] **Step 2: Verify.** Run the recipe for `quic` then `quictls` (`E=…/t4`). Expected: 0 errors. Record the lemma and the top 8. The stop rule applies.
