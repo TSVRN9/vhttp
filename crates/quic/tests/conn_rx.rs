@@ -154,6 +154,21 @@ fn tls_alert_closes() {
 }
 
 #[test]
+fn alert_after_close_keeps_code() {
+    let mut c = peer_params_failed();
+    c.on_tls_alert(0x28, 2);
+    assert_eq!(c.phase(), Phase::Closing);
+    assert_eq!(c.close_info(), &Some((false, 0x08, vec![])));
+}
+
+#[test]
+fn tls_alert_top_of_range() {
+    let mut c = conn();
+    c.on_tls_alert(0xff, 1);
+    assert_eq!(c.close_info(), &Some((false, 0x1ff, vec![])));
+}
+
+#[test]
 fn complete_without_peer_params() {
     let mut c = conn();
     c.on_handshake_complete(b"h3", 1, &rnd(2));

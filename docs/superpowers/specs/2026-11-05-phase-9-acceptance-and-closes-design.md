@@ -169,15 +169,15 @@ rlimit as reported by `--output-json --time-expanded` at `--rlimit 4`. The per-f
 | `quic::reassembly::Reassembly::insert` | 6848875 | 2077934 (T0) | 0 |
 | `quic::conn::Connection::poll_transmit` | 7133799 | | 3, 3b |
 | `quic::conn::Connection::on_datagram` | 1717635 | | 3, 3b |
-| `quic::conn::Connection::close` | 743986 | | 1 |
-| `quic::conn::Connection::close_internal` | 45734 | | 1 |
-| `quic::conn::Connection::on_tls_alert` | 226738 | | 1 |
-| `quic::conn::Connection::on_peer_params` | 671420 | | 1, 3b |
-| `quic::conn::Connection::close_on_error` (caller) | 414859 | | 1 |
-| `quic::conn::Connection::on_counted` (caller) | 1078483 | | 1 |
-| `quic::conn::Connection::on_handshake_complete` | 1328880 | | 1, 3b |
-| `quic::h3_server::H3Server::apply_one` (caller) [m2] | 313607 | | 1 |
-| `quic::h3_server::H3Server::pump` | 183852 | | 1, 3b |
+| `quic::conn::Connection::close` | 743986 | 688163 (T1) | 1 |
+| `quic::conn::Connection::close_internal` | 45734 | 86724 (T1) | 1 |
+| `quic::conn::Connection::on_tls_alert` | 226738 | 193172 (T1) | 1 |
+| `quic::conn::Connection::on_peer_params` | 671420 | 662973 (T1) | 1, 3b |
+| `quic::conn::Connection::close_on_error` (caller) | 414859 | 423068 (T1) | 1 |
+| `quic::conn::Connection::on_counted` (caller) | 1078483 | 1399145 (T1) | 1 |
+| `quic::conn::Connection::on_handshake_complete` | 1328880 | 1153238 (T1) | 1, 3b |
+| `quic::h3_server::H3Server::apply_one` (caller) [m2] | 313607 | 203717 (T1) | 1 |
+| `quic::h3_server::H3Server::pump` | 183852 | 184389 (T1) | 1, 3b |
 | `quictls::server::shut` | 4171 | | 2 |
 | `quictls::server::report` | 6447 | | 2 |
 | `quic::crypto_stream::CryptoStream::on_crypto` | 42037 | | 3 |
@@ -201,6 +201,8 @@ rlimit as reported by `--output-json --time-expanded` at `--rlimit 4`. The per-f
 Task 0 (rlimit headroom) evidence: `vt-9a-evidence/t0` (before: 423878b, whose code is 73cc244's; 73cc244..423878b changes docs only) and `vt-9a-evidence/t0b` (after). quic top 8 before (1201 verified, 0 errors): `datagram::pick` 12095817, `RecvStream::on_data` 11790727, `Paths::on_timeout` 11043766, `frame::lemma_body_roundtrip_a` 9825619, `Streams::poll_max_streams` 8623542, `Connection::send_path_datagram` 8323049, `Reassembly::pop` 8184809, `streams::poll_stream` 7820849; the first seven are above 8M. Each of the seven was split into private helpers (requires/ensures of every existing pub/crate fn unchanged); the new helpers after T0: `RecvStream::data_gate` 152269, `RecvStream::data_buffer` 6321936, `datagram::pick_step` 877778, `Paths::abandon_at` 4220291, `Paths::lemma_lowest_expired` 165595, `frame::lemma_body_roundtrip_{a,r,s}` 496237/158707/550740, `Reassembly::fill` 6116767, `Reassembly::run_end` 45616, `Reassembly::pop` 748360 (was 8184809), `streams::lemma_max_streams_kept` 1448086, `Streams::poll_max_streams` 3352955, `Connection::lemma_idle_timers` 67165, `Connection::send_path_datagram` 5070344.
 
 quic top 8 after Task 0 (`--rlimit 4`, 1212 verified, 0 errors): `Connection::add_space_packet` 7595647, `Streams::poll_max_data` 7553000, `streams::poll_stream` 7402168, `Connection::poll_transmit` 7133799, `Streams::recv_op_at` 6812261, `recv_stream::lemma_same_ranges` 6750564, `header::serialize_long_header` 6542112, `RecvStream::data_buffer` 6321936. `lemma_same_ranges` is untouched and its query text is byte-identical, but it rose from 212497: replayed alone, both the before and the after query cost 7454847, so the 212497 came from the state the `recv_stream` module's solver had reached by then, which the `on_data` split changed. Spinning off `on_data` raised it to 7437501; it cannot be spun off itself (Verus panics on `hide(rfc_recv_step)` in a spun-off fn).
+
+Task 1 (close code at the `Connection` boundary) evidence: `vt-9a-evidence/t1` (before: `t1/base` at bbb5d1d, identical to T0's after; after: `t1/after`). quic top 8 after Task 1 (`--rlimit 4`, 1212 verified, 0 errors; quictls 43 verified, 0 errors): `Connection::add_space_packet` 7595647, `Streams::poll_max_data` 7553000, `streams::poll_stream` 7402168, `Connection::poll_transmit` 7133799, `Streams::recv_op_at` 6812261, `recv_stream::lemma_same_ranges` 6750564, `header::serialize_long_header` 6542112, `RecvStream::data_buffer` 6321936 (unchanged from T0). `on_counted` rose 1078483 → 1399145, as the preflight measured. T0 review m1: without the `forall|q2|` ensures of `Paths::lemma_lowest_expired` (and its `assert forall`), `abandon_at` rises 4220291 → 5033281 (`lemma_lowest_expired` 165595 → 34993, `on_timeout` 1573567 → 1228638), so the conjunct stays: it carries `abandon_at`'s rlimit, not its provability (`t1/m1-noforall`).
 
 ## 5. Inventory claims corrected
 
