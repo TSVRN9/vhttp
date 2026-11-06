@@ -4,7 +4,7 @@ Usage: python3 -I check_quotes.py [--spec-dir DIR] FILE.rs...
 Each `//= <url>#<section>` line starts a citation; the `//#` lines that follow, up to the first
 other line, are its quote. The quote, with whitespace runs collapsed to one space, must occur in
 the named section of DIR/<host>/<path>.txt (default: the repo's .duvet/specifications), whose page
-headers and footers are dropped. Prints each bad citation, then `N citations, B bad`; exit 1 if B > 0,
+headers and footers are dropped. Prints each bad citation, then `N citations, B bad`; exit 1 if B > 0 (a `//#` line outside any citation counts as bad),
 if there are no files or no citations, or if DIR is missing (fail closed).
 """
 import os, re, sys
@@ -49,6 +49,10 @@ def main(argv):
         while i < len(lines):
             m = re.match(r'^\s*//= (https?://([^#\s]+))#(\S+)\s*$', lines[i])
             if not m:
+                if re.match(r'^\s*//#', lines[i]):
+                    n += 1
+                    bad += 1
+                    print(f'{f}:{i + 1}: //# line not preceded by a recognised //= <url>#<section> citation: {lines[i].strip()[:100]}')
                 i += 1
                 continue
             start, host_path, sec = i + 1, m.group(2), m.group(3)

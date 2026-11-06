@@ -1,5 +1,5 @@
-# Error-returning exec fns in verus! blocks that lack an allowed_ ensures clause (scripts/acceptance.sh).
-# One crate::module::[Type::]fn per line. The baseline only shrinks: delete a line when its fn gains the clause.
+# Error-returning exec fns in verus! blocks that lack an allowed_*err ensures clause (scripts/acceptance.sh).
+# One crate::module::[Type[ as Trait]::]fn per line. The baseline only shrinks: delete a line when its fn gains the clause.
 ctcore::check_program
 ctcore::infer::callee_order
 ctcore::infer::infer_labels
@@ -15,8 +15,55 @@ ctcore::loops::pass_step
 ctcore::loops::solve_loop
 ctcore::loops::times_gap
 ctcore::loops::try_header
+ctmir::eval::e_assign
+ctmir::eval::e_cindex
+ctmir::eval::e_deref
+ctmir::eval::e_eval_op
+ctmir::eval::e_eval_ops
+ctmir::eval::e_eval_place
+ctmir::eval::e_eval_rv
+ctmir::eval::e_exec_stmt
+ctmir::eval::e_exec_stmts
+ctmir::eval::e_index
+ctmir::eval::e_mir_entry
+ctmir::eval::e_op_int
+ctmir::eval::e_place_nav
+ctmir::eval::e_proj
+ctmir::eval::e_read_place
+ctmir::eval::e_rv_agg
+ctmir::eval::e_rv_bin
+ctmir::eval::e_rv_cast
+ctmir::eval::e_rv_discr
+ctmir::eval::e_rv_len
+ctmir::eval::e_rv_notneg
+ctmir::eval::e_rv_ptrmeta
+ctmir::eval::e_rv_ref
+ctmir::eval::e_rv_repeat
+ctmir::eval::e_rv_un
+ctmir::eval::e_set_discr
+ctmir::eval::e_store
 ctmir::eval::nav_variant
+ctmir::eval_const::e_const_val
+ctmir::eval_const::e_dec
+ctmir::eval_const::e_dec_adt
+ctmir::eval_const::e_dec_array
+ctmir::eval_const::e_dec_elems
+ctmir::eval_const::e_dec_fields
+ctmir::eval_const::e_dec_ref
+ctmir::eval_const::e_dec_tuple
+ctmir::eval_const::e_dec_zst_ref
+ctmir::eval_const::e_ul_val
+ctmir::eval_const::e_unit_like
+ctmir::eval_const::e_unit_likes
 ctmir::eval_run::e_body_call
+ctmir::eval_run::e_leaf_call
+ctmir::eval_run::e_std_apply
+ctmir::eval_run::ghost_unit
+ctmir::eval_run::std_extend
+ctmir::eval_run::std_push
+ctmir::eval_run::std_set
+ctmir::eval_run::std_slices
+ctmir::eval_run::t_zst_dest
 ctmir::lower::lower_int_op
 ctmir::lower::lower_op
 ctmir::lower::lower_ops
@@ -145,5 +192,5 @@ tls::server::ServerHandshake::on_crypto
 tls::server::ServerHandshake::step
 tls::server_msgs::parse_finished
 tls::sign::sign_cv
-wire::varint::QuicVarInt::parse
-wire::varint::QuicVarInt::prepare
+wire::varint::QuicVarInt as Parser::parse
+wire::varint::QuicVarInt as Prepare::prepare
