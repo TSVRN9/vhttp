@@ -550,8 +550,8 @@ impl<'a> QuicServer<'a> {
         None
     }
 
-    // With `crypto_read`'s `MAX_CRYPTO_BUFFER` bound, each `on_crypto` gets at most that many
-    // bytes, and `theorem_reader_bound` keeps each TLS reader under `4 + MAX_HS_BODY`.
+    // `crypto_read` gives each `on_crypto` at most the buffered CRYPTO bytes (`crypto_end -
+    // crypto_base`), and `theorem_reader_bound` keeps each TLS reader under `4 + MAX_HS_BODY`.
     /// The CRYPTO data of this datagram to TLS, and TLS's events back. Before completion it feeds
     /// Initial and Handshake from TLS's level up; after, only OneRtt (1-RTT CRYPTO arrives only
     /// once complete: a 1-RTT packet is opened only then, RFC 9001 §5.7).

@@ -282,11 +282,22 @@ impl Connection {
         }
     }
 
+    /// The end of level `k`'s in-order CRYPTO data (`crypto_contiguous`).
+    pub closed spec fn crypto_contiguous_spec(&self, k: PacketKind) -> nat {
+        match k {
+            PacketKind::Initial => crypto_contiguous(self.crx_i),
+            PacketKind::Handshake => crypto_contiguous(self.crx_h),
+            PacketKind::OneRtt => crypto_contiguous(self.crx_1),
+        }
+    }
+
     //= https://www.rfc-editor.org/rfc/rfc9001#section-4.1.3
     //# *  If the packet is from a previously installed encryption level, it
     //# MUST NOT contain data that extends past the end of previously
     //# received data in that flow.
-    /// Byte `p` of level `k`'s CRYPTO stream has been received.
+    /// Byte `p` of level `k`'s CRYPTO stream has been received, or lies below the point where
+    /// `discard` restarted the stream (whose ghost record then counts as received). `crypto_end`
+    /// uses it only for the byte before the end, which was received before any restart.
     pub closed spec fn crypto_received(&self, k: PacketKind, p: nat) -> bool {
         let s = match k {
             PacketKind::Initial => self.crx_i,
@@ -1422,11 +1433,11 @@ impl Connection {
             final(self).frames_kept(*old(self)),
             r matches Err(c) ==> c <= VARINT_MAX,
             r matches Err(c) ==> c == CRYPTO_BUFFER_EXCEEDED && crypto_window_exceeded(
-                old(self).crypto_base_spec(k),
+                old(self).crypto_contiguous_spec(k),
                 offset,
                 data@.len(),
             ),
-            crypto_window_exceeded(old(self).crypto_base_spec(k), offset, data@.len()) ==> r
+            crypto_window_exceeded(old(self).crypto_contiguous_spec(k), offset, data@.len()) ==> r
                 == Err::<(), u64>(CRYPTO_BUFFER_EXCEEDED),
     {
         proof {
@@ -3156,7 +3167,9 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
-            final(out)@.len() <= old(out)@.len() + MAX_CRYPTO_BUFFER,
+            final(out)@.len() <= old(out)@.len() + old(self).crypto_end_spec(level) - old(
+                self,
+            ).crypto_base_spec(level),
     {
         // The bound needs only `lemma_wf`; unfolded, these make a missing fact an rlimit failure.
         hide(crate::reassembly::rfc_received);
