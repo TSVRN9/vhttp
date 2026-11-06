@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+set -o pipefail
 VERUS_HOME="${VERUS_HOME:-$HOME/.local/opt/verus/0.2026.10.04.426d8b0/verus-x86-linux}"
 PATH="$VERUS_HOME:$PATH"
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -37,7 +38,7 @@ g=$CT_OUT/gate
 mkdir -p "$g"
 awk '$1 == "declassify" { s = $NF; $1 = ""; $NF = ""; gsub(/^ +| +$/, ""); print $0, s }' "$report" | LC_ALL=C sort > "$g/report"
 awk -F'|' '/^\| ct-declassify: / { k = $2; sub(/^ ct-declassify: /, "", k); sub(/: .*/, "", k); s = $3; gsub(/^ +| +$/, "", s); print k, s }' TRUSTED.md | LC_ALL=C sort > "$g/trusted"
-grep -rn --include='*.rs' 'declassify(' crates/crypto/src | grep -v '/ct\.rs:' | grep -vE '^[^:]*:[0-9]+:[[:space:]]*//' | cut -d: -f1,2 | LC_ALL=C sort > "$g/source"
+{ grep -rn --include='*.rs' 'declassify(' crates/crypto/src || [ $? -eq 1 ]; } | { grep -v '/ct\.rs:' || [ $? -eq 1 ]; } | { grep -vE '^[^:]*:[0-9]+:[[:space:]]*//' || [ $? -eq 1 ]; } | cut -d: -f1,2 | LC_ALL=C sort > "$g/source"
 awk '{ print $NF }' "$g/report" | LC_ALL=C sort > "$g/report-sites"
 d=$(wc -l < "$g/report" | tr -d ' ')
 for k in $(awk '{ $NF = ""; print }' "$g/report"); do
@@ -61,7 +62,7 @@ ml=$(grep -rlPz '\b(admit|assume)\s*\(' "$root/crates" --include='*.rs') && fail
 bad=$(printf '%s\n' "$hits" | awk -v pre="$root/crates/crypto/src/" 'NF { f=$0; sub(/:[0-9]+:.*/, "", f); t=$0; sub(/^[^:]*:[0-9]+:[ \t]*/, "", t); if (index(f, pre) != 1 || t != "#[verifier::external_body]") print }')
 [ -z "$bad" ] || fail "unaccounted escape:
 $bad"
-attrs=$(printf '%s\n' "$hits" | grep -c . || true)
+attrs=$(printf '%s\n' "$hits" | { grep -c . || [ $? -eq 1 ]; })
 named=0
 for f in "$root"/crates/crypto/src/*.rs; do
     [ -f "$f" ] || continue
@@ -79,4 +80,6 @@ rows=$(grep -c '^| crypto::' "$root/TRUSTED.md" || true)
 bin=$("$root/scripts/ct-binary.sh") || exit 1
 bin=$(printf '%s\n' "$bin" | sed -n 's/^ct-binary: ok (\([0-9]*\) fns)$/\1/p')
 [ -n "$bin" ] || { echo "verify.sh: no ok line in ct-binary's output" >&2; exit 1; }
+# Script hygiene: every scripts/*.sh has set -eu and pipefail.
+"$root/scripts/lint-scripts.sh" || exit 1
 echo "verify.sh: all crates verified, duvet ok, ct ok ($d declassify), cost $cost, escapes accounted ($attrs), binary ok ($bin fns)"
