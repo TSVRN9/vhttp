@@ -191,3 +191,13 @@ fn no_stop_sending_after_reset() {
     s.stop_lost();
     assert_eq!(s.pending_stop(), None);
 }
+
+/// An empty STREAM frame inside the window buffers nothing (no unreceived slots).
+#[test]
+fn empty_stream_frame_keeps_window() {
+    let mut s = RecvStream::new(0, 100);
+    assert_eq!(data(&mut s, 0, &[1; 10], false, 1000).0, Ok(10));
+    assert_eq!(s.capacities(), (0, 0));
+    assert_eq!(data(&mut s, 90, &[], false, 1000).0, Ok(80));
+    assert_eq!(s.capacities(), (0, 0));
+}

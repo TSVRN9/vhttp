@@ -163,10 +163,10 @@ rlimit as reported by `--output-json --time-expanded` at `--rlimit 4`. The per-f
 
 | fn | before | after | task |
 |---|---|---|---|
-| `quic::recv_stream::RecvStream::on_data` | 11790727 | 2202435 (T0) | 0, 6 |
+| `quic::recv_stream::RecvStream::on_data` | 11790727 | 2202435 (T0), 1743450 (T6) | 0, 6 |
 | `quic::datagram::pick` | 12095817 | 2730524 (T0) | 0 |
 | `quic::path::Paths::on_timeout` | 11043766 | 1573567 (T0) | 0 |
-| `quic::reassembly::Reassembly::insert` | 6848875 | 2077934 (T0) | 0 |
+| `quic::reassembly::Reassembly::insert` | 6848875 | 2077934 (T0), 1945686 (T6, unedited) | 0 |
 | `quic::conn::Connection::poll_transmit` | 7133799 | 5762297 (T3) | 3, 3b |
 | `quic::conn::Connection::on_datagram` | 1717635 | 2823844 (T3) | 3, 3b |
 | `quic::conn::Connection::close` | 743986 | 688163 (T1) | 1 |
@@ -180,9 +180,16 @@ rlimit as reported by `--output-json --time-expanded` at `--rlimit 4`. The per-f
 | `quic::h3_server::H3Server::pump` | 183852 | 184389 (T1) | 1, 3b |
 | `quictls::server::shut` | 4171 | 7833 (T2) | 2 |
 | `quictls::server::report` | 6447 | 15511 (T2) | 2 |
-| `quic::crypto_stream::CryptoStream::on_crypto` | 42037 | 57284 (T3), 90495 (T3 fix 1) | 3 |
+| `quic::crypto_stream::CryptoStream::on_crypto` | 42037 | 57284 (T3), 90495 (T3 fix 1), 90495 (T6) | 3 |
 | `quic::crypto_stream::CryptoStream::read` | 14538 | 15576 (T3), 17427 (T3 fix 1) | 3 |
 | `quic::reassembly::Reassembly::lemma_insert_tight` (new) | — | 266316 (T3), 266942 (T3 fix 1) | 3 |
+| `quic::recv_stream::RecvStream::data_gate` (T0 helper) | — | 152269 (T0), 437578 (T6) | 0, 6 |
+| `quic::recv_stream::RecvStream::data_buffer` (T0 helper) | — | 6321936 (T0), 5828408 (T6) | 0, 6 |
+| `quic::recv_stream::insert_tight` (new, T6) | — | 22567 | 6 |
+| `quic::reassembly::Reassembly::insert_empty` (new, T6) | — | 951535 | 6 |
+| `quic::reassembly::Reassembly::lemma_insert_tight_within` (new, T6) | — | 294407 | 6 |
+| `quic::recv_stream::lemma_recv_err_rfc` (new, T6) | — | 59324 | 6 |
+| `quic::recv_stream::lemma_recv_allowed_err_rejects` (new, T6) | — | 14280 | 6 |
 | `quic::conn::Connection::crypto_read` | 1407354 | 1404386 (T3), 1746138 (T3 fix 1) | 3, 3b |
 | `quic::conn::Connection::crypto_end` | 42704 | 65508 (T3), 69276 (T3 fix 1) | 3 |
 | `quic::conn::Connection::on_crypto_frame` | 356795 | 375682 (T3), 4611934 (T3 fix 1) | 3 |
@@ -220,6 +227,8 @@ Task 4 (`allowed_tp_err`, `lemma_tp_err_allowed`, spec-only) evidence: `vt-9a-ev
 
 Task 4 fix round 1 (review I1: the duplicate disjunct is stated over the IDs earlier in `b`, not over the code's `seen` mask; I2: the §17.2 receiver rule is cited) evidence: `vt-9a-evidence/t4` (`fix1-final`). `allowed_tp_err_from` takes `ids`, the parameter IDs of `b[..p]`: `allowed_tp_err` starts it empty, and each step inserts the ID just parsed. `lemma_tp_seen_step` proves that `seen` marks exactly the known IDs in `ids`. On 6594f10, a mask mutation that marks 0x0e after a client's 0x0c (in both `rfc_tp_apply` and `tp_apply`) verifies, and all 910 tests pass (`t4/fix1-gap`). After the fix, it fails `lemma_tp_err_allowed_from` (T4-M3). quic 1233 verified, 0 errors (+2: `lemma_tp_seen_step`, `lemma_tp_bit_or`); quictls 43 verified, 0 errors, unchanged (`accept` 3631736). quic top 8 unchanged from Task 4. tp proofs: `theorem_peer_tp_wf` 22463, `lemma_tp_from_wf` 754019, `lemma_server_tail` 1112432, `lemma_tp_step` 1267741 (module-state noise).
 
+Task 6 (merge of main's 9r gates; the empty STREAM insert; `recv_allowed_err` on `data_gate` and `on_data`) evidence: `vt-9a-evidence/t6` (`final`). quic 1238 verified, 0 errors; quictls 43 verified, 0 errors (`accept` 3631736). quic top 8 after Task 6: `Connection::add_space_packet` 7185031, `Streams::recv_op_at` 6812261, `streams::poll_stream` 6709553, `header::serialize_long_header` 6542112, `Streams::poll_max_data` 6435167, `Reassembly::fill` 6116768, `ack_track::lemma_splice_insert` 6101350, `Connection::send_path_datagram` 6070054. `lemma_same_ranges` falls 7432523 → 230169 (untouched; module-state noise, as in T0). The fix: `data_buffer` calls `insert_tight`, which records empty data with `Reassembly::insert_empty` (ghost log only) and proves `tight` with `lemma_insert_tight` (data ending past the window) or `lemma_insert_tight_within` (data ending inside it, including fully delivered duplicates); `RecvStream::wf` carries `re.tight()`. First try with the insert inline: `data_buffer` exceeded rlimit 4 (12000000, `t6/try1`); split into `insert_tight`, 5828408. With `credit_after`, `final_size_trigger`, `flow_trigger` and `recv_allowed_err` `open`, `streams::poll_stream` rose 7402168 → 8200712 and `Streams::poll_max_data` 7553000 → 8090873, over the stop rule, though neither names them (`t6/expB`, streams module alone); `closed`, 6709553 and 6435167 (`t6/expA`). They are closed, as the `Connection` spec fns are. `lemma_recv_err_rfc` proves `recv_data`'s errors equal the RFC triggers both ways (soundness of each error, FINAL_SIZE_ERROR on every final-size trigger, FLOW_CONTROL_ERROR on every limit trigger without one), from `recv_inv` and `s.err is None` (which `wf` gives): the model is not stricter than the predicate.
+
 ## 5. Inventory claims corrected
 
 1. **§4.1 "on_crypto never returned PROTOCOL_VIOLATION … its ensures is already an iff"** is true, but the iff is over-strict, and rule 1 flags it.
@@ -247,6 +256,8 @@ Task 4 fix round 1 (review I1: the duplicate disjunct is stated over the IDs ear
 - **[m10] Proved in 9a, no longer trusted:** after an Initial discard, `crypto_received` reads the real insertion history (`hist`), not `new_at`'s fabricated record.
 - **[T4] Derived reading, proof scheduled in Task 5:** `tp_value_invalid` counts a connection-ID parameter over 20 bytes as invalid. §18.2 has no sentence saying so. The reading is §17.2's receiver rule (a version 1 long header with a connection ID longer than 20 bytes MUST be dropped, header.rs:207 and :666, so the connection's IDs are at most 20 bytes) together with §7.3 (a mismatch with the Initial's connection ID MUST be TRANSPORT_PARAMETER_ERROR or PROTOCOL_VIOLATION), and nothing in T4's lemma links the parameter to the Initial packet. Task 5 proves the link in `tp_allowed_err`'s Err arm: `v.len() > MAX_CID_LEN && client_scid.len() <= MAX_CID_LEN ==> v != client_scid`, with the bound from the handshake.rs:253 invariant through an exec accessor's ensures [C1]. The §7.3 absence and mismatch checks are not part of `allowed_tp_err`. They stay in `on_peer_params` (T1).
 - **[T4] Out of scope, noted:** `rfc_tp_apply` with `from_client == false` refuses preferred_address (0x0d), which §18.2 lets a server send, and refuses retry_source_connection_id (0x10) even after a Retry. That direction is used only to read back our own parameters, and we never send either, so it refuses nothing a peer sends. With `from_client`, it refuses the four server-only IDs, which matches §18.2.
+- **[T6] Open reading, spec unchanged:** `recv_data` sets `high` to `off + len` for empty data too, so an empty non-FIN STREAM frame at offset 90 consumes 80 bytes of connection credit, makes a later FIN below 90 a FINAL_SIZE_ERROR, and past the stream limit is a FLOW_CONTROL_ERROR. §4.5 measures the final size as "the sum of the Offset and Length fields" but defines it via "the byte with the largest offset sent", and §19.10 says "more data than"; an empty frame carries no byte. `recv_allowed_err` is stated over the model's `high`, so `lemma_recv_err_rfc` cannot see this. Changing it touches `lemma_data_trace_ind` and `lemma_same_ranges`; left for a later task.
+- **[T6] Precedence:** with both a final-size and a flow-control trigger, `data_gate` returns FINAL_SIZE_ERROR (pinned by `error_precedence`). The FLOW_CONTROL_ERROR converse is stated under `!final_size_trigger`; the other case is covered by §11's "MAY use any applicable error code", cited at `recv_allowed_err`. `conn_room` is the caller's quantity: that it is MAX_DATA less the other streams' credit is `Streams`' obligation.
 - **Trusted, unchanged:** `allowed_*` predicates are hand-written readings of RFC text, like every `rfc_*` spec (TRUSTED.md, "hand-written formalization"). No tool can prove that a formula means what an English sentence means. Rule 1 makes each reading explicit and reviewable per handler.
 
 ## 7. Trust-base follow-ups [UD]

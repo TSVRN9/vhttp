@@ -156,7 +156,6 @@ quic::conn::Connection::on_packet
 quic::conn::Connection::on_path_frame
 quic::conn::Connection::on_stream_frame
 quic::conn::Connection::stream_write
-quic::crypto_stream::CryptoStream::on_crypto
 quic::frame::parse_frame
 quic::frame::parse_frame_body
 quic::frame::parse_frame_type
@@ -167,7 +166,6 @@ quic::payload::parse_payload
 quic::protect::open_one
 quic::protect::unprotect
 quic::protect::unprotect_at
-quic::recv_stream::RecvStream::on_data
 quic::recv_stream::RecvStream::on_reset
 quic::send_stream::SendStream::write
 quic::sent::SentPackets::on_ack
