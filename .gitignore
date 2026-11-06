@@ -6,3 +6,4 @@
 .verus-solver-log*
 /tools/*/target
 /tools/ct-fixtures/semconf/target
+__pycache__/
