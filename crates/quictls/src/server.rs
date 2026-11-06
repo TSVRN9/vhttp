@@ -81,6 +81,11 @@ fn kind(l: Level) -> (k: PacketKind)
     }
 }
 
+/// The close code `report` passes to the connection.
+spec fn report_code(code: u64) -> u64 {
+    if code <= 0x3fff_ffff_ffff_ffff { code } else { INTERNAL_ERROR }
+}
+
 /// `close` with no reason.
 #[verifier::spinoff_prover]
 fn shut(c: &mut Connection, code: u64, now: u64)
@@ -90,7 +95,10 @@ fn shut(c: &mut Connection, code: u64, now: u64)
     ensures
         final(c).wf(),
         final(c).out_log() == old(c).out_log(),
-        old(c).phase_spec() is Open ==> !(final(c).phase_spec() is Open),
+        old(c).phase_spec() is Open ==> final(c).phase_spec() is Closing
+            && final(c).close_spec() == Some((false, code, Seq::<u8>::empty())),
+        !(old(c).phase_spec() is Open) ==> final(c).phase_spec() == old(c).phase_spec()
+            && final(c).close_spec() == old(c).close_spec(),
 {
     let none: Vec<u8> = Vec::new();
     c.close(code, false, none.as_slice(), now);
@@ -117,9 +125,10 @@ fn shut(c: &mut Connection, code: u64, now: u64)
 //# Upon receiving an error alert, the TLS implementation
 //# SHOULD indicate an error to the application and MUST NOT allow any
 //# further data to be sent or received on the connection.
-// Every TLS error is passed to a close (not an ensures: `tampered_finished_0x133`, `error_ranges` and
-// `a2_closes_0x178` pin the close and its code), the alert as CRYPTO_ERROR_BASE + alert, which is how QUIC
-// sends alert X; the closing state sends only CONNECTION_CLOSE (3d). The quoted sentence is about
+// Every TLS error is passed to a close, and the ensures pins its code: the alert as CRYPTO_ERROR_BASE + alert,
+// which is how QUIC sends alert X; a transport code (0x0a, 0x0d) as it is; anything past VARINT_MAX as
+// INTERNAL_ERROR. `tampered_finished_0x133`, `error_ranges` and `a2_closes_0x178` are regression checks.
+// The closing state sends only CONNECTION_CLOSE (3d). The quoted sentence is about
 // receiving an error alert, whose QUIC image is a peer CONNECTION_CLOSE: conn.rs enters draining,
 // which sends and processes nothing (RFC 9000 §10.2.2). `on_crypto` also returns transport codes
 // (0x0a, 0x0d), which close as they are.
@@ -142,6 +151,10 @@ fn report(c: &mut Connection, code: u64, now: u64)
     ensures
         final(c).wf(),
         final(c).out_log() == old(c).out_log(),
+        old(c).phase_spec() is Open ==> final(c).phase_spec() is Closing
+            && final(c).close_spec() == Some((false, report_code(code), Seq::<u8>::empty())),
+        !(old(c).phase_spec() is Open) ==> final(c).phase_spec() == old(c).phase_spec()
+            && final(c).close_spec() == old(c).close_spec(),
 {
     if CRYPTO_ERROR_BASE <= code && code <= CRYPTO_ERROR_BASE + 0xff {
         c.on_tls_alert((code - CRYPTO_ERROR_BASE) as u8, now);
