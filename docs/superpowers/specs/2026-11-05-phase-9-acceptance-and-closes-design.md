@@ -184,7 +184,7 @@ rlimit as reported by `--output-json --time-expanded` at `--rlimit 4`. The per-f
 | `quic::crypto_stream::CryptoStream::read` | 14538 | 15576 (T3), 17427 (T3 fix 1) | 3 |
 | `quic::reassembly::Reassembly::lemma_insert_tight` (new) | — | 266316 (T3), 266942 (T3 fix 1) | 3 |
 | `quic::conn::Connection::crypto_read` | 1407354 | 1404386 (T3), 1746138 (T3 fix 1) | 3, 3b |
-| `quic::conn::Connection::crypto_end` | 42704 | 65508 (T3), 69433 (T3 fix 1) | 3 |
+| `quic::conn::Connection::crypto_end` | 42704 | 65508 (T3), 69276 (T3 fix 1) | 3 |
 | `quic::conn::Connection::on_crypto_frame` | 356795 | 375682 (T3), 4611934 (T3 fix 1) | 3 |
 | `quic::conn::Connection::discard` | 464457 | 537731 (T3), 1427784 (T3 fix 1) | 3, 3b |
 | `quic::conn::Connection::crypto_write` | 261459 | | 3b |
