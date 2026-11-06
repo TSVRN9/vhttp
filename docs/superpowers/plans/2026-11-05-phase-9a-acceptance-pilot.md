@@ -459,7 +459,7 @@ The lift through `on_frame`/`on_counted` and quictls `apply`/`feed`/`tls_step` i
     - `id <= TP_RETRY_SOURCE_CONNECTION_ID && tp_value_invalid(id, v)` (§7.4 MUST).
     - Define it with a recursive `allowed_tp_err_from(b, p, t, seen)` mirroring `rfc_tp_from`'s shape (same `decreases_by`).
   - `pub proof fn lemma_tp_err_allowed(b: Seq<u8>)`: ensures `rfc_transport_params(b, true) is Err ==> allowed_tp_err(b)`. Induction on `rfc_tp_from`. Its sub-lemma `rfc_tp_value(id, v, t) is None && id <= TP_RETRY_SOURCE_CONNECTION_ID && !tp_server_only(id) ==> tp_value_invalid(id, v)` is where a spec stricter than §18.2 would show up. If it does not prove, report the parameter. Do not widen `tp_value_invalid`.
-  - **Non-vacuity [9r, 2026-11-06 ruling]:** `proof fn lemma_allowed_tp_err_rejects()` exhibits a concrete well-formed client parameter block `b` (e.g. the empty block, or one valid `max_idle_timeout`) with `!allowed_tp_err(b)`. Mutation: replace `allowed_tp_err`'s body with `true`; the lemma must fail.
+  - **Non-vacuity [9r, 2026-11-06 ruling]:** `proof fn lemma_allowed_tp_err_rejects()` exhibits a concrete well-formed client parameter block `b` (e.g. one holding only a valid `initial_source_connection_id`, which §7.3 requires; not the empty block) with `!allowed_tp_err(b)`. Mutation: replace `allowed_tp_err`'s body with `true`; the lemma must fail.
 
 - [ ] **Step 1: Write the spec fns and the lemma.** Spin the lemma off. It is a proof fn, so it adds no exec VC.
 - [ ] **Step 2: Verify.** Run the recipe for `quic` then `quictls` (`E=…/t4`). Expected: 0 errors. Record the lemma and the top 8. The stop rule applies.
