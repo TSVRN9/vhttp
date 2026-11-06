@@ -116,6 +116,20 @@ pub proof fn lemma_contiguous_exists(m: Map<nat, u8>)
     lemma_contiguous_le(m, b);
 }
 
+/// More received never lowers the least offset not received.
+pub proof fn lemma_contiguous_mono(m1: Map<nat, u8>, m2: Map<nat, u8>)
+    requires
+        forall|k: nat| #[trigger] m1.contains_key(k) ==> m2.contains_key(k),
+    ensures
+        rfc_contiguous(m1) <= rfc_contiguous(m2),
+{
+    lemma_contiguous_exists(m1);
+    lemma_contiguous_exists(m2);
+    if rfc_contiguous(m2) < rfc_contiguous(m1) {
+        assert(m1.contains_key(rfc_contiguous(m2)));
+    }
+}
+
 /// Every insertion is consistent with `s`: the keys are the covered offsets, valued from `s`.
 proof fn lemma_received_consistent(ins: Seq<(nat, Seq<u8>)>, s: Seq<u8>)
     requires
@@ -383,6 +397,59 @@ impl Reassembly {
             lemma_contiguous_exists(rfc_received(r.ins@));
         }
         r
+    }
+
+    /// The least offset not received is at most the window's end.
+    pub proof fn lemma_contiguous_le_end(&self)
+        requires
+            self.wf(),
+        ensures
+            rfc_contiguous(rfc_received(self.inserted())) <= self.base() + self.buf_len(),
+    {
+        let m = rfc_received(self.inserted());
+        lemma_contiguous_exists(m);
+        if rfc_contiguous(m) > self.base() + self.buf_len() {
+            assert(m.contains_key((self.base() + self.buf_len()) as nat));
+        }
+    }
+
+    /// The least offset not received, scanning the window from `from`, at most that offset.
+    pub fn contiguous_from(&self, from: u64) -> (r: u64)
+        requires
+            self.wf(),
+            self.base() <= from,
+            from <= rfc_contiguous(rfc_received(self.inserted())),
+        ensures
+            r == rfc_contiguous(rfc_received(self.inserted())),
+            r <= self.base() + self.buf_len(),
+    {
+        let ghost m = rfc_received(self.ins@);
+        proof {
+            self.lemma_contiguous_le_end();
+            lemma_contiguous_exists(m);
+        }
+        let mut i: usize = self.head + (from - self.base) as usize;
+        while i < self.have.len() && self.have[i]
+            invariant
+                self.wf(),
+                m == rfc_received(self.ins@),
+                self.head <= i <= self.have@.len(),
+                forall|j: nat| j < self.base + (i - self.head) ==> #[trigger] m.contains_key(j),
+            decreases self.have@.len() - i,
+        {
+            proof {
+                assert(m.contains_key((self.base + i - self.head) as nat));
+            }
+            i = i + 1;
+        }
+        let n = self.base + (i - self.head) as u64;
+        proof {
+            if i < self.have@.len() {
+                assert(!self.have@[i as int]);
+            }
+            lemma_contiguous_is(m, n as nat);
+        }
+        n
     }
 
     pub fn base_exec(&self) -> (r: u64)
