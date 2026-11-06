@@ -39,6 +39,7 @@ The lift through `on_frame`/`on_counted` and quictls `apply`/`feed`/`tls_step` i
   - A bool-signalling step (`cont`/`ok`) carries `!ok && old Open ==> allowed_x(..)`.
 - **Rule 1b, completeness [T1 review I1, RCA class C7, 2026-11-06]:** where the RFC says MUST close (or "MUST treat as a connection error") on a trigger, the site also carries the converse, `old Open && trigger ==> final Closing with that code`. Every close site a task touches gets a delete-the-close mutation, which must fail on a postcondition.
 - **Rule 1c, non-vacuity [9r]:** every `allowed_*err` predicate gets a proof fn showing an (input, code) pair it rejects.
+- **Rule 1d, RFC-quantity floors [T3 review I2, RCA class C8, 2026-11-06]:** every RFC "MUST support at least N" or "MUST accept" floor is a lemma stated over RFC-defined quantities (e.g. bytes held in out-of-order frames), never over the code's own bookkeeping. Its boundary counterexample is a test, and a mutation that re-anchors the code's notion must fail the lemma.
 - **9r gates (on main since 244e61b):** main is merged into phase-9a just before Task 6. From then on verify.sh runs the acceptance ratchet, the quote check and the gate demos. Task 6 removes the baseline lines of the fns 9a annotates and lowers `MAX_BASELINE`.
 - **Rule 2, proved close:**
   - (a) the error path leaves the connection Closing with that exact code (`close_spec`);
@@ -66,7 +67,7 @@ The lift through `on_frame`/`on_counted` and quictls `apply`/`feed`/`tls_step` i
   - 9a edits no tls file.
 - verify.sh's final line stays byte-identical: `verify.sh: all crates verified, duvet ok, ct ok (10 declassify), cost 19/36, escapes accounted (0), binary ok (49 fns)`.
 - cargo test --workspace stays green (902 tests at main 73cc244).
-  - Plus this plan's new tests: 904 after Task 1, 907 after Task 3, 909 after Task 5, 910 after Task 6. 0 warnings in `cargo build` and `cargo test`.
+  - Plus this plan's new tests: 904 after Task 1, 910 after Task 3 (fix round 1 added 3), 912 after Task 5, 913 after Task 6. 0 warnings in `cargo build` and `cargo test`.
 - No attribution lines in commits.
 - **Duvet:** every new spec fn and ensures that states an RFC condition carries `//= https://www.rfc-editor.org/rfc/rfcNNNN#section-X` plus a contiguous `//#` quote copied verbatim from `.duvet/specifications/www.rfc-editor.org/rfc/`.
   - `.duvet/specifications` and `.duvet/requirements` are git-ignored and missing in wt-9a. Copy both once from `/home/tavern/Projects/rust/web-server/.duvet/`.
