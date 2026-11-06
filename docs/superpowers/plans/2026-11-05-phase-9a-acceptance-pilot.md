@@ -67,7 +67,7 @@ The lift through `on_frame`/`on_counted` and quictls `apply`/`feed`/`tls_step` i
   - 9a edits no tls file.
 - verify.sh's final line stays byte-identical: `verify.sh: all crates verified, duvet ok, ct ok (10 declassify), cost 19/36, escapes accounted (0), binary ok (49 fns)`.
 - cargo test --workspace stays green (902 tests at main 73cc244).
-  - Plus this plan's new tests: 904 after Task 1, 910 after Task 3 (fix round 1 added 3), 913 after Task 3c, 915 after Task 5, 916 after Task 6. 0 warnings in `cargo build` and `cargo test`.
+  - Plus this plan's new tests: 904 after Task 1, 910 after Task 3 (fix round 1 added 3), 911 after Task 6 (done before 3b/5, 2026-11-06), then +2 after Task 5 and +3 after Task 3c' (each task states its own delta against the count it starts from). 0 warnings in `cargo build` and `cargo test`.
 - No attribution lines in commits.
 - **Duvet:** every new spec fn and ensures that states an RFC condition carries `//= https://www.rfc-editor.org/rfc/rfcNNNN#section-X` plus a contiguous `//#` quote copied verbatim from `.duvet/specifications/www.rfc-editor.org/rfc/`.
   - `.duvet/specifications` and `.duvet/requirements` are git-ignored and missing in wt-9a. Copy both once from `/home/tavern/Projects/rust/web-server/.duvet/`.
@@ -365,7 +365,10 @@ The lift through `on_frame`/`on_counted` and quictls `apply`/`feed`/`tls_step` i
   - **M3:** in conn.rs, remove `reveal(crx_ok)` from `crypto_end`. Expected: the `self.wf()` precondition of `crx_k.lemma_end_received()`/`crx_k.end()` fails (corrected after the run; the `crypto_received` postcondition is M3b's). This shows the opaque wrapper actually hides the conjunct.
   - **M3b [T3 review m3]:** keep `reveal(crx_ok)` and delete the three `lemma_end_received()` calls. Expected: `crypto_end`'s `r > 0 ==> crypto_received(..)` postcondition fails.
 
-### Task 3c: the CRYPTO limit counts held bytes, not offset span [T3 review concern 3, 2026-11-06 ruling]
+### Task 3c: the CRYPTO limit counts held bytes, not offset span
+
+> **Status 2026-11-06: BLOCKED as written; superseded by Task 3c' below.** Reassembly is a dense per-offset buffer, not a range set, so a held-bytes limit alone gives no memory bound (one byte at contiguous+2^40 would allocate about 2 TiB). Task 3c' first needs a sparse out-of-order store (a fragment list, or Reassembly as a range set) with a proved memory bound. Then the steps below apply unchanged. It is multi-session, and it waits on the user's reading of the §7.5 floor: bytes held, or offset span.
+ [T3 review concern 3, 2026-11-06 ruling]
 
 RFC 9000 §7.5 says "Implementations MUST support buffering at least 4096 bytes of data received in out-of-order CRYPTO frames". After Task 3 the window is a span past the contiguous end, so a 1-byte frame at contiguous + 20000 closes with 0x0d while almost nothing is held. Under the acceptance rule that is over-strict.
 
@@ -391,6 +394,9 @@ RFC 9000 §7.5 says "Implementations MUST support buffering at least 4096 bytes 
   - Delete the close: the converse must fail.
 
 ### Task 3b: the Initial CRYPTO invariant across the `Connection` boundary [I1]
+
+> **Added 2026-11-06 [T3 concern 1]:** also prove, on the quictls side, that after each datagram is fed, every level's CRYPTO unread count is 0 (`crypto_read` drains to the contiguous end; that is proved in T3). Together with T3's wf this bounds what is buffered between datagrams at the out-of-order window.
+
 
 **Files:**
 - Modify: `crates/quic/src/conn.rs`:
@@ -505,6 +511,9 @@ RFC 9000 §7.5 says "Implementations MUST support buffering at least 4096 bytes 
   - **T4-M3 [fix round 1, review I1]:** in `rfc_tp_apply` and `tp_apply`, after a client's disable_active_migration (0x0c), also mark active_connection_id_limit (0x0e) in the mask. Expected: `lemma_tp_err_allowed_from` fails, at the recursive call's `tp_seen_is` precondition. On 6594f10 this mutation verifies and passes all 910 tests.
 
 ### Task 5: quictls acceptance and close code on the CRYPTO path (P2, quictls)
+
+> **Added 2026-11-06:** (a) [T4 I2/n1] prove that an initial_source_connection_id longer than 20 bytes cannot equal `client_scid_spec()` (bound at handshake.rs:253), which closes the CID>20 step of `allowed_tp_err`; (b) [T1] expose `!peer_tp_known` at quictls `on_params` through an exec ensures, so T1's iff is usable there; (c) [rule 1b, C7] audit `on_handshake_complete`'s close and prove the converse where the RFC says MUST, with a delete-the-close mutation.
+
 
 **Files:**
 - Modify: `crates/quictls/src/server.rs`: `superseded`; `unconsumed` :755-763; `key_changes`; `on_params`; new spec fns after `level_rank` (:54) and in `impl QuicServer` after `unread`.
