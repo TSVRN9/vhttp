@@ -37,6 +37,9 @@ The lift through `on_frame`/`on_counted` and quictls `apply`/`feed`/`tls_step` i
   - `allowed_err` is one spec fn per handler, RFC-cited, and a disjunction of: errors the RFC requires (MUST); errors it permits (MAY/SHOULD "treat as a connection error") where we chose to raise them; our own named limits (Busy, full tables) as visible named predicates.
   - Codecs: `spec_parse(b) is Some ==> res is Ok`.
   - A bool-signalling step (`cont`/`ok`) carries `!ok && old Open ==> allowed_x(..)`.
+- **Rule 1b, completeness [T1 review I1, RCA class C7, 2026-11-06]:** where the RFC says MUST close (or "MUST treat as a connection error") on a trigger, the site also carries the converse, `old Open && trigger ==> final Closing with that code`. Every close site a task touches gets a delete-the-close mutation, which must fail on a postcondition.
+- **Rule 1c, non-vacuity [9r]:** every `allowed_*err` predicate gets a proof fn showing an (input, code) pair it rejects.
+- **9r gates (on main since 244e61b):** main is merged into phase-9a just before Task 6. From then on verify.sh runs the acceptance ratchet, the quote check and the gate demos. Task 6 removes the baseline lines of the fns 9a annotates and lowers `MAX_BASELINE`.
 - **Rule 2, proved close:**
   - (a) the error path leaves the connection Closing with that exact code (`close_spec`);
   - (b) in Closing, if a datagram is emitted, it contains CONNECTION_CLOSE with that code at the right key level (RFC 9000 §10.2.3). The words are "if emitted" because amplification and pacing can block sends. (b) is 9b's.
