@@ -7,6 +7,7 @@
 # changed symbol before `--update`. Target dir: $root/target/ct-binary, wiped whenever the content
 # stamp of the workspace sources changes; the dump and the per-function text stay in its ct-binary/.
 set -eu
+set -o pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 tracked=docs/crypto-binary-digests.txt
@@ -20,7 +21,7 @@ for t in cargo ar objdump nm sha256sum awk sed diff find xargs git; do
     command -v "$t" >/dev/null || die "missing tool: $t"
 done
 # The gate builds the shipped profile only; anything that would change codegen is refused.
-bad=$(env | grep -E '^(RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_[A-Z_]*|CARGO_PROFILE_[A-Z_]*|CARGO_TARGET_[A-Z0-9_]*_RUSTFLAGS|CARGO_INCREMENTAL|RUSTC|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER)=' | cut -d= -f1 || true)
+bad=$({ env | grep -E '^(RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_[A-Z_]*|CARGO_PROFILE_[A-Z_]*|CARGO_TARGET_[A-Z0-9_]*_RUSTFLAGS|CARGO_INCREMENTAL|RUSTC|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER)=' || [ $? -eq 1 ]; } | cut -d= -f1)
 [ -z "$bad" ] || die "refusing to build with" $bad "set: the gate checks the shipped build"
 
 # Content stamp: cargo trusts mtimes for path packages, so a source change that keeps an old
@@ -42,22 +43,22 @@ mkdir -p "$x/fn" "$x/dep"
 members() {
     [ -f "$1" ] || die "no $1"
     l=$(ar t "$1") || die "ar t failed on $1"
-    o=$(printf '%s\n' "$l" | grep -vxE 'lib\.rmeta|lib\.rmeta-link|[^/]+\.rcgu\.o' || true)
+    o=$(printf '%s\n' "$l" | { grep -vxE 'lib\.rmeta|lib\.rmeta-link|[^/]+\.rcgu\.o' || [ $? -eq 1 ]; })
     [ -z "$o" ] || die "$1 has members other than lib.rmeta and .rcgu.o units: $o"
     mkdir -p "$2"
     (cd "$2" && ar x "$1") || die "ar x failed on $1"
-    printf '%s\n' "$l" | grep 'rcgu\.o$' || true
+    printf '%s\n' "$l" | { grep 'rcgu\.o$' || [ $? -eq 1 ]; }
 }
 rlib=$T/release/libcrypto.rlib
 units=$(members "$rlib" "$x") || exit 1
-nunits=$(printf '%s\n' "$units" | grep -c . || true)
+nunits=$(printf '%s\n' "$units" | { grep -c . || [ $? -eq 1 ]; })
 [ "$nunits" -gt 0 ] || die "no .rcgu.o member in $rlib"
 : > "$x/dump"
 for m in $units; do
     objdump -dr --no-show-raw-insn -C "$x/$m" >> "$x/dump" || die "objdump failed on $m"
 done
 v=$(objdump --version) || die "objdump --version failed"
-objver=$(printf '%s\n' "$v" | head -1)
+objver=$(printf '%s\n' "$v" | sed -n 1p)
 [ -n "$objver" ] || die "objdump --version printed nothing"
 
 # Normalise: drop file and section headers (they carry paths and mangled crate hashes), each
@@ -111,7 +112,7 @@ grep -q '^U tls ' "$x/refs" ||
     echo "objdump $objver"
     awk 'NR == FNR { h[$2] = $1; next } { t = index($0, "\t"); print h[substr($0, 1, t - 1)], substr($0, t + 1) }' \
         "$x/sums" "$x/syms" | LC_ALL=C sort -k2
-    grep '^U ' "$x/refs" | LC_ALL=C sort -u
+    { grep '^U ' "$x/refs" || [ $? -eq 1 ]; } | LC_ALL=C sort -u
 } > "$x/digests"
 fns=$(grep -c '^[0-9a-f]\{64\} ' "$x/digests" || true)
 [ "$fns" -eq "$(wc -l < "$x/syms")" ] || die "$(wc -l < "$x/syms") functions but $fns digests"
@@ -168,7 +169,7 @@ diff "$tracked" "$x/digests" >&2 ||
 # also touches the audit doc, and an uncommitted change to it comes with one to the audit doc.
 last=$(git log -1 --format=%H -- "$tracked") || die "git log failed"
 if [ -n "$last" ]; then
-    git show --name-only --format= "$last" | grep -qxF "$audit" ||
+    git show --name-only --format= "$last" | grep -xF "$audit" >/dev/null ||
         err "commit $last changes $tracked but not $audit: record the read of every changed symbol there $recipe"
 fi
 git diff --quiet HEAD -- "$tracked" || ! git diff --quiet HEAD -- "$audit" ||

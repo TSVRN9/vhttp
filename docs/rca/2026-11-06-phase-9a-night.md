@@ -1,0 +1,41 @@
+# RCAs from Phase 9a, 2026-11-06 (fixes on branch `phase-9a`, not yet on main)
+
+## 1. on_peer_params proved only "close ==> mismatch" (9a T1 review I1)
+- **Defect:** `Connection::on_peer_params` proved that a close implies an initial_source_connection_id mismatch, but not that a mismatch closes (the RFC 9000 §7.3 MUST). Deleting the `close_internal` call still verified. Fixed on phase-9a in 87c3561.
+- **Escape:** the design's rule 1 is one-way (`Err ==> allowed`). Nothing required the converse for a MUST-close trigger, and no planned mutation deleted a close call.
+- **Class:** C7, required close missing.
+- **Catch:** plan rule 1b. Where the RFC says MUST close on a trigger, the site proves `old Open && trigger ==> Closing with that code`. Every touched close site gets a delete-the-close mutation that must fail on a postcondition.
+- **Evidence:** mutations T1-M4..T1-M7 (delete each of the four closes) fail on postconditions (`.worktrees/vt-9a-evidence/t1`). Task 3's D3 is the same check for on_crypto_frame.
+- **Open:** the remaining close sites (on_handshake_complete in 9a Task 5; close_on_error and on_counted in 9c).
+
+## 2. CRYPTO window anchored at the read offset (9a T3 review I2; a real bug, already on main)
+- **Defect:** RFC 9000 §7.5: "Implementations MUST support buffering at least 4096 bytes of data received in out-of-order CRYPTO frames". The window was `read offset + 16384`. One datagram with CRYPTO[0,13000) and then CRYPTO[16000,16500) closed with 0x0d while holding 500 out-of-order bytes. Fixed on phase-9a in fcf9ff0 (anchored at the contiguous end) and e5a85ae.
+- **Escape:** `crypto_window_exceeded` and the floor lemma were transcribed from the code's own base-relative notion, not from the RFC sentence, so the proof only checked the code against itself. No test mixed in-order and out-of-order CRYPTO data in one datagram.
+- **Class:** C8, spec written from code instead of the RFC.
+- **Catch:** plan rule 1d. Every RFC "MUST support at least N" floor is a lemma over RFC-defined quantities (here `rfc_contiguous` and out-of-order bytes), with the boundary counterexample as a test.
+- **Evidence:** mutation M4 (re-anchor at the read offset) fails the floor lemma. The test `crypto_in_and_out_of_order_one_datagram_ok` (conn_rx.rs) failed on fcb43a7 and passes after the fix (`.worktrees/vt-9a-evidence/t3`).
+
+## 3. Open: the CRYPTO limit is an offset span, not a byte count
+- **Status:** OPEN conformance item under the strict reading of RFC 9000 §7.5. A 1-byte frame at the contiguous end + 20000 closes with 0x0d while almost nothing is held.
+- **Why it is not fixed yet:** `Reassembly` stores one byte and one flag per offset from base to the highest end, so memory follows the span. A held-bytes limit needs a sparse fragment store or a range-set Reassembly with a proved memory bound. That is multi-session work, scheduled as its own task.
+- **Rejected alternatives:**
+  - A large span cap still closes on far frames.
+  - Recording it as an accepted deviation would be a shortcut.
+- **Interpretation question for the user:** does "at least 4096 bytes of data received in out-of-order CRYPTO frames" count bytes held, or does an offset-span limit of at least 4096 meet it?
+
+## 4. Task 3c dispatched against a representation that doesn't exist (controller error)
+- **Defect:** the controller wrote Task 3c assuming `Reassembly` is a range set and dispatched it without a preflight. The implementer stopped before changing anything.
+- **Escape:** controller-added tasks skipped the preflight that plan tasks get.
+- **Class:** C16, plan drift.
+- **Catch:** every controller-added task gets a recorded preflight read of each type and fn it names (representation, cost) before dispatch. 9r2's plan-lint extends to checking that the named items and their fields exist.
+
+## 5. Missing RFC citation on quictls `report` (9a T2 review I1)
+- **Defect:** the alert-to-code mapping in `report` had no RFC 9001 §4.8 `//=` citation. Fixed on phase-9a in 256d44e.
+- **Escape:** the citation rule is prose. `check_quotes.py` verifies the quotes that exist and cannot see missing ones.
+- **Class:** C1.
+- **Catch (open, owner 9r2):** a gate requiring that every `allowed_*err` spec fn, and every fn whose ensures pin a close code, carry a `//=` block. Its demo strips a citation and must fail.
+
+## 6. task-brief extracted two tasks into one brief
+- **Defect:** the SDD `task-brief` script matched `### Task 3` as a prefix, so Task 3b's text went into Task 3's brief. Caught by the controller before dispatch.
+- **Class:** C16 (tooling).
+- **Catch:** before each dispatch the controller checks that the brief has exactly one `^### ` heading. The script is external plugin code and is not edited here.

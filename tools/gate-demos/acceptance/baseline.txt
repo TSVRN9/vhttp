@@ -1,0 +1,1 @@
+# empty: every error-returning fn in the fixture carries its clause
