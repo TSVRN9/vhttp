@@ -494,14 +494,15 @@ RFC 9000 §7.5 says "Implementations MUST support buffering at least 4096 bytes 
 - [ ] **Step 1: Write the spec fns and the lemma.** Spin the lemma off. It is a proof fn, so it adds no exec VC.
 - [ ] **Step 2: Verify.** Run the recipe for `quic` then `quictls` (`E=…/t4`). Expected: 0 errors. Record the lemma and the top 8. The stop rule applies.
 - [ ] **Step 3: Full checks, then commit.**
-  - Checks: tests 907; `verify.sh`'s line; escape grep 0; quote check on tp.rs; `duvet report`.
+  - Checks: tests 910; `verify.sh`'s line; escape grep 0; quote check on tp.rs; `duvet report`.
   ```bash
   git add crates/quic/src/tp.rs docs/superpowers/specs/2026-11-05-phase-9-acceptance-and-closes-design.md
   git commit -m "feat(quic, 9a T4): allowed_tp_err and lemma_tp_err_allowed: a client's transport parameters are refused only as RFC 9000 §7.4, §18, §18.2 and §20.1 allow"
   ```
 - [ ] **Step 4: Mutations.** Each alone, then `git checkout -- crates/quic/src/tp.rs`.
-  - **T4-M1:** in `tp_value_invalid`, make `ack_delay_exponent > 21`. Expected: `lemma_tp_err_allowed` fails, because `rfc_tp_value` rejects 21.
+  - **T4-M1:** in `tp_value_invalid`, make `ack_delay_exponent > 21`. Expected: the postcondition of `lemma_tp_value_allowed` fails, because `rfc_tp_value` rejects 21. A callee's ensures is assumed by its caller, so `lemma_tp_err_allowed` itself still passes.
   - **T4-M2:** drop the duplicate disjunct. Expected: the lemma fails.
+  - **T4-M3 [fix round 1, review I1]:** in `rfc_tp_apply` and `tp_apply`, after a client's disable_active_migration (0x0c), also mark active_connection_id_limit (0x0e) in the mask. Expected: `lemma_tp_err_allowed_from` fails, at the recursive call's `tp_seen_is` precondition. On 6594f10 this mutation verifies and passes all 910 tests.
 
 ### Task 5: quictls acceptance and close code on the CRYPTO path (P2, quictls)
 
