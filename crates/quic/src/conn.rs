@@ -1320,7 +1320,7 @@ impl Connection {
                 Ok(())
             },
             Frame::Ack(a) => self.on_ack_frame(k, a, now),
-            Frame::Crypto { offset, data } => self.on_crypto_frame(k, *offset, data.as_slice()),
+            Frame::Crypto { offset, data } => self.on_crypto_frame(k, *offset, data.as_slice(), now),
             Frame::ConnectionClose { .. } => {
                 let pto = self.pto();
                 self.lc.enter_draining(now, pto);
@@ -1421,9 +1421,13 @@ impl Connection {
     }
 
     // ponytail: post-handshake CRYPTO (NewSessionTicket) is buffered and ignored; we send none.
-    /// A CRYPTO frame.
+    /// A CRYPTO frame. On `Err` the connection is already Closing with that code, as in
+    /// `on_stream_frame`; `on_datagram`'s `close_internal` is then a no-op.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
+    //# If an endpoint does not expand its buffer, it MUST close
+    //# the connection with a CRYPTO_BUFFER_EXCEEDED error code.
     #[verifier::spinoff_prover]
-    fn on_crypto_frame(&mut self, k: PacketKind, offset: u64, data: &[u8]) -> (r: Result<(), u64>)
+    fn on_crypto_frame(&mut self, k: PacketKind, offset: u64, data: &[u8], now: u64) -> (r: Result<(), u64>)
         requires
             old(self).wf(),
             offset + data@.len() <= VARINT_MAX,
@@ -1439,15 +1443,34 @@ impl Connection {
             ),
             crypto_window_exceeded(old(self).crypto_contiguous_spec(k), offset, data@.len()) ==> r
                 == Err::<(), u64>(CRYPTO_BUFFER_EXCEEDED),
+            old(self).phase_spec() is Open && crypto_window_exceeded(
+                old(self).crypto_contiguous_spec(k),
+                offset,
+                data@.len(),
+            ) ==> final(self).phase_spec() is Closing && final(self).close_spec() == Some(
+                (false, CRYPTO_BUFFER_EXCEEDED, Seq::<u8>::empty()),
+            ),
+            r is Err ==> !(final(self).phase_spec() is Open),
     {
         proof {
             reveal(crx_ok);
         }
-        match k {
+        let pto = self.pto();
+        let r = match k {
             PacketKind::Initial => self.crx_i.on_crypto(offset, data),
             PacketKind::Handshake => self.crx_h.on_crypto(offset, data),
             PacketKind::OneRtt => self.crx_1.on_crypto(offset, data),
+        };
+        if let Err(c) = r {
+            let none: Vec<u8> = Vec::new();
+            proof {
+                assert(none@.take(0) =~= Seq::<u8>::empty());
+            }
+            self.lc.enter_closing(now, pto, false, c, none.as_slice());
+            self.streams = None;
+            return Err(c);
         }
+        Ok(())
     }
 
     /// One of the nine stream-layer frames. On `Err` the connection is already Closing with
