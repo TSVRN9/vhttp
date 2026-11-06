@@ -31,3 +31,4 @@ A catch lower in the list needs a stated reason why a higher one is not possible
 - `2026-11-06-empty-crypto.md`: first RCA entry.
 - Tools: `tools/check_quotes.py`, `tools/rl.py`, `tools/mut.py`; gates: `scripts/lint-scripts.sh`, `scripts/check-quotes.sh`, `scripts/escape-gate.sh`, `scripts/acceptance.sh`, `scripts/gate-demos.sh`.
 - `2026-11-06-acceptance-parser.md`: RCA of the R4 parser's own bugs.
+- `2026-11-06-phase-9a-night.md`: RCAs of the bugs Phase 9a found on 2026-11-06, plus the open CRYPTO span item.
