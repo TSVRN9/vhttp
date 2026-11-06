@@ -341,6 +341,31 @@ impl Reassembly {
     {
     }
 
+    /// `insert` of data ending inside the window (a duplicate, or empty data at a held offset)
+    /// keeps it tight: the old last byte is still received, so the end does not move.
+    pub proof fn lemma_insert_tight_within(a: Reassembly, b: Reassembly, off: u64, d: Seq<u8>)
+        requires
+            a.wf(),
+            a.tight(),
+            b.wf(),
+            off + d.len() <= a.base() + a.buf_len(),
+            b.inserted() == a.inserted().push((off as nat, d)),
+            b.base() == a.base(),
+            b.base() + b.buf_len() <= a.base() + a.buf_len(),
+        ensures
+            b.tight(),
+    {
+        hide(Reassembly::wf);
+        hide(rfc_received);
+        hide(rfc_contiguous);
+        lemma_received_push(a.inserted(), off as nat, d);
+        a.lemma_wf();
+        b.lemma_wf();
+        if a.buf_len() > 0 {
+            assert(rfc_received(b.inserted()).contains_key((a.base() + a.buf_len() - 1) as nat));
+        }
+    }
+
     /// The byte before the window's end is received: the last byte held, or, with nothing
     /// held, the byte before `base`, which is below `rfc_contiguous`.
     pub proof fn lemma_end_received(&self)
@@ -641,6 +666,27 @@ impl Reassembly {
             assert(self.base <= rfc_contiguous(m2));
             assert(forall|k: nat| #[trigger] m2.contains_key(k) ==> k < self.base + len - h);
         }
+    }
+
+    /// Records an insertion of no bytes without touching the buffers: `insert` would extend
+    /// the window to `off` with unreceived slots.
+    pub fn insert_empty(&mut self, _off: u64, _data: &[u8])
+        requires
+            old(self).wf(),
+            _data@.len() == 0,
+        ensures
+            final(self).wf(),
+            final(self).inserted() == old(self).inserted().push((_off as nat, _data@)),
+            final(self).base() == old(self).base(),
+            final(self).buf_len() == old(self).buf_len(),
+            final(self).phys_len() == old(self).phys_len(),
+            old(self).tight() ==> final(self).tight(),
+    {
+        proof {
+            lemma_received_push(self.ins@, _off as nat, _data@);
+            assert(rfc_received(self.ins@.push((_off as nat, _data@))) =~= rfc_received(self.ins@));
+        }
+        self.ins = Ghost(self.ins@.push((_off as nat, _data@)));
     }
 
     /// `pop`'s scan: appends the held run starting at `head` to `out` and returns its end
