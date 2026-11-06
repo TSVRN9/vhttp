@@ -874,6 +874,250 @@ pub proof fn theorem_peer_tp_wf(b: Seq<u8>)
 }
 
 // =============================================================================
+// A client's parameters, as refused (9a T4)
+// =============================================================================
+
+//= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+//# Those
+//# transport parameters that are identified as integers use a variable-
+//# length integer encoding; see Section 16.
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-18
+//# The Transport Parameter Length field contains the length of the
+//# Transport Parameter Value field in bytes.
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+//# The default for this parameter is the maximum permitted UDP
+//# payload of 65527.  Values below 1200 are invalid.
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+//# Values above 20 are invalid.
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+//# Values of 2^14 or greater are invalid.
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+//# The value of the
+//# active_connection_id_limit parameter MUST be at least 2.  An
+//# endpoint that receives a value less than 2 MUST close the
+//# connection with an error of type TRANSPORT_PARAMETER_ERROR.
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
+//# If a max_streams transport parameter or a MAX_STREAMS frame is
+//# received with a value greater than 2^60, this would allow a maximum
+//# stream ID that cannot be expressed as a variable-length integer; see
+//# Section 16.  If either is received, the connection MUST be closed
+//# immediately with a connection error of type TRANSPORT_PARAMETER_ERROR
+//# if the offending value was received in a transport parameter or of
+//# type FRAME_ENCODING_ERROR if it was received in a frame; see
+//# Section 10.2.
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-17.2
+//# In QUIC version 1, this value MUST NOT
+//# exceed 20 bytes.
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+//# An endpoint MUST treat the following as a connection error of type
+//# TRANSPORT_PARAMETER_ERROR or PROTOCOL_VIOLATION:
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+//# *  a mismatch between values received from a peer in these transport
+//#    parameters and the value sent in the corresponding Destination or
+//#    Source Connection ID fields of Initial packets.
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+//# This parameter is
+//# a sequence of 16 bytes.
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+//# This
+//# parameter is a zero-length value.
+/// Value `v` is invalid for known parameter `id` (§18.2), written from the RFC text, not
+/// from `rfc_tp_value`. The integers are 0x01 and 0x03 to 0x0b and 0x0e. A connection ID over
+/// 20 bytes cannot equal the Source or Destination Connection ID of a version 1 Initial
+/// packet (§17.2), so it is a §7.3 mismatch.
+pub open spec fn tp_value_invalid(id: u64, v: Seq<u8>) -> bool {
+    if id == TP_MAX_IDLE_TIMEOUT || id == TP_MAX_UDP_PAYLOAD_SIZE || id == TP_INITIAL_MAX_DATA
+        || id == TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL || id
+        == TP_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE || id == TP_INITIAL_MAX_STREAM_DATA_UNI || id
+        == TP_INITIAL_MAX_STREAMS_BIDI || id == TP_INITIAL_MAX_STREAMS_UNI || id
+        == TP_ACK_DELAY_EXPONENT || id == TP_MAX_ACK_DELAY || id == TP_ACTIVE_CONNECTION_ID_LIMIT {
+        match rfc_varint_decode(v) {
+            None => true,
+            Some((n, x)) => {
+                ||| n != v.len()
+                ||| id == TP_MAX_UDP_PAYLOAD_SIZE && x < 1200
+                ||| id == TP_ACK_DELAY_EXPONENT && x > 20
+                ||| id == TP_MAX_ACK_DELAY && x >= 0x4000  // 2^14
+                ||| id == TP_ACTIVE_CONNECTION_ID_LIMIT && x < 2
+                ||| (id == TP_INITIAL_MAX_STREAMS_BIDI || id == TP_INITIAL_MAX_STREAMS_UNI) && x
+                    > 0x1000_0000_0000_0000  // 2^60
+            },
+        }
+    } else {
+        ||| (id == TP_ORIGINAL_DESTINATION_CONNECTION_ID || id == TP_INITIAL_SOURCE_CONNECTION_ID
+            || id == TP_RETRY_SOURCE_CONNECTION_ID) && v.len() > 20
+        ||| id == TP_STATELESS_RESET_TOKEN && v.len() != 16
+        ||| id == TP_DISABLE_ACTIVE_MIGRATION && v.len() != 0
+    }
+}
+
+//= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+//# A client MUST NOT include any server-only transport parameter:
+//# original_destination_connection_id, preferred_address,
+//# retry_source_connection_id, or stateless_reset_token.  A server MUST
+//# treat receipt of any of these transport parameters as a connection
+//# error of type TRANSPORT_PARAMETER_ERROR.
+/// A parameter only a server may send.
+pub open spec fn tp_server_only(id: u64) -> bool {
+    id == TP_ORIGINAL_DESTINATION_CONNECTION_ID || id == TP_PREFERRED_ADDRESS || id
+        == TP_RETRY_SOURCE_CONNECTION_ID || id == TP_STATELESS_RESET_TOKEN
+}
+
+//= https://www.rfc-editor.org/rfc/rfc9000#section-20.1
+//# TRANSPORT_PARAMETER_ERROR (0x08):  An endpoint received transport
+//# parameters that were badly formatted, included an invalid value,
+//# omitted a mandatory transport parameter, included a forbidden
+//# transport parameter, or were otherwise in error.
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-18
+//# Each transport parameter is encoded as an (identifier, length, value)
+//# tuple, as shown in Figure 21:
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-7.4
+//# An endpoint SHOULD treat receipt of
+//# duplicate transport parameters as a connection error of type
+//# TRANSPORT_PARAMETER_ERROR.
+//
+//= https://www.rfc-editor.org/rfc/rfc9000#section-7.4
+//# An endpoint MUST treat receipt of a transport parameter with an
+//# invalid value as a connection error of type
+//# TRANSPORT_PARAMETER_ERROR.
+/// From offset `p`, reached by parsing `b[..p]` into `t` with mask `seen`, a client's
+/// parameters hold one the RFC lets a server refuse: a parameter that is badly formatted
+/// (§18, §20.1), a duplicate (§7.4 SHOULD, which we chose), server-only (§18.2), or an
+/// invalid value (§7.4).
+pub open spec fn allowed_tp_err_from(b: Seq<u8>, p: int, t: SpecTp, seen: u32) -> bool
+    decreases (if p < b.len() {
+        b.len() - p
+    } else {
+        0
+    }),
+    via allowed_tp_err_decreases
+{
+    if p >= b.len() {
+        false
+    } else {
+        match rfc_vint(b, p) {
+            None => true,
+            Some((id, q)) => match rfc_vint(b, q) {
+                None => true,
+                Some((len, r)) => match rfc_bytes(b, r, len as int) {
+                    None => true,
+                    Some((v, s)) => {
+                        ||| id <= TP_RETRY_SOURCE_CONNECTION_ID && seen & tp_bit(id) != 0
+                        ||| tp_server_only(id)
+                        ||| id <= TP_RETRY_SOURCE_CONNECTION_ID && tp_value_invalid(id, v)
+                        ||| match rfc_tp_apply(id, v, true, t, seen) {
+                            Some((t2, seen2)) => allowed_tp_err_from(b, s, t2, seen2),
+                            None => false,
+                        }
+                    },
+                },
+            },
+        }
+    }
+}
+
+#[verifier::decreases_by]
+proof fn allowed_tp_err_decreases(b: Seq<u8>, p: int, t: SpecTp, seen: u32) {
+    lemma_decode_len_bounds(b.skip(p));
+    if let Some((n, _)) = rfc_varint_decode(b.skip(p)) {
+        lemma_decode_len_bounds(b.skip(p + n));
+    }
+}
+
+/// A client's transport parameters extension value holds a parameter the RFC lets a server
+/// refuse with TRANSPORT_PARAMETER_ERROR.
+pub open spec fn allowed_tp_err(b: Seq<u8>) -> bool {
+    allowed_tp_err_from(b, 0, spec_default_tp(), 0)
+}
+
+/// For a parameter a client may send, `rfc_tp_value` refuses exactly the §18.2-invalid values.
+proof fn lemma_tp_value_allowed(id: u64, v: Seq<u8>, t: SpecTp)
+    requires
+        id <= TP_RETRY_SOURCE_CONNECTION_ID,
+        !tp_server_only(id),
+    ensures
+        rfc_tp_value(id, v, t) is None <==> tp_value_invalid(id, v),
+{
+    assert(MAX_ACK_DELAY_LIMIT == 0x4000 && MAX_STREAMS_LIMIT == 0x1000_0000_0000_0000) by (bit_vector);
+}
+
+/// From offset `p`, a client's parameters are refused exactly when `allowed_tp_err_from`
+/// holds.
+#[verifier::spinoff_prover]
+proof fn lemma_tp_err_allowed_from(b: Seq<u8>, p: int, t: SpecTp, seen: u32)
+    ensures
+        rfc_tp_from(b, p, true, t, seen) is Err <==> allowed_tp_err_from(b, p, t, seen),
+    decreases (if p < b.len() {
+        b.len() - p
+    } else {
+        0
+    }),
+{
+    hide(rfc_varint_decode);
+    hide(rfc_tp_value);
+    hide(tp_value_invalid);
+    if p < b.len() {
+        lemma_decode_len_bounds(b.skip(p));
+        if let Some((id, q)) = rfc_vint(b, p) {
+            lemma_decode_len_bounds(b.skip(q));
+            if let Some((len, r)) = rfc_vint(b, q) {
+                if let Some((v, s)) = rfc_bytes(b, r, len as int) {
+                    if id <= TP_RETRY_SOURCE_CONNECTION_ID && !tp_server_only(id) {
+                        lemma_tp_value_allowed(id, v, t);
+                    }
+                    if let Some((t2, seen2)) = rfc_tp_apply(id, v, true, t, seen) {
+                        lemma_tp_err_allowed_from(b, s, t2, seen2);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A server refuses a client's transport parameters only as RFC 9000 §7.4, §18, §18.2 and
+/// §20.1 allow, and refuses every one they hold.
+pub proof fn lemma_tp_err_allowed(b: Seq<u8>)
+    ensures
+        rfc_transport_params(b, true) is Err ==> allowed_tp_err(b),
+        allowed_tp_err(b) ==> rfc_transport_params(b, true) is Err,
+{
+    lemma_tp_err_allowed_from(b, 0, spec_default_tp(), 0);
+}
+
+/// `allowed_tp_err` is not vacuous: a block holding only a valid one-byte
+/// initial_source_connection_id (§7.3) parses and is not refusable.
+proof fn lemma_allowed_tp_err_rejects()
+    ensures
+        rfc_transport_params(seq![0x0fu8, 0x01u8, 0xabu8], true) is Ok,
+        !allowed_tp_err(seq![0x0fu8, 0x01u8, 0xabu8]),
+{
+    let b = seq![0x0fu8, 0x01u8, 0xabu8];
+    assert(0x0fu8 >> 6u8 == 0 && 0x01u8 >> 6u8 == 0 && 1u8 << 0u8 == 1 && 0x0fu8 & 0x3f == 0x0f
+        && 0x01u8 & 0x3f == 0x01) by (bit_vector);
+    assert(0u32 & (1u32 << 15u32) == 0) by (bit_vector);
+    assert(b.skip(0)[0] == 0x0f && b.skip(0).subrange(1, 1).len() == 0);
+    assert(rfc_varint_decode(b.skip(0)) == Some((1nat, 0x0fu64)));
+    assert(b.skip(1)[0] == 0x01 && b.skip(1).subrange(1, 1).len() == 0);
+    assert(rfc_varint_decode(b.skip(1)) == Some((1nat, 0x01u64)));
+    assert(rfc_bytes(b, 2, 1) == Some((b.subrange(2, 3), 3int)));
+    reveal_with_fuel(rfc_tp_from, 2);
+    reveal_with_fuel(allowed_tp_err_from, 2);
+}
+
+// =============================================================================
 // Executable code
 // =============================================================================
 
