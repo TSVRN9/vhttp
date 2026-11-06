@@ -178,8 +178,8 @@ rlimit as reported by `--output-json --time-expanded` at `--rlimit 4`. The per-f
 | `quic::conn::Connection::on_handshake_complete` | 1328880 | 1153238 (T1) | 1, 3b |
 | `quic::h3_server::H3Server::apply_one` (caller) [m2] | 313607 | 203717 (T1) | 1 |
 | `quic::h3_server::H3Server::pump` | 183852 | 184389 (T1) | 1, 3b |
-| `quictls::server::shut` | 4171 | | 2 |
-| `quictls::server::report` | 6447 | | 2 |
+| `quictls::server::shut` | 4171 | 7833 (T2) | 2 |
+| `quictls::server::report` | 6447 | 15511 (T2) | 2 |
 | `quic::crypto_stream::CryptoStream::on_crypto` | 42037 | | 3 |
 | `quic::crypto_stream::CryptoStream::read` | 14538 | | 3 |
 | `quic::reassembly::lemma_insert_tight` (new) | — | | 3 |
@@ -203,6 +203,8 @@ Task 0 (rlimit headroom) evidence: `vt-9a-evidence/t0` (before: 423878b, whose c
 quic top 8 after Task 0 (`--rlimit 4`, 1212 verified, 0 errors): `Connection::add_space_packet` 7595647, `Streams::poll_max_data` 7553000, `streams::poll_stream` 7402168, `Connection::poll_transmit` 7133799, `Streams::recv_op_at` 6812261, `recv_stream::lemma_same_ranges` 6750564, `header::serialize_long_header` 6542112, `RecvStream::data_buffer` 6321936. `lemma_same_ranges` is untouched and its query text is byte-identical, but it rose from 212497: replayed alone, both the before and the after query cost 7454847, so the 212497 came from the state the `recv_stream` module's solver had reached by then, which the `on_data` split changed. Spinning off `on_data` raised it to 7437501; it cannot be spun off itself (Verus panics on `hide(rfc_recv_step)` in a spun-off fn).
 
 Task 1 (close code at the `Connection` boundary) evidence: `vt-9a-evidence/t1` (before: `t1/base` at bbb5d1d, identical to T0's after; after: `t1/after`). quic top 8 after Task 1 (`--rlimit 4`, 1212 verified, 0 errors; quictls 43 verified, 0 errors): `Connection::add_space_packet` 7595647, `Streams::poll_max_data` 7553000, `streams::poll_stream` 7402168, `Connection::poll_transmit` 7133799, `Streams::recv_op_at` 6812261, `recv_stream::lemma_same_ranges` 6750564, `header::serialize_long_header` 6542112, `RecvStream::data_buffer` 6321936 (unchanged from T0). `on_counted` rose 1078483 → 1399145, as the preflight measured. T0 review m1: without the `forall|q2|` ensures of `Paths::lemma_lowest_expired` (and its `assert forall`), `abandon_at` rises 4220291 → 5033281 (`lemma_lowest_expired` 165595 → 34993, `on_timeout` 1573567 → 1228638), so the conjunct stays: it carries `abandon_at`'s rlimit, not its provability (`t1/m1-noforall`). T1 fix round (review I1): `on_peer_params` gained the converse (`old Open && !peer_tp_known ==> (!final Open <==> isci != Some(client_scid))`) and the §7.3 absence clause; quic top 8 unchanged (`t1/fix1`).
+
+Task 2 (close sinks `shut` and `report`) evidence: `vt-9a-evidence/t2` (`run1`). quictls 43 verified, 0 errors; top 8: `QuicServer::accept` 3631736, `on_secrets` 1153995, `feed` 608838, `receive` 341945, `lemma_fed` 327287, `transmit` 274321, `send_response` 255725, `lemma_push` 252882; `shut` 7833, `report` 15511. quic re-run (1212 verified, 0 errors): top 8 unchanged from T1.
 
 ## 5. Inventory claims corrected
 
