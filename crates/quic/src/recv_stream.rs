@@ -255,20 +255,60 @@ pub open spec fn retired(s: SpecRecv) -> nat {
     }
 }
 
+//= https://www.rfc-editor.org/rfc/rfc9000#section-19.10
+//# When counting data toward this limit, an endpoint accounts for the
+//# largest received offset of data that is sent or received on the
+//# stream.
+//= https://www.rfc-editor.org/rfc/rfc9000#section-19.8
+//# The largest offset delivered on a stream -- the sum of the offset and
+//# data length
+//= https://www.rfc-editor.org/rfc/rfc9000#section-19.8
+//# When a Stream Data field has a length of 0, the offset in the STREAM
+//# frame is the offset of the next byte that would be sent.
+/// The largest received offset of the STREAM frames `ins`: the largest offset plus data length,
+/// an empty frame's offset included (the next byte its sender would send), or 0.
+pub open spec fn largest_received_offset(ins: Seq<(nat, Seq<u8>)>) -> nat
+    decreases ins.len(),
+{
+    if ins.len() == 0 {
+        0
+    } else {
+        let p = largest_received_offset(ins.drop_last());
+        let e = ins.last().0 + ins.last().1.len();
+        if e > p {
+            e
+        } else {
+            p
+        }
+    }
+}
+
 //= https://www.rfc-editor.org/rfc/rfc9000#section-4.5
 //# The final size is the amount of flow control credit that is consumed
 //# by a stream.
+/// The flow control credit the stream has consumed: its final size once known, else the
+/// largest received offset of the frames received (§19.10).
+#[verifier::opaque]
+pub open spec fn credit_before(s: SpecRecv) -> nat {
+    match s.final_size {
+        Some(f) => f,
+        None => largest_received_offset(s.ins),
+    }
+}
+
 /// The flow control credit the stream has consumed once a STREAM frame ending at `end` is
-/// received: its final size once known, else the largest offset received (RFC 9000 §4.5).
-pub closed spec fn credit_after(s: SpecRecv, end: nat, fin: bool) -> nat {
+/// received: its final size once known (the frame's own with a FIN), else the largest received
+/// offset with the frame's.
+#[verifier::opaque]
+pub open spec fn credit_after(s: SpecRecv, end: nat, fin: bool) -> nat {
     if fin {
         end
     } else if s.final_size is Some {
         s.final_size->0
-    } else if end > s.high {
+    } else if end > largest_received_offset(s.ins) {
         end
     } else {
-        s.high
+        largest_received_offset(s.ins)
     }
 }
 
@@ -281,11 +321,12 @@ pub closed spec fn credit_after(s: SpecRecv, end: nat, fin: bool) -> nat {
 //# a STREAM frame or a RESET_STREAM frame containing a different
 //# final size to the one already established.
 /// A STREAM frame ending at `end` that is a final-size error, before it is received in `s`:
-/// data past the known final size, a final size below the largest offset received, or a
+/// data past the known final size, a final size below the largest received offset, or a
 /// final size different from the known one.
-pub closed spec fn final_size_trigger(s: SpecRecv, end: nat, fin: bool) -> bool {
+#[verifier::opaque]
+pub open spec fn final_size_trigger(s: SpecRecv, end: nat, fin: bool) -> bool {
     ||| s.final_size is Some && end > s.final_size->0
-    ||| fin && end < s.high
+    ||| fin && end < largest_received_offset(s.ins)
     ||| fin && s.final_size is Some && end != s.final_size->0
 }
 
@@ -295,10 +336,11 @@ pub closed spec fn final_size_trigger(s: SpecRecv, end: nat, fin: bool) -> bool 
 //# or stream data limits; see Section 11 for details on error handling.
 /// A STREAM frame ending at `end` that violates a limit we advertised: the stream's (`s.limit`,
 /// the largest maximum stream data sent, §19.10) or the connection's, of which `conn_room`
-/// bytes of credit are left for this stream to consume past what it has (`counted`, §4.5).
-pub closed spec fn flow_trigger(s: SpecRecv, end: nat, fin: bool, conn_room: nat) -> bool {
+/// bytes of credit are left for this stream to consume past what it has (`credit_before`).
+#[verifier::opaque]
+pub open spec fn flow_trigger(s: SpecRecv, end: nat, fin: bool, conn_room: nat) -> bool {
     ||| end > s.limit
-    ||| credit_after(s, end, fin) > counted(s) + conn_room
+    ||| credit_after(s, end, fin) > credit_before(s) + conn_room
 }
 
 //= https://www.rfc-editor.org/rfc/rfc9000#section-11
@@ -309,7 +351,8 @@ pub closed spec fn flow_trigger(s: SpecRecv, end: nat, fin: bool, conn_room: nat
 /// The errors `on_data` may return for a STREAM frame at `off` with `len` bytes: FINAL_SIZE_ERROR
 /// on a final-size trigger (§4.5's SHOULDs, which we raise), FLOW_CONTROL_ERROR on a limit
 /// violation (§4.1's MUST). With both triggers either code applies (§11).
-pub closed spec fn recv_allowed_err(
+#[verifier::opaque]
+pub open spec fn recv_allowed_err(
     s: SpecRecv,
     off: nat,
     len: nat,
@@ -354,7 +397,13 @@ pub proof fn lemma_recv_err_rfc(
                 > conn_room))
         }),
 {
+    reveal(credit_before);
+    reveal(credit_after);
+    reveal(final_size_trigger);
+    reveal(flow_trigger);
+    reveal(recv_allowed_err);
     let end = off + data.len();
+    assert(counted(s) == credit_before(s));
     assert(data_final_bad(s, end, fin) <==> final_size_trigger(s, end, fin));
     if !data_final_bad(s, end, fin) && end <= s.limit {
         if terminal(s.state) {
@@ -409,6 +458,11 @@ proof fn lemma_recv_allowed_err_rejects()
         !recv_allowed_err(recv_init(100), 0, 200, false, 1000, PROTOCOL_VIOLATION),
         recv_allowed_err(recv_init(100), 0, 200, false, 1000, FLOW_CONTROL_ERROR),
 {
+    reveal(credit_before);
+    reveal(credit_after);
+    reveal(final_size_trigger);
+    reveal(flow_trigger);
+    reveal(recv_allowed_err);
 }
 
 /// The concatenated `Data` payloads.
@@ -459,6 +513,9 @@ pub open spec fn recv_inv(id: u64, s: SpecRecv) -> bool {
     &&& s.delivered == rfc_contiguous(m)
     &&& forall|k: nat| #[trigger] m.contains_key(k) ==> k < s.high
     &&& s.delivered <= s.high <= counted(s) <= s.limit
+    // `high` is the RFC's largest received offset until the final size is known (§19.10).
+    &&& largest_received_offset(s.ins) <= s.high
+    &&& s.final_size is None ==> s.high == largest_received_offset(s.ins)
     &&& (s.state is Recv <==> s.final_size is None)
     &&& s.state is SizeKnown ==> s.final_size != Some(s.delivered)
     &&& s.state is DataRead ==> s.final_size == Some(s.delivered)
@@ -509,6 +566,7 @@ proof fn lemma_data_step(id: u64, s: SpecRecv, off: nat, data: Seq<u8>, fin: boo
     }
     let m = rfc_received(s.ins);
     let ins = s.ins.push((off, data));
+    assert(ins.drop_last() =~= s.ins);
     let m2 = rfc_received(ins);
     let n = rfc_contiguous(m2);
     let d = s.delivered;
@@ -1079,7 +1137,7 @@ impl RecvStream {
         &&& self.stopped matches Some(c) ==> c <= VARINT_MAX
         &&& (self.re is None <==> s.state is ResetRead)
         &&& self.re matches Some(r) ==> r.wf() && r.inserted() == s.ins && r.base() == s.delivered
-        // The window ends at a received byte: an empty STREAM frame does not grow it (§2.2).
+        // The window ends at a received byte: an empty STREAM frame does not grow it.
         &&& self.re matches Some(r) ==> r.tight()
         // The per-stream buffer bound, from `insert`'s and `pop`'s high-water ensures.
         &&& self.buffered_len_spec() <= s.limit - s.delivered
