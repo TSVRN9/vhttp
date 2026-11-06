@@ -323,6 +323,106 @@ impl Reassembly {
         self.buf.len() - self.head
     }
 
+    /// `insert`'s copy: the bytes of `data` from index `j` on go into the slots not yet held
+    /// (split from `insert` for the rlimit).
+    #[verifier::spinoff_prover]
+    fn fill(&mut self, off: u64, data: &[u8], j: usize)
+        requires
+            ({
+                let m = rfc_received(old(self).ins@);
+                let len = old(self).buf@.len();
+                let h = old(self).head as int;
+                &&& old(self).have@.len() == len
+                &&& h <= len
+                &&& h == 0 || 2 * h < len
+                &&& old(self).base + len - h <= VARINT_MAX
+                &&& off + data@.len() <= old(self).base + len - h
+                &&& j <= data@.len()
+                &&& j < data@.len() ==> old(self).base <= off + j
+                &&& old(self).base <= rfc_contiguous(m)
+                &&& forall|k: nat| #[trigger] m.contains_key(k) ==> k < old(self).base + len - h
+                &&& forall|i: int|
+                    h <= i < len ==> (#[trigger] old(self).have@[i] <==> (m.contains_key(
+                        (old(self).base + i - h) as nat,
+                    ) || (off <= old(self).base + i - h < off + j)))
+                &&& forall|i: int|
+                    h <= i < len && old(self).have@[i] ==> #[trigger] old(self).buf@[i] == if m.contains_key(
+                        (old(self).base + i - h) as nat,
+                    ) {
+                        m[(old(self).base + i - h) as nat]
+                    } else {
+                        data@[old(self).base + i - h - off]
+                    }
+            }),
+        ensures
+            final(self).ins@ == old(self).ins@,
+            final(self).base == old(self).base,
+            final(self).head == old(self).head,
+            final(self).buf@.len() == old(self).buf@.len(),
+            final(self).have@.len() == old(self).buf@.len(),
+            ({
+                let m = rfc_received(old(self).ins@);
+                let len = old(self).buf@.len();
+                let h = old(self).head as int;
+                &&& forall|i: int|
+                    h <= i < len ==> (#[trigger] final(self).have@[i] <==> (m.contains_key(
+                        (old(self).base + i - h) as nat,
+                    ) || (off <= old(self).base + i - h < off + data@.len())))
+                &&& forall|i: int|
+                    h <= i < len && final(self).have@[i] ==> #[trigger] final(self).buf@[i] == if m.contains_key(
+                        (old(self).base + i - h) as nat,
+                    ) {
+                        m[(old(self).base + i - h) as nat]
+                    } else {
+                        data@[old(self).base + i - h - off]
+                    }
+            }),
+    {
+        let ghost m = rfc_received(self.ins@);
+        let ghost len = self.buf@.len();
+        let ghost h = self.head as int;
+        let ghost end = off + data@.len();
+        let mut j = j;
+        while j < data.len()
+            invariant
+                self.ins@ == old(self).ins@,
+                self.base == old(self).base,
+                self.head == h,
+                m == rfc_received(self.ins@),
+                self.buf@.len() == len,
+                self.have@.len() == len,
+                h <= len,
+                h == 0 || 2 * h < len,
+                self.base + len - h <= VARINT_MAX,
+                end == off + data@.len(),
+                end <= self.base + len - h,
+                j <= data@.len(),
+                j < data@.len() ==> self.base <= off + j,
+                self.base <= rfc_contiguous(m),
+                forall|k: nat| #[trigger] m.contains_key(k) ==> k < self.base + len - h,
+                forall|i: int|
+                    h <= i < len ==> (#[trigger] self.have@[i] <==> (m.contains_key(
+                        (self.base + i - h) as nat,
+                    ) || (off <= self.base + i - h < off + j))),
+                forall|i: int|
+                    h <= i < len && self.have@[i] ==> #[trigger] self.buf@[i] == if m.contains_key(
+                        (self.base + i - h) as nat,
+                    ) {
+                        m[(self.base + i - h) as nat]
+                    } else {
+                        data@[self.base + i - h - off]
+                    },
+            decreases data@.len() - j,
+        {
+            let idx = (off + j as u64 - self.base) as usize + self.head;
+            if !self.have[idx] {
+                self.buf[idx] = data[j];
+                self.have[idx] = true;
+            }
+            j = j + 1;
+        }
+    }
+
     //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
     //# Data that has already been received can be
     //# discarded.
@@ -368,51 +468,14 @@ impl Reassembly {
         }
         let ghost len = self.buf@.len();
         let ghost h = self.head as int;
-        let mut j: usize = if off >= self.base {
+        let j: usize = if off >= self.base {
             0
         } else if self.base - off < data.len() as u64 {
             (self.base - off) as usize
         } else {
             data.len()
         };
-        while j < data.len()
-            invariant
-                self.ins@ == old(self).ins@,
-                self.base == old(self).base,
-                self.head == h,
-                m == rfc_received(self.ins@),
-                self.buf@.len() == len,
-                self.have@.len() == len,
-                h <= len,
-                h == 0 || 2 * h < len,
-                self.base + len - h <= VARINT_MAX,
-                end == off + data@.len(),
-                end <= self.base + len - h,
-                j <= data@.len(),
-                j < data@.len() ==> self.base <= off + j,
-                self.base <= rfc_contiguous(m),
-                forall|k: nat| #[trigger] m.contains_key(k) ==> k < self.base + len - h,
-                forall|i: int|
-                    h <= i < len ==> (#[trigger] self.have@[i] <==> (m.contains_key(
-                        (self.base + i - h) as nat,
-                    ) || (off <= self.base + i - h < off + j))),
-                forall|i: int|
-                    h <= i < len && self.have@[i] ==> #[trigger] self.buf@[i] == if m.contains_key(
-                        (self.base + i - h) as nat,
-                    ) {
-                        m[(self.base + i - h) as nat]
-                    } else {
-                        data@[self.base + i - h - off]
-                    },
-            decreases data@.len() - j,
-        {
-            let idx = (off + j as u64 - self.base) as usize + self.head;
-            if !self.have[idx] {
-                self.buf[idx] = data[j];
-                self.have[idx] = true;
-            }
-            j = j + 1;
-        }
+        self.fill(off, data, j);
         self.ins = Ghost(self.ins@.push((off as nat, data@)));
         proof {
             let m2 = rfc_received(self.ins@);
@@ -432,6 +495,40 @@ impl Reassembly {
             assert(self.base <= rfc_contiguous(m2));
             assert(forall|k: nat| #[trigger] m2.contains_key(k) ==> k < self.base + len - h);
         }
+    }
+
+    /// `pop`'s scan: appends the held run starting at `head` to `out` and returns its end
+    /// (split from `pop` for the rlimit).
+    #[verifier::spinoff_prover]
+    fn run_end(&self, out: &mut Vec<u8>) -> (n: usize)
+        requires
+            self.wf(),
+        ensures
+            self.head <= n <= self.have@.len(),
+            forall|k: int| self.head <= k < n ==> #[trigger] self.have@[k],
+            n < self.have@.len() ==> !self.have@[n as int],
+            final(out)@ == old(out)@ + self.buf@.subrange(self.head as int, n as int),
+    {
+        let ghost h = self.head as int;
+        let mut n: usize = self.head;
+        while n < self.have.len() && self.have[n]
+            invariant
+                self.buf@.len() == self.have@.len(),
+                h == self.head,
+                h <= n <= self.have@.len(),
+                forall|k: int| h <= k < n ==> #[trigger] self.have@[k],
+                out@ == old(out)@ + self.buf@.subrange(h, n as int),
+            decreases self.have@.len() - n,
+        {
+            out.push(self.buf[n]);
+            proof {
+                assert(self.buf@.subrange(h, n + 1) =~= self.buf@.subrange(h, n as int).push(
+                    self.buf@[n as int],
+                ));
+            }
+            n = n + 1;
+        }
+        n
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
@@ -459,25 +556,7 @@ impl Reassembly {
         proof {
             lemma_contiguous_exists(m);
         }
-        let mut n: usize = self.head;
-        while n < self.have.len() && self.have[n]
-            invariant
-                *self == *old(self),
-                self.wf(),
-                h == self.head,
-                h <= n <= self.have@.len(),
-                forall|k: int| h <= k < n ==> #[trigger] self.have@[k],
-                out@ == old(out)@ + self.buf@.subrange(h, n as int),
-            decreases self.have@.len() - n,
-        {
-            out.push(self.buf[n]);
-            proof {
-                assert(self.buf@.subrange(h, n + 1) =~= self.buf@.subrange(h, n as int).push(
-                    self.buf@[n as int],
-                ));
-            }
-            n = n + 1;
-        }
+        let n = self.run_end(out);
         let ghost run = self.buf@.subrange(h, n as int);
         proof {
             let c = b + (n - h) as nat;

@@ -1139,6 +1139,106 @@ impl Paths {
         }
     }
 
+    /// `on_timeout`'s abandon step: entry `i` is the lowest expired one; its challenge is
+    /// cleared (split from `on_timeout` for the rlimit).
+    #[verifier::spinoff_prover]
+    fn abandon_at(&mut self, i: usize, Ghost(now): Ghost<u64>, Ghost(pto_us): Ghost<u64>) -> (q: PathId)
+        requires
+            old(self).wf(),
+            i < old(self).paths@.len(),
+            expired(old(self).paths@[i as int]@, now, pto_us),
+            forall|k: int| 0 <= k < i ==> !expired(#[trigger] old(self).paths@[k]@, now, pto_us),
+        ensures
+            final(self).wf(),
+            old(self).has(q),
+            expired(old(self).path(q), now, pto_us),
+            forall|q2: PathId|
+                #[trigger] old(self).has(q2) && old(self).index_spec(q2).unwrap()
+                    < old(self).index_spec(q).unwrap() ==> !expired(
+                    old(self).path(q2),
+                    now,
+                    pto_us,
+                ),
+            kept(*old(self), *final(self), q),
+            final(self).last_validated_spec() == if mtu_fail(old(self).path(q))
+                && old(self).last_validated_spec() == Some(q) {
+                old(self).prev_validated_spec()
+            } else {
+                old(self).last_validated_spec()
+            },
+            final(self).prev_validated_spec() == if mtu_fail(old(self).path(q)) && (old(
+                self,
+            ).last_validated_spec() == Some(q) || old(self).prev_validated_spec() == Some(q)) {
+                None
+            } else {
+                old(self).prev_validated_spec()
+            },
+            final(self).path(q) == (SpecPath {
+                challenge: None,
+                state: if old(self).path(q).state is Validated {
+                    PathState::Validated
+                } else {
+                    PathState::Unvalidated
+                },
+                mtu_failed: old(self).path(q).mtu_failed || mtu_fail(old(self).path(q)),
+                ..old(self).path(q)
+            }),
+            final(self).timed_count() < old(self).timed_count(),
+    {
+        let id = self.paths[i].id;
+        let ghost a = *self;
+        proof {
+            assert(path_wf(self.paths@[i as int]));
+            Paths::lemma_lowest_expired(a, i as int, now, pto_us);
+        }
+        self.paths[i].challenge = None;
+        match self.paths[i].state {
+            PathState::Validated => {
+                if !self.paths[i].mtu_ok {
+                    self.paths[i].mtu_failed = true;
+                    self.forget_validated(id);
+                }
+            },
+            _ => {
+                self.paths[i].state = PathState::Unvalidated;
+            },
+        }
+        proof {
+            Paths::lemma_set(a, *self, i as int);
+            lemma_tcount_update(a.paths@, i as int, self.paths@[i as int]);
+            assert(self.paths@ == a.paths@.update(i as int, self.paths@[i as int]));
+        }
+        id
+    }
+
+    /// Entry `i` is expired and no lower entry is: no path below it in the table is expired.
+    #[verifier::spinoff_prover]
+    proof fn lemma_lowest_expired(a: Paths, i: int, now: u64, pto_us: u64)
+        requires
+            a.wf(),
+            0 <= i < a.paths@.len(),
+            expired(a.paths@[i]@, now, pto_us),
+            forall|k: int| 0 <= k < i ==> !expired(#[trigger] a.paths@[k]@, now, pto_us),
+        ensures
+            a.has(a.paths@[i].id),
+            a.index_spec(a.paths@[i].id) == Some(i as usize),
+            a.path(a.paths@[i].id) == a.paths@[i]@,
+            expired(a.path(a.paths@[i].id), now, pto_us),
+            forall|q2: PathId|
+                #[trigger] a.has(q2) && a.index_spec(q2).unwrap() < a.index_spec(
+                    a.paths@[i].id,
+                ).unwrap() ==> !expired(a.path(q2), now, pto_us),
+    {
+        a.lemma_index(i);
+        assert forall|q2: PathId|
+            #[trigger] a.has(q2) && a.index_spec(q2).unwrap() < a.index_spec(
+                a.paths@[i].id,
+            ).unwrap() implies !expired(a.path(q2), now, pto_us) by {
+            let j = a.lemma_has(q2);
+            assert(!expired(a.paths@[j]@, now, pto_us));
+        }
+    }
+
     /// Abandon at most one expired validation (§8.2.4: 3·PTO after the challenge started):
     /// the lowest entry whose sent challenge has expired. Its challenge is cleared and it is
     /// Unvalidated again, unless it was Validated. A Validated path without a confirmed MTU
@@ -1205,43 +1305,7 @@ impl Paths {
             if !self.paths[i].challenge_owed {
                 if let Some((_, t, _)) = self.paths[i].challenge {
                     if now >= sat_add(t, w) {
-                        let id = self.paths[i].id;
-                        let ghost a = *self;
-                        proof {
-                            assert(path_wf(self.paths@[i as int]));
-                            a.lemma_index(i as int);
-                        }
-                        self.paths[i].challenge = None;
-                        match self.paths[i].state {
-                            PathState::Validated => {
-                                if !self.paths[i].mtu_ok {
-                                    self.paths[i].mtu_failed = true;
-                                    self.forget_validated(id);
-                                }
-                            },
-                            _ => {
-                                self.paths[i].state = PathState::Unvalidated;
-                            },
-                        }
-                        proof {
-                            Paths::lemma_set(a, *self, i as int);
-                            lemma_tcount_update(a.paths@, i as int, self.paths@[i as int]);
-                            assert(self.paths@ == a.paths@.update(
-                                i as int,
-                                self.paths@[i as int],
-                            ));
-                            assert forall|q2: PathId|
-                                #[trigger] a.has(q2) && a.index_spec(q2).unwrap()
-                                    < a.index_spec(id).unwrap() implies !expired(
-                                a.path(q2),
-                                now,
-                                pto_us,
-                            ) by {
-                                let j = a.lemma_has(q2);
-                                assert(!expired(a.paths@[j]@, now, pto_us));
-                            }
-                        }
-                        return Some(id);
+                        return Some(self.abandon_at(i, Ghost(now), Ghost(pto_us)));
                     }
                 }
             }

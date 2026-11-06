@@ -889,13 +889,12 @@ proof fn lemma_close_rt(app: bool, ec: u64, ft: u64, reason: Seq<u8>, rest: Seq<
     lemma_bytes_at(b, p2 + vl.len(), reason, rest);
 }
 
-/// `lemma_body_roundtrip` for PADDING through STREAM (split for the rlimit).
+/// `lemma_body_roundtrip` for PADDING, PING and ACK (split for the rlimit).
 #[verifier::spinoff_prover]
 proof fn lemma_body_roundtrip_a(f: SpecFrame, rest: Seq<u8>)
     requires
         frame_wf(f),
-        f is Padding || f is Ping || f is Ack || f is ResetStream || f is StopSending || f is Crypto
-            || f is Stream,
+        f is Padding || f is Ping || f is Ack,
     ensures
         rfc_frame_body(spec_frame_type(f), spec_frame_body(f) + rest) == Ok::<(SpecFrame, nat), u64>(
             (f, spec_frame_body(f).len()),
@@ -915,12 +914,44 @@ proof fn lemma_body_roundtrip_a(f: SpecFrame, rest: Seq<u8>)
             lemma_serialize_bytes::<true>(ty);
             assert(spec_ack_bytes(a).skip(1) =~= spec_ack_body(a));
         },
+        _ => {},
+    }
+}
+
+/// `lemma_body_roundtrip` for RESET_STREAM and STOP_SENDING (split for the rlimit).
+#[verifier::spinoff_prover]
+proof fn lemma_body_roundtrip_r(f: SpecFrame, rest: Seq<u8>)
+    requires
+        frame_wf(f),
+        f is ResetStream || f is StopSending,
+    ensures
+        rfc_frame_body(spec_frame_type(f), spec_frame_body(f) + rest) == Ok::<(SpecFrame, nat), u64>(
+            (f, spec_frame_body(f).len()),
+        ),
+{
+    match f {
         SpecFrame::ResetStream { stream_id, error_code, final_size } => {
             lemma_reset_stream_rt(stream_id, error_code, final_size, rest);
         },
         SpecFrame::StopSending { stream_id, error_code } => {
             lemma_two_varints_rt(stream_id, error_code, rest);
         },
+        _ => {},
+    }
+}
+
+/// `lemma_body_roundtrip` for CRYPTO and STREAM (split for the rlimit).
+#[verifier::spinoff_prover]
+proof fn lemma_body_roundtrip_s(f: SpecFrame, rest: Seq<u8>)
+    requires
+        frame_wf(f),
+        f is Crypto || f is Stream,
+    ensures
+        rfc_frame_body(spec_frame_type(f), spec_frame_body(f) + rest) == Ok::<(SpecFrame, nat), u64>(
+            (f, spec_frame_body(f).len()),
+        ),
+{
+    match f {
         SpecFrame::Crypto { offset, data } => {
             lemma_crypto_rt(offset, data, rest);
         },
@@ -992,9 +1023,12 @@ proof fn lemma_body_roundtrip(f: SpecFrame, rest: Seq<u8>)
             (f, spec_frame_body(f).len()),
         ),
 {
-    if f is Padding || f is Ping || f is Ack || f is ResetStream || f is StopSending || f is Crypto
-        || f is Stream {
+    if f is Padding || f is Ping || f is Ack {
         lemma_body_roundtrip_a(f, rest);
+    } else if f is ResetStream || f is StopSending {
+        lemma_body_roundtrip_r(f, rest);
+    } else if f is Crypto || f is Stream {
+        lemma_body_roundtrip_s(f, rest);
     } else {
         lemma_body_roundtrip_b(f, rest);
     }

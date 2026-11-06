@@ -163,40 +163,44 @@ rlimit as reported by `--output-json --time-expanded` at `--rlimit 4`. The per-f
 
 | fn | before | after | task |
 |---|---|---|---|
-| `quic::recv_stream::RecvStream::on_data` | 11790727 | | 0, 6 |
-| `quic::datagram::pick` | 12095817 | | 0 |
-| `quic::path::Paths::on_timeout` | 11.04M | | 0 |
-| `quic::reassembly::Reassembly::insert` | 6848875 | | 0 |
+| `quic::recv_stream::RecvStream::on_data` | 11790727 | 2202435 (T0) | 0, 6 |
+| `quic::datagram::pick` | 12095817 | 2730524 (T0) | 0 |
+| `quic::path::Paths::on_timeout` | 11043766 | 1573567 (T0) | 0 |
+| `quic::reassembly::Reassembly::insert` | 6848875 | 2077934 (T0) | 0 |
 | `quic::conn::Connection::poll_transmit` | 7133799 | | 3, 3b |
 | `quic::conn::Connection::on_datagram` | 1717635 | | 3, 3b |
 | `quic::conn::Connection::close` | 743986 | | 1 |
-| `quic::conn::Connection::close_internal` | | | 1 |
-| `quic::conn::Connection::on_tls_alert` | | | 1 |
-| `quic::conn::Connection::on_peer_params` | | | 1, 3b |
-| `quic::conn::Connection::close_on_error` (caller) | | | 1 |
+| `quic::conn::Connection::close_internal` | 45734 | | 1 |
+| `quic::conn::Connection::on_tls_alert` | 226738 | | 1 |
+| `quic::conn::Connection::on_peer_params` | 671420 | | 1, 3b |
+| `quic::conn::Connection::close_on_error` (caller) | 414859 | | 1 |
 | `quic::conn::Connection::on_counted` (caller) | 1078483 | | 1 |
-| `quic::conn::Connection::on_handshake_complete` | | | 1, 3b |
+| `quic::conn::Connection::on_handshake_complete` | 1328880 | | 1, 3b |
 | `quic::h3_server::H3Server::apply_one` (caller) [m2] | 313607 | | 1 |
-| `quic::h3_server::H3Server::pump` | 184K | | 1, 3b |
-| `quictls::server::shut` | | | 2 |
-| `quictls::server::report` | | | 2 |
-| `quic::crypto_stream::CryptoStream::on_crypto` | | | 3 |
-| `quic::crypto_stream::CryptoStream::read` | | | 3 |
+| `quic::h3_server::H3Server::pump` | 183852 | | 1, 3b |
+| `quictls::server::shut` | 4171 | | 2 |
+| `quictls::server::report` | 6447 | | 2 |
+| `quic::crypto_stream::CryptoStream::on_crypto` | 42037 | | 3 |
+| `quic::crypto_stream::CryptoStream::read` | 14538 | | 3 |
 | `quic::reassembly::lemma_insert_tight` (new) | — | | 3 |
-| `quic::conn::Connection::crypto_read` | | | 3, 3b |
-| `quic::conn::Connection::crypto_end` | | | 3 |
-| `quic::conn::Connection::on_crypto_frame` | 357K | | 3 |
-| `quic::conn::Connection::discard` | | | 3, 3b |
-| `quic::conn::Connection::crypto_write` | | | 3b |
-| `quic::pipeline::{receive, transmit, refeed_one_rtt}` | | | 3b |
-| `quic::h3_server::H3Server::{on_timeout, send_response}` | | | 3b |
-| `quictls::server::QuicServer::{receive, transmit, accept, tls_step, feed, apply, on_secrets}` | | | 3b |
+| `quic::conn::Connection::crypto_read` | 1407354 | | 3, 3b |
+| `quic::conn::Connection::crypto_end` | 42704 | | 3 |
+| `quic::conn::Connection::on_crypto_frame` | 356795 | | 3 |
+| `quic::conn::Connection::discard` | 464457 | | 3, 3b |
+| `quic::conn::Connection::crypto_write` | 261459 | | 3b |
+| `quic::pipeline::{receive, transmit, refeed_one_rtt}` | 37596, 124540, 44385 | | 3b |
+| `quic::h3_server::H3Server::{on_timeout, send_response}` | 31317, 203780 | | 3b |
+| `quictls::server::QuicServer::{receive, transmit, accept, tls_step, feed, apply, on_secrets}` | 327717, 271997, 3631736, 214332, 681625, 93837, 1153995 | | 3b |
 | `quic::tp::lemma_tp_err_allowed` (new) | — | | 4 |
-| `quictls::server::QuicServer::superseded` | | | 3b, 5 |
-| `quictls::server::QuicServer::key_changes` | | | 3b, 5 |
-| `quictls::server::QuicServer::on_params` | | | 5 |
-| `quictls::server::QuicServer::unconsumed` | | | 5 |
-| `quictls::server::key_events` | | | 3b |
+| `quictls::server::QuicServer::superseded` | 88699 | | 3b, 5 |
+| `quictls::server::QuicServer::key_changes` | 103831 | | 3b, 5 |
+| `quictls::server::QuicServer::on_params` | 80863 | | 5 |
+| `quictls::server::QuicServer::unconsumed` | 31707 | | 5 |
+| `quictls::server::key_events` | 77403 | | 3b |
+
+Task 0 (rlimit headroom) evidence: `vt-9a-evidence/t0` (before: 423878b, whose code is 73cc244's; 73cc244..423878b changes docs only) and `vt-9a-evidence/t0b` (after). quic top 8 before (1201 verified, 0 errors): `datagram::pick` 12095817, `RecvStream::on_data` 11790727, `Paths::on_timeout` 11043766, `frame::lemma_body_roundtrip_a` 9825619, `Streams::poll_max_streams` 8623542, `Connection::send_path_datagram` 8323049, `Reassembly::pop` 8184809, `streams::poll_stream` 7820849; the first seven are above 8M. Each of the seven was split into private helpers (requires/ensures of every existing pub/crate fn unchanged); the new helpers after T0: `RecvStream::data_gate` 152269, `RecvStream::data_buffer` 6321936, `datagram::pick_step` 877778, `Paths::abandon_at` 4220291, `Paths::lemma_lowest_expired` 165595, `frame::lemma_body_roundtrip_{a,r,s}` 496237/158707/550740, `Reassembly::fill` 6116767, `Reassembly::run_end` 45616, `Reassembly::pop` 748360 (was 8184809), `streams::lemma_max_streams_kept` 1448086, `Streams::poll_max_streams` 3352955, `Connection::lemma_idle_timers` 67165, `Connection::send_path_datagram` 5070344.
+
+quic top 8 after Task 0 (`--rlimit 4`, 1212 verified, 0 errors): `Connection::add_space_packet` 7595647, `Streams::poll_max_data` 7553000, `streams::poll_stream` 7402168, `Connection::poll_transmit` 7133799, `Streams::recv_op_at` 6812261, `recv_stream::lemma_same_ranges` 6750564, `header::serialize_long_header` 6542112, `RecvStream::data_buffer` 6321936. `lemma_same_ranges` is untouched and its query text is byte-identical, but it rose from 212497: replayed alone, both the before and the after query cost 7454847, so the 212497 came from the state the `recv_stream` module's solver had reached by then, which the `on_data` split changed. Spinning off `on_data` raised it to 7437501; it cannot be spun off itself (Verus panics on `hide(rfc_recv_step)` in a spun-off fn).
 
 ## 5. Inventory claims corrected
 
