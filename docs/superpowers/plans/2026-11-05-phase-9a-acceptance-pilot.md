@@ -67,7 +67,7 @@ The lift through `on_frame`/`on_counted` and quictls `apply`/`feed`/`tls_step` i
   - 9a edits no tls file.
 - verify.sh's final line stays byte-identical: `verify.sh: all crates verified, duvet ok, ct ok (10 declassify), cost 19/36, escapes accounted (0), binary ok (49 fns)`.
 - cargo test --workspace stays green (902 tests at main 73cc244).
-  - Plus this plan's new tests: 904 after Task 1, 910 after Task 3 (fix round 1 added 3), 912 after Task 5, 913 after Task 6. 0 warnings in `cargo build` and `cargo test`.
+  - Plus this plan's new tests: 904 after Task 1, 910 after Task 3 (fix round 1 added 3), 913 after Task 3c, 915 after Task 5, 916 after Task 6. 0 warnings in `cargo build` and `cargo test`.
 - No attribution lines in commits.
 - **Duvet:** every new spec fn and ensures that states an RFC condition carries `//= https://www.rfc-editor.org/rfc/rfcNNNN#section-X` plus a contiguous `//#` quote copied verbatim from `.duvet/specifications/www.rfc-editor.org/rfc/`.
   - `.duvet/specifications` and `.duvet/requirements` are git-ignored and missing in wt-9a. Copy both once from `/home/tavern/Projects/rust/web-server/.duvet/`.
@@ -364,6 +364,31 @@ The lift through `on_frame`/`on_counted` and quictls `apply`/`feed`/`tls_step` i
   - **M2:** move the `data.len() == 0` block after the window check. Expected: the iff and `crypto_allowed_err` postconditions fail, and so does `crypto_empty_past_window_ok`.
   - **M3:** in conn.rs, remove `reveal(crx_ok)` from `crypto_end`. Expected: the `self.wf()` precondition of `crx_k.lemma_end_received()`/`crx_k.end()` fails (corrected after the run; the `crypto_received` postcondition is M3b's). This shows the opaque wrapper actually hides the conjunct.
   - **M3b [T3 review m3]:** keep `reveal(crx_ok)` and delete the three `lemma_end_received()` calls. Expected: `crypto_end`'s `r > 0 ==> crypto_received(..)` postcondition fails.
+
+### Task 3c: the CRYPTO limit counts held bytes, not offset span [T3 review concern 3, 2026-11-06 ruling]
+
+RFC 9000 §7.5 says "Implementations MUST support buffering at least 4096 bytes of data received in out-of-order CRYPTO frames". After Task 3 the window is a span past the contiguous end, so a 1-byte frame at contiguous + 20000 closes with 0x0d while almost nothing is held. Under the acceptance rule that is over-strict.
+
+**Files:** `crates/quic/src/crypto_stream.rs`, `crates/quic/src/reassembly.rs` (proof fns only, unless a held-bytes accessor is needed), `crates/quic/tests/crypto_stream.rs`, and design §3.1/§4.
+
+- [ ] **Step 1: Tests first.**
+  - `crypto_far_single_byte_ok`: one byte at contiguous + 20000 is accepted and buffered.
+  - `crypto_held_bytes_limit`: the frame that takes the held out-of-order bytes from 16384 to 16385 gets 0x0d, and the one before it doesn't.
+  - `crypto_range_limit`: 4097 disjoint 1-byte frames give 0x0d on the 4097th, and 4096 don't.
+  - Run them and confirm all three fail before the change.
+- [ ] **Step 2: Code and spec.**
+  - The limit becomes: held out-of-order bytes after the insert > `MAX_CRYPTO_BUFFER` (16384), or range count > `MAX_CRYPTO_RANGES` (4096, our own limit as a named predicate `crypto_ranges_exceeded`).
+  - `crypto_allowed_err` = `c == 0x0d && len > 0 && (held_exceeded || ranges_exceeded)`, in RFC-defined quantities (bytes in `rfc_received` past `rfc_contiguous`).
+  - Keep Task 3's in-place close and its converse.
+- [ ] **Step 3: Proofs.**
+  - Floor lemma (rule 1d): held out-of-order bytes after the insert ≤ 4096 ==> `!crypto_allowed_err`. This covers the range limit too, since every range holds at least 1 byte.
+  - Memory bound: buffered bytes ≤ (contiguous − base) + 16384.
+  - Non-vacuity: keep or adapt `lemma_crypto_allowed_err_rejects`.
+- [ ] **Step 4: Verify.** Run the recipe for quic, then quictls. Apply the stop rule; `lemma_same_ranges` is at 7.43M, so watch it. Tests: 913. Plus verify.sh's line, the greps, the quote check and duvet.
+- [ ] **Step 5: Mutations.**
+  - Span limit restored: the floor lemma and `crypto_far_single_byte_ok` must fail.
+  - `MAX_CRYPTO_RANGES` = 4095: the floor lemma must fail.
+  - Delete the close: the converse must fail.
 
 ### Task 3b: the Initial CRYPTO invariant across the `Connection` boundary [I1]
 
