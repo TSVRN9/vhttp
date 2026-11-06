@@ -55,6 +55,7 @@ fn crypto_window_from_contiguous() {
     let mut c = CryptoStream::new();
     assert_eq!(c.on_crypto(0, &[1; 13000]), Ok(()));
     assert_eq!(c.on_crypto(16000, &[2; 500]), Ok(()));
+    assert_eq!(c.end(), 16500);
     assert_eq!(c.on_crypto(13000 + 16383, &[3]), Ok(()));
     assert_eq!(c.on_crypto(13000 + 16384, &[3]), Err(CRYPTO_BUFFER_EXCEEDED));
     assert_eq!(read(&mut c).len(), 13000);

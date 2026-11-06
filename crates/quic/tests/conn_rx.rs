@@ -257,6 +257,7 @@ fn crypto_in_and_out_of_order_one_datagram_ok() {
     let f = vec![Frame::Crypto { offset: 100, data: vec![1; 12900] }, Frame::Crypto { offset: 16000, data: vec![2; 500] }];
     c.on_datagram(0, 17000, vec![ini(3, f)], None, 1, &rnd(3));
     assert_eq!(c.phase(), Phase::Open);
+    assert_eq!(c.crypto_end(PacketKind::Initial), 16500);
     let mut out = Vec::new();
     c.crypto_read(PacketKind::Initial, &mut out);
     assert_eq!(out, vec![1; 13000]);
