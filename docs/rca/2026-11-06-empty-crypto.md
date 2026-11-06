@@ -1,0 +1,8 @@
+# RCA: window check before the empty filter in CryptoStream::on_crypto
+
+- **Defect:** `crates/quic/src/crypto_stream.rs:89-98` (on main) returns `CRYPTO_BUFFER_EXCEEDED` for an empty CRYPTO frame whose offset is past `base + MAX_CRYPTO_BUFFER`, because the window check runs before the `data.len() == 0` filter. A legal zero-length frame closes the connection. Found by the 9a plan preflight (finding 1).
+- **Escape:** the `ensures` of `on_crypto` prove buffer bounds but say nothing about which errors are allowed, so an over-strict close verifies. The bug is a sibling of fix 753ec2d, which closed only the instance (empty frame past the consumed end at a key change) and left the class: no clause says when `Err` is permitted.
+- **Class:** C5, error path not proved RFC-required (see `catalog.md`).
+- **Catch:** 9a Task 3's `crypto_allowed_err` clause on `on_crypto` (`Err(c) ==> crypto_allowed_err(inputs, c)`), checked by that task's mutation M2 (the mutant that restores the window-before-empty order must fail verification).
+- **What 9r's ratchet does and does not do here:** `scripts/acceptance.sh` does not fire on `on_crypto`. The fn is baselined (`quic::crypto_stream::CryptoStream::on_crypto` in `tools/acceptance-baseline.txt`), so the ratchet passes the original bug and would pass its re-introduction. It only blocks new error-returning fns that lack an `allowed_*err` clause, and it makes 9a's clause visible: once `on_crypto` carries `crypto_allowed_err`, the gate requires deleting its baseline line. It checks a name is present, not that the clause rules out over-strictness.
+- **Evidence:** none yet that the catch fires on the original bug; that evidence is 9a Task 3's mutation M2 failing on the restored order.

@@ -1,7 +1,7 @@
 //! Phase 4 exit: other HTTP/3 clients fetch the static response. Run with `--ignored`.
 //! Both pass: curl 8.18.0 and quiche-client from cloudflare/quiche 0.30.0 (be47c50; build with
-//! `cargo build --release --bin quiche-client`, then set `QUICHE_CLIENT` to it). `quiche_fetches`
-//! skips without `QUICHE_CLIENT`, and panics if `INTEROP_STRICT` is set. `Conn::respond`'s stop-at-first-Busy path is untested by any external client.
+//! `cargo build --release --bin quiche-client`, then set `QUICHE_CLIENT` to it). Each test
+//! skips without its client (curl with HTTP3, `QUICHE_CLIENT`), and panics instead if `INTEROP_STRICT` is set. `Conn::respond`'s stop-at-first-Busy path is untested by any external client.
 use server::*;
 use std::process::Command;
 
@@ -27,6 +27,7 @@ fn curl(args: &[&str]) -> std::process::Output {
 #[ignore]
 fn curl_fetches() {
     if !curl_has_http3() {
+        assert!(std::env::var_os("INTEROP_STRICT").is_none(), "curl lacks HTTP3 with INTEROP_STRICT set");
         eprintln!("skipped: curl lacks HTTP3");
         return;
     }
@@ -43,6 +44,7 @@ fn curl_fetches() {
 #[ignore]
 fn curl_two_requests() {
     if !curl_has_http3() {
+        assert!(std::env::var_os("INTEROP_STRICT").is_none(), "curl lacks HTTP3 with INTEROP_STRICT set");
         eprintln!("skipped: curl lacks HTTP3");
         return;
     }
