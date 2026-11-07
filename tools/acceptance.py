@@ -157,7 +157,7 @@ def body_brace(s, c0, limit, indent, fn_ls):
 
 
 def fns(s, lo, hi, path):
-    """All fn items in s[lo:hi] as (path, ret, clauses, is_exec); raise on a split failure."""
+    """All fn items in s[lo:hi] as (path, ret, clauses, is_exec, offset of `fn`); raise on a split failure."""
     sc = scopes(s, lo, hi)
     pos = lo
     res = []
@@ -199,7 +199,7 @@ def fns(s, lo, hi, path):
         ret = ' '.join(rm.group(1).split()) if rm else ''
         pos = end + 1  # nested fns in a body are examined too
         names = [n for a, bb, n in sc if a < k < bb]
-        res.append(('::'.join([path] + names + [name]), ret, clauses, not ('spec' in mods or 'proof' in mods or any(t.startswith('spec(') for t in mods))))
+        res.append(('::'.join([path] + names + [name]), ret, clauses, not ('spec' in mods or 'proof' in mods or any(t.startswith('spec(') for t in mods)), k))
     return res
 
 
@@ -215,8 +215,9 @@ def rs_files(root):
 
 
 def scan(root):
-    """(exec fns {path: [(ret, ensures)]}, allowed spec fns [(path, name, body)], aliases, blocks, examined)."""
+    """(exec fns {path: [(ret, ensures)]}, allowed spec fns [(path, name, body)], aliases, blocks, examined, fn sites, allowed sites)."""
     found, allowed, aliases, nblocks, examined = {}, [], {}, 0, 0
+    sites, apos = [], []  # every fn in a scanned verus! block (file, offset of `fn`, path, clauses, is_exec); allowed spec fns (file, offset, name)
     texts = []
     for crate, rel, full in rs_files(root):
         s = strip(open(full, encoding='utf-8').read())
@@ -246,6 +247,7 @@ def scan(root):
             k = match_brace(s, e)
             if k < 0: raise ValueError(f'{full}: spec fn {sm.group(1)}: unbalanced body')
             allowed.append((f'{crate}/{rel}', sm.group(1), s[e + 1:k - 1]))
+            apos.append((full, sm.start(), sm.group(1)))
     ere0, _ = error_re(aliases)
     for crate, rel, full, s in texts:
         # a `use .. Result as X;` rename hides an error type: fail closed rather than resolve it
@@ -264,10 +266,11 @@ def scan(root):
             b = match_brace(s, a)
             if b < 0: raise ValueError(f'{full}: unbalanced verus! block')
             nblocks += 1
-            for p, ret, cl, ex in fns(s, a + 1, b - 1, path):
+            for p, ret, cl, ex, k in fns(s, a + 1, b - 1, path):
                 examined += 1
+                sites.append((full, k, p, cl, ex))
                 if ex: found.setdefault(p, []).append((ret, cl))
-    return found, allowed, aliases, nblocks, examined
+    return found, allowed, aliases, nblocks, examined, sites, apos
 
 
 def error_re(aliases):
@@ -319,7 +322,7 @@ def main(argv):
         else: print(f'acceptance: unknown argument {argv[0]}', file=sys.stderr); return 1
     base = base or os.path.join(root, 'tools', 'acceptance-baseline.txt')
     try:
-        found, allowed, aliases, nblocks, examined = scan(root)
+        found, allowed, aliases, nblocks, examined, _, _ = scan(root)
     except (ValueError, OSError) as e:
         print(f'acceptance: cannot parse: {e}', file=sys.stderr); return 1
     if count: print(examined); return 0

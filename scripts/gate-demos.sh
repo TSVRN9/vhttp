@@ -4,7 +4,7 @@ set -o pipefail
 # gate-demos.sh: each cheap gate gets a canned bad input (a temp copy of a fixture in
 # tools/gate-demos/ with one change applied) and must exit non-zero with its message; every fixture
 # first passes unchanged, so a demo cannot fail for the wrong reason. Covers lint-scripts,
-# check-quotes, acceptance (many bad changes, including real-git runs), escape-gate (three), the rlimit gate and the mutant registry (scripts/mutants.sh; its run demos call Verus
+# check-quotes, the citation gate, acceptance (many bad changes, including real-git runs), escape-gate (three), the rlimit gate and the mutant registry (scripts/mutants.sh; its run demos call Verus
 # on the fixture crate). Takes a few seconds, plus about a minute the first time vstd builds in target/mutants-demo.
 root=$(cd "$(dirname "$0")/.." && pwd)
 fx=$root/tools/gate-demos
@@ -333,10 +333,55 @@ rcrepo rc11
 gitc rc11 branch -m main trunk
 expect_fail "rlimit-ceilings: no main" "cannot resolve the merge-base" rceil rc11
 
+# citation gate (tools/citations.py, C1): the fixture crate has a predicate, a code-mapping spec fn and two close-code fns, each cited
+# and (the close fns) named by a mutant row. cite: a predicate, a close-code fn and a mapping fn each with its citation stripped
+# (also keeping only a `///` doc line, or a `//=` without a `//#` quote); a blank line between citation and fn; no crates/; no
+# codes.rs; no predicate; no close-code fn. closes: a close-code fn with no row; a row naming it only in the origin column;
+# an empty or missing tsv.
+cfresh() { rm -rf "${tmp:?}/cit"; cp -r "$fx/citations" "$tmp/cit"; }
+cit=$tmp/cit/crates/quic/src/conn.rs
+cite() { python3 -I "$root/tools/citations.py" cite "$tmp/cit"; }
+closes() { python3 -I "$root/tools/citations.py" closes "$tmp/cit" "$tmp/cit/tools/mutants.tsv"; }
+cfresh
+expect_pass "citations: cite" cite
+expect_pass "citations: closes" closes
+# strip_cite <fn-line pattern>: delete the //= and //# lines directly above the matching line (and its doc comment)
+strip_cite() { awk -v pat="$1" '{ l[NR] = $0 } END { for (i = 1; i <= NR; i++) if (l[i] ~ pat) { j = i - 1; while (j > 0 && l[j] ~ /^(\/\/[=#]|\/\/\/|#\[)/) { if (l[j] ~ /^\/\/[=#]/) l[j] = "\001"; j-- } } for (i = 1; i <= NR; i++) if (l[i] != "\001") print l[i] }' "$cit" > "$cit.new"; mv "$cit.new" "$cit"; }
+strip_cite '^pub open spec fn allowed_demo_err'
+expect_fail "citations: predicate without a citation" "allowed_demo_err has no" cite
+cfresh; strip_cite '^pub fn demo_close'
+expect_fail "citations: close-code fn without a citation" "demo_close has no" cite
+cfresh; strip_cite '^spec fn demo_code'
+expect_fail "citations: code-mapping spec fn without a citation" "demo_code has no" cite
+cfresh; strip_cite '^pub fn demo_map'
+expect_fail "citations: a second close-code fn without a citation" "demo_map has no" cite
+cfresh; sed -i '/^\/\/# /d' "$cit"
+expect_fail "citations: citation lines without a quote" "has no" cite
+cfresh; sed -i 's|^/// A parameter the RFC rejects.|\n/// A parameter the RFC rejects.|' "$cit"
+expect_fail "citations: a blank line between the citation and the predicate" "allowed_demo_err has no" cite
+cfresh; rm -r "$tmp/cit/crates"
+expect_fail "citations: no crates/" "cannot scan crates/" cite
+cfresh; rm "$tmp/cit/crates/quic/src/codes.rs"
+expect_fail "citations: no codes.rs" "cannot scan crates/" cite
+cfresh; sed -i 's/^pub open spec fn allowed_demo_err/pub open spec fn demo_pred/' "$cit"
+expect_fail "citations: no allowed predicate" "no allowed_*err spec fn" cite
+cfresh; sed -i 's/final(c).close_spec() == Some/final(c).phase_spec() == Some/' "$cit"
+expect_fail "citations: no close-code fn" "no close-code fn" cite
+cfresh; sed -i '/^D1/d' "$tmp/cit/tools/mutants.tsv"
+expect_fail "citations: close-code fn with no mutant row" "close-code fn quic::conn::demo_close has no row" closes
+cfresh; sed -i 's/^D1\tquic\tconn\tdemo_close\t/D1\tquic\tconn\tdemo_other\t/; s/gate-demos$/gate-demos demo_close/' "$tmp/cit/tools/mutants.tsv"
+expect_fail "citations: close-code fn named only in the origin column" "close-code fn quic::conn::demo_close has no row" closes
+cfresh; sed -i 's/^D1\tquic\tconn\tdemo_close\t\(.*\)\tgate-demos$/D1\tquic\tconn\tdemo_other\t\1 demo_close\tgate-demos/' "$tmp/cit/tools/mutants.tsv"
+expect_fail "citations: close-code fn named only in the regex column" "close-code fn quic::conn::demo_close has no row" closes
+cfresh; : > "$tmp/cit/tools/mutants.tsv"
+expect_fail "citations: empty tsv" "has no row" closes
+rm "$tmp/cit/tools/mutants.tsv"
+expect_fail "citations: no tsv" "cannot read" closes
+
 # mutant registry (scripts/mutants.sh, C6), in throwaway git repos holding the acceptance fixture crate as crates/demo/src/acc.rs
 # and the one-row registry of tools/gate-demos/mutants. check: a patch that no longer applies, a missing patch, an empty or
 # missing tsv, a duplicate id, an orphan patch, a patch outside its row's crate, a bad regex, a wildcard fn, a patch
-# that applies only at an offset, an allowed_*err predicate with no row. run (real Verus, seconds:
+# that applies only at an offset, an allowed_*err predicate with no row or named only in a row's origin. run (real Verus, seconds:
 # MUTANTS_TARGET_DIR keeps vstd built across runs): the killed mutant (with its named test) passes; a mutant that still
 # verifies, a named test that does not FAIL, one that fails unmutated, a misspelt test and a missing fn fail; a dirty
 # crates/ is refused. The verdict on canned Verus output: rlimit, no or two JSON objects, another fn checked, a non-matching
@@ -389,7 +434,12 @@ sed -i '1i // one line more' "$tmp/m2/crates/demo/src/acc.rs"
 expect_fail "mutants check: patch that applies only at an offset" "applies only with an offset" mut m2 check
 mrepo m2
 sed -i 's/^verus! {$/verus! {\npub open spec fn other_allowed_err(c: u64) -> bool { c == 9 }/' "$tmp/m2/crates/demo/src/acc.rs"
-expect_fail "mutants check: an allowed_*err predicate with no row" "allowed predicate with no mutant row (name it in a row's fn, regex or origin): other_allowed_err" mut m2 check
+expect_fail "mutants check: an allowed_*err predicate with no row" "allowed predicate with no mutant row (name it in a row's fn or regex column): other_allowed_err" mut m2 check
+
+mrepo m2
+sed -i 's/^verus! {$/verus! {\npub open spec fn other_allowed_err(c: u64) -> bool { c == 9 }/' "$tmp/m2/crates/demo/src/acc.rs"
+sed -i 's/^\(D-kill.*\)$/\1 other_allowed_err/' "$tmp/m2/tools/mutants.tsv"
+expect_fail "mutants check: an allowed_*err predicate named only in a row's origin" "allowed predicate with no mutant row (name it in a row's fn or regex column): other_allowed_err" mut m2 check
 
 # run, for real: the fixture's mutant is killed (and the run file written); a mutant that still verifies; a dirty tree.
 mrepo m3
