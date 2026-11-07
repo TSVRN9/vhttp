@@ -1,17 +1,26 @@
 # RFC-quantity allowlist (tools/rfc_quantity.py, C8). Tab-separated; every vouch is keyed by its ROOT predicate:
-#   root<TAB>ROOT<TAB>DIGEST                 sha256 of ROOT's body and every fn it reaches or calls unfollowed, as
+#   root<TAB>ROOT<TAB>DIGEST                 sha256 of ROOT, every fn it reaches or calls unfollowed (transitively), its pins and the constants they name, as
 #                                            source text (comments and annotations included): any edit to them
 #                                            fails until the vouches below are re-reviewed and the digest is updated
 #                                            (python3 -I tools/rfc_quantity.py --print-digest ROOT, run deliberately)
+#   pin<TAB>ROOT<TAB>FN                    FN's text (any fn, exec included) joins ROOT's digest: text a vouch's reason
+#                                            relies on outside the walk (what the model pushes, an invariant, a wf tie)
 #   call<TAB>ROOT<TAB>CALLER<TAB>CALLEE<TAB>REASON  CALLEE is an RFC spec fn, not followed from CALLER under ROOT
 #   name<TAB>ROOT<TAB>FN<TAB>READ<TAB>REASON        READ (a name or a field read), read in FN under ROOT, is the RFC
 #                                                  quantity the reason names
 # Each reason cites `RFC N §x`. A ratchet: ALLOW_DIGEST in tools/rfc_quantity.py pins these lines (--print-digest
 # allowlist), so any change needs that constant changed in the same diff. Stale lines (vouching for nothing) fail.
-root	quic::crypto_stream::crypto_allowed_err	e6187f4ccccf1cba9dc08269a2831d38fb6cd8a2207a61c11ffe82faa8b9e7a2
-root	quic::recv_stream::recv_allowed_err	a9a62ccb1d32128e31e6019e9dbd7b32bc1ea06e61bd0dec8c32b4b3a0d80bdf
-root	quic::tp::allowed_tp_err	f1904c9a008453d5108fcd2d765d6d0eab0069f65812bb39bd28d3feed6506db
-root	quic::tp::allowed_tp_err_from	4e56caa1dc155b5fa4dae99a69f159d7cc25f2186925b0d4581dde7d9582a186
+root	quic::crypto_stream::crypto_allowed_err	3af593cfdab030d4d40451b1a2df14b7a2bafec6eb27bef8a5b0db55903bba74
+root	quic::recv_stream::recv_allowed_err	2e66e9dacc0626a8f531d9e5bcc29284d8b3be307afd239d878f15dc16c6edc6
+root	quic::tp::allowed_tp_err	b26d17c0b4a51945223ba0458ee054d2d2c1141274df51c95da84f669e9e7b48
+root	quic::tp::allowed_tp_err_from	5a06a4041e86d26f2871d45ad264d0b224a37e2ed8370b4912947a511116dbdb
+pin	quic::crypto_stream::crypto_allowed_err	quic::crypto_stream::CryptoStream::on_crypto
+pin	quic::crypto_stream::crypto_allowed_err	quic::crypto_stream::CryptoStream::reassembly
+pin	quic::crypto_stream::crypto_allowed_err	quic::crypto_stream::Reassembly::inserted
+pin	quic::recv_stream::recv_allowed_err	quic::recv_stream::recv_data
+pin	quic::recv_stream::recv_allowed_err	quic::recv_stream::recv_reset
+pin	quic::recv_stream::recv_allowed_err	quic::recv_stream::recv_inv
+pin	quic::recv_stream::recv_allowed_err	quic::recv_stream::RecvStream::wf
 call	quic::crypto_stream::crypto_allowed_err	quic::crypto_stream::crypto_allowed_err	quic::crypto_stream::crypto_contiguous	rfc_contiguous(rfc_received(s.reassembly().inserted())): inserted() holds every non-empty CRYPTO frame on_crypto accepted that reaches past the read offset (frames below it add no bytes), so this is the end of the in-order CRYPTO data received (RFC 9000 §7.5, §19.6)
 name	quic::crypto_stream::crypto_allowed_err	quic::crypto_stream::crypto_allowed_err	c	the error code on_crypto returns, compared with the RFC's CRYPTO_BUFFER_EXCEEDED (RFC 9000 §20.1)
 name	quic::crypto_stream::crypto_allowed_err	quic::crypto_stream::crypto_window_exceeded	contiguous	crypto_contiguous(s), the end of the in-order CRYPTO data received, its one caller's argument (RFC 9000 §7.5)
@@ -25,9 +34,9 @@ name	quic::recv_stream::recv_allowed_err	quic::recv_stream::flow_trigger	end	the
 name	quic::recv_stream::recv_allowed_err	quic::recv_stream::credit_after	end	the STREAM frame's offset plus data length, off + len at every call (RFC 9000 §19.8)
 name	quic::recv_stream::recv_allowed_err	quic::recv_stream::final_size_trigger	fin	the STREAM frame's FIN bit, recv_allowed_err's fin (RFC 9000 §19.8)
 name	quic::recv_stream::recv_allowed_err	quic::recv_stream::credit_after	fin	the STREAM frame's FIN bit, recv_allowed_err's fin (RFC 9000 §19.8)
-call	quic::recv_stream::recv_allowed_err	quic::recv_stream::final_size_trigger	quic::recv_stream::largest_received_offset	the largest received offset of the (offset, data) frames it is given: the largest offset plus data length, an empty frame's offset included (RFC 9000 §19.10, §19.8); what it is given (s.ins) is an open line
-call	quic::recv_stream::recv_allowed_err	quic::recv_stream::credit_after	quic::recv_stream::largest_received_offset	the largest received offset of the (offset, data) frames it is given: the largest offset plus data length, an empty frame's offset included (RFC 9000 §19.10, §19.8); what it is given (s.ins) is an open line
-call	quic::recv_stream::recv_allowed_err	quic::recv_stream::credit_before	quic::recv_stream::largest_received_offset	the largest received offset of the (offset, data) frames it is given: the largest offset plus data length, an empty frame's offset included (RFC 9000 §19.10, §19.8); what it is given (s.ins) is an open line
+call	quic::recv_stream::recv_allowed_err	quic::recv_stream::final_size_trigger	quic::recv_stream::largest_received_offset	the largest received offset of the (offset, data) frames it is given: the largest offset plus data length, an empty frame's offset included (RFC 9000 §19.10, §19.8); what it is given here, s.ins, is vouched by this root's s.ins name lines
+call	quic::recv_stream::recv_allowed_err	quic::recv_stream::credit_after	quic::recv_stream::largest_received_offset	the largest received offset of the (offset, data) frames it is given: the largest offset plus data length, an empty frame's offset included (RFC 9000 §19.10, §19.8); what it is given here, s.ins, is vouched by this root's s.ins name lines
+call	quic::recv_stream::recv_allowed_err	quic::recv_stream::credit_before	quic::recv_stream::largest_received_offset	the largest received offset of the (offset, data) frames it is given: the largest offset plus data length, an empty frame's offset included (RFC 9000 §19.10, §19.8); what it is given here, s.ins, is vouched by this root's s.ins name lines
 call	quic::tp::allowed_tp_err	quic::tp::allowed_tp_err_from	quic::tp::rfc_vint	the variable-length integer at offset p of b, decoded by rfc_varint_decode, with the offset after it (RFC 9000 §16)
 call	quic::tp::allowed_tp_err_from	quic::tp::allowed_tp_err_from	quic::tp::rfc_vint	the variable-length integer at offset p of b, decoded by rfc_varint_decode, with the offset after it (RFC 9000 §16)
 call	quic::tp::allowed_tp_err	quic::tp::allowed_tp_err_from	quic::tp::rfc_bytes	the len bytes at offset p of b, if b has them, with the offset after them (RFC 9000 §18)
