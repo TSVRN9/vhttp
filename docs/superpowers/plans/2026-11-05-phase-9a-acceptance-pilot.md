@@ -463,10 +463,10 @@ RFC 9000 §7.5 says "Implementations MUST support buffering at least 4096 bytes 
   git commit -m "feat(quic, quictls, 9a T3b): the Initial CRYPTO base never decreases (crypto_kept on every Connection entry), so core_ok proves init_end <= base after the key change; superseded's newly-contiguous close proved unreachable and removed; the Initial history survives its discard (RFC 9001 §4.1.3)"
   ```
 - [ ] **Step 6: Mutations.** Each alone, then `git checkout` the file.
-  - **T3b-M1:** drop `crypto_kept` from `crypto_read`'s ensures. Expected: a quictls `core_ok` postcondition fails (in `superseded` or `feed`).
-  - **T3b-M2:** `restart` sets base to 0. Expected: `restart`'s or `discard`'s postcondition fails (`crypto_kept`).
-  - **T3b-M3:** restore the deleted block with the `assert(b@.len() == 0)` before it, using `git show 73cc244:crates/quictls/src/server.rs | sed -n 607,613p` from main's numbering. Expected: verification **passes**, which shows the branch is proved dead.
-  - **T3b-M4:** drop the `apply` loop-invariant conjunct. Expected: `on_secrets`' `core_ok` postcondition fails.
+  - **T3b-M1:** drop `crypto_kept` from `crypto_read`'s ensures. Expected: in `feed`, the precondition of `Connection::lemma_crypto_kept_elim` after `crypto_read` fails (the step that re-proves `core_ok`; `superseded` no longer reads). [Updated after the 3b review, m4.]
+  - **T3b-M2:** `restart` sets base to 0. Expected: `restart`'s postcondition `final.base == old.end_spec()` fails.
+  - **T3b-M3:** restore the deleted block with the `assert(b@.len() == 0)` before it, using `git show 73cc244:crates/quictls/src/server.rs | sed -n 607,613p` from main's numbering. Expected: on 06e0851's server.rs, verification **passes**, which shows the branch is proved dead. On the final tree the restored `crypto_read` instead fails `superseded`'s later `cont ==> h3 unchanged` and drained ensures, never the assertion.
+  - **T3b-M4:** drop the `apply` loop-invariant conjunct. Expected: the precondition of `on_secrets` at its call in `apply` fails (its requires `l is Handshake && level is Initial ==> end(Initial) <= base(Initial)`).
 
 ### Task 4: transport-parameter acceptance lemma (spec-only) [I6]
 

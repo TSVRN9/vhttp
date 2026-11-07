@@ -95,6 +95,11 @@ impl CryptoStream {
         rfc_received(self.hist@).contains_key(p)
     }
 
+    /// Read to the contiguous end: no in-order byte is left unread.
+    pub open spec fn drained(&self) -> bool {
+        self.reassembly().base() == crypto_contiguous(*self)
+    }
+
     /// The end of the received data: the read offset plus the buffered window.
     pub open spec fn end_spec(&self) -> nat {
         (self.reassembly().base() + self.reassembly().buf_len()) as nat
