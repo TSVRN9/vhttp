@@ -2,48 +2,58 @@
 
 Usage: python3 -I tools/rfc_quantity.py [--root DIR] [--allow FILE] [--open FILE] [--old-open FILE]
        [--allow-digest HEX] (the demos' fixture digest; the real tree uses ALLOW_DIGEST)
+       [--print-digest ROOT|allowlist] (print a root's digest or the allowlist's, run deliberately after a re-review)
 
 C8: an allowed_*err predicate written over the code's own bookkeeping (a read-offset window, a
 `seen` mask, a running `high`) instead of the RFC's quantities, so the proof checks the code
 against itself. This gate reads the body of every `allowed_*err`, `allowed_*err_from` and
-`*_allowed_err` spec fn (tools/acceptance.py's scanner and name pattern) and of every spec fn it
-calls, transitively (one level is not enough: recv_allowed_err -> flow_trigger -> credit_before),
-and reports every read of something that is not vouched for as an RFC quantity:
-  - a struct field (`s.high`, `s.final_size->0`), on any receiver;
-  - a method that is not a vstd Seq/Set/Map method (`s.reassembly()`, `x.rfc()`, `y.code_spec()`);
+`*_allowed_err` spec fn (the ROOTs; tools/acceptance.py's scanner and name pattern) and of every
+spec fn it calls, transitively (one level is not enough: recv_allowed_err -> flow_trigger ->
+credit_before), and reports every read of something that is not vouched for as an RFC quantity:
+  - a struct field (`s.high`, `s.final_size->0`, `b@.foo`), on any receiver; a struct update `..s`;
+  - a method that is not a vstd Seq/Set/Map method (`s.reassembly()`, `x.rfc()`, `y.code_spec()`); a
+    user spec method named like a vstd one is refused outright;
   - `self`, a macro call, or a call of a fn that is not a spec fn in a scanned verus! block (vstd's
     `Seq::`/`Set::`/`Map::`/`Multiset::` constructors excepted);
   - a name (a parameter or a pattern-bound local) used other than as a whole argument of a call that
     is followed or allowed: `seen & tp_bit(id)` reads `seen`; `rfc_tp_apply(id, v, true, t, seen)`
     passes it on (the callee's own reads are what count).
 A read is vouched for by one of:
-  - `// rfc-quantity: <why this is the RFC's quantity, citing RFC N §x>` on its source line;
-  - a `name` line of the allowlist (FN, NAME: the name read in FN is the RFC quantity the reason
-    says), or a `call` line (CALLER, CALLEE: CALLEE is an RFC spec fn over RFC histories, not
-    followed from CALLER); every allowlist reason cites `RFC N §x`. There is no prefix rule: rfc_*
-    fns in this tree include models of the code (rfc_recv, rfc_tp_apply) that return bookkeeping;
+  - `// rfc-quantity: READ: <why READ is the RFC's quantity, citing RFC N §x>` on its source line; it
+    vouches only for the read it names (another read on the line is still reported);
+  - a `name` line of the allowlist (ROOT, FN, READ: READ, a name or a field read in FN under ROOT, is
+    the RFC quantity the reason says), or a `call` line (ROOT, CALLER, CALLEE: CALLEE is an RFC spec fn,
+    not followed from CALLER under ROOT); every reason cites `RFC N §x`. There is no prefix rule:
+    rfc_* fns in this tree include models of the code (rfc_recv, rfc_tp_apply) that return bookkeeping;
   - a line of the open ratchet (ROOT, FN, READ, COUNT, OWNER, REASON): a known violation that is
     not an RFC quantity and cannot be fixed by this phase. It only shrinks: a line absent from
     --old-open (the file at the merge-base with main), or with a larger count, fails.
-Fails closed: no predicate, a predicate or callee whose body cannot be found, an ambiguous callee
-name, a missing or malformed list file, an empty or uncited reason, an allowlist line or annotation
-that vouches for nothing (stale), an open line that matches no read (stale) or whose count is not
-the current count, or an allowlist whose digest is not ALLOW_DIGEST (the allowlist is a ratchet: any
-change to it, growth or a swap, needs this constant changed in the same diff, so it is reviewed).
+Every vouch is keyed by its ROOT, and the ROOT's `root` line pins a sha256 of the source text of the
+ROOT and of every fn its walk reaches or calls unfollowed, comments and annotations included. The
+vouches' reasons are claims about that text (what a caller passes, how a call's result is used, what
+an annotation says), so any edit to it fails ("re-review the vouches for ROOT") until a reviewer
+re-reads them and updates the digest with --print-digest; the gate never prints a new digest itself.
+Fails closed: no predicate, a predicate without a `root` line or whose digest differs, a stale root
+line, a predicate or callee whose body cannot be found, an ambiguous callee name, a missing or
+malformed list file, an empty, uncited or read-less annotation, an uncited reason, an allowlist line
+or annotation that vouches for nothing (stale), an open line that matches no read (stale) or whose
+count is not the current count, or an allowlist whose digest is not ALLOW_DIGEST (the allowlist is a
+ratchet: any change to it, growth or a swap, needs this constant changed in the same diff).
 
 Limits (a token scan of comment- and string-stripped text, not a Rust parser): pattern bindings are
 found in match arms (back from `=>` to the arm start), `let`/`if let` patterns, closure and
 quantifier binders and `matches` patterns; a token it cannot place is a read (fails closed). Only
 predicate bodies and the spec fns they call are read: what an exec fn's ensures pass as the
-predicate's arguments (`recv_allowed_err(old(self).rfc(), ..)`) is the refinement proof's business,
-and a `name` line's claim about a parameter holds only if every caller passes what it says (the
-reviewer checks the callers, which this gate lists as followed fns).
+predicate's arguments (`recv_allowed_err(old(self).rfc(), ..)`) is the refinement proof's business.
+The scan is the first filter; the root digest is what makes a reviewer re-check the vouches' claims
+about the text (a `name` line's claim about what every caller passes, a `call` line's claim about
+how its result is used) whenever that text changes.
 """
 import hashlib, importlib.util, os, re, sys
 
 # sha256 of the allowlist's non-comment lines, sorted and joined by newlines: any change to the vouched-for set (a
 # new line, a swap, an edited reason) needs this constant changed in the same diff, so it is reviewed
-ALLOW_DIGEST = 'dc30bcd07767bfa2981d220c91571a7ea182f9f80f5139b4d08015d83a1678e5'
+ALLOW_DIGEST = 'ef71f42ed709fb4551318e98285296c55efb706bfed1b40633b09722bd7d3f16'
 VSTD_TYPES = {'Seq', 'Set', 'Map', 'Multiset'}
 VSTD_METHODS = {'len', 'skip', 'take', 'subrange', 'push', 'last', 'first', 'drop_last', 'drop_first',
                 'contains', 'contains_key', 'insert', 'remove', 'union', 'intersect', 'difference', 'dom',
@@ -119,12 +129,14 @@ def pattern_spans(acc, b):
 
 
 def chain(b, j):
-    """The accessors after index j: [(kind, start, end, name)] with kind field/method/index/num, up to the first
+    """The accessors after index j: [(kind, start, end, name)] with kind field/method/index/num/view, up to the first
     that is not one; end is past the accessor (past a method's argument list)."""
     res = []
     while True:
         k = fwd(b, j)
         if b.startswith('..', k): break
+        if b.startswith('@', k):  # a view: the accessors after it are still read
+            res.append(('view', k, k + 1, '')); j = k + 1; continue
         if b.startswith('.', k) or b.startswith('->', k):
             a = k + (1 if b[k] == '.' else 2)
             a = fwd(b, a)
@@ -175,13 +187,18 @@ class Gate:
             raise Fail('cannot scan crates/: %s' % e)
         self.sites = [x for x in sites if not x[4]]  # spec and proof fns
         self.apos = apos
-        self.text, self.raw = {}, {}
+        self.text, self.raw, self.rawstr = {}, {}, {}
         self.cache = {}
+        # a user spec method with a vstd method's name would be taken for vstd and not followed: refuse it
+        for x in self.sites:
+            parts = x[2].split('::')
+            if parts[-1] in VSTD_METHODS and any(p[:1].isupper() for p in parts[1:-1]):
+                raise Fail('%s: a spec method named like a vstd method (%s) would be read as vstd; rename it' % (x[2], parts[-1]))
 
     def src(self, f):
         if f not in self.text:
             r = open(f, encoding='utf-8').read()
-            self.raw[f], self.text[f] = r.split('\n'), self.acc.strip(r)
+            self.raw[f], self.text[f], self.rawstr[f] = r.split('\n'), self.acc.strip(r), r
         return self.text[f]
 
     def line(self, f, off):
@@ -222,9 +239,16 @@ class Gate:
         if z < 0: raise Fail('%s: unbalanced body' % path)
         return e + 1, z - 1
 
-    def analyse(self, site, allow_calls):
-        """(reads [(kind, text, file, line)], callees [site]) of one fn's body."""
-        key = site[2]
+    def fn_text(self, site):
+        """The raw source of a fn, from its line to its body's end, comments and annotations included."""
+        lo, hi = self.body(site)
+        s = self.rawstr[site[0]]
+        return s[s.rfind('\n', 0, site[1]) + 1:hi + 1]
+
+    def analyse(self, site, allow_calls, rootp):
+        """(reads [(kind, text, file, line)], followed callees [site], allowed callees [site]) of one fn's body, under
+        root rootp's `call` lines allow_calls {(caller, callee): used}."""
+        key = (rootp, site[2])
         if key in self.cache: return self.cache[key]
         f = site[0]
         s = self.src(f)
@@ -232,7 +256,7 @@ class Gate:
         b = s[lo:hi]
         pats = pattern_spans(self.acc, b)
         in_pat = lambda i: any(a <= i < e for a, e in pats)
-        reads, callees, done = [], [], set()
+        reads, callees, allowed, done = [], [], [], set()
         at = lambda i: (f, self.line(f, lo + i))
         # calls first: classify each callee so arguments know whether they pass through
         calls = {}
@@ -265,7 +289,7 @@ class Gate:
                     calls[i] = 'bad'
                     reads.append(('call', '::'.join(qual + [nm]) + '(..)', *at(i)))
             elif (site[2], t[2]) in allow_calls:
-                calls[i] = 'allowed'; allow_calls[(site[2], t[2])] = True
+                calls[i] = 'allowed'; allow_calls[(site[2], t[2])] = True; allowed.append(t)
             else:
                 calls[i] = 'followed'; callees.append(t)
         for m in IDENT.finditer(b):
@@ -308,7 +332,7 @@ class Gate:
                     st = m.start()
                     reads.append(('field' if kind == 'field' else 'method', '(..)' + ' '.join(b[m.end():z].split()), *at(st)))
                     break
-        self.cache[key] = (reads, callees)
+        self.cache[key] = (reads, callees, allowed)
         return self.cache[key]
 
 
@@ -323,18 +347,41 @@ def read_list(path, what):
     return [(n + 1, l) for n, l in enumerate(lines) if l.strip() and not l.lstrip().startswith('#')]
 
 
+LINE_FORMS = ('`root<TAB>ROOT<TAB>DIGEST`, `call<TAB>ROOT<TAB>CALLER<TAB>CALLEE<TAB>REASON` or '
+              '`name<TAB>ROOT<TAB>FN<TAB>READ<TAB>REASON`')
+WHAT = {'field': 'a struct field', 'update': 'a struct update, every field it does not set',
+        'method': 'a method that is not a vstd Seq/Set/Map method', 'self': 'self', 'macro': 'a macro',
+        'call': 'a fn that is not a spec fn in a scanned verus! block',
+        'name': 'a name used other than as a whole argument of a followed or allowed call'}
+
+
+def sha(text):
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+
+def annotation(line):
+    """(read, reason) of a `// rfc-quantity: READ: <reason>` on line, ('', '') if malformed, None if there is none."""
+    a = ANNOT.search(line)
+    if not a: return None
+    c = a.group(1).strip()
+    k = c.find(': ')
+    if k <= 0 or not c[k + 2:].strip(): return ('', '')
+    return (c[:k].strip(), c[k + 2:].strip())
+
+
 def main(argv):
     global acc_
     root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
-    allow = opn = old = None
+    allow = opn = old = pd = None
     nallow = ALLOW_DIGEST
     while argv:
-        if argv[0] in ('--root', '--allow', '--open', '--old-open', '--allow-digest') and len(argv) > 1:
+        if argv[0] in ('--root', '--allow', '--open', '--old-open', '--allow-digest', '--print-digest') and len(argv) > 1:
             v = argv[1]
             if argv[0] == '--root': root = v
             elif argv[0] == '--allow': allow = v
             elif argv[0] == '--open': opn = v
             elif argv[0] == '--allow-digest': nallow = v
+            elif argv[0] == '--print-digest': pd = v
             else: old = v
             argv = argv[2:]
         else:
@@ -345,27 +392,32 @@ def main(argv):
     try:
         acc_ = load_acc()
         g = Gate(acc_, root)
-        # the lists
-        calls, names = {}, {}
+        # the allowlist: every vouch is keyed by its root predicate, whose body text is pinned by the root's line
+        rootd, calls, names = {}, {}, {}  # calls/names: root -> {(fn, x): used}
         al = read_list(allow, 'allowlist')
         for n, l in al:
             f = l.split('\t')
-            if len(f) != 4 or f[0] not in ('call', 'name') or not all(x.strip() for x in f):
-                raise Fail('%s:%d: not `call<TAB>CALLER<TAB>CALLEE<TAB>REASON` or `name<TAB>FN<TAB>NAME<TAB>REASON`' % (allow, n))
-            if not CITE.search(f[3]): fail.append('%s:%d: the reason cites no `RFC N §x`' % (allow, n))
-            d = calls if f[0] == 'call' else names
-            if (f[1], f[2]) in d: fail.append('%s:%d: duplicate line' % (allow, n))
-            d[(f[1], f[2])] = False
-        dig = hashlib.sha256('\n'.join(sorted(l for _, l in al)).encode('utf-8')).hexdigest()
-        if dig != nallow:
-            fail.append('the allowlist\'s digest is %s but ALLOW_DIGEST in tools/rfc_quantity.py is %s (the allowlist is a '
-                        'ratchet: any change to its lines needs the constant changed in the same diff, for review)' % (dig, nallow))
+            if not (f[0] == 'root' and len(f) == 3 or f[0] in ('call', 'name') and len(f) == 5) or not all(x.strip() for x in f):
+                raise Fail('%s:%d: not %s' % (allow, n, LINE_FORMS))
+            if f[0] == 'root':
+                if f[1] in rootd: fail.append('%s:%d: duplicate root line' % (allow, n))
+                rootd[f[1]] = f[2]; continue
+            if not CITE.search(f[4]): fail.append('%s:%d: the reason cites no `RFC N §x`' % (allow, n))
+            d = (calls if f[0] == 'call' else names).setdefault(f[1], {})
+            if (f[2], f[3]) in d: fail.append('%s:%d: duplicate line' % (allow, n))
+            d[(f[2], f[3])] = False
+        adig = sha('\n'.join(sorted(l for _, l in al)))
+        if pd == 'allowlist':
+            print(adig); return 0
+        if adig != nallow:
+            fail.append('the allowlist\'s digest is not ALLOW_DIGEST in tools/rfc_quantity.py (the allowlist is a ratchet: any change '
+                        'to its lines needs the constant changed in the same diff, for review; compute it with --print-digest allowlist)')
         ol = read_list(opn, 'open ratchet')
         opens = {}
         for n, l in ol:
             f = l.split('\t')
-            if len(f) != 6 or not all(x.strip() for x in f) or not f[3].isdigit() or not re.match(r'^9[a-z0-9]+$', f[4]):
-                raise Fail('%s:%d: not `ROOT<TAB>FN<TAB>READ<TAB>COUNT<TAB>OWNER-PHASE<TAB>REASON`' % (opn, n))
+            if len(f) != 6 or not all(x.strip() for x in f) or not f[3].isdigit() or not re.match(r'^9[a-z0-9]+\b', f[4]):
+                raise Fail('%s:%d: not `ROOT<TAB>FN<TAB>READ<TAB>COUNT<TAB>OWNER-PHASE ..<TAB>REASON`' % (opn, n))
             if not CITE.search(f[5]): fail.append('%s:%d: the reason cites no `RFC N §x`' % (opn, n))
             if (f[0], f[1], f[2]) in opens: fail.append('%s:%d: duplicate line' % (opn, n))
             opens[(f[0], f[1], f[2])] = int(f[3])
@@ -380,48 +432,67 @@ def main(argv):
         # the predicates and everything they call
         roots = [g.site_of_pred(f, off, name) for f, off, name in g.apos]
         if not roots: raise Fail('no allowed_*err spec fn found under crates/')
+        if pd is not None and pd not in {r[2] for r in roots}: raise Fail('--print-digest: no predicate %s' % pd)
         hits = {}  # (root, fn, read) -> [(kind, file, line)]
         used_ann, nfns = set(), set()
         for r in roots:
-            seen, work = {r[2]}, [r]
+            rp = r[2]
+            rc, rn = calls.setdefault(rp, {}), names.setdefault(rp, {})
+            seen, work, texts = {rp}, [r], {}
             while work:
                 st = work.pop()
-                reads, callees = g.analyse(st, calls)
+                reads, callees, allowed = g.analyse(st, rc, rp)
                 nfns.add(st[2])
+                texts[st[2]] = g.fn_text(st)
+                for t in allowed:
+                    texts[t[2]] = g.fn_text(t)
                 for kind, text, f, ln in reads:
-                    if kind == 'name' and (st[2], text) in names:
-                        names[(st[2], text)] = True; continue
-                    if ANNOT.search(g.raw[f][ln - 1]):  # an annotation vouches for the line's other reads
+                    if kind in ('name', 'field') and (st[2], text) in rn:
+                        rn[(st[2], text)] = True; continue
+                    a = annotation(g.raw[f][ln - 1])
+                    if a and a[0] == text:  # an annotation vouches only for the read it names
                         used_ann.add((f, ln)); continue
-                    hits.setdefault((r[2], st[2], text), []).append((kind, f, ln))
+                    hits.setdefault((rp, st[2], text), []).append((kind, f, ln))
                 for t in callees:
                     if t[2] not in seen: seen.add(t[2]); work.append(t)
-        # annotations: each cites the RFC and vouches for a read
+            # the root's digest: its body and every fn it reaches or calls unfollowed, as source text, comments included
+            d = sha(''.join('%s\n%s\n' % (p, texts[p]) for p in sorted(texts)))
+            if pd == rp:
+                print(d); return 0
+            if rp not in rootd:
+                fail.append('no `root` line for %s: review every read it makes, add its name/call lines, then a `root` line '
+                            '(digest from --print-digest %s)' % (rp, rp))
+            elif rootd[rp] != d:
+                fail.append('%s or a fn it reaches changed since its vouches were reviewed: re-review the vouches for %s; then update '
+                            'its digest (--print-digest %s)' % (rp, rp, rp))
+        for p in sorted(set(rootd) - {r[2] for r in roots}):
+            fail.append('stale root line, no such predicate: %s' % p)
+        # annotations: each names its read, cites the RFC and vouches for that read
         for _, _, f in acc_.rs_files(root):
             g.src(f)
         for f in sorted(g.raw):
             for n, l in enumerate(g.raw[f]):
-                a = ANNOT.search(l)
-                if not a: continue
+                a = annotation(l)
+                if a is None: continue
                 rel = os.path.relpath(f, root)
-                if not CITE.search(a.group(1)): fail.append('%s:%d: `// rfc-quantity:` reason cites no `RFC N §x` (an empty reason vouches for nothing)' % (rel, n + 1))
-                elif (f, n + 1) not in used_ann: fail.append('%s:%d: `// rfc-quantity:` on a line with no read from an allowed_*err predicate (stale)' % (rel, n + 1))
+                if not a[0] or not CITE.search(a[1]):
+                    fail.append('%s:%d: `// rfc-quantity:` needs `READ: <why it is the RFC quantity, citing RFC N §x>`' % (rel, n + 1))
+                elif (f, n + 1) not in used_ann:
+                    fail.append('%s:%d: `// rfc-quantity: %s:` names no read on its line from an allowed_*err predicate (stale)' % (rel, n + 1, a[0]))
         for dct, what in ((calls, 'call'), (names, 'name')):
-            for k, used in sorted(dct.items()):
-                if not used: fail.append('stale allowlist line, vouches for no read or call: %s\t%s\t%s' % (what, k[0], k[1]))
+            for rp, dd in sorted(dct.items()):
+                for k, used in sorted(dd.items()):
+                    if not used: fail.append('stale allowlist line, vouches for no read or call: %s\t%s\t%s\t%s' % (what, rp, k[0], k[1]))
         for k, v in sorted(hits.items()):
             kind, f, ln = v[0]
-            what = {'field': 'a struct field', 'update': 'a struct update, every field it does not set', 'method': 'a method that is not a vstd Seq/Set/Map method', 'self': 'self',
-                    'macro': 'a macro', 'call': 'a fn that is not a spec fn in a scanned verus! block',
-                    'name': 'a name used other than as a whole argument of a followed or allowed call'}[kind]
             if k in opens:
                 if opens[k] != len(v): fail.append('open line count %d, but %s reads %s %d times (set the count; it only shrinks): %s' % (opens[k], k[1], k[2], len(v), '\t'.join(k)))
                 continue
             via = '' if k[0] == k[1] else ' (from %s)' % k[0].split('::')[-1]
             fail.append('%s:%d: %s%s reads `%s` (%s), which nothing vouches for as an RFC quantity: re-anchor it on the RFC quantity, '
-                        'or add `// rfc-quantity: <why, citing RFC N §x>` on the line, or a `name`/`call` line in tools/rfc-quantity-allow.txt; '
-                        'a known open item only: a line in tools/rfc-quantity-open.txt'
-                        % (os.path.relpath(f, root), ln, k[1].split('::')[-1], via, k[2], what))
+                        'or add `// rfc-quantity: %s: <why, citing RFC N §x>` on the line, or a `name`/`call` line for this root in '
+                        'tools/rfc-quantity-allow.txt; a known open item only: a line in tools/rfc-quantity-open.txt'
+                        % (os.path.relpath(f, root), ln, k[1].split('::')[-1], via, k[2], WHAT[kind], k[2]))
         for k in sorted(set(opens) - set(hits)):
             fail.append('stale open line, no such read (delete it: the open ratchet only shrinks): %s' % '\t'.join(k))
     except Fail as e:

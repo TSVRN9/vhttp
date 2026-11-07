@@ -398,15 +398,26 @@ expect_fail "citations: empty tsv" "has no row" closes
 rm "$tmp/cit/tools/mutants.tsv"
 expect_fail "citations: no tsv" "cannot read" closes
 
-# RFC-quantity gate (tools/rfc_quantity.py, C8). The fixture mirrors main's three predicates, its allowlist (digest qdig) and
-# open ratchet; bad/ holds the 9a originals verbatim: T6's recv_allowed_err (rfc_recv's running `high`), T4's duplicate
-# rule (the `seen` mask), T3's crypto window (the read offset `s.reassembly().base()`).
+# RFC-quantity gate (tools/rfc_quantity.py, C8). The fixture mirrors main's three predicates, its allowlist (digest qdig, one
+# `root` digest per predicate) and open ratchet; bad/ holds the 9a originals verbatim: T6's recv_allowed_err (rfc_recv's
+# running `high`), T4's duplicate rule (the `seen` mask), T3's crypto window (the read offset `s.reassembly().base()`).
+# qredig re-pins every root and the allowlist (what a reviewer does after re-reviewing), so a demo can show that a read is
+# still caught after the digests are updated; rqn runs with the re-pinned allowlist digest.
 qx=$tmp/rfcq/crates/quic/src
-qdig=f8ada6cfb0d3bdc88af71f543b5a14c0c26fa78e2b54a3c8608c1860293e4584
+qdig=1821da2ca1b3e5edff13f56f2a6aba09db0a7675570f6fe68bcd2630e5e43147
 rq() { python3 -I "$root/tools/rfc_quantity.py" --root "$tmp/rfcq" --allow-digest "$qdig" "$@"; }
 qal=$tmp/rfcq/tools/rfc-quantity-allow.txt
 qop=$tmp/rfcq/tools/rfc-quantity-open.txt
 qadd() { sed -i '$d' "$qx/$1"; printf '%s\n\n} // verus!\n' "$2" >> "$qx/$1"; }  # qadd <file> <fn>: append a spec fn
+qredig() {
+    for r in $(awk -F'\t' '$1 == "root" { print $2 }' "$qal"); do
+        d=$(rq --print-digest "$r")
+        awk -F'\t' -v OFS='\t' -v r="$r" -v d="$d" '$1 == "root" && $2 == r { $3 = d } { print }' "$qal" > "$qal.n"; mv "$qal.n" "$qal"
+    done
+    qnow=$(rq --print-digest allowlist)
+}
+rqn() { python3 -I "$root/tools/rfc_quantity.py" --root "$tmp/rfcq" --allow-digest "$qnow" "$@"; }
+RR=quic::recv_stream::recv_allowed_err
 fresh rfcq
 expect_pass "rfc-quantity" rq
 fresh rfcq; cp "$tmp/rfcq/bad/t6-recv_stream.rs" "$qx/recv_stream.rs"
@@ -415,26 +426,45 @@ fresh rfcq; cp "$tmp/rfcq/bad/t4-tp.rs" "$qx/tp.rs"
 expect_fail "rfc-quantity: T4's original duplicate rule (6594f10) reads the seen mask" "allowed_tp_err_from reads \`seen\` (a name used other than" rq
 fresh rfcq; cp "$tmp/rfcq/bad/t3-crypto_stream.rs" "$qx/crypto_stream.rs"
 expect_fail "rfc-quantity: T3's original crypto window (fcf9ff0^) reads the read offset" "crypto_allowed_err reads \`s.reassembly()\` (a method" rq
+# review probes A, B, H: one-token edits that change no list; each changes its root's digest, so the vouches are re-reviewed
+fresh rfcq; sed -i 's/                            None => false,/                            None => true,/' "$qx/tp.rs"
+expect_fail "rfc-quantity: probe A, allowed_tp_err_from's walk arm None => true (the code's model decides)" "re-review the vouches for quic::tp::allowed_tp_err_from" rq
+fresh rfcq; sed -i 's/Some((t2, seen2)) => allowed_tp_err_from(b, s, ids.insert(id), t2, seen2)/Some((t2, len)) => len > 1 || allowed_tp_err_from(b, s, ids.insert(id), t2, len)/' "$qx/tp.rs"
+expect_fail "rfc-quantity: probe B, the seen mask rebound as len" "re-review the vouches for quic::tp::allowed_tp_err_from" rq
+fresh rfcq; sed -i 's/final_size_trigger(s, off + len, fin)/final_size_trigger(s, conn_room, fin)/' "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: probe H, conn_room passed as a callee's vouched end" "re-review the vouches for $RR" rq
+fresh rfcq; qadd crypto_stream.rs 'pub open spec fn allowed_win_err(w: nat, offset: u64, len: nat) -> bool { crypto_window_exceeded(w, offset, len) }'
+expect_fail "rfc-quantity: probe C, a new predicate inheriting a callee's vouches" "no \`root\` line for quic::crypto_stream::allowed_win_err" rq
+fresh rfcq; sed -i 's/^    ||| end > s.limit$/& || s.high > 0 \/\/ rfc-quantity: s.limit: the largest maximum stream data sent (RFC 9000 §19.10)/' "$qx/recv_stream.rs"
+sed -i '/\ts\.limit\t/d' "$qop"; qredig
+expect_fail "rfc-quantity: probe I, s.high on a line whose annotation names s.limit (digests re-pinned)" "flow_trigger (from recv_allowed_err) reads \`s.high\`" rqn
+fresh rfcq; sed -i 's/||| tp_server_only(id)$/||| tp_server_only(id) || b@.foo > 0/' "$qx/tp.rs"; qredig
+expect_fail "rfc-quantity: a field after a view (b@.foo)" "allowed_tp_err_from reads \`b@.foo\` (a struct field)" rqn
+fresh rfcq; qadd recv_stream.rs 'impl SpecRecv { pub open spec fn len(&self) -> nat { 0 } }'
+expect_fail "rfc-quantity: a spec method named like a vstd method" "a spec method named like a vstd method (len)" rq
 fresh rfcq; sed -i 's/^    ||| end > s.limit$/& \/\/ rfc-quantity:/' "$qx/recv_stream.rs"
-expect_fail "rfc-quantity: an annotation with an empty reason" "\`// rfc-quantity:\` reason cites no" rq
-fresh rfcq; sed -i 's/^    ||| end > s.limit$/& \/\/ rfc-quantity: the largest MAX_STREAM_DATA sent/' "$qx/recv_stream.rs"
-expect_fail "rfc-quantity: an annotation citing no RFC section" "\`// rfc-quantity:\` reason cites no" rq
+expect_fail "rfc-quantity: an annotation with an empty reason" "\`// rfc-quantity:\` needs \`READ: <why" rq
+fresh rfcq; sed -i 's/^    ||| end > s.limit$/& \/\/ rfc-quantity: s.limit: the largest MAX_STREAM_DATA sent/' "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: an annotation citing no RFC section" "\`// rfc-quantity:\` needs \`READ: <why" rq
 fresh rfcq; sed -i 's/^    ||| end > s.limit$/& \/\/ rfc-quantity: the largest maximum stream data sent (RFC 9000 §19.10)/' "$qx/recv_stream.rs"
-sed -i '/\ts\.limit\t/d' "$qop"
-expect_pass "rfc-quantity: a cited annotation vouches for its line's read (open line deleted)" rq
-fresh rfcq; sed -i 's/^pub const FINAL_SIZE_ERROR.*/& \/\/ rfc-quantity: the code (RFC 9000 §20.1)/' "$qx/recv_stream.rs"
-expect_fail "rfc-quantity: an annotation on a line with no read" "with no read from an allowed_*err predicate (stale)" rq
+expect_fail "rfc-quantity: an annotation naming no read" "\`// rfc-quantity:\` needs \`READ: <why" rq
+fresh rfcq; sed -i 's/^    ||| end > s.limit$/& \/\/ rfc-quantity: s.limit: the largest maximum stream data sent (RFC 9000 §19.10)/' "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: an annotation changes its root's digest" "re-review the vouches for $RR" rq
+sed -i '/\ts\.limit\t/d' "$qop"; qredig
+expect_pass "rfc-quantity: a cited annotation vouches for the read it names (open line deleted, digests re-pinned)" rqn
+fresh rfcq; sed -i 's/^    ||| end > s.limit$/& \/\/ rfc-quantity: s.high: the largest received offset (RFC 9000 §19.10)/' "$qx/recv_stream.rs"; qredig
+expect_fail "rfc-quantity: an annotation naming a read its line does not make" "\`// rfc-quantity: s.high:\` names no read on its line" rqn
 fresh rfcq; printf 'use vstd::prelude::*;\n\nverus! {\n\npub open spec fn other(n: nat) -> bool {\n    n > 0 // rfc-quantity:\n}\n\n} // verus!\n' > "$qx/other.rs"
-expect_fail "rfc-quantity: an empty annotation in a file no predicate reaches" "other.rs:6: \`// rfc-quantity:\` reason cites no" rq
-fresh rfcq; sed -i 's/final_size_trigger(s, off + len, fin)/crate::recv_stream::final_size_trigger(s, off + len, fin)/' "$qx/recv_stream.rs"
-expect_pass "rfc-quantity: a path-qualified call is followed" rq
+expect_fail "rfc-quantity: an empty annotation in a file no predicate reaches" "other.rs:6: \`// rfc-quantity:\` needs" rq
+fresh rfcq; sed -i 's/final_size_trigger(s, off + len, fin)/crate::recv_stream::final_size_trigger(s, off + len, fin)/' "$qx/recv_stream.rs"; qredig
+expect_pass "rfc-quantity: a path-qualified call is followed (digests re-pinned)" rqn
 sed -i 's/c == FINAL_SIZE_ERROR \&\& /&crate::recv_stream::peek(s) \&\& /' "$qx/recv_stream.rs"
-qadd recv_stream.rs 'pub open spec fn peek(s: SpecRecv) -> bool { s.high > 0 }'
-expect_fail "rfc-quantity: a path-qualified call to a helper reading a field" "peek (from recv_allowed_err) reads \`s.high\`" rq
+qadd recv_stream.rs 'pub open spec fn peek(s: SpecRecv) -> bool { s.high > 0 }'; qredig
+expect_fail "rfc-quantity: a path-qualified call to a helper reading a field" "peek (from recv_allowed_err) reads \`s.high\`" rqn
 fresh rfcq; sed -i 's/c == FINAL_SIZE_ERROR \&\& /crate::tp::peek(s) \&\& /' "$qx/recv_stream.rs"
 qadd recv_stream.rs 'pub open spec fn peek(s: SpecRecv) -> bool { true }'
-qadd tp.rs 'pub open spec fn peek(s: crate::recv_stream::SpecRecv) -> bool { s.high > 0 }'
-expect_fail "rfc-quantity: a module-qualified call reaches that module's fn, not the caller's namesake" "peek (from recv_allowed_err) reads \`s.high\`" rq
+qadd tp.rs 'pub open spec fn peek(s: crate::recv_stream::SpecRecv) -> bool { s.high > 0 }'; qredig
+expect_fail "rfc-quantity: a module-qualified call reaches that module's fn, not the caller's namesake" "peek (from recv_allowed_err) reads \`s.high\`" rqn
 fresh rfcq; qadd tp.rs 'pub open spec fn peek(s: SpecTp) -> bool { true }'; qadd crypto_stream.rs 'pub open spec fn peek(s: CryptoStream) -> bool { true }'
 sed -i 's/c == FINAL_SIZE_ERROR \&\& /peek(s) \&\& /' "$qx/recv_stream.rs"
 expect_fail "rfc-quantity: an unqualified call the caller's module does not define, two modules do" "calls peek, which names 2 spec fns" rq
@@ -455,18 +485,20 @@ fresh rfcq; rm "$qop"
 expect_fail "rfc-quantity: no open ratchet" "cannot read the open ratchet" rq
 fresh rfcq; rm -r "$tmp/rfcq/crates"
 expect_fail "rfc-quantity: no crates/" "cannot scan crates/" rq
-fresh rfcq; printf 'name\tquic::recv_stream::flow_trigger\tconn_room\tthe connection credit left (RFC 9000 §4.1)\n' >> "$qal"
+fresh rfcq; sed -i '/^root\tquic::tp::allowed_tp_err\t/d' "$qal"
+expect_fail "rfc-quantity: a predicate without a root line" "no \`root\` line for quic::tp::allowed_tp_err:" rq
+fresh rfcq; printf 'name\t%s\tquic::recv_stream::flow_trigger\tconn_room\tthe connection credit left (RFC 9000 §4.1)\n' "$RR" >> "$qal"
 sed -i '/\tconn_room\t/d' "$qop"
-expect_fail "rfc-quantity: the allowlist grows without ALLOW_DIGEST" "but ALLOW_DIGEST in tools/rfc_quantity.py is $qdig" rq
-fresh rfcq; sed -i 's/c == CRYPTO_BUFFER_EXCEEDED \&\& //' "$qx/crypto_stream.rs"; sed -i '/::crypto_allowed_err\tc\t/d' "$qal"
-printf 'name\tquic::recv_stream::flow_trigger\tconn_room\tthe connection credit left (RFC 9000 §4.1)\n' >> "$qal"; sed -i '/\tconn_room\t/d' "$qop"
-expect_fail "rfc-quantity: the allowlist swaps a stale line for a new one (same count)" "but ALLOW_DIGEST in tools/rfc_quantity.py is $qdig" rq
-fresh rfcq; sed -i 's/c == CRYPTO_BUFFER_EXCEEDED \&\& //' "$qx/crypto_stream.rs"
-expect_fail "rfc-quantity: a stale allowlist line" "stale allowlist line, vouches for no read or call: name	quic::crypto_stream::crypto_allowed_err	c" rq
+expect_fail "rfc-quantity: the allowlist grows without ALLOW_DIGEST" "the allowlist's digest is not ALLOW_DIGEST" rq
+fresh rfcq; sed -i '/\tquic::crypto_stream::crypto_allowed_err\tc\t/d' "$qal"; sed -i 's/c == CRYPTO_BUFFER_EXCEEDED \&\& //' "$qx/crypto_stream.rs"
+printf 'name\t%s\tquic::recv_stream::flow_trigger\tconn_room\tthe connection credit left (RFC 9000 §4.1)\n' "$RR" >> "$qal"; sed -i '/\tconn_room\t/d' "$qop"
+expect_fail "rfc-quantity: the allowlist swaps a stale line for a new one (same count)" "the allowlist's digest is not ALLOW_DIGEST" rq
+fresh rfcq; sed -i 's/c == CRYPTO_BUFFER_EXCEEDED \&\& //' "$qx/crypto_stream.rs"; qredig
+expect_fail "rfc-quantity: a stale allowlist line" "stale allowlist line, vouches for no read or call: name	quic::crypto_stream::crypto_allowed_err	quic::crypto_stream::crypto_allowed_err	c" rqn
 fresh rfcq; sed -i 's/(RFC 9000 §19.8)$/(the frame)/' "$qal"
 expect_fail "rfc-quantity: an allowlist reason citing no RFC section" "the reason cites no" rq
-fresh rfcq; sed -i 's/credit_before(s) + conn_room/credit_before(s)/' "$qx/recv_stream.rs"
-expect_fail "rfc-quantity: a stale open line" "stale open line, no such read" rq
+fresh rfcq; sed -i 's/credit_before(s) + conn_room/credit_before(s)/' "$qx/recv_stream.rs"; qredig
+expect_fail "rfc-quantity: a stale open line" "stale open line, no such read" rqn
 fresh rfcq; sed -i 's/\ts\.final_size\t4\t/\ts.final_size\t5\t/' "$qop"
 expect_fail "rfc-quantity: an open count that is not the current count" "open line count 5, but" rq
 fresh rfcq; sed -i 's/\t9c\t/\tlater\t/' "$qop"
