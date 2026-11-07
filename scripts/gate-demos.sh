@@ -198,7 +198,7 @@ expect_fail "check-quotes: no spec dir" "check-quotes: no" "$root/scripts/check-
 # acceptance.sh's real git path, in a throwaway repo: a branch that appends a baseline line; main appending one; no main.
 gitrepo() {  # gitrepo <dir>: scripts and tools of the repo plus the acceptance fixture, one commit on main
     rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/tools"
-    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/acceptance.py" "$tmp/$1/tools/"
+    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/acceptance.py" "$root/tools/ratchet_walk.py" "$tmp/$1/tools/"
     cp -r "$fx/acceptance/crates" "$tmp/$1/crates"; cp "$fx/acceptance/baseline.txt" "$tmp/$1/tools/acceptance-baseline.txt"
     git -C "$tmp/$1" init -q -b main
     git -C "$tmp/$1" add -A
@@ -214,7 +214,7 @@ expect_fail "acceptance.sh git: branch appends a baseline line" "not in the merg
 gitrepo g2
 echo "demo::extra" >> "$tmp/g2/tools/acceptance-baseline.txt"
 gitc g2 commit -qam grow
-expect_fail "acceptance.sh git: main appends a baseline line (compared with HEAD^1)" "not in the merge-base baseline" gaccept g2
+expect_fail "acceptance.sh git: main appends a baseline line (walk)" "ratchet-walk: tools/acceptance-baseline.txt grew at" gaccept g2
 gitrepo g3
 gitc g3 branch -m main trunk
 expect_fail "acceptance.sh git: no main" "cannot resolve the merge-base" gaccept g3
@@ -275,7 +275,7 @@ expect_fail "rlimit-gate: FAIL row in the second object" "FAIL row" rl
 # a listed fn above its value; a raised value and a new line against history; a quic line; a stale line; a missing file; server with verus!.
 rcrepo() {  # rcrepo <dir>: scripts, rl.py, the ceilings fixture and server src, one commit on main, then branch feat
     rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/tools"
-    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/rl.py" "$tmp/$1/tools/"
+    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/rl.py" "$root/tools/ratchet_walk.py" "$tmp/$1/tools/"
     cp -r "$fx/rlimit/ceilings/crates" "$fx/rlimit/ceilings/logs" "$tmp/$1/"; cp "$fx/rlimit/ceilings/tools/rlimit-ceilings.txt" "$tmp/$1/tools/"
     git -C "$tmp/$1" init -q -b main
     git -C "$tmp/$1" add -A
@@ -527,7 +527,7 @@ expect_fail "rfc-quantity: an open count above the merge-base's" "open line coun
 # scripts/rfc-quantity.sh's real git path, in a throwaway repo: a branch and main each add a read with its open line; no main.
 qrepo() {  # qrepo <dir>: scripts, the two python tools and the fixture, one commit on main
     rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/tools"
-    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/acceptance.py" "$root/tools/rfc_quantity.py" "$tmp/$1/tools/"
+    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/acceptance.py" "$root/tools/rfc_quantity.py" "$root/tools/ratchet_walk.py" "$tmp/$1/tools/"
     cp -r "$fx/rfcq/crates" "$tmp/$1/crates"; cp "$fx/rfcq/tools/"*.txt "$tmp/$1/tools/"
     git -C "$tmp/$1" init -q -b main
     git -C "$tmp/$1" add -A
@@ -542,11 +542,55 @@ qgate() { "$tmp/$1/scripts/rfc-quantity.sh" --allow-digest "$qdig"; }
 qrepo q1; gitc q1 checkout -qb feat; qgrow q1
 expect_fail "rfc-quantity.sh git: a branch adds an open line" "open line not in the merge-base open ratchet" qgate q1
 qrepo q2; qgrow q2
-expect_fail "rfc-quantity.sh git: main adds an open line (compared with HEAD^1)" "open line not in the merge-base open ratchet" qgate q2
+expect_fail "rfc-quantity.sh git: main adds an open line (walk)" "ratchet-walk: tools/rfc-quantity-open.txt grew at" qgate q2
 qrepo q3; gitc q3 branch -m main trunk
 expect_fail "rfc-quantity.sh git: no main" "cannot resolve the merge-base" qgate q3
 qrepo q4; gitc q4 checkout -qb feat; touch "$tmp/q4/x"; gitc q4 add x; gitc q4 commit -qm noop
 expect_pass "rfc-quantity.sh git: unchanged open ratchet on a branch" qgate q4
+
+# the baseline history walk (tools/ratchet_walk.py, R5): growth spread over direct commits on main, for each of the three
+# ratchet files, with the last commit not growing it (so the HEAD^1 comparison alone passes).
+gitrepo g5
+echo "demo::extra" >> "$tmp/g5/tools/acceptance-baseline.txt"; gitc g5 commit -qam grow
+touch "$tmp/g5/x"; gitc g5 add x; gitc g5 commit -qm noop
+expect_fail "acceptance.sh git: growth over two direct commits on main" "ratchet-walk: tools/acceptance-baseline.txt grew at" gaccept g5
+rcrepo rc12; gitc rc12 checkout -q main; gitc rc12 merge -q feat
+echo "tls tls::flight::extra 9000000" >> "$tmp/rc12/tools/rlimit-ceilings.txt"
+sed -i 's/quic::conn::small", "rlimit": 120000/tls::flight::extra", "rlimit": 9000000/' "$tmp/rc12/logs/tls.json"
+gitc rc12 commit -qam grow; touch "$tmp/rc12/x"; gitc rc12 add x; gitc rc12 commit -qm noop
+expect_fail "rlimit-ceilings.sh git: growth over two direct commits on main" "ratchet-walk: tools/rlimit-ceilings.txt grew at" rceil rc12
+rcrepo rc13; gitc rc13 checkout -q main; gitc rc13 merge -q feat
+sed -i 's/11648578/11648579/' "$tmp/rc13/logs/tls.json" "$tmp/rc13/tools/rlimit-ceilings.txt"; gitc rc13 commit -qam raise
+touch "$tmp/rc13/x"; gitc rc13 add x; gitc rc13 commit -qm noop
+expect_fail "rlimit-ceilings.sh git: a raised value over two direct commits on main" "raised from 11648578 to 11648579" rceil rc13
+qrepo q5; qgrow q5; touch "$tmp/q5/x"; gitc q5 add x; gitc q5 commit -qm noop
+expect_fail "rfc-quantity.sh git: growth over two direct commits on main" "ratchet-walk: tools/rfc-quantity-open.txt grew at" qgate q5
+# the walk itself, on a plain file: a shrink then a re-grow, a legitimate shrink, a deletion then a re-add, a shallow clone.
+walk() { python3 -I "$root/tools/ratchet_walk.py" "$tmp/$1" "$2" "$3"; }
+wrepo() {  # wrepo <dir> <file> <content>: one commit on main
+    rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1"; git -C "$tmp/$1" init -q -b main
+    printf '%s\n' "$3" > "$tmp/$1/$2"; git -C "$tmp/$1" add -A; gitc "$1" commit -qm base
+}
+wrepo w1 f 'a
+b'
+printf 'a\n' > "$tmp/w1/f"; gitc w1 commit -qam shrink
+expect_pass "ratchet-walk: a legitimate shrink" walk w1 f lines
+printf 'a\nb\n' > "$tmp/w1/f"; gitc w1 commit -qam regrow
+expect_fail "ratchet-walk: a shrink then a re-grow" "grew at" walk w1 f lines
+wrepo w2 f 'c 
+c fn 9000000'
+printf 'c fn 9000000\n' > "$tmp/w2/f"; gitc w2 commit -qam noop
+expect_fail "ratchet-walk: an unreadable ceilings line" "unreadable ceilings line" walk w2 f ceilings
+wrepo w3 f 'c fn 9000000'
+printf 'c fn 8500000\n' > "$tmp/w3/f"; gitc w3 commit -qam shrink
+expect_pass "ratchet-walk: a lowered ceiling" walk w3 f ceilings
+git -C "$tmp/w3" rm -q f; gitc w3 commit -qm delete
+printf 'c fn 8600000\n' > "$tmp/w3/f"; git -C "$tmp/w3" add f; gitc w3 commit -qm readd
+expect_fail "ratchet-walk: a deletion then a re-add above the last copy" "raised from 8500000 to 8600000" walk w3 f ceilings
+rm -rf "${tmp:?}/w4"; git clone -q --depth 1 "file://$tmp/w1" "$tmp/w4"
+expect_fail "ratchet-walk: a shallow clone" "shallow" walk w4 f lines
+wrepo w5 f 'a'
+expect_fail "ratchet-walk: a git error (path outside any repo)" "failed" walk w5/nonexistent f lines
 
 # mutant registry (scripts/mutants.sh, C6), in throwaway git repos holding the acceptance fixture crate as crates/demo/src/acc.rs
 # and the one-row registry of tools/gate-demos/mutants. check: a patch that no longer applies, a missing patch, an empty or

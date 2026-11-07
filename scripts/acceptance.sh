@@ -11,7 +11,7 @@ set -o pipefail
 # col-0 `} // verus!`). Known limit: the cross-count checks lexing and block discovery only (the
 # parser reaches every fn token by construction), so it cannot see a fn credited with the wrong
 # clause text; the parser's raise on a body brace not indented under its fn covers that.
-# On main the baseline is compared with HEAD^1's; a git error fails the gate. See tools/acceptance.py for the parser's limits.
+# On main the baseline is walked first-parent from the commit that introduced it (tools/ratchet_walk.py: no step may grow it) and compared with HEAD^1's; a git error fails the gate. See tools/acceptance.py for the parser's limits.
 here=$(cd "$(dirname "$0")/.." && pwd)
 root=$here
 prev=
@@ -22,11 +22,13 @@ done
 have_old=0
 for a in "$@"; do [ "$a" != --old-baseline ] || have_old=1; done
 extra=
+walk=0
 if [ "$(cd "$root" && pwd -P)" = "$(cd "$here" && pwd -P)" ] && [ "$have_old" -eq 0 ]; then
     die() { echo "acceptance: $*" >&2; exit 1; }
     head=$(git -C "$root" rev-parse HEAD) || die "cannot resolve HEAD"
     cmp=$(git -C "$root" merge-base HEAD main) || die "cannot resolve the merge-base of HEAD and main"
-    if [ "$cmp" = "$head" ]; then  # on main (or main == HEAD): compare with the previous commit
+    if [ "$cmp" = "$head" ]; then  # on main (or main == HEAD): compare with the previous commit, and walk the whole history
+        walk=1
         cmp=$(git -C "$root" rev-parse "HEAD^1") || die "HEAD is main and has no parent to compare the baseline with"
     fi
     present=$(git -C "$root" ls-tree --name-only "$cmp" -- tools/acceptance-baseline.txt) || die "git ls-tree $cmp failed"
@@ -39,6 +41,7 @@ if [ "$(cd "$root" && pwd -P)" = "$(cd "$here" && pwd -P)" ] && [ "$have_old" -e
         echo "acceptance: skipping the merge-base baseline check: $cmp has no tools/acceptance-baseline.txt" >&2
     fi
 fi
+[ "$walk" -eq 0 ] || python3 -I "$here/tools/ratchet_walk.py" "$root" tools/acceptance-baseline.txt lines
 # shellcheck disable=SC2086 # $extra is `--old-baseline FILE` or empty
 python3 -I "$here/tools/acceptance.py" "$@" $extra
 parsed=$(python3 -I "$here/tools/acceptance.py" --count "$@" | tail -n 1)

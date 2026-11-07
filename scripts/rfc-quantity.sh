@@ -6,7 +6,8 @@ set -o pipefail
 # vouched for as an RFC quantity (a `// rfc-quantity:` line, tools/rfc-quantity-allow.txt) or is a known open item in
 # tools/rfc-quantity-open.txt, which only shrinks: with the default root, no line (or larger count) may be absent from
 # the open file at the merge-base with main, or at HEAD^1 on main (acceptance.sh's scheme; skipped, and said so, when
-# that commit has no open file; a git error fails the gate).
+# that commit has no open file; a git error fails the gate). On main the whole first-parent history is also walked
+# (tools/ratchet_walk.py: no step may grow the file).
 here=$(cd "$(dirname "$0")/.." && pwd)
 root=$here
 prev=
@@ -18,10 +19,12 @@ for a in "$@"; do
 done
 die() { echo "rfc-quantity: $*" >&2; exit 1; }
 extra=
+walk=0
 if [ "$(cd "$root" && pwd -P)" = "$(cd "$here" && pwd -P)" ] && [ "$have_old" -eq 0 ]; then
     head=$(git -C "$root" rev-parse HEAD) || die "cannot resolve HEAD"
     cmp=$(git -C "$root" merge-base HEAD main) || die "cannot resolve the merge-base of HEAD and main"
     if [ "$cmp" = "$head" ]; then  # on main (or main == HEAD): compare with the previous commit
+        walk=1
         cmp=$(git -C "$root" rev-parse "HEAD^1") || die "HEAD is main and has no parent to compare the open ratchet with"
     fi
     present=$(git -C "$root" ls-tree --name-only "$cmp" -- tools/rfc-quantity-open.txt) || die "git ls-tree $cmp failed"
@@ -34,5 +37,6 @@ if [ "$(cd "$root" && pwd -P)" = "$(cd "$here" && pwd -P)" ] && [ "$have_old" -e
         echo "rfc-quantity: skipping the merge-base open-ratchet check: $cmp has no tools/rfc-quantity-open.txt" >&2
     fi
 fi
+[ "$walk" -eq 0 ] || python3 -I "$here/tools/ratchet_walk.py" "$root" tools/rfc-quantity-open.txt open
 # shellcheck disable=SC2086 # $extra is `--old-open FILE` or empty
 python3 -I "$here/tools/rfc_quantity.py" "$@" $extra
