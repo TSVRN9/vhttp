@@ -3434,12 +3434,21 @@ impl Connection {
         self.peer_tp = Some(copy_tp(tp));
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-8.1
+    //# When using ALPN, endpoints MUST immediately close a connection (see
+    //# Section 10.2 of [QUIC-TRANSPORT]) with a no_application_protocol TLS
+    //# alert (QUIC error code 0x0178; see Section 4.8) if an application
+    //# protocol is not negotiated.
     /// TLS finished, with this ALPN. After this no long-header packet is built.
     #[verifier::spinoff_prover]
     pub fn on_handshake_complete(&mut self, alpn: &[u8], now: u64, rand: &[u8; RAND_LEN])
         requires
             old(self).wf(),
         ensures
+            // §8.1: an open, not yet complete connection whose ALPN is not `h3` closes with 0x0178.
+            old(self).phase_spec() is Open && !old(self).live(PacketKind::OneRtt) && alpn@ != seq![0x68u8, 0x33u8]
+                ==> final(self).phase_spec() is Closing
+                && final(self).close_spec() == Some((false, (CRYPTO_ERROR_BASE + 0x78) as u64, Seq::<u8>::empty())),
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
             final(self).crypto_kept(*old(self)),
@@ -3460,14 +3469,15 @@ impl Connection {
             }
             return;
         }
+        // ALPN first: §8.1's close is owed whatever else is wrong.
+        if let Err(c) = check_alpn(alpn) {
+            self.close_internal(c);
+            return;
+        }
         // `streams.is_none()` is unreachable (`on_peer_params` sets both); `wf`'s `complete` clause
         // needs it, and it costs less than one more conjunct.
         if self.peer_tp.is_none() || self.streams.is_none() {
             self.close_internal(INTERNAL_ERROR);
-            return;
-        }
-        if let Err(c) = check_alpn(alpn) {
-            self.close_internal(c);
             return;
         }
         let ghost s0 = *self;
@@ -8482,6 +8492,20 @@ impl Connection {
             PacketKind::Handshake => self.crx_h.start(),
             PacketKind::OneRtt => self.crx_1.start(),
         }
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2
+    //# Endpoints that receive a version 1 long header
+    //# with a value larger than 20 MUST drop the packet.
+    /// The length of the client's first Initial SCID, at most 20 (`HandshakeIds::wf`).
+    pub fn client_scid_len(&self) -> (r: usize)
+        requires
+            self.wf(),
+        ensures
+            r == self.client_scid_spec().len(),
+            r <= MAX_CID_LEN,
+    {
+        self.ids.client_scid().len()
     }
 
     /// Our transport parameters, filled in.
