@@ -287,6 +287,7 @@ impl CryptoStream {
         ensures
             final(self).wf(),
             final(self).reassembly().inserted() == old(self).reassembly().inserted(),
+            forall|p: nat| #[trigger] final(self).received(p) == old(self).received(p),
             final(self).reassembly().base() == rfc_contiguous(
                 rfc_received(old(self).reassembly().inserted()),
             ),

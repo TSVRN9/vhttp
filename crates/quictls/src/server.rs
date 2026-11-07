@@ -414,7 +414,7 @@ impl<'a> QuicServer<'a> {
         ensures
             s matches Some(q) ==> q.wf() && q.one_rtt_forgotten(),
             app_grew(old(app)@, final(app)@),
-            s matches Some(q) ==> (q.conn_spec().phase_spec() is Open ==> crypto_all_drained(q.conn_spec())),
+            s matches Some(q) ==> crypto_all_drained(q.conn_spec()),
     {
         let dcid = match initial_dcid(d) {
             Some(x) => x,
@@ -450,6 +450,7 @@ impl<'a> QuicServer<'a> {
                 lemma_all_drained_kept(s.h3.conn_spec(), c0);
             }
         }
+        s.drop_if_closed();
         s.forget_failed();
         s.sync_keys();
         Some(s)
@@ -464,9 +465,11 @@ impl<'a> QuicServer<'a> {
             final(self).wf(),
             final(self).one_rtt_forgotten(),
             app_grew(old(app)@, final(app)@),
-            // Drain after the datagram: every CRYPTO byte it delivered in order has gone to TLS.
-            final(self).conn_spec().phase_spec() is Open ==> crypto_all_drained(final(self).conn_spec()),
+            // Drain after the datagram: every CRYPTO byte it delivered in order has gone to TLS, or
+            // been dropped because the connection closed.
+            crypto_all_drained(final(self).conn_spec()),
     {
+        hide(spec_on_crypto);
         let was = self.h3.conn().handshake_complete();
         let ghost c0 = self.h3.conn_spec();
         quic::pipeline::receive(self.h3.conn_mut(), d, path, now, &r.conn, &self.keys);
@@ -487,7 +490,21 @@ impl<'a> QuicServer<'a> {
             self.sync_keys();
             // The refed packet's 1-RTT CRYPTO bytes go to TLS now, not at the next datagram: any
             // such byte is unexpected_message, a close TLS requires at once. `r.tls` is not drawn
-            // on (`lemma_one_rtt_rand_free`).
+            // on: whatever this feed hands TLS, its answer is the same under any other randomness.
+            proof {
+                let cfg = self.hs.cfg_view();
+                let tp = self.hs.tp_view();
+                assert forall|st: SpecServerHs, data: Seq<u8>, r2: Seq<u8>| data.len() > 0 implies spec_on_crypto(
+                    cfg,
+                    tp,
+                    st,
+                    Level::OneRtt,
+                    data,
+                    r.tls@,
+                ) == #[trigger] spec_on_crypto(cfg, tp, st, Level::OneRtt, data, r2) by {
+                    lemma_one_rtt_rand_free(cfg, tp, st, data, r.tls@, r2);
+                }
+            }
             let _ = self.feed(Level::OneRtt, now, r, true);
             proof {
                 let c = self.h3.conn_spec();
@@ -508,8 +525,29 @@ impl<'a> QuicServer<'a> {
                 lemma_all_drained_kept(self.h3.conn_spec(), c2);
             }
         }
+        self.drop_if_closed();
         self.forget_failed();
         self.sync_keys();
+    }
+
+    /// A connection that is no longer open has its unread CRYPTO bytes dropped: TLS reads no more.
+    #[verifier::spinoff_prover]
+    fn drop_if_closed(&mut self)
+        requires
+            old(self).core_ok(),
+            old(self).conn_spec().phase_spec() is Open ==> crypto_all_drained(old(self).conn_spec()),
+        ensures
+            final(self).core_ok(),
+            crypto_all_drained(final(self).conn_spec()),
+    {
+        if matches!(self.h3.conn().phase(), Phase::Open) {
+            return;
+        }
+        let ghost c0 = self.h3.conn_spec();
+        self.h3.conn_mut().crypto_drop();
+        proof {
+            Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
+        }
     }
 
     /// Clears `out`, then protects the next datagram into it and returns its path. A `Some` with
