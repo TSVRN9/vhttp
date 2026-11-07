@@ -4,7 +4,7 @@ set -o pipefail
 # gate-demos.sh: each cheap gate gets a canned bad input (a temp copy of a fixture in
 # tools/gate-demos/ with one change applied) and must exit non-zero with its message; every fixture
 # first passes unchanged, so a demo cannot fail for the wrong reason. Covers lint-scripts,
-# check-quotes, acceptance (many bad changes, including real-git runs) and escape-gate (three). Takes a few seconds.
+# check-quotes, acceptance (many bad changes, including real-git runs), escape-gate (three) and the rlimit gate. Takes a few seconds.
 root=$(cd "$(dirname "$0")/.." && pwd)
 fx=$root/tools/gate-demos
 tmp=$(mktemp -d)
@@ -238,5 +238,28 @@ expect_fail "escape-gate: external_body in crypto without a TRUSTED row" "has no
 fresh escape
 printf 'assume_specification[ f ](x: u8);\n' >> "$tmp/escape/crates/demo/src/lib.rs"
 expect_fail "escape-gate: assume_specification" "unaccounted escape" esc
+
+# rlimit gate (tools/rl.py --gate): a quic fn at 8,000,001; a FAIL row; empty and rowless logs; a missing log; two JSON objects.
+rl() { python3 -I "$root/tools/rl.py" --gate quic --max 8000000 "$tmp/rl.json"; }
+fresh rlimit; cp "$tmp/rlimit/quic.json" "$tmp/rl.json"
+expect_pass "rlimit-gate" rl
+sed -i 's/"rlimit": 8000000/"rlimit": 8000001/' "$tmp/rl.json"
+expect_fail "rlimit-gate: fn at 8,000,001" "quic::conn::edge at 8000001 is above 8000000" rl
+cp "$tmp/rlimit/quic.json" "$tmp/rl.json"; sed -i 's/"rlimit": 120000, "success": true/"rlimit": 120000, "success": false/' "$tmp/rl.json"
+expect_fail "rlimit-gate: FAIL row" "FAIL row" rl
+cp "$tmp/rlimit/quic.json" "$tmp/rl.json"; sed -i 's/"errors": 0/"errors": 1/' "$tmp/rl.json"
+expect_fail "rlimit-gate: errors in the run" "run not clean" rl
+: > "$tmp/rl.json"
+expect_fail "rlimit-gate: empty log" "0 verification-results objects" rl
+echo '{"verification-results": {"success": true}}' > "$tmp/rl.json"
+expect_fail "rlimit-gate: truncated results object" "unreadable results" rl
+sed 's/"function-breakdown": \[[^]]*\]/"function-breakdown": []/' "$tmp/rlimit/quic.json" > "$tmp/rl.json"
+expect_fail "rlimit-gate: no rows" "no per-fn rows" rl
+rm -f "$tmp/rl.json"
+expect_fail "rlimit-gate: missing log" "cannot read" rl
+cat "$tmp/rlimit/quic.json" "$tmp/rlimit/quic.json" > "$tmp/rl.json"
+expect_pass "rlimit-gate: two clean result objects (a dependency built in the run)" rl
+{ cat "$tmp/rlimit/quic.json"; sed 's/"rlimit": 120000, "success": true/"rlimit": 120000, "success": false/' "$tmp/rlimit/quic.json"; } > "$tmp/rl.json"
+expect_fail "rlimit-gate: FAIL row in the second object" "FAIL row" rl
 
 echo "gate-demos: $n demos, all fail as expected"
