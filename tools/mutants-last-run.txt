@@ -1,5 +1,6 @@
-# tools/mutants-last-run.txt: written by scripts/mutants.sh run on 2026-11-07T10:12Z; verify.sh's merge gate reads it
+# tools/mutants-last-run.txt: written by scripts/mutants.sh run on 2026-11-07T10:46Z; verify.sh's main gate reads it
 crates 28bee150e185fe7c1ec4895dbf3e4b5388241bb0
+tree 7f2aa60a8fa69d03dcdde8481783d8b72cab80f9d083a5f4345a3214d75b76d3
 tsv c1881fa0339d3b9300516ac331d9b7c832335c95
 T0-M1 pass dbf79a3123336c3ceb7e5544278d37d96489e038
 T1-M1 pass eb0b52b2dc2ea4da7dac805d1d3df1aeb0caed46
