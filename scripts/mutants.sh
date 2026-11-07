@@ -35,7 +35,9 @@ check() {
 
 # one LOGBASE CRATE MODULE FN: run Verus on FN alone in the worktree; the log goes to LOGBASE.log.
 one() {
-    touch "$wt/crates/$2/src/lib.rs"  # identical source back to back would be a cached no-op
+    # cargo verus decides freshness by content (blake3) and ignores verus args, so an unchanged crate would be a cached
+    # no-op that verifies nothing: clean it first (tools/mutants.py also fails a log without a results line).
+    (cd "$wt" && cargo clean -q -p "$2" --target-dir "$wt/target/verus-partial") < /dev/null > "$1.clean-cargo.log" 2>&1 || { echo "cargo clean -p $2 failed" > "$1.log"; return 0; }
     (cd "$wt/crates/$2" && cargo verus focus -- --verify-only-module "$3" --verify-function "$4") < /dev/null > "$1.log" 2>&1 || true
 }
 
