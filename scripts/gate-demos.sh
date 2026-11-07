@@ -5,7 +5,7 @@ set -o pipefail
 # tools/gate-demos/ with one change applied) and must exit non-zero with its message; every fixture
 # first passes unchanged, so a demo cannot fail for the wrong reason. Covers lint-scripts,
 # check-quotes, the citation gate, the RFC-quantity gate (its git demos in throwaway repos), acceptance (many bad changes, including real-git runs), escape-gate (three), the rlimit gate and the mutant registry (scripts/mutants.sh; its run demos call Verus
-# on the fixture crate). Takes a few seconds, plus about a minute the first time vstd builds in target/mutants-demo.
+# on the fixture crate), the declassify and deps gates, ct-check's report reader (ct-report.sh), ct-binary (against its real build) and the test gate. Takes a few seconds, plus about a minute the first time vstd builds in target/mutants-demo.
 root=$(cd "$(dirname "$0")/.." && pwd)
 fx=$root/tools/gate-demos
 tmp=$(mktemp -d)
@@ -758,5 +758,104 @@ expect_fail "mutants verify: patch edited after the run" "was run with another p
 gitc m3 checkout -q feat
 gitc m3 branch -m main trunk
 expect_fail "mutants verify: no main" "cannot resolve main" mut m3 verify
+
+# declassify gate (scripts/declassify-gate.sh ROOT REPORT GATEDIR): a report site with no TRUSTED.md row; counts that differ; a source
+# line the report lacks; a lost secret label; no report; an empty report; a report without sites.
+dg() { "$root/scripts/declassify-gate.sh" "$tmp/dg" "$tmp/dg/report.txt" "$tmp/dg/gate"; }
+fresh declassify; rm -rf "$tmp/dg"; mv "$tmp/declassify" "$tmp/dg"
+expect_pass "declassify-gate" dg
+sed -i 's/a::f#1/a::f#2/' "$tmp/dg/report.txt"
+expect_fail "declassify-gate: report site with no TRUSTED.md row" "crypto::a::f#2 has no TRUSTED.md ct-declassify row" dg
+fresh declassify; rm -rf "$tmp/dg"; mv "$tmp/declassify" "$tmp/dg"
+printf '| ct-declassify: crypto::a::g#1: y | crates/crypto/src/a.rs:9 | demo | never |\n' >> "$tmp/dg/TRUSTED.md"
+expect_fail "declassify-gate: extra TRUSTED.md row" "1 report sites but 2 TRUSTED.md ct-declassify rows" dg
+sed -i '$d' "$tmp/dg/TRUSTED.md"
+printf 'fn h(x: bool) -> bool { crate::ct::declassify(x) }\n' >> "$tmp/dg/crates/crypto/src/a.rs"
+expect_fail "declassify-gate: declassify( line the report lacks" "1 report sites but 2 declassify( lines" dg
+fresh declassify; rm -rf "$tmp/dg"; mv "$tmp/declassify" "$tmp/dg"
+sed -i 's/secret=d,msg,salt/secret=msg,salt/' "$tmp/dg/report.txt"
+expect_fail "declassify-gate: lost secret label" "rsa_pss_sign_inner lost its secret labels" dg
+fresh declassify; rm -rf "$tmp/dg"; mv "$tmp/declassify" "$tmp/dg"
+sed -i 's/a.rs:2 /a.rs:3 /' "$tmp/dg/TRUSTED.md"
+expect_fail "declassify-gate: row at another line" "report sites and TRUSTED.md rows differ" dg
+rm "$tmp/dg/report.txt"
+expect_fail "declassify-gate: no report" "declassify-gate: no $tmp/dg/report.txt" dg
+: > "$tmp/dg/report.txt"
+expect_fail "declassify-gate: empty report" "is empty" dg
+grep -v '^declassify ' "$fx/declassify/report.txt" > "$tmp/dg/report.txt"
+expect_fail "declassify-gate: report without sites" "no declassify site in" dg
+expect_fail "declassify-gate: no arguments" "usage: declassify-gate.sh" "$root/scripts/declassify-gate.sh"
+
+# deps gate (scripts/deps-gate.sh ROOT TREEFILE): a canned `cargo tree` with a second dep; no dep; a missing and an empty tree.
+mkdir -p "$tmp/dp"
+dpg() { "$root/scripts/deps-gate.sh" "$root" "$tmp/dp/tree.txt"; }
+cp "$fx/deps/tree.txt" "$tmp/dp/tree.txt"
+expect_pass "deps-gate" dpg
+printf 'vstd-extra v0.1.0\n' >> "$tmp/dp/tree.txt"
+expect_fail "deps-gate: a second dep" "not exactly vstd" dpg
+printf 'crypto v0.1.0 (/x/crates/crypto)\n' > "$tmp/dp/tree.txt"
+expect_fail "deps-gate: no dep" "not exactly vstd" dpg
+printf 'crypto v0.1.0 (/x/crates/crypto)\nvstd v0.0.0\nvstd v0.0.0\n' > "$tmp/dp/tree.txt"
+expect_fail "deps-gate: vstd listed twice" "not exactly vstd" dpg
+: > "$tmp/dp/tree.txt"
+expect_fail "deps-gate: empty tree" "empty cargo tree output" dpg
+rm "$tmp/dp/tree.txt"
+expect_fail "deps-gate: missing tree" "deps-gate: no $tmp/dp/tree.txt" dpg
+mkdir -p "$tmp/dp/bin"
+printf '#!/bin/sh\nexit 1\n' > "$tmp/dp/bin/cargo"; chmod +x "$tmp/dp/bin/cargo"
+expect_fail "deps-gate: cargo tree fails" "cargo tree failed" env PATH="$tmp/dp/bin:$PATH" "$root/scripts/deps-gate.sh" "$root"
+
+# ct-check's crypto report reader (scripts/ct-report.sh REPORT MANIFEST LABELS OUTDIR): a canned report with a rejected root; a root
+# with no verdict; changed labels; a missing and an empty report.
+cr() { "$root/scripts/ct-report.sh" "$tmp/cr/report.txt" "$tmp/cr/manifest.txt" "$tmp/cr/labels.txt" "$tmp/cr/out"; }
+fresh ctreport; rm -rf "$tmp/cr"; mv "$tmp/ctreport" "$tmp/cr"
+expect_pass "ct-report" cr
+sed -i 's/^root crypto::a::g ok/reject crypto::a::g SecretSwitch crates\/crypto\/src\/a.rs:1/' "$tmp/cr/report.txt"
+expect_fail "ct-report: a rejected root" "crypto: rejects" cr
+sed -i '/^reject /d' "$tmp/cr/report.txt"
+expect_fail "ct-report: a root with no verdict" "roots with no verdict: crypto::a::g" cr
+fresh ctreport; rm -rf "$tmp/cr"; mv "$tmp/ctreport" "$tmp/cr"
+sed -i 's/secret=x/secret=/' "$tmp/cr/report.txt"
+expect_fail "ct-report: a label lost" "checked lines differ" cr
+rm "$tmp/cr/report.txt"
+expect_fail "ct-report: no report" "crypto: no report" cr
+: > "$tmp/cr/report.txt"
+expect_fail "ct-report: empty report" "crypto: empty report" cr
+fresh ctreport; rm -rf "$tmp/cr"; mv "$tmp/ctreport" "$tmp/cr"
+: > "$tmp/cr/manifest.txt"
+expect_fail "ct-report: manifest without roots" "no root in" cr
+
+# ct-binary (scripts/ct-binary.sh --digests FILE: the real build, dump and checks against a canned digest file): one digest byte
+# changed; an objdump that lists no function; an objdump that fails; a missing digest file.
+cb() { "$root/scripts/ct-binary.sh" --digests "$tmp/cb/digests.txt"; }
+mkdir -p "$tmp/cb/bin" "$tmp/cb/bad"
+cp "$root/docs/crypto-binary-digests.txt" "$tmp/cb/digests.txt"
+expect_pass "ct-binary: the tracked digests as a canned file" cb
+l=$(grep -n -m1 '^[0-9a-f]\{64\} ' "$tmp/cb/digests.txt" | cut -d: -f1)
+c=$(sed -n "${l}s/^\(.\).*/\1/p" "$tmp/cb/digests.txt")
+[ "$c" = 0 ] && r=1 || r=0
+sed -i "${l}s/^./$r/" "$tmp/cb/digests.txt"
+expect_fail "ct-binary: one digest byte differs" "object code differs from $tmp/cb/digests.txt" cb
+printf '#!/bin/sh\n[ "${1-}" = --version ] && echo "GNU objdump fake" || true\n' > "$tmp/cb/bin/objdump"; chmod +x "$tmp/cb/bin/objdump"
+expect_fail "ct-binary: objdump lists no function" "no function in the disassembly" env PATH="$tmp/cb/bin:$PATH" "$root/scripts/ct-binary.sh" --digests "$root/docs/crypto-binary-digests.txt"
+printf '#!/bin/sh\nexit 1\n' > "$tmp/cb/bin/objdump"
+expect_fail "ct-binary: objdump fails" "objdump failed on" env PATH="$tmp/cb/bin:$PATH" "$root/scripts/ct-binary.sh" --digests "$root/docs/crypto-binary-digests.txt"
+rm "$tmp/cb/digests.txt"
+expect_fail "ct-binary: missing digest file" "ct-binary: no $tmp/cb/digests.txt" cb
+expect_fail "ct-binary: --digests without a file" "usage: ct-binary.sh" "$root/scripts/ct-binary.sh" --digests
+
+# test gate (scripts/test-gate.sh DIR LOG): a crate with a failing test; one that does not build; one with no test; a missing dir.
+tg() { "$root/scripts/test-gate.sh" "$tmp/tg" "$tmp/tg.log"; }
+fresh testgate-pass; rm -rf "$tmp/tg"; mv "$tmp/testgate-pass" "$tmp/tg"
+expect_pass "test-gate" tg
+fresh testgate-fail; rm -rf "$tmp/tg"; mv "$tmp/testgate-fail" "$tmp/tg"
+expect_fail "test-gate: a failing test" "test-gate: cargo test failed" tg
+fresh testgate-pass; rm -rf "$tmp/tg"; mv "$tmp/testgate-pass" "$tmp/tg"
+printf 'fn broken( {\n' > "$tmp/tg/src/lib.rs"
+expect_fail "test-gate: a crate that does not build" "test-gate: cargo test failed" tg
+printf 'pub fn f() {}\n' > "$tmp/tg/src/lib.rs"
+expect_fail "test-gate: no test runs" "cargo test passed no test" tg
+rm -rf "$tmp/tg"
+expect_fail "test-gate: missing dir" "no directory" tg
 
 echo "gate-demos: $n demos, all fail as expected"
