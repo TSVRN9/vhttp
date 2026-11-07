@@ -322,6 +322,33 @@ fn initial_data_after_switch_pv() {
     assert_eq!(close_code(&mut s), 0x0a);
 }
 
+/// One byte past the ClientHello's end after the key change: past the end of previously received data (RFC 9001 §4.1.3).
+#[test]
+fn initial_straddle_after_switch_pv() {
+    let mut ch = h3ch(id);
+    let l = ch.len();
+    ch.push(7);
+    let mut s = flight();
+    receive(&mut s, &ini(&qc::S1, 1, || vec![cr(l - 10, &ch[l - 10..])]), 2);
+    assert_eq!(close_code(&mut s), 0x0a);
+}
+
+/// Bytes TLS has not consumed at the key change (0x0a) are checked before the peer's transport
+/// parameters (a duplicate active_connection_id_limit, 0x08): the first error is the one sent.
+#[test]
+fn trailing_bytes_before_bad_tp_pv() {
+    let mut ch = h3ch(|e| {
+        for (t, d) in e.iter_mut() {
+            if *t == 0x39 {
+                *d = qc::hex("0f08c1c1c1c1c1c1c1c1 0e0104 0e0104");
+            }
+        }
+    });
+    ch.push(0x01);
+    let mut s = accept(&ini(&qc::S1, 0, || vec![cr(0, &ch)]));
+    assert_eq!(close_code(&mut s), 0x0a);
+}
+
 /// The ClientHello and, in the same datagram, an out-of-order Initial CRYPTO frame past it: at the
 /// key change TLS has not consumed it (RFC 9001 §4.1.3).
 #[test]

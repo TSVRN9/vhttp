@@ -144,6 +144,16 @@ fn tls_calls_after_close() {
     assert_eq!(c.close_info(), &Some((false, 0x08, vec![])));
 }
 
+/// No application protocol negotiated closes with 0x0178 even before the peer's transport
+/// parameters (RFC 9001 §8.1), not with INTERNAL_ERROR.
+#[test]
+fn alpn_mismatch_without_params() {
+    let mut c = conn();
+    c.on_handshake_complete(b"h2", 1, &rnd(2));
+    assert_eq!(c.phase(), Phase::Closing);
+    assert_eq!(c.close_info(), &Some((false, 0x178, vec![])));
+}
+
 #[test]
 fn tls_alert_closes() {
     let mut c = conn();
