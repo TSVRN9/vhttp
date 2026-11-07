@@ -387,6 +387,9 @@ mrepo m3
 expect_pass "mutants run: killed mutant" mut m3 run
 grep -qx "crates $(git -C "$tmp/m3" rev-parse HEAD:crates)" "$tmp/m3/tools/mutants-last-run.txt" || die "mutants run: run file lacks the crates tree"
 [ -z "$(git -C "$tmp/m3" worktree list --porcelain | grep '^worktree .*/mutants-')" ] || die "mutants run: worktree left behind"
+[ "$(git -C "$tmp/m3" status --porcelain)" = "?? tools/mutants-last-run.txt" ] || die "mutants run: the caller's tree changed beyond the run file:
+$(git -C "$tmp/m3" status --porcelain)"
+echo "gate-demos: mutants run: caller's tree unchanged except tools/mutants-last-run.txt"
 mrepo m4
 cp "$fx/mutants/live.patch" "$tmp/m4/tools/mutants/D-live.patch"
 printf 'D-live\tdemo\tacc\tdemo\t-\tpostcondition not satisfied\tgate-demos: n > 11 keeps the clause\n' >> "$tmp/m4/tools/mutants.tsv"

@@ -5,7 +5,7 @@
 - **Escape:** the design's rule 1 is one-way (`Err ==> allowed`). Nothing required the converse for a MUST-close trigger, and no planned mutation deleted a close call.
 - **Class:** C7, required close missing.
 - **Catch:** plan rule 1b. Where the RFC says MUST close on a trigger, the site proves `old Open && trigger ==> Closing with that code`. Every touched close site gets a delete-the-close mutation that must fail on a postcondition.
-- **Evidence:** mutations T1-M4..T1-M7 (delete each of the four closes) fail on postconditions (`.worktrees/vt-9a-evidence/t1`). Task 3's D3 is the same check for on_crypto_frame.
+- **Evidence:** mutations T1-M4..T1-M7 (delete each of the four closes) fail on postconditions (`.worktrees/vt-9a-evidence/t1`). Task 3's D3 is the same check for on_crypto_frame. Since 9r2 T2 these are registry rows T1-M4..T1-M7 and T3-D3, re-run by `scripts/mutants.sh run` before every merge (`.worktrees/vt-9r2-evidence/r2/mutants-run.log`).
 - **Open:** the remaining close sites (on_handshake_complete in 9a Task 5; close_on_error and on_counted in 9c).
 
 ## 2. CRYPTO window anchored at the read offset (9a T3 review I2; a real bug, already on main)
@@ -46,7 +46,7 @@
 - **Catch:**
   - Plan rule 1d now names one re-anchoring mutation per predicate (model and code together). Reviewers check that list (phase-9a facc168).
   - Open, owner 9r2: a gate that flags `allowed_*err` bodies reading fields of exec or model state unless a `// rfc-quantity:` justification sits on the line.
-- **Evidence:** T4-M3 verified on the pre-fix tree and fails after the fix. T6-M2 fails both `lemma_data_step` and `lemma_recv_err_rfc` after the fix. M4 fails the T3 floor lemma.
+- **Evidence:** T4-M3 verified on the pre-fix tree and fails after the fix. T6-M2 fails both `lemma_data_step` and `lemma_recv_err_rfc` after the fix. M4 fails the T3 floor lemma. Since 9r2 T2 the three re-anchoring mutations are registry rows T4-M3, T6-M2 and T3-M4, re-run mechanically before every merge (`.worktrees/vt-9r2-evidence/r2/mutants-run.log`).
 
 ## 8. Open items for 9r2 gathered tonight
 - Missing-citation gate (§5 above).
