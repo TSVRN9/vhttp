@@ -1,0 +1,4 @@
+root crypto::a::f ok
+root crypto::a::g ok
+checked crypto::a::f secret=x ret=s
+checked crypto::a::g secret= ret=

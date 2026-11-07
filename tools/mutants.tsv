@@ -1,0 +1,39 @@
+# Mutant registry (C6), read by scripts/mutants.sh and tools/mutants.py. One tab-separated row per mutant:
+# id  crate  module  fn (--verify-function, exact)  tests (- or [package/]target:name,..; each must pass unmutated and FAIL mutated)  regex (Python re, DOTALL, in one error block)  origin
+T0-M1	quic	conn	Connection::send_path_datagram	-	postcondition not satisfied.*tx_timers	9a T0 Step 6 T0-M1 (run as M1b): lemma_idle_timers drops its ensures self.tx_timers(s0, now)
+T1-M1	quic	conn	Connection::on_tls_alert	conn_rx:tls_alert_closes,conn_rx:tls_alert_top_of_range	postcondition not satisfied.*close_spec\(\) == Some\(\(false, \(CRYPTO_ERROR_BASE	9a T1 Step 5 T1-M1: on_tls_alert calls close_internal(alert as u64)
+T1-M2	quic	conn	Connection::close	-	postcondition not satisfied.*close_spec\(\) == Some\(\(app, code, reason_cap	9a T1 Step 5 T1-M2: close passes !app to enter_closing
+T1-M3	quic	conn	Connection::on_peer_params	-	postcondition not satisfied.*TRANSPORT_PARAMETER_ERROR	9a T1 Step 5 T1-M3: on_peer_params calls close_internal(PROTOCOL_VIOLATION)
+T1-M4	quic	conn	Connection::on_peer_params	-	postcondition not satisfied.*TRANSPORT_PARAMETER_ERROR	9a T1 fix round 1 (review I1) T1-M4: delete close_internal(c) in on_peer_params
+T1-M5	quic	conn	Connection::close	-	postcondition not satisfied.*is Closing	9a T1 fix round 1 (C7) T1-M5: delete enter_closing in close
+T1-M6	quic	conn	Connection::close_internal	-	postcondition not satisfied.*close_spec\(\) == Some\(\(false, code	9a T1 fix round 1 (C7) T1-M6: delete close in close_internal
+T1-M7	quic	conn	Connection::on_tls_alert	-	postcondition not satisfied.*close_spec\(\) == Some\(\(false, \(CRYPTO_ERROR_BASE	9a T1 fix round 1 (C7) T1-M7: delete close_internal in on_tls_alert
+T2-M1	quictls	server	report	-	postcondition not satisfied.*report_code	9a T2 Step 4 T2-M1: report's last branch shuts with PROTOCOL_VIOLATION
+T2-M2	quictls	server	report	-	postcondition not satisfied.*report_code	9a T2 Step 4 T2-M2: report's alert branch passes alert ^ 1
+T2-M3	quictls	server	shut	-	postcondition not satisfied.*close_spec\(\) == Some\(\(false, code	9a T2 Step 4 T2-M3: shut calls close(code, true, ..)
+T2-D1	quictls	server	shut	-	postcondition not satisfied.*close_spec\(\) == Some\(\(false, code	9a T2 Step 4 (rule 1b) D1: delete close in shut
+T2-D2	quictls	server	report	-	postcondition not satisfied.*report_code	9a T2 Step 4 (rule 1b) D2: delete on_tls_alert in report
+T3-M1	quic	crypto_stream	CryptoStream::on_crypto	crypto_stream:crypto_empty_keeps_end,crypto_stream:crypto_empty_past_window_ok,quictls/server:empty_gapped_initial_ok,quictls/server:empty_initial_after_switch_ok,quictls/server:empty_initial_past_window_ok	postcondition not satisfied.*final\(self\)\.wf\(\)	9a T3 Step 6 M1: the 753ec2d revert (5 parts)
+T3-M2	quic	crypto_stream	CryptoStream::on_crypto	crypto_stream:crypto_empty_past_window_ok,quictls/server:empty_initial_past_window_ok	postcondition not satisfied.*crypto_window_exceeded	9a T3 Step 6 M2: the empty block after the window check
+T3-M3	quic	conn	Connection::crypto_end	-	precondition not satisfied.*lemma_end_received	9a T3 Step 6 M3: crypto_end without reveal(crx_ok)
+T3-M3b	quic	conn	Connection::crypto_end	-	postcondition not satisfied.*crypto_received	9a T3 fix round 1 (review m3) M3b: crypto_end without its lemma_end_received calls
+T3-M4	quic	crypto_stream	lemma_crypto_floor	-	postcondition not satisfied.*crypto_allowed_err	9a T3 fix round 1 (review I2, rule 1d) M4: crypto_allowed_err re-anchored at reassembly().base()
+T3-M4b	quic	crypto_stream	CryptoStream::on_crypto	crypto_stream:crypto_window_from_contiguous,conn_rx:crypto_in_and_out_of_order_one_datagram_ok	postcondition not satisfied.*crypto_window_exceeded	9a T3 fix round 1 (review I2) M4b: on_crypto's window check re-anchored at base
+T3-D1	quic	crypto_stream	CryptoStream::on_crypto	-	postcondition not satisfied.*r is Err <==>	9a T3 Step 6 (rule 1b) D1: on_crypto returns Ok in place of the window Err
+T3-D2	quic	conn	Connection::on_crypto_frame	-	postcondition not satisfied.*CRYPTO_BUFFER_EXCEEDED	9a T3 Step 6 (rule 1b) D2: on_crypto_frame returns Ok after the close
+T3-D3	quic	conn	Connection::on_crypto_frame	-	postcondition not satisfied.*is Closing	9a T3 fix round 1 (review I1, C7) D3: delete enter_closing in on_crypto_frame
+T3-V1	quic	crypto_stream	lemma_crypto_allowed_err_rejects	-	postcondition not satisfied.*crypto_allowed_err	9a T3 Interfaces non-vacuity (rule 1c) V1: crypto_allowed_err body true
+T4-M1	quic	tp	lemma_tp_value_allowed	-	postcondition not satisfied.*rfc_tp_value\(id, v, t\) is None <==> tp_value_invalid\(id, v\)	9a T4 Step 4 T4-M1: ack_delay_exponent > 21 in tp_value_invalid
+T4-M2	quic	tp	lemma_tp_err_allowed_from	-	postcondition not satisfied.*rfc_tp_from\(b, p, true, t, seen\) is Err <==> allowed_tp_err_from	9a T4 Step 4 T4-M2: drop the duplicate disjunct of allowed_tp_err_from
+T4-M3	quic	tp	lemma_tp_err_allowed_from	-	precondition not satisfied.*tp_seen_is	9a T4 fix round 1 (review I1) T4-M3: a client's 0x0c also marks 0x0e, in rfc_tp_apply and tp_apply
+T4-V1	quic	tp	lemma_allowed_tp_err_rejects	-	postcondition not satisfied.*allowed_tp_err	9a T4 Interfaces non-vacuity (rule 1c) V1: allowed_tp_err body true
+T6-M1	quic	recv_stream	insert_tight	recv_stream:empty_stream_frame_keeps_window	postcondition not satisfied.*tight\(\)	9a T6 Step 6 T6-M1: insert_tight inserts empty data (guard removed)
+T6-M2	quic	recv_stream	lemma_data_step	recv_stream:empty_frame_offset_bounds_final_size,recv_stream:empty_stream_frame_keeps_window	postcondition not satisfied.*recv_step_facts\(id, s, recv_data\(id, s, off, data, fin\)\)	9a T6 fix round 1 (review I1, rule 1d) T6-M2: high re-anchored to non-empty frames in recv_data, data_gate and data_buffer
+T6-D1	quic	recv_stream	RecvStream::data_gate	-	postcondition not satisfied.*s2\.err matches Some\(c\) ==> r == Err	9a T6 (rule 1b) D1: delete data_gate's FINAL_SIZE_ERROR return
+T6-D2	quic	recv_stream	RecvStream::data_gate	-	postcondition not satisfied.*FLOW_CONTROL_ERROR	9a T6 (rule 1b) D2: delete the stream-limit FLOW_CONTROL_ERROR return
+T6-D3	quic	recv_stream	RecvStream::data_gate	-	postcondition not satisfied.*FLOW_CONTROL_ERROR	9a T6 (rule 1b) D3: delete the conn-room FLOW_CONTROL_ERROR return
+T6-D4	quic	recv_stream	RecvStream::on_data	-	postcondition not satisfied.*SpecRecvIn::Data \{ off: off as nat, data: data@, fin \}	9a T6 (rule 1b) D4: on_data returns Ok(0) in place of the gate's Err
+T6-V1	quic	recv_stream	lemma_recv_err_rfc	-	assertion failed.*data_final_bad\(s, end, fin\) <==> final_size_trigger	9a T6 (rule 1c) V1: final_size_trigger loses fin && end < largest_received_offset
+T6-V2	quic	recv_stream	lemma_recv_err_rfc	-	assertion failed.*data_final_bad\(s, end, fin\) <==> final_size_trigger	9a T6 (rule 1c) V2: that disjunct widened to <=
+T6-V3	quic	recv_stream	lemma_recv_err_rfc	-	postcondition not satisfied.*s2\.err matches Some\(c\) ==> recv_allowed_err	9a T6 fix round 1 (review M3) V3: flow_trigger end > s.limit becomes >=
+T6-V4	quic	recv_stream	lemma_recv_err_rfc	-	assertion failed.*credit_after\(s, end, fin\)	9a T6 fix round 1 (review M3) V4: credit_after's known-final-size branch returns end

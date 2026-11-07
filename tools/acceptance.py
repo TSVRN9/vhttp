@@ -4,14 +4,15 @@ Usage: python3 -I tools/acceptance.py [--root DIR] [--baseline FILE] [--old-base
 Lists every exec fn inside a `verus!` block under DIR/crates (crates/crypto/src excluded) whose
 return type mentions `Result`, `Error`, `Err` or an alias of one (`type R<T> = Result<T, E>;`
 anywhere in the scanned crates, matched as a whole word), and whether its ensures call an allowed
-spec fn: a `spec fn` (any crate, crypto/src included) named `allowed_*err` or `*_allowed_err`,
+spec fn: a `spec fn` (any crate, crypto/src included) named `allowed_*err`, `allowed_*err_from` or `*_allowed_err`,
 written `NAME(`. Fns without the clause must be listed in the baseline, one
 `crate::module::[Type[ as Trait]::]fn` per line (`#` comments allowed). Fails if:
   - an unannotated fn is not in the baseline;
   - a baseline line names a fn that now carries the clause, or no longer exists, or is duplicated;
   - the baseline has more than MAX_BASELINE lines (lower the constant in the commit that deletes
     lines), or (--old-baseline FILE, the baseline at the merge-base with main) a line absent from FILE;
-  - an allowed spec fn body is literally `true` (parentheses and braces stripped), a match with
+  - an allowed spec fn body (found as fns() finds it, so a `{` in a decreases clause is not the
+    body) is literally `true` (parentheses and braces stripped), a match with
     all arms `true`, or a match with a `_` or `Err(..)` arm that is `true`; or has no body;
   - a `use .. as ..` renames Result, an Err/Error name or an alias (not resolved: refused);
   - no verus! block, no error-returning fn, a `verus!(..)`/`verus![..]` block, or an fn whose
@@ -36,7 +37,7 @@ import os, re, subprocess, sys
 
 MAX_BASELINE = 191  # lower this in the commit that deletes baseline lines
 ERR_SUBSTR = ['Result', 'Error', 'Err']
-ALLOWED_NAME = re.compile(r'^(?:allowed_\w*err|\w+_allowed_err)$')
+ALLOWED_NAME = re.compile(r'^(?:allowed_\w*err(?:_from)?|\w+_allowed_err)$')
 CLAUSE = re.compile(r'\b(requires|ensures|recommends|decreases|opens_invariants|no_unwind|returns)\b')
 NEXTFN = re.compile(r'(?<![A-Za-z0-9_])fn\s+\w+')
 
@@ -156,8 +157,38 @@ def body_brace(s, c0, limit, indent, fn_ls):
     return None, False
 
 
+def sig_end(s, k, name_end, hi, path, name):
+    """(index past the parameter list, start of the first clause keyword or None, index of the body `{` or of
+    the `;` ending a bodyless declaration, bodyless) for the fn whose `fn` token is at k; raise on a split failure."""
+    ls = s.rfind('\n', 0, k) + 1
+    p = s.find('(', name_end, hi)
+    if p < 0: raise ValueError(f'{path}: fn {name}: no parameter list')
+    q = match_paren(s, p)
+    if q < 0: raise ValueError(f'{path}: fn {name}: unbalanced parameter list')
+    indent = len(s[ls:]) - len(s[ls:].lstrip(' \t'))
+    nxt = NEXTFN.search(s, q, hi)
+    limit = nxt.start() if nxt else hi
+    c = CLAUSE.search(s, q, limit)
+    if c and s.find('{', q, c.start()) < 0 and top_semi(s, q, c.start()) < 0:
+        try:
+            end, bodyless = body_brace(s, c.start(), limit, indent, ls)
+        except ValueError as e:
+            raise ValueError(f'{path}: fn {name}: {e}')
+        if end is None: raise ValueError(f'{path}: fn {name}: cannot find the end of the signature')
+        return q, c.start(), end, bodyless
+    else:
+        j, d = q, 0
+        while j < limit and not (s[j] in '{;' and d == 0):
+            if s[j] in '(<[': d += 1
+            elif s[j] in ')]': d -= 1
+            elif s[j] == '>' and s[j - 1] != '-': d -= 1
+            j += 1
+        if j >= limit: raise ValueError(f'{path}: fn {name}: cannot find the end of the signature')
+        return q, None, j, s[j] == ';'
+
+
 def fns(s, lo, hi, path):
-    """All fn items in s[lo:hi] as (path, ret, clauses, is_exec); raise on a split failure."""
+    """All fn items in s[lo:hi] as (path, ret, clauses, is_exec, offset of `fn`); raise on a split failure."""
     sc = scopes(s, lo, hi)
     pos = lo
     res = []
@@ -166,40 +197,20 @@ def fns(s, lo, hi, path):
         if not m: break
         name = re.match(r'fn\s+(\w+)', m.group(0)).group(1)
         k = m.start()
-        ls = s.rfind('\n', 0, k) + 1
         b = max(s.rfind(';', lo, k), s.rfind('}', lo, k), s.rfind('{', lo, k), s.rfind(']', lo, k))
         mods = s[b + 1:k].split()
         pos = m.end()
-        p = s.find('(', m.end(), hi)
-        if p < 0: raise ValueError(f'{path}: fn {name}: no parameter list')
-        q = match_paren(s, p)
-        if q < 0: raise ValueError(f'{path}: fn {name}: unbalanced parameter list')
-        indent = len(s[ls:]) - len(s[ls:].lstrip(' \t'))
-        nxt = NEXTFN.search(s, q, hi)
-        limit = nxt.start() if nxt else hi
-        c = CLAUSE.search(s, q, limit)
-        if c and s.find('{', q, c.start()) < 0 and top_semi(s, q, c.start()) < 0:
-            try:
-                end, bodyless = body_brace(s, c.start(), limit, indent, ls)
-            except ValueError as e:
-                raise ValueError(f'{path}: fn {name}: {e}')
-            if end is None: raise ValueError(f'{path}: fn {name}: cannot find the end of the signature')
-            sig_head, clauses = s[q:c.start()], s[c.start():end]
+        q, c, end, bodyless = sig_end(s, k, m.end(), hi, path, name)
+        if c is not None:
+            sig_head, clauses = s[q:c], s[c:end]
         else:
-            j, d = q, 0
-            while j < limit and not (s[j] in '{;' and d == 0):
-                if s[j] in '(<[': d += 1
-                elif s[j] in ')]': d -= 1
-                elif s[j] == '>' and s[j - 1] != '-': d -= 1
-                j += 1
-            if j >= limit: raise ValueError(f'{path}: fn {name}: cannot find the end of the signature')
-            end, bodyless, sig_head, clauses = j, s[j] == ';', s[q:j], ''
+            sig_head, clauses = s[q:end], ''
         if NEXTFN.search(clauses): raise ValueError(f'{path}: fn {name}: the signature scan overran into another fn')
         rm = re.match(r'\s*->\s*(.*)', sig_head, re.S)
         ret = ' '.join(rm.group(1).split()) if rm else ''
         pos = end + 1  # nested fns in a body are examined too
         names = [n for a, bb, n in sc if a < k < bb]
-        res.append(('::'.join([path] + names + [name]), ret, clauses, not ('spec' in mods or 'proof' in mods or any(t.startswith('spec(') for t in mods))))
+        res.append(('::'.join([path] + names + [name]), ret, clauses, not ('spec' in mods or 'proof' in mods or any(t.startswith('spec(') for t in mods)), k))
     return res
 
 
@@ -215,8 +226,9 @@ def rs_files(root):
 
 
 def scan(root):
-    """(exec fns {path: [(ret, ensures)]}, allowed spec fns [(path, name, body)], aliases, blocks, examined)."""
+    """(exec fns {path: [(ret, ensures)]}, allowed spec fns [(path, name, body)], aliases, blocks, examined, fn sites, allowed sites)."""
     found, allowed, aliases, nblocks, examined = {}, [], {}, 0, 0
+    sites, apos = [], []  # every fn in a scanned verus! block (file, offset of `fn`, path, clauses, is_exec); allowed spec fns (file, offset, name)
     texts = []
     for crate, rel, full in rs_files(root):
         s = strip(open(full, encoding='utf-8').read())
@@ -237,15 +249,13 @@ def scan(root):
             aliases[m.group(1)] = s[j + 1:e]
         for sm in re.finditer(r'(?<![A-Za-z0-9_])spec(?:\(\w+\))?\s+fn\s+(\w+)', s):
             if not ALLOWED_NAME.match(sm.group(1)): continue
-            j = sm.end()
-            pa = s.find('(', j); qa = match_paren(s, pa) if pa >= 0 else -1
-            if qa < 0: raise ValueError(f'{full}: spec fn {sm.group(1)}: no parameter list')
-            e = qa
-            while e < len(s) and s[e] not in '{;': e += 1
-            if e >= len(s) or s[e] == ';': raise ValueError(f'{full}: spec fn {sm.group(1)} has no body')
+            # the body brace as fns() finds it: a `{` in a decreases clause is not the body
+            _, _, e, bodyless = sig_end(s, s.rfind('fn', sm.start(), sm.end()), sm.end(), len(s), full, sm.group(1))
+            if bodyless: raise ValueError(f'{full}: spec fn {sm.group(1)} has no body')
             k = match_brace(s, e)
             if k < 0: raise ValueError(f'{full}: spec fn {sm.group(1)}: unbalanced body')
             allowed.append((f'{crate}/{rel}', sm.group(1), s[e + 1:k - 1]))
+            apos.append((full, sm.start(), sm.group(1)))
     ere0, _ = error_re(aliases)
     for crate, rel, full, s in texts:
         # a `use .. Result as X;` rename hides an error type: fail closed rather than resolve it
@@ -264,10 +274,11 @@ def scan(root):
             b = match_brace(s, a)
             if b < 0: raise ValueError(f'{full}: unbalanced verus! block')
             nblocks += 1
-            for p, ret, cl, ex in fns(s, a + 1, b - 1, path):
+            for p, ret, cl, ex, k in fns(s, a + 1, b - 1, path):
                 examined += 1
+                sites.append((full, k, p, cl, ex))
                 if ex: found.setdefault(p, []).append((ret, cl))
-    return found, allowed, aliases, nblocks, examined
+    return found, allowed, aliases, nblocks, examined, sites, apos
 
 
 def error_re(aliases):
@@ -319,7 +330,7 @@ def main(argv):
         else: print(f'acceptance: unknown argument {argv[0]}', file=sys.stderr); return 1
     base = base or os.path.join(root, 'tools', 'acceptance-baseline.txt')
     try:
-        found, allowed, aliases, nblocks, examined = scan(root)
+        found, allowed, aliases, nblocks, examined, _, _ = scan(root)
     except (ValueError, OSError) as e:
         print(f'acceptance: cannot parse: {e}', file=sys.stderr); return 1
     if count: print(examined); return 0
