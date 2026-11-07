@@ -46,7 +46,7 @@ A clause stated over an implementation number does not meet rule 1. The 753ec2d 
 
 | Sub-phase | Contents | Proves |
 |---|---|---|
-| **9a** (plan: `docs/superpowers/plans/2026-11-05-phase-9a-acceptance-pilot.md`) | rlimit headroom [C1]; P0; P1; P2; the `core_ok` invariant [I1]; the transport-parameter lemma [I6]; the empty STREAM insert [I3] | Rule 2(a) at the `Connection` boundary and in quictls's close sinks. Rule 1 on `CryptoStream`, `on_crypto_frame` and the quictls CRYPTO steps. `superseded`'s second close proved unreachable, then removed. The measured rlimit of every touched fn, with no quic fn above 8M |
+| **9a** (plan: `docs/superpowers/plans/2026-11-05-phase-9a-acceptance-pilot.md`) | rlimit headroom [C1]; P0; P1; P2; the `core_ok` invariant [I1]; the transport-parameter lemma [I6]; the empty STREAM insert [I3] | Rule 2(a) at the `Connection` boundary and in quictls's close sinks. Rule 1 on `CryptoStream`, `on_crypto_frame` and the quictls CRYPTO steps. `superseded`'s second close proved unreachable, then removed (Task 3b: pending at the 2026-11-07 merge, see §3.1's status block). The measured rlimit of every touched fn, with no quic fn above 8M |
 | **9b** | P3, P4 | Rule 1 for every other exact ≡ codec and h3/tls spec (spec-only lemmas); rule 2(b) through `poll_transmit` |
 | **9c** | P5, P6, P7, and the quictls `apply`/`feed`/`tls_step` lift | Rule 1 and 2(a) for frame errors inside packets, h3 → quic closes, the tls own-limit escapes, and the quictls steps above `key_changes`/`on_params` |
 
