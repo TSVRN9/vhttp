@@ -136,6 +136,7 @@ pub fn accept_datagram(
     ensures
         r matches Some(c) ==> c.wf(),
         r is Some ==> rfc_long_header(d@) matches Some(SpecHeader::Long { ty: LongType::Initial, .. }),
+        r matches Some(c) ==> !c.peer_tp_known_spec(),
 {
     hide(rfc_open_datagram);
     let dcid = match initial_dcid(d) {
@@ -161,7 +162,11 @@ pub fn accept_datagram(
     proof {
         assert(c.odcid_spec() == dcid@);
     }
+    let ghost c0 = c;
     c.on_datagram(path, d.len(), rx.packets, rx.error, now, rand);
+    proof {
+        Connection::lemma_crypto_kept_elim(c, c0);
+    }
     Some(c)
 }
 

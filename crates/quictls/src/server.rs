@@ -92,6 +92,9 @@ proof fn lemma_past_received_rejects(c: Connection, k: PacketKind, end: nat)
 //# parameter from the server as a connection error of type
 //# TRANSPORT_PARAMETER_ERROR.
 //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+//# An endpoint MUST treat the following as a connection error of type
+//# TRANSPORT_PARAMETER_ERROR or PROTOCOL_VIOLATION:
+//= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
 //# a mismatch between values received from a peer in these transport
 //# parameters and the value sent in the corresponding Destination or
 //# Source Connection ID fields of Initial packets.
@@ -100,11 +103,12 @@ proof fn lemma_past_received_rejects(c: Connection, k: PacketKind, end: nat)
 //# value larger than 20 MUST drop the packet.
 /// The client's transport parameters `b` are refusable on `c` with TRANSPORT_PARAMETER_ERROR: they
 /// do not parse (`allowed_tp_err`), or their initial_source_connection_id is absent or not the
-/// Source Connection ID of the client's first Initial. A parse error carries the §17.2 bound: no
-/// connection ID over 20 bytes is `c`'s, so `allowed_tp_err`'s over-20 disjunct is a §7.3 mismatch.
+/// Source Connection ID of the client's first Initial. A parse error carries the §17.2 bound: `c`'s
+/// ID is at most 20 bytes, so `allowed_tp_err`'s over-20 disjunct is a §7.3 mismatch
+/// (`lemma_long_cid_mismatch`).
 spec fn tp_allowed_err(c: Connection, b: Seq<u8>) -> bool {
     match rfc_transport_params(b, true) {
-        Err(_) => allowed_tp_err(b) && forall|v: Seq<u8>| #[trigger] v.len() > MAX_CID_LEN ==> v != c.client_scid_spec(),
+        Err(_) => allowed_tp_err(b) && c.client_scid_spec().len() <= MAX_CID_LEN,
         Ok(t) => t.initial_source_connection_id != Some(c.client_scid_spec()),
     }
 }
@@ -120,6 +124,16 @@ fn initial_end(c: &Connection) -> (r: u64)
         r > 0 ==> c.crypto_received(PacketKind::Initial, (r - 1) as nat),
 {
     c.crypto_end(PacketKind::Initial)
+}
+
+/// Under `tp_allowed_err`'s bound, a connection ID over 20 bytes is not the client's (§7.3 mismatch).
+proof fn lemma_long_cid_mismatch(c: Connection, v: Seq<u8>)
+    requires
+        c.client_scid_spec().len() <= MAX_CID_LEN,
+        v.len() > MAX_CID_LEN,
+    ensures
+        Some(v) != Some(c.client_scid_spec()),
+{
 }
 
 /// `tp_allowed_err` is not vacuous: the client's own SCID as its initial_source_connection_id.
@@ -376,6 +390,9 @@ impl<'a> QuicServer<'a> {
         &&& self.level is Initial ==> self.init_end == 0
         // TLS receives at OneRtt only once the connection has completed (`on_complete`).
         &&& self.level is OneRtt ==> self.h3.conn_spec().live(PacketKind::OneRtt)
+        // The peer's transport parameters are known only once TLS has left its ClientHello phases
+        // (Start, HrrSent): `PeerParams` comes only from a call leaving them (`theorem_event_discipline`).
+        &&& self.h3.conn_spec().peer_tp_known_spec() ==> spec_rank(self.hs@.phase) <= 1
     }
 
     /// No discarded keys (RFC 9001 §4.9.1, §4.9.2).
@@ -982,6 +999,9 @@ impl<'a> QuicServer<'a> {
         let ghost h0 = self.hs@;
         let ghost cfg = self.hs.cfg_view();
         let ghost tp = self.hs.tp_view();
+        proof {
+            lemma_fed(cfg, tp, h0, l, b@, r.tls@);
+        }
         match self.hs.on_crypto(l, b.as_slice(), &r.tls, &mut ev) {
             Err(code) => {
                 //= https://www.rfc-editor.org/rfc/rfc8446#section-6
@@ -1004,12 +1024,7 @@ impl<'a> QuicServer<'a> {
                 self.sync_keys();
                 false
             },
-            Ok(()) => {
-                proof {
-                    lemma_fed(cfg, tp, h0, l, b@, r.tls@);
-                }
-                self.apply(ev, now, r)
-            },
+            Ok(()) => self.apply(ev, now, r),
         }
     }
 
@@ -1019,6 +1034,13 @@ impl<'a> QuicServer<'a> {
         requires
             old(self).wf(),
             forall|i: int| 0 <= i < ev.deep_view().len() ==> !spec_send_level(#[trigger] ev.deep_view()[i], Level::OneRtt),
+            // `theorem_event_discipline`: one `PeerParams` at most, from a call that left the
+            // ClientHello phases, so none were known before it (`core_ok`).
+            forall|i: int| 0 <= i < ev.deep_view().len() && #[trigger] ev.deep_view()[i] is PeerParams
+                ==> !old(self).conn_spec().peer_tp_known_spec() && old(self).hs@.phase is WaitFinished,
+            forall|i: int, j: int|
+                0 <= i < ev.deep_view().len() && 0 <= j < ev.deep_view().len() && #[trigger] ev.deep_view()[i] is PeerParams
+                    && #[trigger] ev.deep_view()[j] is PeerParams ==> i == j,
         ensures
             final(self).wf(),
             final(self).conn_spec().out_log() == old(self).conn_spec().out_log(),
@@ -1043,14 +1065,30 @@ impl<'a> QuicServer<'a> {
                     PacketKind::Initial,
                 ) <= self.conn_spec().crypto_base_spec(PacketKind::Initial),
                 fed_kept(self.conn_spec(), old(self).conn_spec()),
+                i <= ev.deep_view().len(),
+                forall|j: int| i <= j < ev.deep_view().len() && #[trigger] ev.deep_view()[j] is PeerParams
+                    ==> !self.conn_spec().peer_tp_known_spec() && self.hs@.phase is WaitFinished,
+                forall|j: int, k: int|
+                    0 <= j < ev.deep_view().len() && 0 <= k < ev.deep_view().len() && #[trigger] ev.deep_view()[j] is PeerParams
+                        && #[trigger] ev.deep_view()[k] is PeerParams ==> j == k,
             decreases ev.len() - i,
         {
             let ghost c0 = self.conn_spec();
+            let ghost dv = ev.deep_view();
             let ok = match &ev[i] {
                 TlsEvent::PeerParams(b) => {
+                    proof {
+                        assert(dv[i as int] == ev@[i as int].deep_view());
+                        assert(dv[i as int] is PeerParams);
+                    }
                     let ok = self.on_params(b, now);
                     proof {
-                        Connection::lemma_crypto_kept_elim(self.conn_spec(), c0);
+                        Connection::lemma_crypto_kept_base_elim(self.conn_spec(), c0);
+                        assert forall|j: int| i < j < dv.len() implies !(#[trigger] dv[j] is PeerParams) by {
+                            if dv[j] is PeerParams {
+                                assert(dv[i as int] is PeerParams);
+                            }
+                        }
                     }
                     ok
                 },
@@ -1238,13 +1276,16 @@ impl<'a> QuicServer<'a> {
     fn on_params(&mut self, b: &Vec<u8>, now: u64) -> (ok: bool)
         requires
             old(self).wf(),
+            // The first delivery (`apply`, from `theorem_event_discipline`).
+            !old(self).conn_spec().peer_tp_known_spec(),
+            old(self).hs@.phase is WaitFinished,
         ensures
             final(self).wf(),
             final(self).conn_spec().out_log() == old(self).conn_spec().out_log(),
             final(self).hs == old(self).hs,
             final(self).level == old(self).level,
             ok ==> final(self).conn_spec().crypto_end_spec(PacketKind::Initial) == old(self).conn_spec().crypto_end_spec(PacketKind::Initial),
-            final(self).conn_spec().crypto_kept(old(self).conn_spec()),
+            final(self).conn_spec().crypto_kept_base(old(self).conn_spec()),
             !ok ==> !(final(self).conn_spec().phase_spec() is Open),
             fed_kept(final(self).conn_spec(), old(self).conn_spec()),
             // Acceptance: a stop only for parameters RFC 9000 lets a server refuse, with
@@ -1254,11 +1295,11 @@ impl<'a> QuicServer<'a> {
                 &&& final(self).conn_spec().phase_spec() is Closing
                 &&& final(self).conn_spec().close_spec() == Some((false, TRANSPORT_PARAMETER_ERROR, Seq::<u8>::empty()))
             },
-            // Rule 1b: refusable parameters close so; for a §7.3 fault, while none are known yet
-            // (TLS delivers them once; `on_peer_params` ignores a second delivery).
-            old(self).conn_spec().phase_spec() is Open && (allowed_tp_err(b@) || !old(self).conn_spec().peer_tp_known_spec()
-                && tp_allowed_err(old(self).conn_spec(), b@)) ==> !ok && final(self).conn_spec().phase_spec() is Closing
-                && final(self).conn_spec().close_spec() == Some((false, TRANSPORT_PARAMETER_ERROR, Seq::<u8>::empty())),
+            // Rule 1b: refusable parameters close so.
+            old(self).conn_spec().phase_spec() is Open && tp_allowed_err(old(self).conn_spec(), b@) ==> !ok
+                && final(self).conn_spec().phase_spec() is Closing && final(self).conn_spec().close_spec() == Some(
+                (false, TRANSPORT_PARAMETER_ERROR, Seq::<u8>::empty()),
+            ),
     {
         let ghost c0 = self.h3.conn_spec();
         // The §17.2 bound `tp_allowed_err` carries.
@@ -1271,6 +1312,7 @@ impl<'a> QuicServer<'a> {
                 shut(self.h3.conn_mut(), TRANSPORT_PARAMETER_ERROR, now);
                 proof {
                     Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
+                    Connection::lemma_crypto_kept_to_base(self.h3.conn_spec(), c0);
                 }
                 self.sync_keys();
                 false
@@ -1281,7 +1323,7 @@ impl<'a> QuicServer<'a> {
                 }
                 self.h3.conn_mut().on_peer_params(&t, now);
                 proof {
-                    Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
+                    Connection::lemma_crypto_kept_base_elim(self.h3.conn_spec(), c0);
                 }
                 if !matches!(self.h3.conn().phase(), Phase::Open) {
                     self.sync_keys();
@@ -1378,6 +1420,7 @@ impl<'a> QuicServer<'a> {
             !ok ==> final(self).level == old(self).level,
             !ok ==> !(final(self).conn_spec().phase_spec() is Open),
             fed_kept(final(self).conn_spec(), old(self).conn_spec()),
+            final(self).conn_spec().peer_tp_known_spec() ==> old(self).conn_spec().peer_tp_known_spec(),
     {
         let alpn: &[u8] = &H3_ALPN;
         // `on_handshake_complete` sets HANDSHAKE_DONE owed in the call that completes, so the next
@@ -1421,10 +1464,16 @@ proof fn lemma_fed(
     ensures
         ({
             let (s2, res) = spec_on_crypto(cfg, tp, s, l, data, rand);
-            res matches Ok(evs) ==> {
+            &&& spec_rank(s2.phase) <= spec_rank(s.phase)
+            &&& res matches Ok(evs) ==> {
                 &&& !(l is OneRtt)
                 &&& !(s.phase is Failed) ==> !(s2.phase is Failed)
                 &&& forall|i: int| 0 <= i < evs.len() ==> !spec_send_level(#[trigger] evs[i], Level::OneRtt)
+                &&& forall|i: int| 0 <= i < evs.len() && #[trigger] evs[i] is PeerParams ==> (s.phase is Start
+                    || s.phase is HrrSent) && s2.phase is WaitFinished
+                &&& forall|i: int, j: int|
+                    0 <= i < evs.len() && 0 <= j < evs.len() && #[trigger] evs[i] is PeerParams
+                        && #[trigger] evs[j] is PeerParams ==> i == j
             }
         }),
 {
