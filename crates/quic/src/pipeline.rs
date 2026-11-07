@@ -137,6 +137,8 @@ pub fn accept_datagram(
         r matches Some(c) ==> c.wf(),
         r is Some ==> rfc_long_header(d@) matches Some(SpecHeader::Long { ty: LongType::Initial, .. }),
         r matches Some(c) ==> !c.peer_tp_known_spec(),
+        r matches Some(c) ==> (c.phase_spec() is Open && c.live(PacketKind::Initial) ==> c.crypto_base_spec(PacketKind::Initial) == 0),
+        r matches Some(c) ==> (c.phase_spec() is Open && c.live(PacketKind::Handshake) ==> c.crypto_base_spec(PacketKind::Handshake) == 0),
 {
     hide(rfc_open_datagram);
     let dcid = match initial_dcid(d) {

@@ -194,8 +194,9 @@ impl CryptoStream {
                 )
                 &&& final(self).reassembly().base() == old(self).reassembly().base()
             },
-            // The record of what arrived only grows.
+            // The record of what arrived only grows, and so does its end.
             forall|p: nat| #[trigger] old(self).received(p) ==> final(self).received(p),
+            final(self).end_spec() >= old(self).end_spec(),
     {
         hide(rfc_received);
         hide(rfc_contiguous);
@@ -241,6 +242,11 @@ impl CryptoStream {
                 rfc_received(self.re.inserted()),
             );
             self.lemma_hist_insert(*old(self), offset as nat, data@);
+            old(self).re.lemma_end_received();
+            self.re.lemma_wf();
+            if old(self).end_spec() > 0 {
+                assert(rfc_received(self.re.inserted()).contains_key((old(self).end_spec() - 1) as nat));
+            }
         }
         self.contig = self.re.contiguous_from(self.contig);
         Ok(())
