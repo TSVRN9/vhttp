@@ -1420,7 +1420,7 @@ impl Connection {
         }
     }
 
-    // ponytail: post-handshake CRYPTO (NewSessionTicket) is buffered and ignored; we send none.
+    // Post-handshake CRYPTO is buffered here and read and fed to TLS by quictls; we send no NewSessionTicket.
     /// A CRYPTO frame. On `Err` the connection is already Closing with that code, as in
     /// `on_stream_frame`; `on_datagram`'s `close_internal` is then a no-op.
     //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
