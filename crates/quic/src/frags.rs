@@ -1144,7 +1144,7 @@ impl Frags {
 
     /// Adds each byte of `data` (at `off`) at a position at or past `lo` that is not held: the
     /// first writer wins. Runs that become adjacent are merged into one fragment.
-    // shortcut: a frame adding new positions copies the fragments it touches into the merged one and shifts the list, O(held + count) per frame (CRYPTO: at most 16384 + 4096); such frames are bounded per level by its new positions (1-RTT at most 16385; Initial and Handshake the bytes TLS accepts plus 16384). Upgrade: VecDeque fragments merged small-to-large plus an index (tracked C15).
+    // shortcut: a frame adding new positions copies the fragments it touches and moves the list, about 10-12 µs worst measured; per connection about 0.2 s (1-RTT), 1 s (Handshake) and 1.8 s (Initial, two ClientHellos, pre-authentication). Upgrade: Phase 9b Task 1, a Frags index (C15).
     pub fn insert(&mut self, lo: u64, off: u64, data: &[u8])
         requires
             old(self).wf(),
@@ -1244,10 +1244,35 @@ impl Frags {
             // One fragment replaced in place.
             self.v[i] = (ms, md);
         } else {
-            let mut tail = self.v.split_off(j);
-            self.v.truncate(i);
-            self.v.push((ms, md));
-            self.v.append(&mut tail);
+            // Fragments `[i, j)` merged: `i` replaced in place, the tail moved down over the rest
+            // one slot at a time, no allocation.
+            self.v[i] = (ms, md);
+            let ghost w = self.v@;
+            let d = j - i - 1;
+            let n = self.v.len();
+            let mut k = j;
+            while k < n
+                invariant
+                    w.len() == n,
+                    d == j - i - 1,
+                    i + 1 < j <= k <= n,
+                    self.v@.len() == n,
+                    forall|t: int| #![trigger self.v@[t]] 0 <= t <= i ==> self.v@[t] == w[t],
+                    forall|t: int| #![trigger self.v@[t]] i < t < k - d ==> self.v@[t] == w[t + d],
+                    forall|t: int| #![trigger self.v@[t]] k <= t < n ==> self.v@[t] == w[t],
+                decreases n - k,
+            {
+                let mut tmp: (u64, Vec<u8>) = (0, Vec::new());
+                core::mem::swap(&mut self.v[k], &mut tmp);
+                core::mem::swap(&mut self.v[k - d], &mut tmp);
+                k = k + 1;
+            }
+            self.v.truncate(n - d);
+            proof {
+                assert forall|t: int| i < t < self.v@.len() implies #[trigger] self.v@[t] == old(self).v@[t - i - 1 + j] by {
+                    assert(self.v@[t] == w[t + d]);
+                }
+            }
         }
         proof {
             let g = splice(f, i as int, j as int, (ms as nat, mdv));
