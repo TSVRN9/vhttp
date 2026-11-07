@@ -1,0 +1,18 @@
+diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
+index b0c451c..0790d07 100644
+--- a/crates/quictls/src/server.rs
++++ b/crates/quictls/src/server.rs
+@@ -1041,11 +1041,11 @@ impl<'a> QuicServer<'a> {
+         let ghost cfg = self.hs.cfg_view();
+         let ghost tp = self.hs.tp_view();
+         proof {
+-            lemma_fed(cfg, tp, h0, l, b@, r.tls@);
++            lemma_fed(cfg, tp, h0, l, b@.skip(1), r.tls@);
+         }
+         // TLS's step consumes exactly the bytes `crypto_read` handed over, which `fed` counts.
+         let ghost step = spec_on_crypto(cfg, tp, h0, l, b@, r.tls@);
+-        match self.hs.on_crypto(l, b.as_slice(), &r.tls, &mut ev) {
++        match self.hs.on_crypto(l, vstd::slice::slice_subrange(b.as_slice(), 1, b.len()), &r.tls, &mut ev) {
+             Err(code) => {
+                 proof {
+                     assert(step.1 is Err ==> self.hs@ == step.0);

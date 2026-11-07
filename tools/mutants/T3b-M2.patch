@@ -1,0 +1,13 @@
+diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
+index 206d62d..02b12c5 100644
+--- a/crates/quic/src/crypto_stream.rs
++++ b/crates/quic/src/crypto_stream.rs
+@@ -312,7 +312,7 @@ impl CryptoStream {
+         let ghost a = *self;
+         let ghost d = Seq::new(end as nat, |_i: int| 0u8);
+         self.buf = Vec::new();
+-        self.base = end;
++        self.base = 0;
+         self.contig = end;
+         self.ooo = Frags::new();
+         self.ins = Ghost(Seq::<(nat, Seq<u8>)>::empty().push((0nat, d)));

@@ -1,0 +1,12 @@
+diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
+index b0c451c..fef0fc4 100644
+--- a/crates/quictls/src/server.rs
++++ b/crates/quictls/src/server.rs
+@@ -969,7 +969,6 @@ impl<'a> QuicServer<'a> {
+             proof {
+                 assert(c0.crypto_received(PacketKind::Initial, (e - 1) as nat));
+             }
+-            shut(self.h3.conn_mut(), PROTOCOL_VIOLATION, now);
+             proof {
+                 Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
+             }

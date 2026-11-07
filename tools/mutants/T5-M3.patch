@@ -1,0 +1,13 @@
+diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
+index b0c451c..9c08ffb 100644
+--- a/crates/quictls/src/server.rs
++++ b/crates/quictls/src/server.rs
+@@ -1398,7 +1398,7 @@ impl<'a> QuicServer<'a> {
+         }
+         match parse_transport_params(b.as_slice(), true) {
+             Err(_) => {
+-                shut(self.h3.conn_mut(), TRANSPORT_PARAMETER_ERROR, now);
++                shut(self.h3.conn_mut(), PROTOCOL_VIOLATION, now);
+                 proof {
+                     Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
+                     Connection::lemma_crypto_kept_to_base(self.h3.conn_spec(), c0);

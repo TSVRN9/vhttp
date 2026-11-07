@@ -1,0 +1,19 @@
+diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
+index b0c451c..bad4ece 100644
+--- a/crates/quictls/src/server.rs
++++ b/crates/quictls/src/server.rs
+@@ -119,11 +119,12 @@ fn initial_end(c: &Connection) -> (r: u64)
+     requires
+         c.wf(),
+     ensures
+-        r == c.crypto_end_spec(PacketKind::Initial),
++        r == (if c.crypto_end_spec(PacketKind::Initial) > 0 { c.crypto_end_spec(PacketKind::Initial) - 1 } else { 0 }),
+         forall|p: nat| #[trigger] c.crypto_received(PacketKind::Initial, p) ==> p < r,
+         r > 0 ==> c.crypto_received(PacketKind::Initial, (r - 1) as nat),
+ {
+-    c.crypto_end(PacketKind::Initial)
++    let e = c.crypto_end(PacketKind::Initial);
++    if e > 0 { e - 1 } else { 0 }
+ }
+ 
+ /// Under `tp_allowed_err`'s bound, a connection ID over 20 bytes is not the client's (§7.3 mismatch).

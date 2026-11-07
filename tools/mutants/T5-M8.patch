@@ -1,0 +1,22 @@
+diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
+index b0c451c..81fb826 100644
+--- a/crates/quictls/src/server.rs
++++ b/crates/quictls/src/server.rs
+@@ -107,7 +107,7 @@ proof fn lemma_past_received_rejects(c: Connection, k: PacketKind, end: nat)
+ /// ID is at most 20 bytes, so `allowed_tp_err`'s over-20 disjunct is a §7.3 mismatch
+ /// (`lemma_long_cid_mismatch`).
+ spec fn tp_allowed_err(c: Connection, b: Seq<u8>) -> bool {
+-    match rfc_transport_params(b, true) {
++    match rfc_transport_params(b, false) {
+         Err(_) => allowed_tp_err(b) && c.client_scid_spec().len() <= MAX_CID_LEN,  // rfc-quantity: c.client_scid_spec(): the Source Connection ID field of the client's first Initial (RFC 9000 §7.3), tied by Connection::accept's ensures client_scid_spec() == first.scid@ (T5-M8' kills a re-anchor); its length bound <= 20 is §17.2's receiver rule via HandshakeIds::wf (Connection::client_scid_len)
+         Ok(t) => t.initial_source_connection_id != Some(c.client_scid_spec()),  // rfc-quantity: c.client_scid_spec(): the Source Connection ID field of the client's first Initial (RFC 9000 §7.3), as on the Err arm
+     }
+@@ -1396,7 +1396,7 @@ impl<'a> QuicServer<'a> {
+         proof {
+             lemma_tp_err_allowed(b@);
+         }
+-        match parse_transport_params(b.as_slice(), true) {
++        match parse_transport_params(b.as_slice(), false) {
+             Err(_) => {
+                 shut(self.h3.conn_mut(), TRANSPORT_PARAMETER_ERROR, now);
+                 proof {

@@ -1,0 +1,26 @@
+diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
+index b0c451c..9ee6671 100644
+--- a/crates/quictls/src/server.rs
++++ b/crates/quictls/src/server.rs
+@@ -1212,11 +1212,7 @@ impl<'a> QuicServer<'a> {
+     /// reassembly buffer out of order.
+     spec fn unread(&self, l: Level, k: PacketKind) -> nat {
+         let c = self.h3.conn_spec();
+-        spec_reader(self.hs@, l).len() + if c.crypto_end_spec(k) > self.fed_spec(l) {
+-            (c.crypto_end_spec(k) - self.fed_spec(l)) as nat
+-        } else {
+-            0
+-        }
++        spec_reader(self.hs@, l).len() + 0
+     }
+ 
+     /// The CRYPTO bytes of level `l` handed to TLS so far.
+@@ -1271,7 +1267,7 @@ impl<'a> QuicServer<'a> {
+                 assert(self.h3.conn_spec().crypto_received(k, (e - 1) as nat));
+             }
+         }
+-        self.hs.pending(l) || e > f
++        self.hs.pending(l)
+     }
+ 
+     //= https://www.rfc-editor.org/rfc/rfc9001#section-4.1.3

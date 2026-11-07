@@ -1,0 +1,12 @@
+diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
+index 84680fd..d2e1267 100644
+--- a/crates/quic/src/conn.rs
++++ b/crates/quic/src/conn.rs
+@@ -3230,7 +3230,6 @@ impl Connection {
+                 self.live_i = false;
+                 self.sent_i.drain_inflight(&mut lost);
+                 // Restarted empty at its end, which the glue still checks (RFC 9001 §4.1.3).
+-                self.crx_i.restart();
+                 self.ctx_i = SendStream::new(VARINT_MAX);
+                 self.recv_i = RecvPns::new(k);
+                 self.cid_updates.push(CidUpdate::Remove(slice_to_vec(self.ids.odcid())));

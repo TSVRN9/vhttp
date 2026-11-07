@@ -1,0 +1,12 @@
+diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
+index 84680fd..b1f62e9 100644
+--- a/crates/quic/src/conn.rs
++++ b/crates/quic/src/conn.rs
+@@ -3598,7 +3598,6 @@ impl Connection {
+         let ghost s0 = *self;
+         self.discard(PacketKind::Initial);
+         let ghost s1 = *self;
+-        self.discard(PacketKind::Handshake);
+         let ghost s2 = *self;
+         proof {
+             reveal(crx_ok);
