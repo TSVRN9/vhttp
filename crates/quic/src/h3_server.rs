@@ -1007,10 +1007,12 @@ impl H3Server {
                 ),
             // No timer moves to a time `on_timeout` has passed (`H3Server::settled_later`).
             final(self).conn_spec().keeps_later(old(self).conn_spec()),
+            final(self).conn_spec().crypto_kept(old(self).conn_spec()),
     {
         let ghost a0 = app@;
         proof {
             self.conn.lemma_keeps_refl();
+            Connection::lemma_crypto_kept_refl(self.conn);
         }
         if !self.started {
             if !(self.conn.handshake_complete() && matches!(self.conn.phase(), Phase::Open)) {
@@ -1030,6 +1032,9 @@ impl H3Server {
                 let now = self.conn.now();
                 let none: Vec<u8> = Vec::new();
                 self.conn.close(H3_GENERAL_PROTOCOL_ERROR, true, none.as_slice(), now);
+                proof {
+                    self.conn.lemma_keeps_crypto(old(self).conn);
+                }
                 return;
             }
             let mut outs: Vec<Output> = Vec::new();
@@ -1060,6 +1065,7 @@ impl H3Server {
             c2.lemma_keeps_trans(c1, old(self).conn);
             c3.lemma_keeps_trans(c2, old(self).conn);
             self.conn.lemma_keeps_trans(c3, old(self).conn);
+            self.conn.lemma_keeps_crypto(old(self).conn);
         }
     }
 
@@ -1083,7 +1089,11 @@ impl H3Server {
             r is Ok ==> exists|a: Seq<SpecOutput>| #[trigger] one_response(a, id, resp@)
                 && forall|j: u64| #[trigger] final(self).emitted(j) == old(self).emitted(j) + writes_on(a, j),
             r is Err ==> forall|j: u64| #[trigger] final(self).emitted(j) == old(self).emitted(j),
+            final(self).conn_spec().crypto_kept(old(self).conn_spec()),
     {
+        proof {
+            Connection::lemma_crypto_kept_refl(self.conn);
+        }
         if self.pending.len() != 0 {
             return Err(SendError::Busy);
         }
@@ -1098,6 +1108,7 @@ impl H3Server {
                 self.apply(outs, app);
                 proof {
                     assert(s1.skip(0) =~= s1);
+                    self.conn.lemma_keeps_crypto(old(self).conn);
                 }
                 Ok(())
             },
@@ -1156,11 +1167,13 @@ impl H3Server {
             // `Connection::on_timeout`'s, kept by `pump`.
             now < u64::MAX ==> final(self).conn_spec().timers_later(now),
             now <= final(self).conn_spec().now_spec(),
+            final(self).conn_spec().crypto_kept(old(self).conn_spec()),
     {
         self.conn.on_timeout(now, rand);
         let ghost c0 = self.conn;
         self.pump(app);
         proof {
+            Connection::lemma_crypto_kept_trans(old(self).conn, c0, self.conn);
             self.conn.lemma_keeps_now(c0);
             if now < u64::MAX {
                 self.conn.lemma_keeps_elim(c0, now);

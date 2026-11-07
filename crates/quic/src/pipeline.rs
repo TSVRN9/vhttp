@@ -189,12 +189,17 @@ pub fn receive(
         // §8.1: counted on a known path, whatever decrypted.
         old(c).has_path(path) && !(old(c).phase_spec() is Draining) && !(old(c).phase_spec() is Closed)
             ==> recv_counted(old(c).amp_trace(path), final(c).amp_trace(path), d.len() as nat),
+        final(c).crypto_kept(*old(c)),
 {
     hide(rfc_open_datagram);
     let rx = open_for(c, d, keys);
     c.on_datagram(path, d.len(), rx.packets, rx.error, now, rand);
     if let Some(tail) = rx.reset_tail {
+        let ghost c1 = *c;
         c.on_reset_candidate(&tail, now);
+        proof {
+            Connection::lemma_crypto_kept_trans(*old(c), c1, *c);
+        }
     }
 }
 
@@ -252,8 +257,12 @@ pub fn refeed_one_rtt(
         final(c).out_log() == old(c).out_log(),
         !old(c).live(PacketKind::OneRtt) ==> *final(c) == *old(c),
         !(old(c).phase_spec() is Open) ==> *final(c) == *old(c),
+        final(c).crypto_kept(*old(c)),
 {
     hide(rfc_open_datagram);
+    proof {
+        Connection::lemma_crypto_kept_refl(*c);
+    }
     if !c.handshake_complete() {
         return;
     }
@@ -294,6 +303,7 @@ pub fn transmit(c: &mut Connection, now: u64, keys: &[Option<KeyPair>; 3], out: 
         r is None ==> final(out)@ == Seq::<u8>::empty() && final(c).out_log() == old(c).out_log()
             && final(c).acks_later(now),
         now < u64::MAX && old(c).timers_later(now) ==> final(c).timers_later(now),
+        final(c).crypto_kept(*old(c)),
 {
     out.clear();
     let d = match c.poll_transmit(now) {
