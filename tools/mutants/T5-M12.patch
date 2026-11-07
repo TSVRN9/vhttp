@@ -1,0 +1,12 @@
+diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
+index b0c451c..2e96a67 100644
+--- a/crates/quictls/src/server.rs
++++ b/crates/quictls/src/server.rs
+@@ -1141,6 +1141,7 @@ impl<'a> QuicServer<'a> {
+                         assert(dv[i as int] == ev@[i as int].deep_view());
+                         assert(dv[i as int] is PeerParams);
+                     }
++                    let _ = self.on_params(b, now);
+                     let ok = self.on_params(b, now);
+                     proof {
+                         Connection::lemma_crypto_kept_base_elim(self.conn_spec(), c0);

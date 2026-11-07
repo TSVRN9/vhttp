@@ -1,0 +1,12 @@
+diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
+index b0c451c..dbd9d20 100644
+--- a/crates/quictls/src/server.rs
++++ b/crates/quictls/src/server.rs
+@@ -942,7 +942,6 @@ impl<'a> QuicServer<'a> {
+                 > old(self).init_end && old(self).conn_spec().phase_spec() is Open ==> !cont && !(final(self).conn_spec().phase_spec() is Open),
+             !cont ==> !(final(self).conn_spec().phase_spec() is Open),
+             cont ==> final(self).h3 == old(self).h3,
+-            cont && !(old(self).level is Initial) ==> crypto_drained(final(self).conn_spec(), PacketKind::Initial),
+             // Acceptance: a stop only for Initial data past the end of what was received before the
+             // key change, with PROTOCOL_VIOLATION.
+             !cont ==> !(old(self).level is Initial) && old(self).conn_spec().crypto_end_spec(PacketKind::Initial)

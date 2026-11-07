@@ -1,13 +1,16 @@
 diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
-index dc2ddf1..b3eda34 100644
+index 206d62d..57e62d9 100644
 --- a/crates/quic/src/crypto_stream.rs
 +++ b/crates/quic/src/crypto_stream.rs
-@@ -39,7 +39,7 @@ pub open spec fn crypto_window_exceeded(contiguous: nat, offset: u64, len: nat)
+@@ -66,10 +66,7 @@ pub open spec fn ooo_runs(s: CryptoStream, off: u64, d: Seq<u8>) -> nat {
  //# CRYPTO frames received in the future, or it MAY close the connection
  //# with a CRYPTO_BUFFER_EXCEEDED error code.
  pub open spec fn crypto_allowed_err(s: CryptoStream, offset: u64, len: nat, c: u64) -> bool {
--    c == CRYPTO_BUFFER_EXCEEDED && crypto_window_exceeded(crypto_contiguous(s), offset, len)
+-    let d = Seq::new(len, |_i: int| 0u8);
+-    &&& c == CRYPTO_BUFFER_EXCEEDED
+-    &&& len > 0
+-    &&& ooo_held(s, offset, d) > MAX_CRYPTO_BUFFER || ooo_runs(s, offset, d) > MAX_CRYPTO_RANGES as nat
 +    true
  }
  
- /// `crypto_allowed_err` is not vacuous: an empty frame is never a window error, a 1-byte frame
+ /// The out-of-order positions depend on the frame's length, not its bytes.

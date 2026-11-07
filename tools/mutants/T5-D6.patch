@@ -1,0 +1,12 @@
+diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
+index 84680fd..c8fab6d 100644
+--- a/crates/quic/src/conn.rs
++++ b/crates/quic/src/conn.rs
+@@ -3592,7 +3592,6 @@ impl Connection {
+         // `streams.is_none()` is unreachable (`on_peer_params` sets both); `wf`'s `complete` clause
+         // needs it, and it costs less than one more conjunct.
+         if self.peer_tp.is_none() || self.streams.is_none() {
+-            self.close_internal(INTERNAL_ERROR);
+             return;
+         }
+         let ghost s0 = *self;

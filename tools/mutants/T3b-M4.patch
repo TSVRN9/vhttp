@@ -1,0 +1,18 @@
+diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
+index b0c451c..be7ad58 100644
+--- a/crates/quictls/src/server.rs
++++ b/crates/quictls/src/server.rs
+@@ -1117,13 +1117,6 @@ impl<'a> QuicServer<'a> {
+                 self.conn_spec().out_log() == old(self).conn_spec().out_log(),
+                 self.hs == old(self).hs,
+                 forall|j: int| 0 <= j < ev.deep_view().len() ==> !spec_send_level(#[trigger] ev.deep_view()[j], Level::OneRtt),
+-                // `key_changes` saw nothing unread at Initial, and nothing is read or received here.
+-                (spec_key_events(ev.deep_view()).0 || spec_key_events(ev.deep_view()).1) && self.level is Initial
+-                    ==> self.conn_spec().crypto_end_spec(
+-                    PacketKind::Initial,
+-                ) <= self.conn_spec().crypto_base_spec(PacketKind::Initial) && self.conn_spec().crypto_end_spec(
+-                    PacketKind::Initial,
+-                ) <= self.fed_i,
+                 fed_kept(self.conn_spec(), old(self).conn_spec()),
+                 i <= ev.deep_view().len(),
+                 forall|j: int| i <= j < ev.deep_view().len() && #[trigger] ev.deep_view()[j] is PeerParams

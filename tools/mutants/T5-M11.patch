@@ -1,0 +1,22 @@
+diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
+index 206d62d..0b8c237 100644
+--- a/crates/quic/src/crypto_stream.rs
++++ b/crates/quic/src/crypto_stream.rs
+@@ -301,8 +301,7 @@ impl CryptoStream {
+             final(self).wf(),
+             final(self).base_spec() == old(self).end_spec(),
+             final(self).buf_len_spec() == 0,
+-            final(self).history() == old(self).history(),
+-            forall|p: nat| #[trigger] final(self).received(p) == old(self).received(p),
++            final(self).history() == (if old(self).end_spec() > 0 { seq![((old(self).end_spec() - 1) as nat, seq![0u8])] } else { Seq::<(nat, Seq<u8>)>::empty() }),
+             crypto_contiguous(*final(self)) == old(self).end_spec(),
+     {
+         proof {
+@@ -316,6 +315,7 @@ impl CryptoStream {
+         self.contig = end;
+         self.ooo = Frags::new();
+         self.ins = Ghost(Seq::<(nat, Seq<u8>)>::empty().push((0nat, d)));
++        self.hist = Ghost(if end > 0 { seq![((end - 1) as nat, seq![0u8])] } else { Seq::empty() });
+         proof {
+             let m = rfc_received(self.ins@);
+             lemma_received_push(Seq::<(nat, Seq<u8>)>::empty(), 0, d);
