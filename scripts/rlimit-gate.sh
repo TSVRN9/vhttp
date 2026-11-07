@@ -19,8 +19,15 @@ mkdir -p "$out"
 rm -f "$out"/*.json  # no log of a removed crate survives into the ceilings check
 fail() { echo "rlimit-gate: $*" >&2; exit 1; }
 cd "$root"
-set -- crates/*/
-[ -d "$1" ] || fail "no crates under crates/"
+# Dependency order, so a crate is verified once (its dependencies are already built and cached); a crate dir missing from
+# this list, or a name here with no dir, fails.
+order="wire crypto ctcore ctmir h3 tls quic quictls server"
+have=$(for d in crates/*/; do [ -d "$d" ] && basename "$d"; done | LC_ALL=C sort | tr '\n' ' ')
+want=$(printf '%s\n' $order | LC_ALL=C sort | tr '\n' ' ')
+[ -n "$have" ] || fail "no crates under crates/"
+[ "$have" = "$want" ] || fail "crates/ holds [$have] but the dependency order lists [$want]; update order in scripts/rlimit-gate.sh"
+set --
+for n in $order; do set -- "$@" "crates/$n/"; done
 (cd "$root" && cargo verus verify -p wire > "$out/warm.log" 2>&1) || { cat "$out/warm.log"; fail "default-limit warm-up of vstd and wire failed"; }
 best=0 bestfn=
 for c in "$@"; do
