@@ -811,6 +811,40 @@ proof fn lemma_extend(m0: Seq<u8>, a: Seq<u8>, ms: nat, p0: nat, fv: spec_fn(nat
     }
 }
 
+/// If every position of `[s, e)` is held, fragment `i` holds them all.
+proof fn lemma_all_held(f: Seq<(nat, Seq<u8>)>, s: nat, e: nat, i: int, j: int)
+    requires
+        sep(f),
+        located(f, s, e, i, j),
+        s < e,
+    ensures
+        (forall|k: nat| s <= k < e ==> #[trigger] pos(f).contains(k)) ==> i < j && f[i].0 <= s && e
+            <= f[i].0 + f[i].1.len(),
+{
+    lemma_at(f);
+    if forall|k: nat| s <= k < e ==> #[trigger] pos(f).contains(k) {
+        assert(pos(f).contains(s));
+        let t = choose|t: int| inf(f, t, s);
+        if t > i {
+            assert(f[i].0 + f[i].1.len() < f[t].0);
+        }
+        if t >= j && j < f.len() && t > j {
+            assert(f[j].0 + f[j].1.len() < f[t].0);
+        }
+        assert(t == i);
+        let r = f[i].0 + f[i].1.len();
+        if e > r {
+            assert(pos(f).contains(r));
+            let u = choose|u: int| inf(f, u, r);
+            if u > i {
+                assert(f[i].0 + f[i].1.len() < f[u].0);
+            } else if u < i {
+                assert(f[u].0 + f[u].1.len() < f[i].0);
+            }
+        }
+    }
+}
+
 /// The sparse store.
 pub struct Frags {
     v: Vec<(u64, Vec<u8>)>,
@@ -955,20 +989,39 @@ impl Frags {
                 assert(f[t] == (self.v@[t].0 as nat, self.v@[t].1@));
             }
         }
+        // Binary search for the first fragment ending at or past `s`: fragments are sorted, so
+        // their ends are too.
         let mut i: usize = 0;
-        while i < n && self.v[i].0 + (self.v[i].1.len() as u64) < s
+        let mut hi: usize = n;
+        while i < hi
             invariant
                 forall|t: int| #![trigger self.v@[t]] 0 <= t < n ==> self.v@[t].0
                     + self.v@[t].1@.len() <= VARINT_MAX,
                 f == self.fs(),
                 sep(f),
                 n == f.len(),
-                i <= n,
+                i <= hi <= n,
                 forall|t: int| #![trigger f[t]] 0 <= t < i ==> f[t].0 + f[t].1.len() < s,
-            decreases n - i,
+                forall|t: int| #![trigger f[t]] hi <= t < n ==> f[t].0 + f[t].1.len() >= s,
+            decreases hi - i,
         {
-            assert(f[i as int] == (self.v@[i as int].0 as nat, self.v@[i as int].1@));
-            i = i + 1;
+            let mid = i + (hi - i) / 2;
+            assert(f[mid as int] == (self.v@[mid as int].0 as nat, self.v@[mid as int].1@));
+            if self.v[mid].0 + (self.v[mid].1.len() as u64) < s {
+                assert forall|t: int| #![trigger f[t]] 0 <= t <= mid implies f[t].0 + f[t].1.len() < s by {
+                    if t < mid {
+                        assert(f[t].0 + f[t].1.len() < f[mid as int].0);
+                    }
+                }
+                i = mid + 1;
+            } else {
+                assert forall|t: int| #![trigger f[t]] mid <= t < n implies f[t].0 + f[t].1.len() >= s by {
+                    if t > mid {
+                        assert(f[mid as int].0 + f[mid as int].1.len() < f[t].0);
+                    }
+                }
+                hi = mid;
+            }
         }
         proof {
             if i < n {
@@ -1052,6 +1105,23 @@ impl Frags {
             return (self.held, self.v.len());
         }
         let (i, j) = self.locate(s, e);
+        self.counts(lo, off, data, s, e, i, j)
+    }
+
+    /// `after_insert` past `locate`.
+    fn counts(&self, _lo: u64, _off: u64, _data: &[u8], s: u64, e: u64, i: usize, j: usize) -> (r: (u64, usize))
+        requires
+            self.wf(),
+            _off + _data@.len() <= VARINT_MAX,
+            s == (if _lo >= _off { _lo } else { _off }),
+            e == _off + _data@.len(),
+            s < e,
+            located(self.fs(), s as nat, e as nat, i as int, j as int),
+        ensures
+            r.0 == put(self.view(), _lo as nat, _off as nat, _data@).dom().len(),
+            r.1 == runs(put(self.view(), _lo as nat, _off as nat, _data@).dom()),
+    {
+        let ghost f = self.fs();
         let cov = self.sum_range(i, j);
         let (ms, me) = self.bounds(s, e, i, j);
         let ghost md = Seq::new((me - ms) as nat, |_k: int| 0u8);
@@ -1066,7 +1136,7 @@ impl Frags {
             lemma_located(f, s as nat, e as nat, i as int, j as int);
             assert(pos(f).subset_of(Set::range(0, VARINT_MAX as nat)));
             vstd::set_lib::lemma_len_subset(pos(f), Set::range(0, VARINT_MAX as nat));
-            assert(put(self.view(), lo as nat, off as nat, data@).dom() =~= pos(g));
+            assert(put(self.view(), _lo as nat, _off as nat, _data@).dom() =~= pos(g));
             self.lemma_wf();
         }
         (self.held + (me - ms) - cov, self.v.len() - (j - i) + 1)
@@ -1074,7 +1144,7 @@ impl Frags {
 
     /// Adds each byte of `data` (at `off`) at a position at or past `lo` that is not held: the
     /// first writer wins. Runs that become adjacent are merged into one fragment.
-    // shortcut: the touched fragments are copied into the merged one and the list is shifted, O(held + count) per call (CRYPTO: at most 16384 + 4096); extend in place if profiles show it.
+    // shortcut: a frame adding new positions copies the fragments it touches into the merged one and shifts the list, O(held + count) per frame (CRYPTO: at most 16384 + 4096); such frames are bounded per level by its new positions (1-RTT at most 16385; Initial and Handshake the bytes TLS accepts plus 16384). Upgrade: VecDeque fragments merged small-to-large plus an index (tracked C15).
     pub fn insert(&mut self, lo: u64, off: u64, data: &[u8])
         requires
             old(self).wf(),
@@ -1084,6 +1154,10 @@ impl Frags {
             final(self).view() == put(old(self).view(), lo as nat, off as nat, data@),
             final(self).held() == put(old(self).view(), lo as nat, off as nat, data@).dom().len(),
             final(self).count() == runs(put(old(self).view(), lo as nat, off as nat, data@).dom()),
+            // A frame holding no new position changes nothing: it returns after `locate`'s
+            // binary search and one comparison, copying and allocating nothing.
+            (forall|k: nat| (if lo >= off { lo } else { off }) <= k < off + data@.len() ==> #[trigger]
+                old(self).view().contains_key(k)) ==> *final(self) == *old(self),
     {
         let ghost f = self.fs();
         let s = if lo >= off { lo } else { off };
@@ -1094,8 +1168,24 @@ impl Frags {
             }
             return;
         }
-        let (h, _c) = self.after_insert(lo, off, data);
         let (i, j) = self.locate(s, e);
+        proof {
+            lemma_all_held(f, s as nat, e as nat, i as int, j as int);
+            if i < j {
+                assert(f[i as int] == (self.v@[i as int].0 as nat, self.v@[i as int].1@));
+            }
+        }
+        if i < j && self.v[i].0 <= s && e <= self.v[i].0 + self.v[i].1.len() as u64 {
+            proof {
+                lemma_at(f);
+                assert forall|k: nat| s <= k < e implies #[trigger] self.view().contains_key(k) by {
+                    assert(inf(f, i as int, k));
+                }
+                assert(put(self.view(), lo as nat, off as nat, data@) =~= self.view());
+            }
+            return;
+        }
+        let (h, _c) = self.counts(lo, off, data, s, e, i, j);
         let (ms, me) = self.bounds(s, e, i, j);
         let md = self.merged(off, data, s, e, i, j, ms, me);
         let ghost mdv = md@;
@@ -1147,10 +1237,18 @@ impl Frags {
     {
         let ghost f = self.fs();
         let ghost mdv = md@;
-        let mut tail = self.v.split_off(j);
-        self.v.truncate(i);
-        self.v.push((ms, md));
-        self.v.append(&mut tail);
+        if j == i {
+            // A new fragment: one shift of the tail, no reallocation of it.
+            self.v.insert(i, (ms, md));
+        } else if j == i + 1 {
+            // One fragment replaced in place.
+            self.v[i] = (ms, md);
+        } else {
+            let mut tail = self.v.split_off(j);
+            self.v.truncate(i);
+            self.v.push((ms, md));
+            self.v.append(&mut tail);
+        }
         proof {
             let g = splice(f, i as int, j as int, (ms as nat, mdv));
             lemma_splice_index(f, i as int, j as int, (ms as nat, mdv));
@@ -1158,6 +1256,8 @@ impl Frags {
                 assert forall|t: int| 0 <= t < g.len() implies #[trigger] self.fs()[t] == g[t] by {
                     if t > i {
                         assert(self.v@[t] == old(self).v@[t - i - 1 + j]);
+                    } else if t < i {
+                        assert(self.v@[t] == old(self).v@[t]);
                     }
                 }
             }
@@ -1182,7 +1282,7 @@ impl Frags {
     {
         let ghost f = self.fs();
         let ghost fv = |q: nat| nb(f, data@, off as nat, q);
-        let mut md: Vec<u8> = Vec::new();
+        let mut md: Vec<u8> = Vec::with_capacity((_me - ms) as usize);
         let mut p: u64 = ms;
         let mut t: usize = i;
         while t < j

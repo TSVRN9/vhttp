@@ -138,3 +138,15 @@ fn crypto_dup_ooo_not_double_counted() {
     assert_eq!(c.on_crypto(20000, &[2; 6384]), Ok(()));
     assert_eq!(c.on_crypto(30000, &[3]), Err(CRYPTO_BUFFER_EXCEEDED));
 }
+
+/// The out-of-order store's allocation stays bounded at the limits: 4096 one-byte runs take
+/// at most twice their slots plus their bytes (Verus models lengths only, TRUSTED.md).
+#[test]
+fn crypto_ooo_capacity_bounded() {
+    let mut c = CryptoStream::new();
+    for k in 0..4096u64 {
+        assert_eq!(c.on_crypto(2 + 2 * k, &[1]), Ok(()));
+    }
+    let slot = std::mem::size_of::<(u64, Vec<u8>)>();
+    assert!(c.capacities().1 <= 2 * 4096 * slot + 4096, "{:?}", c.capacities());
+}
