@@ -313,6 +313,18 @@ expect_fail "rlimit-ceilings: stale line (fn gone)" "delete the line" rceil rc8
 rcrepo rc9
 printf 'verus! {\n}\n' >> "$tmp/rc9/crates/server/src/lib.rs"
 expect_fail "rlimit-ceilings: server containing verus!" "has proofs" rceil rc9
+rcrepo rc12
+printf '#[verifier::external_body]\npub fn f() {}\n' >> "$tmp/rc12/crates/server/src/lib.rs"
+expect_fail "rlimit-ceilings: server with #[verifier" "has proofs" rceil rc12
+rcrepo rc13
+printf '#![verifier::loop_isolation(false)]\n' >> "$tmp/rc13/crates/server/src/lib.rs"
+expect_fail "rlimit-ceilings: server with #![verifier" "has proofs" rceil rc13
+rcrepo rc14
+rm -r "$tmp/rc14/crates/server"
+expect_fail "rlimit-ceilings: no server src" "crates/server/src is missing" rceil rc14
+rcrepo rc15
+cp "$tmp/rc15/logs/tls.json" "$tmp/rc15/logs/gone.json"
+expect_fail "rlimit-ceilings: log of a crate that is not under crates/" "stale log" rceil rc15
 rcrepo rc10
 rm "$tmp/rc10/logs/tls.json"
 expect_fail "rlimit-ceilings: no logs" "no JSON logs" rceil rc10

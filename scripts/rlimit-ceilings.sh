@@ -5,18 +5,20 @@ set -o pipefail
 # every fn above 8,000,000 in any crate is listed in ROOT/tools/rlimit-ceilings.txt at no more than its listed value, the
 # file only shrinks (compared with the merge-base with main, or HEAD^1 on main, exactly as scripts/acceptance.sh does for
 # its baseline; skipped, and said so, when that commit has no file), and the unverified-shell exemption of crates/server
-# holds only while crates/server/src has no verus! and no #[verifier.
+# holds only while crates/server/src exists and has no verus!, #[verifier, #![verifier or verus_spec; a log with no crate is stale.
 root=${1:?root}
 logs=${2:?logdir}
 tools=$(cd "$(dirname "$0")/../tools" && pwd)
 die() { echo "rlimit-gate: $*" >&2; exit 1; }
-if [ -d "$root/crates/server/src" ]; then
-    hits=$(grep -rnE 'verus!|#\[verifier' "$root/crates/server/src" || [ $? -eq 1 ])
-    [ -z "$hits" ] || die "crates/server is exempt as unverified shell code but has proofs:
+[ -d "$root/crates/server/src" ] || die "crates/server/src is missing (the unverified-shell exemption names a crate that must exist)"
+hits=$(grep -rnE 'verus!|#!?\[verifier|verus_spec' "$root/crates/server/src" || [ $? -eq 1 ])
+[ -z "$hits" ] || die "crates/server is exempt as unverified shell code but has proofs:
 $hits"
-fi
 set -- "$logs"/*.json
 [ -f "$1" ] || die "no JSON logs in $logs"
+for f in "$@"; do
+    [ -d "$root/crates/$(basename "$f" .json)" ] || die "$f has no crate crates/$(basename "$f" .json) (stale log)"
+done
 extra=
 if [ -d "$root/.git" ] || [ -f "$root/.git" ]; then
     head=$(git -C "$root" rev-parse HEAD) || die "cannot resolve HEAD"

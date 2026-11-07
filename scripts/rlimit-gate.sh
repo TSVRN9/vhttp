@@ -16,6 +16,7 @@ ungated=server
 cap=8000000
 out=${RL_OUT:-$root/target/rlimit}
 mkdir -p "$out"
+rm -f "$out"/*.json  # no log of a removed crate survives into the ceilings check
 fail() { echo "rlimit-gate: $*" >&2; exit 1; }
 cd "$root"
 set -- crates/*/
