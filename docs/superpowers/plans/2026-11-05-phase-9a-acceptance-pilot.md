@@ -67,7 +67,7 @@ The lift through `on_frame`/`on_counted` and quictls `apply`/`feed`/`tls_step` i
   - 9a edits no tls file.
 - verify.sh's final line stays byte-identical: `verify.sh: all crates verified, duvet ok, ct ok (10 declassify), cost 19/36, escapes accounted (0), binary ok (49 fns)`.
 - cargo test --workspace stays green (902 tests at main 73cc244).
-  - Plus this plan's new tests: 904 after Task 1, 910 after Task 3 (fix round 1 added 3), 911 after Task 6 (done before 3b/5, 2026-11-06), then +2 after Task 5 and +3 after Task 3c' (each task states its own delta against the count it starts from). 0 warnings in `cargo build` and `cargo test`.
+  - Plus this plan's new tests: 904 after Task 1, 910 after Task 3 (fix round 1 added 3), 912 after Task 6 and its fix round (done before 3b/5, 2026-11-06), then +2 after Task 5 and +3 after Task 3c' (each task states its own delta against the count it starts from). 0 warnings in `cargo build` and `cargo test`.
 - No attribution lines in commits.
 - **Duvet:** every new spec fn and ensures that states an RFC condition carries `//= https://www.rfc-editor.org/rfc/rfcNNNN#section-X` plus a contiguous `//#` quote copied verbatim from `.duvet/specifications/www.rfc-editor.org/rfc/`.
   - `.duvet/specifications` and `.duvet/requirements` are git-ignored and missing in wt-9a. Copy both once from `/home/tavern/Projects/rust/web-server/.duvet/`.
@@ -83,7 +83,7 @@ The lift through `on_frame`/`on_counted` and quictls `apply`/`feed`/`tls_step` i
 2. **An Initial frame straddling `init_end` by one byte** after the key change closes with 0x0a; one ending exactly at `init_end` does not (already pinned by `initial_retransmit_after_switch_ok`). Task 5: `initial_straddle_after_switch_pv` [m4].
 3. **Two errors in one flight:** the first error's code is the one sent. Task 5: `trailing_bytes_before_bad_tp_pv` (0x0a, not 0x08), with mutation T5-M5 [m11]. Task 1: `alert_after_close_keeps_code`.
 4. **TLS alert 0xff** closes with 0x1ff, the top of the CRYPTO_ERROR range (RFC 9001 §4.8). Task 1: `tls_alert_top_of_range`.
-5. **A CRYPTO frame ending exactly at `base + 16384`** is accepted; one byte more closes with 0x0d. Pinned by `crypto_limit`, which must stay green after Task 3's reorder. The `base + 4096` floor is proved (Task 3, [m9]).
+5. **A CRYPTO frame ending exactly at `crypto_contiguous + 16384`** is accepted; one byte more closes with 0x0d (the window was anchored at `base` until T3 review I2). Pinned by `crypto_limit`, which must stay green after Task 3's reorder. The `crypto_contiguous + 4096` floor is proved (Task 3, [m9]).
 
 ---
 
@@ -280,7 +280,7 @@ The lift through `on_frame`/`on_counted` and quictls `apply`/`feed`/`tls_step` i
 - Produces (`quic::crypto_stream`):
   - `pub open spec fn crypto_window_exceeded(base: nat, offset: u64, len: nat) -> bool` = `len > 0 && offset + len > base + MAX_CRYPTO_BUFFER`. This is the named own-limit.
   - `pub open spec fn crypto_allowed_err(s: CryptoStream, offset: u64, len: nat, c: u64) -> bool` = `c == CRYPTO_BUFFER_EXCEEDED && crypto_window_exceeded(s.reassembly().base(), offset, len)`. Cite §7.5's handshake MUST (crypto_stream.rs:90-92) and its post-handshake MAY [m7]: `//# Once the handshake completes, if an endpoint is unable to buffer all` … `//# CONNECTION_CLOSE … CRYPTO_BUFFER_EXCEEDED error code.`, copied exactly from rfc9000.txt §7.5.
-  - `pub proof fn lemma_crypto_floor(base: nat, offset: u64, len: nat)` [m9]: requires `offset + len <= base + 4096`; ensures `!crypto_window_exceeded(base, offset, len)`. Cite §7.5's "MUST support buffering at least 4096 bytes" (crypto_stream.rs:12-14).
+  - `pub proof fn lemma_crypto_floor(s: CryptoStream, offset: u64, len: nat)` [m9; anchored at `crypto_contiguous(s)` by T3 review I2, it was `base`]: requires `offset + len <= crypto_contiguous(s) + 4096`; ensures `!crypto_window_exceeded(crypto_contiguous(s), offset, len)` and no code is allowed. Cite §7.5's "MUST support buffering at least 4096 bytes" (crypto_stream.rs:12-14).
   - `CryptoStream::wf` adds `&&& self.reassembly().tight()`.
   - `on_crypto`'s body order: `end <= base` → `Ok`; `data.len() == 0` → `Ok`; `end > base + MAX_CRYPTO_BUFFER` → `Err(CRYPTO_BUFFER_EXCEEDED)`; `insert`, then `proof { Reassembly::lemma_insert_tight(old(self).re, self.re, offset, data@) }`. The ensures (the iff changes; the rest as today):
     ```
