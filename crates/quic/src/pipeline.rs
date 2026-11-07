@@ -304,6 +304,7 @@ pub fn transmit(c: &mut Connection, now: u64, keys: &[Option<KeyPair>; 3], out: 
             && final(c).acks_later(now),
         now < u64::MAX && old(c).timers_later(now) ==> final(c).timers_later(now),
         final(c).crypto_kept(*old(c)),
+        drained_kept(*final(c), *old(c)),
 {
     out.clear();
     let d = match c.poll_transmit(now) {

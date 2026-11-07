@@ -238,9 +238,11 @@ fn key_events(ev: &Vec<TlsEvent>) -> (r: (bool, bool))
     (hs, done)
 }
 
-/// From `o` to `c`: an open `c` was open in `o`, and every level drained in `o` still is.
+/// From `o` to `c`: an open `c` was open in `o`, every level drained in `o` still is, and a
+/// completed handshake stays completed.
 spec fn fed_kept(c: Connection, o: Connection) -> bool {
-    c.phase_spec() is Open ==> o.phase_spec() is Open && drained_kept(c, o)
+    &&& c.phase_spec() is Open ==> o.phase_spec() is Open && drained_kept(c, o)
+    &&& o.live(PacketKind::OneRtt) ==> c.live(PacketKind::OneRtt)
 }
 
 pub struct QuicServer<'a> {
@@ -289,7 +291,13 @@ impl<'a> QuicServer<'a> {
         // §4.1.3: what TLS had at Initial when it left is read, so `init_end` is the end of the
         // Initial data received before the key change.
         &&& !(self.level is Initial) ==> self.h3.conn_spec().crypto_base_spec(PacketKind::Initial) >= self.init_end
+        // Unproved path (carry-over to Task 5): `apply` at `level is Initial` with
+        // `spec_key_events(ev).1 && !spec_key_events(ev).0` (Complete without Secrets { Handshake }).
+        // tls emits Complete only from WaitFinished, reached after Secrets { Handshake }, but no
+        // tls theorem states it. On that path `init_end` stays 0 and the next datagram closes.
         &&& self.level is Initial ==> self.init_end == 0
+        // TLS receives at OneRtt only once the connection has completed (`on_complete`).
+        &&& self.level is OneRtt ==> self.h3.conn_spec().live(PacketKind::OneRtt)
     }
 
     /// No discarded keys (RFC 9001 §4.9.1, §4.9.2).
@@ -406,6 +414,7 @@ impl<'a> QuicServer<'a> {
         ensures
             s matches Some(q) ==> q.wf() && q.one_rtt_forgotten(),
             app_grew(old(app)@, final(app)@),
+            s matches Some(q) ==> (q.conn_spec().phase_spec() is Open ==> crypto_all_drained(q.conn_spec())),
     {
         let dcid = match initial_dcid(d) {
             Some(x) => x,
@@ -437,6 +446,9 @@ impl<'a> QuicServer<'a> {
         s.h3.pump(app);
         proof {
             Connection::lemma_crypto_kept_elim(s.h3.conn_spec(), c0);
+            if s.h3.conn_spec().phase_spec() is Open {
+                lemma_all_drained_kept(s.h3.conn_spec(), c0);
+            }
         }
         s.forget_failed();
         s.sync_keys();
@@ -452,6 +464,8 @@ impl<'a> QuicServer<'a> {
             final(self).wf(),
             final(self).one_rtt_forgotten(),
             app_grew(old(app)@, final(app)@),
+            // Drain after the datagram: every CRYPTO byte it delivered in order has gone to TLS.
+            final(self).conn_spec().phase_spec() is Open ==> crypto_all_drained(final(self).conn_spec()),
     {
         let was = self.h3.conn().handshake_complete();
         let ghost c0 = self.h3.conn_spec();
@@ -461,6 +475,7 @@ impl<'a> QuicServer<'a> {
         }
         self.sync_keys();
         self.tls_step(now, r);
+        let ghost ct = self.h3.conn_spec();
         if !was && self.h3.conn().handshake_complete() {
             let ghost c1 = self.h3.conn_spec();
             // The same datagram and path as the first pass, with its own randomness: the first
@@ -470,12 +485,28 @@ impl<'a> QuicServer<'a> {
                 Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c1);
             }
             self.sync_keys();
+            // The refed packet's 1-RTT CRYPTO bytes go to TLS now, not at the next datagram: any
+            // such byte is unexpected_message, a close TLS requires at once. `r.tls` is not drawn
+            // on (`lemma_one_rtt_rand_free`).
+            let _ = self.feed(Level::OneRtt, now, r, true);
+            proof {
+                let c = self.h3.conn_spec();
+                self.h3.lemma_conn_wf();
+                Connection::lemma_dead_drained(c);
+                assert(c.live(PacketKind::OneRtt));
+                if c.phase_spec() is Open {
+                    lemma_all_drained(c);
+                }
+            }
         }
         let ghost c2 = self.h3.conn_spec();
         // SETTINGS goes out once 1-RTT is live.
         self.h3.pump(app);
         proof {
             Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c2);
+            if self.h3.conn_spec().phase_spec() is Open {
+                lemma_all_drained_kept(self.h3.conn_spec(), c2);
+            }
         }
         self.forget_failed();
         self.sync_keys();
@@ -500,6 +531,7 @@ impl<'a> QuicServer<'a> {
             r is None ==> final(out)@ == Seq::<u8>::empty() && final(self).conn_spec().out_log()
                 == old(self).conn_spec().out_log() && final(self).conn_spec().acks_later(now),
             now < u64::MAX && old(self).conn_spec().timers_later(now) ==> final(self).conn_spec().timers_later(now),
+            drained_kept(final(self).conn_spec(), old(self).conn_spec()),
     {
         let ghost c0 = self.h3.conn_spec();
         let r = quic::pipeline::transmit(self.h3.conn_mut(), now, &self.keys, out);
@@ -520,6 +552,7 @@ impl<'a> QuicServer<'a> {
             app_grew(old(app)@, final(app)@),
             now < u64::MAX ==> final(self).conn_spec().timers_later(now),
             now <= final(self).conn_spec().now_spec(),
+            drained_kept(final(self).conn_spec(), old(self).conn_spec()),
     {
         let ghost c0 = self.h3.conn_spec();
         self.h3.on_timeout(now, rand, app);
@@ -537,6 +570,7 @@ impl<'a> QuicServer<'a> {
             final(self).wf(),
             final(self).one_rtt_forgotten(),
             final(self).conn_spec().keeps_later(old(self).conn_spec()),
+            drained_kept(final(self).conn_spec(), old(self).conn_spec()),
     {
         let ghost c0 = self.h3.conn_spec();
         self.h3.conn_mut().poll_cid_updates(out);
@@ -555,6 +589,7 @@ impl<'a> QuicServer<'a> {
             final(self).wf(),
             final(self).one_rtt_forgotten(),
             app_grew(old(app)@, final(app)@),
+            drained_kept(final(self).conn_spec(), old(self).conn_spec()),
     {
         let ghost c0 = self.h3.conn_spec();
         self.h3.conn_mut().on_reset_candidate(tail, now);
@@ -578,6 +613,7 @@ impl<'a> QuicServer<'a> {
             final(self).wf(),
             final(self).one_rtt_forgotten(),
             app_grew(old(app)@, final(app)@),
+            drained_kept(final(self).conn_spec(), old(self).conn_spec()),
     {
         let ghost c0 = self.h3.conn_spec();
         let r = self.h3.send_response(id, resp, app);
@@ -661,39 +697,64 @@ impl<'a> QuicServer<'a> {
             // §4.1.3: Initial data past what TLS had when it left Initial.
             !(old(self).level_spec() is Initial) && old(self).conn_spec().crypto_end_spec(PacketKind::Initial)
                 > old(self).init_end && old(self).conn_spec().phase_spec() is Open ==> !(final(self).conn_spec().phase_spec() is Open),
-            // Drain after feed: no level TLS read here is left holding an in-order byte TLS has
-            // not been given, so between datagrams each holds at most the out-of-order window.
-            final(self).conn_spec().phase_spec() is Open ==> {
-                &&& !(old(self).level is Initial) ==> crypto_drained(final(self).conn_spec(), PacketKind::Initial)
-                &&& !old(self).conn_spec().live(PacketKind::OneRtt) && old(self).level is Initial ==> crypto_drained(
-                    final(self).conn_spec(),
-                    PacketKind::Initial,
-                )
-                &&& !old(self).conn_spec().live(PacketKind::OneRtt) && !(final(self).level is OneRtt) ==> crypto_drained(
-                    final(self).conn_spec(),
-                    PacketKind::Handshake,
-                )
-                &&& old(self).conn_spec().live(PacketKind::OneRtt) ==> crypto_drained(final(self).conn_spec(), PacketKind::OneRtt)
-            },
+            // Drain after feed: at `tls_step`'s return no level holds an in-order byte TLS has not
+            // been given (levels not live are drained by `Connection::wf`).
+            final(self).conn_spec().phase_spec() is Open ==> crypto_all_drained(final(self).conn_spec()),
     {
+        let ghost c0 = self.h3.conn_spec();
+        proof {
+            self.h3.lemma_conn_wf();
+            Connection::lemma_dead_drained(c0);
+        }
         let was = self.h3.conn().handshake_complete();
         if !self.superseded(now) {
             self.sync_keys();
             return ;
         }
         if was {
+            // Initial and Handshake are discarded (`lemma_dead_drained`); OneRtt is read here.
             if !self.feed(Level::OneRtt, now, r, was) {
                 self.sync_keys();
                 return ;
             }
+            proof {
+                let c = self.h3.conn_spec();
+                if c.phase_spec() is Open {
+                    assert(crypto_drained(c0, PacketKind::Initial));
+                    assert(crypto_drained(c0, PacketKind::Handshake));
+                    lemma_all_drained(c);
+                }
+            }
         } else {
+            // OneRtt is not live yet, so drained (`lemma_dead_drained`).
+            let ghost l0 = self.level;
             if rank(self.level) == 0 && !self.feed(Level::Initial, now, r, was) {
                 self.sync_keys();
                 return ;
             }
+            let ghost c1 = self.h3.conn_spec();
+            proof {
+                if c1.phase_spec() is Open {
+                    assert(crypto_drained(c0, PacketKind::OneRtt));
+                    assert(crypto_drained(c1, PacketKind::OneRtt));
+                    assert(crypto_drained(c1, PacketKind::Initial));
+                }
+            }
             if rank(self.level) <= 1 && !self.feed(Level::Handshake, now, r, was) {
                 self.sync_keys();
                 return ;
+            }
+            proof {
+                let c = self.h3.conn_spec();
+                self.h3.lemma_conn_wf();
+                Connection::lemma_dead_drained(c);
+                if c.phase_spec() is Open {
+                    assert(crypto_drained(c, PacketKind::OneRtt));
+                    assert(crypto_drained(c, PacketKind::Initial));
+                    // Not read here only once TLS is at OneRtt, so complete and Handshake discarded.
+                    assert(crypto_drained(c, PacketKind::Handshake));
+                    lemma_all_drained(c);
+                }
             }
         }
         self.sync_keys();
@@ -938,6 +999,7 @@ impl<'a> QuicServer<'a> {
             ok ==> final(self).h3 == old(self).h3,
             ok && spec_key_events(ev.deep_view()).0 ==> old(self).unread(Level::Initial, PacketKind::Initial) == 0,
             !ok ==> !(final(self).conn_spec().phase_spec() is Open),
+            fed_kept(final(self).conn_spec(), old(self).conn_spec()),
     {
         let (to_hs, done) = key_events(ev);
         let ghost c0 = self.h3.conn_spec();
@@ -1097,7 +1159,8 @@ impl<'a> QuicServer<'a> {
             final(self).wf(),
             final(self).conn_spec().out_log() == old(self).conn_spec().out_log(),
             final(self).hs == old(self).hs,
-            final(self).level is OneRtt,
+            ok ==> final(self).level is OneRtt,
+            !ok ==> final(self).level == old(self).level,
             !ok ==> !(final(self).conn_spec().phase_spec() is Open),
             fed_kept(final(self).conn_spec(), old(self).conn_spec()),
     {
@@ -1112,11 +1175,12 @@ impl<'a> QuicServer<'a> {
         proof {
             Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
         }
-        self.level = Level::OneRtt;
         if !matches!(self.h3.conn().phase(), Phase::Open) {
             self.sync_keys();
             return false;
         }
+        // Only a completed connection: `core_ok` ties OneRtt to completion.
+        self.level = Level::OneRtt;
         self.sync_keys();
         true
     }
@@ -1149,6 +1213,57 @@ proof fn lemma_fed(
         lemma_ok_not_failed(cfg, tp, s, l, data, rand);
     }
     theorem_event_discipline(cfg, tp, s, l, data, rand);
+}
+
+/// All drained in `o`, and every level drained in `o` still is in `c`.
+proof fn lemma_all_drained_kept(c: Connection, o: Connection)
+    requires
+        crypto_all_drained(o),
+        drained_kept(c, o),
+    ensures
+        crypto_all_drained(c),
+{
+    assert forall|k: PacketKind| #[trigger] crypto_drained(c, k) by {
+        assert(crypto_drained(o, k));
+    }
+}
+
+/// The three levels drained: all are.
+proof fn lemma_all_drained(c: Connection)
+    requires
+        crypto_drained(c, PacketKind::Initial),
+        crypto_drained(c, PacketKind::Handshake),
+        crypto_drained(c, PacketKind::OneRtt),
+    ensures
+        crypto_all_drained(c),
+{
+    assert forall|k: PacketKind| #[trigger] crypto_drained(c, k) by {
+        match k {
+            PacketKind::Initial => {},
+            PacketKind::Handshake => {},
+            PacketKind::OneRtt => {},
+        }
+    }
+}
+
+/// TLS's answer to non-empty 1-RTT CRYPTO data does not depend on its randomness: no phase
+/// expects OneRtt, so it is the unexpected_message failure (or the earlier failure) either way.
+/// `receive`'s second OneRtt feed therefore draws nothing from `r.tls`.
+proof fn lemma_one_rtt_rand_free(
+    cfg: Seq<SpecCertChain>,
+    tp: Seq<u8>,
+    s: SpecServerHs,
+    data: Seq<u8>,
+    r1: Seq<u8>,
+    r2: Seq<u8>,
+)
+    requires
+        data.len() > 0,
+    ensures
+        spec_on_crypto(cfg, tp, s, Level::OneRtt, data, r1) == spec_on_crypto(cfg, tp, s, Level::OneRtt, data, r2),
+        spec_on_crypto(cfg, tp, s, Level::OneRtt, data, r1).1 is Err,
+{
+    hide(spec_drain);
 }
 
 } // verus!

@@ -400,6 +400,14 @@ impl H3Server {
         s
     }
 
+    pub proof fn lemma_conn_wf(&self)
+        requires
+            self.wf(),
+        ensures
+            self.conn_spec().wf(),
+    {
+    }
+
     pub fn conn(&self) -> (r: &Connection)
         requires
             self.wf(),
@@ -1008,6 +1016,9 @@ impl H3Server {
             // No timer moves to a time `on_timeout` has passed (`H3Server::settled_later`).
             final(self).conn_spec().keeps_later(old(self).conn_spec()),
             final(self).conn_spec().crypto_kept(old(self).conn_spec()),
+            drained_kept(final(self).conn_spec(), old(self).conn_spec()),
+            final(self).conn_spec().phase_spec() is Open ==> old(self).conn_spec().phase_spec() is Open,
+            final(self).conn_spec().live(PacketKind::OneRtt) == old(self).conn_spec().live(PacketKind::OneRtt),
     {
         let ghost a0 = app@;
         proof {
@@ -1090,6 +1101,7 @@ impl H3Server {
                 && forall|j: u64| #[trigger] final(self).emitted(j) == old(self).emitted(j) + writes_on(a, j),
             r is Err ==> forall|j: u64| #[trigger] final(self).emitted(j) == old(self).emitted(j),
             final(self).conn_spec().crypto_kept(old(self).conn_spec()),
+            drained_kept(final(self).conn_spec(), old(self).conn_spec()),
     {
         proof {
             Connection::lemma_crypto_kept_refl(self.conn);
@@ -1168,6 +1180,7 @@ impl H3Server {
             now < u64::MAX ==> final(self).conn_spec().timers_later(now),
             now <= final(self).conn_spec().now_spec(),
             final(self).conn_spec().crypto_kept(old(self).conn_spec()),
+            drained_kept(final(self).conn_spec(), old(self).conn_spec()),
     {
         self.conn.on_timeout(now, rand);
         let ghost c0 = self.conn;

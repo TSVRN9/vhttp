@@ -547,6 +547,20 @@ fn finished_coalesced_with_one_rtt() {
     assert_eq!(s.conn().largest_pn(PacketKind::OneRtt), Some(0));
 }
 
+/// A 1-RTT CRYPTO frame coalesced behind the client's Finished: `refeed_one_rtt` processes it
+/// after TLS completes, and TLS must see it in the same datagram (any 1-RTT CRYPTO byte is
+/// unexpected_message), not at the client's next datagram.
+#[test]
+fn finished_coalesced_with_one_rtt_crypto_0x10a() {
+    let (mut s, mut c, mut log) = flight();
+    let d = c.datagrams(Some(vec![Frame::Crypto { offset: 0, data: vec![0x18, 0, 0, 1, 0] }]));
+    send(&mut s, &d[0], 3);
+    assert!(s.conn().handshake_complete());
+    assert_eq!(s.conn().phase(), Phase::Closing);
+    pull_server(&mut s, &mut c, &mut log);
+    assert!(close_in(&log, PacketKind::OneRtt, 0x10a), "{:?}", log);
+}
+
 #[test]
 fn finished_trailing_bytes_pv() {
     let (mut s, mut c, mut log) = flight();
