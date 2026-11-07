@@ -2,6 +2,21 @@
 set -eu
 set -o pipefail
 # ct-lib.sh: the report readers of ct-check.sh (sourced; the sourcer defines fail and CT_OUT).
+
+# grep_hits [-v] PATTERN FILE..: (ERE) prints the matching lines; returns 0 on a match, 1 on none, and
+# fails on a missing file or a grep exit of 2 or more (a bare `grep .. && fail` reads those as no match).
+grep_hits() {
+    v=
+    if [ "${1-}" = -v ]; then v=-v; shift; fi
+    [ $# -ge 2 ] || fail "grep_hits: usage: grep_hits [-v] PATTERN FILE.."
+    gp=$1
+    shift
+    for gf in "$@"; do [ -f "$gf" ] || fail "grep_hits: no $gf"; done
+    grc=0
+    grep -E $v -e "$gp" "$@" || grc=$?
+    [ "$grc" -le 1 ] || fail "grep_hits: grep failed (exit $grc) on $*"
+    return "$grc"
+}
 # verdicts <report>: one line per root, `ok <path>` or `reject <path> <K1,K2,..>` (kinds sorted
 # and unique), sorted.
 verdicts() {

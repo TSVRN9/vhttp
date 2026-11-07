@@ -99,7 +99,7 @@ echo "ct-check: fixtures $n/$n"
 # Selftest: every vector line of selftest.txt must report `pass`; counted per crate prefix.
 r=$CT_OUT/crypto/selftest-crypto.txt
 front 150 "selftest=$st" "$CT_OUT/crypto/mir-crypto.json" "$r" "$cm"
-grep -v '^pass ' "$r" >&2 && fail "selftest: vectors failed (above)"
+grep_hits -v '^pass ' "$r" >&2 && fail "selftest: vectors failed (above)"
 v=$(grep -c '^crypto::' "$st")
 p=$(grep -c "^pass " "$r" || true)
 [ "$p" -eq "$v" ] || fail "selftest: $p of $v vectors passed"
@@ -110,7 +110,7 @@ for c in wire h3 quic; do
 done
 r=$CT_OUT/parsers/selftest.txt
 cat "$CT_OUT/parsers/selftest-wire.txt" "$CT_OUT/parsers/selftest-h3.txt" "$CT_OUT/parsers/selftest-quic.txt" > "$r"
-grep -v '^pass ' "$r" >&2 && fail "selftest parsers: vectors failed (above)"
+grep_hits -v '^pass ' "$r" >&2 && fail "selftest parsers: vectors failed (above)"
 v=$(grep -c -E '^(wire|h3|quic)::' "$st")
 p=$(grep -c "^pass " "$r" || true)
 [ "$p" -eq "$v" ] || fail "selftest parsers: $p of $v vectors passed"
@@ -142,7 +142,7 @@ got=$CT_OUT/parsers/cost-verdicts.txt
 cat $reports | sed -E 's/ NotCounted\([0-9]+\)$/ NotCounted/' > "$CT_OUT/parsers/cost-all.txt"
 cost_verdicts "$CT_OUT/parsers/cost-all.txt" atoms > "$got"
 diff -u "$ct/expected-cost.txt" "$got" || fail "cost parsers: verdicts differ from tools/ct-driver/expected-cost.txt"
-if grep -qvE '^[[:space:]]*(#|$|cost-root[[:space:]])' "$ct/cost-targets.txt"; then
+if grep_hits -v '^[[:space:]]*(#|$|cost-root[[:space:]])' "$ct/cost-targets.txt" > /dev/null; then
     fail "cost-targets.txt holds a line that is not a cost-root line (the selftest and the cost run must share one cpol)"
 fi
 nt=$(grep -c -E '^[[:space:]]*cost-root[[:space:]]' "$ct/cost-targets.txt")
@@ -227,7 +227,7 @@ got=$CT_OUT/semconf/selftest-semconf.txt
 # activation, is a `fail`); the whole run takes well under a second, and the 60 s bound stops a
 # looping vector.
 front 60 "selftest=$sc/vectors.txt" "$CT_OUT/semconf/mir-semconf.json" "$got" "$sc/manifest.txt"
-grep -v '^pass ' "$got" >&2 && fail "semconf: vectors failed (above)"
+grep_hits -v '^pass ' "$got" >&2 && fail "semconf: vectors failed (above)"
 v=$(grep -c '^semconf::' "$sc/vectors.txt")
 p=$(grep -c '^pass ' "$got" || true)
 [ "$p" -eq "$v" ] || fail "semconf: $p of $v vectors passed"

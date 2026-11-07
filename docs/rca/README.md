@@ -33,6 +33,7 @@ A catch lower in the list needs a stated reason why a higher one is not possible
 
 - `catalog.md`: root causes of every bug found by review so far, the 18 classes with their catches and owners.
 - `2026-11-06-empty-crypto.md`: first RCA entry.
+- `2026-11-07-grep-exit-2.md`: a missing crypto report passed ct-check's reject check (grep exit 2 read as no match); grep_hits and the lint rule.
 - Tools: `tools/check_quotes.py`, `tools/rl.py`, `tools/mut.py`, `tools/mutants.py`; gates: `scripts/lint-scripts.sh`, `scripts/check-quotes.sh`, `scripts/escape-gate.sh`, `scripts/acceptance.sh`, `scripts/rlimit-gate.sh`, `scripts/rlimit-ceilings.sh`, `scripts/mutants.sh`, `scripts/gate-demos.sh`.
 - Mutant registry (C6): `tools/mutants.tsv` and `tools/mutants/<id>.patch`. A mutation that a review or plan runs by hand is added as a row (id, crate, module, the fn whose verification it must break, tests that must fail, the expected-failure regex, origin) with its `git diff` as the patch, so it is re-run mechanically instead of once.
 
