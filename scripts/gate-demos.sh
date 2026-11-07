@@ -335,16 +335,19 @@ expect_fail "rlimit-ceilings: no main" "cannot resolve the merge-base" rceil rc1
 
 # mutant registry (scripts/mutants.sh, C6), in throwaway git repos holding the acceptance fixture crate as crates/demo/src/acc.rs
 # and the one-row registry of tools/gate-demos/mutants. check: a patch that no longer applies, a missing patch, an empty or
-# missing tsv, a duplicate id, an orphan patch, a patch outside its row's crate, a bad regex. run (real Verus, seconds:
-# CARGO_TARGET_DIR keeps vstd built across runs): the killed mutant passes; a mutant that still verifies fails; a dirty
+# missing tsv, a duplicate id, an orphan patch, a patch outside its row's crate, a bad regex, a wildcard fn, a patch
+# that applies only at an offset, an allowed_*err predicate with no row. run (real Verus, seconds:
+# MUTANTS_TARGET_DIR keeps vstd built across runs): the killed mutant (with its named test) passes; a mutant that still
+# verifies, a named test that does not FAIL, one that fails unmutated, a misspelt test and a missing fn fail; a dirty
 # crates/ is refused. The verdict on canned Verus output: rlimit, no or two JSON objects, another fn checked, a non-matching
-# error kind. The merge gate on a --no-ff merge into main: passes with a fresh run file; fails with none (also detached at
-# main's tip), a stale crates tree, a fail line, a missing id or an edited patch, or no main at all; on the branch only check runs.
-export CARGO_TARGET_DIR="${MUTANTS_DEMO_TARGET:-$root/target/mutants-demo}"
+# error kind. The main gate (every commit at main's tip): passes after a --no-ff merge or a fast-forward with a fresh run file;
+# fails with none (also detached), crates/ or Cargo.toml changed after the run, a fast-forward without a run, main's own
+# crates/ change in the merge, a fail line, a missing or extra id, an edited tsv or patch, or no main; on the branch, check only.
+export MUTANTS_TARGET_DIR="${MUTANTS_DEMO_TARGET:-$root/target/mutants-demo}"
 mrepo() {  # mrepo <dir>: scripts, tools/mutants.py and the fixture, one commit on main, then branch feat
     rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/tools"
-    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/mutants.py" "$tmp/$1/tools/"
-    cp -r "$fx/mutants/Cargo.toml" "$fx/mutants/Cargo.lock" "$fx/mutants/crates" "$tmp/$1/"
+    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/mutants.py" "$root/tools/acceptance.py" "$tmp/$1/tools/"
+    cp -r "$fx/mutants/Cargo.toml" "$fx/mutants/Cargo.lock" "$fx/mutants/crates" "$root/rust-toolchain.toml" "$tmp/$1/"
     cp -r "$fx/mutants/tools/mutants.tsv" "$fx/mutants/tools/mutants" "$tmp/$1/tools/"
     cp "$fx/acceptance/crates/demo/src/lib.rs" "$tmp/$1/crates/demo/src/acc.rs"
     printf '/.worktrees/\n/target/\n' > "$tmp/$1/.gitignore"
@@ -379,8 +382,14 @@ mrepo m2
 sed -i 's/postcondition not satisfied/postcondition (not/' "$tmp/m2/tools/mutants.tsv"
 expect_fail "mutants check: regex that does not compile" "regex does not compile" mut m2 check
 mrepo m2
-sed -i 's/\tdemo\t-\t/\tdemo*\t-\t/' "$tmp/m2/tools/mutants.tsv"
+sed -i 's/\tacc\tdemo\t/\tacc\tdemo*\t/' "$tmp/m2/tools/mutants.tsv"
 expect_fail "mutants check: wildcard fn" "must be a plain path" mut m2 check
+mrepo m2
+sed -i '1i // one line more' "$tmp/m2/crates/demo/src/acc.rs"
+expect_fail "mutants check: patch that applies only at an offset" "applies only with an offset" mut m2 check
+mrepo m2
+sed -i 's/^verus! {$/verus! {\npub open spec fn other_allowed_err(c: u64) -> bool { c == 9 }/' "$tmp/m2/crates/demo/src/acc.rs"
+expect_fail "mutants check: an allowed_*err predicate with no row" "allowed predicate with no mutant row (name it in a row's fn, regex or origin): other_allowed_err" mut m2 check
 
 # run, for real: the fixture's mutant is killed (and the run file written); a mutant that still verifies; a dirty tree.
 mrepo m3
@@ -399,6 +408,18 @@ expect_fail "mutants run: a mutant that still verifies" "the mutant still verifi
 mrepo m5
 printf '// dirty\n' >> "$tmp/m5/crates/demo/src/acc.rs"
 expect_fail "mutants run: uncommitted crates/" "uncommitted changes" mut m5 run
+# run's tests branch and fn name: each row edit is committed (run uses HEAD), then one real run.
+mrow() {  # mrow <dir> <sed expr on the D-kill row>: a fresh repo whose row is edited and committed
+    mrepo "$1"; sed -i "/^D-kill/$2" "$tmp/$1/tools/mutants.tsv"; gitc "$1" commit -qam row
+}
+mrow m6 's/acc:demo_eleven_is_err7/acc:demo_three_is_ok/'
+expect_fail "mutants run: a named test that still passes on the mutant" "test demo/acc:demo_three_is_ok did not print '... FAILED'" mut m6 run D-kill
+mrow m6 's/acc:demo_eleven_is_err7/acc:demo_three_is_err/'
+expect_fail "mutants run: a named test that fails unmutated" "unmutated: test demo/acc:demo_three_is_err did not print '... ok'" mut m6 run D-kill
+mrow m6 's/acc:demo_eleven_is_err7/acc:demo_eleven_is_er7/'
+expect_fail "mutants run: a misspelt test name" "test demo/acc:demo_eleven_is_er7 did not print '... ok'" mut m6 run D-kill
+mrow m6 's/\tacc\tdemo\t/\tacc\tdemo2\t/'
+expect_fail "mutants run: a fn name that is not in the module" "D-kill.clean.json: a VIR error, or not a --verify-function run" mut m6 run D-kill
 
 # the verdict on canned Verus output (tools/mutants.py killed/clean): a passing kill first.
 v=$tmp/verdict
@@ -426,7 +447,7 @@ expect_fail "mutants verdict: still verifies" "the mutant still verifies" killed
 vj 1 false
 expect_fail "mutants verdict: the unmutated fn fails" "unmutated acc::demo" python3 -I "$root/tools/mutants.py" clean "$v" demo acc demo
 
-# the merge gate (mutants.sh verify on main at a merge commit), on m3's real run file.
+# the main gate (mutants.sh verify at main's tip, merge or not), on m3's real run file.
 mmerge() { gitc "$1" checkout -q main; gitc "$1" reset -q --hard "$mbase"; gitc "$1" merge -q --no-ff feat -m merge; }
 mbranch() { gitc "$1" checkout -q feat; gitc "$1" reset -q --hard "$2"; }
 mbase=$(git -C "$tmp/m3" rev-parse main)
@@ -434,7 +455,9 @@ gitc m3 add tools/mutants-last-run.txt; gitc m3 commit -qm "mutants run"
 fresh_run=$(git -C "$tmp/m3" rev-parse HEAD)
 expect_pass "mutants verify on the branch (check only, no run file needed there)" mut m3 verify
 mmerge m3
-expect_pass "mutants verify: merge with a fresh run file" mut m3 verify
+expect_pass "mutants verify: merge --no-ff with a fresh run file" mut m3 verify
+gitc m3 checkout -q main; gitc m3 reset -q --hard "$mbase"; gitc m3 merge -q --ff-only feat
+expect_pass "mutants verify: fast-forward to a branch tip with a fresh run file" mut m3 verify
 mbranch m3 "$fresh_run"; gitc m3 rm -q tools/mutants-last-run.txt; gitc m3 commit -qm "no run file"; mmerge m3
 expect_fail "mutants verify: merge without a run file" "git show HEAD:tools/mutants-last-run.txt failed" mut m3 verify
 gitc m3 checkout -q --detach main
@@ -442,14 +465,25 @@ expect_fail "mutants verify: the same merge checked out detached (a CI checkout)
 gitc m3 checkout -q main
 mbranch m3 "$fresh_run"; printf '// later\n' >> "$tmp/m3/crates/demo/src/lib.rs"; gitc m3 commit -qam "crates change after the run"; mmerge m3
 expect_fail "mutants verify: stale run file (crates changed after the run)" "is stale" mut m3 verify
+gitc m3 checkout -q main; gitc m3 reset -q --hard "$mbase"; gitc m3 merge -q --ff-only feat
+expect_fail "mutants verify: fast-forward commit on main without a run" "is stale" mut m3 verify
+mbranch m3 "$fresh_run"; gitc m3 checkout -q main; gitc m3 reset -q --hard "$mbase"
+printf '// main moved\n' >> "$tmp/m3/crates/demo/src/lib.rs"; gitc m3 commit -qam "crates change on main"
+gitc m3 merge -q --no-ff feat -m merge
+expect_fail "mutants verify: main changed crates/ since the fork (merge tree differs from the run's)" "is stale" mut m3 verify
+mbranch m3 "$fresh_run"; printf '# root manifest edit\n' >> "$tmp/m3/Cargo.toml"; gitc m3 commit -qam "Cargo.toml change after the run"; mmerge m3
+expect_fail "mutants verify: root Cargo.toml changed after the run" "is stale" mut m3 verify
 mbranch m3 "$fresh_run"; sed -i 's/^D-kill pass /D-kill fail /' "$tmp/m3/tools/mutants-last-run.txt"; gitc m3 commit -qam "fail line"; mmerge m3
 expect_fail "mutants verify: a fail line" "D-kill did not pass" mut m3 verify
 mbranch m3 "$fresh_run"; sed -i '/^D-kill /d' "$tmp/m3/tools/mutants-last-run.txt"; gitc m3 commit -qam "missing id"; mmerge m3
 expect_fail "mutants verify: a missing id" "missing D-kill" mut m3 verify
+mbranch m3 "$fresh_run"; echo "D-extra pass 0000" >> "$tmp/m3/tools/mutants-last-run.txt"; gitc m3 commit -qam "extra id"; mmerge m3
+expect_fail "mutants verify: an extra id in the run file" "extra D-extra" mut m3 verify
+mbranch m3 "$fresh_run"; sed -i 's/gate-demos: Err(8)/gate-demos: Err (8)/' "$tmp/m3/tools/mutants.tsv"; gitc m3 commit -qam "tsv edited"; mmerge m3
+expect_fail "mutants verify: tsv changed after the run" "was written for another tools/mutants.tsv" mut m3 verify
 mbranch m3 "$fresh_run"; sed -i 's/^index .*/index 0000000..1111111 100644/' "$tmp/m3/tools/mutants/D-kill.patch"; gitc m3 commit -qam "patch edited"; mmerge m3
 expect_fail "mutants verify: patch edited after the run" "was run with another patch" mut m3 verify
-gitc m3 checkout -q main; gitc m3 reset -q --hard "$mbase"; gitc m3 commit -q --allow-empty -m "direct commit on main"
-expect_pass "mutants verify: a non-merge commit on main runs check only" mut m3 verify
+gitc m3 checkout -q feat
 gitc m3 branch -m main trunk
 expect_fail "mutants verify: no main" "cannot resolve main" mut m3 verify
 

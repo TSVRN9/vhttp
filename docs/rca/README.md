@@ -34,7 +34,13 @@ A catch lower in the list needs a stated reason why a higher one is not possible
 
 ## Before merging a branch
 
-`scripts/mutants.sh run` is the last step on a branch before merging, after the last commit that touches `crates/`. It applies each patch alone in a throwaway git worktree, needs every mutant killed (rlimit is not a kill), and writes `tools/mutants-last-run.txt`; commit that file. On main at the merge commit, `scripts/verify.sh` fails unless the file names the merged branch's `crates/` tree (`HEAD^2:crates`) with every registry id passing. On a branch verify.sh runs only `scripts/mutants.sh check` (every patch still applies). If a change to `crates/` makes a patch stop applying, regenerate it (`git apply` what still applies, redo the edit, `git diff > tools/mutants/<id>.patch`) and re-run. If main changed `tools/mutants.tsv` or a patch since the branch's run, the gate fails by design: merge main into the branch, re-run, commit the file, then merge.
-- `2026-11-06-acceptance-parser.md`: RCA of the R4 parser's own bugs.
-- `2026-11-06-phase-9a-night.md`: RCAs of the bugs Phase 9a found on 2026-11-06, plus the open CRYPTO span item.
-- `2026-11-07-audit.md`: the 2026-11-07 repo audit (tests not gated; reviewed fixes left off main).
+On main, every commit at main's tip (a merge, a fast-forward or a squash) must carry a `tools/mutants-last-run.txt` written for exactly its tree: `scripts/verify.sh` fails unless the file names this commit's `crates/` tree and its `tree` hash (crates/ plus the root Cargo.toml, Cargo.lock and rust-toolchain.toml), the committed tsv's blob, and every registry id as `pass` with its patch's blob. On a branch verify.sh runs only `scripts/mutants.sh check`: every patch still applies, with no line offset, and every `allowed_*err`/`*_allowed_err` spec fn under crates/ is named by some row. So the last steps on a branch are:
+
+1. Merge main into the branch, so the merge into main changes nothing.
+2. Run `scripts/mutants.sh run` after the last commit that touches crates/ or the root Cargo files. It applies each patch alone in a throwaway git worktree and needs every mutant killed; rlimit is not a kill.
+3. Commit `tools/mutants-last-run.txt`.
+4. `git merge --no-ff` the branch into main. The merge commit's tree equals the branch tip's when main has no new changes, so the run file holds.
+
+If a change to crates/ makes a patch stop applying, or apply only at an offset, regenerate it: `git apply` what still applies, redo the edit, `git diff > tools/mutants/<id>.patch`. Then re-run.
+
+Trust boundary (accepted): the run file is plain text. Nothing ties a `pass` line to an actual run except the run's own log (keep it in the branch's evidence). The gate catches a stale or partial file, not a forged one.

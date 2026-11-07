@@ -6,10 +6,14 @@
 #                            the mutant run checked only FN and FN failed for the stated reason: >= 1 error, REGEX
 #                            (Python re, DOTALL) found in a postcondition, precondition or assertion error block of
 #                            BASE.log, no rlimit text
-#   gate ROOT                the merge gate, all read from ROOT's commits: HEAD:tools/mutants-last-run.txt names
-#                            HEAD^2:crates, HEAD:tools/mutants.tsv's blob, and every id of that tsv (no other) as
-#                            `pass` with the blob of HEAD:tools/mutants/<id>.patch
+#   gate ROOT                the main gate, all read from ROOT's HEAD commit: HEAD:tools/mutants-last-run.txt names
+#                            `tree` (see tree), HEAD:crates, HEAD:tools/mutants.tsv's blob, and every id of that tsv
+#                            (no other) as `pass` with the blob of HEAD:tools/mutants/<id>.patch
+#   tree ROOT REV            sha256 of `git ls-tree REV -- Cargo.lock Cargo.toml crates rust-toolchain.toml` (all four needed)
+#   allowed ROOT TSV         every allowed_*err / *_allowed_err spec fn under ROOT/crates is named by a row
 # Every mode exits 1 with a "mutants: ..." message on failure, and fails closed on a missing or empty input.
+import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -133,24 +137,39 @@ def git(root, *args):
     return r.stdout
 
 
+TREE_PATHS = ('Cargo.lock', 'Cargo.toml', 'crates', 'rust-toolchain.toml')
+
+
+def tree(root, rev):
+    """One hash for what a mutant run depends on: crates/ and the root Cargo.toml, Cargo.lock, rust-toolchain.toml."""
+    ls = git(root, 'ls-tree', rev, '--', *TREE_PATHS)
+    names = sorted(l.split('\t', 1)[1] for l in ls.split('\n') if l)
+    if names != sorted(TREE_PATHS):
+        die('%s lacks %s (the run tree hash covers all of them)' % (rev, ' '.join(sorted(set(TREE_PATHS) - set(names)))))
+    return hashlib.sha256(ls.encode()).hexdigest()
+
+
 def gate(root):
-    crates = git(root, 'rev-parse', 'HEAD^2:crates').strip()
+    """Every commit at main's tip: the committed run file names this commit's tree."""
+    want_tree = tree(root, 'HEAD')
     tsv = git(root, 'show', 'HEAD:tools/mutants.tsv')
     want = [l.split('\t')[0] for l in tsv.split('\n') if l.strip() and not l.startswith('#')]
     if not want:
         die('HEAD:tools/mutants.tsv has no rows')
     run = 'HEAD:tools/mutants-last-run.txt'
     lines = [l for l in git(root, 'show', run).split('\n') if l and not l.startswith('#')]
-    head = dict(l.split(' ', 1) for l in lines if l.split(' ', 1)[0] in ('crates', 'tsv'))
-    if head.get('crates') != crates:
-        die('%s is stale: it names crates tree %s, the merged branch (HEAD^2) has %s; run `scripts/mutants.sh run` '
-            'as the branch\'s last step and commit the file' % (run, head.get('crates'), crates))
+    keys = ('crates', 'tree', 'tsv')
+    head = dict(l.split(' ', 1) for l in lines if l.split(' ', 1)[0] in keys)
+    if head.get('tree') != want_tree or head.get('crates') != git(root, 'rev-parse', 'HEAD:crates').strip():
+        die('%s is stale: it names tree %s, this commit has %s (crates/ or the root Cargo.toml, Cargo.lock, '
+            'rust-toolchain.toml differ from the run). Merge main into the branch, run `scripts/mutants.sh run`, '
+            'commit the file, then merge --no-ff' % (run, head.get('tree'), want_tree))
     if head.get('tsv') != git(root, 'rev-parse', 'HEAD:tools/mutants.tsv').strip():
         die('%s was written for another tools/mutants.tsv (re-run `scripts/mutants.sh run`)' % run)
     got = {}
     for l in lines:
         f = l.split(' ')
-        if f[0] in ('crates', 'tsv'):
+        if f[0] in keys:
             continue
         if len(f) != 3 or f[0] in got:
             die('%s: bad or duplicate line %r' % (run, l))
@@ -164,7 +183,25 @@ def gate(root):
             die('%s: %s did not pass (%s)' % (run, i, st))
         if h != git(root, 'rev-parse', 'HEAD:tools/mutants/%s.patch' % i).strip():
             die('%s: %s was run with another patch (re-run `scripts/mutants.sh run`)' % (run, i))
-    print('mutants: last run passes: %d mutants on crates tree %s' % (len(want), crates))
+    print('mutants: last run passes: %d mutants on tree %s' % (len(want), want_tree))
+
+
+def allowed(root, tsv):
+    """Every allowed_*err / *_allowed_err spec fn under ROOT/crates (tools/acceptance.py's scanner) is named, as a whole
+    word, in some row's fn, regex or origin: a new acceptance predicate needs a mutant."""
+    sys.dont_write_bytecode = True  # no tools/__pycache__ in the caller's tree
+    spec = importlib.util.spec_from_file_location('acceptance', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'acceptance.py'))
+    acc = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(acc)
+        names = sorted({n for _, n, _ in acc.scan(root)[1]})
+    except (ValueError, OSError) as e:
+        die('cannot scan crates/ for allowed_*err predicates: %s' % e)
+    text = '\n'.join('\t'.join(l.split('\t')[3:]) for l in read(tsv).split('\n') if l.strip() and not l.startswith('#'))
+    bare = [n for n in names if not re.search(r'(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])' % re.escape(n), text)]
+    if bare:
+        die('allowed predicate with no mutant row (name it in a row\'s fn, regex or origin): %s' % ' '.join(bare))
+    print('mutants: %d allowed predicates, each named by a row' % len(names))
 
 
 def main(a):
@@ -176,6 +213,10 @@ def main(a):
         killed(*a[1:])
     elif a[:1] == ['gate'] and len(a) == 2:
         gate(a[1])
+    elif a[:1] == ['tree'] and len(a) == 3:
+        print(tree(a[1], a[2]))
+    elif a[:1] == ['allowed'] and len(a) == 3:
+        allowed(a[1], a[2])
     else:
         die('usage: see the header of tools/mutants.py')
 
