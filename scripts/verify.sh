@@ -65,6 +65,9 @@ bin=$(printf '%s\n' "$bin" | sed -n 's/^ct-binary: ok (\([0-9]*\) fns)$/\1/p')
 # (the quote text is checked by check-quotes above), and every close-code fn is named by a row of tools/mutants.tsv.
 python3 -I "$root/tools/citations.py" cite "$root" || exit 1
 python3 -I "$root/tools/citations.py" closes "$root" "$root/tools/mutants.tsv" || exit 1
+# RFC-quantity gate (C8): every read in an allowed_*err predicate's body and the spec fns it calls is vouched for as an RFC
+# quantity (a `// rfc-quantity:` line, tools/rfc-quantity-allow.txt, a ratchet) or listed in the shrinking tools/rfc-quantity-open.txt.
+"$root/scripts/rfc-quantity.sh" || exit 1
 # Mutant registry (C6): every tools/mutants/ patch applies exactly and every allowed_*err predicate has a row; at main's
 # tip, tools/mutants-last-run.txt must name this commit's crates/ and root Cargo files with every mutant killed.
 "$root/scripts/mutants.sh" verify || exit 1
