@@ -170,3 +170,20 @@ fn timeout_close_frees_slot() {
     s.on_datagram(&A2, addr(1), 60_000_001, &mut send).unwrap();
     assert_eq!(s.conn_count(), 1);
 }
+
+static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn counting_rng(b: &mut [u8]) -> io::Result<()> {
+    CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    rng(b)
+}
+
+/// One `rng` call per datagram that needs a `Rand` (2026-11-07 audit finding 4).
+#[test]
+fn one_rng_call_per_datagram() {
+    let mut s = Server::new(cfg(), counting_rng);
+    let mut send = Vec::new();
+    s.on_datagram(&A2, addr(1), 0, &mut send).unwrap();
+    s.on_datagram(&A2, addr(1), 1, &mut send).unwrap();
+    assert_eq!(CALLS.load(std::sync::atomic::Ordering::Relaxed), 2);
+}

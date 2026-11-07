@@ -2050,6 +2050,55 @@ proof fn lemma_ids_frame(s0: Streams, s1: Streams)
     assert forall|y: u64| #[trigger] created(s1.ids, y) == created(s0.ids, y) by {}
 }
 
+/// `poll_max_streams` committed this direction's MAX_STREAMS (`s1` to `s2`, only `ids`
+/// changed): the polling state is still kept (split from `poll_max_streams` for the rlimit).
+#[verifier::spinoff_prover]
+proof fn lemma_max_streams_kept(
+    s0: Streams,
+    s1: Streams,
+    s2: Streams,
+    bidi: bool,
+    n: int,
+    out: Seq<Frame>,
+)
+    requires
+        kept(s0, s1),
+        sends_same(s0, s1),
+        out_tx(s1, n, out),
+        s2.ids.wf(),
+        forall|b: bool| #[trigger] s2.ids.peer_opened_spec(b) == s1.ids.peer_opened_spec(b),
+        s2.ids.peer_credit_spec(!bidi) == s1.ids.peer_credit_spec(!bidi),
+        s2.ids.local_uni_spec() == s1.ids.local_uni_spec(),
+        ({
+            let c0 = s1.ids.peer_credit_spec(bidi);
+            let c1 = s2.ids.peer_credit_spec(bidi);
+            &&& c1.consumed_spec() == c0.consumed_spec()
+            &&& c1.window_spec() == c0.window_spec()
+        }),
+        s2 == (Streams { ids: s2.ids, ..s1 }),
+    ensures
+        kept(s0, s2),
+        sends_same(s0, s2),
+        out_tx(s2, n, out),
+{
+    assert forall|b: bool|
+        {
+            &&& #[trigger] s2.ids.peer_opened_spec(b) == s1.ids.peer_opened_spec(b)
+            &&& s2.ids.peer_credit_spec(b).consumed_spec() == s1.ids.peer_credit_spec(
+                b,
+            ).consumed_spec()
+            &&& s2.ids.peer_credit_spec(b).window_spec() == s1.ids.peer_credit_spec(
+                b,
+            ).window_spec()
+        } by {
+        if b != bidi {
+            assert(b == !bidi);
+        }
+    }
+    lemma_ids_frame(s1, s2);
+    assert(forall|j: u64| #[trigger] s2.rx_spec(j) == s1.rx_spec(j));
+}
+
 /// Entry `i` replaced by `ne`, with the same ID, the trace record following its receiving part
 /// and the reset record its sending part: the entry invariants still hold.
 proof fn lemma_update(
@@ -2866,6 +2915,7 @@ fn fit(room: usize, hdr: usize, w: usize, want: u64) -> (r: Option<u64>)
 /// STREAM chunks of sending part `p` (stream `id`) while they fit in `room`: `poll_data` stays
 /// under the stream's limit and, with `cs.available()`, the connection's, and `cs` is charged
 /// each chunk's new bytes.
+#[verifier::spinoff_prover]
 fn poll_stream(
     p: &mut SendStream,
     id: u64,
@@ -3887,6 +3937,7 @@ impl Streams {
     }
 
     /// The pending MAX_DATA.
+    #[verifier::spinoff_prover]
     fn poll_max_data(
         &mut self,
         room: &mut usize,
@@ -4009,8 +4060,7 @@ impl Streams {
                 let ghost s1 = *self;
                 self.ids.commit_max_streams(bidi);
                 proof {
-                    lemma_ids_frame(s1, *self);
-                    assert(forall|j: u64| #[trigger] self.rx_spec(j) == s1.rx_spec(j));
+                    lemma_max_streams_kept(s0, s1, *self, bidi, pre.len() as int, out@);
                 }
             }
         }

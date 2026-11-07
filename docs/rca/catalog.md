@@ -122,15 +122,17 @@ Existing-gate abbreviations: V = `scripts/verify.sh` (verus verify of all crates
 - **8d final M3, M4** (M): cost-targets.txt non-`cost-root` lines would split cpol; `eval_probe --exact` could run 0 tests. Fix 14a7ded (guards, demos fail closed). -> C4 [partial; open, owner 9r2]
 - **8d final M1, M2, M5, M6** (M): stale semconf header, stale `interp` mentions in code and 8c spec, wording. Fix 14a7ded. -> C2 [open]
 
-### Phase 9a (pilot, in flight; fixes pending in wt-9a)
-- **9a plan finding 1** (new bug on main): an empty CRYPTO frame ending past base+16384 closes CRYPTO_BUFFER_EXCEEDED (window checked before the empty filter); sibling of 753ec2d. Fix: pending (Task 3). ESCAPE: 753ec2d fixed the instance; no ensures says which codes are allowed. -> C5 [partial; scheduled 9a/9b/9c]
-- **9a pre C1** (C): the planned `Connection::lemma_crypto_end_received` pushes `RecvStream::on_data` past rlimit 4 (4 reproductions; 98.3% before). Fix: pending (Task 0 restructuring, varB shape). -> C11 [scheduled 9r2]
+### Phase 9a (pilot; T0-T4 and T6 merged 2026-11-07, 3b/5/3c' pending on phase-9a2)
+- **9a plan finding 1** (new bug on main): an empty CRYPTO frame ending past base+16384 closes CRYPTO_BUFFER_EXCEEDED (window checked before the empty filter); sibling of 753ec2d. Fix 40aae23 (T3). ESCAPE: 753ec2d fixed the instance; no ensures says which codes are allowed. -> C5 [partial; scheduled 9a/9b/9c]
+- **9a pre C1** (C): the planned `Connection::lemma_crypto_end_received` pushes `RecvStream::on_data` past rlimit 4 (4 reproductions; 98.3% before). Fix 736860f (T0 restructuring, varB shape). -> C11 [scheduled 9r2]
 - **9a pre I1** (I, directive): deleting `superseded`'s second close rested on an argued, not proved, invariant; needs `crypto_kept` + base-monotonic ensures on every call. Pending (Task 3b). -> C6 [scheduled 9r2]
 - **9a pre I2** (I): tight atoms +17.9% in `poll_transmit`; plan's ±5% guard trips; Z3 perturbs untouched fns (`Reassembly::insert` 6.85M..11.54M). Pending. -> C11 [scheduled 9r2]
-- **9a pre I3** (I): RecvStream empty STREAM insert grows the window (audit item "no fix"). Pending (Task 6). -> C5 [partial; scheduled 9a/9b/9c], C10 [scheduled 9r2]
+- **9a pre I3** (I): RecvStream empty STREAM insert grows the window (audit item "no fix"); second instance of 753ec2d's `Reassembly::insert` defect, fixed then at the CRYPTO caller only. Fix 8f6b48e (T6): empty data is recorded without touching the buffers (`insert_tight`), and `tight` is in `RecvStream::wf`. Class catch: every `Reassembly` holder (CryptoStream T3, RecvStream T6) carries `tight` in its wf; `insert` itself still extends the window on empty data and no gate checks a new holder. -> C5 [partial; scheduled 9a/9b/9c], C10 [scheduled 9r2]
 - **9a pre I4** (I): acceptance clauses stop at `on_crypto`; `on_crypto_frame`/`on_frame`/`on_counted`/`apply` carry none, so "end to end" untrue. Pending/9c. -> C5 [partial; scheduled 9a/9b/9c]
-- **9a pre I6** (I): `tp_allowed_err` `Err(_) => true` makes the clause vacuous on the parse-error path. Pending (Task 4). -> C5 [partial; scheduled 9a/9b/9c]
+- **9a pre I6** (I): `tp_allowed_err` `Err(_) => true` makes the clause vacuous on the parse-error path. Fix 6594f10, 9afdf5e (T4). -> C5 [partial; scheduled 9a/9b/9c]
 - **9a pre m3, m4, m11** (M): mutants fail on the plan's own precondition rather than the claim; duplicate test; no mutation shows `trailing_bytes_before_bad_tp_pv` can fail. -> C6 [scheduled 9r2]
+- **9a T4 review I1** (I): the duplicate-parameter disjunct of `allowed_tp_err` read the code's `seen` mask, so a wrong mask still verified (T4-M3 verified on 6594f10). Fix 9afdf5e (ghost `ids` from the parse + mask lemma). ESCAPE: predicate written over code bookkeeping; rule 1d existed only in prose. -> C8 [catch: rule 1d's named re-anchoring mutation per predicate (plan facc168); gate scheduled 9r2]
+- **9a T6 review I1** (I): `recv_allowed_err` read `rfc_recv`'s running `high` instead of the RFC's largest received offset. Fix 0a8c534 (`largest_received_offset` + `recv_inv`). ESCAPE: same as T4 I1, third recurrence of C8 in one night. -> C8 [catch as above; gate scheduled 9r2]
 - **9a pre m9** (M): span window vs RFC "4096 bytes of data" floor undecided (set possibly wider/narrower than RFC). -> C5 [partial; scheduled 9a/9b/9c]
 
 ### Older phases, from the fix-commit log only (subject lines; severity unknown)
@@ -162,7 +164,7 @@ Existing-gate abbreviations: V = `scripts/verify.sh` (verus verify of all crates
 **C4 GATE-FAIL-OPEN** (gate or test can pass with nothing checked, can be re-recorded, or masks a failing pipeline).
  EXISTING NOW: instance fixes only: CC:171-190 (lost-bound, 36 pin), CC:183 (cost-targets only cost-root), `-gt 0` coverage guard, eval_probe "1 passed", verify.sh:34-35 exact deps, ct-binary stamp/pre-checks, strict-quiche panic.
  PROPOSED: (1) `scripts/gate-demos.sh` in V (or CI): for each gate, apply a canned mutation (drop a root, empty a list, rename a test, delete a TRUSTED row) and assert non-zero exit; 8d did this by hand per task (M). (2) `shellcheck` + require `set -eu` and no unguarded `|` in scripts/ (S). (3) Test-skip policy: `#[ignore = "reason"]` only; an early `return` on missing env must `panic!` under `STRICT` (S).
- STATUS: partial (R2 set -eu/pipefail lint; R5 demos for lint-scripts, check-quotes, acceptance, escape-gate; ct-check, ct-binary, the declassify gate and the deps gate have no demo: open, owner 9r2)
+ STATUS: partial (R2 set -eu/pipefail lint; R5 demos for lint-scripts, check-quotes, acceptance, escape-gate; ct-check, ct-binary, the declassify gate, the deps gate and verify.sh's cargo-test step (added 2026-11-07) have no demo: open, owner 9r2)
 
 **C5 ERROR-PATH NOT PROVED RFC-REQUIRED** (a close/Err is unrestricted or over-strict: any code, any trigger; includes vacuous allowed-sets).
  EXISTING NOW: only the 9a pilot design (not merged): `allowed_err` predicates for `on_crypto`, `close_spec`; elsewhere tests and reviewer reading. Closed-instance fixes (88c25aa, 753ec2d).

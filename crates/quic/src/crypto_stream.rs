@@ -12,13 +12,66 @@ verus! {
 //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
 //# Implementations MUST support buffering at least 4096 bytes of data
 //# received in out-of-order CRYPTO frames.
-// ponytail: fixed 16 KiB window past the read offset (§7.5 floor is 4096); grow during the handshake only if real ClientHellos need it.
-/// Data ending within `read offset + MAX_CRYPTO_BUFFER` is always accepted.
+// ponytail: fixed 16 KiB out-of-order window past the contiguous end (§7.5 floor is 4096); grow during the handshake only if real ClientHellos need it.
+/// Data ending within `crypto_contiguous + MAX_CRYPTO_BUFFER` is always accepted.
 pub const MAX_CRYPTO_BUFFER: u64 = 16384;
+
+/// The end of the in-order CRYPTO data received: every byte below it has been received, and the
+/// byte at it has not. Bytes received past it are the out-of-order data of RFC 9000 §7.5.
+pub open spec fn crypto_contiguous(s: CryptoStream) -> nat {
+    rfc_contiguous(rfc_received(s.reassembly().inserted()))
+}
+
+/// Our own limit: a frame with data ending past `contiguous + MAX_CRYPTO_BUFFER` overflows the
+/// out-of-order window. An empty frame buffers nothing, so it never does.
+pub open spec fn crypto_window_exceeded(contiguous: nat, offset: u64, len: nat) -> bool {
+    len > 0 && offset + len > contiguous + MAX_CRYPTO_BUFFER
+}
+
+/// The errors `on_crypto` may return: CRYPTO_BUFFER_EXCEEDED on the window overflow. During the
+/// handshake the close is required; after it, closing is the chosen one of two MAYs.
+//= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
+//# If an endpoint does not expand its buffer, it MUST close
+//# the connection with a CRYPTO_BUFFER_EXCEEDED error code.
+//= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
+//# Once the handshake completes, if an endpoint is unable to buffer all
+//# data in a CRYPTO frame, it MAY discard that CRYPTO frame and all
+//# CRYPTO frames received in the future, or it MAY close the connection
+//# with a CRYPTO_BUFFER_EXCEEDED error code.
+pub open spec fn crypto_allowed_err(s: CryptoStream, offset: u64, len: nat, c: u64) -> bool {
+    c == CRYPTO_BUFFER_EXCEEDED && crypto_window_exceeded(crypto_contiguous(s), offset, len)
+}
+
+/// `crypto_allowed_err` is not vacuous: an empty frame is never a window error, a 1-byte frame
+/// at offset 0 is in the window, and no other code is allowed.
+proof fn lemma_crypto_allowed_err_rejects(s: CryptoStream, offset: u64)
+    ensures
+        !crypto_allowed_err(s, offset, 0, CRYPTO_BUFFER_EXCEEDED),
+        !crypto_allowed_err(s, 0, 1, CRYPTO_BUFFER_EXCEEDED),
+        !crypto_allowed_err(s, offset, 1, PROTOCOL_VIOLATION),
+{
+    lemma_crypto_floor(s, 0, 1);
+}
+
+//= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
+//# Implementations MUST support buffering at least 4096 bytes of data
+//# received in out-of-order CRYPTO frames.
+/// The floor: a frame whose out-of-order part (its bytes past `crypto_contiguous`) ends within
+/// 4096 bytes of the contiguous end is never refused, however much in-order data is unread.
+pub proof fn lemma_crypto_floor(s: CryptoStream, offset: u64, len: nat)
+    requires
+        offset + len <= crypto_contiguous(s) + 4096,
+    ensures
+        !crypto_window_exceeded(crypto_contiguous(s), offset, len),
+        forall|c: u64| !#[trigger] crypto_allowed_err(s, offset, len, c),
+{
+}
 
 /// The CRYPTO stream of one encryption level.
 pub struct CryptoStream {
     re: Reassembly,
+    /// `crypto_contiguous`, kept so a frame costs O(1) plus the bytes it makes contiguous.
+    contig: u64,
 }
 
 impl CryptoStream {
@@ -26,9 +79,30 @@ impl CryptoStream {
         self.re
     }
 
+    pub closed spec fn contig_spec(&self) -> nat {
+        self.contig as nat
+    }
+
+    /// The buffer holds the unread in-order bytes, `[base, crypto_contiguous)`, plus at most
+    /// `MAX_CRYPTO_BUFFER` bytes of window past them.
     pub open spec fn wf(&self) -> bool {
         &&& self.reassembly().wf()
-        &&& self.reassembly().buf_len() <= MAX_CRYPTO_BUFFER
+        &&& self.reassembly().tight()
+        &&& self.contig_spec() == crypto_contiguous(*self)
+        &&& self.reassembly().base() + self.reassembly().buf_len() <= crypto_contiguous(*self)
+            + MAX_CRYPTO_BUFFER
+    }
+
+    /// The byte before `end()` has been received.
+    pub proof fn lemma_end_received(&self)
+        requires
+            self.wf(),
+        ensures
+            self.reassembly().base() + self.reassembly().buf_len() > 0 ==> rfc_received(
+                self.reassembly().inserted(),
+            ).contains_key((self.reassembly().base() + self.reassembly().buf_len() - 1) as nat),
+    {
+        self.re.lemma_end_received();
     }
 
     pub fn new() -> (r: CryptoStream)
@@ -37,7 +111,16 @@ impl CryptoStream {
             r.reassembly().inserted() == Seq::<(nat, Seq<u8>)>::empty(),
             r.reassembly().base() == 0,
     {
-        CryptoStream { re: Reassembly::new() }
+        let re = Reassembly::new();
+        proof {
+            re.lemma_wf();
+        }
+        let contig = re.contiguous_from(0);
+        let r = CryptoStream { re, contig };
+        proof {
+            r.re.lemma_new_tight();
+        }
+        r
     }
 
     /// Nothing buffered, and everything below `base` read.
@@ -49,7 +132,16 @@ impl CryptoStream {
             r.reassembly().base() == base,
             r.reassembly().buf_len() == 0,
     {
-        CryptoStream { re: Reassembly::new_at(base) }
+        let re = Reassembly::new_at(base);
+        proof {
+            re.lemma_wf();
+        }
+        let contig = re.contiguous_from(base);
+        let r = CryptoStream { re, contig };
+        proof {
+            r.re.lemma_new_tight();
+        }
+        r
     }
 
     /// A CRYPTO frame's `offset` and `data`.
@@ -59,8 +151,9 @@ impl CryptoStream {
             offset + data@.len() <= VARINT_MAX,
         ensures
             final(self).wf(),
-            r is Err <==> offset + data@.len() > old(self).reassembly().base() + MAX_CRYPTO_BUFFER,
+            r is Err <==> crypto_window_exceeded(crypto_contiguous(*old(self)), offset, data@.len()),
             r is Err ==> r == Err::<(), u64>(CRYPTO_BUFFER_EXCEEDED),
+            r matches Err(c) ==> crypto_allowed_err(*old(self), offset, data@.len(), c),
             (r is Err || offset + data@.len() <= old(self).reassembly().base() || data@.len() == 0)
                 ==> *final(self) == *old(self),
             (r is Ok && offset + data@.len() > old(self).reassembly().base() && data@.len() > 0) ==> {
@@ -83,20 +176,34 @@ impl CryptoStream {
             //# frame was discarded.
             // Already read: not an error, so the packet is processed and acknowledged. The
             // post-handshake option to discard frames that don't fit (a MAY) is declined: a
-            // frame past the window always closes the connection, below.
+            // non-empty frame past the window always closes the connection, below.
             return Ok(());
         }
-        if end > base + MAX_CRYPTO_BUFFER {
+        if data.len() == 0 {
+            // No bytes: nothing is buffered, so the buffer is not exceeded at any offset
+            // (RFC 9000 §7.5), and the window is not extended past what was received (RFC 9001
+            // §4.1.3). Checked before the window.
+            return Ok(());
+        }
+        proof {
+            self.re.lemma_contiguous_le_end();
+        }
+        if end > self.contig + MAX_CRYPTO_BUFFER {
             //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
             //# If an endpoint does not expand its buffer, it MUST close
             //# the connection with a CRYPTO_BUFFER_EXCEEDED error code.
             return Err(CRYPTO_BUFFER_EXCEEDED);
         }
-        if data.len() == 0 {
-            // No bytes: the window is not extended past what was received (RFC 9001 §4.1.3).
-            return Ok(());
-        }
         self.re.insert(offset, data);
+        proof {
+            Reassembly::lemma_insert_tight(old(self).re, self.re, offset, data@);
+            lemma_received_push(old(self).re.inserted(), offset as nat, data@);
+            lemma_contiguous_mono(
+                rfc_received(old(self).re.inserted()),
+                rfc_received(self.re.inserted()),
+            );
+        }
+        self.contig = self.re.contiguous_from(self.contig);
         Ok(())
     }
 
@@ -125,6 +232,9 @@ impl CryptoStream {
             self.re.lemma_wf();
         }
         self.re.pop(out);
+        proof {
+            Reassembly::lemma_pop_tight(old(self).re, self.re);
+        }
     }
 
     /// The read offset.
