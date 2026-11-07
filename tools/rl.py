@@ -1,7 +1,7 @@
 # rl.py LOG [FN...]: print per-module verification results and the six highest-rlimit fns from cargo-verus --time-expanded JSON output,
 # then the rlimit of each named FN. Run as: python3 -I tools/rl.py LOG [FN...]
 # Gate mode: python3 -I tools/rl.py --gate NAME [--max N] LOG  prints `rlimit-gate: NAME max <fn> <n>` and exits 0, or
-# exits 1 with the reason when LOG is unreadable, has no verification-results object, no rows, a failed run, a FAIL row, or a fn above N.
+# exits 1 with the reason when LOG is unreadable, has no verification-results object, no rows, a failed run, a FAIL row, or a fn of NAME above N.
 import json,sys
 gate=None; mx=None; a=sys.argv[1:]
 if a and a[0]=='--gate':
@@ -25,7 +25,7 @@ if gate is not None:
     # a dependency not yet built is verified inside this crate's run and prints its own object: gate every object
     try: rs=[d for d in objs if 'verification-results' in d]; assert rs
     except AssertionError: gfail('0 verification-results objects in the log')
-    best=(0,'')
+    best=(0,'')  # over NAME's own fns: a dependency built in this run (quictls builds tls) is gated for FAIL rows but not for the cap
     for d in rs:
         try:
             v=d['verification-results']
@@ -36,7 +36,9 @@ if gate is not None:
         if not rows: gfail('no per-fn rows')
         for r in rows:
             if not r[2]: gfail('FAIL row %s'%(r,))
-        best=max(best,max(rows)[:2])
+        own=[r[:2] for r in rows if r[1].startswith(gate+'::')]
+        if own: best=max(best,max(own))
+    if not best[1]: gfail('no rows for fns of %s'%gate)
     if mx is not None and best[0]>mx: gfail('%s at %d is above %d'%(best[1],best[0],mx))
     print('rlimit-gate: %s max %s %d'%(gate,best[1],best[0])); sys.exit(0)
 for d in objs:
