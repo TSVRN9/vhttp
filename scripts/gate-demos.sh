@@ -589,6 +589,14 @@ printf 'c fn 8600000\n' > "$tmp/w3/f"; git -C "$tmp/w3" add f; gitc w3 commit -q
 expect_fail "ratchet-walk: a deletion then a re-add above the last copy" "raised from 8500000 to 8600000" walk w3 f ceilings
 rm -rf "${tmp:?}/w4"; git clone -q --depth 1 "file://$tmp/w1" "$tmp/w4"
 expect_fail "ratchet-walk: a shallow clone" "shallow" walk w4 f lines
+wrepo w6 f 'a
+b'
+printf 'a\n' > "$tmp/w6/f"; gitc w6 commit -qam shrink
+printf 'a\nb\n' > "$tmp/w6/f"
+expect_fail "ratchet-walk: an uncommitted re-grow after a committed shrink" "grew at the working tree" walk w6 f lines
+wrepo w7 f 'c fn 9000000
+c fn 8000001'
+expect_fail "ratchet-walk: a duplicate ceilings key in a committed copy" "duplicate ceilings line" walk w7 f ceilings
 wrepo w5 f 'a'
 expect_fail "ratchet-walk: a git error (path outside any repo)" "failed" walk w5/nonexistent f lines
 
