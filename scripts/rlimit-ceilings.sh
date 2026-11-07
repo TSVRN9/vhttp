@@ -4,7 +4,7 @@ set -o pipefail
 # rlimit-ceilings.sh ROOT LOGDIR: the ceilings ratchet over the per-crate JSON logs in LOGDIR (see tools/rl.py --ceilings):
 # every fn above 8,000,000 in any crate is listed in ROOT/tools/rlimit-ceilings.txt at no more than its listed value, the
 # file only shrinks (compared with the merge-base with main, or HEAD^1 on main, exactly as scripts/acceptance.sh does for
-# its baseline; skipped, and said so, when that commit has no file), and the unverified-shell exemption of crates/server
+# its baseline, plus on main a first-parent walk of the whole history, tools/ratchet_walk.py; skipped, and said so, when that commit has no file), and the unverified-shell exemption of crates/server
 # holds only while crates/server/src exists and has no verus!, #[verifier, #![verifier or verus_spec; a log with no crate is stale.
 root=${1:?root}
 logs=${2:?logdir}
@@ -20,10 +20,12 @@ for f in "$@"; do
     [ -d "$root/crates/$(basename "$f" .json)" ] || die "$f has no crate crates/$(basename "$f" .json) (stale log)"
 done
 extra=
+walk=0
 if [ -d "$root/.git" ] || [ -f "$root/.git" ]; then
     head=$(git -C "$root" rev-parse HEAD) || die "cannot resolve HEAD"
     cmp=$(git -C "$root" merge-base HEAD main) || die "cannot resolve the merge-base of HEAD and main"
     if [ "$cmp" = "$head" ]; then
+        walk=1
         cmp=$(git -C "$root" rev-parse "HEAD^1") || die "HEAD is main and has no parent to compare the ceilings with"
     fi
     present=$(git -C "$root" ls-tree --name-only "$cmp" -- tools/rlimit-ceilings.txt) || die "git ls-tree $cmp failed"
@@ -38,5 +40,6 @@ if [ -d "$root/.git" ] || [ -f "$root/.git" ]; then
 else
     die "$root is not a git checkout; cannot compare the ceilings with history"
 fi
+[ "$walk" -eq 0 ] || python3 -I "$tools/ratchet_walk.py" "$root" tools/rlimit-ceilings.txt ceilings
 # shellcheck disable=SC2086 # $extra is `--old FILE` or empty
 python3 -I "$tools/rl.py" --ceilings "$root/tools/rlimit-ceilings.txt" $extra "$@"
