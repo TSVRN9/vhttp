@@ -9,6 +9,8 @@
 #   gate ROOT                the main gate, all read from ROOT's HEAD commit: HEAD:tools/mutants-last-run.txt names
 #                            `tree` (see tree), HEAD:crates, HEAD:tools/mutants.tsv's blob, and every id of that tsv
 #                            (no other) as `pass` with the blob of HEAD:tools/mutants/<id>.patch
+#   gate-branch ROOT         on a branch: nothing to demand while crates/, the root Cargo files and the registry equal the
+#                            merge-base's, else `gate`
 #   tree ROOT REV            sha256 of `git ls-tree REV -- Cargo.lock Cargo.toml crates rust-toolchain.toml` (all four needed)
 #   allowed ROOT TSV         every allowed_*err / *_allowed_err spec fn under ROOT/crates is named by a row's fn or regex column
 # Every mode exits 1 with a "mutants: ..." message on failure, and fails closed on a missing or empty input.
@@ -186,6 +188,17 @@ def gate(root):
     print('mutants: last run passes: %d mutants on tree %s' % (len(want), want_tree))
 
 
+def gate_branch(root):
+    """On a branch: nothing to demand while crates/, the root Cargo files and the registry equal the merge-base's (the
+    committed run file still describes them); once any differs, the full gate, so a stale run file shows before the merge."""
+    mb = git(root, 'merge-base', 'HEAD', 'main').strip()
+    same = tree(root, 'HEAD') == tree(root, mb) and git(root, 'diff', '--name-only', mb, 'HEAD', '--', 'tools/mutants.tsv', 'tools/mutants').strip() == ''
+    if same:
+        print('mutants: branch tree and registry equal the merge-base\'s: the committed run file still stands')
+    else:
+        gate(root)
+
+
 def allowed(root, tsv):
     """Every allowed_*err / *_allowed_err spec fn under ROOT/crates (tools/acceptance.py's scanner) is named, as a whole
     word, in some row's fn or regex column (not origin): a new acceptance predicate needs a mutant."""
@@ -214,6 +227,8 @@ def main(a):
         killed(*a[1:])
     elif a[:1] == ['gate'] and len(a) == 2:
         gate(a[1])
+    elif a[:1] == ['gate-branch'] and len(a) == 2:
+        gate_branch(a[1])
     elif a[:1] == ['tree'] and len(a) == 3:
         print(tree(a[1], a[2]))
     elif a[:1] == ['allowed'] and len(a) == 3:

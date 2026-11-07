@@ -50,16 +50,22 @@ expect_fail "lint-scripts: a verdict by and-list" "uses grep as a verdict" "$roo
 fresh lint
 printf 'if grep -q x /nonexistent; then fail found; fi\n' >> "$tmp/lint/good.sh"
 expect_fail "lint-scripts: grep as an if condition" "uses grep as a verdict" "$root/scripts/lint-scripts.sh" "$tmp/lint"
+g=gr; g=${g}ep  # the demo's own lines must not trip the rule they test
+for form in "! $g -q x /nonexistent" "while $g -q x /nonexistent" "until $g -q x /nonexistent" "$g -q x /nonexistent && { echo bad; exit 1; }"; do
+    fresh lint
+    printf '%s\n' "$form" >> "$tmp/lint/good.sh"
+    expect_fail "lint-scripts: grep verdict form: $form" "uses grep as a verdict" "$root/scripts/lint-scripts.sh" "$tmp/lint"
+done
 fresh lint
 printf 'grep_hits x /nonexistent %s fail "found"\ngrep -q x f || fail "missing"\n# grep x f %s fail\n' '&&' '&&' >> "$tmp/lint/good.sh"
 expect_pass "lint-scripts: grep_hits form, grep .. || fail and a comment" "$root/scripts/lint-scripts.sh" "$tmp/lint"
 
 # grep_hits (scripts/ct-lib.sh): 0 on a match, 1 on none, a failure on a missing file or a bad pattern.
-gh() { sh -c 'set -eu; fail() { echo "ct-check: $*" >&2; exit 1; }; . "$1"; shift; grep_hits "$@"; echo "rc=$?"' sh "$root/scripts/ct-lib.sh" "$@" ; }
+gh() { sh -c 'set -eu; fail() { echo "ct-check: $*" >&2; exit 1; }; . "$1"; shift; rc=0; grep_hits "$@" || rc=$?; echo "rc=$rc"' sh "$root/scripts/ct-lib.sh" "$@" ; }
 printf 'a\nb\n' > "$tmp/gh.txt"
 expect_pass "grep_hits: a match" gh a "$tmp/gh.txt"
 rc=0; out=$(gh zzz "$tmp/gh.txt" 2>&1) || rc=$?
-[ "$rc" -eq 1 ] || [ "$out" = "rc=1" ] || die "grep_hits: no match did not return 1: rc=$rc $out"
+{ [ "$rc" -eq 0 ] && [ "$out" = "rc=1" ]; } || die "grep_hits: no match did not return 1 quietly: rc=$rc out=$out"
 echo "gate-demos: grep_hits: no match returns 1 (not a failure)"
 expect_fail "grep_hits: a missing file" "grep_hits: no $tmp/nonexistent" gh a "$tmp/nonexistent"
 expect_fail "grep_hits: a missing file among others" "grep_hits: no $tmp/nonexistent" gh a "$tmp/gh.txt" "$tmp/nonexistent"
@@ -237,7 +243,7 @@ expect_fail "acceptance.sh git: branch appends a baseline line" "not in the merg
 gitrepo g2
 echo "demo::extra" >> "$tmp/g2/tools/acceptance-baseline.txt"
 gitc g2 commit -qam grow
-expect_fail "acceptance.sh git: main appends a baseline line (walk)" "ratchet-walk: tools/acceptance-baseline.txt grew at" gaccept g2
+expect_fail "acceptance.sh git: main appends a baseline line (walk)" "ratchet-walk: tools/acceptance-baseline.txt: HEAD is outside the floor" gaccept g2
 gitrepo g3
 gitc g3 branch -m main trunk
 expect_fail "acceptance.sh git: no main" "cannot resolve the merge-base" gaccept g3
@@ -565,7 +571,7 @@ qgate() { "$tmp/$1/scripts/rfc-quantity.sh" --allow-digest "$qdig"; }
 qrepo q1; gitc q1 checkout -qb feat; qgrow q1
 expect_fail "rfc-quantity.sh git: a branch adds an open line" "open line not in the merge-base open ratchet" qgate q1
 qrepo q2; qgrow q2
-expect_fail "rfc-quantity.sh git: main adds an open line (walk)" "ratchet-walk: tools/rfc-quantity-open.txt grew at" qgate q2
+expect_fail "rfc-quantity.sh git: main adds an open line (walk)" "ratchet-walk: tools/rfc-quantity-open.txt: HEAD is outside the floor" qgate q2
 qrepo q3; gitc q3 branch -m main trunk
 expect_fail "rfc-quantity.sh git: no main" "cannot resolve the merge-base" qgate q3
 qrepo q4; gitc q4 checkout -qb feat; touch "$tmp/q4/x"; gitc q4 add x; gitc q4 commit -qm noop
@@ -576,22 +582,22 @@ expect_pass "rfc-quantity.sh git: unchanged open ratchet on a branch" qgate q4
 gitrepo g5
 echo "demo::extra" >> "$tmp/g5/tools/acceptance-baseline.txt"; gitc g5 commit -qam grow
 touch "$tmp/g5/x"; gitc g5 add x; gitc g5 commit -qm noop
-expect_fail "acceptance.sh git: growth over two direct commits on main" "ratchet-walk: tools/acceptance-baseline.txt grew at" gaccept g5
+expect_fail "acceptance.sh git: growth over two direct commits on main" "ratchet-walk: tools/acceptance-baseline.txt: HEAD is outside the floor" gaccept g5
 rcrepo rc12; gitc rc12 checkout -q main; gitc rc12 merge -q feat
 echo "tls tls::flight::extra 9000000" >> "$tmp/rc12/tools/rlimit-ceilings.txt"
 sed -i 's/quic::conn::small", "rlimit": 120000/tls::flight::extra", "rlimit": 9000000/' "$tmp/rc12/logs/tls.json"
 gitc rc12 commit -qam grow; touch "$tmp/rc12/x"; gitc rc12 add x; gitc rc12 commit -qm noop
-expect_fail "rlimit-ceilings.sh git: growth over two direct commits on main" "ratchet-walk: tools/rlimit-ceilings.txt grew at" rceil rc12
+expect_fail "rlimit-ceilings.sh git: growth over two direct commits on main" "ratchet-walk: tools/rlimit-ceilings.txt: HEAD is outside the floor" rceil rc12
 rcrepo rc13; gitc rc13 checkout -q main; gitc rc13 merge -q feat
 sed -i 's/11648578/11648579/' "$tmp/rc13/logs/tls.json" "$tmp/rc13/tools/rlimit-ceilings.txt"; gitc rc13 commit -qam raise
 touch "$tmp/rc13/x"; gitc rc13 add x; gitc rc13 commit -qm noop
-expect_fail "rlimit-ceilings.sh git: a raised value over two direct commits on main" "raised from 11648578 to 11648579" rceil rc13
+expect_fail "rlimit-ceilings.sh git: a raised value over two direct commits on main" "above its lowest earlier value 11648578" rceil rc13
 qrepo q5; qgrow q5; touch "$tmp/q5/x"; gitc q5 add x; gitc q5 commit -qm noop
-expect_fail "rfc-quantity.sh git: growth over two direct commits on main" "ratchet-walk: tools/rfc-quantity-open.txt grew at" qgate q5
+expect_fail "rfc-quantity.sh git: growth over two direct commits on main" "ratchet-walk: tools/rfc-quantity-open.txt: HEAD is outside the floor" qgate q5
 # the walk itself, on a plain file: a shrink then a re-grow, a legitimate shrink, a deletion then a re-add, a shallow clone.
 walk() { python3 -I "$root/tools/ratchet_walk.py" "$tmp/$1" "$2" "$3"; }
 wrepo() {  # wrepo <dir> <file> <content>: one commit on main
-    rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1"; git -C "$tmp/$1" init -q -b main
+    rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/$(dirname "$2")"; git -C "$tmp/$1" init -q -b main
     printf '%s\n' "$3" > "$tmp/$1/$2"; git -C "$tmp/$1" add -A; gitc "$1" commit -qm base
 }
 wrepo w1 f 'a
@@ -599,7 +605,7 @@ b'
 printf 'a\n' > "$tmp/w1/f"; gitc w1 commit -qam shrink
 expect_pass "ratchet-walk: a legitimate shrink" walk w1 f lines
 printf 'a\nb\n' > "$tmp/w1/f"; gitc w1 commit -qam regrow
-expect_fail "ratchet-walk: a shrink then a re-grow" "grew at" walk w1 f lines
+expect_fail "ratchet-walk: a shrink then a re-grow" "HEAD is outside the floor" walk w1 f lines
 wrepo w2 f 'c 
 c fn 9000000'
 printf 'c fn 9000000\n' > "$tmp/w2/f"; gitc w2 commit -qam noop
@@ -609,17 +615,41 @@ printf 'c fn 8500000\n' > "$tmp/w3/f"; gitc w3 commit -qam shrink
 expect_pass "ratchet-walk: a lowered ceiling" walk w3 f ceilings
 git -C "$tmp/w3" rm -q f; gitc w3 commit -qm delete
 printf 'c fn 8600000\n' > "$tmp/w3/f"; git -C "$tmp/w3" add f; gitc w3 commit -qm readd
-expect_fail "ratchet-walk: a deletion then a re-add above the last copy" "raised from 8500000 to 8600000" walk w3 f ceilings
+expect_fail "ratchet-walk: a deletion then a re-add above the last copy" "above its lowest earlier value 8500000" walk w3 f ceilings
 rm -rf "${tmp:?}/w4"; git clone -q --depth 1 "file://$tmp/w1" "$tmp/w4"
 expect_fail "ratchet-walk: a shallow clone" "shallow" walk w4 f lines
 wrepo w6 f 'a
 b'
 printf 'a\n' > "$tmp/w6/f"; gitc w6 commit -qam shrink
 printf 'a\nb\n' > "$tmp/w6/f"
-expect_fail "ratchet-walk: an uncommitted re-grow after a committed shrink" "grew at the working tree" walk w6 f lines
+expect_fail "ratchet-walk: an uncommitted re-grow after a committed shrink" "the working tree is outside the floor" walk w6 f lines
 wrepo w7 f 'c fn 9000000
 c fn 8000001'
 expect_fail "ratchet-walk: a duplicate ceilings key in a committed copy" "duplicate ceilings line" walk w7 f ceilings
+# floor semantics: growth shrunk back before HEAD passes (a fast-forwarded WIP commit); growth beyond the floor fails.
+wrepo w8 f 'a
+b'
+printf 'a\nb\nc\n' > "$tmp/w8/f"; gitc w8 commit -qam wip
+printf 'a\n' > "$tmp/w8/f"; gitc w8 commit -qam fix
+expect_pass "ratchet-walk: transient growth shrunk back (a fast-forward of a branch)" walk w8 f lines
+printf 'a\nb\n' > "$tmp/w8/f"; gitc w8 commit -qam regrow
+expect_fail "ratchet-walk: a shrink then a re-grow beyond the shrunk floor" "HEAD is outside the floor" walk w8 f lines
+# Ratchet-Reset (ceilings only; needs rust-toolchain.toml or Cargo.lock in the same commit)
+wrepo w9 tools/c 'c fn 9000000'
+printf 'c fn 9100000\n' > "$tmp/w9/tools/c"
+expect_fail "ratchet-walk: a raised ceiling without a reset" "above its lowest earlier value 9000000" walk w9 tools/c ceilings
+gitc w9 commit -qam "toolchain" -m "Ratchet-Reset: tools/c: measured values shift"
+expect_fail "ratchet-walk: a reset commit touching neither rust-toolchain.toml nor Cargo.lock" "touches neither rust-toolchain.toml nor Cargo.lock" walk w9 tools/c ceilings
+gitc w9 reset -q --hard HEAD~1
+printf 'c fn 9100000\n' > "$tmp/w9/tools/c"; printf 'x\n' > "$tmp/w9/Cargo.lock"; git -C "$tmp/w9" add -A
+gitc w9 commit -qm "upgrade" -m "Ratchet-Reset: tools/c: measured values shift after the Verus upgrade"
+expect_pass "ratchet-walk: a valid reset (ceilings, with Cargo.lock)" walk w9 tools/c ceilings
+printf 'c fn 9200000\n' > "$tmp/w9/tools/c"; gitc w9 commit -qam "raise again, no reset"
+expect_fail "ratchet-walk: a raise after the reset is a raise" "above its lowest earlier value 9100000" walk w9 tools/c ceilings
+wrepo w10 tools/acceptance-baseline.txt 'a'
+printf 'x\n' > "$tmp/w10/Cargo.lock"; git -C "$tmp/w10" add -A
+gitc w10 commit -qm "upgrade" -m "Ratchet-Reset: tools/acceptance-baseline.txt: no"
+expect_fail "ratchet-walk: a reset of the acceptance baseline is refused" "only tools/rlimit-ceilings.txt may be reset" walk w10 tools/acceptance-baseline.txt lines
 wrepo w5 f 'a'
 expect_fail "ratchet-walk: a git error (path outside any repo)" "failed" walk w5/nonexistent f lines
 
@@ -758,7 +788,9 @@ expect_fail "mutants verify: merge without a run file" "git show HEAD:tools/muta
 gitc m3 checkout -q --detach main
 expect_fail "mutants verify: the same merge checked out detached (a CI checkout)" "git show HEAD:tools/mutants-last-run.txt failed" mut m3 verify
 gitc m3 checkout -q main
-mbranch m3 "$fresh_run"; printf '// later\n' >> "$tmp/m3/crates/demo/src/lib.rs"; gitc m3 commit -qam "crates change after the run"; mmerge m3
+mbranch m3 "$fresh_run"; printf '// later\n' >> "$tmp/m3/crates/demo/src/lib.rs"; gitc m3 commit -qam "crates change after the run"
+expect_fail "mutants verify on a branch: crates changed after the run (shows before the merge)" "is stale" mut m3 verify
+mmerge m3
 expect_fail "mutants verify: stale run file (crates changed after the run)" "is stale" mut m3 verify
 gitc m3 checkout -q main; gitc m3 reset -q --hard "$mbase"; gitc m3 merge -q --ff-only feat
 expect_fail "mutants verify: fast-forward commit on main without a run" "is stale" mut m3 verify
@@ -880,5 +912,16 @@ printf 'pub fn f() {}\n' > "$tmp/tg/src/lib.rs"
 expect_fail "test-gate: no test runs" "cargo test passed no test" tg
 rm -rf "$tmp/tg"
 expect_fail "test-gate: missing dir" "no directory" tg
+# --workspace runs per member: a member with tests whose tests are all ignored fails although another member passes.
+tw() { "$root/scripts/test-gate.sh" "$tmp/tw" "$tmp/tw.log" --workspace; }
+rm -rf "${tmp:?}/tw"; mkdir -p "$tmp/tw/crates/a/src" "$tmp/tw/crates/b/src"
+printf '[workspace]\nmembers = ["crates/a", "crates/b"]\nresolver = "2"\n' > "$tmp/tw/Cargo.toml"
+for m in a b; do printf '[package]\nname = "%s"\nversion = "0.0.0"\nedition = "2021"\n' "$m" > "$tmp/tw/crates/$m/Cargo.toml"; done
+printf '#[test]\nfn t() {}\n' > "$tmp/tw/crates/a/src/lib.rs"
+printf '#[test]\nfn t() {}\n' > "$tmp/tw/crates/b/src/lib.rs"
+(cd "$tmp/tw" && cargo generate-lockfile --offline -q) || die "test-gate demo: cannot lock the workspace fixture"
+expect_pass "test-gate: --workspace, every member passes a test" tw
+printf '#[test]\n#[ignore]\nfn t() {}\n' > "$tmp/tw/crates/b/src/lib.rs"
+expect_fail "test-gate: --workspace, a member whose tests are all ignored" "crate b has tests but passed no test" tw
 
 echo "gate-demos: $n demos, all fail as expected"

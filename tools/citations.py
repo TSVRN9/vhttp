@@ -121,7 +121,7 @@ def cite(root):
            % (os.path.relpath(f, root), ln, n) for f, ln, n in preds + closes if not cited(f, ln)]
     if bad:
         die('\n'.join(bad))
-    print('citations: ok (%d allowed predicates and %d close-code fns, each cited)' % (len(preds), len(closes)))
+    print('citations: ok (%d allowed predicates/mapping fns and %d close-code fns, each cited)' % (len(preds), len(closes)))
 
 
 def rows(root, tsv):

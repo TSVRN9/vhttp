@@ -13,7 +13,8 @@ set -o pipefail
 #           writes tools/mutants-last-run.txt; a run of some ids only prints. Last step on a branch before merging.
 #   verify  what verify.sh runs: `check`, and at main's tip (every commit there, merge or not) the gate
 #           (tools/mutants.py gate): the committed run file names this commit's crates/ + root Cargo.toml, Cargo.lock,
-#           rust-toolchain.toml with every id passing. check also fails on an allowed_*err predicate with no row.
+#           rust-toolchain.toml with every id passing; on a branch, the same gate once crates/, the root Cargo files or
+#           the registry differ from the merge-base's (tools/mutants.py gate-branch). check also fails on an allowed_*err predicate with no row.
 root=$(cd "$(dirname "$0")/.." && pwd)
 VERUS_HOME="${VERUS_HOME:-$HOME/.local/opt/verus/0.2026.10.04.426d8b0/verus-x86-linux}"
 PATH="$VERUS_HOME:$PATH"
@@ -143,7 +144,7 @@ verify() {
     if [ "$head" = "$main" ]; then
         mpy gate "$root" || exit 1
     else
-        echo "mutants: HEAD is not main's tip: main gate not applicable, check only"
+        mpy gate-branch "$root" || exit 1  # a stale run file shows before the merge, not after
     fi
 }
 

@@ -3,8 +3,8 @@ set -eu
 set -o pipefail
 # rlimit-ceilings.sh ROOT LOGDIR: the ceilings ratchet over the per-crate JSON logs in LOGDIR (see tools/rl.py --ceilings):
 # every fn above 8,000,000 in any crate is listed in ROOT/tools/rlimit-ceilings.txt at no more than its listed value, the
-# file only shrinks (compared with the merge-base with main, or HEAD^1 on main, exactly as scripts/acceptance.sh does for
-# its baseline, plus on main a first-parent walk of the whole history, tools/ratchet_walk.py; skipped, and said so, when that commit has no file), and the unverified-shell exemption of crates/server
+# file only shrinks (on a branch compared with the merge-base with main, skipped, and said so, when that commit has no
+# file; on main by the first-parent floor walk of tools/ratchet_walk.py, which a Ratchet-Reset commit may restart), and the unverified-shell exemption of crates/server
 # holds only while crates/server/src exists and has no verus!, #[verifier, #![verifier or verus_spec; a log with no crate is stale.
 root=${1:?root}
 logs=${2:?logdir}

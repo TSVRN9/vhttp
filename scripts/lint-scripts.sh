@@ -20,7 +20,7 @@ for f in "$dir"/*.sh; do
         /^set -[a-z]+$/ { next }
         { exit }
         END { if (!eu) printf " set-eu"; if (!pf) printf " pipefail" }' "$f")
-    idiom=$({ grep -nE '(^|[^_[:alnum:]])grep[[:space:]][^|;]*&&[[:space:]]*(fail|die|err|exit)\b|(^|[[:space:];({])(if|while|until|!)[[:space:]]+grep[[:space:]]' "$f" || [ $? -eq 1 ]; } | { grep -vE '^[0-9]+:[[:space:]]*#' || [ $? -eq 1 ]; })
+    idiom=$({ grep -nE '(^|[^_[:alnum:]])grep[[:space:]][^|;]*&&[[:space:]]*(\{|(fail|die|err|exit)\b)|(^|[[:space:];({])(if|while|until|!)[[:space:]]+grep[[:space:]]' "$f" || [ $? -eq 1 ]; } | { grep -vE '^[0-9]+:[[:space:]]*#' || [ $? -eq 1 ]; })
     if [ -n "$idiom" ]; then
         echo "lint-scripts: $f uses grep as a verdict (exit 2 reads as no match; use grep_hits):" >&2
         printf '%s\n' "$idiom" >&2
