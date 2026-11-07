@@ -29,7 +29,13 @@ A read is vouched for by one of:
     not an RFC quantity and cannot be fixed by this phase. It only shrinks: a line absent from
     --old-open (the file at the merge-base with main), or with a larger count, fails.
 Every vouch is keyed by its ROOT, and the ROOT's `root` line pins a sha256 of the source text of the
-ROOT and of every fn its walk reaches or calls unfollowed, comments and annotations included. The
+ROOT, of every fn its walk reaches or calls unfollowed and every fn those call, transitively (methods
+resolved by name in the crate; an ambiguous name fails), of the fns its `pin` lines name (text a
+reason relies on outside the walk: what the model pushes, an invariant, a wf tie), and of every
+`const`/`static` that text names; each fn's text starts after the item before it, so its attributes
+and doc comment are in, and comments and annotations are included. A `use .. as` rename of a name
+that text uses, in a file holding any of it, is refused (the gate reads names, not what they stand
+for). The
 vouches' reasons are claims about that text (what a caller passes, how a call's result is used, what
 an annotation says), so any edit to it fails ("re-review the vouches for ROOT") until a reviewer
 re-reads them and updates the digest with --print-digest; the gate never prints a new digest itself.
@@ -47,13 +53,15 @@ predicate bodies and the spec fns they call are read: what an exec fn's ensures 
 predicate's arguments (`recv_allowed_err(old(self).rfc(), ..)`) is the refinement proof's business.
 The scan is the first filter; the root digest is what makes a reviewer re-check the vouches' claims
 about the text (a `name` line's claim about what every caller passes, a `call` line's claim about
-how its result is used) whenever that text changes.
+how its result is used) whenever that text changes. The gate does not check meaning: that a vouch is
+true is the reviewer's, and the semantic catches are the proofs, rule 1c's non-vacuity lemmas and
+rule 1d's registered re-anchoring mutants (tools/mutants.tsv).
 """
 import hashlib, importlib.util, os, re, sys
 
 # sha256 of the allowlist's non-comment lines, sorted and joined by newlines: any change to the vouched-for set (a
 # new line, a swap, an edited reason) needs this constant changed in the same diff, so it is reviewed
-ALLOW_DIGEST = 'ef71f42ed709fb4551318e98285296c55efb706bfed1b40633b09722bd7d3f16'
+ALLOW_DIGEST = '666e81e18758470a29346ac031697347b0d5ed38763a8012eb80a17ca863941d'
 VSTD_TYPES = {'Seq', 'Set', 'Map', 'Multiset'}
 VSTD_METHODS = {'len', 'skip', 'take', 'subrange', 'push', 'last', 'first', 'drop_last', 'drop_first',
                 'contains', 'contains_key', 'insert', 'remove', 'union', 'intersect', 'difference', 'dom',
@@ -186,6 +194,7 @@ class Gate:
         except (ValueError, OSError) as e:
             raise Fail('cannot scan crates/: %s' % e)
         self.sites = [x for x in sites if not x[4]]  # spec and proof fns
+        self.allsites = sites  # exec fns too, for `pin` lines
         self.apos = apos
         self.text, self.raw, self.rawstr = {}, {}, {}
         self.cache = {}
@@ -240,10 +249,84 @@ class Gate:
         return e + 1, z - 1
 
     def fn_text(self, site):
-        """The raw source of a fn, from its line to its body's end, comments and annotations included."""
+        """The raw source of a fn from the end of the item before it (so its doc comment and attributes are in) to its
+        body's end, comments and annotations included."""
         lo, hi = self.body(site)
-        s = self.rawstr[site[0]]
-        return s[s.rfind('\n', 0, site[1]) + 1:hi + 1]
+        s, st = self.rawstr[site[0]], self.text[site[0]]
+        b = max(st.rfind(';', 0, site[1]), st.rfind('}', 0, site[1]), st.rfind('{', 0, site[1]))
+        return s[b + 1:hi + 1]
+
+    def callees_any(self, site):
+        """Every scanned spec fn site the body of site calls, free or as a method (a vstd method name excepted, and an
+        unresolved name taken for vstd); raise when a name could mean more than one fn."""
+        lo, hi = self.body(site)
+        b = self.text[site[0]][lo:hi]
+        out = []
+        for m in IDENT.finditer(b):
+            nm, i, e = m.group(0), m.start(), m.end()
+            p = fwd(b, e)
+            if b[p:p + 1] != '(' or nm in KEYWORDS or nm[0].isupper() or nm == 'self': continue
+            pb = back(b, i)
+            if pb >= 0 and (b[pb] == '.' or b[pb - 1:pb + 1] == '->'):
+                if nm in VSTD_METHODS: continue
+                crate = site[2].split('::')[0]
+                cand = [x for x in self.sites if x[2].split('::')[-1] == nm and any(q[:1].isupper() for q in x[2].split('::')[1:-1])]
+                cand = [x for x in cand if x[2].split('::')[0] == crate] or cand
+                paths = sorted({x[2] for x in cand})
+                if len(paths) > 1: raise Fail('%s calls the method %s, which names %d spec fns (%s): ambiguous' % (site[2], nm, len(paths), ', '.join(paths)))
+                out += cand[:1]
+                continue
+            qual, j = [], i
+            while True:
+                k = back(b, j)
+                if k >= 1 and b[k - 1:k + 1] == '::':
+                    mm = re.search(r'([A-Za-z_][A-Za-z0-9_]*)\s*(?:::\s*)?(<[^<>]*>)?\s*$', b[:k - 1])
+                    if not mm: break
+                    qual.insert(0, mm.group(1)); j = mm.start()
+                else:
+                    break
+            x = self.resolve(site, nm, qual)
+            if x is not None: out.append(x)
+        return out
+
+    def consts(self):
+        """{NAME: [raw text of each `const`/`static` NAME definition in crates/]}."""
+        if not hasattr(self, '_consts'):
+            self._consts = {}
+            for _, _, f in self.acc.rs_files(self.root):
+                st = self.src(f)
+                for m in re.finditer(r'(?<![A-Za-z0-9_])(?:const|static)\s+(?:mut\s+)?([A-Z][A-Z0-9_]*)\s*:', st):
+                    e = st.find(';', m.end())
+                    if e < 0: raise Fail('%s: const %s: no `;`' % (f, m.group(1)))
+                    self._consts.setdefault(m.group(1), []).append(self.rawstr[f][m.start():e + 1])
+        return self._consts
+
+    def digest(self, rp, walk, allowed, pins):
+        """sha256 of the source text a root's vouches rest on: the walk's fns, every fn they or an unfollowed callee call,
+        transitively, the pinned fns, and the definition of every constant any of that text names; also refuse a
+        `use .. as` rename of a name that text uses, in a file holding any of it."""
+        texts, work = {}, list(walk) + list(allowed)
+        while work:
+            x = work.pop()
+            if x[2] in texts: continue
+            texts[x[2]] = self.fn_text(x)
+            work += self.callees_any(x)
+        for x in pins:
+            texts.setdefault(x[2], self.fn_text(x))
+        files = {x[0] for x in list(walk) + list(allowed) + list(pins)}
+        files |= {x[0] for x in self.sites + self.allsites if x[2] in texts}
+        toks = {m.group(0) for v in texts.values() for m in IDENT.finditer(v)}
+        for f in sorted(files):
+            for u in re.finditer(r'(?<![A-Za-z0-9_])use\b([^;]*);', self.text[f]):
+                for r in re.finditer(r'([A-Za-z0-9_]+)\s+as\s+([A-Za-z0-9_]+)', u.group(1)):
+                    if r.group(2) in toks:
+                        raise Fail('%s: `use .. %s` renames a name that the text %s rests on uses: the gate reads and hashes '
+                                   'the name, not the item it stands for; refused' % (os.path.relpath(f, self.root), r.group(0), rp))
+        cs = self.consts()
+        named = sorted(n for n in toks if n in cs)
+        body = ''.join('%s\n%s\n' % (p, texts[p]) for p in sorted(texts))
+        body += ''.join('const %s\n%s\n' % (n, '\n'.join(cs[n])) for n in named)
+        return sha(body)
 
     def analyse(self, site, allow_calls, rootp):
         """(reads [(kind, text, file, line)], followed callees [site], allowed callees [site]) of one fn's body, under
@@ -347,7 +430,7 @@ def read_list(path, what):
     return [(n + 1, l) for n, l in enumerate(lines) if l.strip() and not l.lstrip().startswith('#')]
 
 
-LINE_FORMS = ('`root<TAB>ROOT<TAB>DIGEST`, `call<TAB>ROOT<TAB>CALLER<TAB>CALLEE<TAB>REASON` or '
+LINE_FORMS = ('`root<TAB>ROOT<TAB>DIGEST`, `pin<TAB>ROOT<TAB>FN`, `call<TAB>ROOT<TAB>CALLER<TAB>CALLEE<TAB>REASON` or '
               '`name<TAB>ROOT<TAB>FN<TAB>READ<TAB>REASON`')
 WHAT = {'field': 'a struct field', 'update': 'a struct update, every field it does not set',
         'method': 'a method that is not a vstd Seq/Set/Map method', 'self': 'self', 'macro': 'a macro',
@@ -393,15 +476,18 @@ def main(argv):
         acc_ = load_acc()
         g = Gate(acc_, root)
         # the allowlist: every vouch is keyed by its root predicate, whose body text is pinned by the root's line
-        rootd, calls, names = {}, {}, {}  # calls/names: root -> {(fn, x): used}
+        rootd, calls, names, pins = {}, {}, {}, {}  # calls/names: root -> {(fn, x): used}; pins: root -> {fn path}
         al = read_list(allow, 'allowlist')
         for n, l in al:
             f = l.split('\t')
-            if not (f[0] == 'root' and len(f) == 3 or f[0] in ('call', 'name') and len(f) == 5) or not all(x.strip() for x in f):
+            if not (f[0] in ('root', 'pin') and len(f) == 3 or f[0] in ('call', 'name') and len(f) == 5) or not all(x.strip() for x in f):
                 raise Fail('%s:%d: not %s' % (allow, n, LINE_FORMS))
             if f[0] == 'root':
                 if f[1] in rootd: fail.append('%s:%d: duplicate root line' % (allow, n))
                 rootd[f[1]] = f[2]; continue
+            if f[0] == 'pin':
+                if f[2] in pins.setdefault(f[1], set()): fail.append('%s:%d: duplicate pin line' % (allow, n))
+                pins[f[1]].add(f[2]); continue
             if not CITE.search(f[4]): fail.append('%s:%d: the reason cites no `RFC N §x`' % (allow, n))
             d = (calls if f[0] == 'call' else names).setdefault(f[1], {})
             if (f[2], f[3]) in d: fail.append('%s:%d: duplicate line' % (allow, n))
@@ -438,14 +524,12 @@ def main(argv):
         for r in roots:
             rp = r[2]
             rc, rn = calls.setdefault(rp, {}), names.setdefault(rp, {})
-            seen, work, texts = {rp}, [r], {}
+            seen, work, walked, unf = {rp}, [r], [], []
             while work:
                 st = work.pop()
                 reads, callees, allowed = g.analyse(st, rc, rp)
                 nfns.add(st[2])
-                texts[st[2]] = g.fn_text(st)
-                for t in allowed:
-                    texts[t[2]] = g.fn_text(t)
+                walked.append(st); unf += allowed
                 for kind, text, f, ln in reads:
                     if kind in ('name', 'field') and (st[2], text) in rn:
                         rn[(st[2], text)] = True; continue
@@ -455,8 +539,13 @@ def main(argv):
                     hits.setdefault((rp, st[2], text), []).append((kind, f, ln))
                 for t in callees:
                     if t[2] not in seen: seen.add(t[2]); work.append(t)
-            # the root's digest: its body and every fn it reaches or calls unfollowed, as source text, comments included
-            d = sha(''.join('%s\n%s\n' % (p, texts[p]) for p in sorted(texts)))
+            # the root's digest: the source text its vouches rest on, comments included
+            ps = []
+            for p in sorted(pins.get(rp, {})):
+                x = [y for y in g.allsites if y[2] == p]
+                if len(x) != 1: fail.append('pin line for %s names %s, which is %s' % (rp, p, 'not a fn in a scanned verus! block' if not x else 'two fns')); continue
+                ps.append(x[0])
+            d = g.digest(rp, walked, unf, ps)
             if pd == rp:
                 print(d); return 0
             if rp not in rootd:
@@ -465,8 +554,8 @@ def main(argv):
             elif rootd[rp] != d:
                 fail.append('%s or a fn it reaches changed since its vouches were reviewed: re-review the vouches for %s; then update '
                             'its digest (--print-digest %s)' % (rp, rp, rp))
-        for p in sorted(set(rootd) - {r[2] for r in roots}):
-            fail.append('stale root line, no such predicate: %s' % p)
+        for p in sorted((set(rootd) | set(pins)) - {r[2] for r in roots}):
+            fail.append('stale root or pin line, no such predicate: %s' % p)
         # annotations: each names its read, cites the RFC and vouches for that read
         for _, _, f in acc_.rs_files(root):
             g.src(f)

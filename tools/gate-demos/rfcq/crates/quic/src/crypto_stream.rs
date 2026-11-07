@@ -30,6 +30,13 @@ impl CryptoStream {
     pub closed spec fn reassembly(&self) -> Reassembly {
         self.re
     }
+
+    pub fn on_crypto(&mut self, offset: u64, len: u64) -> (r: Result<(), u64>)
+        ensures
+            r is Ok && len > 0 ==> final(self).reassembly().inserted().len() == old(self).reassembly().inserted().len() + 1,
+    {
+        Ok(())
+    }
 }
 
 pub open spec fn rfc_contiguous(ins: Seq<(nat, Seq<u8>)>) -> nat {

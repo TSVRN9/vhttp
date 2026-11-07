@@ -25,6 +25,10 @@ One file per RCA, `docs/rca/<date>-<slug>.md`, or one bullet in `catalog.md` for
 
 A catch lower in the list needs a stated reason why a higher one is not possible yet.
 
+## What the RFC-quantity gate guarantees (C8)
+
+`scripts/rfc-quantity.sh` (tools/rfc_quantity.py) flags every bookkeeping read (a struct field, a non-vstd method, a name outside a call argument) in an `allowed_*err` predicate and the spec fns it reaches, unless a cited vouch covers it, and it forces a re-review of every vouch for a predicate whenever any text those vouches rest on changes: the predicate, the fns it reaches or calls (transitively), its pinned fns and the constants they name are pinned by a per-predicate sha256. It does not check meaning. Whether a vouch's reason is true is the reviewer's to judge, and the semantic catches are the proofs, rule 1c's non-vacuity lemmas and rule 1d's registered re-anchoring mutants (tools/mutants.tsv). That boundary is the ruling (9r2 T4): a residual of the same class past it is parked for those catches, not fixed by widening the gate.
+
 ## Files
 
 - `catalog.md`: root causes of every bug found by review so far, the 18 classes with their catches and owners.

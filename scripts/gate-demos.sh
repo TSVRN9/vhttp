@@ -404,7 +404,7 @@ expect_fail "citations: no tsv" "cannot read" closes
 # qredig re-pins every root and the allowlist (what a reviewer does after re-reviewing), so a demo can show that a read is
 # still caught after the digests are updated; rqn runs with the re-pinned allowlist digest.
 qx=$tmp/rfcq/crates/quic/src
-qdig=1821da2ca1b3e5edff13f56f2a6aba09db0a7675570f6fe68bcd2630e5e43147
+qdig=5d1b74703f97002dc987c831d9f30b49bd6463cc3f2c3bb48ecab8027b3f3771
 rq() { python3 -I "$root/tools/rfc_quantity.py" --root "$tmp/rfcq" --allow-digest "$qdig" "$@"; }
 qal=$tmp/rfcq/tools/rfc-quantity-allow.txt
 qop=$tmp/rfcq/tools/rfc-quantity-open.txt
@@ -435,6 +435,21 @@ fresh rfcq; sed -i 's/final_size_trigger(s, off + len, fin)/final_size_trigger(s
 expect_fail "rfc-quantity: probe H, conn_room passed as a callee's vouched end" "re-review the vouches for $RR" rq
 fresh rfcq; qadd crypto_stream.rs 'pub open spec fn allowed_win_err(w: nat, offset: u64, len: nat) -> bool { crypto_window_exceeded(w, offset, len) }'
 expect_fail "rfc-quantity: probe C, a new predicate inheriting a callee's vouches" "no \`root\` line for quic::crypto_stream::allowed_win_err" rq
+# re-review probes: text a vouch rests on outside the walk (pins), callees of unfollowed fns, constants, attributes, aliases
+fresh rfcq; sed -i 's/^        let ins = s.ins.push((off, data));$/        let ins = if data.len() > 0 { s.ins.push((off, data)) } else { s.ins };/' "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: probe N1b, recv_data (pinned) skips empty frames" "re-review the vouches for $RR" rq
+fresh rfcq; sed -i 's/^        self.ins@$/        self.ins@.skip(1)/' "$qx/crypto_stream.rs"
+expect_fail "rfc-quantity: probe N1a, Reassembly::inserted (pinned, called by the unfollowed crypto_contiguous) drops a frame" "re-review the vouches for quic::crypto_stream::crypto_allowed_err" rq
+fresh rfcq; sed -i 's/^    1u32 << (id as u32)$/    0u32/' "$qx/tp.rs"
+expect_fail "rfc-quantity: probe N3, tp_bit (called by the unfollowed rfc_tp_apply) returns 0" "re-review the vouches for quic::tp::allowed_tp_err_from" rq
+fresh rfcq; sed -i 's/^pub const MAX_CRYPTO_BUFFER: u64 = 16384;$/pub const MAX_CRYPTO_BUFFER: u64 = 0;/' "$qx/crypto_stream.rs"
+expect_fail "rfc-quantity: probe N2, a constant the predicate names changes" "re-review the vouches for quic::crypto_stream::crypto_allowed_err" rq
+fresh rfcq; sed -i 's/^pub open spec fn tp_server_only/#[verifier::external_body]\n&/' "$qx/tp.rs"
+expect_fail "rfc-quantity: probe N5, an attribute above a reached fn" "re-review the vouches for quic::tp::allowed_tp_err_from" rq
+fresh rfcq; sed -i 's/^use vstd::prelude::\*;$/&\nuse crate::crypto_stream::rfc_contiguous as rfc_vint;/' "$qx/tp.rs"
+expect_fail "rfc-quantity: probe N4, a use .. as alias of a name the hashed text calls" "renames a name that the text" rq
+fresh rfcq; printf 'pin\t%s\tquic::recv_stream::no_such_fn\n' "$RR" >> "$qal"
+expect_fail "rfc-quantity: a pin line naming no fn" "names quic::recv_stream::no_such_fn, which is not a fn" rq
 fresh rfcq; sed -i 's/^    ||| end > s.limit$/& || s.high > 0 \/\/ rfc-quantity: s.limit: the largest maximum stream data sent (RFC 9000 §19.10)/' "$qx/recv_stream.rs"
 sed -i '/\ts\.limit\t/d' "$qop"; qredig
 expect_fail "rfc-quantity: probe I, s.high on a line whose annotation names s.limit (digests re-pinned)" "flow_trigger (from recv_allowed_err) reads \`s.high\`" rqn

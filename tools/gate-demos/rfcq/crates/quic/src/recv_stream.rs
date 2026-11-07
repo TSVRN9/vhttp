@@ -30,6 +30,35 @@ pub open spec fn largest_received_offset(ins: Seq<(nat, Seq<u8>)>) -> nat
     }
 }
 
+pub open spec fn recv_data(s: SpecRecv, off: nat, data: Seq<u8>, fin: bool) -> SpecRecv {
+    let end = off + data.len();
+    if end > s.limit {
+        s
+    } else {
+        let ins = s.ins.push((off, data));
+        SpecRecv { ins, high: if end > s.high { end } else { s.high }, final_size: if fin { Some(end) } else { s.final_size }, ..s }
+    }
+}
+
+pub open spec fn recv_reset(s: SpecRecv, fs: nat) -> SpecRecv {
+    SpecRecv { final_size: Some(fs), high: fs, ..s }
+}
+
+pub open spec fn recv_inv(s: SpecRecv) -> bool {
+    &&& largest_received_offset(s.ins) <= s.high
+    &&& s.final_size is None ==> s.high == largest_received_offset(s.ins)
+}
+
+pub struct RecvStream {
+    ins: Ghost<Seq<(nat, Seq<u8>)>>,
+}
+
+impl RecvStream {
+    pub closed spec fn wf(&self, s: SpecRecv) -> bool {
+        self.ins@ == s.ins
+    }
+}
+
 #[verifier::opaque]
 pub open spec fn credit_before(s: SpecRecv) -> nat {
     match s.final_size {
