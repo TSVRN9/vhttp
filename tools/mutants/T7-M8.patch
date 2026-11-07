@@ -1,5 +1,5 @@
 diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
-index 206d62d..6823705 100644
+index 206d62d..85d80fd 100644
 --- a/crates/quic/src/crypto_stream.rs
 +++ b/crates/quic/src/crypto_stream.rs
 @@ -50,7 +50,13 @@ pub open spec fn ooo_held(s: CryptoStream, off: u64, d: Seq<u8>) -> nat {
@@ -7,7 +7,7 @@ index 206d62d..6823705 100644
  /// The number of maximal runs they form.
  pub open spec fn ooo_runs(s: CryptoStream, off: u64, d: Seq<u8>) -> nat {
 -    runs(ooo_received(s, off, d))
-+    frame_count(s.inserted().push((off as nat, d)), rfc_contiguous(rfc_received(s.inserted().push((off as nat, d)))))
++    frame_count(s.inserted_frames().push((off as nat, d)), rfc_contiguous(rfc_received(s.inserted_frames().push((off as nat, d)))))
 +}
 +
 +pub open spec fn frame_count(ins: Seq<(nat, Seq<u8>)>, c: nat) -> nat
