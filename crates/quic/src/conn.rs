@@ -318,6 +318,7 @@ impl Connection {
     pub closed spec fn crypto_kept_base(&self, o: Connection) -> bool {
         &&& self.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial)
         &&& o.complete ==> self.complete
+        &&& forall|p: nat| #[trigger] o.crx_i.received(p) ==> self.crx_i.received(p)
     }
 
     /// The three CRYPTO streams, and the handshake's completion, are as in `o`; no transport
@@ -371,6 +372,7 @@ impl Connection {
         ensures
             c.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial),
             o.live(PacketKind::OneRtt) ==> c.live(PacketKind::OneRtt),
+            forall|p: nat| #[trigger] o.crypto_received(PacketKind::Initial, p) ==> c.crypto_received(PacketKind::Initial, p),
     {
     }
 
@@ -381,6 +383,8 @@ impl Connection {
             c.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial),
             o.live(PacketKind::OneRtt) ==> c.live(PacketKind::OneRtt),
             c.peer_tp_known_spec() ==> o.peer_tp_known_spec(),
+            // RFC 9001 §4.1.3's "previously received data" only grows.
+            forall|p: nat| #[trigger] o.crypto_received(PacketKind::Initial, p) ==> c.crypto_received(PacketKind::Initial, p),
     {
     }
 

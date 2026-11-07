@@ -385,6 +385,9 @@ impl<'a> QuicServer<'a> {
         // connection had received when TLS left Initial (`init_rx`), no more and no less.
         &&& !(self.level is Initial) ==> forall|p: nat| #[trigger] self.init_rx@.crypto_received(PacketKind::Initial, p) ==> p < self.init_end
         &&& !(self.level is Initial) && self.init_end > 0 ==> self.init_rx@.crypto_received(PacketKind::Initial, (self.init_end - 1) as nat)
+        // `init_rx` is this connection's past: what it had received at Initial, it still has.
+        &&& !(self.level is Initial) ==> forall|p: nat| #[trigger] self.init_rx@.crypto_received(PacketKind::Initial, p)
+            ==> self.h3.conn_spec().crypto_received(PacketKind::Initial, p)
         // TLS leaves Initial at `Secrets { Handshake }` (`on_secrets`) or, if a batch has `Complete`
         // without it, at `on_complete`; both record `init_end` and `init_rx`.
         &&& self.level is Initial ==> self.init_end == 0
