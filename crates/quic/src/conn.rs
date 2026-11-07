@@ -3078,6 +3078,7 @@ impl Connection {
             final(self).streams == old(self).streams,
             final(self).crypto_end_spec(PacketKind::Initial) == old(self).crypto_end_spec(PacketKind::Initial),
             final(self).crypto_kept(*old(self)),
+            drained_kept(*final(self), *old(self)),
     {
         proof {
             reveal(crx_ok);
@@ -3243,6 +3244,9 @@ impl Connection {
             ).crypto_contiguous_spec(level) - old(self).crypto_base_spec(level),
             old(self).crypto_end_spec(level) <= old(self).crypto_base_spec(level) ==> final(out)@ == old(out)@,
             final(self).crypto_kept(*old(self)),
+            final(self).phase_spec() == old(self).phase_spec(),
+            old(self).phase_spec() is Open ==> crypto_drained(*final(self), level),
+            drained_kept(*final(self), *old(self)),
     {
         // The bound needs only `lemma_wf`; unfolded, these make a missing fact an rlimit failure.
         hide(crate::reassembly::rfc_received);
@@ -3286,6 +3290,8 @@ impl Connection {
             final(self).out_log() == old(self).out_log(),
             final(self).crypto_kept(*old(self)),
             final(self).crypto_end_spec(PacketKind::Initial) == old(self).crypto_end_spec(PacketKind::Initial),
+            final(self).phase_spec() == old(self).phase_spec(),
+            drained_kept(*final(self), *old(self)),
     {
         if !matches!(self.lc.phase(), Phase::Open) {
             return;
@@ -3339,6 +3345,7 @@ impl Connection {
                 && final(self).close_spec() == old(self).close_spec(),
             final(self).crypto_kept(*old(self)),
             final(self).crypto_end_spec(PacketKind::Initial) == old(self).crypto_end_spec(PacketKind::Initial),
+            drained_kept(*final(self), *old(self)),
     {
         if now > self.now {
             self.now = now;
@@ -3368,6 +3375,8 @@ impl Connection {
             final(self).out_log() == old(self).out_log(),
             final(self).crypto_kept(*old(self)),
             final(self).crypto_end_spec(PacketKind::Initial) == old(self).crypto_end_spec(PacketKind::Initial),
+            final(self).phase_spec() is Open ==> old(self).phase_spec() is Open,
+            drained_kept(*final(self), *old(self)),
     {
         if now > self.now {
             self.now = now;
@@ -3386,12 +3395,22 @@ impl Connection {
             self.close_internal(c);
             return;
         }
+        let ghost s0 = *self;
         self.discard(PacketKind::Initial);
+        let ghost s1 = *self;
         self.discard(PacketKind::Handshake);
+        let ghost s2 = *self;
         self.complete = true;
         self.hs_done = HsDone::Pending;
         self.spin = rand[128] & 1 == 1;
         self.issue_cids(rand);
+        proof {
+            assert forall|k: PacketKind| #[trigger] crypto_drained(*old(self), k) implies crypto_drained(*self, k) by {
+                assert(crypto_drained(s0, k));
+                assert(crypto_drained(s1, k));
+                assert(crypto_drained(s2, k));
+            }
+        }
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9001#section-4.8
@@ -8325,9 +8344,24 @@ impl Connection {
             r == self.crypto_end_spec(k),
             self.crypto_base_spec(k) <= r,
             r > 0 ==> self.crypto_received(k, (r - 1) as nat),
+            self.crypto_base_spec(k) <= self.crypto_contiguous_spec(k) <= r,
     {
         proof {
             reveal(crx_ok);
+            match k {
+                PacketKind::Initial => {
+                    self.crx_i.reassembly().lemma_wf();
+                    self.crx_i.reassembly().lemma_contiguous_le_end();
+                },
+                PacketKind::Handshake => {
+                    self.crx_h.reassembly().lemma_wf();
+                    self.crx_h.reassembly().lemma_contiguous_le_end();
+                },
+                PacketKind::OneRtt => {
+                    self.crx_1.reassembly().lemma_wf();
+                    self.crx_1.reassembly().lemma_contiguous_le_end();
+                },
+            }
         }
         match k {
             PacketKind::Initial => self.crx_i.end(),
@@ -8466,6 +8500,16 @@ impl Connection {
 #[verifier::opaque]
 spec fn crx_ok(i: CryptoStream, h: CryptoStream, o: CryptoStream) -> bool {
     i.wf() && h.wf() && o.wf()
+}
+
+/// Level `k` holds no unread in-order CRYPTO byte: it has been read to its contiguous end.
+pub open spec fn crypto_drained(c: Connection, k: PacketKind) -> bool {
+    c.crypto_base_spec(k) == c.crypto_contiguous_spec(k)
+}
+
+/// Every level drained in `o` is drained in `c`.
+pub open spec fn drained_kept(c: Connection, o: Connection) -> bool {
+    forall|k: PacketKind| #[trigger] crypto_drained(o, k) ==> crypto_drained(c, k)
 }
 
 /// §8.1: trace `t1` starts with `t0` and then the receipt of an `n`-byte datagram. Opaque, so a
