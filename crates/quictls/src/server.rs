@@ -1375,6 +1375,26 @@ impl<'a> QuicServer<'a> {
         self.sync_keys();
     }
 
+    /// TLS leaves Initial: `init_end` and `init_rx` record what the connection has received there.
+    #[verifier::spinoff_prover]
+    fn leave_initial(&mut self)
+        requires
+            old(self).h3.wf(),
+            old(self).h3.conn_spec().crypto_end_spec(PacketKind::Initial) <= old(self).h3.conn_spec().crypto_base_spec(
+                PacketKind::Initial,
+            ),
+        ensures
+            *final(self) == (QuicServer { init_end: final(self).init_end, init_rx: final(self).init_rx, ..*old(self) }),
+            final(self).init_rx@ == old(self).h3.conn_spec(),
+            final(self).init_end == old(self).h3.conn_spec().crypto_end_spec(PacketKind::Initial),
+            final(self).init_end <= old(self).h3.conn_spec().crypto_base_spec(PacketKind::Initial),
+            forall|p: nat| #[trigger] final(self).init_rx@.crypto_received(PacketKind::Initial, p) ==> p < final(self).init_end,
+            final(self).init_end > 0 ==> final(self).init_rx@.crypto_received(PacketKind::Initial, (final(self).init_end - 1) as nat),
+    {
+        self.init_end = initial_end(self.h3.conn());
+        self.init_rx = Ghost(self.h3.conn_spec());
+    }
+
     /// `Secrets`: the packet keys of level `l`; at Handshake, TLS now receives there.
     #[verifier::spinoff_prover]
     fn on_secrets(&mut self, l: Level, client: &[u8; 32], server: &[u8; 32])
@@ -1396,8 +1416,7 @@ impl<'a> QuicServer<'a> {
             Level::Handshake => {
                 if matches!(self.level, Level::Initial) {
                     // Everything TLS had at Initial (`key_changes` saw nothing unread there).
-                    self.init_end = initial_end(self.h3.conn());
-                    self.init_rx = Ghost(self.h3.conn_spec());
+                    self.leave_initial();
                 }
                 self.keys[1] = Some(kp);
                 self.level = Level::Handshake;
@@ -1442,8 +1461,7 @@ impl<'a> QuicServer<'a> {
         }
         if matches!(self.level, Level::Initial) {
             // TLS leaves Initial here (no `Secrets { Handshake }` before it): as `on_secrets` does.
-            self.init_end = initial_end(self.h3.conn());
-            self.init_rx = Ghost(self.h3.conn_spec());
+            self.leave_initial();
         }
         // Only a completed connection: `core_ok` ties OneRtt to completion.
         self.level = Level::OneRtt;
