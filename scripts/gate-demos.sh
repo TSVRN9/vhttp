@@ -46,10 +46,10 @@ expect_fail "lint-scripts: no scripts" "no *.sh" "$root/scripts/lint-scripts.sh"
 # lint-scripts: grep read as a verdict (exit 2, a missing file, reads as "no match"); the grep_hits form passes.
 fresh lint
 printf 'grep -q x /nonexistent %s fail "found"\n' '&&' >> "$tmp/lint/good.sh"
-expect_fail "lint-scripts: grep .. && fail" "uses grep as a verdict" "$root/scripts/lint-scripts.sh" "$tmp/lint"
+expect_fail "lint-scripts: a verdict by and-list" "uses grep as a verdict" "$root/scripts/lint-scripts.sh" "$tmp/lint"
 fresh lint
 printf 'if grep -q x /nonexistent; then fail found; fi\n' >> "$tmp/lint/good.sh"
-expect_fail "lint-scripts: if grep .." "uses grep as a verdict" "$root/scripts/lint-scripts.sh" "$tmp/lint"
+expect_fail "lint-scripts: grep as an if condition" "uses grep as a verdict" "$root/scripts/lint-scripts.sh" "$tmp/lint"
 fresh lint
 printf 'grep_hits x /nonexistent %s fail "found"\ngrep -q x f || fail "missing"\n# grep x f %s fail\n' '&&' '&&' >> "$tmp/lint/good.sh"
 expect_pass "lint-scripts: grep_hits form, grep .. || fail and a comment" "$root/scripts/lint-scripts.sh" "$tmp/lint"
