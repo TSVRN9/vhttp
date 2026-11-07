@@ -40,6 +40,9 @@ pub open spec fn ooo_received(s: CryptoStream, off: u64, d: Seq<u8>) -> Set<nat>
     m.dom().filter(|p: nat| p > rfc_contiguous(m))
 }
 
+//= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
+//# Implementations MUST support buffering at least 4096 bytes of data
+//# received in out-of-order CRYPTO frames.
 /// The number of out-of-order bytes held once `d` at `off` is in.
 pub open spec fn ooo_held(s: CryptoStream, off: u64, d: Seq<u8>) -> nat {
     ooo_received(s, off, d).len()
