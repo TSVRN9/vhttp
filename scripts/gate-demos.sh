@@ -4,7 +4,7 @@ set -o pipefail
 # gate-demos.sh: each cheap gate gets a canned bad input (a temp copy of a fixture in
 # tools/gate-demos/ with one change applied) and must exit non-zero with its message; every fixture
 # first passes unchanged, so a demo cannot fail for the wrong reason. Covers lint-scripts,
-# check-quotes, the citation gate, acceptance (many bad changes, including real-git runs), escape-gate (three), the rlimit gate and the mutant registry (scripts/mutants.sh; its run demos call Verus
+# check-quotes, the citation gate, the RFC-quantity gate (its git demos in throwaway repos), acceptance (many bad changes, including real-git runs), escape-gate (three), the rlimit gate and the mutant registry (scripts/mutants.sh; its run demos call Verus
 # on the fixture crate). Takes a few seconds, plus about a minute the first time vstd builds in target/mutants-demo.
 root=$(cd "$(dirname "$0")/.." && pwd)
 fx=$root/tools/gate-demos
@@ -92,6 +92,10 @@ expect_fail "acceptance: allowed_ fn, catch-all arm true" "vacuous allowed spec 
 afresh
 sed -i 's/pub open spec fn allowed_demo_err/pub spec(checked) fn allowed_demo_err/; s/    n > 10 \&\& c == 7/    true/' "$lib"
 expect_fail "acceptance: spec(checked) allowed_ fn with body true" "vacuous allowed spec fn" acc
+# a `{` in a decreases clause is not the body (9r2 T4: the body was read from `decreases (if .. {`, as allowed_tp_err_from's was)
+afresh
+sed -i 's/^pub open spec fn allowed_demo_err(n: u64, c: u64) -> bool {$/pub open spec fn allowed_demo_err(n: u64, c: u64) -> bool\n    decreases (if n < 10 { 10 - n } else { 0 }),\n{/; s/    n > 10 \&\& c == 7/    true/' "$lib"
+expect_fail "acceptance: allowed_ fn with body true after a decreases clause holding a brace" "vacuous allowed spec fn" acc
 # a same-line `ensures .. {` body must not hide the next fn (it used to credit `a` with `hidden`'s clause)
 afresh
 addfn 'pub fn a(n: u64) -> (r: Result<(), u64>) ensures r is Ok ==> n == 0 {
@@ -393,6 +397,92 @@ cfresh; : > "$tmp/cit/tools/mutants.tsv"
 expect_fail "citations: empty tsv" "has no row" closes
 rm "$tmp/cit/tools/mutants.tsv"
 expect_fail "citations: no tsv" "cannot read" closes
+
+# RFC-quantity gate (tools/rfc_quantity.py, C8). The fixture mirrors main's three predicates, its allowlist (30 lines) and
+# open ratchet; bad/ holds the 9a originals verbatim: T6's recv_allowed_err (rfc_recv's running `high`), T4's duplicate
+# rule (the `seen` mask), T3's crypto window (the read offset `s.reassembly().base()`).
+qx=$tmp/rfcq/crates/quic/src
+rq() { python3 -I "$root/tools/rfc_quantity.py" --root "$tmp/rfcq" --allow-lines 30 "$@"; }
+qal=$tmp/rfcq/tools/rfc-quantity-allow.txt
+qop=$tmp/rfcq/tools/rfc-quantity-open.txt
+qadd() { sed -i '$d' "$qx/$1"; printf '%s\n\n} // verus!\n' "$2" >> "$qx/$1"; }  # qadd <file> <fn>: append a spec fn
+fresh rfcq
+expect_pass "rfc-quantity" rq
+fresh rfcq; cp "$tmp/rfcq/bad/t6-recv_stream.rs" "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: T6's original recv_allowed_err (8f6b48e) reads the running high" "final_size_trigger (from recv_allowed_err) reads \`s.high\` (a struct field)" rq
+fresh rfcq; cp "$tmp/rfcq/bad/t4-tp.rs" "$qx/tp.rs"
+expect_fail "rfc-quantity: T4's original duplicate rule (6594f10) reads the seen mask" "allowed_tp_err_from reads \`seen\` (a name used other than" rq
+fresh rfcq; cp "$tmp/rfcq/bad/t3-crypto_stream.rs" "$qx/crypto_stream.rs"
+expect_fail "rfc-quantity: T3's original crypto window (fcf9ff0^) reads the read offset" "crypto_allowed_err reads \`s.reassembly()\` (a method" rq
+fresh rfcq; sed -i 's/^    ||| end > s.limit$/& \/\/ rfc-quantity:/' "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: an annotation with an empty reason" "\`// rfc-quantity:\` reason cites no" rq
+fresh rfcq; sed -i 's/^    ||| end > s.limit$/& \/\/ rfc-quantity: the largest MAX_STREAM_DATA sent/' "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: an annotation citing no RFC section" "\`// rfc-quantity:\` reason cites no" rq
+fresh rfcq; sed -i 's/^    ||| end > s.limit$/& \/\/ rfc-quantity: the largest maximum stream data sent (RFC 9000 §19.10)/' "$qx/recv_stream.rs"
+sed -i '/\ts\.limit\t/d' "$qop"
+expect_pass "rfc-quantity: a cited annotation vouches for its line's read (open line deleted)" rq
+fresh rfcq; sed -i 's/^pub const FINAL_SIZE_ERROR.*/& \/\/ rfc-quantity: the code (RFC 9000 §20.1)/' "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: an annotation on a line with no read" "with no read from an allowed_*err predicate (stale)" rq
+fresh rfcq; sed -i 's/final_size_trigger(s, off + len, fin)/crate::recv_stream::final_size_trigger(s, off + len, fin)/' "$qx/recv_stream.rs"
+expect_pass "rfc-quantity: a path-qualified call is followed" rq
+sed -i 's/c == FINAL_SIZE_ERROR \&\& /&crate::recv_stream::peek(s) \&\& /' "$qx/recv_stream.rs"
+qadd recv_stream.rs 'pub open spec fn peek(s: SpecRecv) -> bool { s.high > 0 }'
+expect_fail "rfc-quantity: a path-qualified call to a helper reading a field" "peek (from recv_allowed_err) reads \`s.high\`" rq
+fresh rfcq; sed -i 's/c == FINAL_SIZE_ERROR \&\& /s.code_spec() == 0 \&\& \&/' "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: a *_spec() accessor" "recv_allowed_err reads \`s.code_spec()\` (a method" rq
+fresh rfcq; sed -i 's/c == FINAL_SIZE_ERROR \&\& /vstd::arithmetic::power2::pow2(len) > 0 \&\& &/' "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: a call of a fn outside the scanned verus! blocks" "reads \`vstd::arithmetic::power2::pow2(..)\` (a fn that is not" rq
+fresh rfcq; qadd recv_stream.rs 'pub open spec fn dup(n: nat) -> bool { n > 0 }'; qadd tp.rs 'pub open spec fn dup(n: nat) -> bool { n > 0 }'
+sed -i 's/^    c == CRYPTO_BUFFER_EXCEEDED \&\& /&dup(len) \&\& /' "$qx/crypto_stream.rs"
+expect_fail "rfc-quantity: a callee name two modules define" "calls dup, which names 2 spec fns" rq
+fresh rfcq; sed -i 's/allowed_/permitted_/g' "$qx"/*.rs
+expect_fail "rfc-quantity: no predicate" "no allowed_*err spec fn found" rq
+fresh rfcq; rm "$qal"
+expect_fail "rfc-quantity: no allowlist" "cannot read the allowlist" rq
+fresh rfcq; rm "$qop"
+expect_fail "rfc-quantity: no open ratchet" "cannot read the open ratchet" rq
+fresh rfcq; rm -r "$tmp/rfcq/crates"
+expect_fail "rfc-quantity: no crates/" "cannot scan crates/" rq
+fresh rfcq; printf 'name\tquic::recv_stream::flow_trigger\tconn_room\tthe connection credit left (RFC 9000 §4.1)\n' >> "$qal"
+sed -i '/\tconn_room\t/d' "$qop"
+expect_fail "rfc-quantity: the allowlist grows without ALLOW_LINES" "the allowlist has 31 lines but ALLOW_LINES" rq
+fresh rfcq; printf 'name\tquic::recv_stream::flow_trigger\tzzz\tnothing (RFC 9000 §4.1)\n' >> "$qal"
+expect_fail "rfc-quantity: a stale allowlist line" "stale allowlist line, vouches for no read or call: name" rq --allow-lines 31
+fresh rfcq; sed -i 's/(RFC 9000 §19.8)$/(the frame)/' "$qal"
+expect_fail "rfc-quantity: an allowlist reason citing no RFC section" "the reason cites no" rq
+fresh rfcq; sed -i 's/credit_before(s) + conn_room/credit_before(s)/' "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: a stale open line" "stale open line, no such read" rq
+fresh rfcq; sed -i 's/\ts\.final_size\t4\t/\ts.final_size\t5\t/' "$qop"
+expect_fail "rfc-quantity: an open count that is not the current count" "open line count 5, but" rq
+fresh rfcq; sed -i 's/\t9c\t/\tlater\t/' "$qop"
+expect_fail "rfc-quantity: an open line without an owner phase" "OWNER-PHASE" rq
+fresh rfcq; grep -v $'\tconn_room\t' "$qop" > "$tmp/rfcq/old-open.txt"
+expect_fail "rfc-quantity: an open line absent from the merge-base's" "open line not in the merge-base open ratchet" rq --old-open "$tmp/rfcq/old-open.txt"
+fresh rfcq; sed 's/\ts\.final_size\t4\t/\ts.final_size\t3\t/' "$qop" > "$tmp/rfcq/old-open.txt"
+expect_fail "rfc-quantity: an open count above the merge-base's" "open line count 4 above the merge-base's 3" rq --old-open "$tmp/rfcq/old-open.txt"
+# scripts/rfc-quantity.sh's real git path, in a throwaway repo: a branch and main each add a read with its open line; no main.
+qrepo() {  # qrepo <dir>: scripts, the two python tools and the fixture, one commit on main
+    rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/tools"
+    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/acceptance.py" "$root/tools/rfc_quantity.py" "$tmp/$1/tools/"
+    cp -r "$fx/rfcq/crates" "$tmp/$1/crates"; cp "$fx/rfcq/tools/"*.txt "$tmp/$1/tools/"
+    git -C "$tmp/$1" init -q -b main
+    git -C "$tmp/$1" add -A
+    gitc "$1" commit -qm base
+}
+qgrow() {  # qgrow <dir>: flow_trigger reads s.high, and the open ratchet lists it
+    sed -i 's/^    ||| end > s.limit$/&\n    ||| end > s.high/' "$tmp/$1/crates/quic/src/recv_stream.rs"
+    printf 'quic::recv_stream::recv_allowed_err\tquic::recv_stream::flow_trigger\ts.high\t1\t9c\trfc_recv'"'"'s running high (RFC 9000 §19.10)\n' >> "$tmp/$1/tools/rfc-quantity-open.txt"
+    gitc "$1" commit -qam grow
+}
+qgate() { "$tmp/$1/scripts/rfc-quantity.sh" --allow-lines 30; }
+qrepo q1; gitc q1 checkout -qb feat; qgrow q1
+expect_fail "rfc-quantity.sh git: a branch adds an open line" "open line not in the merge-base open ratchet" qgate q1
+qrepo q2; qgrow q2
+expect_fail "rfc-quantity.sh git: main adds an open line (compared with HEAD^1)" "open line not in the merge-base open ratchet" qgate q2
+qrepo q3; gitc q3 branch -m main trunk
+expect_fail "rfc-quantity.sh git: no main" "cannot resolve the merge-base" qgate q3
+qrepo q4; gitc q4 checkout -qb feat; touch "$tmp/q4/x"; gitc q4 add x; gitc q4 commit -qm noop
+expect_pass "rfc-quantity.sh git: unchanged open ratchet on a branch" qgate q4
 
 # mutant registry (scripts/mutants.sh, C6), in throwaway git repos holding the acceptance fixture crate as crates/demo/src/acc.rs
 # and the one-row registry of tools/gate-demos/mutants. check: a patch that no longer applies, a missing patch, an empty or
