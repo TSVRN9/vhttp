@@ -14,7 +14,7 @@ fail() { echo "ct-check: $*" >&2; exit 1; }
 [ -f "$cm" ] && [ -f "$labels" ] || fail "crypto: no manifest $cm or labels $labels"
 [ "$(grep -c '^root ' "$cm" || true)" -gt 0 ] || fail "crypto: no root in $cm"
 mkdir -p "$out"
-grep '^reject ' "$report" >&2 && fail "crypto: rejects (above)"
+grep_hits '^reject ' "$report" >&2 && fail "crypto: rejects (above)"
 got=$out/verdicts.txt
 verdicts "$report" > "$got"
 no_missing "$cm" "$got"

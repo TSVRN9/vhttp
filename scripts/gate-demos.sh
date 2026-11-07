@@ -43,6 +43,29 @@ expect_fail "lint-scripts: script without pipefail" "lacks: pipefail" "$root/scr
 mkdir "$tmp/empty"
 expect_fail "lint-scripts: no scripts" "no *.sh" "$root/scripts/lint-scripts.sh" "$tmp/empty"
 
+# lint-scripts: grep read as a verdict (exit 2, a missing file, reads as "no match"); the grep_hits form passes.
+fresh lint
+printf 'grep -q x /nonexistent %s fail "found"\n' '&&' >> "$tmp/lint/good.sh"
+expect_fail "lint-scripts: grep .. && fail" "uses grep as a verdict" "$root/scripts/lint-scripts.sh" "$tmp/lint"
+fresh lint
+printf 'if grep -q x /nonexistent; then fail found; fi\n' >> "$tmp/lint/good.sh"
+expect_fail "lint-scripts: if grep .." "uses grep as a verdict" "$root/scripts/lint-scripts.sh" "$tmp/lint"
+fresh lint
+printf 'grep_hits x /nonexistent %s fail "found"\ngrep -q x f || fail "missing"\n# grep x f %s fail\n' '&&' '&&' >> "$tmp/lint/good.sh"
+expect_pass "lint-scripts: grep_hits form, grep .. || fail and a comment" "$root/scripts/lint-scripts.sh" "$tmp/lint"
+
+# grep_hits (scripts/ct-lib.sh): 0 on a match, 1 on none, a failure on a missing file or a bad pattern.
+gh() { sh -c 'set -eu; fail() { echo "ct-check: $*" >&2; exit 1; }; . "$1"; shift; grep_hits "$@"; echo "rc=$?"' sh "$root/scripts/ct-lib.sh" "$@" ; }
+printf 'a\nb\n' > "$tmp/gh.txt"
+expect_pass "grep_hits: a match" gh a "$tmp/gh.txt"
+rc=0; out=$(gh zzz "$tmp/gh.txt" 2>&1) || rc=$?
+[ "$rc" -eq 1 ] || [ "$out" = "rc=1" ] || die "grep_hits: no match did not return 1: rc=$rc $out"
+echo "gate-demos: grep_hits: no match returns 1 (not a failure)"
+expect_fail "grep_hits: a missing file" "grep_hits: no $tmp/nonexistent" gh a "$tmp/nonexistent"
+expect_fail "grep_hits: a missing file among others" "grep_hits: no $tmp/nonexistent" gh a "$tmp/gh.txt" "$tmp/nonexistent"
+expect_fail "grep_hits: an invalid pattern (grep exit 2)" "grep failed (exit 2)" gh '(' "$tmp/gh.txt"
+expect_fail "grep_hits: no file argument" "grep_hits: usage" gh a
+
 # check-quotes: a quote altered by one word.
 fresh quotes
 expect_pass "check-quotes" "$root/scripts/check-quotes.sh" "$tmp/quotes/crates"

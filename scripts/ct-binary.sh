@@ -15,6 +15,8 @@ audit=docs/crypto-binary-audit.md
 T=$root/target/ct-binary
 recipe="per $audit's recipe (\"Gate\", update protocol)"
 die() { echo "ct-binary: $*; the gate failed closed, see $audit (\"Gate\") for what to re-read" >&2; exit 1; }
+fail() { die "$@"; }
+. "$root/scripts/ct-lib.sh"
 update=0
 # --digests FILE: compare against FILE instead of the tracked file (scripts/gate-demos.sh feeds it a
 # canned one); the build, the dump and the structural checks are unchanged, and --update refuses it.
@@ -103,7 +105,7 @@ for r in "$T"/release/lib*.rlib; do
             "$x/dep/$c/$m.nm" >> "$x/refs" || die "reading nm output of $m failed"
     done
 done
-if grep -q '^D ' "$x/refs"; then
+if grep_hits '^D ' "$x/refs" > /dev/null; then
     sed -n 's/^D /  /p' "$x/refs" >&2
     err "the symbols above are crypto:: code defined in another crate's units, which the gate does not hash: re-read them where they are $recipe, or make them calls"
 fi
