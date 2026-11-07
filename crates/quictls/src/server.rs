@@ -1317,6 +1317,22 @@ impl<'a> QuicServer<'a> {
         self.sync_keys();
     }
 
+    /// `init_end` is the end of the Initial data `init_rx` received: the pins `core_ok` carries.
+    proof fn lemma_init_pins(&self)
+        requires
+            self.init_rx@ == self.h3.conn_spec(),
+            self.init_end == self.h3.conn_spec().crypto_end_spec(PacketKind::Initial),
+            forall|p: nat| #[trigger] self.h3.conn_spec().crypto_received(PacketKind::Initial, p) ==> p < self.h3.conn_spec().crypto_end_spec(PacketKind::Initial),
+            self.h3.conn_spec().crypto_end_spec(PacketKind::Initial) > 0 ==> self.h3.conn_spec().crypto_received(
+                PacketKind::Initial,
+                (self.h3.conn_spec().crypto_end_spec(PacketKind::Initial) - 1) as nat,
+            ),
+        ensures
+            forall|p: nat| #[trigger] self.init_rx@.crypto_received(PacketKind::Initial, p) ==> p < self.init_end,
+            self.init_end > 0 ==> self.init_rx@.crypto_received(PacketKind::Initial, (self.init_end - 1) as nat),
+    {
+    }
+
     /// `Secrets`: the packet keys of level `l`; at Handshake, TLS now receives there.
     #[verifier::spinoff_prover]
     fn on_secrets(&mut self, l: Level, client: &[u8; 32], server: &[u8; 32])
@@ -1340,6 +1356,9 @@ impl<'a> QuicServer<'a> {
                     // Everything TLS had at Initial (`key_changes` saw nothing unread there).
                     self.init_end = self.h3.conn().crypto_end(PacketKind::Initial);
                     self.init_rx = Ghost(self.h3.conn_spec());
+                    proof {
+                        self.lemma_init_pins();
+                    }
                 }
                 self.keys[1] = Some(kp);
                 self.level = Level::Handshake;
@@ -1385,6 +1404,9 @@ impl<'a> QuicServer<'a> {
             // TLS leaves Initial here (no `Secrets { Handshake }` before it): as `on_secrets` does.
             self.init_end = self.h3.conn().crypto_end(PacketKind::Initial);
             self.init_rx = Ghost(self.h3.conn_spec());
+            proof {
+                self.lemma_init_pins();
+            }
         }
         // Only a completed connection: `core_ok` ties OneRtt to completion.
         self.level = Level::OneRtt;
