@@ -57,8 +57,14 @@ fn duplicate_ooo_frames_allocate_nothing() {
         assert_eq!(c.on_crypto(2 + 2 * k, &[1]), Ok(()));
     }
     let before = allocated();
+    let t = std::time::Instant::now();
     for k in 0..10_000u64 {
         assert_eq!(c.on_crypto(2 + 2 * (k % 4096), &[1]), Ok(()));
     }
+    let took = t.elapsed();
     assert_eq!(allocated() - before, 0);
+    // `locate` is a binary search: 2-6 ms here in a debug build; a linear scan over the 4096
+    // fragments took about 165 ms (9a T7 fix round 2).
+    eprintln!("10,000 duplicates over 4096 fragments: {:?}", took);
+    assert!(took.as_millis() < 50, "took {:?}", took);
 }
