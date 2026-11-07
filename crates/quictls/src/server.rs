@@ -70,9 +70,19 @@ fn rank(l: Level) -> (r: u8)
     }
 }
 
+/// The packet space of TLS level `l`.
+pub open spec fn level_kind(l: Level) -> PacketKind {
+    match l {
+        Level::Initial => PacketKind::Initial,
+        Level::Handshake => PacketKind::Handshake,
+        Level::OneRtt => PacketKind::OneRtt,
+    }
+}
+
 fn kind(l: Level) -> (k: PacketKind)
     ensures
         (k is OneRtt) == (l is OneRtt),
+        k == level_kind(l),
 {
     match l {
         Level::Initial => PacketKind::Initial,
@@ -226,6 +236,11 @@ fn key_events(ev: &Vec<TlsEvent>) -> (r: (bool, bool))
         assert(i == ev.deep_view().len());
     }
     (hs, done)
+}
+
+/// From `o` to `c`: an open `c` was open in `o`, and every level drained in `o` still is.
+spec fn fed_kept(c: Connection, o: Connection) -> bool {
+    c.phase_spec() is Open ==> o.phase_spec() is Open && drained_kept(c, o)
 }
 
 pub struct QuicServer<'a> {
@@ -646,6 +661,20 @@ impl<'a> QuicServer<'a> {
             // §4.1.3: Initial data past what TLS had when it left Initial.
             !(old(self).level_spec() is Initial) && old(self).conn_spec().crypto_end_spec(PacketKind::Initial)
                 > old(self).init_end && old(self).conn_spec().phase_spec() is Open ==> !(final(self).conn_spec().phase_spec() is Open),
+            // Drain after feed: no level TLS read here is left holding an in-order byte TLS has
+            // not been given, so between datagrams each holds at most the out-of-order window.
+            final(self).conn_spec().phase_spec() is Open ==> {
+                &&& !(old(self).level is Initial) ==> crypto_drained(final(self).conn_spec(), PacketKind::Initial)
+                &&& !old(self).conn_spec().live(PacketKind::OneRtt) && old(self).level is Initial ==> crypto_drained(
+                    final(self).conn_spec(),
+                    PacketKind::Initial,
+                )
+                &&& !old(self).conn_spec().live(PacketKind::OneRtt) && !(final(self).level is OneRtt) ==> crypto_drained(
+                    final(self).conn_spec(),
+                    PacketKind::Handshake,
+                )
+                &&& old(self).conn_spec().live(PacketKind::OneRtt) ==> crypto_drained(final(self).conn_spec(), PacketKind::OneRtt)
+            },
     {
         let was = self.h3.conn().handshake_complete();
         if !self.superseded(now) {
@@ -695,6 +724,9 @@ impl<'a> QuicServer<'a> {
             final(self).level == old(self).level,
             !(old(self).level is Initial) && old(self).conn_spec().crypto_end_spec(PacketKind::Initial)
                 > old(self).init_end && old(self).conn_spec().phase_spec() is Open ==> !cont && !(final(self).conn_spec().phase_spec() is Open),
+            !cont ==> !(final(self).conn_spec().phase_spec() is Open),
+            cont ==> final(self).h3 == old(self).h3,
+            cont && !(old(self).level is Initial) ==> crypto_drained(final(self).conn_spec(), PacketKind::Initial),
     {
         if matches!(self.level, Level::Initial) {
             return true;
@@ -728,6 +760,9 @@ impl<'a> QuicServer<'a> {
             final(self).hs@.phase is Failed && !(old(self).hs@.phase is Failed) && !was
                 ==> final(self).keys@[2] is None,
             was ==> final(self).keys@[2] == old(self).keys@[2],
+            !cont ==> !(final(self).conn_spec().phase_spec() is Open),
+            fed_kept(final(self).conn_spec(), old(self).conn_spec()),
+            final(self).conn_spec().phase_spec() is Open ==> crypto_drained(final(self).conn_spec(), level_kind(l)),
     {
         hide(spec_on_crypto);
         let mut b: Vec<u8> = Vec::new();
@@ -790,6 +825,8 @@ impl<'a> QuicServer<'a> {
             final(self).wf(),
             final(self).conn_spec().out_log() == old(self).conn_spec().out_log(),
             final(self).hs == old(self).hs,
+            !ok ==> !(final(self).conn_spec().phase_spec() is Open),
+            fed_kept(final(self).conn_spec(), old(self).conn_spec()),
     {
         if !self.key_changes(&ev, now) {
             self.sync_keys();
@@ -806,6 +843,7 @@ impl<'a> QuicServer<'a> {
                 spec_key_events(ev.deep_view()).0 && self.level is Initial ==> self.conn_spec().crypto_end_spec(
                     PacketKind::Initial,
                 ) <= self.conn_spec().crypto_base_spec(PacketKind::Initial),
+                fed_kept(self.conn_spec(), old(self).conn_spec()),
             decreases ev.len() - i,
         {
             let ghost c0 = self.conn_spec();
@@ -899,6 +937,7 @@ impl<'a> QuicServer<'a> {
             final(self).hs == old(self).hs,
             ok ==> final(self).h3 == old(self).h3,
             ok && spec_key_events(ev.deep_view()).0 ==> old(self).unread(Level::Initial, PacketKind::Initial) == 0,
+            !ok ==> !(final(self).conn_spec().phase_spec() is Open),
     {
         let (to_hs, done) = key_events(ev);
         let ghost c0 = self.h3.conn_spec();
@@ -949,6 +988,8 @@ impl<'a> QuicServer<'a> {
             final(self).level == old(self).level,
             ok ==> final(self).conn_spec().crypto_end_spec(PacketKind::Initial) == old(self).conn_spec().crypto_end_spec(PacketKind::Initial),
             final(self).conn_spec().crypto_kept(old(self).conn_spec()),
+            !ok ==> !(final(self).conn_spec().phase_spec() is Open),
+            fed_kept(final(self).conn_spec(), old(self).conn_spec()),
     {
         let ghost c0 = self.h3.conn_spec();
         match parse_transport_params(b.as_slice(), true) {
@@ -1005,6 +1046,7 @@ impl<'a> QuicServer<'a> {
             final(self).level == old(self).level,
             final(self).conn_spec().crypto_end_spec(PacketKind::Initial) == old(self).conn_spec().crypto_end_spec(PacketKind::Initial),
             final(self).conn_spec().crypto_kept(old(self).conn_spec()),
+            fed_kept(final(self).conn_spec(), old(self).conn_spec()),
     {
         let ghost c0 = self.h3.conn_spec();
         self.h3.conn_mut().crypto_write(kind(l), data.as_slice());
@@ -1056,6 +1098,8 @@ impl<'a> QuicServer<'a> {
             final(self).conn_spec().out_log() == old(self).conn_spec().out_log(),
             final(self).hs == old(self).hs,
             final(self).level is OneRtt,
+            !ok ==> !(final(self).conn_spec().phase_spec() is Open),
+            fed_kept(final(self).conn_spec(), old(self).conn_spec()),
     {
         let alpn: &[u8] = &H3_ALPN;
         // `on_handshake_complete` sets HANDSHAKE_DONE owed in the call that completes, so the next

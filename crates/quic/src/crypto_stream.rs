@@ -118,6 +118,7 @@ impl CryptoStream {
             r.wf(),
             r.reassembly().inserted() == Seq::<(nat, Seq<u8>)>::empty(),
             r.reassembly().base() == 0,
+            crypto_contiguous(r) == 0,
     {
         let re = Reassembly::new();
         proof {
@@ -141,6 +142,7 @@ impl CryptoStream {
             final(self).reassembly().base() == old(self).end_spec(),
             final(self).reassembly().buf_len() == 0,
             final(self).history() == old(self).history(),
+            crypto_contiguous(*final(self)) == old(self).end_spec(),
     {
         proof {
             self.re.lemma_wf();
