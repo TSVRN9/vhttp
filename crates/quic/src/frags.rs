@@ -1074,6 +1074,7 @@ impl Frags {
 
     /// Adds each byte of `data` (at `off`) at a position at or past `lo` that is not held: the
     /// first writer wins. Runs that become adjacent are merged into one fragment.
+    // shortcut: the touched fragments are copied into the merged one and the list is shifted, O(held + count) per call (CRYPTO: at most 16384 + 4096); extend in place if profiles show it.
     pub fn insert(&mut self, lo: u64, off: u64, data: &[u8])
         requires
             old(self).wf(),
