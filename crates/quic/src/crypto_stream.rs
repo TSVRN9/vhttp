@@ -125,10 +125,16 @@ proof fn lemma_crypto_allowed_err_16385(s: CryptoStream)
 /// run holds a byte, so the runs are at most 4096 too.
 pub proof fn lemma_crypto_floor(s: CryptoStream, offset: u64, d: Seq<u8>)
     requires
-        ooo_held(s, offset, d) <= 4096,
+        // Stated over the RFC set itself, not through `ooo_held`, so that a redefinition of the
+        // predicate's quantities cannot carry the floor with it (rule 1d).
+        rfc_received(s.inserted().push((offset as nat, d))).dom().filter(
+            |p: nat| p > rfc_contiguous(rfc_received(s.inserted().push((offset as nat, d)))),
+        ).len() <= 4096,
     ensures
         forall|c: u64| !#[trigger] crypto_allowed_err(s, offset, d.len(), c),
 {
+    let m = rfc_received(s.inserted().push((offset as nat, d)));
+    assert(ooo_received(s, offset, d) =~= m.dom().filter(|p: nat| p > rfc_contiguous(m)));
     lemma_ooo_bytes_free(s, offset, d);
     lemma_runs_le_len(ooo_received(s, offset, d));
 }
