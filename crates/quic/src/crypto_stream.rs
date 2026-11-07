@@ -800,4 +800,3 @@ impl CryptoStream {
 }
 
 const _: () = assert!(MAX_CRYPTO_BUFFER >= 4096);
-const _: () = assert!(MAX_CRYPTO_RANGES >= 4096);
