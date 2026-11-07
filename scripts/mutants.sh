@@ -37,24 +37,27 @@ check() {
 one() {
     # cargo verus decides freshness by content (blake3) and ignores verus args, so an unchanged crate would be a cached
     # no-op that verifies nothing: clean it first (tools/mutants.py also fails a log without a results line).
-    (cd "$wt" && cargo clean -q -p "$2" --target-dir "$wt/target/verus-partial") < /dev/null > "$1.clean-cargo.log" 2>&1 || { : > "$1.json"; echo "cargo clean -p $2 failed" > "$1.log"; return 0; }
+    (cd "$wt" && cargo clean -q -p "$2" --target-dir "${CARGO_TARGET_DIR:-$wt/target}/verus-partial") < /dev/null > "$1.clean-cargo.log" 2>&1 || { : > "$1.json"; echo "cargo clean -p $2 failed" > "$1.log"; return 0; }
     (cd "$wt/crates/$2" && cargo verus focus -- --verify-only-module "$3" --verify-function "$4" --output-json --time-expanded) \
         < /dev/null > "$1.json" 2> "$1.log" || true
 }
 
-# tests LOGBASE CRATE TESTS WANT: each target:name of TESTS must print `test name ... WANT` (ok or FAILED).
+# tests LOGBASE CRATE TESTS WANT: each [package/]target:name of TESTS (package defaults to CRATE) must print
+# `test name ... WANT` (ok or FAILED); a misspelt name runs 0 tests and prints neither.
 tests() {
     [ "$3" = - ] && return 0
     for t in $(printf '%s\n' "$3" | tr ',' ' '); do
-        (cd "$wt" && cargo test -p "$2" --test "${t%%:*}" -- --exact "${t#*:}") < /dev/null > "$1.${t#*:}.log" 2>&1 || true
-        grep -qxF "test ${t#*:} ... $4" "$1.${t#*:}.log" || { echo "test ${t#*:} did not print '... $4' ($1.${t#*:}.log)"; return 1; }
+        p=$2 name=${t#*:} tgt=${t%%:*}
+        case $tgt in */*) p=${tgt%%/*} tgt=${tgt#*/} ;; esac
+        (cd "$wt" && cargo test -p "$p" --test "$tgt" -- --exact "$name") < /dev/null > "$1.$name.log" 2>&1 || true
+        grep -qxF "test $name ... $4" "$1.$name.log" || { echo "test $p/$tgt:$name did not print '... $4' ($1.$name.log)"; return 1; }
     done
 }
 
 run() {
     check > /dev/null
-    [ -z "$(git -C "$root" status --porcelain -- crates tools/mutants tools/mutants.tsv)" ] \
-        || fail "crates/ or the registry has uncommitted changes; the run uses HEAD, so commit first"
+    st=$(git -C "$root" status --porcelain -- crates tools/mutants tools/mutants.tsv tools/mutants.py scripts/mutants.sh) || fail "git status failed"
+    [ -z "$st" ] || fail "crates/, the registry or the mutants tools have uncommitted changes; the run uses HEAD, so commit first"
     rows=$(mpy rows "$tsv" "$pdir") || exit 1
     full=1
     if [ $# -gt 0 ]; then
@@ -122,17 +125,24 @@ EOF
 
 verify() {
     check
-    branch=$(git -C "$root" symbolic-ref -q --short HEAD) || branch=
-    if [ "$branch" = main ] && git -C "$root" rev-parse -q --verify HEAD^2 > /dev/null; then
+    head=$(git -C "$root" rev-parse HEAD) || fail "git rev-parse HEAD failed"
+    # main's tip, checked out as main or detached (a CI checkout); a missing main is no main tip, so check only
+    main=$(git -C "$root" rev-parse -q --verify refs/heads/main) || main=
+    if [ "$head" = "$main" ] && git -C "$root" rev-parse -q --verify HEAD^2 > /dev/null; then
         mpy gate "$root" || exit 1
     else
-        echo "mutants: not a merge commit on main (${branch:-detached}): merge gate not applicable, check only"
+        echo "mutants: HEAD is not a merge commit at main's tip: merge gate not applicable, check only"
     fi
 }
 
-case ${1:-} in
-check) check ;;
-run) shift; run "$@" ;;
-verify) verify ;;
-*) fail "usage: mutants.sh check | run [id..] | verify" ;;
-esac
+# One braced block, parsed whole before it runs: sh reads a script as it goes, so an edit to this file during a long
+# run would otherwise be executed from the middle (seen in the first full run).
+{
+    case ${1:-} in
+    check) check ;;
+    run) shift; run "$@" ;;
+    verify) verify ;;
+    *) fail "usage: mutants.sh check | run [id..] | verify" ;;
+    esac
+    exit
+}

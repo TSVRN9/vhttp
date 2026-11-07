@@ -61,6 +61,9 @@ bin=$(printf '%s\n' "$bin" | sed -n 's/^ct-binary: ok (\([0-9]*\) fns)$/\1/p')
 "$root/scripts/check-quotes.sh" || exit 1
 # Acceptance ratchet: every error-returning exec fn in verus! carries an allowed_ clause or is in the shrinking baseline.
 "$root/scripts/acceptance.sh" || exit 1
+# Mutant registry (C6): every tools/mutants/ patch applies; on main at a merge commit, tools/mutants-last-run.txt must
+# name the merged branch's crates tree (HEAD^2:crates) with every mutant killed (`scripts/mutants.sh run` on the branch).
+"$root/scripts/mutants.sh" verify || exit 1
 # Script hygiene: every scripts/*.sh has set -eu and pipefail.
 "$root/scripts/lint-scripts.sh" || exit 1
 # Gate demos: each cheap gate rejects its canned bad input.

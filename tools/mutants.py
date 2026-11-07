@@ -51,8 +51,8 @@ def rows(tsv, pdir):
             die('%s:%d: bad crate or module' % (tsv, n))
         if not re.fullmatch(r'[A-Za-z0-9_]+(::[A-Za-z0-9_]+)*', fn):
             die('%s:%d: fn %r must be a plain path (no wildcard: one fn per row)' % (tsv, n, fn))
-        if tests != '-' and not all(re.fullmatch(r'[a-z0-9_]+:[A-Za-z0-9_]+', t) for t in tests.split(',')):
-            die('%s:%d: tests must be - or target:name[,target:name..]' % (tsv, n))
+        if tests != '-' and not all(re.fullmatch(r'([a-z0-9_]+/)?[a-z0-9_]+:[A-Za-z0-9_]+', t) for t in tests.split(',')):
+            die('%s:%d: tests must be - or [package/]target:name[,..] (package defaults to the row\'s crate)' % (tsv, n))
         try:
             re.compile(rx, re.S)
         except re.error as e:
