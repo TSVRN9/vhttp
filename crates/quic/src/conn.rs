@@ -307,18 +307,27 @@ impl Connection {
 
     /// The Initial CRYPTO read offset has not gone back since `o`: with `crypto_read`'s drain,
     /// what quictls reads when TLS leaves Initial stays read (RFC 9001 §4.1.3). Nor has the
-    /// handshake's completion been undone.
+    /// handshake's completion been undone. Nor have the peer's transport parameters appeared:
+    /// only `on_peer_params` sets them (it ensures `crypto_kept_base`).
     pub closed spec fn crypto_kept(&self, o: Connection) -> bool {
+        &&& self.crypto_kept_base(o)
+        &&& self.peer_tp is Some ==> o.peer_tp is Some
+    }
+
+    /// `crypto_kept` without the transport-parameters frame.
+    pub closed spec fn crypto_kept_base(&self, o: Connection) -> bool {
         &&& self.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial)
         &&& o.complete ==> self.complete
     }
 
-    /// The three CRYPTO streams, and the handshake's completion, are as in `o`.
+    /// The three CRYPTO streams, and the handshake's completion, are as in `o`; no transport
+    /// parameters appeared.
     pub closed spec fn crypto_same(&self, o: Connection) -> bool {
         &&& self.crx_i == o.crx_i
         &&& self.crx_h == o.crx_h
         &&& self.crx_1 == o.crx_1
         &&& self.complete == o.complete
+        &&& self.peer_tp is Some ==> o.peer_tp is Some
     }
 
     /// A level whose space is discarded or not yet live holds no unread in-order byte: its packets
@@ -348,12 +357,30 @@ impl Connection {
     {
     }
 
+    pub proof fn lemma_crypto_kept_to_base(c: Connection, o: Connection)
+        requires
+            c.crypto_kept(o),
+        ensures
+            c.crypto_kept_base(o),
+    {
+    }
+
+    pub proof fn lemma_crypto_kept_base_elim(c: Connection, o: Connection)
+        requires
+            c.crypto_kept_base(o),
+        ensures
+            c.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial),
+            o.live(PacketKind::OneRtt) ==> c.live(PacketKind::OneRtt),
+    {
+    }
+
     pub proof fn lemma_crypto_kept_elim(c: Connection, o: Connection)
         requires
             c.crypto_kept(o),
         ensures
             c.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial),
             o.live(PacketKind::OneRtt) ==> c.live(PacketKind::OneRtt),
+            c.peer_tp_known_spec() ==> o.peer_tp_known_spec(),
     {
     }
 
@@ -534,6 +561,15 @@ impl Connection {
                 > MAX_CID_LEN || !local_tp_ok(local_tp@)),
             r matches Some(c) ==> c.wf() && c.out_log() == Seq::<SpecOutDatagram>::empty(),
             r matches Some(c) ==> c.odcid_spec() == first.dcid@,
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+            //# a mismatch between values received from a peer in these transport
+            //# parameters and the value sent in the corresponding Destination or
+            //# Source Connection ID fields of Initial packets.
+            // The value `on_peer_params` checks initial_source_connection_id against: the Source
+            // Connection ID field of the client's first Initial.
+            r matches Some(c) ==> c.client_scid_spec() == first.scid@,
+            // No transport parameters yet: TLS delivers them later (`on_peer_params`).
+            r matches Some(c) ==> !c.peer_tp_known_spec(),
     {
         if datagram_len < MIN_INITIAL_DATAGRAM || !is_local_tp_ok(local_tp) {
             return None;
@@ -3412,7 +3448,7 @@ impl Connection {
                 && final(self).close_spec() == Some((false, TRANSPORT_PARAMETER_ERROR, Seq::<u8>::empty())),
             !(old(self).phase_spec() is Open) ==> final(self).phase_spec() == old(self).phase_spec()
                 && final(self).close_spec() == old(self).close_spec(),
-            final(self).crypto_kept(*old(self)),
+            final(self).crypto_kept_base(*old(self)),
             final(self).crypto_end_spec(PacketKind::Initial) == old(self).crypto_end_spec(PacketKind::Initial),
             drained_kept(*final(self), *old(self)),
     {
