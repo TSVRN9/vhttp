@@ -255,6 +255,10 @@ echo '{"verification-results": {"success": true}}' > "$tmp/rl.json"
 expect_fail "rlimit-gate: truncated results object" "unreadable results" rl
 sed 's/"function-breakdown": \[[^]]*\]/"function-breakdown": []/' "$tmp/rlimit/quic.json" > "$tmp/rl.json"
 expect_fail "rlimit-gate: no rows" "no per-fn rows" rl
+sed 's/quic::conn::small", "rlimit": 120000/tls::big", "rlimit": 11000000/' "$tmp/rlimit/quic.json" > "$tmp/rl.json"
+expect_pass "rlimit-gate: a dependency's fn above the cap is not the gated crate's" rl
+sed 's/quic::conn/tls::conn/g' "$tmp/rlimit/quic.json" > "$tmp/rl.json"
+expect_fail "rlimit-gate: no fns of the gated crate" "no rows for fns of quic" rl
 rm -f "$tmp/rl.json"
 expect_fail "rlimit-gate: missing log" "cannot read" rl
 cat "$tmp/rlimit/quic.json" "$tmp/rlimit/quic.json" > "$tmp/rl.json"
