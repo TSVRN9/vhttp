@@ -76,7 +76,7 @@ T5-D6	quic	conn	Connection::on_handshake_complete	-	postcondition not satisfied.
 T7-M1	quic	crypto_stream	lemma_crypto_floor	crypto_stream:crypto_far_single_byte_ok	postcondition not satisfied.*crypto_allowed_err	9a T7 M1-span (rule 1d, crypto_allowed_err): the span limit restored in model and code
 T7-M2	quic	crypto_stream	lemma_crypto_floor	crypto_stream:crypto_range_limit	postcondition not satisfied.*crypto_allowed_err	9a T7 M2-ranges4095: MAX_CRYPTO_RANGES = 4095
 T7-M3b2	quic	frags	Frags::locate	crypto_stream:crypto_range_limit,crypto_stream:crypto_held_bytes_limit	postcondition not satisfied.*located\(	9a T7 fix round 1 M3b2 (the brief's M3, M3b regenerated on the binary-search locate): merging disabled in the code only
-T7-M4	quic	frags	Frags::insert	crypto_stream:crypto_dup_ooo_not_double_counted	postcondition not satisfied.*final\(self\)\.wf\(\)	9a T7 M4-held-dups: held += data.len() in Frags::insert
+T7-M4	quic	frags	Frags::insert	-	postcondition not satisfied.*final\(self\)\.wf\(\)	9a T7 M4-held-dups: held += data.len() in Frags::insert (9a T8: its test passes since T7 fix round 1, an exact duplicate now returns before the count)
 T7-M5	quic	conn	Connection::on_crypto_frame	-	postcondition not satisfied.*CRYPTO_BUFFER_EXCEEDED	9a T7 M5-noclose (rule 1b): delete on_crypto_frame's enter_closing
 T7-M6	quic	reassembly	Reassembly::insert	recv_stream:empty_stream_frame_keeps_window	postcondition not satisfied.*data@\.len\(\) == 0 ==>	9a T7 M6-empty-extends: Reassembly::insert loses its empty early return
 T7-M7	quic	crypto_stream	lemma_crypto_floor	-	postcondition not satisfied.*crypto_allowed_err	9a T7 fix round 1 (I2, rule 1d) M7-held-dups-model: ooo_held counts duplicates (model) and held += data.len() (code)
