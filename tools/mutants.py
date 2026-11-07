@@ -1,13 +1,16 @@
 # mutants.py: the parsing half of scripts/mutants.sh (C6 MUST ONLY TEST-PINNED). Run as python3 -I.
 #   rows TSV PATCHDIR        validate the registry, print one tab-separated row per line (id crate module fn tests regex)
-#   clean LOG CRATE MOD FN   the unmutated run of FN verified it: N >= 1 verified, 0 errors
-#   killed LOG CRATE MOD FN REGEX
-#                            the mutant run of FN failed for the stated reason: >= 1 error, REGEX (Python re, DOTALL)
-#                            found in a postcondition, precondition or assertion error block, no rlimit text
+#   clean BASE CRATE MOD FN  BASE.json (Verus --output-json --time-expanded) and BASE.log (its stderr): FN, and only FN,
+#                            was checked, and it verified (>= 1 verified, 0 errors), no rlimit text
+#   killed BASE CRATE MOD FN REGEX
+#                            the mutant run checked only FN and FN failed for the stated reason: >= 1 error, REGEX
+#                            (Python re, DOTALL) found in a postcondition, precondition or assertion error block of
+#                            BASE.log, no rlimit text
 #   gate ROOT                the merge gate, all read from ROOT's commits: HEAD:tools/mutants-last-run.txt names
 #                            HEAD^2:crates, HEAD:tools/mutants.tsv's blob, and every id of that tsv (no other) as
 #                            `pass` with the blob of HEAD:tools/mutants/<id>.patch
 # Every mode exits 1 with a "mutants: ..." message on failure, and fails closed on a missing or empty input.
+import json
 import os
 import re
 import subprocess
@@ -75,33 +78,52 @@ def rows(tsv, pdir):
         print('\t'.join(r))
 
 
-def scan(log, crate, mod, fn):
-    text = read(log)
-    note = 'note: verifying module %s, function %s::%s::%s (selected functions)' % (mod, crate, mod, fn)
-    if note not in text.split('\n'):
-        die('%s: no "%s" line (wrong fn, an ambiguous name, or Verus did not run)' % (log, note))
-    res = re.findall(r'^verification results:: (\d+) verified, (\d+) errors', text, re.M)
-    if len(res) != 1:
-        die('%s: %d verification results lines, want 1 (a cached or failed build verifies nothing)' % (log, len(res)))
+def scan(base, crate, mod, fn):
+    """BASE.json is Verus's --output-json --time-expanded stdout, BASE.log its stderr. Returns (log text, verified,
+    errors, success of FN's row); FN must be the only fn Verus spent rlimit on."""
+    fqn = '%s::%s::%s' % (crate, mod, fn)
+    raw, dec, objs, i = read(base + '.json'), json.JSONDecoder(), [], 0
+    while True:
+        j = raw.find('{', i)
+        if j < 0:
+            break
+        try:
+            o, e = dec.raw_decode(raw[j:])
+        except ValueError:
+            die('%s.json: unreadable JSON at offset %d' % (base, j))
+        objs.append(o)
+        i = j + e
+    if len(objs) != 1 or not isinstance(objs[0].get('verification-results'), dict):
+        die('%s.json: %d Verus result objects, want 1 (a cached build, a compile error or a crash verifies nothing)'
+            % (base, len(objs)))
+    vr = objs[0]['verification-results']
+    if vr.get('encountered-vir-error') is not False or vr.get('is-verifying-entire-crate') is not False:
+        die('%s.json: a VIR error, or not a --verify-function run: %s' % (base, vr))
+    rows = [e for m in objs[0].get('times-ms', {}).get('smt', {}).get('smt-run-module-times', [])
+            for e in m.get('function-breakdown', [])]
+    ran = sorted({e.get('function') for e in rows if e.get('rlimit', 0) > 0 or e.get('success') is not True})
+    if ran != [fqn]:
+        die('%s.json: Verus checked %s, want exactly %s (wrong or ambiguous fn name)' % (base, ran or 'no fn', fqn))
+    text = read(base + '.log')
     if re.search('rlimit', text, re.I):
-        die('%s: rlimit text in the log (an rlimit failure is not a kill, and a clean run must not hit it)' % log)
-    return text, int(res[0][0]), int(res[0][1])
+        die('%s.log: rlimit text (an rlimit failure is not a kill, and the clean run must not hit it)' % base)
+    ok = all(e.get('success') is True for e in rows if e.get('function') == fqn)
+    return text, vr.get('verified'), vr.get('errors'), ok
 
 
-def clean(log, crate, mod, fn):
-    _, ok, bad = scan(log, crate, mod, fn)
-    if ok < 1 or bad != 0:
-        die('%s: unmutated %s::%s gives %d verified, %d errors (want >= 1, 0)' % (log, mod, fn, ok, bad))
+def clean(base, crate, mod, fn):
+    _, ok, bad, good = scan(base, crate, mod, fn)
+    if not isinstance(ok, int) or ok < 1 or bad != 0 or not good:
+        die('%s: unmutated %s::%s gives %s verified, %s errors (want >= 1, 0)' % (base, mod, fn, ok, bad))
 
 
-def killed(log, crate, mod, fn, rx):
-    text, _, bad = scan(log, crate, mod, fn)
-    if bad < 1:
-        die('%s: the mutant still verifies %s::%s (0 errors)' % (log, mod, fn))
+def killed(base, crate, mod, fn, rx):
+    text, _, bad, good = scan(base, crate, mod, fn)
+    if not isinstance(bad, int) or bad < 1 or good:
+        die('%s: the mutant still verifies %s::%s (%s errors)' % (base, mod, fn, bad))
     blocks = re.split(r'\n(?=error)', text)
-    hit = [b for b in blocks if b.split('\n', 1)[0].strip() in KINDS and re.search(rx, b, re.S)]
-    if not hit:
-        die('%s: %d errors, but no postcondition/precondition/assertion block matches %r' % (log, bad, rx))
+    if not any(b.split('\n', 1)[0].strip() in KINDS and re.search(rx, b, re.S) for b in blocks):
+        die('%s.log: %d errors, but no postcondition/precondition/assertion block matches %r' % (base, bad, rx))
 
 
 def git(root, *args):
