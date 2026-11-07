@@ -30,6 +30,38 @@ fn crypto_limit() {
 }
 
 #[test]
+fn crypto_empty_past_window_ok() {
+    let mut c = CryptoStream::new();
+    assert_eq!(c.on_crypto(16385, &[]), Ok(()));
+    assert_eq!(c.on_crypto(1 << 40, &[]), Ok(()));
+    assert_eq!(c.end(), 0);
+    assert_eq!(c.on_crypto(16384, &[1]), Err(CRYPTO_BUFFER_EXCEEDED));
+}
+
+#[test]
+fn crypto_empty_keeps_end() {
+    let mut c = CryptoStream::new();
+    assert_eq!(c.on_crypto(0, &[1; 10]), Ok(()));
+    assert_eq!(c.on_crypto(100, &[]), Ok(()));
+    assert_eq!(c.end(), 10);
+    assert_eq!(read(&mut c), [1; 10]);
+    assert_eq!(c.end(), 10);
+}
+
+/// The window counts only out-of-order bytes (RFC 9000 §7.5): it is anchored at the contiguous
+/// end, not the read offset, so unread in-order data does not use it up.
+#[test]
+fn crypto_window_from_contiguous() {
+    let mut c = CryptoStream::new();
+    assert_eq!(c.on_crypto(0, &[1; 13000]), Ok(()));
+    assert_eq!(c.on_crypto(16000, &[2; 500]), Ok(()));
+    assert_eq!(c.end(), 16500);
+    assert_eq!(c.on_crypto(13000 + 16383, &[3]), Ok(()));
+    assert_eq!(c.on_crypto(13000 + 16384, &[3]), Err(CRYPTO_BUFFER_EXCEEDED));
+    assert_eq!(read(&mut c).len(), 13000);
+}
+
+#[test]
 fn crypto_duplicate() {
     let mut c = CryptoStream::new();
     let d: Vec<u8> = (1..=10).collect();

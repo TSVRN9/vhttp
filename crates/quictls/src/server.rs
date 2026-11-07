@@ -81,6 +81,17 @@ fn kind(l: Level) -> (k: PacketKind)
     }
 }
 
+//= https://www.rfc-editor.org/rfc/rfc9000#section-16
+//# This means that integers are encoded on 1, 2, 4, or 8 bytes and can
+//# encode 6-, 14-, 30-, or 62-bit values, respectively.
+//= https://www.rfc-editor.org/rfc/rfc9000#section-20.1
+//# INTERNAL_ERROR (0x01):  The endpoint encountered an internal error
+//# and cannot continue with the connection.
+/// The close code `report` passes to the connection.
+spec fn report_code(code: u64) -> u64 {
+    if code <= 0x3fff_ffff_ffff_ffff { code } else { INTERNAL_ERROR }
+}
+
 /// `close` with no reason.
 #[verifier::spinoff_prover]
 fn shut(c: &mut Connection, code: u64, now: u64)
@@ -90,12 +101,21 @@ fn shut(c: &mut Connection, code: u64, now: u64)
     ensures
         final(c).wf(),
         final(c).out_log() == old(c).out_log(),
-        old(c).phase_spec() is Open ==> !(final(c).phase_spec() is Open),
+        old(c).phase_spec() is Open ==> final(c).phase_spec() is Closing
+            && final(c).close_spec() == Some((false, code, Seq::<u8>::empty())),
+        !(old(c).phase_spec() is Open) ==> final(c).phase_spec() == old(c).phase_spec()
+            && final(c).close_spec() == old(c).close_spec(),
 {
     let none: Vec<u8> = Vec::new();
     c.close(code, false, none.as_slice(), now);
 }
 
+//= https://www.rfc-editor.org/rfc/rfc9001#section-4.8
+//# A TLS alert is converted into a QUIC connection error.  The
+//# AlertDescription value is added to 0x0100 to produce a QUIC error
+//# code from the range reserved for CRYPTO_ERROR; see Section 20.1 of
+//# [QUIC-TRANSPORT].  The resulting value is sent in a QUIC
+//# CONNECTION_CLOSE frame of type 0x1c.
 //= https://www.rfc-editor.org/rfc/rfc9001#section-4.8
 //# As QUIC provides
 //# alternative mechanisms for connection termination and the TLS
@@ -117,9 +137,10 @@ fn shut(c: &mut Connection, code: u64, now: u64)
 //# Upon receiving an error alert, the TLS implementation
 //# SHOULD indicate an error to the application and MUST NOT allow any
 //# further data to be sent or received on the connection.
-// Every TLS error is passed to a close (not an ensures: `tampered_finished_0x133`, `error_ranges` and
-// `a2_closes_0x178` pin the close and its code), the alert as CRYPTO_ERROR_BASE + alert, which is how QUIC
-// sends alert X; the closing state sends only CONNECTION_CLOSE (3d). The quoted sentence is about
+// Every TLS error is passed to a close, and the ensures pins its code: the alert as CRYPTO_ERROR_BASE + alert,
+// which is how QUIC sends alert X; a transport code (0x0a, 0x0d) as it is; anything past VARINT_MAX as
+// INTERNAL_ERROR. `tampered_finished_0x133`, `error_ranges` and `a2_closes_0x178` are regression checks.
+// The closing state sends only CONNECTION_CLOSE (3d). The quoted sentence is about
 // receiving an error alert, whose QUIC image is a peer CONNECTION_CLOSE: conn.rs enters draining,
 // which sends and processes nothing (RFC 9000 §10.2.2). `on_crypto` also returns transport codes
 // (0x0a, 0x0d), which close as they are.
@@ -142,6 +163,10 @@ fn report(c: &mut Connection, code: u64, now: u64)
     ensures
         final(c).wf(),
         final(c).out_log() == old(c).out_log(),
+        old(c).phase_spec() is Open ==> final(c).phase_spec() is Closing
+            && final(c).close_spec() == Some((false, report_code(code), Seq::<u8>::empty())),
+        !(old(c).phase_spec() is Open) ==> final(c).phase_spec() == old(c).phase_spec()
+            && final(c).close_spec() == old(c).close_spec(),
 {
     if CRYPTO_ERROR_BASE <= code && code <= CRYPTO_ERROR_BASE + 0xff {
         c.on_tls_alert((code - CRYPTO_ERROR_BASE) as u8, now);
@@ -525,8 +550,8 @@ impl<'a> QuicServer<'a> {
         None
     }
 
-    // With `crypto_read`'s `MAX_CRYPTO_BUFFER` bound, each `on_crypto` gets at most that many
-    // bytes, and `theorem_reader_bound` keeps each TLS reader under `4 + MAX_HS_BODY`.
+    // `crypto_read` gives each `on_crypto` at most the buffered CRYPTO bytes (`crypto_end -
+    // crypto_base`), and `theorem_reader_bound` keeps each TLS reader under `4 + MAX_HS_BODY`.
     /// The CRYPTO data of this datagram to TLS, and TLS's events back. Before completion it feeds
     /// Initial and Handshake from TLS's level up; after, only OneRtt (1-RTT CRYPTO arrives only
     /// once complete: a 1-RTT packet is opened only then, RFC 9001 §5.7).

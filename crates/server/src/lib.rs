@@ -148,13 +148,15 @@ pub fn fill_random(b: &mut [u8]) -> io::Result<()> {
 
 type Rng = fn(&mut [u8]) -> io::Result<()>;
 
-/// One fresh `Rand`; each array is filled by its own call.
+/// One fresh `Rand`, from a single `rng` call.
 fn rand(rng: Rng) -> io::Result<Rand> {
+    let mut b = [0u8; 3 * RAND_LEN + TLS_RAND_LEN];
+    rng(&mut b)?;
     let mut r = Rand { conn: [0; RAND_LEN], refeed: [0; RAND_LEN], complete: [0; RAND_LEN], tls: [0; TLS_RAND_LEN] };
-    rng(&mut r.conn)?;
-    rng(&mut r.refeed)?;
-    rng(&mut r.complete)?;
-    rng(&mut r.tls)?;
+    r.conn.copy_from_slice(&b[..RAND_LEN]);
+    r.refeed.copy_from_slice(&b[RAND_LEN..2 * RAND_LEN]);
+    r.complete.copy_from_slice(&b[2 * RAND_LEN..3 * RAND_LEN]);
+    r.tls.copy_from_slice(&b[3 * RAND_LEN..]);
     Ok(r)
 }
 

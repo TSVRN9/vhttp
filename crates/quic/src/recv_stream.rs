@@ -255,6 +255,216 @@ pub open spec fn retired(s: SpecRecv) -> nat {
     }
 }
 
+//= https://www.rfc-editor.org/rfc/rfc9000#section-19.10
+//# When counting data toward this limit, an endpoint accounts for the
+//# largest received offset of data that is sent or received on the
+//# stream.
+//= https://www.rfc-editor.org/rfc/rfc9000#section-19.8
+//# The largest offset delivered on a stream -- the sum of the offset and
+//# data length
+//= https://www.rfc-editor.org/rfc/rfc9000#section-19.8
+//# When a Stream Data field has a length of 0, the offset in the STREAM
+//# frame is the offset of the next byte that would be sent.
+/// The largest received offset of the STREAM frames `ins`: the largest offset plus data length,
+/// an empty frame's offset included (the next byte its sender would send), or 0.
+pub open spec fn largest_received_offset(ins: Seq<(nat, Seq<u8>)>) -> nat
+    decreases ins.len(),
+{
+    if ins.len() == 0 {
+        0
+    } else {
+        let p = largest_received_offset(ins.drop_last());
+        let e = ins.last().0 + ins.last().1.len();
+        if e > p {
+            e
+        } else {
+            p
+        }
+    }
+}
+
+//= https://www.rfc-editor.org/rfc/rfc9000#section-4.5
+//# The final size is the amount of flow control credit that is consumed
+//# by a stream.
+/// The flow control credit the stream has consumed: its final size once known, else the
+/// largest received offset of the frames received (§19.10).
+#[verifier::opaque]
+pub open spec fn credit_before(s: SpecRecv) -> nat {
+    match s.final_size {
+        Some(f) => f,
+        None => largest_received_offset(s.ins),
+    }
+}
+
+/// The flow control credit the stream has consumed once a STREAM frame ending at `end` is
+/// received: its final size once known (the frame's own with a FIN), else the largest received
+/// offset with the frame's.
+#[verifier::opaque]
+pub open spec fn credit_after(s: SpecRecv, end: nat, fin: bool) -> nat {
+    if fin {
+        end
+    } else if s.final_size is Some {
+        s.final_size->0
+    } else if end > largest_received_offset(s.ins) {
+        end
+    } else {
+        largest_received_offset(s.ins)
+    }
+}
+
+//= https://www.rfc-editor.org/rfc/rfc9000#section-20.1
+//# FINAL_SIZE_ERROR (0x06):  (1) An endpoint received a STREAM frame
+//# containing data that exceeded the previously established final
+//# size, (2) an endpoint received a STREAM frame or a RESET_STREAM
+//# frame containing a final size that was lower than the size of
+//# stream data that was already received, or (3) an endpoint received
+//# a STREAM frame or a RESET_STREAM frame containing a different
+//# final size to the one already established.
+/// A STREAM frame ending at `end` that is a final-size error, before it is received in `s`:
+/// data past the known final size, a final size below the largest received offset, or a
+/// final size different from the known one.
+#[verifier::opaque]
+pub open spec fn final_size_trigger(s: SpecRecv, end: nat, fin: bool) -> bool {
+    ||| s.final_size is Some && end > s.final_size->0
+    ||| fin && end < largest_received_offset(s.ins)
+    ||| fin && s.final_size is Some && end != s.final_size->0
+}
+
+//= https://www.rfc-editor.org/rfc/rfc9000#section-4.1
+//# A receiver MUST close the connection with an error of type
+//# FLOW_CONTROL_ERROR if the sender violates the advertised connection
+//# or stream data limits; see Section 11 for details on error handling.
+/// A STREAM frame ending at `end` that violates a limit we advertised: the stream's (`s.limit`,
+/// the largest maximum stream data sent, §19.10) or the connection's, of which `conn_room`
+/// bytes of credit are left for this stream to consume past what it has (`credit_before`).
+#[verifier::opaque]
+pub open spec fn flow_trigger(s: SpecRecv, end: nat, fin: bool, conn_room: nat) -> bool {
+    ||| end > s.limit
+    ||| credit_after(s, end, fin) > credit_before(s) + conn_room
+}
+
+//= https://www.rfc-editor.org/rfc/rfc9000#section-11
+//# In particular, an endpoint MAY use any applicable error
+//# code when it detects an error condition; a generic error code (such
+//# as PROTOCOL_VIOLATION or INTERNAL_ERROR) can always be used in place
+//# of specific error codes.
+/// The errors `on_data` may return for a STREAM frame at `off` with `len` bytes: FINAL_SIZE_ERROR
+/// on a final-size trigger (§4.5's SHOULDs, which we raise), FLOW_CONTROL_ERROR on a limit
+/// violation (§4.1's MUST). With both triggers either code applies (§11).
+#[verifier::opaque]
+pub open spec fn recv_allowed_err(
+    s: SpecRecv,
+    off: nat,
+    len: nat,
+    fin: bool,
+    conn_room: nat,
+    c: u64,
+) -> bool {
+    ||| c == FINAL_SIZE_ERROR && final_size_trigger(s, off + len, fin)
+    ||| c == FLOW_CONTROL_ERROR && flow_trigger(s, off + len, fin, conn_room)
+}
+
+/// The model's STREAM errors are the RFC's, both ways: every error `recv_data` (or the
+/// connection credit check after it) raises has its trigger, and every trigger raises one, a
+/// final-size trigger as FINAL_SIZE_ERROR. A model stricter than the RFC fails the first two.
+pub proof fn lemma_recv_err_rfc(
+    id: u64,
+    s: SpecRecv,
+    off: nat,
+    data: Seq<u8>,
+    fin: bool,
+    conn_room: nat,
+)
+    requires
+        recv_inv(id, s),
+        s.err is None,
+    ensures
+        ({
+            let s2 = recv_data(id, s, off, data, fin);
+            let end = off + data.len();
+            &&& s2.err matches Some(c) ==> recv_allowed_err(s, off, data.len(), fin, conn_room, c)
+            &&& (s2.err is None && counted(s2) - counted(s) > conn_room) ==> recv_allowed_err(
+                s,
+                off,
+                data.len(),
+                fin,
+                conn_room,
+                FLOW_CONTROL_ERROR,
+            )
+            &&& final_size_trigger(s, end, fin) ==> s2.err == Some(FINAL_SIZE_ERROR)
+            &&& (flow_trigger(s, end, fin, conn_room) && !final_size_trigger(s, end, fin)) ==> (
+            s2.err == Some(FLOW_CONTROL_ERROR) || (s2.err is None && counted(s2) - counted(s)
+                > conn_room))
+        }),
+{
+    reveal(credit_before);
+    reveal(credit_after);
+    reveal(final_size_trigger);
+    reveal(flow_trigger);
+    reveal(recv_allowed_err);
+    let end = off + data.len();
+    assert(counted(s) == credit_before(s));
+    assert(data_final_bad(s, end, fin) <==> final_size_trigger(s, end, fin));
+    if !data_final_bad(s, end, fin) && end <= s.limit {
+        if terminal(s.state) {
+            assert(credit_after(s, end, fin) == counted(s));
+        } else {
+            assert(counted(recv_data(id, s, off, data, fin)) == credit_after(s, end, fin));
+        }
+    }
+}
+
+/// `Reassembly::insert`, keeping the window tight: empty data is recorded without touching
+/// the buffers, since inserting it past the window's end would extend the window with
+/// unreceived slots (split from `data_buffer` for the rlimit).
+fn insert_tight(re: &mut Reassembly, off: u64, data: &[u8])
+    requires
+        old(re).wf(),
+        old(re).tight(),
+        off + data@.len() <= VARINT_MAX,
+    ensures
+        final(re).wf(),
+        final(re).tight(),
+        final(re).inserted() == old(re).inserted().push((off as nat, data@)),
+        final(re).base() == old(re).base(),
+        final(re).base() + final(re).buf_len() <= if old(re).base() + old(re).buf_len() >= off
+            + data@.len() {
+            old(re).base() + old(re).buf_len()
+        } else {
+            off + data@.len()
+        },
+{
+    let ghost re0 = *re;
+    if data.len() > 0 {
+        re.insert(off, data);
+    } else {
+        re.insert_empty(off, data);
+    }
+    proof {
+        if off + data@.len() <= re0.base() + re0.buf_len() {
+            Reassembly::lemma_insert_tight_within(re0, *re, off, data@);
+        } else if data@.len() > 0 {
+            Reassembly::lemma_insert_tight(re0, *re, off, data@);
+        }
+    }
+}
+
+/// `recv_allowed_err` is not vacuous: 10 bytes inside a 100-byte window with room raise
+/// nothing, and an unrelated code is never allowed.
+proof fn lemma_recv_allowed_err_rejects()
+    ensures
+        !recv_allowed_err(recv_init(100), 0, 10, false, 1000, FLOW_CONTROL_ERROR),
+        !recv_allowed_err(recv_init(100), 0, 10, true, 1000, FINAL_SIZE_ERROR),
+        !recv_allowed_err(recv_init(100), 0, 200, false, 1000, PROTOCOL_VIOLATION),
+        recv_allowed_err(recv_init(100), 0, 200, false, 1000, FLOW_CONTROL_ERROR),
+{
+    reveal(credit_before);
+    reveal(credit_after);
+    reveal(final_size_trigger);
+    reveal(flow_trigger);
+    reveal(recv_allowed_err);
+}
+
 /// The concatenated `Data` payloads.
 pub open spec fn data_of(evs: Seq<SpecStreamEvent>) -> Seq<u8>
     decreases evs.len(),
@@ -303,6 +513,9 @@ pub open spec fn recv_inv(id: u64, s: SpecRecv) -> bool {
     &&& s.delivered == rfc_contiguous(m)
     &&& forall|k: nat| #[trigger] m.contains_key(k) ==> k < s.high
     &&& s.delivered <= s.high <= counted(s) <= s.limit
+    // `high` is the RFC's largest received offset until the final size is known (§19.10).
+    &&& largest_received_offset(s.ins) <= s.high
+    &&& s.final_size is None ==> s.high == largest_received_offset(s.ins)
     &&& (s.state is Recv <==> s.final_size is None)
     &&& s.state is SizeKnown ==> s.final_size != Some(s.delivered)
     &&& s.state is DataRead ==> s.final_size == Some(s.delivered)
@@ -353,6 +566,7 @@ proof fn lemma_data_step(id: u64, s: SpecRecv, off: nat, data: Seq<u8>, fin: boo
     }
     let m = rfc_received(s.ins);
     let ins = s.ins.push((off, data));
+    assert(ins.drop_last() =~= s.ins);
     let m2 = rfc_received(ins);
     let n = rfc_contiguous(m2);
     let d = s.delivered;
@@ -923,6 +1137,8 @@ impl RecvStream {
         &&& self.stopped matches Some(c) ==> c <= VARINT_MAX
         &&& (self.re is None <==> s.state is ResetRead)
         &&& self.re matches Some(r) ==> r.wf() && r.inserted() == s.ins && r.base() == s.delivered
+        // The window ends at a received byte: an empty STREAM frame does not grow it.
+        &&& self.re matches Some(r) ==> r.tight()
         // The per-stream buffer bound, from `insert`'s and `pop`'s high-water ensures.
         &&& self.buffered_len_spec() <= s.limit - s.delivered
         &&& self.buffered_len_spec() <= counted(s) - retired(s)
@@ -967,10 +1183,14 @@ impl RecvStream {
             r.stop_code() is None,
             r.pending_stop() is None,
     {
+        let re = Reassembly::new();
+        proof {
+            re.lemma_new_tight();
+        }
         let r = RecvStream {
             id,
             state: RecvState::Recv,
-            re: Some(Reassembly::new()),
+            re: Some(re),
             high: 0,
             final_size: None,
             credit: RecvCredit::new(window, VARINT_MAX),
@@ -1252,6 +1472,22 @@ impl RecvStream {
             } else {
                 old(self).pending_stop()
             },
+            r matches Err(c) ==> recv_allowed_err(
+                old(self).rfc(),
+                off as nat,
+                data@.len(),
+                fin,
+                conn_room as nat,
+                c,
+            ),
+            final_size_trigger(old(self).rfc(), off as nat + data@.len(), fin) ==> r == Err::<u64, u64>(
+                FINAL_SIZE_ERROR,
+            ),
+            (flow_trigger(old(self).rfc(), off as nat + data@.len(), fin, conn_room as nat)
+                && !final_size_trigger(old(self).rfc(), off as nat + data@.len(), fin)) ==> r == Err::<
+                u64,
+                u64,
+            >(FLOW_CONTROL_ERROR),
     {
         let ghost t2 = self.trace@.push(SpecRecvIn::Data { off: off as nat, data: data@, fin });
         let ghost s1 = self.rfc();
@@ -1261,7 +1497,69 @@ impl RecvStream {
                 data: data@,
                 fin,
             });
+        }
+        let n_new = match self.data_gate(off, data, fin, conn_room) {
+            Ok(n) => n,
+            Err(c) => {
+                return Err(c);
+            },
+        };
+        if self.is_terminal() {
+            self.trace = Ghost(t2);
+            proof {
+                assert(rfc_recv(self.id, self.credit.window_spec(), t2).events.skip(
+                    s1.events.len() as int,
+                ) =~= Seq::<SpecStreamEvent>::empty());
+                assert(event_views(ev@) =~= event_views(ev@) + Seq::<SpecStreamEvent>::empty());
+            }
+            return Ok(0);
+        }
+        self.data_buffer(off, data, fin, ev);
+        Ok(n_new)
+    }
+
+    /// `on_data`'s flow-control and final-size half: the error the frame raises, else the
+    /// connection credit it consumes (split from `on_data` for the rlimit).
+    #[verifier::spinoff_prover]
+    fn data_gate(&self, off: u64, data: &[u8], fin: bool, conn_room: u64) -> (r: Result<u64, u64>)
+        requires
+            self.wf(),
+            off + data@.len() <= VARINT_MAX,
+        ensures
+            ({
+                let s1 = self.rfc();
+                let s2 = recv_data(self.id_spec(), s1, off as nat, data@, fin);
+                &&& s2.err matches Some(c) ==> r == Err::<u64, u64>(c)
+                &&& (s2.err is None && counted(s2) - counted(s1) > conn_room) ==> r == Err::<
+                    u64,
+                    u64,
+                >(FLOW_CONTROL_ERROR)
+                &&& (s2.err is None && counted(s2) - counted(s1) <= conn_room) ==> r == Ok::<
+                    u64,
+                    u64,
+                >((counted(s2) - counted(s1)) as u64)
+            }),
+            r matches Err(c) ==> recv_allowed_err(
+                self.rfc(),
+                off as nat,
+                data@.len(),
+                fin,
+                conn_room as nat,
+                c,
+            ),
+            final_size_trigger(self.rfc(), off as nat + data@.len(), fin) ==> r == Err::<u64, u64>(
+                FINAL_SIZE_ERROR,
+            ),
+            (flow_trigger(self.rfc(), off as nat + data@.len(), fin, conn_room as nat)
+                && !final_size_trigger(self.rfc(), off as nat + data@.len(), fin)) ==> r == Err::<
+                u64,
+                u64,
+            >(FLOW_CONTROL_ERROR),
+    {
+        proof {
             self.credit.lemma_wf();
+            self.lemma_wf();
+            lemma_recv_err_rfc(self.id, self.rfc(), off as nat, data@, fin, conn_room as nat);
         }
         let end = off + data.len() as u64;
         let bad = match self.final_size {
@@ -1298,13 +1596,6 @@ impl RecvStream {
             return Err(FLOW_CONTROL_ERROR);
         }
         if self.is_terminal() {
-            self.trace = Ghost(t2);
-            proof {
-                assert(rfc_recv(self.id, self.credit.window_spec(), t2).events.skip(
-                    s1.events.len() as int,
-                ) =~= Seq::<SpecStreamEvent>::empty());
-                assert(event_views(ev@) =~= event_views(ev@) + Seq::<SpecStreamEvent>::empty());
-            }
             return Ok(0);
         }
         let fs = if fin {
@@ -1325,6 +1616,62 @@ impl RecvStream {
         if n_new > conn_room {
             return Err(FLOW_CONTROL_ERROR);
         }
+        Ok(n_new)
+    }
+
+    /// `on_data`'s buffering half: the frame passed `data_gate` and the stream is not
+    /// terminal; its bytes are reassembled and the newly contiguous ones delivered (split from
+    /// `on_data` for the rlimit).
+    #[verifier::spinoff_prover]
+    fn data_buffer(&mut self, off: u64, data: &[u8], fin: bool, ev: &mut Vec<StreamEvent>)
+        requires
+            old(self).wf(),
+            off + data@.len() <= VARINT_MAX,
+            !terminal(old(self).rfc().state),
+            recv_data(old(self).id_spec(), old(self).rfc(), off as nat, data@, fin).err is None,
+        ensures
+            final(self).id_spec() == old(self).id_spec(),
+            final(self).window_spec() == old(self).window_spec(),
+            final(self).wf(),
+            ({
+                let t2 = old(self).trace().push(
+                    SpecRecvIn::Data { off: off as nat, data: data@, fin },
+                );
+                let s1 = old(self).rfc();
+                let s2 = rfc_recv(old(self).id_spec(), old(self).window_spec(), t2);
+                &&& final(self).trace() == t2
+                &&& event_views(final(ev)@) == event_views(old(ev)@) + s2.events.skip(
+                    s1.events.len() as int,
+                )
+            }),
+            final(self).stop_code() == old(self).stop_code(),
+            final(self).pending_stop() == if terminal(final(self).rfc().state) {
+                None
+            } else {
+                old(self).pending_stop()
+            },
+    {
+        let ghost t2 = self.trace@.push(SpecRecvIn::Data { off: off as nat, data: data@, fin });
+        let ghost s1 = self.rfc();
+        proof {
+            lemma_recv_push(self.id, self.credit.window_spec(), self.trace@, SpecRecvIn::Data {
+                off: off as nat,
+                data: data@,
+                fin,
+            });
+            self.credit.lemma_wf();
+        }
+        let end = off + data.len() as u64;
+        let fs = if fin {
+            Some(end)
+        } else {
+            self.final_size
+        };
+        let high = if end > self.high {
+            end
+        } else {
+            self.high
+        };
         let mut re = match self.re.take() {
             Some(r) => r,
             None => Reassembly::new(),  // unreachable: `re` is Some unless ResetRead
@@ -1333,11 +1680,13 @@ impl RecvStream {
             re.lemma_wf();
         }
         let delivered = re.base_exec();
-        re.insert(off, data);
+        insert_tight(&mut re, off, data);
+        let ghost re1 = re;
         let mut out: Vec<u8> = Vec::new();
         re.pop(&mut out);
         let n = re.base_exec();
         proof {
+            Reassembly::lemma_pop_tight(re1, re);
             re.lemma_wf();
         }
         let done = match fs {
@@ -1382,7 +1731,6 @@ impl RecvStream {
         proof {
             assert(self.wf());
         }
-        Ok(n_new)
     }
 
     /// A RESET_STREAM frame's error code and final size, with `conn_room` bytes of connection
@@ -1488,3 +1836,15 @@ impl RecvStream {
 }
 
 } // verus!
+
+impl RecvStream {
+    /// Test support: the allocated capacities of the reassembly buffers, `(0, 0)` once reset.
+    /// Verus models `Vec` length, not capacity (TRUSTED.md).
+    #[doc(hidden)]
+    pub fn capacities(&self) -> (usize, usize) {
+        match &self.re {
+            Some(r) => r.capacities(),
+            None => (0, 0),
+        }
+    }
+}

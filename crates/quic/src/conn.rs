@@ -175,6 +175,11 @@ pub open spec fn tokens_covered(s: Seq<CidUpdate>, before: Seq<[u8; 16]>, after:
         )
 }
 
+/// The reason phrase a close keeps: its first 64 bytes (`Lifecycle::enter_closing`'s cap).
+pub open spec fn reason_cap(r: Seq<u8>) -> Seq<u8> {
+    r.take(if r.len() > 64 { 64int } else { r.len() as int })
+}
+
 // =============================================================================
 // The connection
 // =============================================================================
@@ -277,6 +282,31 @@ impl Connection {
         }
     }
 
+    /// The end of level `k`'s in-order CRYPTO data (`crypto_contiguous`).
+    pub closed spec fn crypto_contiguous_spec(&self, k: PacketKind) -> nat {
+        match k {
+            PacketKind::Initial => crypto_contiguous(self.crx_i),
+            PacketKind::Handshake => crypto_contiguous(self.crx_h),
+            PacketKind::OneRtt => crypto_contiguous(self.crx_1),
+        }
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-4.1.3
+    //# *  If the packet is from a previously installed encryption level, it
+    //# MUST NOT contain data that extends past the end of previously
+    //# received data in that flow.
+    /// Byte `p` of level `k`'s CRYPTO stream has been received, or lies below the point where
+    /// `discard` restarted the stream (whose ghost record then counts as received). `crypto_end`
+    /// uses it only for the byte before the end, which was received before any restart.
+    pub closed spec fn crypto_received(&self, k: PacketKind, p: nat) -> bool {
+        let s = match k {
+            PacketKind::Initial => self.crx_i,
+            PacketKind::Handshake => self.crx_h,
+            PacketKind::OneRtt => self.crx_1,
+        };
+        crate::reassembly::rfc_received(s.reassembly().inserted()).contains_key(p)
+    }
+
     /// The client's original Destination Connection ID.
     pub closed spec fn odcid_spec(&self) -> Seq<u8> {
         self.ids@.odcid
@@ -284,6 +314,21 @@ impl Connection {
 
     pub closed spec fn phase_spec(&self) -> Phase {
         self.lc.phase_spec()
+    }
+
+    /// The close being sent: application or transport, code, reason.
+    pub closed spec fn close_spec(&self) -> Option<(bool, u64, Seq<u8>)> {
+        self.lc.close_spec()
+    }
+
+    /// The Source Connection ID of the client's first Initial.
+    pub closed spec fn client_scid_spec(&self) -> Seq<u8> {
+        self.ids@.client_scid
+    }
+
+    /// TLS has delivered the client's transport parameters and they were accepted.
+    pub closed spec fn peer_tp_known_spec(&self) -> bool {
+        self.peer_tp is Some
     }
 
     pub closed spec fn events_spec(&self) -> Seq<StreamEvent> {
@@ -318,9 +363,7 @@ impl Connection {
         &&& self.sent_i.wf()
         &&& self.sent_h.wf()
         &&& self.sent_1.wf()
-        &&& self.crx_i.wf()
-        &&& self.crx_h.wf()
-        &&& self.crx_1.wf()
+        &&& crx_ok(self.crx_i, self.crx_h, self.crx_1)
         &&& self.ctx_i.wf()
         &&& self.ctx_h.wf()
         &&& self.local_cids.wf()
@@ -518,6 +561,7 @@ impl Connection {
                 assert(ids_seq[0] == path);
             }
             assert(c.wf_parts()) by {
+                reveal(crx_ok);
                 assert(c.cid_updates@.len() == 2);
             }
             assert(c.wf_amp());
@@ -1276,7 +1320,7 @@ impl Connection {
                 Ok(())
             },
             Frame::Ack(a) => self.on_ack_frame(k, a, now),
-            Frame::Crypto { offset, data } => self.on_crypto_frame(k, *offset, data.as_slice()),
+            Frame::Crypto { offset, data } => self.on_crypto_frame(k, *offset, data.as_slice(), now),
             Frame::ConnectionClose { .. } => {
                 let pto = self.pto();
                 self.lc.enter_draining(now, pto);
@@ -1376,10 +1420,14 @@ impl Connection {
         }
     }
 
-    // ponytail: post-handshake CRYPTO (NewSessionTicket) is buffered and ignored; we send none.
-    /// A CRYPTO frame.
+    // Post-handshake CRYPTO is buffered here and read and fed to TLS by quictls; we send no NewSessionTicket.
+    /// A CRYPTO frame. On `Err` the connection is already Closing with that code, as in
+    /// `on_stream_frame`; `on_datagram`'s `close_internal` is then a no-op.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
+    //# If an endpoint does not expand its buffer, it MUST close
+    //# the connection with a CRYPTO_BUFFER_EXCEEDED error code.
     #[verifier::spinoff_prover]
-    fn on_crypto_frame(&mut self, k: PacketKind, offset: u64, data: &[u8]) -> (r: Result<(), u64>)
+    fn on_crypto_frame(&mut self, k: PacketKind, offset: u64, data: &[u8], now: u64) -> (r: Result<(), u64>)
         requires
             old(self).wf(),
             offset + data@.len() <= VARINT_MAX,
@@ -1388,12 +1436,41 @@ impl Connection {
             final(self).wf(),
             final(self).frames_kept(*old(self)),
             r matches Err(c) ==> c <= VARINT_MAX,
+            r matches Err(c) ==> c == CRYPTO_BUFFER_EXCEEDED && crypto_window_exceeded(
+                old(self).crypto_contiguous_spec(k),
+                offset,
+                data@.len(),
+            ),
+            crypto_window_exceeded(old(self).crypto_contiguous_spec(k), offset, data@.len()) ==> r
+                == Err::<(), u64>(CRYPTO_BUFFER_EXCEEDED),
+            old(self).phase_spec() is Open && crypto_window_exceeded(
+                old(self).crypto_contiguous_spec(k),
+                offset,
+                data@.len(),
+            ) ==> final(self).phase_spec() is Closing && final(self).close_spec() == Some(
+                (false, CRYPTO_BUFFER_EXCEEDED, Seq::<u8>::empty()),
+            ),
+            r is Err ==> !(final(self).phase_spec() is Open),
     {
-        match k {
+        proof {
+            reveal(crx_ok);
+        }
+        let pto = self.pto();
+        let r = match k {
             PacketKind::Initial => self.crx_i.on_crypto(offset, data),
             PacketKind::Handshake => self.crx_h.on_crypto(offset, data),
             PacketKind::OneRtt => self.crx_1.on_crypto(offset, data),
+        };
+        if let Err(c) = r {
+            let none: Vec<u8> = Vec::new();
+            proof {
+                assert(none@.take(0) =~= Seq::<u8>::empty());
+            }
+            self.lc.enter_closing(now, pto, false, c, none.as_slice());
+            self.streams = None;
+            return Err(c);
         }
+        Ok(())
     }
 
     /// One of the nine stream-layer frames. On `Err` the connection is already Closing with
@@ -2960,6 +3037,9 @@ impl Connection {
             final(self).streams == old(self).streams,
             final(self).crypto_end_spec(PacketKind::Initial) == old(self).crypto_end_spec(PacketKind::Initial),
     {
+        proof {
+            reveal(crx_ok);
+        }
         let mut lost: Vec<SentPacket> = Vec::new();
         match k {
             PacketKind::Initial => {
@@ -3014,12 +3094,19 @@ impl Connection {
             final(self).paths == old(self).paths,
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
+            old(self).phase_spec() is Open ==> final(self).phase_spec() is Closing
+                && final(self).close_spec() == Some((false, code, Seq::<u8>::empty())),
+            !(old(self).phase_spec() is Open) ==> final(self).phase_spec() == old(self).phase_spec()
+                && final(self).close_spec() == old(self).close_spec(),
     {
         let now = self.now;
         let none: Vec<u8> = Vec::new();
         self.close(code, false, none.as_slice(), now);
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.1
+    //# An endpoint enters the closing state after initiating an immediate
+    //# close.
     /// Enters the closing state (the first error wins, §11.1) and drops the streams.
     #[verifier::spinoff_prover]
     pub fn close(&mut self, code: u64, app: bool, reason: &[u8], now: u64)
@@ -3032,6 +3119,8 @@ impl Connection {
             final(self).out_log() == old(self).out_log(),
             old(self).phase_spec() is Open ==> final(self).phase_spec() is Closing,
             !(old(self).phase_spec() is Open) ==> final(self).phase_spec() == old(self).phase_spec(),
+            old(self).phase_spec() is Open ==> final(self).close_spec() == Some((app, code, reason_cap(reason@))),
+            !(old(self).phase_spec() is Open) ==> final(self).close_spec() == old(self).close_spec(),
             final(self).events_spec() == old(self).events_spec(),
             final(self).keeps_later(*old(self)),
     {
@@ -3101,11 +3190,23 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
-            final(out)@.len() <= old(out)@.len() + MAX_CRYPTO_BUFFER,
+            final(out)@.len() <= old(out)@.len() + old(self).crypto_end_spec(level) - old(
+                self,
+            ).crypto_base_spec(level),
+            // A read drains the in-order data: nothing received in order stays unread.
+            old(self).phase_spec() is Open ==> final(self).crypto_base_spec(level) == old(
+                self,
+            ).crypto_contiguous_spec(level),
+            old(self).phase_spec() is Open ==> final(out)@.len() == old(out)@.len() + old(
+                self,
+            ).crypto_contiguous_spec(level) - old(self).crypto_base_spec(level),
     {
         // The bound needs only `lemma_wf`; unfolded, these make a missing fact an rlimit failure.
         hide(crate::reassembly::rfc_received);
         hide(crate::reassembly::rfc_contiguous);
+        proof {
+            reveal(crx_ok);
+        }
         if !matches!(self.lc.phase(), Phase::Open) {
             return;
         }
@@ -3155,6 +3256,21 @@ impl Connection {
         }
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+    //# An endpoint MUST treat the following as a connection error of type
+    //# TRANSPORT_PARAMETER_ERROR or PROTOCOL_VIOLATION:
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+    //# a mismatch between values received from a peer in these transport
+    //# parameters and the value sent in the corresponding Destination or
+    //# Source Connection ID fields of Initial packets.
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+    //# An endpoint MUST treat the absence of the
+    //# initial_source_connection_id transport parameter from either endpoint
+    //# or the absence of the original_destination_connection_id transport
+    //# parameter from the server as a connection error of type
+    //# TRANSPORT_PARAMETER_ERROR.
     /// TLS delivered the client's transport parameters.
     #[verifier::spinoff_prover]
     pub fn on_peer_params(&mut self, tp: &TransportParams, now: u64)
@@ -3164,6 +3280,18 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
+            old(self).phase_spec() is Open && !(final(self).phase_spec() is Open) ==> {
+                &&& final(self).phase_spec() is Closing
+                &&& final(self).close_spec() == Some((false, TRANSPORT_PARAMETER_ERROR, Seq::<u8>::empty()))
+                &&& tp@.initial_source_connection_id != Some(old(self).client_scid_spec())
+            },
+            old(self).phase_spec() is Open && !old(self).peer_tp_known_spec() ==> (!(final(self).phase_spec() is Open)
+                <==> tp@.initial_source_connection_id != Some(old(self).client_scid_spec())),
+            old(self).phase_spec() is Open && !old(self).peer_tp_known_spec() && tp@.initial_source_connection_id is None
+                ==> final(self).phase_spec() is Closing
+                && final(self).close_spec() == Some((false, TRANSPORT_PARAMETER_ERROR, Seq::<u8>::empty())),
+            !(old(self).phase_spec() is Open) ==> final(self).phase_spec() == old(self).phase_spec()
+                && final(self).close_spec() == old(self).close_spec(),
     {
         if now > self.now {
             self.now = now;
@@ -3217,6 +3345,12 @@ impl Connection {
         self.issue_cids(rand);
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-4.8
+    //# A TLS alert is converted into a QUIC connection error.  The
+    //# AlertDescription value is added to 0x0100 to produce a QUIC error
+    //# code from the range reserved for CRYPTO_ERROR; see Section 20.1 of
+    //# [QUIC-TRANSPORT].  The resulting value is sent in a QUIC
+    //# CONNECTION_CLOSE frame of type 0x1c.
     /// TLS failed with this alert (RFC 9001 §4.8).
     #[verifier::spinoff_prover]
     pub fn on_tls_alert(&mut self, alert: u8, now: u64)
@@ -3225,6 +3359,10 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
+            old(self).phase_spec() is Open ==> final(self).phase_spec() is Closing
+                && final(self).close_spec() == Some((false, (CRYPTO_ERROR_BASE + alert as u64) as u64, Seq::<u8>::empty())),
+            !(old(self).phase_spec() is Open) ==> final(self).phase_spec() == old(self).phase_spec()
+                && final(self).close_spec() == old(self).close_spec(),
     {
         if now > self.now {
             self.now = now;
@@ -6359,6 +6497,40 @@ impl Connection {
         }
     }
 
+    /// `send_path_datagram`'s timers: only the idle timer moved since `c2`, to `now` at the latest
+    /// (split from `send_path_datagram` for the rlimit).
+    #[verifier::spinoff_prover]
+    proof fn lemma_idle_timers(&self, c2: Connection, s0: Connection, now: u64)
+        requires
+            c2.tx_timers(s0, now),
+            *self == (Connection { idle: self.idle, ..c2 }),
+            self.idle.last == c2.idle.last || self.idle.last == now,
+        ensures
+            self.tx_timers(s0, now),
+    {
+        reveal(Connection::tx_timers);
+        if !(self.lc.phase_spec() is Closed) {
+            assert forall|k: PacketKind|
+                #[trigger] self.sent(k).inflight_spec() == s0.sent(k).inflight_spec() || (self.sent(k).inflight_spec().len() > 0
+                    && now <= self.sent(k).inflight_spec().last().time) by {
+                assert(c2.sent(k).inflight_spec() == s0.sent(k).inflight_spec() || (c2.sent(k).inflight_spec().len() > 0
+                    && now <= c2.sent(k).inflight_spec().last().time));
+                assert(self.sent(k) == c2.sent(k)) by {
+                    match k {
+                        PacketKind::Initial => {},
+                        PacketKind::Handshake => {},
+                        PacketKind::OneRtt => {},
+                    }
+                }
+            }
+            assert forall|r: PathId|
+                #[trigger] self.paths.has(r) && timed(self.paths.path(r)) implies s0.paths.has(r) && (self.paths.path(r).challenge
+                    == s0.paths.path(r).challenge && timed(s0.paths.path(r)) || now <= self.paths.path(r).challenge.unwrap().1) by {
+                assert(c2.paths.has(r) && timed(c2.paths.path(r)));
+            }
+        }
+    }
+
     /// Takes the frames owed on `q`, builds their packet and commits it. `q`'s budget was checked by
     /// `choose_path`, before anything was taken.
     #[verifier::spinoff_prover]
@@ -6447,29 +6619,7 @@ impl Connection {
         proof {
             assert(c2.tx_timers(c, now));
             c2.lemma_tx_trans(c, s0, now);
-            assert(self.tx_timers(s0, now)) by {
-              reveal(Connection::tx_timers);
-              if !(self.lc.phase_spec() is Closed) {
-                assert forall|k: PacketKind|
-                    #[trigger] self.sent(k).inflight_spec() == s0.sent(k).inflight_spec() || (self.sent(k).inflight_spec().len() > 0
-                        && now <= self.sent(k).inflight_spec().last().time) by {
-                    assert(c2.sent(k).inflight_spec() == s0.sent(k).inflight_spec() || (c2.sent(k).inflight_spec().len() > 0
-                        && now <= c2.sent(k).inflight_spec().last().time));
-                    assert(self.sent(k) == c2.sent(k)) by {
-                        match k {
-                            PacketKind::Initial => {},
-                            PacketKind::Handshake => {},
-                            PacketKind::OneRtt => {},
-                        }
-                    }
-                }
-                assert forall|r: PathId|
-                    #[trigger] self.paths.has(r) && timed(self.paths.path(r)) implies s0.paths.has(r) && (self.paths.path(r).challenge
-                        == s0.paths.path(r).challenge && timed(s0.paths.path(r)) || now <= self.paths.path(r).challenge.unwrap().1) by {
-                    assert(c2.paths.has(r) && timed(c2.paths.path(r)));
-                }
-              }
-            }
+            self.lemma_idle_timers(c2, s0, now);
             reveal(Connection::path_rules);
             self.lemma_one_sent(o, d@, w);
             lemma_path_frames_of(o.paths.path(q));
@@ -8048,7 +8198,17 @@ impl Connection {
             self.wf(),
         ensures
             r == self.crypto_end_spec(k),
+            self.crypto_base_spec(k) <= r,
+            r > 0 ==> self.crypto_received(k, (r - 1) as nat),
     {
+        proof {
+            reveal(crx_ok);
+            match k {
+                PacketKind::Initial => self.crx_i.lemma_end_received(),
+                PacketKind::Handshake => self.crx_h.lemma_end_received(),
+                PacketKind::OneRtt => self.crx_1.lemma_end_received(),
+            }
+        }
         match k {
             PacketKind::Initial => self.crx_i.end(),
             PacketKind::Handshake => self.crx_h.end(),
@@ -8180,6 +8340,13 @@ impl Connection {
 // =============================================================================
 // Helpers
 // =============================================================================
+
+/// The three CRYPTO streams' `wf`. Opaque, so fns that do not touch a CRYPTO stream carry it by
+/// field congruence without unfolding it.
+#[verifier::opaque]
+spec fn crx_ok(i: CryptoStream, h: CryptoStream, o: CryptoStream) -> bool {
+    i.wf() && h.wf() && o.wf()
+}
 
 /// §8.1: trace `t1` starts with `t0` and then the receipt of an `n`-byte datagram. Opaque, so a
 /// caller forwards it without unfolding sequence equality.

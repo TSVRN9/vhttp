@@ -67,4 +67,6 @@ bin=$(printf '%s\n' "$bin" | sed -n 's/^ct-binary: ok (\([0-9]*\) fns)$/\1/p')
 "$root/scripts/lint-scripts.sh" || exit 1
 # Gate demos: each cheap gate rejects its canned bad input.
 "$root/scripts/gate-demos.sh" || exit 1
+# Tests: the unverified shell (crates/server) has no proofs, so its tests are its only guard.
+(cd "$root" && cargo test --workspace --locked -q > "$CT_OUT/cargo-test.log" 2>&1) || { cat "$CT_OUT/cargo-test.log"; echo "verify.sh: cargo test failed" >&2; exit 1; }
 echo "verify.sh: all crates verified, duvet ok, ct ok ($d declassify), cost $cost, escapes accounted ($attrs), binary ok ($bin fns)"

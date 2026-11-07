@@ -154,6 +154,21 @@ fn tls_alert_closes() {
 }
 
 #[test]
+fn alert_after_close_keeps_code() {
+    let mut c = peer_params_failed();
+    c.on_tls_alert(0x28, 2);
+    assert_eq!(c.phase(), Phase::Closing);
+    assert_eq!(c.close_info(), &Some((false, 0x08, vec![])));
+}
+
+#[test]
+fn tls_alert_top_of_range() {
+    let mut c = conn();
+    c.on_tls_alert(0xff, 1);
+    assert_eq!(c.close_info(), &Some((false, 0x1ff, vec![])));
+}
+
+#[test]
 fn complete_without_peer_params() {
     let mut c = conn();
     c.on_handshake_complete(b"h3", 1, &rnd(2));
@@ -232,6 +247,30 @@ fn crypto_delivered() {
     let mut u = Vec::new();
     c.poll_cid_updates(&mut u);
     assert_eq!(u, vec![CidUpdate::Add(S1.to_vec()), CidUpdate::Add(L0.to_vec())]);
+}
+
+/// One datagram with in-order and out-of-order CRYPTO data: 500 out-of-order bytes are held, so
+/// the §7.5 floor (4096) applies even though 13000 in-order bytes are still unread.
+#[test]
+fn crypto_in_and_out_of_order_one_datagram_ok() {
+    let mut c = conn();
+    let f = vec![Frame::Crypto { offset: 100, data: vec![1; 12900] }, Frame::Crypto { offset: 16000, data: vec![2; 500] }];
+    c.on_datagram(0, 17000, vec![ini(3, f)], None, 1, &rnd(3));
+    assert_eq!(c.phase(), Phase::Open);
+    assert_eq!(c.crypto_end(PacketKind::Initial), 16500);
+    let mut out = Vec::new();
+    c.crypto_read(PacketKind::Initial, &mut out);
+    assert_eq!(out, vec![1; 13000]);
+}
+
+/// One byte past the window measured from the contiguous end closes with CRYPTO_BUFFER_EXCEEDED.
+#[test]
+fn crypto_past_contiguous_window_0x0d() {
+    let mut c = conn();
+    let f = vec![Frame::Crypto { offset: 100, data: vec![1; 12900] }, Frame::Crypto { offset: 13000 + 16384, data: vec![2] }];
+    c.on_datagram(0, 17000, vec![ini(3, f)], None, 1, &rnd(3));
+    assert_eq!(c.phase(), Phase::Closing);
+    assert_eq!(c.close_info(), &Some((false, 0x0d, vec![])));
 }
 
 #[test]

@@ -517,6 +517,46 @@ proof fn lemma_take_step(s: Seq<SpecOutPacket>, j: int)
     assert(s.take(j + 1).drop_last() =~= s.take(j));
 }
 
+/// One step of `pick`'s scan: packet `j` is measured once and folded into the best packet
+/// so far and the running total (split from `pick` for the rlimit).
+#[verifier::spinoff_prover]
+fn pick_step(ps: &Vec<OutPacket>, j: usize, best_i: usize, best: usize, total: usize) -> (r: (
+    usize,
+    usize,
+    usize,
+))
+    requires
+        1 <= ps.len() <= 3,
+        forall|k: int| 0 <= k < ps.len() ==> out_packet_sized(#[trigger] ps@[k]@),
+        1 <= j < ps.len(),
+        best_i < ps.len(),
+        best == ps@[best_i as int]@.pn_len + plaintext_len(ps@[best_i as int]@),
+        forall|k: int| 0 <= k < j ==> (#[trigger] ps@[k]@).pn_len + plaintext_len(ps@[k]@) <= best,
+        total == packets_len(packets_view(ps@).take(j as int)),
+        total <= 16434 * j,
+    ensures
+        r.0 < ps.len(),
+        r.1 == ps@[r.0 as int]@.pn_len + plaintext_len(ps@[r.0 as int]@),
+        forall|k: int|
+            0 <= k < j + 1 ==> (#[trigger] ps@[k]@).pn_len + plaintext_len(ps@[k]@) <= r.1,
+        r.2 == packets_len(packets_view(ps@).take(j + 1)),
+        r.2 <= 16434 * (j + 1),
+{
+    hide(frames_len);
+    proof {
+        lemma_take_step(packets_view(ps@), j as int);
+        lemma_overhead(ps@[j as int]@);
+    }
+    let pt = plain_len(&ps[j]);
+    let q = ps[j].pn_len as usize + pt;
+    let (bi, b) = if q > best {
+        (j, q)
+    } else {
+        (best_i, best)
+    };
+    (bi, b, total + len_from(&ps[j], pt))
+}
+
 /// The first packet with the most packet number and plaintext bytes, its Length, and the
 /// datagram length; each packet is serialized once.
 #[verifier::spinoff_prover]
@@ -557,17 +597,10 @@ fn pick(ps: &Vec<OutPacket>) -> (r: (usize, usize, usize))
             total <= 16434 * j,
         decreases ps.len() - j,
     {
-        proof {
-            lemma_take_step(s, j as int);
-            lemma_overhead(ps@[j as int]@);
-        }
-        let pt = plain_len(&ps[j]);
-        let q = ps[j].pn_len as usize + pt;
-        if q > best {
-            best = q;
-            best_i = j;
-        }
-        total = total + len_from(&ps[j], pt);
+        let (bi, b, t) = pick_step(ps, j, best_i, best, total);
+        best_i = bi;
+        best = b;
+        total = t;
         j += 1;
     }
     assert(s.take(j as int) =~= s);

@@ -75,7 +75,8 @@ fn tp_errors() {
     assert_eq!(client(&hex("40")), Err(TPE));
     assert_eq!(client(&hex("01")), Err(TPE));
     assert_eq!(client(&hex("0140")), Err(TPE));
-    // preferred_address and retry_source_connection_id are errors from either side.
+    // preferred_address and retry_source_connection_id are refused. With `false` this only
+    // reads back our own parameters, which never hold them; stricter than §18.2 for a client.
     assert_eq!(client(&hex("0d00")), Err(TPE));
     assert_eq!(client(&hex("1000")), Err(TPE));
     assert_eq!(parse_transport_params(&hex("0d00"), false), Err(TPE));
