@@ -24,12 +24,11 @@ walk=0
 if [ -d "$root/.git" ] || [ -f "$root/.git" ]; then
     head=$(git -C "$root" rev-parse HEAD) || die "cannot resolve HEAD"
     cmp=$(git -C "$root" merge-base HEAD main) || die "cannot resolve the merge-base of HEAD and main"
-    if [ "$cmp" = "$head" ]; then
-        walk=1
-        cmp=$(git -C "$root" rev-parse "HEAD^1") || die "HEAD is main and has no parent to compare the ceilings with"
-    fi
+    if [ "$cmp" = "$head" ]; then walk=1; fi
     present=$(git -C "$root" ls-tree --name-only "$cmp" -- tools/rlimit-ceilings.txt) || die "git ls-tree $cmp failed"
-    if [ -n "$present" ]; then
+    if [ "$walk" -eq 1 ]; then
+        :
+    elif [ -n "$present" ]; then
         old=$(mktemp)
         trap 'rm -f "$old"' EXIT
         git -C "$root" show "$cmp:tools/rlimit-ceilings.txt" > "$old" || die "git show $cmp:tools/rlimit-ceilings.txt failed"

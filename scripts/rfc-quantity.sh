@@ -5,8 +5,8 @@ set -o pipefail
 # gate (C8, tools/rfc_quantity.py). Every read in an allowed_*err predicate's body, and in the spec fns it calls, is
 # vouched for as an RFC quantity (a `// rfc-quantity:` line, tools/rfc-quantity-allow.txt) or is a known open item in
 # tools/rfc-quantity-open.txt, which only shrinks: with the default root, no line (or larger count) may be absent from
-# the open file at the merge-base with main, or at HEAD^1 on main (acceptance.sh's scheme; skipped, and said so, when
-# that commit has no open file; a git error fails the gate). On main the whole first-parent history is also walked
+# the open file at the merge-base with main (skipped, and said so, when that commit has no open file; a git error fails
+# the gate). On main the whole first-parent history is also walked
 # (tools/ratchet_walk.py: no step may grow the file).
 here=$(cd "$(dirname "$0")/.." && pwd)
 root=$here
@@ -23,12 +23,11 @@ walk=0
 if [ "$(cd "$root" && pwd -P)" = "$(cd "$here" && pwd -P)" ] && [ "$have_old" -eq 0 ]; then
     head=$(git -C "$root" rev-parse HEAD) || die "cannot resolve HEAD"
     cmp=$(git -C "$root" merge-base HEAD main) || die "cannot resolve the merge-base of HEAD and main"
-    if [ "$cmp" = "$head" ]; then  # on main (or main == HEAD): compare with the previous commit
-        walk=1
-        cmp=$(git -C "$root" rev-parse "HEAD^1") || die "HEAD is main and has no parent to compare the open ratchet with"
-    fi
+    if [ "$cmp" = "$head" ]; then walk=1; fi  # on main (or main == HEAD): walk the whole first-parent history and the working tree
     present=$(git -C "$root" ls-tree --name-only "$cmp" -- tools/rfc-quantity-open.txt) || die "git ls-tree $cmp failed"
-    if [ -n "$present" ]; then
+    if [ "$walk" -eq 1 ]; then
+        :
+    elif [ -n "$present" ]; then
         old=$(mktemp)
         trap 'rm -f "$old"' EXIT
         git -C "$root" show "$cmp:tools/rfc-quantity-open.txt" > "$old" || die "git show $cmp:tools/rfc-quantity-open.txt failed"
