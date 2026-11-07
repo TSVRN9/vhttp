@@ -4,10 +4,8 @@ Walks the first-parent history of HEAD in ROOT from the commit that introduced F
 every copy, each at its lowest value (lines: the stripped non-comment lines; open: ROOT<TAB>FN<TAB>READ keyed, COUNT;
 ceilings: CRATE FN VALUE, FN keyed, VALUE). HEAD's copy and the working tree must lie within the floor: growth that was
 shrunk back passes, growth that persists (or a shrink then a re-grow) fails. A commit that deletes the file is not a
-reset. Reset (ceilings only): a commit whose message has `Ratchet-Reset: tools/rlimit-ceilings.txt: REASON` and that
-touches rust-toolchain.toml or Cargo.lock restarts the floor; the trailer is refused for the other files. Any git
-error, and a shallow clone, fail (fail closed)."""
-import os, re, subprocess, sys
+reset. Commit messages are ignored (there is no reset). Any git error, and a shallow clone, fail (fail closed)."""
+import os, subprocess, sys
 
 
 class Fail(Exception):
@@ -41,29 +39,6 @@ def parse(text, mode):
     return d
 
 
-def resets(root, path, mode):
-    """Commits (first-parent, oldest first) whose message carries `Ratchet-Reset: PATH: REASON` for PATH.
-    Only the ceilings file may reset, and only in a commit touching rust-toolchain.toml or Cargo.lock."""
-    out = []
-    log = git(root, 'log', '--first-parent', '--reverse', '--format=%H%x1f%B%x1e', 'HEAD')
-    for rec in log.split('\x1e'):
-        if not rec.strip():
-            continue
-        c, _, body = rec.strip().partition('\x1f')
-        for l in body.splitlines():
-            m = re.match(r'^Ratchet-Reset: (\S+): (\S.*)$', l)
-            if not m or m.group(1) != path:
-                continue
-            if mode != 'ceilings':
-                raise Fail('%s: commit %s carries `Ratchet-Reset` for it; only tools/rlimit-ceilings.txt may be reset' % (path, c[:12]))
-            files = git(root, 'diff-tree', '-r', '--root', '-m', '--first-parent', '--name-only', '--no-commit-id', c).split()
-            if 'rust-toolchain.toml' not in files and 'Cargo.lock' not in files:
-                raise Fail('%s: reset commit %s touches neither rust-toolchain.toml nor Cargo.lock' % (path, c[:12]))
-            out.append(c)
-            break
-    return out
-
-
 def floor_of(versions):
     """keys present in every version, each at its minimum value"""
     fl = dict(versions[0])
@@ -86,12 +61,7 @@ def main(root, path, mode):
         raise Fail('unknown mode %s' % mode)
     if git(root, 'rev-parse', '--is-shallow-repository').strip() != 'false':
         raise Fail('the clone is shallow (history missing): %s cannot be walked; fetch the full history' % path)
-    rs = resets(root, path, mode)
     commits = git(root, 'rev-list', '--first-parent', '--reverse', 'HEAD', '--', path).split()
-    if rs:
-        order = git(root, 'rev-list', '--first-parent', '--reverse', 'HEAD').split()
-        pos = {c: i for i, c in enumerate(order)}
-        commits = [rs[-1]] + [c for c in commits if pos[c] > pos[rs[-1]]]
     versions = []
     for c in commits:
         if not git(root, 'ls-tree', '--name-only', c, '--', path).strip():
@@ -115,7 +85,7 @@ def main(root, path, mode):
             bad = outside(cur, fl)
             if bad:
                 raise Fail('%s: %s is outside the floor of its first-parent history: %s (the file only shrinks)' % (path, what, bad))
-    print('ratchet-walk: %s ok (%d commits touch it%s)' % (path, len(commits), ', reset' if rs else ''))
+    print('ratchet-walk: %s ok (%d commits touch it)' % (path, len(commits)))
 
 
 if __name__ == '__main__':
