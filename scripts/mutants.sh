@@ -126,8 +126,8 @@ EOF
 verify() {
     check
     head=$(git -C "$root" rev-parse HEAD) || fail "git rev-parse HEAD failed"
-    # main's tip, checked out as main or detached (a CI checkout); a missing main is no main tip, so check only
-    main=$(git -C "$root" rev-parse -q --verify refs/heads/main) || main=
+    # main's tip, checked out as main or detached (a CI checkout); no main is a failure, not a skipped gate
+    main=$(git -C "$root" rev-parse -q --verify refs/heads/main) || fail "cannot resolve main (refs/heads/main): the merge gate cannot tell whether HEAD is main's merge commit"
     if [ "$head" = "$main" ] && git -C "$root" rev-parse -q --verify HEAD^2 > /dev/null; then
         mpy gate "$root" || exit 1
     else

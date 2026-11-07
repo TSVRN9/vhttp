@@ -339,7 +339,7 @@ expect_fail "rlimit-ceilings: no main" "cannot resolve the merge-base" rceil rc1
 # CARGO_TARGET_DIR keeps vstd built across runs): the killed mutant passes; a mutant that still verifies fails; a dirty
 # crates/ is refused. The verdict on canned Verus output: rlimit, no or two JSON objects, another fn checked, a non-matching
 # error kind. The merge gate on a --no-ff merge into main: passes with a fresh run file; fails with none (also detached at
-# main's tip), a stale crates tree, a fail line, a missing id or an edited patch; on the branch only check runs.
+# main's tip), a stale crates tree, a fail line, a missing id or an edited patch, or no main at all; on the branch only check runs.
 export CARGO_TARGET_DIR="${MUTANTS_DEMO_TARGET:-$root/target/mutants-demo}"
 mrepo() {  # mrepo <dir>: scripts, tools/mutants.py and the fixture, one commit on main, then branch feat
     rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/tools"
@@ -447,5 +447,7 @@ mbranch m3 "$fresh_run"; sed -i 's/^index .*/index 0000000..1111111 100644/' "$t
 expect_fail "mutants verify: patch edited after the run" "was run with another patch" mut m3 verify
 gitc m3 checkout -q main; gitc m3 reset -q --hard "$mbase"; gitc m3 commit -q --allow-empty -m "direct commit on main"
 expect_pass "mutants verify: a non-merge commit on main runs check only" mut m3 verify
+gitc m3 branch -m main trunk
+expect_fail "mutants verify: no main" "cannot resolve main" mut m3 verify
 
 echo "gate-demos: $n demos, all fail as expected"
