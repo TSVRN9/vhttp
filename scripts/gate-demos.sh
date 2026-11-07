@@ -404,7 +404,7 @@ expect_fail "citations: no tsv" "cannot read" closes
 # qredig re-pins every root and the allowlist (what a reviewer does after re-reviewing), so a demo can show that a read is
 # still caught after the digests are updated; rqn runs with the re-pinned allowlist digest.
 qx=$tmp/rfcq/crates/quic/src
-qdig=5d1b74703f97002dc987c831d9f30b49bd6463cc3f2c3bb48ecab8027b3f3771
+qdig=36c9a7087dc8d06981727c66ddad8de36f60bc9e1322636693d8d4f1d21f39cc
 rq() { python3 -I "$root/tools/rfc_quantity.py" --root "$tmp/rfcq" --allow-digest "$qdig" "$@"; }
 qal=$tmp/rfcq/tools/rfc-quantity-allow.txt
 qop=$tmp/rfcq/tools/rfc-quantity-open.txt
@@ -438,6 +438,8 @@ expect_fail "rfc-quantity: probe C, a new predicate inheriting a callee's vouche
 # re-review probes: text a vouch rests on outside the walk (pins), callees of unfollowed fns, constants, attributes, aliases
 fresh rfcq; sed -i 's/^        let ins = s.ins.push((off, data));$/        let ins = if data.len() > 0 { s.ins.push((off, data)) } else { s.ins };/' "$qx/recv_stream.rs"
 expect_fail "rfc-quantity: probe N1b, recv_data (pinned) skips empty frames" "re-review the vouches for $RR" rq
+fresh rfcq; sed -i 's/recv_allowed_err(old(self).rfc(), off as nat, /recv_allowed_err(old(self).rfc(), 0, /' "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: probe E1, on_data (pinned) passes 0 for the frame's offset" "re-review the vouches for $RR" rq
 fresh rfcq; sed -i 's/^        self.ins@$/        self.ins@.skip(1)/' "$qx/crypto_stream.rs"
 expect_fail "rfc-quantity: probe N1a, Reassembly::inserted (pinned, called by the unfollowed crypto_contiguous) drops a frame" "re-review the vouches for quic::crypto_stream::crypto_allowed_err" rq
 fresh rfcq; sed -i 's/^    1u32 << (id as u32)$/    0u32/' "$qx/tp.rs"

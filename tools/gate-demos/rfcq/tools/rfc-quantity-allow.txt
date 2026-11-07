@@ -11,7 +11,7 @@
 # Each reason cites `RFC N §x`. A ratchet: ALLOW_DIGEST in tools/rfc_quantity.py pins these lines (--print-digest
 # allowlist), so any change needs that constant changed in the same diff. Stale lines (vouching for nothing) fail.
 root	quic::crypto_stream::crypto_allowed_err	3af593cfdab030d4d40451b1a2df14b7a2bafec6eb27bef8a5b0db55903bba74
-root	quic::recv_stream::recv_allowed_err	2e66e9dacc0626a8f531d9e5bcc29284d8b3be307afd239d878f15dc16c6edc6
+root	quic::recv_stream::recv_allowed_err	42bfc7fc8f3792f6ee26f9d3ab2e79da7cf9f9a59b9ff02af4ce82c9eb8bb22b
 root	quic::tp::allowed_tp_err	b26d17c0b4a51945223ba0458ee054d2d2c1141274df51c95da84f669e9e7b48
 root	quic::tp::allowed_tp_err_from	5a06a4041e86d26f2871d45ad264d0b224a37e2ed8370b4912947a511116dbdb
 pin	quic::crypto_stream::crypto_allowed_err	quic::crypto_stream::CryptoStream::on_crypto
@@ -21,6 +21,7 @@ pin	quic::recv_stream::recv_allowed_err	quic::recv_stream::recv_data
 pin	quic::recv_stream::recv_allowed_err	quic::recv_stream::recv_reset
 pin	quic::recv_stream::recv_allowed_err	quic::recv_stream::recv_inv
 pin	quic::recv_stream::recv_allowed_err	quic::recv_stream::RecvStream::wf
+pin	quic::recv_stream::recv_allowed_err	quic::recv_stream::RecvStream::on_data
 call	quic::crypto_stream::crypto_allowed_err	quic::crypto_stream::crypto_allowed_err	quic::crypto_stream::crypto_contiguous	rfc_contiguous(rfc_received(s.reassembly().inserted())): inserted() holds every non-empty CRYPTO frame on_crypto accepted that reaches past the read offset (frames below it add no bytes), so this is the end of the in-order CRYPTO data received (RFC 9000 §7.5, §19.6)
 name	quic::crypto_stream::crypto_allowed_err	quic::crypto_stream::crypto_allowed_err	c	the error code on_crypto returns, compared with the RFC's CRYPTO_BUFFER_EXCEEDED (RFC 9000 §20.1)
 name	quic::crypto_stream::crypto_allowed_err	quic::crypto_stream::crypto_window_exceeded	contiguous	crypto_contiguous(s), the end of the in-order CRYPTO data received, its one caller's argument (RFC 9000 §7.5)
