@@ -1,0 +1,13 @@
+diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
+index dc2ddf1..b93b97c 100644
+--- a/crates/quic/src/crypto_stream.rs
++++ b/crates/quic/src/crypto_stream.rs
+@@ -39,7 +39,7 @@ pub open spec fn crypto_window_exceeded(contiguous: nat, offset: u64, len: nat)
+ //# CRYPTO frames received in the future, or it MAY close the connection
+ //# with a CRYPTO_BUFFER_EXCEEDED error code.
+ pub open spec fn crypto_allowed_err(s: CryptoStream, offset: u64, len: nat, c: u64) -> bool {
+-    c == CRYPTO_BUFFER_EXCEEDED && crypto_window_exceeded(crypto_contiguous(s), offset, len)
++    c == CRYPTO_BUFFER_EXCEEDED && crypto_window_exceeded(s.reassembly().base(), offset, len)
+ }
+ 
+ /// `crypto_allowed_err` is not vacuous: an empty frame is never a window error, a 1-byte frame

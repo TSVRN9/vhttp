@@ -1,0 +1,17 @@
+diff --git a/crates/quic/src/recv_stream.rs b/crates/quic/src/recv_stream.rs
+index a4f824e..18feba1 100644
+--- a/crates/quic/src/recv_stream.rs
++++ b/crates/quic/src/recv_stream.rs
+@@ -435,11 +435,7 @@ fn insert_tight(re: &mut Reassembly, off: u64, data: &[u8])
+         },
+ {
+     let ghost re0 = *re;
+-    if data.len() > 0 {
+-        re.insert(off, data);
+-    } else {
+-        re.insert_empty(off, data);
+-    }
++    re.insert(off, data);
+     proof {
+         if off + data@.len() <= re0.base() + re0.buf_len() {
+             Reassembly::lemma_insert_tight_within(re0, *re, off, data@);

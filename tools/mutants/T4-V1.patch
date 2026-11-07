@@ -1,0 +1,13 @@
+diff --git a/crates/quic/src/tp.rs b/crates/quic/src/tp.rs
+index 17d8601..2ca8743 100644
+--- a/crates/quic/src/tp.rs
++++ b/crates/quic/src/tp.rs
+@@ -1069,7 +1069,7 @@ proof fn allowed_tp_err_decreases(b: Seq<u8>, p: int, ids: Set<u64>, t: SpecTp,
+ /// A client's transport parameters extension value holds a parameter the RFC lets a server
+ /// refuse with TRANSPORT_PARAMETER_ERROR.
+ pub open spec fn allowed_tp_err(b: Seq<u8>) -> bool {
+-    allowed_tp_err_from(b, 0, Set::empty(), spec_default_tp(), 0)
++    true
+ }
+ 
+ /// The mask `seen` marks exactly the known IDs in `ids`.

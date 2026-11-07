@@ -15,8 +15,18 @@ audit=docs/crypto-binary-audit.md
 T=$root/target/ct-binary
 recipe="per $audit's recipe (\"Gate\", update protocol)"
 die() { echo "ct-binary: $*; the gate failed closed, see $audit (\"Gate\") for what to re-read" >&2; exit 1; }
+fail() { die "$@"; }
+. "$root/scripts/ct-lib.sh"
 update=0
-case "${1-}" in --update) update=1 ;; "") ;; *) die "usage: ct-binary.sh [--update]" ;; esac
+# --digests FILE: compare against FILE instead of the tracked file (scripts/gate-demos.sh feeds it a
+# canned one); the build, the dump and the structural checks are unchanged, and --update refuses it.
+cmp_to=$tracked
+case "${1-}" in
+    --update) [ $# -eq 1 ] || die "usage: ct-binary.sh [--update | --digests FILE]"; update=1 ;;
+    --digests) [ $# -eq 2 ] || die "usage: ct-binary.sh [--update | --digests FILE]"; cmp_to=$2 ;;
+    "") ;;
+    *) die "usage: ct-binary.sh [--update | --digests FILE]" ;;
+esac
 for t in cargo ar objdump nm sha256sum awk sed diff find xargs git; do
     command -v "$t" >/dev/null || die "missing tool: $t"
 done
@@ -95,7 +105,7 @@ for r in "$T"/release/lib*.rlib; do
             "$x/dep/$c/$m.nm" >> "$x/refs" || die "reading nm output of $m failed"
     done
 done
-if grep -q '^D ' "$x/refs"; then
+if grep_hits '^D ' "$x/refs" > /dev/null; then
     sed -n 's/^D /  /p' "$x/refs" >&2
     err "the symbols above are crypto:: code defined in another crate's units, which the gate does not hash: re-read them where they are $recipe, or make them calls"
 fi
@@ -117,11 +127,11 @@ grep -q '^U tls ' "$x/refs" ||
 fns=$(grep -c '^[0-9a-f]\{64\} ' "$x/digests" || true)
 [ "$fns" -eq "$(wc -l < "$x/syms")" ] || die "$(wc -l < "$x/syms") functions but $fns digests"
 
-if [ "$update" -eq 0 ] && [ -f "$tracked" ]; then
-    grep -qx "units $nunits" "$tracked" ||
-        err "$nunits units in $rlib, $tracked records another count: inlining moved, re-read every function $recipe"
-    grep -qxF "objdump $objver" "$tracked" ||
-        err "objdump is now '$objver', $tracked records another: digests may move with no code change; follow update protocol step 7 in $audit (build the commit that last wrote $tracked, cmp its whole .rcgu.o units, relocations included, against this build's in $x; identical: re-digest with --update and record the new objdump line and md5 in Gate records; otherwise re-read every changed symbol $recipe)"
+if [ "$update" -eq 0 ] && [ -f "$cmp_to" ]; then
+    grep -qx "units $nunits" "$cmp_to" ||
+        err "$nunits units in $rlib, $cmp_to records another count: inlining moved, re-read every function $recipe"
+    grep -qxF "objdump $objver" "$cmp_to" ||
+        err "objdump is now '$objver', $cmp_to records another: digests may move with no code change; follow update protocol step 7 in $audit (build the commit that last wrote $tracked, cmp its whole .rcgu.o units, relocations included, against this build's in $x; identical: re-digest with --update and record the new objdump line and md5 in Gate records; otherwise re-read every changed symbol $recipe)"
 fi
 # Structural checks, in every mode. fnfile prints the normalised text's path of a symbol defined once.
 fnfile() {
@@ -162,9 +172,9 @@ if [ "$update" -eq 1 ]; then
     echo "ct-binary: wrote $tracked ($fns fns). Every changed symbol above needs a fresh read $recipe, recorded in the audit with its date and commit, in the same commit." >&2
     exit 0
 fi
-[ -f "$tracked" ] || die "no $tracked (run --update after a fresh read $recipe)"
-diff "$tracked" "$x/digests" >&2 ||
-    err "object code differs from $tracked (diff above: < tracked, > built; dump in $x/dump): re-read every changed symbol, and for a removed U line the dependent's caller, $recipe, then run scripts/ct-binary.sh --update"
+[ -f "$cmp_to" ] || die "no $cmp_to (run --update after a fresh read $recipe)"
+diff "$cmp_to" "$x/digests" >&2 ||
+    err "object code differs from $cmp_to (diff above: < tracked, > built; dump in $x/dump): re-read every changed symbol, and for a removed U line the dependent's caller, $recipe, then run scripts/ct-binary.sh --update"
 # A digests change must come with its recorded read: the last commit touching the digests file
 # also touches the audit doc, and an uncommitted change to it comes with one to the audit doc.
 last=$(git log -1 --format=%H -- "$tracked") || die "git log failed"

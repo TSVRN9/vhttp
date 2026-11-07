@@ -1,0 +1,13 @@
+diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
+index c97e69c..6d21284 100644
+--- a/crates/quic/src/conn.rs
++++ b/crates/quic/src/conn.rs
+@@ -3300,7 +3300,7 @@ impl Connection {
+             return;
+         }
+         if let Err(c) = self.ids.check_peer_tp(tp) {
+-            self.close_internal(c);
++            self.close_internal(PROTOCOL_VIOLATION);
+             return;
+         }
+         proof {

@@ -1,0 +1,2 @@
+# demo registry: one mutant of the acceptance fixture crate (copied in as crates/demo/src/acc.rs)
+D-kill	demo	acc	demo	acc:demo_eleven_is_err7	postcondition not satisfied.*allowed_demo_err	gate-demos: Err(8) breaks the allowed_demo_err clause

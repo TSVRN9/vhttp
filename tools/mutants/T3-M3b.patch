@@ -1,0 +1,16 @@
+diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
+index c97e69c..f161683 100644
+--- a/crates/quic/src/conn.rs
++++ b/crates/quic/src/conn.rs
+@@ -8203,11 +8203,6 @@ impl Connection {
+     {
+         proof {
+             reveal(crx_ok);
+-            match k {
+-                PacketKind::Initial => self.crx_i.lemma_end_received(),
+-                PacketKind::Handshake => self.crx_h.lemma_end_received(),
+-                PacketKind::OneRtt => self.crx_1.lemma_end_received(),
+-            }
+         }
+         match k {
+             PacketKind::Initial => self.crx_i.end(),

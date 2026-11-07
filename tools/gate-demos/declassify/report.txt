@@ -1,0 +1,6 @@
+checked crypto::p256::fe_from_be secret= ret=s
+checked crypto::p256::sec1_decode_exec secret= ret=
+checked crypto::rsa::rsa_pss_sign_inner secret=d,msg,salt ret=s
+checked crypto::rsa::mod_pow_ct secret=b,e ret=s
+checked crypto::rsa::modulus_bits secret= ret=
+declassify crypto::a::f#1 crates/crypto/src/a.rs:2
