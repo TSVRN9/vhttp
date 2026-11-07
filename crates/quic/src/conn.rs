@@ -316,9 +316,25 @@ impl Connection {
 
     /// `crypto_kept` without the transport-parameters frame.
     pub closed spec fn crypto_kept_base(&self, o: Connection) -> bool {
+        self.crypto_kept_but(o, None)
+    }
+
+    /// The frame of `crypto_kept_base`, but level `skip`'s read offset may move (`crypto_read`):
+    /// the Initial offset and end do not go back, the Initial history only grows, completion is
+    /// not undone, the connection does not reopen, no space comes back, and while open the read
+    /// offset of a live Initial or Handshake space other than `skip` stays where it was.
+    pub closed spec fn crypto_kept_but(&self, o: Connection, skip: Option<PacketKind>) -> bool {
         &&& self.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial)
+        &&& self.crypto_end_spec(PacketKind::Initial) >= o.crypto_end_spec(PacketKind::Initial)
         &&& o.complete ==> self.complete
         &&& forall|p: nat| #[trigger] o.crx_i.received(p) ==> self.crx_i.received(p)
+        &&& self.lc.phase_spec() is Open ==> o.lc.phase_spec() is Open
+        &&& self.live_i ==> o.live_i
+        &&& self.live_h ==> o.live_h
+        &&& skip != Some(PacketKind::Initial) && self.lc.phase_spec() is Open && self.live_i ==> self.crx_i.reassembly().base()
+            == o.crx_i.reassembly().base()
+        &&& skip != Some(PacketKind::Handshake) && self.lc.phase_spec() is Open && self.live_h ==> self.crx_h.reassembly().base()
+            == o.crx_h.reassembly().base()
     }
 
     /// The three CRYPTO streams, and the handshake's completion, are as in `o`; no transport
@@ -329,6 +345,9 @@ impl Connection {
         &&& self.crx_1 == o.crx_1
         &&& self.complete == o.complete
         &&& self.peer_tp is Some ==> o.peer_tp is Some
+        &&& self.live_i == o.live_i
+        &&& self.live_h == o.live_h
+        &&& self.lc.phase_spec() is Open ==> o.lc.phase_spec() is Open
     }
 
     /// A level whose space is discarded or not yet live holds no unread in-order byte: its packets
@@ -339,6 +358,8 @@ impl Connection {
         ensures
             forall|k: PacketKind| !c.live(k) ==> #[trigger] crypto_drained(c, k),
             c.live(PacketKind::OneRtt) ==> !c.live(PacketKind::Initial) && !c.live(PacketKind::Handshake),
+            // A discarded Initial space buffers nothing: its read offset is its end.
+            !c.live(PacketKind::Initial) ==> c.crypto_base_spec(PacketKind::Initial) == c.crypto_end_spec(PacketKind::Initial),
     {
         reveal(crx_ok);
     }
@@ -373,6 +394,36 @@ impl Connection {
             c.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial),
             o.live(PacketKind::OneRtt) ==> c.live(PacketKind::OneRtt),
             forall|p: nat| #[trigger] o.crypto_received(PacketKind::Initial, p) ==> c.crypto_received(PacketKind::Initial, p),
+            c.crypto_end_spec(PacketKind::Initial) >= o.crypto_end_spec(PacketKind::Initial),
+            c.phase_spec() is Open ==> o.phase_spec() is Open,
+            c.live(PacketKind::Initial) ==> o.live(PacketKind::Initial),
+            c.live(PacketKind::Handshake) ==> o.live(PacketKind::Handshake),
+            c.phase_spec() is Open && c.live(PacketKind::Initial) ==> c.crypto_base_spec(PacketKind::Initial) == o.crypto_base_spec(
+                PacketKind::Initial,
+            ),
+            c.phase_spec() is Open && c.live(PacketKind::Handshake) ==> c.crypto_base_spec(PacketKind::Handshake)
+                == o.crypto_base_spec(PacketKind::Handshake),
+    {
+    }
+
+    /// What `crypto_kept_but` says, in terms quictls can read.
+    pub proof fn lemma_crypto_kept_but_elim(c: Connection, o: Connection, skip: Option<PacketKind>)
+        requires
+            c.crypto_kept_but(o, skip),
+        ensures
+            c.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial),
+            c.crypto_end_spec(PacketKind::Initial) >= o.crypto_end_spec(PacketKind::Initial),
+            o.live(PacketKind::OneRtt) ==> c.live(PacketKind::OneRtt),
+            forall|p: nat| #[trigger] o.crypto_received(PacketKind::Initial, p) ==> c.crypto_received(PacketKind::Initial, p),
+            c.phase_spec() is Open ==> o.phase_spec() is Open,
+            c.live(PacketKind::Initial) ==> o.live(PacketKind::Initial),
+            c.live(PacketKind::Handshake) ==> o.live(PacketKind::Handshake),
+            skip != Some(PacketKind::Initial) && c.phase_spec() is Open && c.live(PacketKind::Initial) ==> c.crypto_base_spec(
+                PacketKind::Initial,
+            ) == o.crypto_base_spec(PacketKind::Initial),
+            skip != Some(PacketKind::Handshake) && c.phase_spec() is Open && c.live(PacketKind::Handshake) ==> c.crypto_base_spec(
+                PacketKind::Handshake,
+            ) == o.crypto_base_spec(PacketKind::Handshake),
     {
     }
 
@@ -385,6 +436,15 @@ impl Connection {
             c.peer_tp_known_spec() ==> o.peer_tp_known_spec(),
             // RFC 9001 §4.1.3's "previously received data" only grows.
             forall|p: nat| #[trigger] o.crypto_received(PacketKind::Initial, p) ==> c.crypto_received(PacketKind::Initial, p),
+            c.crypto_end_spec(PacketKind::Initial) >= o.crypto_end_spec(PacketKind::Initial),
+            c.phase_spec() is Open ==> o.phase_spec() is Open,
+            c.live(PacketKind::Initial) ==> o.live(PacketKind::Initial),
+            c.live(PacketKind::Handshake) ==> o.live(PacketKind::Handshake),
+            c.phase_spec() is Open && c.live(PacketKind::Initial) ==> c.crypto_base_spec(PacketKind::Initial) == o.crypto_base_spec(
+                PacketKind::Initial,
+            ),
+            c.phase_spec() is Open && c.live(PacketKind::Handshake) ==> c.crypto_base_spec(PacketKind::Handshake)
+                == o.crypto_base_spec(PacketKind::Handshake),
     {
     }
 
@@ -574,6 +634,7 @@ impl Connection {
             r matches Some(c) ==> c.client_scid_spec() == first.scid@,
             // No transport parameters yet: TLS delivers them later (`on_peer_params`).
             r matches Some(c) ==> !c.peer_tp_known_spec(),
+            r matches Some(c) ==> c.crypto_base_spec(PacketKind::Initial) == 0 && c.crypto_base_spec(PacketKind::Handshake) == 0,
     {
         if datagram_len < MIN_INITIAL_DATAGRAM || !is_local_tp_ok(local_tp) {
             return None;
@@ -3352,7 +3413,10 @@ impl Connection {
                 self,
             ).crypto_contiguous_spec(level) - old(self).crypto_base_spec(level),
             old(self).crypto_end_spec(level) <= old(self).crypto_base_spec(level) ==> final(out)@ == old(out)@,
-            final(self).crypto_kept(*old(self)),
+            // The read hands over exactly the bytes its offset passes; no other level's moves.
+            final(self).crypto_kept_but(*old(self), Some(level)),
+            final(self).peer_tp_known_spec() == old(self).peer_tp_known_spec(),
+            !(old(self).phase_spec() is Open) ==> final(out)@ == old(out)@,
             final(self).phase_spec() == old(self).phase_spec(),
             old(self).phase_spec() is Open ==> crypto_drained(*final(self), level),
             drained_kept(*final(self), *old(self)),
@@ -8665,7 +8729,7 @@ impl Connection {
 #[verifier::opaque]
 spec fn crx_ok(i: CryptoStream, h: CryptoStream, o: CryptoStream, live_i: bool, live_h: bool, complete: bool) -> bool {
     &&& i.wf() && h.wf() && o.wf()
-    &&& !live_i ==> i.drained()
+    &&& !live_i ==> i.drained() && i.reassembly().buf_len() == 0
     &&& !live_h ==> h.drained()
     &&& !complete ==> o.drained()
 }

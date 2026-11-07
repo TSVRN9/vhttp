@@ -340,6 +340,9 @@ pub struct QuicServer<'a> {
     level: Level,
     /// `crypto_end(Initial)` when `level` left Initial (`on_secrets`, or `on_complete`).
     init_end: u64,
+    /// The Initial and Handshake CRYPTO bytes handed to TLS (`on_crypto`) so far.
+    fed_i: u64,
+    fed_h: u64,
     /// The connection when `level` left Initial: `init_end` is the end of what it had received.
     #[allow(dead_code)]
     init_rx: Ghost<Connection>,
@@ -393,6 +396,16 @@ impl<'a> QuicServer<'a> {
         &&& self.level is Initial ==> self.init_end == 0
         // TLS receives at OneRtt only once the connection has completed (`on_complete`).
         &&& self.level is OneRtt ==> self.h3.conn_spec().live(PacketKind::OneRtt)
+        // The bytes handed to TLS are the stream's prefix up to the read offset: while open, a
+        // live space's offset moves only in `crypto_read`, which hands TLS exactly the bytes it
+        // passes (`feed`).
+        &&& self.h3.conn_spec().phase_spec() is Open && self.h3.conn_spec().live(PacketKind::Initial)
+            ==> self.h3.conn_spec().crypto_base_spec(PacketKind::Initial) == self.fed_i
+        &&& self.h3.conn_spec().phase_spec() is Open && self.h3.conn_spec().live(PacketKind::Handshake)
+            ==> self.h3.conn_spec().crypto_base_spec(PacketKind::Handshake) == self.fed_h
+        &&& self.fed_i <= self.h3.conn_spec().crypto_end_spec(PacketKind::Initial)
+        // §4.1.3, at the key change: `init_end` is what TLS had been handed at Initial.
+        &&& !(self.level is Initial) ==> self.init_end == self.fed_i
         // The peer's transport parameters are known only once TLS has left its ClientHello phases
         // (Start, HrrSent): `PeerParams` comes only from a call leaving them (`theorem_event_discipline`).
         &&& self.h3.conn_spec().peer_tp_known_spec() ==> spec_rank(self.hs@.phase) <= 1
@@ -483,6 +496,8 @@ impl<'a> QuicServer<'a> {
             final(self).hs == old(self).hs,
             final(self).level == old(self).level,
             final(self).init_end == old(self).init_end,
+            final(self).fed_i == old(self).fed_i,
+            final(self).fed_h == old(self).fed_h,
             final(self).log == old(self).log,
             final(self).keys@[2] == old(self).keys@[2],
             final(self).keys@[0] == old(self).keys@[0] || final(self).keys@[0] is None,
@@ -537,6 +552,8 @@ impl<'a> QuicServer<'a> {
             keys,
             level: Level::Initial,
             init_end: 0,
+            fed_i: 0,
+            fed_h: 0,
             init_rx: Ghost(cs),
             log: Ghost(Seq::empty()),
         };
@@ -985,9 +1002,30 @@ impl<'a> QuicServer<'a> {
         hide(spec_on_crypto);
         let mut b: Vec<u8> = Vec::new();
         let ghost c0 = self.h3.conn_spec();
-        self.h3.conn_mut().crypto_read(kind(l), &mut b);
         proof {
-            Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
+            self.h3.lemma_conn_wf();
+            Connection::lemma_dead_drained(c0);
+        }
+        self.h3.conn_mut().crypto_read(kind(l), &mut b);
+        // Bounds the count: what TLS has been handed is the stream up to the read offset.
+        let _ = self.h3.conn().crypto_end(kind(l));
+        proof {
+            Connection::lemma_crypto_kept_but_elim(self.h3.conn_spec(), c0, Some(level_kind(l)));
+        }
+        proof {
+            if b.len() > 0 {
+                assert(c0.phase_spec() is Open);
+                if !c0.live(level_kind(l)) {
+                    assert(crypto_drained(c0, level_kind(l)));
+                }
+            }
+        }
+        if b.len() > 0 {
+            match l {
+                Level::Initial => self.fed_i = self.fed_i + b.len() as u64,
+                Level::Handshake => self.fed_h = self.fed_h + b.len() as u64,
+                Level::OneRtt => {},
+            }
         }
         self.sync_keys();
         if b.len() == 0 {
@@ -1044,6 +1082,8 @@ impl<'a> QuicServer<'a> {
             forall|i: int, j: int|
                 0 <= i < ev.deep_view().len() && 0 <= j < ev.deep_view().len() && #[trigger] ev.deep_view()[i] is PeerParams
                     && #[trigger] ev.deep_view()[j] is PeerParams ==> i == j,
+            // `feed` hands TLS bytes only from an open connection.
+            old(self).conn_spec().phase_spec() is Open,
         ensures
             final(self).wf(),
             final(self).conn_spec().out_log() == old(self).conn_spec().out_log(),
@@ -1054,6 +1094,11 @@ impl<'a> QuicServer<'a> {
         if !self.key_changes(&ev, now) {
             self.sync_keys();
             return false;
+        }
+        proof {
+            // The Initial offset is what TLS was handed (live), or the end (discarded).
+            self.h3.lemma_conn_wf();
+            Connection::lemma_dead_drained(self.conn_spec());
         }
         let mut i: usize = 0;
         while i < ev.len()
@@ -1066,7 +1111,9 @@ impl<'a> QuicServer<'a> {
                 (spec_key_events(ev.deep_view()).0 || spec_key_events(ev.deep_view()).1) && self.level is Initial
                     ==> self.conn_spec().crypto_end_spec(
                     PacketKind::Initial,
-                ) <= self.conn_spec().crypto_base_spec(PacketKind::Initial),
+                ) <= self.conn_spec().crypto_base_spec(PacketKind::Initial) && self.conn_spec().crypto_end_spec(
+                    PacketKind::Initial,
+                ) <= self.fed_i,
                 fed_kept(self.conn_spec(), old(self).conn_spec()),
                 i <= ev.deep_view().len(),
                 forall|j: int| i <= j < ev.deep_view().len() && #[trigger] ev.deep_view()[j] is PeerParams
@@ -1155,21 +1202,27 @@ impl<'a> QuicServer<'a> {
     /// reassembly buffer out of order.
     spec fn unread(&self, l: Level, k: PacketKind) -> nat {
         let c = self.h3.conn_spec();
-        spec_reader(self.hs@, l).len() + if c.crypto_end_spec(k) > c.crypto_base_spec(k) {
-            (c.crypto_end_spec(k) - c.crypto_base_spec(k)) as nat
+        spec_reader(self.hs@, l).len() + if c.crypto_end_spec(k) > self.fed_spec(l) {
+            (c.crypto_end_spec(k) - self.fed_spec(l)) as nat
         } else {
             0
         }
     }
 
+    /// The CRYPTO bytes of level `l` handed to TLS so far.
+    spec fn fed_spec(&self, l: Level) -> nat {
+        match l {
+            Level::Initial => self.fed_i as nat,
+            Level::Handshake => self.fed_h as nat,
+            Level::OneRtt => 0,
+        }
+    }
+
     /// RFC 9001 §4.1.3's "data from a previous encryption level that TLS has not consumed" at
-    /// level `l` (space `k`): bytes in TLS's reader, or bytes received at or past the read offset.
+    /// level `l` (space `k`): bytes in TLS's reader, or bytes received at or past the end of what
+    /// was handed to TLS.
     spec fn tls_unconsumed(&self, l: Level, k: PacketKind) -> bool {
-        spec_reader(self.hs@, l).len() > 0 || past_received(
-            self.h3.conn_spec(),
-            k,
-            self.h3.conn_spec().crypto_base_spec(k),
-        )
+        spec_reader(self.hs@, l).len() > 0 || past_received(self.h3.conn_spec(), k, self.fed_spec(l))
     }
 
     /// The batch `ev` gives keys above a level whose data TLS has not consumed: Handshake keys
@@ -1179,11 +1232,11 @@ impl<'a> QuicServer<'a> {
         ||| spec_key_events(ev).1 && self.tls_unconsumed(Level::Handshake, PacketKind::Handshake)
     }
 
-    /// `tls_unconsumed` is not vacuous: an empty reader and nothing received past the read offset.
+    /// `tls_unconsumed` is not vacuous: an empty reader and nothing received past what TLS has.
     proof fn lemma_tls_unconsumed_rejects(&self, l: Level, k: PacketKind)
         requires
             spec_reader(self.hs@, l).len() == 0,
-            forall|p: nat| #[trigger] self.h3.conn_spec().crypto_received(k, p) ==> p < self.h3.conn_spec().crypto_base_spec(k),
+            forall|p: nat| #[trigger] self.h3.conn_spec().crypto_received(k, p) ==> p < self.fed_spec(l),
         ensures
             !self.tls_unconsumed(l, k),
     {
@@ -1193,17 +1246,22 @@ impl<'a> QuicServer<'a> {
     fn unconsumed(&self, l: Level, k: PacketKind) -> (r: bool)
         requires
             self.core_ok(),
+            !(l is OneRtt),
         ensures
             r == (self.unread(l, k) > 0),
             r == self.tls_unconsumed(l, k),
     {
         let e = self.h3.conn().crypto_end(k);
+        let f = match l {
+            Level::Initial => self.fed_i,
+            _ => self.fed_h,
+        };
         proof {
-            if e > self.h3.conn_spec().crypto_base_spec(k) {
+            if e > f {
                 assert(self.h3.conn_spec().crypto_received(k, (e - 1) as nat));
             }
         }
-        self.hs.pending(l) || e > self.h3.conn().crypto_base(k)
+        self.hs.pending(l) || e > f
     }
 
     /// The pre-checks: none of `ev` is applied if TLS moves past a level with bytes unread there.
@@ -1212,6 +1270,8 @@ impl<'a> QuicServer<'a> {
         requires
             old(self).wf(),
         ensures
+            final(self).level == old(self).level,
+            final(self).fed_i == old(self).fed_i,
             final(self).wf(),
             final(self).conn_spec().out_log() == old(self).conn_spec().out_log(),
             final(self).hs == old(self).hs,
@@ -1283,6 +1343,7 @@ impl<'a> QuicServer<'a> {
             !old(self).conn_spec().peer_tp_known_spec(),
             old(self).hs@.phase is WaitFinished,
         ensures
+            final(self).fed_i == old(self).fed_i,
             final(self).wf(),
             final(self).conn_spec().out_log() == old(self).conn_spec().out_log(),
             final(self).hs == old(self).hs,
@@ -1359,6 +1420,7 @@ impl<'a> QuicServer<'a> {
             old(self).wf(),
             !(l is OneRtt),
         ensures
+            final(self).fed_i == old(self).fed_i,
             final(self).wf(),
             final(self).conn_spec().out_log() == old(self).conn_spec().out_log(),
             final(self).hs == old(self).hs,
@@ -1383,8 +1445,10 @@ impl<'a> QuicServer<'a> {
             old(self).h3.conn_spec().crypto_end_spec(PacketKind::Initial) <= old(self).h3.conn_spec().crypto_base_spec(
                 PacketKind::Initial,
             ),
+            old(self).h3.conn_spec().crypto_end_spec(PacketKind::Initial) == old(self).fed_i,
         ensures
             *final(self) == (QuicServer { init_end: final(self).init_end, init_rx: final(self).init_rx, ..*old(self) }),
+            final(self).init_end == old(self).fed_i,
             final(self).init_rx@ == old(self).h3.conn_spec(),
             final(self).init_end == old(self).h3.conn_spec().crypto_end_spec(PacketKind::Initial),
             final(self).init_end <= old(self).h3.conn_spec().crypto_base_spec(PacketKind::Initial),
@@ -1401,8 +1465,11 @@ impl<'a> QuicServer<'a> {
         requires
             old(self).wf(),
             l is Handshake && old(self).level is Initial ==> old(self).conn_spec().crypto_end_spec(PacketKind::Initial)
-                <= old(self).conn_spec().crypto_base_spec(PacketKind::Initial),
+                <= old(self).conn_spec().crypto_base_spec(PacketKind::Initial) && old(self).conn_spec().crypto_end_spec(
+                PacketKind::Initial,
+            ) <= old(self).fed_i,
         ensures
+            final(self).fed_i == old(self).fed_i,
             final(self).wf(),
             final(self).conn_spec().out_log() == old(self).conn_spec().out_log(),
             final(self).hs == old(self).hs,
@@ -1433,8 +1500,11 @@ impl<'a> QuicServer<'a> {
         requires
             old(self).wf(),
             old(self).level is Initial ==> old(self).conn_spec().crypto_end_spec(PacketKind::Initial)
-                <= old(self).conn_spec().crypto_base_spec(PacketKind::Initial),
+                <= old(self).conn_spec().crypto_base_spec(PacketKind::Initial) && old(self).conn_spec().crypto_end_spec(
+                PacketKind::Initial,
+            ) <= old(self).fed_i,
         ensures
+            final(self).fed_i == old(self).fed_i,
             final(self).wf(),
             final(self).conn_spec().out_log() == old(self).conn_spec().out_log(),
             final(self).hs == old(self).hs,
