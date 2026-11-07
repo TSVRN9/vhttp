@@ -147,6 +147,7 @@ impl CryptoStream {
             final(self).reassembly().base() == old(self).end_spec(),
             final(self).reassembly().buf_len() == 0,
             final(self).history() == old(self).history(),
+            forall|p: nat| #[trigger] final(self).received(p) == old(self).received(p),
             crypto_contiguous(*final(self)) == old(self).end_spec(),
     {
         proof {
@@ -193,6 +194,8 @@ impl CryptoStream {
                 )
                 &&& final(self).reassembly().base() == old(self).reassembly().base()
             },
+            // The record of what arrived only grows.
+            forall|p: nat| #[trigger] old(self).received(p) ==> final(self).received(p),
     {
         hide(rfc_received);
         hide(rfc_contiguous);
