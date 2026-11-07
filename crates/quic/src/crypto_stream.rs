@@ -27,7 +27,7 @@ pub const MAX_CRYPTO_RANGES: usize = 4096;
 /// The end of the in-order CRYPTO data received: every byte below it has been received, and the
 /// byte at it has not. Bytes received past it are the out-of-order data of RFC 9000 §7.5.
 pub open spec fn crypto_contiguous(s: CryptoStream) -> nat {
-    rfc_contiguous(rfc_received(s.inserted()))
+    rfc_contiguous(rfc_received(s.inserted_frames()))
 }
 
 //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
@@ -36,7 +36,7 @@ pub open spec fn crypto_contiguous(s: CryptoStream) -> nat {
 /// The positions received past the contiguous end once `d` at `off` is in: the data held from
 /// out-of-order CRYPTO frames.
 pub open spec fn ooo_received(s: CryptoStream, off: u64, d: Seq<u8>) -> Set<nat> {
-    let m = rfc_received(s.inserted().push((off as nat, d)));
+    let m = rfc_received(s.inserted_frames().push((off as nat, d)));
     m.dom().filter(|p: nat| p > rfc_contiguous(m))
 }
 
@@ -78,10 +78,10 @@ pub proof fn lemma_ooo_bytes_free(s: CryptoStream, off: u64, d: Seq<u8>)
         ooo_received(s, off, d) == ooo_received(s, off, Seq::new(d.len(), |_i: int| 0u8)),
 {
     let z = Seq::new(d.len(), |_i: int| 0u8);
-    let m1 = rfc_received(s.inserted().push((off as nat, d)));
-    let m2 = rfc_received(s.inserted().push((off as nat, z)));
-    lemma_received_push(s.inserted(), off as nat, d);
-    lemma_received_push(s.inserted(), off as nat, z);
+    let m1 = rfc_received(s.inserted_frames().push((off as nat, d)));
+    let m2 = rfc_received(s.inserted_frames().push((off as nat, z)));
+    lemma_received_push(s.inserted_frames(), off as nat, d);
+    lemma_received_push(s.inserted_frames(), off as nat, z);
     assert(m1.dom() =~= m2.dom());
     lemma_contiguous_exists(m1);
     lemma_contiguous_is(m2, rfc_contiguous(m1));
@@ -101,7 +101,7 @@ proof fn lemma_crypto_allowed_err_rejects(s: CryptoStream, offset: u64)
 /// close.
 proof fn lemma_crypto_allowed_err_16385(s: CryptoStream)
     requires
-        s.inserted() == Seq::<(nat, Seq<u8>)>::empty().push((1nat, Seq::new(16384, |_i: int| 0u8))),
+        s.inserted_frames() == Seq::<(nat, Seq<u8>)>::empty().push((1nat, Seq::new(16384, |_i: int| 0u8))),
     ensures
         ooo_held(s, 16385, Seq::new(1, |_i: int| 0u8)) == 16385,
         crypto_allowed_err(s, 16385, 1, CRYPTO_BUFFER_EXCEEDED),
@@ -110,8 +110,8 @@ proof fn lemma_crypto_allowed_err_16385(s: CryptoStream)
     let a = Seq::new(16384, |_i: int| 0u8);
     let b = Seq::new(1, |_i: int| 0u8);
     lemma_received_push(e, 1, a);
-    lemma_received_push(s.inserted(), 16385, b);
-    let m = rfc_received(s.inserted().push((16385nat, b)));
+    lemma_received_push(s.inserted_frames(), 16385, b);
+    let m = rfc_received(s.inserted_frames().push((16385nat, b)));
     assert(rfc_received(e) =~= Map::<nat, u8>::empty());
     lemma_contiguous_is(m, 0);
     assert(ooo_received(s, 16385, b) =~= Set::<nat>::range(1, 16386));
@@ -127,13 +127,13 @@ pub proof fn lemma_crypto_floor(s: CryptoStream, offset: u64, d: Seq<u8>)
     requires
         // Stated over the RFC set itself, not through `ooo_held`, so that a redefinition of the
         // predicate's quantities cannot carry the floor with it (rule 1d).
-        rfc_received(s.inserted().push((offset as nat, d))).dom().filter(
-            |p: nat| p > rfc_contiguous(rfc_received(s.inserted().push((offset as nat, d)))),
+        rfc_received(s.inserted_frames().push((offset as nat, d))).dom().filter(
+            |p: nat| p > rfc_contiguous(rfc_received(s.inserted_frames().push((offset as nat, d)))),
         ).len() <= 4096,
     ensures
         forall|c: u64| !#[trigger] crypto_allowed_err(s, offset, d.len(), c),
 {
-    let m = rfc_received(s.inserted().push((offset as nat, d)));
+    let m = rfc_received(s.inserted_frames().push((offset as nat, d)));
     assert(ooo_received(s, offset, d) =~= m.dom().filter(|p: nat| p > rfc_contiguous(m)));
     lemma_ooo_bytes_free(s, offset, d);
     lemma_runs_le_len(ooo_received(s, offset, d));
@@ -158,7 +158,7 @@ pub struct CryptoStream {
 
 impl CryptoStream {
     /// The insertions since the last `restart`, its record of the bytes below its base first.
-    pub closed spec fn inserted(&self) -> Seq<(nat, Seq<u8>)> {
+    pub closed spec fn inserted_frames(&self) -> Seq<(nat, Seq<u8>)> {
         self.ins@
     }
 
@@ -176,7 +176,7 @@ impl CryptoStream {
         self.hist@
     }
 
-    /// Byte `p` arrived in a CRYPTO frame. `inserted()` also holds `restart`'s record of the bytes
+    /// Byte `p` arrived in a CRYPTO frame. `inserted_frames()` also holds `restart`'s record of the bytes
     /// below its base, which were read but are not data received anew.
     pub closed spec fn received(&self, p: nat) -> bool {
         rfc_received(self.hist@).contains_key(p)
@@ -220,7 +220,7 @@ impl CryptoStream {
     }
 
     /// `core`, and the record of what arrived: the byte before the end arrived, and every byte
-    /// that arrived is in `inserted()`.
+    /// that arrived is in `inserted_frames()`.
     pub closed spec fn wf(&self) -> bool {
         &&& self.core()
         &&& self.end_spec() > 0 ==> self.received((self.end_spec() - 1) as nat)
@@ -261,7 +261,7 @@ impl CryptoStream {
         ensures
             self.base_spec() <= crypto_contiguous(*self) <= self.end_spec() <= VARINT_MAX,
             forall|k: nat| #[trigger]
-                rfc_received(self.inserted()).contains_key(k) ==> k < self.end_spec(),
+                rfc_received(self.inserted_frames()).contains_key(k) ==> k < self.end_spec(),
             self.end_spec() > 0 ==> self.received((self.end_spec() - 1) as nat),
             forall|p: nat| #[trigger] self.received(p) ==> p < self.end_spec(),
     {
@@ -271,7 +271,7 @@ impl CryptoStream {
     pub fn new() -> (r: CryptoStream)
         ensures
             r.wf(),
-            r.inserted() == Seq::<(nat, Seq<u8>)>::empty(),
+            r.inserted_frames() == Seq::<(nat, Seq<u8>)>::empty(),
             r.base_spec() == 0,
             crypto_contiguous(r) == 0,
     {
@@ -344,7 +344,7 @@ impl CryptoStream {
             (r is Err || offset + data@.len() <= old(self).base_spec() || data@.len() == 0)
                 ==> *final(self) == *old(self),
             (r is Ok && offset + data@.len() > old(self).base_spec() && data@.len() > 0) ==> {
-                &&& final(self).inserted() == old(self).inserted().push((offset as nat, data@))
+                &&& final(self).inserted_frames() == old(self).inserted_frames().push((offset as nat, data@))
                 &&& final(self).base_spec() == old(self).base_spec()
             },
             // The record of what arrived only grows, and so does its end.
@@ -462,14 +462,14 @@ impl CryptoStream {
             old(self).wf(),
         ensures
             final(self).wf(),
-            final(self).inserted() == old(self).inserted(),
+            final(self).inserted_frames() == old(self).inserted_frames(),
             forall|p: nat| #[trigger] final(self).received(p) == old(self).received(p),
-            final(self).base_spec() == rfc_contiguous(rfc_received(old(self).inserted())),
+            final(self).base_spec() == rfc_contiguous(rfc_received(old(self).inserted_frames())),
             final(self).base_spec() + final(self).buf_len_spec() == old(self).base_spec() + old(
                 self,
             ).buf_len_spec(),
             final(out)@ == old(out)@ + rfc_prefix(
-                rfc_received(old(self).inserted()),
+                rfc_received(old(self).inserted_frames()),
                 final(self).base_spec(),
             ).subrange(old(self).base_spec() as int, final(self).base_spec() as int),
     {

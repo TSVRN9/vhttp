@@ -61,7 +61,7 @@ import hashlib, importlib.util, os, re, sys
 
 # sha256 of the allowlist's non-comment lines, sorted and joined by newlines: any change to the vouched-for set (a
 # new line, a swap, an edited reason) needs this constant changed in the same diff, so it is reviewed
-ALLOW_DIGEST = 'f136f254aa400ece51d6b0f3abadea48353b28d9c0f1d14ac5520fd109ce954b'
+ALLOW_DIGEST = '09b6e83d6dafe169334fe913b0ba47e974daeaaa97cd43d9d84cfba5eb7d7721'
 VSTD_TYPES = {'Seq', 'Set', 'Map', 'Multiset'}
 VSTD_METHODS = {'len', 'skip', 'take', 'subrange', 'push', 'last', 'first', 'drop_last', 'drop_first',
                 'contains', 'contains_key', 'insert', 'remove', 'union', 'intersect', 'difference', 'dom',

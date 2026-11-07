@@ -256,7 +256,7 @@ Existing-gate abbreviations: V = `scripts/verify.sh` (verus verify of all crates
 | C3 CARRYOVER IN PROSE | 8 | 3d2 final M5; 3e final M2, M4; 4c final I1; 5e I1, T5; 8b final I2; 3e preflight | memory file only | carryovers.tsv gate, scripts tracked | M | partial (R1: tools tracked; carryover gate open) |
 | C2 STALE TEXT | 9 | 3d2 final M3, M4, re-review; 3e final M1, M3; 5e m2-m6; 8b M; 8d M | none | doclint.sh | S | open |
 | C13 CHECKER IDENTITY | 3 | 8b T1b I1, final M4; S6 | crate-id key, split manifest | baseline report diff, lint | S | open |
-| C15 ALGORITHMIC COST | 3 | 3d2 T4 M1; S2 | h3_alloc.rs | ratio tests | S each | open |
+| C15 ALGORITHMIC COST | 3 | 3d2 T4 M1; S2 | h3_alloc.rs | ratio tests | S each | open: Phase 9b Task 1 — Frags index (9a T7 worst case ~1.8 s CPU per connection at Initial, pre-auth) |
 | C16 PLAN DRIFT | 7 | preflights of 3d2, 3e, 4c, 5e, 8b, 8d, 9a | manual preflight | plan-lint.sh | S | open |
 | C17 SECRET HYGIENE | 3 | 3e T2 I2; S4 e587b9e; (4c Rand) | hand-written Debug | derive(Debug) grep gate | S | open |
 | C18 UNVERIFIED SHELL | 2 | 3e T6; 3e preflight C1/C2 | shell tests, reviewer probes | tracked seeded fuzz + getsockopt test | S | open |

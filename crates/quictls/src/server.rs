@@ -108,8 +108,8 @@ proof fn lemma_past_received_rejects(c: Connection, k: PacketKind, end: nat)
 /// (`lemma_long_cid_mismatch`).
 spec fn tp_allowed_err(c: Connection, b: Seq<u8>) -> bool {
     match rfc_transport_params(b, true) {
-        Err(_) => allowed_tp_err(b) && c.client_scid_spec().len() <= MAX_CID_LEN,
-        Ok(t) => t.initial_source_connection_id != Some(c.client_scid_spec()),
+        Err(_) => allowed_tp_err(b) && c.client_scid_spec().len() <= MAX_CID_LEN,  // rfc-quantity: c.client_scid_spec(): the Source Connection ID field of the client's first Initial (RFC 9000 §7.3), tied by Connection::accept's ensures client_scid_spec() == first.scid@ (T5-M8' kills a re-anchor); its length bound <= 20 is §17.2's receiver rule via HandshakeIds::wf (Connection::client_scid_len)
+        Ok(t) => t.initial_source_connection_id != Some(c.client_scid_spec()),  // rfc-quantity: c.client_scid_spec(): the Source Connection ID field of the client's first Initial (RFC 9000 §7.3), as on the Err arm
     }
 }
 
@@ -1274,6 +1274,11 @@ impl<'a> QuicServer<'a> {
         self.hs.pending(l) || e > f
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-4.1.3
+    //# When TLS
+    //# provides keys for a higher encryption level, if there is data from
+    //# a previous encryption level that TLS has not consumed, this MUST
+    //# be treated as a connection error of type PROTOCOL_VIOLATION.
     /// The pre-checks: none of `ev` is applied if TLS moves past a level with bytes unread there.
     #[verifier::spinoff_prover]
     fn key_changes(&mut self, ev: &Vec<TlsEvent>, now: u64) -> (ok: bool)
@@ -1343,6 +1348,16 @@ impl<'a> QuicServer<'a> {
         true
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4
+    //# An endpoint MUST treat receipt of a transport parameter with an
+    //# invalid value as a connection error of type
+    //# TRANSPORT_PARAMETER_ERROR.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+    //# An endpoint MUST treat the absence of the
+    //# initial_source_connection_id transport parameter from either endpoint
+    //# or the absence of the original_destination_connection_id transport
+    //# parameter from the server as a connection error of type
+    //# TRANSPORT_PARAMETER_ERROR.
     /// `PeerParams`: the client's transport parameters. No keys are installed on a connection
     /// they closed.
     #[verifier::spinoff_prover]
