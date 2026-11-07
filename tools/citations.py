@@ -5,8 +5,9 @@
 #                    is checked against the RFC by scripts/check-quotes.sh.
 #   closes ROOT TSV  every exec fn that pins a close code is the fn column (crate module fn) of some row of TSV.
 # A close-code fn is an exec fn (tools/acceptance.py's scanner) whose ensures contain `close_spec() == Some((app, code, reason))`
-# with a numeric literal, a codes.rs constant or a call (a mapping spec fn such as report_code, cited too) in `code`; a code
-# passed in as a parameter pins nothing here (its callers do).
+# with a numeric literal, a codes.rs constant, a call (a mapping spec fn such as report_code, cited too, also path-qualified) or a
+# bare name that is not a parameter of the fn (bound elsewhere in the ensures) in `code`; a code passed in as a parameter pins
+# nothing here (its callers do).
 # Fails closed: no allowed predicate, no close-code fn, no codes.rs constant or an unreadable input is an error.
 import importlib.util
 import os
@@ -25,6 +26,15 @@ def load_acc():
     acc = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(acc)
     return acc
+
+
+def params(acc, f, off):
+    s = acc.strip(open(f, encoding='utf-8').read())
+    p = s.find('(', off)
+    q = acc.match_paren(s, p) if p >= 0 else -1
+    if q < 0:
+        die('%s: cannot read the parameter list of the fn at offset %d' % (f, off))
+    return {x.split(':', 1)[0].replace('mut ', '').strip() for x in acc.split_top(s[p + 1:q - 1]) if ':' in x}
 
 
 def scan(root):
@@ -62,8 +72,11 @@ def scan(root):
             if len(parts) != 3:
                 die('%s: fn %s: close_spec() == Some(..) is not an (app, code, reason) tuple' % (f, path))
             code = parts[1]
-            calls = set(re.findall(r'(?<![A-Za-z0-9_:.])([a-z_][A-Za-z0-9_]*)\s*\(', code))
-            if cname.search(code) or calls:
+            calls = set(re.findall(r'(?<![A-Za-z0-9_.])([a-z_][A-Za-z0-9_]*)\s*\(', code))
+            # a bare name that is not one of the fn's own parameters is bound elsewhere (an ensures variable, a ghost let)
+            # and may equal a constant or a mapping: fail closed, treat it as pinning
+            free = re.fullmatch(r'\s*([a-z_][A-Za-z0-9_]*)\s*', code) and re.fullmatch(r'\s*([a-z_][A-Za-z0-9_]*)\s*', code).group(1) not in params(acc, f, off)
+            if cname.search(code) or calls or free:
                 closes.append((f, line(f, off), path))
                 maps |= calls
                 break
