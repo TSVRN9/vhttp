@@ -39,3 +39,17 @@
 - **Defect:** the SDD `task-brief` script matched `### Task 3` as a prefix, so Task 3b's text went into Task 3's brief. Caught by the controller before dispatch.
 - **Class:** C16 (tooling).
 - **Catch:** before each dispatch the controller checks that the brief has exactly one `^### ` heading. The script is external plugin code and is not edited here.
+
+## 7. C8 recurred three times in one night (T3 I2, T4 I1, T6 I1)
+- **Defect:** three `allowed_*err` predicates read the code's own bookkeeping instead of RFC quantities. T3 used the read-offset window, T4 the `seen` mask, T6 rfc_recv's running `high`. Each proof then checked the code against itself. All three are fixed on phase-9a: fcf9ff0, 9afdf5e, 0a8c534.
+- **Escape:** rule 1d (state floors over RFC quantities) was added after the first instance, but only as prose. Nothing required a per-predicate re-anchoring mutation, so the third instance slipped past again until review.
+- **Catch:**
+  - Plan rule 1d now names one re-anchoring mutation per predicate (model and code together). Reviewers check that list (phase-9a facc168).
+  - Open, owner 9r2: a gate that flags `allowed_*err` bodies reading fields of exec or model state unless a `// rfc-quantity:` justification sits on the line.
+- **Evidence:** T4-M3 verified on the pre-fix tree and fails after the fix. T6-M2 fails both `lemma_data_step` and `lemma_recv_err_rfc` after the fix. M4 fails the T3 floor lemma.
+
+## 8. Open items for 9r2 gathered tonight
+- Missing-citation gate (§5 above).
+- The model-state gate for `allowed_*err` bodies (§7).
+- The `Reassembly::insert` class fix: `insert`'s own ensures should make an empty insert a no-op, so no future holder can repeat 753ec2d or T6. Scheduled with 3c', which reworks Reassembly.
+- shellcheck repo-wide. It needs the user's sudo. A controller-side unquoted heredoc lost two words of a ledger line tonight, a class shellcheck flags.
