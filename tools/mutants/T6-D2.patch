@@ -1,0 +1,14 @@
+diff --git a/crates/quic/src/recv_stream.rs b/crates/quic/src/recv_stream.rs
+index a4f824e..ead162f 100644
+--- a/crates/quic/src/recv_stream.rs
++++ b/crates/quic/src/recv_stream.rs
+@@ -1592,9 +1592,6 @@ impl RecvStream {
+         //# STREAM frames received after sending a STOP_SENDING frame are still
+         //# counted toward connection and stream flow control, even though these
+         //# frames can be discarded upon receipt.
+-        if end > self.credit.limit() {
+-            return Err(FLOW_CONTROL_ERROR);
+-        }
+         if self.is_terminal() {
+             return Ok(0);
+         }
