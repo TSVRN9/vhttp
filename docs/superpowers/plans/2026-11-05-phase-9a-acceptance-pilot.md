@@ -367,7 +367,7 @@ The lift through `on_frame`/`on_counted` and quictls `apply`/`feed`/`tls_step` i
 
 ### Task 3c: the CRYPTO limit counts held bytes, not offset span
 
-> **Status 2026-11-06: BLOCKED as written; superseded by Task 3c' below.** Reassembly is a dense per-offset buffer, not a range set, so a held-bytes limit alone gives no memory bound (one byte at contiguous+2^40 would allocate about 2 TiB). Task 3c' first needs a sparse out-of-order store (a fragment list, or Reassembly as a range set) with a proved memory bound. Then the steps below apply unchanged. It is multi-session, and it waits on the user's reading of the §7.5 floor: bytes held, or offset span.
+> **Status 2026-11-06: BLOCKED as written; superseded by Task 7 (3c') below.** Reassembly is a dense per-offset buffer, not a range set, so a held-bytes limit alone gives no memory bound (one byte at contiguous+2^40 would allocate about 2 TiB). Task 3c' first needs a sparse out-of-order store (a fragment list, or Reassembly as a range set) with a proved memory bound. Then the steps below apply unchanged. It is multi-session, and it waits on the user's reading of the §7.5 floor: bytes held, or offset span.
  [T3 review concern 3, 2026-11-06 ruling]
 
 RFC 9000 §7.5 says "Implementations MUST support buffering at least 4096 bytes of data received in out-of-order CRYPTO frames". After Task 3 the window is a span past the contiguous end, so a 1-byte frame at contiguous + 20000 closes with 0x0d while almost nothing is held. Under the acceptance rule that is over-strict.
@@ -653,6 +653,51 @@ RFC 9000 §7.5 says "Implementations MUST support buffering at least 4096 bytes 
 - [ ] **Step 6: Mutation.** **T6-M1:** remove the empty-data guard. Expected: the `tight` conjunct of `RecvStream::wf` fails at the insert, and so does `empty_stream_frame_keeps_window`.
 
 ---
+
+### Task 7: Task 3c' — sparse CRYPTO out-of-order store with a proved memory bound (RFC 9000 §7.5 held-bytes floor)
+
+> **Added 2026-11-07 (controller).** Replaces the blocked Task 3c. Ruling (ledger, 2026-11-07): RFC 9000 §7.5's floor "MUST support buffering at least 4096 bytes of data received in out-of-order CRYPTO frames" counts **bytes held**, not offset span. The dense `Reassembly` can't carry that (one byte at contiguous + 2^40 would allocate ~2 TiB), so CRYPTO's out-of-order part moves to a sparse store with its own proved bound. RecvStream keeps the dense `Reassembly` (flow control already bounds its span).
+
+**Files:**
+- Create: `crates/quic/src/frags.rs` (the sparse store), registered in `crates/quic/src/lib.rs`.
+- Modify: `crates/quic/src/crypto_stream.rs` (representation, `wf`, `crypto_allowed_err`, floor lemma); `crates/quic/src/conn.rs` (the 21 `reassembly()` uses re-pointed to `CryptoStream` accessors; no clause weakened); `crates/quic/src/reassembly.rs` (class fix: `insert` itself ensures an empty insert is a no-op).
+- Test: `crates/quic/tests/crypto_stream.rs`, `crates/quic/tests/frags.rs`.
+- Modify: design §3.1, §4 (rows), §6; `docs/requirements.md` §7.5 row (partial -> met, if the floor lemma is proved as stated).
+
+**Interfaces:**
+- Produces (`quic::frags`):
+  - `pub struct Frags` = sorted, pairwise disjoint and **non-adjacent** non-empty fragments (`Vec<(u64, Vec<u8>)>`) plus an exec `held: u64`.
+  - `pub closed spec fn view(&self) -> Map<nat, u8>`; `pub closed spec fn wf(&self) -> bool`; `wf ==> held == view.dom().len()` and `count() == runs(view.dom())` where `pub open spec fn runs(s: Set<nat>) -> nat` = `s.filter(|p| p == 0 || !s.contains(p - 1)).len()` (the number of maximal runs: an RFC-side quantity, not bookkeeping).
+  - `pub fn new() -> Frags`; `pub fn held(&self) -> u64`; `pub fn count(&self) -> usize`.
+  - `pub fn insert(&mut self, lo: u64, off: u64, data: &[u8])`: adds each byte of `data` at a position `p >= lo` not already in `view` (first writer wins); merges adjacent runs; ensures the exact new `view`, `held`, `count`.
+  - `pub fn after_insert(&self, lo: u64, off: u64, data: &[u8]) -> (u64, usize)`: the `(held, count)` `insert` would give, without changing `self` (so the limit is checked before committing).
+  - `pub fn take_front(&mut self, end: u64, out: &mut Vec<u8>) -> (new_end: u64)`: while the first fragment starts at or below `end`, appends its bytes past `end` to `out` and removes it; ensures `out` grows by exactly `view`'s contiguous run from `end`, and the removed positions leave `view`.
+- Produces (`quic::crypto_stream`):
+  - `CryptoStream` holds the unread in-order bytes (`[base, contig)`, dense; a `Vec<u8>` or the existing `Reassembly` restricted to that range) plus `Frags` for positions `> contig`. `hist`, `restart`, `received`, `drained`, `end_spec` keep their meaning (3b).
+  - New closed accessors replacing `reassembly()` for callers: `base_spec()`, `inserted()` (the accepted insertion history since the last restart; `crypto_contiguous(s) = rfc_contiguous(rfc_received(s.inserted()))`), `buf_len_spec()`.
+  - `pub open spec fn ooo_held(s: CryptoStream, off: u64, d: Seq<u8>) -> nat` = the number of received positions past the contiguous end **after** the insert, over `rfc_received(s.inserted().push((off, d)))` (RFC quantity); `pub open spec fn ooo_runs(..)` = `runs` of that set.
+  - `MAX_CRYPTO_BUFFER` (16384) now bounds held out-of-order bytes; new `MAX_CRYPTO_RANGES: usize = 4096`, a named own-limit.
+  - `crypto_allowed_err(s, off, len, c)` = `c == CRYPTO_BUFFER_EXCEEDED && len > 0 && (ooo_held(..) > MAX_CRYPTO_BUFFER || ooo_runs(..) > MAX_CRYPTO_RANGES)`.
+  - Floor lemma (rule 1d): `ooo_held(s, off, d) <= 4096 ==> forall c. !crypto_allowed_err(s, off, d.len(), c)` (covers runs, since each run holds at least one byte). Non-vacuity (1c): a 16385th held byte is allowed to err.
+  - Memory bound in `wf`: buffered bytes `<= (contig - base) + MAX_CRYPTO_BUFFER` and fragment count `<= MAX_CRYPTO_RANGES`; with 3b's drain (base == contig at every pub QuicServer exit) that is `<= 16384` bytes plus `<= 4096` fragment headers between datagrams.
+  - `on_crypto` keeps T3's in-place close and its converse (rule 1b) and 3b's ensures.
+- Class fix (`quic::reassembly`): `Reassembly::insert` ensures `data@.len() == 0 ==> *final(self) == *old(self)`; `insert_empty`/`insert_tight`'s empty guards become proved-redundant (keep them or remove them; say which).
+
+- [ ] **Step 1: Tests first** (RED on the current tree):
+  - `crypto_far_single_byte_ok`: one byte at contiguous + 20000 is accepted and buffered.
+  - `crypto_held_bytes_limit`: the frame taking held out-of-order bytes from 16384 to 16385 gets 0x0d; the one before it doesn't.
+  - `crypto_range_limit`: 4097 disjoint 1-byte runs give 0x0d on the 4097th; 4096 don't.
+  - `crypto_dup_ooo_not_double_counted`: the same out-of-order frame twice holds its bytes once.
+  - `frags.rs`: insert/merge/take_front unit tests (overlap left, right, inside, spanning several fragments; adjacency merge).
+- [ ] **Step 2: `Frags`** with its proofs. **Step 3: `CryptoStream` on `Frags`**, spec accessors, conn.rs re-pointing (diff every pub signature: requires/ensures unchanged except the accessor names), the floor and non-vacuity lemmas. **Step 4: `Reassembly::insert` class fix.**
+- [ ] **Step 5: Verify.** quic then quictls at rlimit 4 (recipe); stop rule (no quic fn above 8M); record the touched fns and the top 8. Tests: state the delta against 920. verify.sh exact line; escape greps; check-quotes; duvet.
+- [ ] **Step 6: Mutations** (each must fail on a named obligation, not rlimit):
+  - span limit restored (limit on `off + len - contig`): the floor lemma and `crypto_far_single_byte_ok` fail;
+  - `MAX_CRYPTO_RANGES` = 4095: the floor lemma fails;
+  - re-anchoring (rule 1d): the limit read from `frags.count()` with merging disabled: `Frags::wf`'s `count == runs` fails;
+  - held counted with duplicates (`held += data.len()`): `held == view.dom().len()` fails;
+  - delete the close: the rule-1b converse fails;
+  - `Reassembly::insert` stops early-returning on empty data and extends the window: the new ensures fails.
 
 ## Self-review notes
 
