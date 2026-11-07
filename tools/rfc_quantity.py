@@ -1,7 +1,7 @@
 """RFC-quantity gate (Phase 9r2 R4, class C8). Run via scripts/rfc-quantity.sh.
 
 Usage: python3 -I tools/rfc_quantity.py [--root DIR] [--allow FILE] [--open FILE] [--old-open FILE]
-       [--allow-lines N] (the demos' fixture count; the real tree uses ALLOW_LINES)
+       [--allow-digest HEX] (the demos' fixture digest; the real tree uses ALLOW_DIGEST)
 
 C8: an allowed_*err predicate written over the code's own bookkeeping (a read-offset window, a
 `seen` mask, a running `high`) instead of the RFC's quantities, so the proof checks the code
@@ -28,8 +28,8 @@ A read is vouched for by one of:
 Fails closed: no predicate, a predicate or callee whose body cannot be found, an ambiguous callee
 name, a missing or malformed list file, an empty or uncited reason, an allowlist line or annotation
 that vouches for nothing (stale), an open line that matches no read (stale) or whose count is not
-the current count, or an allowlist whose line count is not ALLOW_LINES (the allowlist is a ratchet:
-growth needs this constant raised in the same diff, so it is visible in review).
+the current count, or an allowlist whose digest is not ALLOW_DIGEST (the allowlist is a ratchet: any
+change to it, growth or a swap, needs this constant changed in the same diff, so it is reviewed).
 
 Limits (a token scan of comment- and string-stripped text, not a Rust parser): pattern bindings are
 found in match arms (back from `=>` to the arm start), `let`/`if let` patterns, closure and
@@ -39,9 +39,11 @@ predicate's arguments (`recv_allowed_err(old(self).rfc(), ..)`) is the refinemen
 and a `name` line's claim about a parameter holds only if every caller passes what it says (the
 reviewer checks the callers, which this gate lists as followed fns).
 """
-import importlib.util, os, re, sys
+import hashlib, importlib.util, os, re, sys
 
-ALLOW_LINES = 30  # the allowlist's line count: raise it in the diff that adds a line (reviewed growth)
+# sha256 of the allowlist's non-comment lines, sorted and joined by newlines: any change to the vouched-for set (a
+# new line, a swap, an edited reason) needs this constant changed in the same diff, so it is reviewed
+ALLOW_DIGEST = 'dc30bcd07767bfa2981d220c91571a7ea182f9f80f5139b4d08015d83a1678e5'
 VSTD_TYPES = {'Seq', 'Set', 'Map', 'Multiset'}
 VSTD_METHODS = {'len', 'skip', 'take', 'subrange', 'push', 'last', 'first', 'drop_last', 'drop_first',
                 'contains', 'contains_key', 'insert', 'remove', 'union', 'intersect', 'difference', 'dom',
@@ -191,16 +193,18 @@ class Gate:
         return hit[0]
 
     def resolve(self, caller, name, qual):
-        crate = caller[2].split('::')[0]
+        """The spec fn site a call of `qual::name` in caller names, None if no scanned fn has that name; raise when
+        more than one could be meant. A path keeps the fns whose module path ends with it (`crate` is the caller's
+        crate; `self`/`super` are dropped, which only widens the match); an unqualified name is the caller's own
+        module's fn (it shadows a glob import), else the one fn of that name in all scanned crates."""
         cand = [x for x in self.sites if x[2].split('::')[-1] == name]
-        if qual and qual[-1][0].isupper() and qual[-1] not in VSTD_TYPES:
-            cand = [x for x in cand if qual[-1] in x[2].split('::')[:-1]]
-        # a fn of the caller's own module shadows a glob import; otherwise one per crate, or one in all crates
-        here = [x for x in cand if x[0] == caller[0]]
-        same = [x for x in cand if x[2].split('::')[0] == crate]
-        cand = here or same or cand
+        q = [caller[2].split('::')[0] if x == 'crate' else x for x in qual if x not in ('self', 'super')]
+        if q:
+            cand = [x for x in cand if x[2].split('::')[:-1][-len(q):] == q]
+        else:
+            cand = [x for x in cand if x[0] == caller[0]] or cand
         paths = sorted({x[2] for x in cand})
-        if len(paths) > 1: raise Fail('%s calls %s, which names %d spec fns (%s): ambiguous' % (caller[2], name, len(paths), ', '.join(paths)))
+        if len(paths) > 1: raise Fail('%s calls %s, which names %d spec fns (%s): ambiguous' % (caller[2], '::'.join(qual + [name]), len(paths), ', '.join(paths)))
         if not cand: return None
         if len({(x[0], x[1]) for x in cand}) > 1: raise Fail('%s: two fns with one path' % paths[0])
         return cand[0]
@@ -268,6 +272,8 @@ class Gate:
             nm, i, e = m.group(0), m.start(), m.end()
             if i in calls: continue
             pb = back(b, i)
+            if pb >= 1 and b[pb - 1:pb + 1] == '..' and not nm[0].isupper():
+                reads.append(('update', '..' + nm, *at(i))); continue  # `S { f: x, ..s }` reads every other field of s
             if pb >= 0 and (b[pb] == '.' or b[pb - 1:pb + 1] == '->'): continue
             if pb >= 1 and b[pb - 1:pb + 1] == '::': continue
             p = fwd(b, e)
@@ -293,8 +299,8 @@ class Gate:
                 if whole and c and calls.get(c[0]) in ('followed', 'allowed'):
                     continue  # passed on: the callee's own reads count, or the call line vouches for it
             reads.append(('name', nm, *at(i)))
-        # accessors on call results and parenthesised expressions
-        for m in re.finditer(r'[)\]]', b):
+        # accessors on call results, parenthesised expressions and struct literals
+        for m in re.finditer(r'[)\]}]', b):
             for kind, a, z, mn in chain(b, m.end()):
                 if a in done: break
                 done.add(a)
@@ -321,16 +327,14 @@ def main(argv):
     global acc_
     root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
     allow = opn = old = None
-    nallow = ALLOW_LINES
+    nallow = ALLOW_DIGEST
     while argv:
-        if argv[0] in ('--root', '--allow', '--open', '--old-open', '--allow-lines') and len(argv) > 1:
+        if argv[0] in ('--root', '--allow', '--open', '--old-open', '--allow-digest') and len(argv) > 1:
             v = argv[1]
             if argv[0] == '--root': root = v
             elif argv[0] == '--allow': allow = v
             elif argv[0] == '--open': opn = v
-            elif argv[0] == '--allow-lines':
-                if not v.isdigit(): print('rfc-quantity: --allow-lines takes a number', file=sys.stderr); return 1
-                nallow = int(v)
+            elif argv[0] == '--allow-digest': nallow = v
             else: old = v
             argv = argv[2:]
         else:
@@ -352,9 +356,10 @@ def main(argv):
             d = calls if f[0] == 'call' else names
             if (f[1], f[2]) in d: fail.append('%s:%d: duplicate line' % (allow, n))
             d[(f[1], f[2])] = False
-        if len(al) != nallow:
-            fail.append('the allowlist has %d lines but ALLOW_LINES in tools/rfc_quantity.py is %d (the allowlist is a ratchet: '
-                        'a new line needs the constant raised in the same diff, a deleted line needs it lowered)' % (len(al), nallow))
+        dig = hashlib.sha256('\n'.join(sorted(l for _, l in al)).encode('utf-8')).hexdigest()
+        if dig != nallow:
+            fail.append('the allowlist\'s digest is %s but ALLOW_DIGEST in tools/rfc_quantity.py is %s (the allowlist is a '
+                        'ratchet: any change to its lines needs the constant changed in the same diff, for review)' % (dig, nallow))
         ol = read_list(opn, 'open ratchet')
         opens = {}
         for n, l in ol:
@@ -392,6 +397,8 @@ def main(argv):
                 for t in callees:
                     if t[2] not in seen: seen.add(t[2]); work.append(t)
         # annotations: each cites the RFC and vouches for a read
+        for _, _, f in acc_.rs_files(root):
+            g.src(f)
         for f in sorted(g.raw):
             for n, l in enumerate(g.raw[f]):
                 a = ANNOT.search(l)
@@ -404,7 +411,7 @@ def main(argv):
                 if not used: fail.append('stale allowlist line, vouches for no read or call: %s\t%s\t%s' % (what, k[0], k[1]))
         for k, v in sorted(hits.items()):
             kind, f, ln = v[0]
-            what = {'field': 'a struct field', 'method': 'a method that is not a vstd Seq/Set/Map method', 'self': 'self',
+            what = {'field': 'a struct field', 'update': 'a struct update, every field it does not set', 'method': 'a method that is not a vstd Seq/Set/Map method', 'self': 'self',
                     'macro': 'a macro', 'call': 'a fn that is not a spec fn in a scanned verus! block',
                     'name': 'a name used other than as a whole argument of a followed or allowed call'}[kind]
             if k in opens:
