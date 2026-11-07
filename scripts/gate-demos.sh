@@ -365,6 +365,8 @@ cfresh; sed -i 's/Some((false, TRANSPORT_PARAMETER_ERROR/Some((false, k/' "$cit"
 expect_fail "citations: close code a name bound outside the fn's parameters, no citation" "demo_close has no" cite
 cfresh; sed -i 's/Some((false, TRANSPORT_PARAMETER_ERROR/Some((false, k/' "$cit"; sed -i '/^D1/d' "$tmp/cit/tools/mutants.tsv"
 expect_fail "citations: close code a name bound outside the fn's parameters, no row" "close-code fn quic::conn::demo_close has no row" closes
+cfresh; sed -i 's/Some((false, TRANSPORT_PARAMETER_ERROR/Some((false, self.code/' "$cit"; strip_cite '^pub fn demo_close'
+expect_fail "citations: close code a field expression, fn without a citation" "demo_close has no" cite
 cfresh; sed -i 's/(false, demo_code(n)/(false, crate::conn::demo_code(n)/' "$cit"; strip_cite '^spec fn demo_code'
 expect_fail "citations: path-qualified code-mapping call, mapping fn without a citation" "demo_code has no" cite
 cfresh; sed -i 's|^//= https://|//= http://|' "$cit"

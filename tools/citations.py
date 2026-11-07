@@ -5,9 +5,9 @@
 #                    is checked against the RFC by scripts/check-quotes.sh.
 #   closes ROOT TSV  every exec fn that pins a close code is the fn column (crate module fn) of some row of TSV.
 # A close-code fn is an exec fn (tools/acceptance.py's scanner) whose ensures contain `close_spec() == Some((app, code, reason))`
-# with a numeric literal, a codes.rs constant, a call (a mapping spec fn such as report_code, cited too, also path-qualified) or a
-# bare name that is not a parameter of the fn (bound elsewhere in the ensures) in `code`; a code passed in as a parameter pins
-# nothing here (its callers do).
+# with anything but a bare parameter name in `code` (a literal, a codes.rs constant, a call to a mapping spec fn such as
+# report_code, cited too, also path-qualified, a field, a method, a name that is not a parameter); a code that is exactly a parameter, or a name bound by a `matches` pattern
+# in the same ensures (it echoes the stored code), pins nothing here (callers do).
 # Fails closed: no allowed predicate, no close-code fn, no codes.rs constant or an unreadable input is an error.
 import importlib.util
 import os
@@ -50,7 +50,6 @@ def scan(root):
         die('no constants found in crates/quic/src/codes.rs')
     line = lambda f, off: open(f, encoding='utf-8').read().count('\n', 0, off) + 1
     preds = [(f, line(f, off), name) for f, off, name in apos]
-    cname = re.compile(r'(?<![A-Za-z0-9_])(?:%s)(?![A-Za-z0-9_])|(?<![A-Za-z0-9_])(?:0x[0-9a-fA-F_]+|[0-9]+)(?![A-Za-z0-9_])' % '|'.join(sorted(consts)))
     if not preds:
         die('no allowed_*err spec fn found under crates/')
     closes, maps = [], set()
@@ -73,10 +72,13 @@ def scan(root):
                 die('%s: fn %s: close_spec() == Some(..) is not an (app, code, reason) tuple' % (f, path))
             code = parts[1]
             calls = set(re.findall(r'(?<![A-Za-z0-9_.])([a-z_][A-Za-z0-9_]*)\s*\(', code))
-            # a bare name that is not one of the fn's own parameters is bound elsewhere (an ensures variable, a ghost let)
-            # and may equal a constant or a mapping: fail closed, treat it as pinning
-            free = re.fullmatch(r'\s*([a-z_][A-Za-z0-9_]*)\s*', code) and re.fullmatch(r'\s*([a-z_][A-Za-z0-9_]*)\s*', code).group(1) not in params(acc, f, off)
-            if cname.search(code) or calls or free:
+            # only a code that is exactly one of the fn's own parameters is unpinned (its callers pin it); any other
+            # expression (constant, call, field, method, a name bound elsewhere) pins a code: fail closed
+            # a name bound by a `matches` pattern (close_info: `r matches Some((a, c, v)) ==> close_spec() == Some((*a, *c, v@))`)
+            # echoes what is stored, it pins nothing
+            bound = {n for pat in re.findall(r'\bmatches\s+[A-Za-z:]*\s*(\((?:[^()]|\([^()]*\))*\))', ens)
+                     for n in re.findall(r'[a-z_][A-Za-z0-9_]*', pat)}
+            if code.strip().lstrip('*&').strip() not in params(acc, f, off) | bound:
                 closes.append((f, line(f, off), path))
                 maps |= calls
                 break
