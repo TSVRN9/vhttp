@@ -3250,6 +3250,49 @@ impl Connection {
     // The TLS boundary
     // =========================================================================
 
+    /// A connection no longer open: every level's unread in-order CRYPTO bytes are dropped, since
+    /// TLS is fed nothing more after a close (RFC 8446 §6.2). The ends and the received history
+    /// stay, for RFC 9001 §4.1.3.
+    #[verifier::spinoff_prover]
+    pub fn crypto_drop(&mut self)
+        requires
+            old(self).wf(),
+            !(old(self).phase_spec() is Open),
+        ensures
+            final(self).wf(),
+            final(self).out_log() == old(self).out_log(),
+            final(self).phase_spec() == old(self).phase_spec(),
+            final(self).close_spec() == old(self).close_spec(),
+            forall|k: PacketKind| #[trigger] final(self).live(k) == old(self).live(k),
+            forall|k: PacketKind| #[trigger] final(self).crypto_end_spec(k) == old(self).crypto_end_spec(k),
+            forall|k: PacketKind, p: nat| #[trigger] final(self).crypto_received(k, p) == old(self).crypto_received(k, p),
+            final(self).crypto_kept(*old(self)),
+            crypto_all_drained(*final(self)),
+    {
+        hide(crate::reassembly::rfc_received);
+        hide(crate::reassembly::rfc_contiguous);
+        proof {
+            reveal(crx_ok);
+            self.crx_i.reassembly().lemma_wf();
+            self.crx_h.reassembly().lemma_wf();
+            self.crx_1.reassembly().lemma_wf();
+        }
+        // shortcut: the bytes are copied out and dropped (`read`); a copy-free pop only if this shows up.
+        let mut sink: Vec<u8> = Vec::new();
+        self.crx_i.read(&mut sink);
+        self.crx_h.read(&mut sink);
+        self.crx_1.read(&mut sink);
+        proof {
+            assert forall|k: PacketKind| #[trigger] crypto_drained(*self, k) by {
+                match k {
+                    PacketKind::Initial => {},
+                    PacketKind::Handshake => {},
+                    PacketKind::OneRtt => {},
+                }
+            }
+        }
+    }
+
     /// Appends the newly contiguous CRYPTO bytes of `level` to `out`.
     #[verifier::spinoff_prover]
     pub fn crypto_read(&mut self, level: PacketKind, out: &mut Vec<u8>)
@@ -8551,9 +8594,10 @@ impl Connection {
 // Helpers
 // =============================================================================
 
-/// The three CRYPTO streams' `wf`. Opaque, so fns that do not touch a CRYPTO stream carry it by
-/// field congruence without unfolding it.
-/// With the three CRYPTO streams' `wf`: a stream whose space is not live is drained.
+/// The three CRYPTO streams' `wf`, and a stream whose space is not live is drained. Opaque, so a
+/// fn that changes neither a CRYPTO stream nor `live_i`, `live_h`, `complete` carries it by field
+/// congruence; the fns that do (`on_crypto_frame`, `crypto_read`, `crypto_drop`, `discard`,
+/// `on_handshake_complete`, `crypto_end`'s proof, the constructor) reveal it.
 #[verifier::opaque]
 spec fn crx_ok(i: CryptoStream, h: CryptoStream, o: CryptoStream, live_i: bool, live_h: bool, complete: bool) -> bool {
     &&& i.wf() && h.wf() && o.wf()

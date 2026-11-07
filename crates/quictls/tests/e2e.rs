@@ -663,6 +663,21 @@ fn initial_data_past_end_with_handshake_pv() {
     assert!(!done(&log));
 }
 
+/// The datagram that closes leaves nothing unread: the Finished in its Handshake packet was never
+/// fed (`superseded` closed first), and its bytes are dropped, not kept for a TLS that reads no more.
+#[test]
+fn closing_datagram_drops_unread_crypto() {
+    let (mut s, mut c, _) = flight();
+    let mut parts = c.crypto_parts();
+    parts.push((Level::Initial, vec![Frame::Crypto { offset: c.tx_off[0], data: vec![7; 5] }]));
+    let d = c.dgram(parts);
+    send(&mut s, &d, 3);
+    assert_eq!(s.conn().phase(), Phase::Closing);
+    let h = PacketKind::Handshake;
+    assert!(s.conn().crypto_end(h) > 0);
+    assert_eq!(s.conn().crypto_base(h), s.conn().crypto_end(h));
+}
+
 /// RFC 9001 §4.1.3 (M1, Handshake to 1-RTT): Handshake CRYPTO bytes buffered past a gap when the
 /// 1-RTT keys install.
 #[test]

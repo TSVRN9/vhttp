@@ -418,7 +418,7 @@ impl H3Server {
         &self.conn
     }
 
-    /// Only for the TLS calls, `close` and `poll_transmit`; call `pump` after any change made through
+    /// Only for the TLS calls (`crypto_drop` included), `close` and `poll_transmit`; call `pump` after any change made through
     /// it. `stream_write`, `stream_reset` or `poll_stream_events` through it bypass the write log and
     /// h3, so the per-stream prefix and every-event-to-h3 guarantees would no longer hold.
     pub fn conn_mut(&mut self) -> (r: &mut Connection)
