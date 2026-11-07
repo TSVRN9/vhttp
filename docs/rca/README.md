@@ -29,7 +29,12 @@ A catch lower in the list needs a stated reason why a higher one is not possible
 
 - `catalog.md`: root causes of every bug found by review so far, the 18 classes with their catches and owners.
 - `2026-11-06-empty-crypto.md`: first RCA entry.
-- Tools: `tools/check_quotes.py`, `tools/rl.py`, `tools/mut.py`; gates: `scripts/lint-scripts.sh`, `scripts/check-quotes.sh`, `scripts/escape-gate.sh`, `scripts/acceptance.sh`, `scripts/gate-demos.sh`.
+- Tools: `tools/check_quotes.py`, `tools/rl.py`, `tools/mut.py`, `tools/mutants.py`; gates: `scripts/lint-scripts.sh`, `scripts/check-quotes.sh`, `scripts/escape-gate.sh`, `scripts/acceptance.sh`, `scripts/rlimit-gate.sh`, `scripts/rlimit-ceilings.sh`, `scripts/mutants.sh`, `scripts/gate-demos.sh`.
+- Mutant registry (C6): `tools/mutants.tsv` and `tools/mutants/<id>.patch`. A mutation that a review or plan runs by hand is added as a row (id, crate, module, the fn whose verification it must break, tests that must fail, the expected-failure regex, origin) with its `git diff` as the patch, so it is re-run mechanically instead of once.
+
+## Before merging a branch
+
+`scripts/mutants.sh run` is the last step on a branch before merging, after the last commit that touches `crates/`. It applies each patch alone in a throwaway git worktree, needs every mutant killed (rlimit is not a kill), and writes `tools/mutants-last-run.txt`; commit that file. On main at the merge commit, `scripts/verify.sh` fails unless the file names the merged branch's `crates/` tree (`HEAD^2:crates`) with every registry id passing. On a branch verify.sh runs only `scripts/mutants.sh check` (every patch still applies). If a change to `crates/` makes a patch stop applying, regenerate it (`git apply` what still applies, redo the edit, `git diff > tools/mutants/<id>.patch`) and re-run.
 - `2026-11-06-acceptance-parser.md`: RCA of the R4 parser's own bugs.
 - `2026-11-06-phase-9a-night.md`: RCAs of the bugs Phase 9a found on 2026-11-06, plus the open CRYPTO span item.
 - `2026-11-07-audit.md`: the 2026-11-07 repo audit (tests not gated; reviewed fixes left off main).

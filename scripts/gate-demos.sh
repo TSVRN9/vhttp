@@ -4,7 +4,8 @@ set -o pipefail
 # gate-demos.sh: each cheap gate gets a canned bad input (a temp copy of a fixture in
 # tools/gate-demos/ with one change applied) and must exit non-zero with its message; every fixture
 # first passes unchanged, so a demo cannot fail for the wrong reason. Covers lint-scripts,
-# check-quotes, acceptance (many bad changes, including real-git runs), escape-gate (three) and the rlimit gate. Takes a few seconds.
+# check-quotes, acceptance (many bad changes, including real-git runs), escape-gate (three), the rlimit gate and the mutant registry (scripts/mutants.sh; its run demos call Verus
+# on the fixture crate). Takes a few seconds, plus about a minute the first time vstd builds in target/mutants-demo.
 root=$(cd "$(dirname "$0")/.." && pwd)
 fx=$root/tools/gate-demos
 tmp=$(mktemp -d)
@@ -331,5 +332,120 @@ expect_fail "rlimit-ceilings: no logs" "no JSON logs" rceil rc10
 rcrepo rc11
 gitc rc11 branch -m main trunk
 expect_fail "rlimit-ceilings: no main" "cannot resolve the merge-base" rceil rc11
+
+# mutant registry (scripts/mutants.sh, C6), in throwaway git repos holding the acceptance fixture crate as crates/demo/src/acc.rs
+# and the one-row registry of tools/gate-demos/mutants. check: a patch that no longer applies, a missing patch, an empty or
+# missing tsv, a duplicate id, an orphan patch, a patch outside its row's crate, a bad regex. run (real Verus, seconds:
+# CARGO_TARGET_DIR keeps vstd built across runs): the killed mutant passes; a mutant that still verifies fails; a dirty
+# crates/ is refused. The verdict on canned Verus output: rlimit, no or two JSON objects, another fn checked, a non-matching
+# error kind. The merge gate on a --no-ff merge into main: passes with a fresh run file; fails with none (also detached at
+# main's tip), a stale crates tree, a fail line, a missing id or an edited patch; on the branch only check runs.
+export CARGO_TARGET_DIR="${MUTANTS_DEMO_TARGET:-$root/target/mutants-demo}"
+mrepo() {  # mrepo <dir>: scripts, tools/mutants.py and the fixture, one commit on main, then branch feat
+    rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/tools"
+    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/mutants.py" "$tmp/$1/tools/"
+    cp -r "$fx/mutants/Cargo.toml" "$fx/mutants/Cargo.lock" "$fx/mutants/crates" "$tmp/$1/"
+    cp -r "$fx/mutants/tools/mutants.tsv" "$fx/mutants/tools/mutants" "$tmp/$1/tools/"
+    cp "$fx/acceptance/crates/demo/src/lib.rs" "$tmp/$1/crates/demo/src/acc.rs"
+    printf '/.worktrees/\n/target/\n' > "$tmp/$1/.gitignore"
+    git -C "$tmp/$1" init -q -b main
+    git -C "$tmp/$1" add -A
+    gitc "$1" commit -qm base
+    gitc "$1" checkout -qb feat
+}
+mut() { d=$1; shift; "$tmp/$d/scripts/mutants.sh" "$@"; }
+mrepo m1
+expect_pass "mutants check" mut m1 check
+sed -i 's/if n > 10 { Err(7) }/if n > 10 { Err(9) }/' "$tmp/m1/crates/demo/src/acc.rs"
+expect_fail "mutants check: patch that does not apply" "D-kill.patch does not apply" mut m1 check
+mrepo m2
+rm "$tmp/m2/tools/mutants/D-kill.patch"
+expect_fail "mutants check: missing patch" "cannot read" mut m2 check
+mrepo m2
+sed -i '/^D-kill/d' "$tmp/m2/tools/mutants.tsv"; rm "$tmp/m2/tools/mutants/D-kill.patch"
+expect_fail "mutants check: empty tsv" "has no rows" mut m2 check
+rm "$tmp/m2/tools/mutants.tsv"
+expect_fail "mutants check: no tsv" "mutants: no " mut m2 check
+mrepo m2
+sed -i 's/^D-kill.*/&\n&/' "$tmp/m2/tools/mutants.tsv"
+expect_fail "mutants check: duplicate id" "duplicate id D-kill" mut m2 check
+mrepo m2
+cp "$fx/mutants/live.patch" "$tmp/m2/tools/mutants/D-live.patch"
+expect_fail "mutants check: patch without a row" "patch without a row: D-live" mut m2 check
+mrepo m2
+sed -i 's/^D-kill\tdemo\t/D-kill\twire\t/' "$tmp/m2/tools/mutants.tsv"
+expect_fail "mutants check: patch outside its row's crate" "outside crates/wire/" mut m2 check
+mrepo m2
+sed -i 's/postcondition not satisfied/postcondition (not/' "$tmp/m2/tools/mutants.tsv"
+expect_fail "mutants check: regex that does not compile" "regex does not compile" mut m2 check
+mrepo m2
+sed -i 's/\tdemo\t-\t/\tdemo*\t-\t/' "$tmp/m2/tools/mutants.tsv"
+expect_fail "mutants check: wildcard fn" "must be a plain path" mut m2 check
+
+# run, for real: the fixture's mutant is killed (and the run file written); a mutant that still verifies; a dirty tree.
+mrepo m3
+expect_pass "mutants run: killed mutant" mut m3 run
+grep -qx "crates $(git -C "$tmp/m3" rev-parse HEAD:crates)" "$tmp/m3/tools/mutants-last-run.txt" || die "mutants run: run file lacks the crates tree"
+[ -z "$(git -C "$tmp/m3" worktree list --porcelain | grep '^worktree .*/mutants-')" ] || die "mutants run: worktree left behind"
+mrepo m4
+cp "$fx/mutants/live.patch" "$tmp/m4/tools/mutants/D-live.patch"
+printf 'D-live\tdemo\tacc\tdemo\t-\tpostcondition not satisfied\tgate-demos: n > 11 keeps the clause\n' >> "$tmp/m4/tools/mutants.tsv"
+gitc m4 add -A; gitc m4 commit -qm live
+expect_fail "mutants run: a mutant that still verifies" "the mutant still verifies acc::demo" mut m4 run D-live
+[ -z "$(git -C "$tmp/m4" worktree list --porcelain | grep '^worktree .*/mutants-')" ] || die "mutants run: worktree left behind after a failure"
+mrepo m5
+printf '// dirty\n' >> "$tmp/m5/crates/demo/src/acc.rs"
+expect_fail "mutants run: uncommitted crates/" "uncommitted changes" mut m5 run
+
+# the verdict on canned Verus output (tools/mutants.py killed/clean): a passing kill first.
+v=$tmp/verdict
+vj() {  # vj <errors> <success> [extra fn]: a one-object Verus JSON with demo::acc::demo checked
+    x=; [ -z "${3:-}" ] || x=", {\"function\": \"$3\", \"rlimit\": 5, \"success\": true}"
+    printf '{"verification-results": {"encountered-error": false, "encountered-vir-error": false, "verified": %s, "errors": %s, "is-verifying-entire-crate": false}, "times-ms": {"smt": {"smt-run-module-times": [{"function-breakdown": [{"function": "demo::acc::demo", "rlimit": 900, "success": %s}%s]}]}}}\n' \
+        "$((1 - $1))" "$1" "$2" "$x" > "$v.json"
+}
+vlog() { printf 'error: %s\n   --> crates/demo/src/acc.rs:11:9\n    |\n11  |         r is Err ==> allowed_demo_err(n, r->Err_0),\n' "$1" > "$v.log"; }
+killed() { python3 -I "$root/tools/mutants.py" killed "$v" demo acc demo 'postcondition not satisfied.*allowed_demo_err'; }
+vj 1 false; vlog "postcondition not satisfied"
+expect_pass "mutants verdict" killed
+printf 'error: function body check: Resource limit (rlimit) exceeded\n' >> "$v.log"
+expect_fail "mutants verdict: rlimit is not a kill" "rlimit text" killed
+vlog "possible arithmetic underflow/overflow"
+expect_fail "mutants verdict: another error kind" "no postcondition/precondition/assertion block matches" killed
+vlog "postcondition not satisfied"; : > "$v.json"
+expect_fail "mutants verdict: no JSON (cached build or compile error)" "0 Verus result objects" killed
+vj 1 false; cat "$v.json" "$v.json" > "$v.2"; mv "$v.2" "$v.json"
+expect_fail "mutants verdict: two JSON objects" "2 Verus result objects" killed
+vj 1 false demo::acc::other
+expect_fail "mutants verdict: another fn checked too" "want exactly demo::acc::demo" killed
+vj 0 true
+expect_fail "mutants verdict: still verifies" "the mutant still verifies" killed
+vj 1 false
+expect_fail "mutants verdict: the unmutated fn fails" "unmutated acc::demo" python3 -I "$root/tools/mutants.py" clean "$v" demo acc demo
+
+# the merge gate (mutants.sh verify on main at a merge commit), on m3's real run file.
+mmerge() { gitc "$1" checkout -q main; gitc "$1" reset -q --hard "$mbase"; gitc "$1" merge -q --no-ff feat -m merge; }
+mbranch() { gitc "$1" checkout -q feat; gitc "$1" reset -q --hard "$2"; }
+mbase=$(git -C "$tmp/m3" rev-parse main)
+gitc m3 add tools/mutants-last-run.txt; gitc m3 commit -qm "mutants run"
+fresh_run=$(git -C "$tmp/m3" rev-parse HEAD)
+expect_pass "mutants verify on the branch (check only, no run file needed there)" mut m3 verify
+mmerge m3
+expect_pass "mutants verify: merge with a fresh run file" mut m3 verify
+mbranch m3 "$fresh_run"; gitc m3 rm -q tools/mutants-last-run.txt; gitc m3 commit -qm "no run file"; mmerge m3
+expect_fail "mutants verify: merge without a run file" "git show HEAD:tools/mutants-last-run.txt failed" mut m3 verify
+gitc m3 checkout -q --detach main
+expect_fail "mutants verify: the same merge checked out detached (a CI checkout)" "git show HEAD:tools/mutants-last-run.txt failed" mut m3 verify
+gitc m3 checkout -q main
+mbranch m3 "$fresh_run"; printf '// later\n' >> "$tmp/m3/crates/demo/src/lib.rs"; gitc m3 commit -qam "crates change after the run"; mmerge m3
+expect_fail "mutants verify: stale run file (crates changed after the run)" "is stale" mut m3 verify
+mbranch m3 "$fresh_run"; sed -i 's/^D-kill pass /D-kill fail /' "$tmp/m3/tools/mutants-last-run.txt"; gitc m3 commit -qam "fail line"; mmerge m3
+expect_fail "mutants verify: a fail line" "D-kill did not pass" mut m3 verify
+mbranch m3 "$fresh_run"; sed -i '/^D-kill /d' "$tmp/m3/tools/mutants-last-run.txt"; gitc m3 commit -qam "missing id"; mmerge m3
+expect_fail "mutants verify: a missing id" "missing D-kill" mut m3 verify
+mbranch m3 "$fresh_run"; sed -i 's/^index .*/index 0000000..1111111 100644/' "$tmp/m3/tools/mutants/D-kill.patch"; gitc m3 commit -qam "patch edited"; mmerge m3
+expect_fail "mutants verify: patch edited after the run" "was run with another patch" mut m3 verify
+gitc m3 checkout -q main; gitc m3 reset -q --hard "$mbase"; gitc m3 commit -q --allow-empty -m "direct commit on main"
+expect_pass "mutants verify: a non-merge commit on main runs check only" mut m3 verify
 
 echo "gate-demos: $n demos, all fail as expected"
