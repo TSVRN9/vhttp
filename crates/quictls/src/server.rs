@@ -1043,8 +1043,13 @@ impl<'a> QuicServer<'a> {
         proof {
             lemma_fed(cfg, tp, h0, l, b@, r.tls@);
         }
+        // TLS's step consumes exactly the bytes `crypto_read` handed over, which `fed` counts.
+        let ghost step = spec_on_crypto(cfg, tp, h0, l, b@, r.tls@);
         match self.hs.on_crypto(l, b.as_slice(), &r.tls, &mut ev) {
             Err(code) => {
+                proof {
+                    assert(step.1 is Err ==> self.hs@ == step.0);
+                }
                 //= https://www.rfc-editor.org/rfc/rfc8446#section-6
                 //# Servers and
                 //# clients MUST forget the secret values and keys established in failed
@@ -1065,7 +1070,12 @@ impl<'a> QuicServer<'a> {
                 self.sync_keys();
                 false
             },
-            Ok(()) => self.apply(ev, now, r),
+            Ok(()) => {
+                proof {
+                    assert(self.hs@ == step.0);
+                }
+                self.apply(ev, now, r)
+            },
         }
     }
 
@@ -1360,7 +1370,7 @@ impl<'a> QuicServer<'a> {
                 &&& final(self).conn_spec().close_spec() == Some((false, TRANSPORT_PARAMETER_ERROR, Seq::<u8>::empty()))
             },
             // Rule 1b: refusable parameters close so.
-            old(self).conn_spec().phase_spec() is Open && tp_allowed_err(old(self).conn_spec(), b@) ==> !ok
+            old(self).conn_spec().phase_spec() is Open && (allowed_tp_err(b@) || tp_allowed_err(old(self).conn_spec(), b@)) ==> !ok
                 && final(self).conn_spec().phase_spec() is Closing && final(self).conn_spec().close_spec() == Some(
                 (false, TRANSPORT_PARAMETER_ERROR, Seq::<u8>::empty()),
             ),
