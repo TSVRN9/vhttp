@@ -72,6 +72,8 @@ pub struct CryptoStream {
     re: Reassembly,
     /// `crypto_contiguous`, kept so a frame costs O(1) plus the bytes it makes contiguous.
     contig: u64,
+    /// Every insertion `on_crypto` made, kept across `restart`: what was really received.
+    hist: Ghost<Seq<(nat, Seq<u8>)>>,
 }
 
 impl CryptoStream {
@@ -83,6 +85,21 @@ impl CryptoStream {
         self.contig as nat
     }
 
+    pub closed spec fn history(&self) -> Seq<(nat, Seq<u8>)> {
+        self.hist@
+    }
+
+    /// Byte `p` arrived in a CRYPTO frame. `reassembly().inserted()` also holds `restart`'s
+    /// record of the bytes below its base, which were read but are not data received anew.
+    pub closed spec fn received(&self, p: nat) -> bool {
+        rfc_received(self.hist@).contains_key(p)
+    }
+
+    /// The end of the received data: the read offset plus the buffered window.
+    pub open spec fn end_spec(&self) -> nat {
+        (self.reassembly().base() + self.reassembly().buf_len()) as nat
+    }
+
     /// The buffer holds the unread in-order bytes, `[base, crypto_contiguous)`, plus at most
     /// `MAX_CRYPTO_BUFFER` bytes of window past them.
     pub open spec fn wf(&self) -> bool {
@@ -91,18 +108,9 @@ impl CryptoStream {
         &&& self.contig_spec() == crypto_contiguous(*self)
         &&& self.reassembly().base() + self.reassembly().buf_len() <= crypto_contiguous(*self)
             + MAX_CRYPTO_BUFFER
-    }
-
-    /// The byte before `end()` has been received.
-    pub proof fn lemma_end_received(&self)
-        requires
-            self.wf(),
-        ensures
-            self.reassembly().base() + self.reassembly().buf_len() > 0 ==> rfc_received(
-                self.reassembly().inserted(),
-            ).contains_key((self.reassembly().base() + self.reassembly().buf_len() - 1) as nat),
-    {
-        self.re.lemma_end_received();
+        &&& self.end_spec() > 0 ==> self.received((self.end_spec() - 1) as nat)
+        &&& forall|p: nat| #[trigger]
+            self.received(p) ==> rfc_received(self.reassembly().inserted()).contains_key(p)
     }
 
     pub fn new() -> (r: CryptoStream)
@@ -116,32 +124,48 @@ impl CryptoStream {
             re.lemma_wf();
         }
         let contig = re.contiguous_from(0);
-        let r = CryptoStream { re, contig };
+        let r = CryptoStream { re, contig, hist: Ghost(Seq::empty()) };
         proof {
             r.re.lemma_new_tight();
         }
         r
     }
 
-    /// Nothing buffered, and everything below `base` read.
-    pub fn new_at(base: u64) -> (r: CryptoStream)
+    /// Nothing buffered, everything below the end read, and `history` kept: what an Initial
+    /// discard leaves, for the end check of RFC 9001 §4.1.3.
+    pub fn restart(&mut self)
         requires
-            base <= VARINT_MAX,
+            old(self).wf(),
         ensures
-            r.wf(),
-            r.reassembly().base() == base,
-            r.reassembly().buf_len() == 0,
+            final(self).wf(),
+            final(self).reassembly().base() == old(self).end_spec(),
+            final(self).reassembly().buf_len() == 0,
+            final(self).history() == old(self).history(),
     {
-        let re = Reassembly::new_at(base);
+        proof {
+            self.re.lemma_wf();
+        }
+        let end = self.end();
+        let re = Reassembly::new_at(end);
         proof {
             re.lemma_wf();
         }
-        let contig = re.contiguous_from(base);
-        let r = CryptoStream { re, contig };
+        let contig = re.contiguous_from(end);
         proof {
-            r.re.lemma_new_tight();
+            re.lemma_new_tight();
+            lemma_contiguous_exists(rfc_received(re.inserted()));
         }
-        r
+        let ghost a = *self;
+        self.re = re;
+        self.contig = contig;
+        proof {
+            assert forall|p: nat| #[trigger] self.received(p) implies rfc_received(self.reassembly().inserted()).contains_key(p) by {
+                assert(a.received(p));
+            }
+            if self.end_spec() > 0 {
+                assert(a.received((a.end_spec() - 1) as nat));
+            }
+        }
     }
 
     /// A CRYPTO frame's `offset` and `data`.
@@ -163,6 +187,8 @@ impl CryptoStream {
                 &&& final(self).reassembly().base() == old(self).reassembly().base()
             },
     {
+        hide(rfc_received);
+        hide(rfc_contiguous);
         proof {
             self.re.lemma_wf();
         }
@@ -195,16 +221,56 @@ impl CryptoStream {
             return Err(CRYPTO_BUFFER_EXCEEDED);
         }
         self.re.insert(offset, data);
+        self.hist = Ghost(self.hist@.push((offset as nat, data@)));
         proof {
             Reassembly::lemma_insert_tight(old(self).re, self.re, offset, data@);
             lemma_received_push(old(self).re.inserted(), offset as nat, data@);
+            lemma_received_push(old(self).hist@, offset as nat, data@);
             lemma_contiguous_mono(
                 rfc_received(old(self).re.inserted()),
                 rfc_received(self.re.inserted()),
             );
+            self.lemma_hist_insert(*old(self), offset as nat, data@);
         }
         self.contig = self.re.contiguous_from(self.contig);
         Ok(())
+    }
+
+    /// `on_crypto`'s insertion of `d` at `o` keeps the history conjuncts of `wf`: the byte before
+    /// the end lies in `d`, or the end did not move.
+    proof fn lemma_hist_insert(&self, a: CryptoStream, o: nat, d: Seq<u8>)
+        requires
+            a.wf(),
+            self.re.wf(),
+            self.re.tight(),
+            self.re.inserted() == a.re.inserted().push((o, d)),
+            self.hist@ == a.hist@.push((o, d)),
+        ensures
+            self.end_spec() > 0 ==> self.received((self.end_spec() - 1) as nat),
+            forall|p: nat| #[trigger]
+                self.received(p) ==> rfc_received(self.reassembly().inserted()).contains_key(p),
+    {
+        hide(rfc_contiguous);
+        lemma_received_push(a.re.inserted(), o, d);
+        lemma_received_push(a.hist@, o, d);
+        a.re.lemma_wf();
+        self.re.lemma_wf();
+        self.re.lemma_end_received();
+        let e = self.end_spec();
+        if e > 0 && !(o <= e - 1 < o + d.len()) {
+            assert(rfc_received(self.re.inserted()).contains_key((e - 1) as nat));
+            assert(rfc_received(a.re.inserted()).contains_key((e - 1) as nat));
+            assert(e <= a.end_spec());
+            assert(a.received((a.end_spec() - 1) as nat));
+            assert(rfc_received(a.re.inserted()).contains_key((a.end_spec() - 1) as nat));
+            assert(rfc_received(self.re.inserted()).contains_key((a.end_spec() - 1) as nat));
+            assert(e == a.end_spec());
+        }
+        assert forall|p: nat| #[trigger] self.received(p) implies rfc_received(self.reassembly().inserted()).contains_key(p) by {
+            if !(o <= p < o + d.len()) {
+                assert(a.received(p));
+            }
+        }
     }
 
     /// Appends the newly contiguous CRYPTO bytes to `out`.
@@ -234,6 +300,12 @@ impl CryptoStream {
         self.re.pop(out);
         proof {
             Reassembly::lemma_pop_tight(old(self).re, self.re);
+            assert forall|p: nat| #[trigger] self.received(p) implies rfc_received(self.reassembly().inserted()).contains_key(p) by {
+                assert(old(self).received(p));
+            }
+            if self.end_spec() > 0 {
+                assert(old(self).received((old(self).end_spec() - 1) as nat));
+            }
         }
     }
 
