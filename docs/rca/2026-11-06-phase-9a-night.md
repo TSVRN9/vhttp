@@ -5,7 +5,7 @@
 - **Escape:** the design's rule 1 is one-way (`Err ==> allowed`). Nothing required the converse for a MUST-close trigger, and no planned mutation deleted a close call.
 - **Class:** C7, required close missing.
 - **Catch:** plan rule 1b. Where the RFC says MUST close on a trigger, the site proves `old Open && trigger ==> Closing with that code`. Every touched close site gets a delete-the-close mutation that must fail on a postcondition.
-- **Evidence:** mutations T1-M4..T1-M7 (delete each of the four closes) fail on postconditions (`.worktrees/vt-9a-evidence/t1`). Task 3's D3 is the same check for on_crypto_frame.
+- **Evidence:** mutations T1-M4..T1-M7 (delete each of the four closes) fail on postconditions (`.worktrees/vt-9a-evidence/t1`). Task 3's D3 is the same check for on_crypto_frame. Since 9r2 T2 these are registry rows T1-M4..T1-M7 and T3-D3, re-run by `scripts/mutants.sh run` before every merge (`.worktrees/vt-9r2-evidence/r2/mutants-run.log`).
 - **Open:** the remaining close sites (on_handshake_complete in 9a Task 5; close_on_error and on_counted in 9c).
 
 ## 2. CRYPTO window anchored at the read offset (9a T3 review I2; a real bug, already on main)
@@ -33,7 +33,7 @@
 - **Defect:** the alert-to-code mapping in `report` had no RFC 9001 §4.8 `//=` citation. Fixed on phase-9a in 256d44e.
 - **Escape:** the citation rule is prose. `check_quotes.py` verifies the quotes that exist and cannot see missing ones.
 - **Class:** C1.
-- **Catch (open, owner 9r2):** a gate requiring that every `allowed_*err` spec fn, and every fn whose ensures pin a close code, carry a `//=` block. Its demo strips a citation and must fail.
+- **Catch (in place, 9r2 T3):** `tools/citations.py cite` (verify.sh, after check-quotes) requires a `//= https://www.rfc-editor.org/rfc/..#..` line with a `//#` quote in the comment block above every `allowed_*err` spec fn, every exec fn whose ensures pin `close_spec() == Some((app, code, reason))` with a literal, a codes.rs constant or a call in `code`, and every spec fn such a call names (`report_code`). `tools/citations.py closes` also requires a `tools/mutants.tsv` row (fn column) for each close-code fn. On the current tree: 5 predicates/mappings and 4 close-code fns, all cited and all with rows. Evidence: scripts/gate-demos.sh "citations" demos strip the citation from a predicate, a close-code fn and a mapping fn (each fails naming the fn), and fail with no row, a row naming the fn only in origin or regex, no tsv, no crates/, no codes.rs. Known limit: it checks that a citation exists, not that it is the right one.
 
 ## 6. task-brief extracted two tasks into one brief
 - **Defect:** the SDD `task-brief` script matched `### Task 3` as a prefix, so Task 3b's text went into Task 3's brief. Caught by the controller before dispatch.
@@ -45,8 +45,9 @@
 - **Escape:** rule 1d (state floors over RFC quantities) was added after the first instance, but only as prose. Nothing required a per-predicate re-anchoring mutation, so the third instance slipped past again until review.
 - **Catch:**
   - Plan rule 1d now names one re-anchoring mutation per predicate (model and code together). Reviewers check that list (phase-9a facc168).
-  - Open, owner 9r2: a gate that flags `allowed_*err` bodies reading fields of exec or model state unless a `// rfc-quantity:` justification sits on the line.
-- **Evidence:** T4-M3 verified on the pre-fix tree and fails after the fix. T6-M2 fails both `lemma_data_step` and `lemma_recv_err_rfc` after the fix. M4 fails the T3 floor lemma.
+  - In place since 9r2 T4: `scripts/rfc-quantity.sh` (tools/rfc_quantity.py, run by verify.sh) reads every `allowed_*err` body and the spec fns it calls, transitively, and fails on a struct field, a non-vstd method, `self`, an unscanned call, or a name read outside a call argument, unless a cited `// rfc-quantity: READ:` line naming that read, a cited line of tools/rfc-quantity-allow.txt (a ratchet: ALLOW_DIGEST, a sha256 of its lines in the tool, pins it) or a line of the shrinking tools/rfc-quantity-open.txt vouches for it. The `seen` instance needed the name rule: `seen & tp_bit(id)` reads no field. Every vouch is keyed by its root predicate and pinned to a sha256 of the source text the predicate reaches, so a one-token edit that changes no list (the walk arm `None => true`, an open-listed counter passed as a vouched parameter) fails until the vouches are re-reviewed.
+  - Still open, owner 9c: the open ratchet's 6 lines (10 reads). `recv_allowed_err`'s helpers read the model's `final_size` and `limit` and the caller's `conn_room`, none tied to the RFC quantity by a lemma (9a final review M1; design §3.3 re-anchors `final_size`, lifts `conn_room` and only notes `limit`). `s.ins` is vouched: it is the RFC's STREAM frames received while the final size is unknown, which recv_inv ties (`state is Recv <==> final_size is None`).
+- **Evidence:** the three originals, canned under tools/gate-demos/rfcq/bad/, fail the gate: T6's helpers on `s.high`, T4's `allowed_tp_err_from` on `seen`, T3's `crypto_allowed_err` on `s.reassembly()` (gate-demos.sh "rfc-quantity: T6's/T4's/T3's original" demos; the same three files dropped into a copy of the real tree fail against the real lists, `.worktrees/vt-9r2-evidence/r4/originals-on-real-tree.log`). T4-M3 verified on the pre-fix tree and fails after the fix. T6-M2 fails both `lemma_data_step` and `lemma_recv_err_rfc` after the fix. M4 fails the T3 floor lemma. Since 9r2 T2 the three re-anchoring mutations are registry rows T4-M3, T6-M2 and T3-M4, re-run mechanically before every merge (`.worktrees/vt-9r2-evidence/r2/mutants-run.log`).
 
 ## 8. Open items for 9r2 gathered tonight
 - Missing-citation gate (§5 above).

@@ -4,7 +4,8 @@ set -o pipefail
 # gate-demos.sh: each cheap gate gets a canned bad input (a temp copy of a fixture in
 # tools/gate-demos/ with one change applied) and must exit non-zero with its message; every fixture
 # first passes unchanged, so a demo cannot fail for the wrong reason. Covers lint-scripts,
-# check-quotes, acceptance (many bad changes, including real-git runs) and escape-gate (three). Takes a few seconds.
+# check-quotes, the citation gate, the RFC-quantity gate (its git demos in throwaway repos), acceptance (many bad changes, including real-git runs), escape-gate (three), the rlimit gate and the mutant registry (scripts/mutants.sh; its run demos call Verus
+# on the fixture crate), the declassify and deps gates, ct-check's report reader (ct-report.sh), ct-binary (against its real build) and the test gate. Takes a few seconds, plus about a minute the first time vstd builds in target/mutants-demo.
 root=$(cd "$(dirname "$0")/.." && pwd)
 fx=$root/tools/gate-demos
 tmp=$(mktemp -d)
@@ -41,6 +42,35 @@ sed -i '/pipefail/d' "$tmp/lint/good.sh"
 expect_fail "lint-scripts: script without pipefail" "lacks: pipefail" "$root/scripts/lint-scripts.sh" "$tmp/lint"
 mkdir "$tmp/empty"
 expect_fail "lint-scripts: no scripts" "no *.sh" "$root/scripts/lint-scripts.sh" "$tmp/empty"
+
+# lint-scripts: grep read as a verdict (exit 2, a missing file, reads as "no match"); the grep_hits form passes.
+fresh lint
+printf 'grep -q x /nonexistent %s fail "found"\n' '&&' >> "$tmp/lint/good.sh"
+expect_fail "lint-scripts: a verdict by and-list" "uses grep as a verdict" "$root/scripts/lint-scripts.sh" "$tmp/lint"
+fresh lint
+printf 'if grep -q x /nonexistent; then fail found; fi\n' >> "$tmp/lint/good.sh"
+expect_fail "lint-scripts: grep as an if condition" "uses grep as a verdict" "$root/scripts/lint-scripts.sh" "$tmp/lint"
+g=gr; g=${g}ep  # the demo's own lines must not trip the rule they test
+for form in "! $g -q x /nonexistent" "while $g -q x /nonexistent" "until $g -q x /nonexistent" "$g -q x /nonexistent && { echo bad; exit 1; }"; do
+    fresh lint
+    printf '%s\n' "$form" >> "$tmp/lint/good.sh"
+    expect_fail "lint-scripts: grep verdict form: $form" "uses grep as a verdict" "$root/scripts/lint-scripts.sh" "$tmp/lint"
+done
+fresh lint
+printf 'grep_hits x /nonexistent %s fail "found"\ngrep -q x f || fail "missing"\n# grep x f %s fail\n' '&&' '&&' >> "$tmp/lint/good.sh"
+expect_pass "lint-scripts: grep_hits form, grep .. || fail and a comment" "$root/scripts/lint-scripts.sh" "$tmp/lint"
+
+# grep_hits (scripts/ct-lib.sh): 0 on a match, 1 on none, a failure on a missing file or a bad pattern.
+gh() { sh -c 'set -eu; fail() { echo "ct-check: $*" >&2; exit 1; }; . "$1"; shift; rc=0; grep_hits "$@" || rc=$?; echo "rc=$rc"' sh "$root/scripts/ct-lib.sh" "$@" ; }
+printf 'a\nb\n' > "$tmp/gh.txt"
+expect_pass "grep_hits: a match" gh a "$tmp/gh.txt"
+rc=0; out=$(gh zzz "$tmp/gh.txt" 2>&1) || rc=$?
+{ [ "$rc" -eq 0 ] && [ "$out" = "rc=1" ]; } || die "grep_hits: no match did not return 1 quietly: rc=$rc out=$out"
+echo "gate-demos: grep_hits: no match returns 1 (not a failure)"
+expect_fail "grep_hits: a missing file" "grep_hits: no $tmp/nonexistent" gh a "$tmp/nonexistent"
+expect_fail "grep_hits: a missing file among others" "grep_hits: no $tmp/nonexistent" gh a "$tmp/gh.txt" "$tmp/nonexistent"
+expect_fail "grep_hits: an invalid pattern (grep exit 2)" "grep failed (exit 2)" gh '(' "$tmp/gh.txt"
+expect_fail "grep_hits: no file argument" "grep_hits: usage" gh a
 
 # check-quotes: a quote altered by one word.
 fresh quotes
@@ -91,6 +121,10 @@ expect_fail "acceptance: allowed_ fn, catch-all arm true" "vacuous allowed spec 
 afresh
 sed -i 's/pub open spec fn allowed_demo_err/pub spec(checked) fn allowed_demo_err/; s/    n > 10 \&\& c == 7/    true/' "$lib"
 expect_fail "acceptance: spec(checked) allowed_ fn with body true" "vacuous allowed spec fn" acc
+# a `{` in a decreases clause is not the body (9r2 T4: the body was read from `decreases (if .. {`, as allowed_tp_err_from's was)
+afresh
+sed -i 's/^pub open spec fn allowed_demo_err(n: u64, c: u64) -> bool {$/pub open spec fn allowed_demo_err(n: u64, c: u64) -> bool\n    decreases (if n < 10 { 10 - n } else { 0 }),\n{/; s/    n > 10 \&\& c == 7/    true/' "$lib"
+expect_fail "acceptance: allowed_ fn with body true after a decreases clause holding a brace" "vacuous allowed spec fn" acc
 # a same-line `ensures .. {` body must not hide the next fn (it used to credit `a` with `hidden`'s clause)
 afresh
 addfn 'pub fn a(n: u64) -> (r: Result<(), u64>) ensures r is Ok ==> n == 0 {
@@ -193,7 +227,7 @@ expect_fail "check-quotes: no spec dir" "check-quotes: no" "$root/scripts/check-
 # acceptance.sh's real git path, in a throwaway repo: a branch that appends a baseline line; main appending one; no main.
 gitrepo() {  # gitrepo <dir>: scripts and tools of the repo plus the acceptance fixture, one commit on main
     rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/tools"
-    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/acceptance.py" "$tmp/$1/tools/"
+    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/acceptance.py" "$root/tools/ratchet_walk.py" "$tmp/$1/tools/"
     cp -r "$fx/acceptance/crates" "$tmp/$1/crates"; cp "$fx/acceptance/baseline.txt" "$tmp/$1/tools/acceptance-baseline.txt"
     git -C "$tmp/$1" init -q -b main
     git -C "$tmp/$1" add -A
@@ -209,7 +243,7 @@ expect_fail "acceptance.sh git: branch appends a baseline line" "not in the merg
 gitrepo g2
 echo "demo::extra" >> "$tmp/g2/tools/acceptance-baseline.txt"
 gitc g2 commit -qam grow
-expect_fail "acceptance.sh git: main appends a baseline line (compared with HEAD^1)" "not in the merge-base baseline" gaccept g2
+expect_fail "acceptance.sh git: main appends a baseline line (walk)" "ratchet-walk: tools/acceptance-baseline.txt: HEAD is outside the floor" gaccept g2
 gitrepo g3
 gitc g3 branch -m main trunk
 expect_fail "acceptance.sh git: no main" "cannot resolve the merge-base" gaccept g3
@@ -238,5 +272,655 @@ expect_fail "escape-gate: external_body in crypto without a TRUSTED row" "has no
 fresh escape
 printf 'assume_specification[ f ](x: u8);\n' >> "$tmp/escape/crates/demo/src/lib.rs"
 expect_fail "escape-gate: assume_specification" "unaccounted escape" esc
+
+# rlimit gate (tools/rl.py --gate): a quic fn at 8,000,001; a FAIL row; empty and rowless logs; a missing log; two JSON objects.
+rl() { python3 -I "$root/tools/rl.py" --gate quic --max 8000000 "$tmp/rl.json"; }
+fresh rlimit; cp "$tmp/rlimit/quic.json" "$tmp/rl.json"
+expect_pass "rlimit-gate" rl
+sed -i 's/"rlimit": 8000000/"rlimit": 8000001/' "$tmp/rl.json"
+expect_fail "rlimit-gate: fn at 8,000,001" "quic::conn::edge at 8000001 is above 8000000" rl
+cp "$tmp/rlimit/quic.json" "$tmp/rl.json"; sed -i 's/"rlimit": 120000, "success": true/"rlimit": 120000, "success": false/' "$tmp/rl.json"
+expect_fail "rlimit-gate: FAIL row" "FAIL row" rl
+cp "$tmp/rlimit/quic.json" "$tmp/rl.json"; sed -i 's/"errors": 0/"errors": 1/' "$tmp/rl.json"
+expect_fail "rlimit-gate: errors in the run" "run not clean" rl
+: > "$tmp/rl.json"
+expect_fail "rlimit-gate: empty log" "0 verification-results objects" rl
+echo '{"verification-results": {"success": true}}' > "$tmp/rl.json"
+expect_fail "rlimit-gate: truncated results object" "unreadable results" rl
+sed 's/"function-breakdown": \[[^]]*\]/"function-breakdown": []/' "$tmp/rlimit/quic.json" > "$tmp/rl.json"
+expect_fail "rlimit-gate: no rows" "no per-fn rows" rl
+sed 's/quic::conn::small", "rlimit": 120000/tls::big", "rlimit": 11000000/' "$tmp/rlimit/quic.json" > "$tmp/rl.json"
+expect_pass "rlimit-gate: a dependency's fn above the cap is not the gated crate's" rl
+sed 's/quic::conn/tls::conn/g' "$tmp/rlimit/quic.json" > "$tmp/rl.json"
+expect_fail "rlimit-gate: no fns of the gated crate" "no rows for fns of quic" rl
+rm -f "$tmp/rl.json"
+expect_fail "rlimit-gate: missing log" "cannot read" rl
+cat "$tmp/rlimit/quic.json" "$tmp/rlimit/quic.json" > "$tmp/rl.json"
+expect_pass "rlimit-gate: two clean result objects (a dependency built in the run)" rl
+{ cat "$tmp/rlimit/quic.json"; sed 's/"rlimit": 120000, "success": true/"rlimit": 120000, "success": false/' "$tmp/rlimit/quic.json"; } > "$tmp/rl.json"
+expect_fail "rlimit-gate: FAIL row in the second object" "FAIL row" rl
+
+# rlimit ceilings ratchet (scripts/rlimit-ceilings.sh, in throwaway git repos like the acceptance.sh ones): an unlisted fn above 8M;
+# a listed fn above its value; a raised value and a new line against history; a quic line; a stale line; a missing file; server with verus!.
+rcrepo() {  # rcrepo <dir>: scripts, rl.py, the ceilings fixture and server src, one commit on main, then branch feat
+    rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/tools"
+    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/rl.py" "$root/tools/ratchet_walk.py" "$tmp/$1/tools/"
+    cp -r "$fx/rlimit/ceilings/crates" "$fx/rlimit/ceilings/logs" "$tmp/$1/"; cp "$fx/rlimit/ceilings/tools/rlimit-ceilings.txt" "$tmp/$1/tools/"
+    git -C "$tmp/$1" init -q -b main
+    git -C "$tmp/$1" add -A
+    gitc "$1" commit -qm base
+    gitc "$1" checkout -qb feat
+    gitc "$1" commit -q --allow-empty -m feat
+}
+rceil() { "$tmp/$1/scripts/rlimit-ceilings.sh" "$tmp/$1" "$tmp/$1/logs"; }
+rcrepo rc1
+expect_pass "rlimit-ceilings" rceil rc1
+: > "$tmp/rc1/tools/rlimit-ceilings.txt"
+expect_fail "rlimit-ceilings: empty file with a fn above 8M" "is empty but 1 fns are above" rceil rc1
+rm "$tmp/rc1/tools/rlimit-ceilings.txt"
+expect_fail "rlimit-ceilings: missing file with a fn above 8M" "is missing but 1 fns are above" rceil rc1
+rcrepo rc2
+sed -i 's/11648578/11648577/' "$tmp/rc2/logs/tls.json"
+expect_pass "rlimit-ceilings: fn below its ceiling" rceil rc2
+sed -i 's/11648577/11648579/' "$tmp/rc2/logs/tls.json"
+expect_fail "rlimit-ceilings: listed fn above its value" "exceeds its ceiling 11648578" rceil rc2
+rcrepo rc3
+sed -i 's/tls::flight::build_flight", "rlimit": 11648578/tls::flight::other", "rlimit": 8000001/' "$tmp/rc3/logs/tls.json"
+expect_fail "rlimit-ceilings: unlisted fn above 8M" "unlisted fn above 8000000: tls::flight::other at 8000001" rceil rc3
+rcrepo rc4
+sed -i 's/11648578/11648579/' "$tmp/rc4/logs/tls.json" "$tmp/rc4/tools/rlimit-ceilings.txt"
+expect_fail "rlimit-ceilings: raised value against the merge-base" "raised from 11648578 to 11648579" rceil rc4
+rcrepo rc5
+echo "tls tls::flight::extra 9000000" >> "$tmp/rc5/tools/rlimit-ceilings.txt"
+sed -i 's/quic::conn::small", "rlimit": 120000/tls::flight::extra", "rlimit": 9000000/' "$tmp/rc5/logs/tls.json"
+expect_fail "rlimit-ceilings: new line against the merge-base" "not in the merge-base file" rceil rc5
+rcrepo rc6
+echo "quic quic::conn::small 9000000" >> "$tmp/rc6/tools/rlimit-ceilings.txt"
+sed -i 's/quic::conn::small", "rlimit": 120000/quic::conn::small", "rlimit": 9000000/' "$tmp/rc6/logs/tls.json"
+expect_fail "rlimit-ceilings: a quic line" "quic/quictls have a hard 8000000 cap" rceil rc6
+rcrepo rc7
+sed -i 's/11648578/7999999/' "$tmp/rc7/logs/tls.json"
+expect_fail "rlimit-ceilings: stale line (fn dropped below 8M)" "stale ceiling line" rceil rc7
+rcrepo rc8
+sed -i 's/tls::flight::build_flight/tls::flight::renamed/' "$tmp/rc8/logs/tls.json"
+expect_fail "rlimit-ceilings: stale line (fn gone)" "delete the line" rceil rc8
+rcrepo rc9
+printf 'verus! {\n}\n' >> "$tmp/rc9/crates/server/src/lib.rs"
+expect_fail "rlimit-ceilings: server containing verus!" "has proofs" rceil rc9
+rcrepo rc12
+printf '#[verifier::external_body]\npub fn f() {}\n' >> "$tmp/rc12/crates/server/src/lib.rs"
+expect_fail "rlimit-ceilings: server with #[verifier" "has proofs" rceil rc12
+rcrepo rc13
+printf '#![verifier::loop_isolation(false)]\n' >> "$tmp/rc13/crates/server/src/lib.rs"
+expect_fail "rlimit-ceilings: server with #![verifier" "has proofs" rceil rc13
+rcrepo rc14
+rm -r "$tmp/rc14/crates/server"
+expect_fail "rlimit-ceilings: no server src" "crates/server/src is missing" rceil rc14
+rcrepo rc15
+cp "$tmp/rc15/logs/tls.json" "$tmp/rc15/logs/gone.json"
+expect_fail "rlimit-ceilings: log of a crate that is not under crates/" "stale log" rceil rc15
+rcrepo rc10
+rm "$tmp/rc10/logs/tls.json"
+expect_fail "rlimit-ceilings: no logs" "no JSON logs" rceil rc10
+rcrepo rc11
+gitc rc11 branch -m main trunk
+expect_fail "rlimit-ceilings: no main" "cannot resolve the merge-base" rceil rc11
+
+# citation gate (tools/citations.py, C1): the fixture crate has a predicate, a code-mapping spec fn and two close-code fns, each cited
+# and (the close fns) named by a mutant row. cite: a predicate, a close-code fn and a mapping fn each with its citation stripped
+# (also keeping only a `///` doc line, or a `//=` without a `//#` quote); a blank line between citation and fn; no crates/; no
+# codes.rs; no predicate; no close-code fn. closes: a close-code fn with no row; a row naming it only in the origin column;
+# an empty or missing tsv.
+cfresh() { rm -rf "${tmp:?}/cit"; cp -r "$fx/citations" "$tmp/cit"; }
+cit=$tmp/cit/crates/quic/src/conn.rs
+cite() { python3 -I "$root/tools/citations.py" cite "$tmp/cit"; }
+closes() { python3 -I "$root/tools/citations.py" closes "$tmp/cit" "$tmp/cit/tools/mutants.tsv"; }
+cfresh
+expect_pass "citations: cite (the uncited echo getter demo_info is not a close-code fn)" cite
+expect_pass "citations: closes" closes
+# strip_cite <fn-line pattern>: delete the //= and //# lines directly above the matching line (and its doc comment)
+strip_cite() { awk -v pat="$1" '{ l[NR] = $0 } END { for (i = 1; i <= NR; i++) if (l[i] ~ pat) { j = i - 1; while (j > 0 && l[j] ~ /^(\/\/[=#]|\/\/\/|#\[)/) { if (l[j] ~ /^\/\/[=#]/) l[j] = "\001"; j-- } } for (i = 1; i <= NR; i++) if (l[i] != "\001") print l[i] }' "$cit" > "$cit.new"; mv "$cit.new" "$cit"; }
+strip_cite '^pub open spec fn allowed_demo_err'
+expect_fail "citations: predicate without a citation" "allowed_demo_err has no" cite
+cfresh; strip_cite '^pub fn demo_close'
+expect_fail "citations: close-code fn without a citation" "demo_close has no" cite
+cfresh; strip_cite '^spec fn demo_code'
+expect_fail "citations: code-mapping spec fn without a citation" "demo_code has no" cite
+cfresh; strip_cite '^pub fn demo_map'
+expect_fail "citations: a second close-code fn without a citation" "demo_map has no" cite
+cfresh; sed -i '/^\/\/# /d' "$cit"
+expect_fail "citations: citation lines without a quote" "has no" cite
+cfresh; sed -i 's|^/// A parameter the RFC rejects.|\n/// A parameter the RFC rejects.|' "$cit"
+expect_fail "citations: a blank line between the citation and the predicate" "allowed_demo_err has no" cite
+cfresh; strip_cite '^pub open spec fn allowed_demo_err_from'
+expect_fail "citations: an allowed_*err_from predicate without a citation" "allowed_demo_err_from has no" cite
+cfresh; sed -i 's/Some((false, TRANSPORT_PARAMETER_ERROR/Some((false, k/' "$cit"; strip_cite '^pub fn demo_close'
+expect_fail "citations: close code a name bound outside the fn's parameters, no citation" "demo_close has no" cite
+cfresh; sed -i 's/Some((false, TRANSPORT_PARAMETER_ERROR/Some((false, k/' "$cit"; sed -i '/^D1/d' "$tmp/cit/tools/mutants.tsv"
+expect_fail "citations: close code a name bound outside the fn's parameters, no row" "close-code fn quic::conn::demo_close has no row" closes
+cfresh; sed -i 's/^        r is None ==> c.close_spec() is None,/&\n        r matches Some((a, k, v)) ==> k == 0x0a,/' "$cit"
+expect_fail "citations: an echo getter whose code is constrained elsewhere in its ensures, no citation" "demo_info has no" cite
+cfresh; sed -i 's/Some((false, TRANSPORT_PARAMETER_ERROR/Some((false, self.code/' "$cit"; strip_cite '^pub fn demo_close'
+expect_fail "citations: close code a field expression, fn without a citation" "demo_close has no" cite
+cfresh; sed -i 's/(false, demo_code(n)/(false, crate::conn::demo_code(n)/' "$cit"; strip_cite '^spec fn demo_code'
+expect_fail "citations: path-qualified code-mapping call, mapping fn without a citation" "demo_code has no" cite
+cfresh; sed -i 's|^//= https://|//= http://|' "$cit"
+expect_fail "citations: citation with an http URL" "has no" cite
+cfresh; sed -i 's|^\(//= https://www.rfc-editor.org/rfc/rfc9000\)#section-7.4|\1|' "$cit"
+expect_fail "citations: citation without a section" "has no" cite
+cfresh; rm -r "$tmp/cit/crates"
+expect_fail "citations: no crates/" "cannot scan crates/" cite
+cfresh; rm "$tmp/cit/crates/quic/src/codes.rs"
+expect_fail "citations: no codes.rs" "cannot scan crates/" cite
+cfresh; sed -i 's/^pub open spec fn allowed_demo_err/pub open spec fn demo_pred/' "$cit"
+expect_fail "citations: no allowed predicate" "no allowed_*err spec fn" cite
+cfresh; sed -i 's/final(c).close_spec() == Some/final(c).phase_spec() == Some/' "$cit"
+expect_fail "citations: no close-code fn" "no close-code fn" cite
+cfresh; sed -i '/^D1/d' "$tmp/cit/tools/mutants.tsv"
+expect_fail "citations: close-code fn with no mutant row" "close-code fn quic::conn::demo_close has no row" closes
+cfresh; sed -i 's/^D1\tquic\tconn\tdemo_close\t/D1\tquic\tconn\tdemo_other\t/; s/gate-demos$/gate-demos demo_close/' "$tmp/cit/tools/mutants.tsv"
+expect_fail "citations: close-code fn named only in the origin column" "close-code fn quic::conn::demo_close has no row" closes
+cfresh; sed -i 's/^D1\tquic\tconn\tdemo_close\t\(.*\)\tgate-demos$/D1\tquic\tconn\tdemo_other\t\1 demo_close\tgate-demos/' "$tmp/cit/tools/mutants.tsv"
+expect_fail "citations: close-code fn named only in the regex column" "close-code fn quic::conn::demo_close has no row" closes
+cfresh; : > "$tmp/cit/tools/mutants.tsv"
+expect_fail "citations: empty tsv" "has no row" closes
+rm "$tmp/cit/tools/mutants.tsv"
+expect_fail "citations: no tsv" "cannot read" closes
+
+# RFC-quantity gate (tools/rfc_quantity.py, C8). The fixture mirrors main's three predicates, its allowlist (digest qdig, one
+# `root` digest per predicate) and open ratchet; bad/ holds the 9a originals verbatim: T6's recv_allowed_err (rfc_recv's
+# running `high`), T4's duplicate rule (the `seen` mask), T3's crypto window (the read offset `s.reassembly().base()`).
+# qredig re-pins every root and the allowlist (what a reviewer does after re-reviewing), so a demo can show that a read is
+# still caught after the digests are updated; rqn runs with the re-pinned allowlist digest.
+qx=$tmp/rfcq/crates/quic/src
+qdig=36c9a7087dc8d06981727c66ddad8de36f60bc9e1322636693d8d4f1d21f39cc
+rq() { python3 -I "$root/tools/rfc_quantity.py" --root "$tmp/rfcq" --allow-digest "$qdig" "$@"; }
+qal=$tmp/rfcq/tools/rfc-quantity-allow.txt
+qop=$tmp/rfcq/tools/rfc-quantity-open.txt
+qadd() { sed -i '$d' "$qx/$1"; printf '%s\n\n} // verus!\n' "$2" >> "$qx/$1"; }  # qadd <file> <fn>: append a spec fn
+qredig() {
+    for r in $(awk -F'\t' '$1 == "root" { print $2 }' "$qal"); do
+        d=$(rq --print-digest "$r")
+        awk -F'\t' -v OFS='\t' -v r="$r" -v d="$d" '$1 == "root" && $2 == r { $3 = d } { print }' "$qal" > "$qal.n"; mv "$qal.n" "$qal"
+    done
+    qnow=$(rq --print-digest allowlist)
+}
+rqn() { python3 -I "$root/tools/rfc_quantity.py" --root "$tmp/rfcq" --allow-digest "$qnow" "$@"; }
+RR=quic::recv_stream::recv_allowed_err
+fresh rfcq
+expect_pass "rfc-quantity" rq
+fresh rfcq; cp "$tmp/rfcq/bad/t6-recv_stream.rs" "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: T6's original recv_allowed_err (8f6b48e) reads the running high" "final_size_trigger (from recv_allowed_err) reads \`s.high\` (a struct field)" rq
+fresh rfcq; cp "$tmp/rfcq/bad/t4-tp.rs" "$qx/tp.rs"
+expect_fail "rfc-quantity: T4's original duplicate rule (6594f10) reads the seen mask" "allowed_tp_err_from reads \`seen\` (a name used other than" rq
+fresh rfcq; cp "$tmp/rfcq/bad/t3-crypto_stream.rs" "$qx/crypto_stream.rs"
+expect_fail "rfc-quantity: T3's original crypto window (fcf9ff0^) reads the read offset" "crypto_allowed_err reads \`s.reassembly()\` (a method" rq
+# review probes A, B, H: one-token edits that change no list; each changes its root's digest, so the vouches are re-reviewed
+fresh rfcq; sed -i 's/                            None => false,/                            None => true,/' "$qx/tp.rs"
+expect_fail "rfc-quantity: probe A, allowed_tp_err_from's walk arm None => true (the code's model decides)" "re-review the vouches for quic::tp::allowed_tp_err_from" rq
+fresh rfcq; sed -i 's/Some((t2, seen2)) => allowed_tp_err_from(b, s, ids.insert(id), t2, seen2)/Some((t2, len)) => len > 1 || allowed_tp_err_from(b, s, ids.insert(id), t2, len)/' "$qx/tp.rs"
+expect_fail "rfc-quantity: probe B, the seen mask rebound as len" "re-review the vouches for quic::tp::allowed_tp_err_from" rq
+fresh rfcq; sed -i 's/final_size_trigger(s, off + len, fin)/final_size_trigger(s, conn_room, fin)/' "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: probe H, conn_room passed as a callee's vouched end" "re-review the vouches for $RR" rq
+fresh rfcq; qadd crypto_stream.rs 'pub open spec fn allowed_win_err(w: nat, offset: u64, len: nat) -> bool { crypto_window_exceeded(w, offset, len) }'
+expect_fail "rfc-quantity: probe C, a new predicate inheriting a callee's vouches" "no \`root\` line for quic::crypto_stream::allowed_win_err" rq
+# re-review probes: text a vouch rests on outside the walk (pins), callees of unfollowed fns, constants, attributes, aliases
+fresh rfcq; sed -i 's/^        let ins = s.ins.push((off, data));$/        let ins = if data.len() > 0 { s.ins.push((off, data)) } else { s.ins };/' "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: probe N1b, recv_data (pinned) skips empty frames" "re-review the vouches for $RR" rq
+fresh rfcq; sed -i 's/recv_allowed_err(old(self).rfc(), off as nat, /recv_allowed_err(old(self).rfc(), 0, /' "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: probe E1, on_data (pinned) passes 0 for the frame's offset" "re-review the vouches for $RR" rq
+fresh rfcq; sed -i 's/^        self.ins@$/        self.ins@.skip(1)/' "$qx/crypto_stream.rs"
+expect_fail "rfc-quantity: probe N1a, Reassembly::inserted (pinned, called by the unfollowed crypto_contiguous) drops a frame" "re-review the vouches for quic::crypto_stream::crypto_allowed_err" rq
+fresh rfcq; sed -i 's/^    1u32 << (id as u32)$/    0u32/' "$qx/tp.rs"
+expect_fail "rfc-quantity: probe N3, tp_bit (called by the unfollowed rfc_tp_apply) returns 0" "re-review the vouches for quic::tp::allowed_tp_err_from" rq
+fresh rfcq; sed -i 's/^pub const MAX_CRYPTO_BUFFER: u64 = 16384;$/pub const MAX_CRYPTO_BUFFER: u64 = 0;/' "$qx/crypto_stream.rs"
+expect_fail "rfc-quantity: probe N2, a constant the predicate names changes" "re-review the vouches for quic::crypto_stream::crypto_allowed_err" rq
+fresh rfcq; sed -i 's/^pub open spec fn tp_server_only/#[verifier::external_body]\n&/' "$qx/tp.rs"
+expect_fail "rfc-quantity: probe N5, an attribute above a reached fn" "re-review the vouches for quic::tp::allowed_tp_err_from" rq
+fresh rfcq; sed -i 's/^use vstd::prelude::\*;$/&\nuse crate::crypto_stream::rfc_contiguous as rfc_vint;/' "$qx/tp.rs"
+expect_fail "rfc-quantity: probe N4, a use .. as alias of a name the hashed text calls" "renames a name that the text" rq
+fresh rfcq; printf 'pin\t%s\tquic::recv_stream::no_such_fn\n' "$RR" >> "$qal"
+expect_fail "rfc-quantity: a pin line naming no fn" "names quic::recv_stream::no_such_fn, which is not a fn" rq
+fresh rfcq; sed -i 's/^    ||| end > s.limit$/& || s.high > 0 \/\/ rfc-quantity: s.limit: the largest maximum stream data sent (RFC 9000 §19.10)/' "$qx/recv_stream.rs"
+sed -i '/\ts\.limit\t/d' "$qop"; qredig
+expect_fail "rfc-quantity: probe I, s.high on a line whose annotation names s.limit (digests re-pinned)" "flow_trigger (from recv_allowed_err) reads \`s.high\`" rqn
+fresh rfcq; sed -i 's/||| tp_server_only(id)$/||| tp_server_only(id) || b@.foo > 0/' "$qx/tp.rs"; qredig
+expect_fail "rfc-quantity: a field after a view (b@.foo)" "allowed_tp_err_from reads \`b@.foo\` (a struct field)" rqn
+fresh rfcq; qadd recv_stream.rs 'impl SpecRecv { pub open spec fn len(&self) -> nat { 0 } }'
+expect_fail "rfc-quantity: a spec method named like a vstd method" "a spec method named like a vstd method (len)" rq
+fresh rfcq; sed -i 's/^    ||| end > s.limit$/& \/\/ rfc-quantity:/' "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: an annotation with an empty reason" "\`// rfc-quantity:\` needs \`READ: <why" rq
+fresh rfcq; sed -i 's/^    ||| end > s.limit$/& \/\/ rfc-quantity: s.limit: the largest MAX_STREAM_DATA sent/' "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: an annotation citing no RFC section" "\`// rfc-quantity:\` needs \`READ: <why" rq
+fresh rfcq; sed -i 's/^    ||| end > s.limit$/& \/\/ rfc-quantity: the largest maximum stream data sent (RFC 9000 §19.10)/' "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: an annotation naming no read" "\`// rfc-quantity:\` needs \`READ: <why" rq
+fresh rfcq; sed -i 's/^    ||| end > s.limit$/& \/\/ rfc-quantity: s.limit: the largest maximum stream data sent (RFC 9000 §19.10)/' "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: an annotation changes its root's digest" "re-review the vouches for $RR" rq
+sed -i '/\ts\.limit\t/d' "$qop"; qredig
+expect_pass "rfc-quantity: a cited annotation vouches for the read it names (open line deleted, digests re-pinned)" rqn
+fresh rfcq; sed -i 's/^    ||| end > s.limit$/& \/\/ rfc-quantity: s.high: the largest received offset (RFC 9000 §19.10)/' "$qx/recv_stream.rs"; qredig
+expect_fail "rfc-quantity: an annotation naming a read its line does not make" "\`// rfc-quantity: s.high:\` names no read on its line" rqn
+fresh rfcq; printf 'use vstd::prelude::*;\n\nverus! {\n\npub open spec fn other(n: nat) -> bool {\n    n > 0 // rfc-quantity:\n}\n\n} // verus!\n' > "$qx/other.rs"
+expect_fail "rfc-quantity: an empty annotation in a file no predicate reaches" "other.rs:6: \`// rfc-quantity:\` needs" rq
+fresh rfcq; sed -i 's/final_size_trigger(s, off + len, fin)/crate::recv_stream::final_size_trigger(s, off + len, fin)/' "$qx/recv_stream.rs"; qredig
+expect_pass "rfc-quantity: a path-qualified call is followed (digests re-pinned)" rqn
+sed -i 's/c == FINAL_SIZE_ERROR \&\& /&crate::recv_stream::peek(s) \&\& /' "$qx/recv_stream.rs"
+qadd recv_stream.rs 'pub open spec fn peek(s: SpecRecv) -> bool { s.high > 0 }'; qredig
+expect_fail "rfc-quantity: a path-qualified call to a helper reading a field" "peek (from recv_allowed_err) reads \`s.high\`" rqn
+fresh rfcq; sed -i 's/c == FINAL_SIZE_ERROR \&\& /crate::tp::peek(s) \&\& /' "$qx/recv_stream.rs"
+qadd recv_stream.rs 'pub open spec fn peek(s: SpecRecv) -> bool { true }'
+qadd tp.rs 'pub open spec fn peek(s: crate::recv_stream::SpecRecv) -> bool { s.high > 0 }'; qredig
+expect_fail "rfc-quantity: a module-qualified call reaches that module's fn, not the caller's namesake" "peek (from recv_allowed_err) reads \`s.high\`" rqn
+fresh rfcq; qadd tp.rs 'pub open spec fn peek(s: SpecTp) -> bool { true }'; qadd crypto_stream.rs 'pub open spec fn peek(s: CryptoStream) -> bool { true }'
+sed -i 's/c == FINAL_SIZE_ERROR \&\& /peek(s) \&\& /' "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: an unqualified call the caller's module does not define, two modules do" "calls peek, which names 2 spec fns" rq
+fresh rfcq; sed -i 's/None => largest_received_offset(s.ins),/None => largest_received_offset(SpecRecv { limit: 0, ..s }.ins),/' "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: a struct update reads the fields it does not set" "credit_before (from recv_allowed_err) reads \`..s\` (a struct update" rq
+fresh rfcq; sed -i 's/c == FINAL_SIZE_ERROR \&\& /s.code_spec() == 0 \&\& \&/' "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: a *_spec() accessor" "recv_allowed_err reads \`s.code_spec()\` (a method" rq
+fresh rfcq; sed -i 's/c == FINAL_SIZE_ERROR \&\& /vstd::arithmetic::power2::pow2(len) > 0 \&\& &/' "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: a call of a fn outside the scanned verus! blocks" "reads \`vstd::arithmetic::power2::pow2(..)\` (a fn that is not" rq
+fresh rfcq; qadd recv_stream.rs 'pub open spec fn dup(n: nat) -> bool { n > 0 }'; qadd tp.rs 'pub open spec fn dup(n: nat) -> bool { n > 0 }'
+sed -i 's/^    c == CRYPTO_BUFFER_EXCEEDED \&\& /&dup(len) \&\& /' "$qx/crypto_stream.rs"
+expect_fail "rfc-quantity: a callee name two modules define" "calls dup, which names 2 spec fns" rq
+fresh rfcq; sed -i 's/allowed_/permitted_/g' "$qx"/*.rs
+expect_fail "rfc-quantity: no predicate" "no allowed_*err spec fn found" rq
+fresh rfcq; rm "$qal"
+expect_fail "rfc-quantity: no allowlist" "cannot read the allowlist" rq
+fresh rfcq; rm "$qop"
+expect_fail "rfc-quantity: no open ratchet" "cannot read the open ratchet" rq
+fresh rfcq; rm -r "$tmp/rfcq/crates"
+expect_fail "rfc-quantity: no crates/" "cannot scan crates/" rq
+fresh rfcq; sed -i '/^root\tquic::tp::allowed_tp_err\t/d' "$qal"
+expect_fail "rfc-quantity: a predicate without a root line" "no \`root\` line for quic::tp::allowed_tp_err:" rq
+fresh rfcq; printf 'name\t%s\tquic::recv_stream::flow_trigger\tconn_room\tthe connection credit left (RFC 9000 §4.1)\n' "$RR" >> "$qal"
+sed -i '/\tconn_room\t/d' "$qop"
+expect_fail "rfc-quantity: the allowlist grows without ALLOW_DIGEST" "the allowlist's digest is not ALLOW_DIGEST" rq
+fresh rfcq; sed -i '/\tquic::crypto_stream::crypto_allowed_err\tc\t/d' "$qal"; sed -i 's/c == CRYPTO_BUFFER_EXCEEDED \&\& //' "$qx/crypto_stream.rs"
+printf 'name\t%s\tquic::recv_stream::flow_trigger\tconn_room\tthe connection credit left (RFC 9000 §4.1)\n' "$RR" >> "$qal"; sed -i '/\tconn_room\t/d' "$qop"
+expect_fail "rfc-quantity: the allowlist swaps a stale line for a new one (same count)" "the allowlist's digest is not ALLOW_DIGEST" rq
+fresh rfcq; sed -i 's/c == CRYPTO_BUFFER_EXCEEDED \&\& //' "$qx/crypto_stream.rs"; qredig
+expect_fail "rfc-quantity: a stale allowlist line" "stale allowlist line, vouches for no read or call: name	quic::crypto_stream::crypto_allowed_err	quic::crypto_stream::crypto_allowed_err	c" rqn
+fresh rfcq; sed -i 's/(RFC 9000 §19.8)$/(the frame)/' "$qal"
+expect_fail "rfc-quantity: an allowlist reason citing no RFC section" "the reason cites no" rq
+fresh rfcq; sed -i 's/credit_before(s) + conn_room/credit_before(s)/' "$qx/recv_stream.rs"; qredig
+expect_fail "rfc-quantity: a stale open line" "stale open line, no such read" rqn
+fresh rfcq; sed -i 's/\ts\.final_size\t4\t/\ts.final_size\t5\t/' "$qop"
+expect_fail "rfc-quantity: an open count that is not the current count" "open line count 5, but" rq
+fresh rfcq; sed -i 's/\t9c\t/\tlater\t/' "$qop"
+expect_fail "rfc-quantity: an open line without an owner phase" "OWNER-PHASE" rq
+fresh rfcq; grep -v $'\tconn_room\t' "$qop" > "$tmp/rfcq/old-open.txt"
+expect_fail "rfc-quantity: an open line absent from the merge-base's" "open line not in the merge-base open ratchet" rq --old-open "$tmp/rfcq/old-open.txt"
+fresh rfcq; sed 's/\ts\.final_size\t4\t/\ts.final_size\t3\t/' "$qop" > "$tmp/rfcq/old-open.txt"
+expect_fail "rfc-quantity: an open count above the merge-base's" "open line count 4 above the merge-base's 3" rq --old-open "$tmp/rfcq/old-open.txt"
+# scripts/rfc-quantity.sh's real git path, in a throwaway repo: a branch and main each add a read with its open line; no main.
+qrepo() {  # qrepo <dir>: scripts, the two python tools and the fixture, one commit on main
+    rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/tools"
+    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/acceptance.py" "$root/tools/rfc_quantity.py" "$root/tools/ratchet_walk.py" "$tmp/$1/tools/"
+    cp -r "$fx/rfcq/crates" "$tmp/$1/crates"; cp "$fx/rfcq/tools/"*.txt "$tmp/$1/tools/"
+    git -C "$tmp/$1" init -q -b main
+    git -C "$tmp/$1" add -A
+    gitc "$1" commit -qm base
+}
+qgrow() {  # qgrow <dir>: flow_trigger reads s.high, and the open ratchet lists it
+    sed -i 's/^    ||| end > s.limit$/&\n    ||| end > s.high/' "$tmp/$1/crates/quic/src/recv_stream.rs"
+    printf 'quic::recv_stream::recv_allowed_err\tquic::recv_stream::flow_trigger\ts.high\t1\t9c\trfc_recv'"'"'s running high (RFC 9000 §19.10)\n' >> "$tmp/$1/tools/rfc-quantity-open.txt"
+    gitc "$1" commit -qam grow
+}
+qgate() { "$tmp/$1/scripts/rfc-quantity.sh" --allow-digest "$qdig"; }
+qrepo q1; gitc q1 checkout -qb feat; qgrow q1
+expect_fail "rfc-quantity.sh git: a branch adds an open line" "open line not in the merge-base open ratchet" qgate q1
+qrepo q2; qgrow q2
+expect_fail "rfc-quantity.sh git: main adds an open line (walk)" "ratchet-walk: tools/rfc-quantity-open.txt: HEAD is outside the floor" qgate q2
+qrepo q3; gitc q3 branch -m main trunk
+expect_fail "rfc-quantity.sh git: no main" "cannot resolve the merge-base" qgate q3
+qrepo q4; gitc q4 checkout -qb feat; touch "$tmp/q4/x"; gitc q4 add x; gitc q4 commit -qm noop
+expect_pass "rfc-quantity.sh git: unchanged open ratchet on a branch" qgate q4
+
+# the baseline history walk (tools/ratchet_walk.py, R5): growth spread over direct commits on main, for each of the three
+# ratchet files, with the last commit not growing it (so the HEAD^1 comparison alone passes).
+gitrepo g5
+echo "demo::extra" >> "$tmp/g5/tools/acceptance-baseline.txt"; gitc g5 commit -qam grow
+touch "$tmp/g5/x"; gitc g5 add x; gitc g5 commit -qm noop
+expect_fail "acceptance.sh git: growth over two direct commits on main" "ratchet-walk: tools/acceptance-baseline.txt: HEAD is outside the floor" gaccept g5
+rcrepo rc12; gitc rc12 checkout -q main; gitc rc12 merge -q feat
+echo "tls tls::flight::extra 9000000" >> "$tmp/rc12/tools/rlimit-ceilings.txt"
+sed -i 's/quic::conn::small", "rlimit": 120000/tls::flight::extra", "rlimit": 9000000/' "$tmp/rc12/logs/tls.json"
+gitc rc12 commit -qam grow; touch "$tmp/rc12/x"; gitc rc12 add x; gitc rc12 commit -qm noop
+expect_fail "rlimit-ceilings.sh git: growth over two direct commits on main" "ratchet-walk: tools/rlimit-ceilings.txt: HEAD is outside the floor" rceil rc12
+rcrepo rc13; gitc rc13 checkout -q main; gitc rc13 merge -q feat
+sed -i 's/11648578/11648579/' "$tmp/rc13/logs/tls.json" "$tmp/rc13/tools/rlimit-ceilings.txt"; gitc rc13 commit -qam raise
+touch "$tmp/rc13/x"; gitc rc13 add x; gitc rc13 commit -qm noop
+expect_fail "rlimit-ceilings.sh git: a raised value over two direct commits on main" "above its lowest earlier value 11648578" rceil rc13
+qrepo q5; qgrow q5; touch "$tmp/q5/x"; gitc q5 add x; gitc q5 commit -qm noop
+expect_fail "rfc-quantity.sh git: growth over two direct commits on main" "ratchet-walk: tools/rfc-quantity-open.txt: HEAD is outside the floor" qgate q5
+# the walk itself, on a plain file: a shrink then a re-grow, a legitimate shrink, a deletion then a re-add, a shallow clone.
+walk() { python3 -I "$root/tools/ratchet_walk.py" "$tmp/$1" "$2" "$3"; }
+wrepo() {  # wrepo <dir> <file> <content>: one commit on main
+    rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/$(dirname "$2")"; git -C "$tmp/$1" init -q -b main
+    printf '%s\n' "$3" > "$tmp/$1/$2"; git -C "$tmp/$1" add -A; gitc "$1" commit -qm base
+}
+wrepo w1 f 'a
+b'
+printf 'a\n' > "$tmp/w1/f"; gitc w1 commit -qam shrink
+expect_pass "ratchet-walk: a legitimate shrink" walk w1 f lines
+printf 'a\nb\n' > "$tmp/w1/f"; gitc w1 commit -qam regrow
+expect_fail "ratchet-walk: a shrink then a re-grow" "HEAD is outside the floor" walk w1 f lines
+wrepo w2 f 'c 
+c fn 9000000'
+printf 'c fn 9000000\n' > "$tmp/w2/f"; gitc w2 commit -qam noop
+expect_fail "ratchet-walk: an unreadable ceilings line" "unreadable ceilings line" walk w2 f ceilings
+wrepo w3 f 'c fn 9000000'
+printf 'c fn 8500000\n' > "$tmp/w3/f"; gitc w3 commit -qam shrink
+expect_pass "ratchet-walk: a lowered ceiling" walk w3 f ceilings
+git -C "$tmp/w3" rm -q f; gitc w3 commit -qm delete
+printf 'c fn 8600000\n' > "$tmp/w3/f"; git -C "$tmp/w3" add f; gitc w3 commit -qm readd
+expect_fail "ratchet-walk: a deletion then a re-add above the last copy" "above its lowest earlier value 8500000" walk w3 f ceilings
+rm -rf "${tmp:?}/w4"; git clone -q --depth 1 "file://$tmp/w1" "$tmp/w4"
+expect_fail "ratchet-walk: a shallow clone" "shallow" walk w4 f lines
+wrepo w6 f 'a
+b'
+printf 'a\n' > "$tmp/w6/f"; gitc w6 commit -qam shrink
+printf 'a\nb\n' > "$tmp/w6/f"
+expect_fail "ratchet-walk: an uncommitted re-grow after a committed shrink" "the working tree is outside the floor" walk w6 f lines
+wrepo w7 f 'c fn 9000000
+c fn 8000001'
+expect_fail "ratchet-walk: a duplicate ceilings key in a committed copy" "duplicate ceilings line" walk w7 f ceilings
+# floor semantics: growth shrunk back before HEAD passes (a fast-forwarded WIP commit); growth beyond the floor fails.
+wrepo w8 f 'a
+b'
+printf 'a\nb\nc\n' > "$tmp/w8/f"; gitc w8 commit -qam wip
+printf 'a\n' > "$tmp/w8/f"; gitc w8 commit -qam fix
+expect_pass "ratchet-walk: transient growth shrunk back (a fast-forward of a branch)" walk w8 f lines
+printf 'a\nb\n' > "$tmp/w8/f"; gitc w8 commit -qam regrow
+expect_fail "ratchet-walk: a shrink then a re-grow beyond the shrunk floor" "HEAD is outside the floor" walk w8 f lines
+# no reset: a raised ceiling fails, and a commit message that looks like a trailer changes nothing.
+wrepo w9 tools/c 'c fn 9000000'
+printf 'c fn 9100000\n' > "$tmp/w9/tools/c"; printf 'x\n' > "$tmp/w9/Cargo.lock"; git -C "$tmp/w9" add -A
+gitc w9 commit -qm "upgrade" -m "Ratchet-Reset: tools/c: measured values shift"
+expect_fail "ratchet-walk: a raised ceiling fails whatever the commit message says" "above its lowest earlier value 9000000" walk w9 tools/c ceilings
+wrepo w5 f 'a'
+expect_fail "ratchet-walk: a git error (path outside any repo)" "failed" walk w5/nonexistent f lines
+
+# mutant registry (scripts/mutants.sh, C6), in throwaway git repos holding the acceptance fixture crate as crates/demo/src/acc.rs
+# and the one-row registry of tools/gate-demos/mutants. check: a patch that no longer applies, a missing patch, an empty or
+# missing tsv, a duplicate id, an orphan patch, a patch outside its row's crate, a bad regex, a wildcard fn, a patch
+# that applies only at an offset, an allowed_*err predicate with no row or named only in a row's origin. run (real Verus, seconds:
+# MUTANTS_TARGET_DIR keeps vstd built across runs): the killed mutant (with its named test) passes; a mutant that still
+# verifies, a named test that does not FAIL, one that fails unmutated, a misspelt test and a missing fn fail; a dirty
+# crates/ is refused. The verdict on canned Verus output: rlimit, no or two JSON objects, another fn checked, a non-matching
+# error kind. The main gate (every commit at main's tip): passes after a --no-ff merge or a fast-forward with a fresh run file;
+# fails with none (also detached), crates/ or Cargo.toml changed after the run, a fast-forward without a run, main's own
+# crates/ change in the merge, a fail line, a missing or extra id, an edited tsv or patch, or no main; on the branch, check only.
+export MUTANTS_TARGET_DIR="${MUTANTS_DEMO_TARGET:-$root/target/mutants-demo}"
+mrepo() {  # mrepo <dir>: scripts, tools/mutants.py and the fixture, one commit on main, then branch feat
+    rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/tools"
+    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/mutants.py" "$root/tools/acceptance.py" "$tmp/$1/tools/"
+    cp -r "$fx/mutants/Cargo.toml" "$fx/mutants/Cargo.lock" "$fx/mutants/crates" "$root/rust-toolchain.toml" "$tmp/$1/"
+    cp -r "$fx/mutants/tools/mutants.tsv" "$fx/mutants/tools/mutants" "$tmp/$1/tools/"
+    cp "$fx/acceptance/crates/demo/src/lib.rs" "$tmp/$1/crates/demo/src/acc.rs"
+    printf '/.worktrees/\n/target/\n' > "$tmp/$1/.gitignore"
+    git -C "$tmp/$1" init -q -b main
+    git -C "$tmp/$1" add -A
+    gitc "$1" commit -qm base
+    gitc "$1" checkout -qb feat
+}
+mut() { d=$1; shift; "$tmp/$d/scripts/mutants.sh" "$@"; }
+mrepo m1
+expect_pass "mutants check" mut m1 check
+sed -i 's/if n > 10 { Err(7) }/if n > 10 { Err(9) }/' "$tmp/m1/crates/demo/src/acc.rs"
+expect_fail "mutants check: patch that does not apply" "D-kill.patch does not apply" mut m1 check
+mrepo m2
+rm "$tmp/m2/tools/mutants/D-kill.patch"
+expect_fail "mutants check: missing patch" "cannot read" mut m2 check
+mrepo m2
+sed -i '/^D-kill/d' "$tmp/m2/tools/mutants.tsv"; rm "$tmp/m2/tools/mutants/D-kill.patch"
+expect_fail "mutants check: empty tsv" "has no rows" mut m2 check
+rm "$tmp/m2/tools/mutants.tsv"
+expect_fail "mutants check: no tsv" "mutants: no " mut m2 check
+mrepo m2
+sed -i 's/^D-kill.*/&\n&/' "$tmp/m2/tools/mutants.tsv"
+expect_fail "mutants check: duplicate id" "duplicate id D-kill" mut m2 check
+mrepo m2
+cp "$fx/mutants/live.patch" "$tmp/m2/tools/mutants/D-live.patch"
+expect_fail "mutants check: patch without a row" "patch without a row: D-live" mut m2 check
+mrepo m2
+sed -i 's/^D-kill\tdemo\t/D-kill\twire\t/' "$tmp/m2/tools/mutants.tsv"
+expect_fail "mutants check: patch outside its row's crate" "outside crates/wire/" mut m2 check
+mrepo m2
+sed -i 's/postcondition not satisfied/postcondition (not/' "$tmp/m2/tools/mutants.tsv"
+expect_fail "mutants check: regex that does not compile" "regex does not compile" mut m2 check
+mrepo m2
+sed -i 's/\tacc\tdemo\t/\tacc\tdemo*\t/' "$tmp/m2/tools/mutants.tsv"
+expect_fail "mutants check: wildcard fn" "must be a plain path" mut m2 check
+mrepo m2
+sed -i '1i // one line more' "$tmp/m2/crates/demo/src/acc.rs"
+expect_fail "mutants check: patch that applies only at an offset" "applies only with an offset" mut m2 check
+mrepo m2
+sed -i 's/^verus! {$/verus! {\npub open spec fn other_allowed_err(c: u64) -> bool { c == 9 }/' "$tmp/m2/crates/demo/src/acc.rs"
+expect_fail "mutants check: an allowed_*err predicate with no row" "allowed predicate with no mutant row (name it in a row's fn or regex column): other_allowed_err" mut m2 check
+
+mrepo m2
+sed -i 's/^verus! {$/verus! {\npub open spec fn other_allowed_err(c: u64) -> bool { c == 9 }/' "$tmp/m2/crates/demo/src/acc.rs"
+sed -i 's/^\(D-kill.*\)$/\1 other_allowed_err/' "$tmp/m2/tools/mutants.tsv"
+expect_fail "mutants check: an allowed_*err predicate named only in a row's origin" "allowed predicate with no mutant row (name it in a row's fn or regex column): other_allowed_err" mut m2 check
+
+# run, for real: the fixture's mutant is killed (and the run file written); a mutant that still verifies; a dirty tree.
+mrepo m3
+expect_pass "mutants run: killed mutant" mut m3 run
+grep -qx "crates $(git -C "$tmp/m3" rev-parse HEAD:crates)" "$tmp/m3/tools/mutants-last-run.txt" || die "mutants run: run file lacks the crates tree"
+[ -z "$(git -C "$tmp/m3" worktree list --porcelain | grep '^worktree .*/mutants-')" ] || die "mutants run: worktree left behind"
+[ "$(git -C "$tmp/m3" status --porcelain)" = "?? tools/mutants-last-run.txt" ] || die "mutants run: the caller's tree changed beyond the run file:
+$(git -C "$tmp/m3" status --porcelain)"
+echo "gate-demos: mutants run: caller's tree unchanged except tools/mutants-last-run.txt"
+mrepo m4
+cp "$fx/mutants/live.patch" "$tmp/m4/tools/mutants/D-live.patch"
+printf 'D-live\tdemo\tacc\tdemo\t-\tpostcondition not satisfied\tgate-demos: n > 11 keeps the clause\n' >> "$tmp/m4/tools/mutants.tsv"
+gitc m4 add -A; gitc m4 commit -qm live
+expect_fail "mutants run: a mutant that still verifies" "the mutant still verifies acc::demo" mut m4 run D-live
+[ -z "$(git -C "$tmp/m4" worktree list --porcelain | grep '^worktree .*/mutants-')" ] || die "mutants run: worktree left behind after a failure"
+mrepo m5
+printf '// dirty\n' >> "$tmp/m5/crates/demo/src/acc.rs"
+expect_fail "mutants run: uncommitted crates/" "uncommitted changes" mut m5 run
+# run's tests branch and fn name: each row edit is committed (run uses HEAD), then one real run.
+mrow() {  # mrow <dir> <sed expr on the D-kill row>: a fresh repo whose row is edited and committed
+    mrepo "$1"; sed -i "/^D-kill/$2" "$tmp/$1/tools/mutants.tsv"; gitc "$1" commit -qam row
+}
+mrow m6 's/acc:demo_eleven_is_err7/acc:demo_three_is_ok/'
+expect_fail "mutants run: a named test that still passes on the mutant" "test demo/acc:demo_three_is_ok did not print '... FAILED'" mut m6 run D-kill
+mrow m6 's/acc:demo_eleven_is_err7/acc:demo_three_is_err/'
+expect_fail "mutants run: a named test that fails unmutated" "unmutated: test demo/acc:demo_three_is_err did not print '... ok'" mut m6 run D-kill
+mrow m6 's/acc:demo_eleven_is_err7/acc:demo_eleven_is_er7/'
+expect_fail "mutants run: a misspelt test name" "test demo/acc:demo_eleven_is_er7 did not print '... ok'" mut m6 run D-kill
+mrow m6 's/\tacc\tdemo\t/\tacc\tdemo2\t/'
+expect_fail "mutants run: a fn name that is not in the module" "D-kill.clean.json: a VIR error, or not a --verify-function run" mut m6 run D-kill
+
+# the verdict on canned Verus output (tools/mutants.py killed/clean): a passing kill first.
+v=$tmp/verdict
+vj() {  # vj <errors> <success> [extra fn]: a one-object Verus JSON with demo::acc::demo checked
+    x=; [ -z "${3:-}" ] || x=", {\"function\": \"$3\", \"rlimit\": 5, \"success\": true}"
+    printf '{"verification-results": {"encountered-error": false, "encountered-vir-error": false, "verified": %s, "errors": %s, "is-verifying-entire-crate": false}, "times-ms": {"smt": {"smt-run-module-times": [{"function-breakdown": [{"function": "demo::acc::demo", "rlimit": 900, "success": %s}%s]}]}}}\n' \
+        "$((1 - $1))" "$1" "$2" "$x" > "$v.json"
+}
+vlog() { printf 'error: %s\n   --> crates/demo/src/acc.rs:11:9\n    |\n11  |         r is Err ==> allowed_demo_err(n, r->Err_0),\n' "$1" > "$v.log"; }
+killed() { python3 -I "$root/tools/mutants.py" killed "$v" demo acc demo 'postcondition not satisfied.*allowed_demo_err'; }
+vj 1 false; vlog "postcondition not satisfied"
+expect_pass "mutants verdict" killed
+printf 'error: function body check: Resource limit (rlimit) exceeded\n' >> "$v.log"
+expect_fail "mutants verdict: rlimit is not a kill" "rlimit text" killed
+vlog "possible arithmetic underflow/overflow"
+expect_fail "mutants verdict: another error kind" "no postcondition/precondition/assertion block matches" killed
+vlog "postcondition not satisfied"; : > "$v.json"
+expect_fail "mutants verdict: no JSON (cached build or compile error)" "0 Verus result objects" killed
+vj 1 false; cat "$v.json" "$v.json" > "$v.2"; mv "$v.2" "$v.json"
+expect_fail "mutants verdict: two JSON objects" "2 Verus result objects" killed
+vj 1 false demo::acc::other
+expect_fail "mutants verdict: another fn checked too" "want exactly demo::acc::demo" killed
+vj 0 true
+expect_fail "mutants verdict: still verifies" "the mutant still verifies" killed
+vj 1 false
+expect_fail "mutants verdict: the unmutated fn fails" "unmutated acc::demo" python3 -I "$root/tools/mutants.py" clean "$v" demo acc demo
+
+# the main gate (mutants.sh verify at main's tip, merge or not), on m3's real run file.
+mmerge() { gitc "$1" checkout -q main; gitc "$1" reset -q --hard "$mbase"; gitc "$1" merge -q --no-ff feat -m merge; }
+mbranch() { gitc "$1" checkout -q feat; gitc "$1" reset -q --hard "$2"; }
+mbase=$(git -C "$tmp/m3" rev-parse main)
+gitc m3 add tools/mutants-last-run.txt; gitc m3 commit -qm "mutants run"
+fresh_run=$(git -C "$tmp/m3" rev-parse HEAD)
+expect_pass "mutants verify on the branch (check only, no run file needed there)" mut m3 verify
+mmerge m3
+expect_pass "mutants verify: merge --no-ff with a fresh run file" mut m3 verify
+gitc m3 checkout -q main; gitc m3 reset -q --hard "$mbase"; gitc m3 merge -q --ff-only feat
+expect_pass "mutants verify: fast-forward to a branch tip with a fresh run file" mut m3 verify
+mbranch m3 "$fresh_run"; gitc m3 rm -q tools/mutants-last-run.txt; gitc m3 commit -qm "no run file"; mmerge m3
+expect_fail "mutants verify: merge without a run file" "git show HEAD:tools/mutants-last-run.txt failed" mut m3 verify
+gitc m3 checkout -q --detach main
+expect_fail "mutants verify: the same merge checked out detached (a CI checkout)" "git show HEAD:tools/mutants-last-run.txt failed" mut m3 verify
+gitc m3 checkout -q main
+mbranch m3 "$fresh_run"; printf '// later\n' >> "$tmp/m3/crates/demo/src/lib.rs"; gitc m3 commit -qam "crates change after the run"
+expect_fail "mutants verify on a branch: crates changed after the run (shows before the merge)" "is stale" mut m3 verify
+mmerge m3
+expect_fail "mutants verify: stale run file (crates changed after the run)" "is stale" mut m3 verify
+gitc m3 checkout -q main; gitc m3 reset -q --hard "$mbase"; gitc m3 merge -q --ff-only feat
+expect_fail "mutants verify: fast-forward commit on main without a run" "is stale" mut m3 verify
+mbranch m3 "$fresh_run"; gitc m3 checkout -q main; gitc m3 reset -q --hard "$mbase"
+printf '// main moved\n' >> "$tmp/m3/crates/demo/src/lib.rs"; gitc m3 commit -qam "crates change on main"
+gitc m3 merge -q --no-ff feat -m merge
+expect_fail "mutants verify: main changed crates/ since the fork (merge tree differs from the run's)" "is stale" mut m3 verify
+mbranch m3 "$fresh_run"; printf '# root manifest edit\n' >> "$tmp/m3/Cargo.toml"; gitc m3 commit -qam "Cargo.toml change after the run"; mmerge m3
+expect_fail "mutants verify: root Cargo.toml changed after the run" "is stale" mut m3 verify
+mbranch m3 "$fresh_run"; sed -i 's/^D-kill pass /D-kill fail /' "$tmp/m3/tools/mutants-last-run.txt"; gitc m3 commit -qam "fail line"; mmerge m3
+expect_fail "mutants verify: a fail line" "D-kill did not pass" mut m3 verify
+mbranch m3 "$fresh_run"; sed -i '/^D-kill /d' "$tmp/m3/tools/mutants-last-run.txt"; gitc m3 commit -qam "missing id"; mmerge m3
+expect_fail "mutants verify: a missing id" "missing D-kill" mut m3 verify
+mbranch m3 "$fresh_run"; echo "D-extra pass 0000" >> "$tmp/m3/tools/mutants-last-run.txt"; gitc m3 commit -qam "extra id"; mmerge m3
+expect_fail "mutants verify: an extra id in the run file" "extra D-extra" mut m3 verify
+mbranch m3 "$fresh_run"; sed -i 's/gate-demos: Err(8)/gate-demos: Err (8)/' "$tmp/m3/tools/mutants.tsv"; gitc m3 commit -qam "tsv edited"; mmerge m3
+expect_fail "mutants verify: tsv changed after the run" "was written for another tools/mutants.tsv" mut m3 verify
+mbranch m3 "$fresh_run"; sed -i 's/^index .*/index 0000000..1111111 100644/' "$tmp/m3/tools/mutants/D-kill.patch"; gitc m3 commit -qam "patch edited"; mmerge m3
+expect_fail "mutants verify: patch edited after the run" "was run with another patch" mut m3 verify
+gitc m3 checkout -q feat
+gitc m3 branch -m main trunk
+expect_fail "mutants verify: no main" "cannot resolve main" mut m3 verify
+
+# declassify gate (scripts/declassify-gate.sh ROOT REPORT GATEDIR): a report site with no TRUSTED.md row; counts that differ; a source
+# line the report lacks; a lost secret label; no report; an empty report; a report without sites.
+dg() { "$root/scripts/declassify-gate.sh" "$tmp/dg" "$tmp/dg/report.txt" "$tmp/dg/gate"; }
+fresh declassify; rm -rf "$tmp/dg"; mv "$tmp/declassify" "$tmp/dg"
+expect_pass "declassify-gate" dg
+sed -i 's/a::f#1/a::f#2/' "$tmp/dg/report.txt"
+expect_fail "declassify-gate: report site with no TRUSTED.md row" "crypto::a::f#2 has no TRUSTED.md ct-declassify row" dg
+fresh declassify; rm -rf "$tmp/dg"; mv "$tmp/declassify" "$tmp/dg"
+printf '| ct-declassify: crypto::a::g#1: y | crates/crypto/src/a.rs:9 | demo | never |\n' >> "$tmp/dg/TRUSTED.md"
+expect_fail "declassify-gate: extra TRUSTED.md row" "1 report sites but 2 TRUSTED.md ct-declassify rows" dg
+sed -i '$d' "$tmp/dg/TRUSTED.md"
+printf 'fn h(x: bool) -> bool { crate::ct::declassify(x) }\n' >> "$tmp/dg/crates/crypto/src/a.rs"
+expect_fail "declassify-gate: declassify( line the report lacks" "1 report sites but 2 declassify( lines" dg
+fresh declassify; rm -rf "$tmp/dg"; mv "$tmp/declassify" "$tmp/dg"
+sed -i 's/secret=d,msg,salt/secret=msg,salt/' "$tmp/dg/report.txt"
+expect_fail "declassify-gate: lost secret label" "rsa_pss_sign_inner lost its secret labels" dg
+fresh declassify; rm -rf "$tmp/dg"; mv "$tmp/declassify" "$tmp/dg"
+sed -i 's/a.rs:2 /a.rs:3 /' "$tmp/dg/TRUSTED.md"
+expect_fail "declassify-gate: row at another line" "report sites and TRUSTED.md rows differ" dg
+rm "$tmp/dg/report.txt"
+expect_fail "declassify-gate: no report" "declassify-gate: no $tmp/dg/report.txt" dg
+: > "$tmp/dg/report.txt"
+expect_fail "declassify-gate: empty report" "is empty" dg
+grep -v '^declassify ' "$fx/declassify/report.txt" > "$tmp/dg/report.txt"
+expect_fail "declassify-gate: report without sites" "no declassify site in" dg
+expect_fail "declassify-gate: no arguments" "usage: declassify-gate.sh" "$root/scripts/declassify-gate.sh"
+
+# deps gate (scripts/deps-gate.sh ROOT TREEFILE): a canned `cargo tree` with a second dep; no dep; a missing and an empty tree.
+mkdir -p "$tmp/dp"
+dpg() { "$root/scripts/deps-gate.sh" "$root" "$tmp/dp/tree.txt"; }
+cp "$fx/deps/tree.txt" "$tmp/dp/tree.txt"
+expect_pass "deps-gate" dpg
+printf 'vstd-extra v0.1.0\n' >> "$tmp/dp/tree.txt"
+expect_fail "deps-gate: a second dep" "not exactly vstd" dpg
+printf 'crypto v0.1.0 (/x/crates/crypto)\n' > "$tmp/dp/tree.txt"
+expect_fail "deps-gate: no dep" "not exactly vstd" dpg
+printf 'crypto v0.1.0 (/x/crates/crypto)\nvstd v0.0.0\nvstd v0.0.0\n' > "$tmp/dp/tree.txt"
+expect_fail "deps-gate: vstd listed twice" "not exactly vstd" dpg
+: > "$tmp/dp/tree.txt"
+expect_fail "deps-gate: empty tree" "empty cargo tree output" dpg
+rm "$tmp/dp/tree.txt"
+expect_fail "deps-gate: missing tree" "deps-gate: no $tmp/dp/tree.txt" dpg
+mkdir -p "$tmp/dp/bin"
+printf '#!/bin/sh\nexit 1\n' > "$tmp/dp/bin/cargo"; chmod +x "$tmp/dp/bin/cargo"
+expect_fail "deps-gate: cargo tree fails" "cargo tree failed" env PATH="$tmp/dp/bin:$PATH" "$root/scripts/deps-gate.sh" "$root"
+
+# ct-check's crypto report reader (scripts/ct-report.sh REPORT MANIFEST LABELS OUTDIR): a canned report with a rejected root; a root
+# with no verdict; changed labels; a missing and an empty report.
+cr() { "$root/scripts/ct-report.sh" "$tmp/cr/report.txt" "$tmp/cr/manifest.txt" "$tmp/cr/labels.txt" "$tmp/cr/out"; }
+fresh ctreport; rm -rf "$tmp/cr"; mv "$tmp/ctreport" "$tmp/cr"
+expect_pass "ct-report" cr
+sed -i 's/^root crypto::a::g ok/reject crypto::a::g SecretSwitch crates\/crypto\/src\/a.rs:1/' "$tmp/cr/report.txt"
+expect_fail "ct-report: a rejected root" "crypto: rejects" cr
+sed -i '/^reject /d' "$tmp/cr/report.txt"
+expect_fail "ct-report: a root with no verdict" "roots with no verdict: crypto::a::g" cr
+fresh ctreport; rm -rf "$tmp/cr"; mv "$tmp/ctreport" "$tmp/cr"
+sed -i 's/secret=x/secret=/' "$tmp/cr/report.txt"
+expect_fail "ct-report: a label lost" "checked lines differ" cr
+rm "$tmp/cr/report.txt"
+expect_fail "ct-report: no report" "crypto: no report" cr
+: > "$tmp/cr/report.txt"
+expect_fail "ct-report: empty report" "crypto: empty report" cr
+fresh ctreport; rm -rf "$tmp/cr"; mv "$tmp/ctreport" "$tmp/cr"
+: > "$tmp/cr/manifest.txt"
+expect_fail "ct-report: manifest without roots" "no root in" cr
+
+# ct-binary (scripts/ct-binary.sh --digests FILE: the real build, dump and checks against a canned digest file): one digest byte
+# changed; an objdump that lists no function; an objdump that fails; a missing digest file.
+cb() { "$root/scripts/ct-binary.sh" --digests "$tmp/cb/digests.txt"; }
+mkdir -p "$tmp/cb/bin" "$tmp/cb/bad"
+cp "$root/docs/crypto-binary-digests.txt" "$tmp/cb/digests.txt"
+expect_pass "ct-binary: the tracked digests as a canned file" cb
+l=$(grep -n -m1 '^[0-9a-f]\{64\} ' "$tmp/cb/digests.txt" | cut -d: -f1)
+c=$(sed -n "${l}s/^\(.\).*/\1/p" "$tmp/cb/digests.txt")
+[ "$c" = 0 ] && r=1 || r=0
+sed -i "${l}s/^./$r/" "$tmp/cb/digests.txt"
+expect_fail "ct-binary: one digest byte differs" "object code differs from $tmp/cb/digests.txt" cb
+printf '#!/bin/sh\n[ "${1-}" = --version ] && echo "GNU objdump fake" || true\n' > "$tmp/cb/bin/objdump"; chmod +x "$tmp/cb/bin/objdump"
+expect_fail "ct-binary: objdump lists no function" "no function in the disassembly" env PATH="$tmp/cb/bin:$PATH" "$root/scripts/ct-binary.sh" --digests "$root/docs/crypto-binary-digests.txt"
+printf '#!/bin/sh\nexit 1\n' > "$tmp/cb/bin/objdump"
+expect_fail "ct-binary: objdump fails" "objdump failed on" env PATH="$tmp/cb/bin:$PATH" "$root/scripts/ct-binary.sh" --digests "$root/docs/crypto-binary-digests.txt"
+rm "$tmp/cb/digests.txt"
+expect_fail "ct-binary: missing digest file" "ct-binary: no $tmp/cb/digests.txt" cb
+expect_fail "ct-binary: --digests without a file" "usage: ct-binary.sh" "$root/scripts/ct-binary.sh" --digests
+
+# test gate (scripts/test-gate.sh DIR LOG): a crate with a failing test; one that does not build; one with no test; a missing dir.
+tg() { "$root/scripts/test-gate.sh" "$tmp/tg" "$tmp/tg.log"; }
+fresh testgate-pass; rm -rf "$tmp/tg"; mv "$tmp/testgate-pass" "$tmp/tg"
+expect_pass "test-gate" tg
+fresh testgate-fail; rm -rf "$tmp/tg"; mv "$tmp/testgate-fail" "$tmp/tg"
+expect_fail "test-gate: a failing test" "test-gate: cargo test failed" tg
+fresh testgate-pass; rm -rf "$tmp/tg"; mv "$tmp/testgate-pass" "$tmp/tg"
+printf 'fn broken( {\n' > "$tmp/tg/src/lib.rs"
+expect_fail "test-gate: a crate that does not build" "test-gate: cargo test failed" tg
+printf 'pub fn f() {}\n' > "$tmp/tg/src/lib.rs"
+expect_fail "test-gate: no test runs" "cargo test passed no test" tg
+rm -rf "$tmp/tg"
+expect_fail "test-gate: missing dir" "no directory" tg
+# --workspace runs per member: a member with tests whose tests are all ignored fails although another member passes.
+tw() { "$root/scripts/test-gate.sh" "$tmp/tw" "$tmp/tw.log" --workspace; }
+rm -rf "${tmp:?}/tw"; mkdir -p "$tmp/tw/crates/a/src" "$tmp/tw/crates/b/src" "$tmp/tw/crates/server/src"
+printf '[workspace]\nmembers = ["crates/a", "crates/b", "crates/server"]\nresolver = "2"\n' > "$tmp/tw/Cargo.toml"
+for m in a b server; do printf '[package]\nname = "%s"\nversion = "0.0.0"\nedition = "2021"\n' "$m" > "$tmp/tw/crates/$m/Cargo.toml"; done
+printf '#[test]\nfn t() {}\n' > "$tmp/tw/crates/a/src/lib.rs"
+printf '#[test]\nfn t() {}\n' > "$tmp/tw/crates/b/src/lib.rs"
+printf '#[test]\nfn t() {}\n' > "$tmp/tw/crates/server/src/lib.rs"
+(cd "$tmp/tw" && cargo generate-lockfile --offline -q) || die "test-gate demo: cannot lock the workspace fixture"
+expect_pass "test-gate: --workspace, every member passes a test" tw
+printf '#[test]\n#[ignore]\nfn t() {}\n' > "$tmp/tw/crates/b/src/lib.rs"
+expect_fail "test-gate: --workspace, a member whose tests are all ignored" "crate b has tests but passed no test" tw
+# the required crate (server) with no tests at all
+rm -rf "${tmp:?}/tw/crates/b"
+printf 'pub fn f() {}\n' > "$tmp/tw/crates/server/src/lib.rs"
+printf '[workspace]\nmembers = ["crates/a", "crates/server"]\nresolver = "2"\n' > "$tmp/tw/Cargo.toml"
+(cd "$tmp/tw" && cargo generate-lockfile --offline -q) || die "test-gate demo: cannot lock the workspace fixture"
+expect_fail "test-gate: --workspace, the server crate with its tests deleted" "crate server has tests but passed no test" tw
+rm -rf "$tmp/tw/crates/server"; printf '[workspace]\nmembers = ["crates/a"]\nresolver = "2"\n' > "$tmp/tw/Cargo.toml"
+(cd "$tmp/tw" && cargo generate-lockfile --offline -q) || die "test-gate demo: cannot lock the workspace fixture"
+expect_fail "test-gate: --workspace, the server crate missing" "required-tests crate server is missing" tw
 
 echo "gate-demos: $n demos, all fail as expected"

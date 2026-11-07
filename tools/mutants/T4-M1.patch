@@ -1,0 +1,13 @@
+diff --git a/crates/quic/src/tp.rs b/crates/quic/src/tp.rs
+index 17d8601..398a7b2 100644
+--- a/crates/quic/src/tp.rs
++++ b/crates/quic/src/tp.rs
+@@ -953,7 +953,7 @@ pub open spec fn tp_value_invalid(id: u64, v: Seq<u8>) -> bool {
+             Some((n, x)) => {
+                 ||| n != v.len()
+                 ||| id == TP_MAX_UDP_PAYLOAD_SIZE && x < 1200
+-                ||| id == TP_ACK_DELAY_EXPONENT && x > 20
++                ||| id == TP_ACK_DELAY_EXPONENT && x > 21
+                 ||| id == TP_MAX_ACK_DELAY && x >= 0x4000  // 2^14
+                 ||| id == TP_ACTIVE_CONNECTION_ID_LIMIT && x < 2
+                 ||| (id == TP_INITIAL_MAX_STREAMS_BIDI || id == TP_INITIAL_MAX_STREAMS_UNI) && x

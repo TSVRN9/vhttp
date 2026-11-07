@@ -67,46 +67,7 @@ front() {
     [ -f "$o" ] || fail "ct-front $mode $d wrote no $o"
 }
 
-# verdicts <report>: one line per root, `ok <path>` or `reject <path> <K1,K2,..>` (kinds sorted
-# and unique), sorted.
-verdicts() {
-    { awk '$1 == "root" && $3 == "ok" { print "ok", $2 }' "$1"
-      awk '$1 == "reject" { print $2, $3 }' "$1" | LC_ALL=C sort -u |
-          awk '{ k[$1] = ($1 in k) ? k[$1] "," $2 : $2 } END { for (p in k) print "reject", p, k[p] }'
-    } | LC_ALL=C sort
-}
-
-# no_missing <manifest> <verdicts file>: every manifest root has a verdict line.
-no_missing() {
-    awk '{ print $2 }' "$2" | LC_ALL=C sort -u > "$2.paths"
-    missing=$(awk '$1 == "root" { print $2 }' "$1" | LC_ALL=C sort | LC_ALL=C comm -23 - "$2.paths")
-    [ -z "$missing" ] || fail "roots with no verdict: $missing"
-}
-
-# cost_verdicts <report> [atoms]: its lines without coefficients, a first error's text or a
-# `CalleeNone` or `Validator` index (the closure's own numbering), sorted. With a second argument a
-# `bounded` line keeps its non-constant monomials' atoms (`bounded p deg=1 len(b)`), so a bound that
-# stops being in `len(..)` atoms shows as a diff.
-cost_verdicts() {
-    sed -E 's/^(bounded .* deg=[012]) steps <= (.*)$/\1 \2/
-            s/^(none .* (Unsupported|Unresolved)) .*$/\1/
-            s/ (CalleeNone|Validator)\([0-9]+\)$/ \1/' "$1" |
-        awk -v atoms="${2:-}" '$1 == "bounded" { out = $1 " " $2 " " $3
-                if (atoms == "") { print out; next }
-                sub(/^bounded [^ ]+ deg=[012] ?/, ""); n = split($0, t, / \+ /); seen = ""
-                for (i = 1; i <= n; i++) { m = t[i]; sub(/^[0-9]+\*/, "", m); if (m ~ /[a-z_#]/) seen = seen " " m }
-                print out seen; next } { print }' | LC_ALL=C sort
-}
-
-# cost_no_missing <manifest> <report>..: every cost-root has a verdict line in some report. Grepped
-# whole, because a path may hold spaces (`<a::B as a::C>::f`).
-cost_no_missing() {
-    sed -nE 's/^[[:space:]]*cost-root[[:space:]]+//; T; s/[[:space:]]+#.*$//; p' "$1" > "$CT_OUT/cost-roots.txt"
-    shift
-    while IFS= read -r p; do
-        grep -qF -e "bounded $p deg=" -e "none $p " "$@" || fail "cost-root with no verdict: $p"
-    done < "$CT_OUT/cost-roots.txt"
-}
+. "$root/scripts/ct-lib.sh"
 
 ct=$root/tools/ct-driver
 fx=$root/tools/ct-fixtures
@@ -138,7 +99,7 @@ echo "ct-check: fixtures $n/$n"
 # Selftest: every vector line of selftest.txt must report `pass`; counted per crate prefix.
 r=$CT_OUT/crypto/selftest-crypto.txt
 front 150 "selftest=$st" "$CT_OUT/crypto/mir-crypto.json" "$r" "$cm"
-grep -v '^pass ' "$r" >&2 && fail "selftest: vectors failed (above)"
+grep_hits -v '^pass ' "$r" >&2 && fail "selftest: vectors failed (above)"
 v=$(grep -c '^crypto::' "$st")
 p=$(grep -c "^pass " "$r" || true)
 [ "$p" -eq "$v" ] || fail "selftest: $p of $v vectors passed"
@@ -149,7 +110,7 @@ for c in wire h3 quic; do
 done
 r=$CT_OUT/parsers/selftest.txt
 cat "$CT_OUT/parsers/selftest-wire.txt" "$CT_OUT/parsers/selftest-h3.txt" "$CT_OUT/parsers/selftest-quic.txt" > "$r"
-grep -v '^pass ' "$r" >&2 && fail "selftest parsers: vectors failed (above)"
+grep_hits -v '^pass ' "$r" >&2 && fail "selftest parsers: vectors failed (above)"
 v=$(grep -c -E '^(wire|h3|quic)::' "$st")
 p=$(grep -c "^pass " "$r" || true)
 [ "$p" -eq "$v" ] || fail "selftest parsers: $p of $v vectors passed"
@@ -181,7 +142,7 @@ got=$CT_OUT/parsers/cost-verdicts.txt
 cat $reports | sed -E 's/ NotCounted\([0-9]+\)$/ NotCounted/' > "$CT_OUT/parsers/cost-all.txt"
 cost_verdicts "$CT_OUT/parsers/cost-all.txt" atoms > "$got"
 diff -u "$ct/expected-cost.txt" "$got" || fail "cost parsers: verdicts differ from tools/ct-driver/expected-cost.txt"
-if grep -qvE '^[[:space:]]*(#|$|cost-root[[:space:]])' "$ct/cost-targets.txt"; then
+if grep_hits -v '^[[:space:]]*(#|$|cost-root[[:space:]])' "$ct/cost-targets.txt" > /dev/null; then
     fail "cost-targets.txt holds a line that is not a cost-root line (the selftest and the cost run must share one cpol)"
 fi
 nt=$(grep -c -E '^[[:space:]]*cost-root[[:space:]]' "$ct/cost-targets.txt")
@@ -201,12 +162,7 @@ lines=$({ grep -rh --include='*.rs' 'declassify(' "$root/crates/crypto/src" || [
 # F = distinct checked fns, R = manifest roots, D = declassify sites. verify.sh reads this report.
 report=$CT_OUT/crypto/report-crypto.txt
 front $t check "$CT_OUT/crypto/mir-crypto.json" "$report" "$cm"
-grep '^reject ' "$report" >&2 && fail "crypto: rejects (above)"
-got=$CT_OUT/crypto/verdicts.txt
-verdicts "$report" > "$got"
-no_missing "$cm" "$got"
-grep '^checked ' "$report" > "$CT_OUT/crypto/labels.txt" || true
-diff -u "$ct/expected-labels.txt" "$CT_OUT/crypto/labels.txt" || fail "crypto: checked lines differ from tools/ct-driver/expected-labels.txt"
+CT_OUT=$CT_OUT "$root/scripts/ct-report.sh" "$report" "$cm" "$ct/expected-labels.txt" "$CT_OUT/crypto" || exit 1
 f=$(awk '$1 == "checked" { print $2 }' "$report" | LC_ALL=C sort -u | wc -l | tr -d ' ')
 r=$(grep -c '^root ' "$cm")
 d=$(grep -c '^declassify ' "$report" || true)
@@ -271,7 +227,7 @@ got=$CT_OUT/semconf/selftest-semconf.txt
 # activation, is a `fail`); the whole run takes well under a second, and the 60 s bound stops a
 # looping vector.
 front 60 "selftest=$sc/vectors.txt" "$CT_OUT/semconf/mir-semconf.json" "$got" "$sc/manifest.txt"
-grep -v '^pass ' "$got" >&2 && fail "semconf: vectors failed (above)"
+grep_hits -v '^pass ' "$got" >&2 && fail "semconf: vectors failed (above)"
 v=$(grep -c '^semconf::' "$sc/vectors.txt")
 p=$(grep -c '^pass ' "$got" || true)
 [ "$p" -eq "$v" ] || fail "semconf: $p of $v vectors passed"

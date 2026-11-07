@@ -1,0 +1,12 @@
+diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
+index c97e69c..e8a7512 100644
+--- a/crates/quic/src/conn.rs
++++ b/crates/quic/src/conn.rs
+@@ -3367,7 +3367,6 @@ impl Connection {
+         if now > self.now {
+             self.now = now;
+         }
+-        self.close_internal(CRYPTO_ERROR_BASE + alert as u64);
+     }
+ 
+     /// Issues CIDs up to the peer's limit, trying each CID slice of `rand` once.

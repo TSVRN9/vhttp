@@ -1,0 +1,14 @@
+diff --git a/crates/quic/src/recv_stream.rs b/crates/quic/src/recv_stream.rs
+index a4f824e..fa6ffd3 100644
+--- a/crates/quic/src/recv_stream.rs
++++ b/crates/quic/src/recv_stream.rs
+@@ -1613,9 +1613,6 @@ impl RecvStream {
+             None => high,
+         };
+         let n_new = c2 - self.counted_exec();
+-        if n_new > conn_room {
+-            return Err(FLOW_CONTROL_ERROR);
+-        }
+         Ok(n_new)
+     }
+ 

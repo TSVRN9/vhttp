@@ -1,0 +1,22 @@
+diff --git a/crates/quic/src/tp.rs b/crates/quic/src/tp.rs
+index 17d8601..508ed1f 100644
+--- a/crates/quic/src/tp.rs
++++ b/crates/quic/src/tp.rs
+@@ -299,7 +299,7 @@ pub open spec fn rfc_tp_apply(id: u64, v: Seq<u8>, from_client: bool, t: SpecTp,
+         None
+     } else {
+         match rfc_tp_value(id, v, t) {
+-            Some(t2) => Some((t2, seen | tp_bit(id))),
++            Some(t2) => if from_client && id == TP_DISABLE_ACTIVE_MIGRATION { Some((t2, seen | tp_bit(id) | tp_bit(TP_ACTIVE_CONNECTION_ID_LIMIT))) } else { Some((t2, seen | tp_bit(id))) },
+             None => None,
+         }
+     }
+@@ -1333,7 +1333,7 @@ fn tp_apply(id: u64, v: &[u8], from_client: bool, t: TransportParams, seen: u32)
+         return None;
+     }
+     match tp_value(id, v, t) {
+-        Some(t2) => Some((t2, seen | bit)),
++        Some(t2) => if from_client && id == TP_DISABLE_ACTIVE_MIGRATION { Some((t2, seen | bit | (1u32 << 14u32))) } else { Some((t2, seen | bit)) },
+         None => None,
+     }
+ }

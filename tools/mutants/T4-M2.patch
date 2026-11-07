@@ -1,0 +1,12 @@
+diff --git a/crates/quic/src/tp.rs b/crates/quic/src/tp.rs
+index 17d8601..ee2bb62 100644
+--- a/crates/quic/src/tp.rs
++++ b/crates/quic/src/tp.rs
+@@ -1022,7 +1022,6 @@ pub open spec fn allowed_tp_err_from(b: Seq<u8>, p: int, ids: Set<u64>, t: SpecT
+                 Some((len, r)) => match rfc_bytes(b, r, len as int) {
+                     None => true,
+                     Some((v, s)) => {
+-                        ||| id <= TP_RETRY_SOURCE_CONNECTION_ID && ids.contains(id)
+                         ||| tp_server_only(id)
+                         ||| id <= TP_RETRY_SOURCE_CONNECTION_ID && tp_value_invalid(id, v)
+                         ||| match rfc_tp_apply(id, v, true, t, seen) {
