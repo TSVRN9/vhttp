@@ -273,11 +273,12 @@ fn crypto_in_and_out_of_order_one_datagram_ok() {
     assert_eq!(out, vec![1; 13000]);
 }
 
-/// One byte past the window measured from the contiguous end closes with CRYPTO_BUFFER_EXCEEDED.
+/// A 16385th out-of-order byte held closes with CRYPTO_BUFFER_EXCEEDED, however much in-order
+/// data is unread.
 #[test]
 fn crypto_past_contiguous_window_0x0d() {
     let mut c = conn();
-    let f = vec![Frame::Crypto { offset: 100, data: vec![1; 12900] }, Frame::Crypto { offset: 13000 + 16384, data: vec![2] }];
+    let f = vec![Frame::Crypto { offset: 100, data: vec![1; 12900] }, Frame::Crypto { offset: 13001, data: vec![2; 16385] }];
     c.on_datagram(0, 17000, vec![ini(3, f)], None, 1, &rnd(3));
     assert_eq!(c.phase(), Phase::Closing);
     assert_eq!(c.close_info(), &Some((false, 0x0d, vec![])));

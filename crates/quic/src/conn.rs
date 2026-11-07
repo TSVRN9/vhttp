@@ -270,15 +270,24 @@ impl Connection {
             PacketKind::Handshake => self.crx_h,
             PacketKind::OneRtt => self.crx_1,
         };
-        (s.reassembly().base() + s.reassembly().buf_len()) as nat
+        (s.base_spec() + s.buf_len_spec()) as nat
+    }
+
+    /// Level `k`'s CRYPTO stream.
+    spec fn crx_spec(&self, k: PacketKind) -> CryptoStream {
+        match k {
+            PacketKind::Initial => self.crx_i,
+            PacketKind::Handshake => self.crx_h,
+            PacketKind::OneRtt => self.crx_1,
+        }
     }
 
     /// How far level `k`'s CRYPTO data has been read (`crypto_read`).
     pub closed spec fn crypto_base_spec(&self, k: PacketKind) -> nat {
         match k {
-            PacketKind::Initial => self.crx_i.reassembly().base(),
-            PacketKind::Handshake => self.crx_h.reassembly().base(),
-            PacketKind::OneRtt => self.crx_1.reassembly().base(),
+            PacketKind::Initial => self.crx_i.base_spec(),
+            PacketKind::Handshake => self.crx_h.base_spec(),
+            PacketKind::OneRtt => self.crx_1.base_spec(),
         }
     }
 
@@ -331,10 +340,10 @@ impl Connection {
         &&& self.lc.phase_spec() is Open ==> o.lc.phase_spec() is Open
         &&& self.live_i ==> o.live_i
         &&& self.live_h ==> o.live_h
-        &&& skip != Some(PacketKind::Initial) && self.lc.phase_spec() is Open && self.live_i ==> self.crx_i.reassembly().base()
-            == o.crx_i.reassembly().base()
-        &&& skip != Some(PacketKind::Handshake) && self.lc.phase_spec() is Open && self.live_h ==> self.crx_h.reassembly().base()
-            == o.crx_h.reassembly().base()
+        &&& skip != Some(PacketKind::Initial) && self.lc.phase_spec() is Open && self.live_i ==> self.crx_i.base_spec()
+            == o.crx_i.base_spec()
+        &&& skip != Some(PacketKind::Handshake) && self.lc.phase_spec() is Open && self.live_h ==> self.crx_h.base_spec()
+            == o.crx_h.base_spec()
     }
 
     /// The three CRYPTO streams, and the handshake's completion, are as in `o`; no transport
@@ -1599,17 +1608,19 @@ impl Connection {
             final(self).wf(),
             final(self).frames_kept(*old(self)),
             r matches Err(c) ==> c <= VARINT_MAX,
-            r matches Err(c) ==> c == CRYPTO_BUFFER_EXCEEDED && crypto_window_exceeded(
-                old(self).crypto_contiguous_spec(k),
+            r matches Err(c) ==> c == CRYPTO_BUFFER_EXCEEDED && crypto_allowed_err(
+                old(self).crx_spec(k),
                 offset,
                 data@.len(),
+                c,
             ),
-            crypto_window_exceeded(old(self).crypto_contiguous_spec(k), offset, data@.len()) ==> r
+            crypto_allowed_err(old(self).crx_spec(k), offset, data@.len(), CRYPTO_BUFFER_EXCEEDED) ==> r
                 == Err::<(), u64>(CRYPTO_BUFFER_EXCEEDED),
-            old(self).phase_spec() is Open && crypto_window_exceeded(
-                old(self).crypto_contiguous_spec(k),
+            old(self).phase_spec() is Open && crypto_allowed_err(
+                old(self).crx_spec(k),
                 offset,
                 data@.len(),
+                CRYPTO_BUFFER_EXCEEDED,
             ) ==> final(self).phase_spec() is Closing && final(self).close_spec() == Some(
                 (false, CRYPTO_BUFFER_EXCEEDED, Seq::<u8>::empty()),
             ),
@@ -3374,9 +3385,9 @@ impl Connection {
         hide(crate::reassembly::rfc_contiguous);
         proof {
             reveal(crx_ok);
-            self.crx_i.reassembly().lemma_wf();
-            self.crx_h.reassembly().lemma_wf();
-            self.crx_1.reassembly().lemma_wf();
+            self.crx_i.lemma_wf();
+            self.crx_h.lemma_wf();
+            self.crx_1.lemma_wf();
         }
         // shortcut: the bytes are copied out and dropped (`read`); a copy-free pop only if this shows up.
         let mut sink: Vec<u8> = Vec::new();
@@ -3433,19 +3444,19 @@ impl Connection {
         match level {
             PacketKind::Initial => {
                 proof {
-                    self.crx_i.reassembly().lemma_wf();
+                    self.crx_i.lemma_wf();
                 }
                 self.crx_i.read(out)
             },
             PacketKind::Handshake => {
                 proof {
-                    self.crx_h.reassembly().lemma_wf();
+                    self.crx_h.lemma_wf();
                 }
                 self.crx_h.read(out)
             },
             PacketKind::OneRtt => {
                 proof {
-                    self.crx_1.reassembly().lemma_wf();
+                    self.crx_1.lemma_wf();
                 }
                 self.crx_1.read(out)
             },
@@ -8563,16 +8574,13 @@ impl Connection {
             reveal(crx_ok);
             match k {
                 PacketKind::Initial => {
-                    self.crx_i.reassembly().lemma_wf();
-                    self.crx_i.reassembly().lemma_contiguous_le_end();
+                    self.crx_i.lemma_wf();
                 },
                 PacketKind::Handshake => {
-                    self.crx_h.reassembly().lemma_wf();
-                    self.crx_h.reassembly().lemma_contiguous_le_end();
+                    self.crx_h.lemma_wf();
                 },
                 PacketKind::OneRtt => {
-                    self.crx_1.reassembly().lemma_wf();
-                    self.crx_1.reassembly().lemma_contiguous_le_end();
+                    self.crx_1.lemma_wf();
                 },
             }
         }
@@ -8729,7 +8737,7 @@ impl Connection {
 #[verifier::opaque]
 spec fn crx_ok(i: CryptoStream, h: CryptoStream, o: CryptoStream, live_i: bool, live_h: bool, complete: bool) -> bool {
     &&& i.wf() && h.wf() && o.wf()
-    &&& !live_i ==> i.drained() && i.reassembly().buf_len() == 0
+    &&& !live_i ==> i.drained() && i.buf_len_spec() == 0
     &&& !live_h ==> h.drained()
     &&& !complete ==> o.drained()
 }

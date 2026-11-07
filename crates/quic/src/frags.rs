@@ -866,6 +866,8 @@ impl Frags {
             ),
             self.count() == 0 ==> self.view().dom() =~= Set::<nat>::empty(),
             self.count() <= VARINT_MAX,
+            self.held() == self.view().dom().len(),
+            self.count() == runs(self.view().dom()),
     {
         let f = self.fs();
         lemma_runs_le_len(self.view().dom());
@@ -891,6 +893,8 @@ impl Frags {
         ensures
             r.wf(),
             r.view() == Map::<nat, u8>::empty(),
+            r.held() == 0,
+            r.count() == 0,
     {
         let r = Frags { v: Vec::new(), held: 0 };
         proof {
