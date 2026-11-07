@@ -4,10 +4,8 @@ set -o pipefail
 VERUS_HOME="${VERUS_HOME:-$HOME/.local/opt/verus/0.2026.10.04.426d8b0/verus-x86-linux}"
 PATH="$VERUS_HOME:$PATH"
 root=$(cd "$(dirname "$0")/.." && pwd)
-for c in "$root"/crates/*/; do
-    [ -d "$c" ] || { echo "verify.sh: no crates under crates/" >&2; exit 1; }
-    (cd "$c" && cargo verus verify)
-done
+# Every crate verified at --rlimit 4 (replaces the default per-crate run); quic/quictls fns must stay under 8,000,000.
+"$root/scripts/rlimit-gate.sh" "$root" || exit 1
 (cd "$root" && duvet report)
 # Constant-time check; its crypto report is read by the declassify gate, so pin where it goes.
 export CT_TARGET_DIR="${CT_TARGET_DIR:-$root/target/ct}"
