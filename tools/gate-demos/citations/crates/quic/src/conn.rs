@@ -13,6 +13,13 @@ pub open spec fn allowed_demo_err(n: u64, c: u64) -> bool {
 //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4
 //# An endpoint MUST treat receipt of a transport parameter with an invalid value as a connection error of type
 //# TRANSPORT_PARAMETER_ERROR.
+pub open spec fn allowed_demo_err_from(n: u64, c: u64) -> bool {
+    allowed_demo_err(n, c)
+}
+
+//= https://www.rfc-editor.org/rfc/rfc9000#section-7.4
+//# An endpoint MUST treat receipt of a transport parameter with an invalid value as a connection error of type
+//# TRANSPORT_PARAMETER_ERROR.
 spec fn demo_code(n: u64) -> u64 {
     TRANSPORT_PARAMETER_ERROR
 }

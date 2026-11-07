@@ -359,6 +359,18 @@ cfresh; sed -i '/^\/\/# /d' "$cit"
 expect_fail "citations: citation lines without a quote" "has no" cite
 cfresh; sed -i 's|^/// A parameter the RFC rejects.|\n/// A parameter the RFC rejects.|' "$cit"
 expect_fail "citations: a blank line between the citation and the predicate" "allowed_demo_err has no" cite
+cfresh; strip_cite '^pub open spec fn allowed_demo_err_from'
+expect_fail "citations: an allowed_*err_from predicate without a citation" "allowed_demo_err_from has no" cite
+cfresh; sed -i 's/Some((false, TRANSPORT_PARAMETER_ERROR/Some((false, k/' "$cit"; strip_cite '^pub fn demo_close'
+expect_fail "citations: close code a name bound outside the fn's parameters, no citation" "demo_close has no" cite
+cfresh; sed -i 's/Some((false, TRANSPORT_PARAMETER_ERROR/Some((false, k/' "$cit"; sed -i '/^D1/d' "$tmp/cit/tools/mutants.tsv"
+expect_fail "citations: close code a name bound outside the fn's parameters, no row" "close-code fn quic::conn::demo_close has no row" closes
+cfresh; sed -i 's/(false, demo_code(n)/(false, crate::conn::demo_code(n)/' "$cit"; strip_cite '^spec fn demo_code'
+expect_fail "citations: path-qualified code-mapping call, mapping fn without a citation" "demo_code has no" cite
+cfresh; sed -i 's|^//= https://|//= http://|' "$cit"
+expect_fail "citations: citation with an http URL" "has no" cite
+cfresh; sed -i 's|^\(//= https://www.rfc-editor.org/rfc/rfc9000\)#section-7.4|\1|' "$cit"
+expect_fail "citations: citation without a section" "has no" cite
 cfresh; rm -r "$tmp/cit/crates"
 expect_fail "citations: no crates/" "cannot scan crates/" cite
 cfresh; rm "$tmp/cit/crates/quic/src/codes.rs"

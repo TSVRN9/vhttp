@@ -4,7 +4,7 @@ Usage: python3 -I tools/acceptance.py [--root DIR] [--baseline FILE] [--old-base
 Lists every exec fn inside a `verus!` block under DIR/crates (crates/crypto/src excluded) whose
 return type mentions `Result`, `Error`, `Err` or an alias of one (`type R<T> = Result<T, E>;`
 anywhere in the scanned crates, matched as a whole word), and whether its ensures call an allowed
-spec fn: a `spec fn` (any crate, crypto/src included) named `allowed_*err` or `*_allowed_err`,
+spec fn: a `spec fn` (any crate, crypto/src included) named `allowed_*err`, `allowed_*err_from` or `*_allowed_err`,
 written `NAME(`. Fns without the clause must be listed in the baseline, one
 `crate::module::[Type[ as Trait]::]fn` per line (`#` comments allowed). Fails if:
   - an unannotated fn is not in the baseline;
@@ -36,7 +36,7 @@ import os, re, subprocess, sys
 
 MAX_BASELINE = 192  # lower this in the commit that deletes baseline lines
 ERR_SUBSTR = ['Result', 'Error', 'Err']
-ALLOWED_NAME = re.compile(r'^(?:allowed_\w*err|\w+_allowed_err)$')
+ALLOWED_NAME = re.compile(r'^(?:allowed_\w*err(?:_from)?|\w+_allowed_err)$')
 CLAUSE = re.compile(r'\b(requires|ensures|recommends|decreases|opens_invariants|no_unwind|returns)\b')
 NEXTFN = re.compile(r'(?<![A-Za-z0-9_])fn\s+\w+')
 
