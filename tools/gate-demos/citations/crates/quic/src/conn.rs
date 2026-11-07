@@ -46,4 +46,12 @@ pub fn demo_map(c: &mut Conn, n: u64)
 {
 }
 
+pub fn demo_info(c: &Conn) -> (r: Option<(bool, u64, Vec<u8>)>)
+    ensures
+        r matches Some((a, k, v)) ==> c.close_spec() == Some((*a, *k, v@)),
+        r is None ==> c.close_spec() is None,
+        r matches Some((_, k, v)) ==> *k <= VARINT_MAX,
+{
+}
+
 } // verus!

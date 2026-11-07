@@ -343,7 +343,7 @@ cit=$tmp/cit/crates/quic/src/conn.rs
 cite() { python3 -I "$root/tools/citations.py" cite "$tmp/cit"; }
 closes() { python3 -I "$root/tools/citations.py" closes "$tmp/cit" "$tmp/cit/tools/mutants.tsv"; }
 cfresh
-expect_pass "citations: cite" cite
+expect_pass "citations: cite (the uncited echo getter demo_info is not a close-code fn)" cite
 expect_pass "citations: closes" closes
 # strip_cite <fn-line pattern>: delete the //= and //# lines directly above the matching line (and its doc comment)
 strip_cite() { awk -v pat="$1" '{ l[NR] = $0 } END { for (i = 1; i <= NR; i++) if (l[i] ~ pat) { j = i - 1; while (j > 0 && l[j] ~ /^(\/\/[=#]|\/\/\/|#\[)/) { if (l[j] ~ /^\/\/[=#]/) l[j] = "\001"; j-- } } for (i = 1; i <= NR; i++) if (l[i] != "\001") print l[i] }' "$cit" > "$cit.new"; mv "$cit.new" "$cit"; }
@@ -365,6 +365,8 @@ cfresh; sed -i 's/Some((false, TRANSPORT_PARAMETER_ERROR/Some((false, k/' "$cit"
 expect_fail "citations: close code a name bound outside the fn's parameters, no citation" "demo_close has no" cite
 cfresh; sed -i 's/Some((false, TRANSPORT_PARAMETER_ERROR/Some((false, k/' "$cit"; sed -i '/^D1/d' "$tmp/cit/tools/mutants.tsv"
 expect_fail "citations: close code a name bound outside the fn's parameters, no row" "close-code fn quic::conn::demo_close has no row" closes
+cfresh; sed -i 's/^        r is None ==> c.close_spec() is None,/&\n        r matches Some((a, k, v)) ==> k == 0x0a,/' "$cit"
+expect_fail "citations: an echo getter whose code is constrained elsewhere in its ensures, no citation" "demo_info has no" cite
 cfresh; sed -i 's/Some((false, TRANSPORT_PARAMETER_ERROR/Some((false, self.code/' "$cit"; strip_cite '^pub fn demo_close'
 expect_fail "citations: close code a field expression, fn without a citation" "demo_close has no" cite
 cfresh; sed -i 's/(false, demo_code(n)/(false, crate::conn::demo_code(n)/' "$cit"; strip_cite '^spec fn demo_code'

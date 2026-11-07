@@ -7,7 +7,7 @@
 # A close-code fn is an exec fn (tools/acceptance.py's scanner) whose ensures contain `close_spec() == Some((app, code, reason))`
 # with anything but a bare parameter name in `code` (a literal, a codes.rs constant, a call to a mapping spec fn such as
 # report_code, cited too, also path-qualified, a field, a method, a name that is not a parameter); a code that is exactly a parameter, or a name bound by a `matches` pattern
-# in the same ensures (it echoes the stored code), pins nothing here (callers do).
+# that no other part of the ensures mentions (it echoes the stored code), pins nothing here (callers do).
 # Fails closed: no allowed predicate, no close-code fn, no codes.rs constant or an unreadable input is an error.
 import importlib.util
 import os
@@ -75,9 +75,14 @@ def scan(root):
             # only a code that is exactly one of the fn's own parameters is unpinned (its callers pin it); any other
             # expression (constant, call, field, method, a name bound elsewhere) pins a code: fail closed
             # a name bound by a `matches` pattern (close_info: `r matches Some((a, c, v)) ==> close_spec() == Some((*a, *c, v@))`)
-            # echoes what is stored, it pins nothing
-            bound = {n for pat in re.findall(r'\bmatches\s+[A-Za-z:]*\s*(\((?:[^()]|\([^()]*\))*\))', ens)
-                     for n in re.findall(r'[a-z_][A-Za-z0-9_]*', pat)}
+            # echoes what is stored, so it pins nothing unless another part of the ensures mentions it (a comparison, a call)
+            pats = re.findall(r'\bmatches\s+[A-Za-z:]*\s*(\((?:[^()]|\([^()]*\))*\))', ens)
+            rest = ens[:m.start()] + ens[j:]
+            for pat in pats:
+                rest = rest.replace(pat, ' ')
+            rest = re.sub(r'\*?[a-z_][A-Za-z0-9_]*\s*<=\s*VARINT_MAX\b', ' ', rest)  # the varint range every code obeys pins nothing
+            bound = {n for pat in pats for n in re.findall(r'[a-z_][A-Za-z0-9_]*', pat)
+                     if not re.search(r'(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])' % n, rest)}
             if code.strip().lstrip('*&').strip() not in params(acc, f, off) | bound:
                 closes.append((f, line(f, off), path))
                 maps |= calls
