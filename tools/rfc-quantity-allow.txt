@@ -1,8 +1,8 @@
 # RFC-quantity allowlist (tools/rfc_quantity.py, C8). Tab-separated, one vouched-for read per line:
 #   call<TAB>CALLER<TAB>CALLEE<TAB>REASON  CALLEE is an RFC spec fn, not followed from CALLER; the reason says what it computes
 #   name<TAB>FN<TAB>NAME<TAB>REASON        NAME, read in FN's body, is the RFC quantity the reason names (check FN's callers)
-# Each reason cites `RFC N §x`. A ratchet: the line count is ALLOW_LINES in tools/rfc_quantity.py, so a new line
-# needs that constant raised in the same diff. Stale lines (vouching for nothing) fail.
+# Each reason cites `RFC N §x`. A ratchet: ALLOW_DIGEST in tools/rfc_quantity.py pins these lines, so any change
+# needs that constant changed in the same diff. Stale lines (vouching for nothing) fail.
 call	quic::crypto_stream::crypto_allowed_err	quic::crypto_stream::crypto_contiguous	rfc_contiguous(rfc_received(s.reassembly().inserted())): inserted() holds every non-empty CRYPTO frame on_crypto accepted that reaches past the read offset (frames below it add no bytes), so this is the end of the in-order CRYPTO data received (RFC 9000 §7.5, §19.6)
 name	quic::crypto_stream::crypto_allowed_err	c	the error code on_crypto returns, compared with the RFC's CRYPTO_BUFFER_EXCEEDED (RFC 9000 §20.1)
 name	quic::crypto_stream::crypto_window_exceeded	contiguous	crypto_contiguous(s), the end of the in-order CRYPTO data received, its one caller's argument (RFC 9000 §7.5)

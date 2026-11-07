@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 set -o pipefail
-# rfc-quantity.sh [--root DIR] [--allow FILE] [--open FILE] [--old-open FILE] [--allow-lines N]: the RFC-quantity
+# rfc-quantity.sh [--root DIR] [--allow FILE] [--open FILE] [--old-open FILE] [--allow-digest HEX]: the RFC-quantity
 # gate (C8, tools/rfc_quantity.py). Every read in an allowed_*err predicate's body, and in the spec fns it calls, is
 # vouched for as an RFC quantity (a `// rfc-quantity:` line, tools/rfc-quantity-allow.txt) or is a known open item in
 # tools/rfc-quantity-open.txt, which only shrinks: with the default root, no line (or larger count) may be absent from
