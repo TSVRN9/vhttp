@@ -1,0 +1,14 @@
+diff --git a/crates/quic/src/recv_stream.rs b/crates/quic/src/recv_stream.rs
+index a4f824e..b2a4ba2 100644
+--- a/crates/quic/src/recv_stream.rs
++++ b/crates/quic/src/recv_stream.rs
+@@ -1576,9 +1576,6 @@ impl RecvStream {
+             Some(f) => end > f || (fin && end != f),
+             None => fin && end < self.high,
+         };
+-        if bad {
+-            return Err(FINAL_SIZE_ERROR);
+-        }
+         //= https://www.rfc-editor.org/rfc/rfc9000#section-4.1
+         //# A receiver MUST close the connection with an error of type
+         //# FLOW_CONTROL_ERROR if the sender violates the advertised connection

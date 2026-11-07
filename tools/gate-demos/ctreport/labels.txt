@@ -1,0 +1,2 @@
+checked crypto::a::f secret=x ret=s
+checked crypto::a::g secret= ret=

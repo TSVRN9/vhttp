@@ -1,0 +1,13 @@
+diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
+index f0ecd46..82f3a01 100644
+--- a/crates/quictls/src/server.rs
++++ b/crates/quictls/src/server.rs
+@@ -173,7 +173,7 @@ fn report(c: &mut Connection, code: u64, now: u64)
+     } else if code <= 0x3fff_ffff_ffff_ffff {
+         shut(c, code, now);
+     } else {
+-        shut(c, INTERNAL_ERROR, now);
++        shut(c, PROTOCOL_VIOLATION, now);
+     }
+ }
+ 

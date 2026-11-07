@@ -1,0 +1,13 @@
+diff --git a/crates/quic/src/recv_stream.rs b/crates/quic/src/recv_stream.rs
+index a4f824e..151c544 100644
+--- a/crates/quic/src/recv_stream.rs
++++ b/crates/quic/src/recv_stream.rs
+@@ -326,7 +326,7 @@ pub open spec fn credit_after(s: SpecRecv, end: nat, fin: bool) -> nat {
+ #[verifier::opaque]
+ pub open spec fn final_size_trigger(s: SpecRecv, end: nat, fin: bool) -> bool {
+     ||| s.final_size is Some && end > s.final_size->0
+-    ||| fin && end < largest_received_offset(s.ins)
++    ||| fin && end <= largest_received_offset(s.ins)
+     ||| fin && s.final_size is Some && end != s.final_size->0
+ }
+ 

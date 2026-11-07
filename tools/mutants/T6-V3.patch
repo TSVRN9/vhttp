@@ -1,0 +1,13 @@
+diff --git a/crates/quic/src/recv_stream.rs b/crates/quic/src/recv_stream.rs
+index a4f824e..d1dfa91 100644
+--- a/crates/quic/src/recv_stream.rs
++++ b/crates/quic/src/recv_stream.rs
+@@ -339,7 +339,7 @@ pub open spec fn final_size_trigger(s: SpecRecv, end: nat, fin: bool) -> bool {
+ /// bytes of credit are left for this stream to consume past what it has (`credit_before`).
+ #[verifier::opaque]
+ pub open spec fn flow_trigger(s: SpecRecv, end: nat, fin: bool, conn_room: nat) -> bool {
+-    ||| end > s.limit
++    ||| end >= s.limit
+     ||| credit_after(s, end, fin) > credit_before(s) + conn_room
+ }
+ 

@@ -1,0 +1,13 @@
+diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
+index c97e69c..0bb28af 100644
+--- a/crates/quic/src/conn.rs
++++ b/crates/quic/src/conn.rs
+@@ -6505,8 +6505,6 @@ impl Connection {
+             c2.tx_timers(s0, now),
+             *self == (Connection { idle: self.idle, ..c2 }),
+             self.idle.last == c2.idle.last || self.idle.last == now,
+-        ensures
+-            self.tx_timers(s0, now),
+     {
+         reveal(Connection::tx_timers);
+         if !(self.lc.phase_spec() is Closed) {

@@ -1,0 +1,2 @@
+#[test]
+fn bad() { assert_eq!(1 + 1, 3); }
