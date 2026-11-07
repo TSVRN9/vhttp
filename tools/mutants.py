@@ -10,7 +10,7 @@
 #                            `tree` (see tree), HEAD:crates, HEAD:tools/mutants.tsv's blob, and every id of that tsv
 #                            (no other) as `pass` with the blob of HEAD:tools/mutants/<id>.patch
 #   tree ROOT REV            sha256 of `git ls-tree REV -- Cargo.lock Cargo.toml crates rust-toolchain.toml` (all four needed)
-#   allowed ROOT TSV         every allowed_*err / *_allowed_err spec fn under ROOT/crates is named by a row
+#   allowed ROOT TSV         every allowed_*err / *_allowed_err spec fn under ROOT/crates is named by a row's fn or regex column
 # Every mode exits 1 with a "mutants: ..." message on failure, and fails closed on a missing or empty input.
 import hashlib
 import importlib.util
@@ -188,7 +188,7 @@ def gate(root):
 
 def allowed(root, tsv):
     """Every allowed_*err / *_allowed_err spec fn under ROOT/crates (tools/acceptance.py's scanner) is named, as a whole
-    word, in some row's fn, regex or origin: a new acceptance predicate needs a mutant."""
+    word, in some row's fn or regex column (not origin): a new acceptance predicate needs a mutant."""
     sys.dont_write_bytecode = True  # no tools/__pycache__ in the caller's tree
     spec = importlib.util.spec_from_file_location('acceptance', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'acceptance.py'))
     acc = importlib.util.module_from_spec(spec)
@@ -197,10 +197,11 @@ def allowed(root, tsv):
         names = sorted({n for _, n, _ in acc.scan(root)[1]})
     except (ValueError, OSError) as e:
         die('cannot scan crates/ for allowed_*err predicates: %s' % e)
-    text = '\n'.join('\t'.join(l.split('\t')[3:]) for l in read(tsv).split('\n') if l.strip() and not l.startswith('#'))
+    # fn and regex columns only: a name in the free-text origin column is a comment, not a mutant of the predicate
+    text = '\n'.join(' '.join(f[3:6:2]) for f in (l.split('\t') for l in read(tsv).split('\n') if l.strip() and not l.startswith('#')))
     bare = [n for n in names if not re.search(r'(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])' % re.escape(n), text)]
     if bare:
-        die('allowed predicate with no mutant row (name it in a row\'s fn, regex or origin): %s' % ' '.join(bare))
+        die('allowed predicate with no mutant row (name it in a row\'s fn or regex column): %s' % ' '.join(bare))
     print('mutants: %d allowed predicates, each named by a row' % len(names))
 
 

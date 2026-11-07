@@ -33,7 +33,7 @@
 - **Defect:** the alert-to-code mapping in `report` had no RFC 9001 §4.8 `//=` citation. Fixed on phase-9a in 256d44e.
 - **Escape:** the citation rule is prose. `check_quotes.py` verifies the quotes that exist and cannot see missing ones.
 - **Class:** C1.
-- **Catch (open, owner 9r2):** a gate requiring that every `allowed_*err` spec fn, and every fn whose ensures pin a close code, carry a `//=` block. Its demo strips a citation and must fail.
+- **Catch (in place, 9r2 T3):** `tools/citations.py cite` (verify.sh, after check-quotes) requires a `//= https://www.rfc-editor.org/rfc/..#..` line with a `//#` quote in the comment block above every `allowed_*err` spec fn, every exec fn whose ensures pin `close_spec() == Some((app, code, reason))` with a literal, a codes.rs constant or a call in `code`, and every spec fn such a call names (`report_code`). `tools/citations.py closes` also requires a `tools/mutants.tsv` row (fn column) for each close-code fn. On the current tree: 4 predicates/mappings and 4 close-code fns, all cited and all with rows. Evidence: scripts/gate-demos.sh "citations" demos strip the citation from a predicate, a close-code fn and a mapping fn (each fails naming the fn), and fail with no row, a row naming the fn only in origin or regex, no tsv, no crates/, no codes.rs. Known limit: it checks that a citation exists, not that it is the right one.
 
 ## 6. task-brief extracted two tasks into one brief
 - **Defect:** the SDD `task-brief` script matched `### Task 3` as a prefix, so Task 3b's text went into Task 3's brief. Caught by the controller before dispatch.

@@ -1,0 +1,3 @@
+# fixture registry
+D1	quic	conn	demo_close	-	postcondition not satisfied.*close_spec	gate-demos
+D2	quic	conn	demo_map	-	postcondition not satisfied.*close_spec	gate-demos

@@ -61,6 +61,10 @@ bin=$(printf '%s\n' "$bin" | sed -n 's/^ct-binary: ok (\([0-9]*\) fns)$/\1/p')
 "$root/scripts/check-quotes.sh" || exit 1
 # Acceptance ratchet: every error-returning exec fn in verus! carries an allowed_ clause or is in the shrinking baseline.
 "$root/scripts/acceptance.sh" || exit 1
+# Citation gate (C1): every allowed_*err predicate, close-code fn and code-mapping spec fn carries an RFC citation with a quote
+# (the quote text is checked by check-quotes above), and every close-code fn is named by a row of tools/mutants.tsv.
+python3 -I "$root/tools/citations.py" cite "$root" || exit 1
+python3 -I "$root/tools/citations.py" closes "$root" "$root/tools/mutants.tsv" || exit 1
 # Mutant registry (C6): every tools/mutants/ patch applies exactly and every allowed_*err predicate has a row; at main's
 # tip, tools/mutants-last-run.txt must name this commit's crates/ and root Cargo files with every mutant killed.
 "$root/scripts/mutants.sh" verify || exit 1
