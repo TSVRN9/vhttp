@@ -1,0 +1,11 @@
+crypto crypto::sha256::sha256_cat 8054786
+ctcore ctcore::sem_sanity::sanity_declassify_event 10313486
+ctcore ctcore::sem_sanity::sanity_push_appends 8683301
+h3 h3::conn::H3Conn::send_response 11044302
+h3 h3::conn::H3Conn::uni_data 9478654
+h3 h3::conn::write_response 10894178
+h3 h3::qpack::field_section::encode_field_section 9564387
+h3 h3::request::lemma_frame_at 10315117
+h3 h3::uni::UniStream::determine 9731672
+h3 h3::uni::UniStream::on_data 11438164
+tls tls::flight::build_flight 11648578

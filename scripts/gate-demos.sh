@@ -266,4 +266,58 @@ expect_pass "rlimit-gate: two clean result objects (a dependency built in the ru
 { cat "$tmp/rlimit/quic.json"; sed 's/"rlimit": 120000, "success": true/"rlimit": 120000, "success": false/' "$tmp/rlimit/quic.json"; } > "$tmp/rl.json"
 expect_fail "rlimit-gate: FAIL row in the second object" "FAIL row" rl
 
+# rlimit ceilings ratchet (scripts/rlimit-ceilings.sh, in throwaway git repos like the acceptance.sh ones): an unlisted fn above 8M;
+# a listed fn above its value; a raised value and a new line against history; a quic line; a stale line; a missing file; server with verus!.
+rcrepo() {  # rcrepo <dir>: scripts, rl.py, the ceilings fixture and server src, one commit on main, then branch feat
+    rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/tools"
+    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/rl.py" "$tmp/$1/tools/"
+    cp -r "$fx/rlimit/ceilings/crates" "$fx/rlimit/ceilings/logs" "$tmp/$1/"; cp "$fx/rlimit/ceilings/tools/rlimit-ceilings.txt" "$tmp/$1/tools/"
+    git -C "$tmp/$1" init -q -b main
+    git -C "$tmp/$1" add -A
+    gitc "$1" commit -qm base
+    gitc "$1" checkout -qb feat
+    gitc "$1" commit -q --allow-empty -m feat
+}
+rceil() { "$tmp/$1/scripts/rlimit-ceilings.sh" "$tmp/$1" "$tmp/$1/logs"; }
+rcrepo rc1
+expect_pass "rlimit-ceilings" rceil rc1
+: > "$tmp/rc1/tools/rlimit-ceilings.txt"
+expect_fail "rlimit-ceilings: empty file with a fn above 8M" "is empty but 1 fns are above" rceil rc1
+rm "$tmp/rc1/tools/rlimit-ceilings.txt"
+expect_fail "rlimit-ceilings: missing file with a fn above 8M" "is missing but 1 fns are above" rceil rc1
+rcrepo rc2
+sed -i 's/11648578/11648577/' "$tmp/rc2/logs/tls.json"
+expect_pass "rlimit-ceilings: fn below its ceiling" rceil rc2
+sed -i 's/11648577/11648579/' "$tmp/rc2/logs/tls.json"
+expect_fail "rlimit-ceilings: listed fn above its value" "exceeds its ceiling 11648578" rceil rc2
+rcrepo rc3
+sed -i 's/tls::flight::build_flight", "rlimit": 11648578/tls::flight::other", "rlimit": 8000001/' "$tmp/rc3/logs/tls.json"
+expect_fail "rlimit-ceilings: unlisted fn above 8M" "unlisted fn above 8000000: tls::flight::other at 8000001" rceil rc3
+rcrepo rc4
+sed -i 's/11648578/11648579/' "$tmp/rc4/logs/tls.json" "$tmp/rc4/tools/rlimit-ceilings.txt"
+expect_fail "rlimit-ceilings: raised value against the merge-base" "raised from 11648578 to 11648579" rceil rc4
+rcrepo rc5
+echo "tls tls::flight::extra 9000000" >> "$tmp/rc5/tools/rlimit-ceilings.txt"
+sed -i 's/quic::conn::small", "rlimit": 120000/tls::flight::extra", "rlimit": 9000000/' "$tmp/rc5/logs/tls.json"
+expect_fail "rlimit-ceilings: new line against the merge-base" "not in the merge-base file" rceil rc5
+rcrepo rc6
+echo "quic quic::conn::small 9000000" >> "$tmp/rc6/tools/rlimit-ceilings.txt"
+sed -i 's/quic::conn::small", "rlimit": 120000/quic::conn::small", "rlimit": 9000000/' "$tmp/rc6/logs/tls.json"
+expect_fail "rlimit-ceilings: a quic line" "quic/quictls have a hard 8000000 cap" rceil rc6
+rcrepo rc7
+sed -i 's/11648578/7999999/' "$tmp/rc7/logs/tls.json"
+expect_fail "rlimit-ceilings: stale line (fn dropped below 8M)" "stale ceiling line" rceil rc7
+rcrepo rc8
+sed -i 's/tls::flight::build_flight/tls::flight::renamed/' "$tmp/rc8/logs/tls.json"
+expect_fail "rlimit-ceilings: stale line (fn gone)" "delete the line" rceil rc8
+rcrepo rc9
+printf 'verus! {\n}\n' >> "$tmp/rc9/crates/server/src/lib.rs"
+expect_fail "rlimit-ceilings: server containing verus!" "has proofs" rceil rc9
+rcrepo rc10
+rm "$tmp/rc10/logs/tls.json"
+expect_fail "rlimit-ceilings: no logs" "no JSON logs" rceil rc10
+rcrepo rc11
+gitc rc11 branch -m main trunk
+expect_fail "rlimit-ceilings: no main" "cannot resolve the merge-base" rceil rc11
+
 echo "gate-demos: $n demos, all fail as expected"
