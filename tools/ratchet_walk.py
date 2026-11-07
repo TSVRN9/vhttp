@@ -62,13 +62,13 @@ def main(root, path, mode):
         try:
             cur = parse(text, mode)
         except Fail as e:
-            raise Fail('%s at %s: %s' % (path, c[:12], e))
+            raise Fail('%s at %s: %s' % (path, c[:12] if len(c) == 40 else c, e))
         if prev is not None:
             for k, v in sorted(cur.items(), key=str):
                 if k not in prev:
-                    raise Fail('%s grew at %s: new line %s (the file only shrinks, across the whole first-parent history and the working tree)' % (path, c[:12], k))
+                    raise Fail('%s grew at %s: new line %s (the file only shrinks, across the whole first-parent history and the working tree)' % (path, c[:12] if len(c) == 40 else c, k))
                 if v > prev[k]:
-                    raise Fail('%s grew at %s: %s raised from %d to %d (the file only shrinks, across the whole first-parent history and the working tree)' % (path, c[:12], k, prev[k], v))
+                    raise Fail('%s grew at %s: %s raised from %d to %d (the file only shrinks, across the whole first-parent history and the working tree)' % (path, c[:12] if len(c) == 40 else c, k, prev[k], v))
         prev = cur
     print('ratchet-walk: %s ok (%d commits touch it)' % (path, len(commits)))
 
