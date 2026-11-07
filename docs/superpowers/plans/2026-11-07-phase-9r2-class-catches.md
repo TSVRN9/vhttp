@@ -28,6 +28,7 @@
 
 ### Task R2: mutant registry (C6 MUST ONLY TEST-PINNED)
 - `tools/mutants/<id>.patch` (one unified diff each) and `tools/mutants.tsv` (`id`, crate, expected failure regex, origin: plan task + mutation name). Seed it with every mutation named in the merged 9a tasks' Mutations steps (T1 M4-M7, T3 D1-D3/M1-M4, T4 M1-M3, T6 M1-M2 and the rest in those plan sections), regenerated against the current tree.
+- Each row also names the fn(s) whose verification the mutant must break; `run` passes them to Verus's `--verify-function` (or `--verify-only-module`) so one mutant costs one fn's verification, not the crate's. Check Verus 0.2026.10.04's exact flag spelling with `verus --help` and record it.
 - `scripts/mutants.sh check` (cheap, in verify.sh): every row has a patch, every patch `git apply --check`s against the tree, no duplicate ids, the tsv is non-empty.
 - `scripts/mutants.sh run [id...]`: applies each patch alone in a throwaway `git worktree` (never the caller's tree), runs that crate's `cargo verus verify` (and the tests the row names), and passes only if verification fails matching the row's regex (not on rlimit: a `rlimit` match is a failure of the mutant run). Writes `tools/mutants-last-run.txt`: the crates tree hash (`git rev-parse HEAD:crates`) and one line per id.
 - Merge gate: on main, when HEAD is a merge commit, verify.sh requires `tools/mutants-last-run.txt` to name `HEAD^2:crates`'s tree hash with every id passing. Document in the RCA README that `mutants.sh run` is the last step on a branch before merging.
