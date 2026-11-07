@@ -414,9 +414,9 @@ pub proof fn lemma_recv_err_rfc(
     }
 }
 
-/// `Reassembly::insert`, keeping the window tight: empty data is recorded without touching
-/// the buffers, since inserting it past the window's end would extend the window with
-/// unreceived slots (split from `data_buffer` for the rlimit).
+/// `Reassembly::insert`, keeping the window tight: `insert` records empty data without touching
+/// the buffers, and the two tight lemmas cover non-empty data (split from `data_buffer` for the
+/// rlimit).
 fn insert_tight(re: &mut Reassembly, off: u64, data: &[u8])
     requires
         old(re).wf(),
@@ -435,11 +435,7 @@ fn insert_tight(re: &mut Reassembly, off: u64, data: &[u8])
         },
 {
     let ghost re0 = *re;
-    if data.len() > 0 {
-        re.insert(off, data);
-    } else {
-        re.insert_empty(off, data);
-    }
+    re.insert(off, data);
     proof {
         if off + data@.len() <= re0.base() + re0.buf_len() {
             Reassembly::lemma_insert_tight_within(re0, *re, off, data@);
