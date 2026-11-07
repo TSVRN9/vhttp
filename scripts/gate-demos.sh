@@ -634,22 +634,11 @@ printf 'a\n' > "$tmp/w8/f"; gitc w8 commit -qam fix
 expect_pass "ratchet-walk: transient growth shrunk back (a fast-forward of a branch)" walk w8 f lines
 printf 'a\nb\n' > "$tmp/w8/f"; gitc w8 commit -qam regrow
 expect_fail "ratchet-walk: a shrink then a re-grow beyond the shrunk floor" "HEAD is outside the floor" walk w8 f lines
-# Ratchet-Reset (ceilings only; needs rust-toolchain.toml or Cargo.lock in the same commit)
+# no reset: a raised ceiling fails, and a commit message that looks like a trailer changes nothing.
 wrepo w9 tools/c 'c fn 9000000'
-printf 'c fn 9100000\n' > "$tmp/w9/tools/c"
-expect_fail "ratchet-walk: a raised ceiling without a reset" "above its lowest earlier value 9000000" walk w9 tools/c ceilings
-gitc w9 commit -qam "toolchain" -m "Ratchet-Reset: tools/c: measured values shift"
-expect_fail "ratchet-walk: a reset commit touching neither rust-toolchain.toml nor Cargo.lock" "touches neither rust-toolchain.toml nor Cargo.lock" walk w9 tools/c ceilings
-gitc w9 reset -q --hard HEAD~1
 printf 'c fn 9100000\n' > "$tmp/w9/tools/c"; printf 'x\n' > "$tmp/w9/Cargo.lock"; git -C "$tmp/w9" add -A
-gitc w9 commit -qm "upgrade" -m "Ratchet-Reset: tools/c: measured values shift after the Verus upgrade"
-expect_pass "ratchet-walk: a valid reset (ceilings, with Cargo.lock)" walk w9 tools/c ceilings
-printf 'c fn 9200000\n' > "$tmp/w9/tools/c"; gitc w9 commit -qam "raise again, no reset"
-expect_fail "ratchet-walk: a raise after the reset is a raise" "above its lowest earlier value 9100000" walk w9 tools/c ceilings
-wrepo w10 tools/acceptance-baseline.txt 'a'
-printf 'x\n' > "$tmp/w10/Cargo.lock"; git -C "$tmp/w10" add -A
-gitc w10 commit -qm "upgrade" -m "Ratchet-Reset: tools/acceptance-baseline.txt: no"
-expect_fail "ratchet-walk: a reset of the acceptance baseline is refused" "only tools/rlimit-ceilings.txt may be reset" walk w10 tools/acceptance-baseline.txt lines
+gitc w9 commit -qm "upgrade" -m "Ratchet-Reset: tools/c: measured values shift"
+expect_fail "ratchet-walk: a raised ceiling fails whatever the commit message says" "above its lowest earlier value 9000000" walk w9 tools/c ceilings
 wrepo w5 f 'a'
 expect_fail "ratchet-walk: a git error (path outside any repo)" "failed" walk w5/nonexistent f lines
 
@@ -914,14 +903,24 @@ rm -rf "$tmp/tg"
 expect_fail "test-gate: missing dir" "no directory" tg
 # --workspace runs per member: a member with tests whose tests are all ignored fails although another member passes.
 tw() { "$root/scripts/test-gate.sh" "$tmp/tw" "$tmp/tw.log" --workspace; }
-rm -rf "${tmp:?}/tw"; mkdir -p "$tmp/tw/crates/a/src" "$tmp/tw/crates/b/src"
-printf '[workspace]\nmembers = ["crates/a", "crates/b"]\nresolver = "2"\n' > "$tmp/tw/Cargo.toml"
-for m in a b; do printf '[package]\nname = "%s"\nversion = "0.0.0"\nedition = "2021"\n' "$m" > "$tmp/tw/crates/$m/Cargo.toml"; done
+rm -rf "${tmp:?}/tw"; mkdir -p "$tmp/tw/crates/a/src" "$tmp/tw/crates/b/src" "$tmp/tw/crates/server/src"
+printf '[workspace]\nmembers = ["crates/a", "crates/b", "crates/server"]\nresolver = "2"\n' > "$tmp/tw/Cargo.toml"
+for m in a b server; do printf '[package]\nname = "%s"\nversion = "0.0.0"\nedition = "2021"\n' "$m" > "$tmp/tw/crates/$m/Cargo.toml"; done
 printf '#[test]\nfn t() {}\n' > "$tmp/tw/crates/a/src/lib.rs"
 printf '#[test]\nfn t() {}\n' > "$tmp/tw/crates/b/src/lib.rs"
+printf '#[test]\nfn t() {}\n' > "$tmp/tw/crates/server/src/lib.rs"
 (cd "$tmp/tw" && cargo generate-lockfile --offline -q) || die "test-gate demo: cannot lock the workspace fixture"
 expect_pass "test-gate: --workspace, every member passes a test" tw
 printf '#[test]\n#[ignore]\nfn t() {}\n' > "$tmp/tw/crates/b/src/lib.rs"
 expect_fail "test-gate: --workspace, a member whose tests are all ignored" "crate b has tests but passed no test" tw
+# the required crate (server) with no tests at all
+rm -rf "${tmp:?}/tw/crates/b"
+printf 'pub fn f() {}\n' > "$tmp/tw/crates/server/src/lib.rs"
+printf '[workspace]\nmembers = ["crates/a", "crates/server"]\nresolver = "2"\n' > "$tmp/tw/Cargo.toml"
+(cd "$tmp/tw" && cargo generate-lockfile --offline -q) || die "test-gate demo: cannot lock the workspace fixture"
+expect_fail "test-gate: --workspace, the server crate with its tests deleted" "crate server has tests but passed no test" tw
+rm -rf "$tmp/tw/crates/server"; printf '[workspace]\nmembers = ["crates/a"]\nresolver = "2"\n' > "$tmp/tw/Cargo.toml"
+(cd "$tmp/tw" && cargo generate-lockfile --offline -q) || die "test-gate demo: cannot lock the workspace fixture"
+expect_fail "test-gate: --workspace, the server crate missing" "required-tests crate server is missing" tw
 
 echo "gate-demos: $n demos, all fail as expected"

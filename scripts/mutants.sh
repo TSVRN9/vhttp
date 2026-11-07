@@ -138,8 +138,8 @@ EOF
 verify() {
     check
     head=$(git -C "$root" rev-parse HEAD) || fail "git rev-parse HEAD failed"
-    # main's tip (checked out as main, or detached as in a CI checkout), merge or not: a fast-forward or a squash is
-    # gated like a merge. No main is a failure, not a skipped gate.
+    # main's tip (checked out as main, or detached as in a CI checkout). Merges to main are --no-ff only; whatever else
+    # lands at main's tip is gated all the same. No main is a failure, not a skipped gate.
     main=$(git -C "$root" rev-parse -q --verify refs/heads/main) || fail "cannot resolve main (refs/heads/main): the gate cannot tell whether HEAD is main's tip"
     if [ "$head" = "$main" ]; then
         mpy gate "$root" || exit 1
