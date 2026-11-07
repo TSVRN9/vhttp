@@ -11,7 +11,9 @@ set -o pipefail
 #           matching <regex> with no rlimit text, and every named test prints `test <name> ... FAILED`. `focus`
 #           verifies only the crate (plain `verify -- ARGS` passes ARGS to the dependencies too). A full run (no ids)
 #           writes tools/mutants-last-run.txt; a run of some ids only prints. Last step on a branch before merging.
-#   verify  what verify.sh runs: `check`, and on main at a merge commit the merge gate (tools/mutants.py gate).
+#   verify  what verify.sh runs: `check`, and at main's tip (every commit there, merge or not) the gate
+#           (tools/mutants.py gate): the committed run file names this commit's crates/ + root Cargo.toml, Cargo.lock,
+#           rust-toolchain.toml with every id passing. check also fails on an allowed_*err predicate with no row.
 root=$(cd "$(dirname "$0")/.." && pwd)
 VERUS_HOME="${VERUS_HOME:-$HOME/.local/opt/verus/0.2026.10.04.426d8b0/verus-x86-linux}"
 PATH="$VERUS_HOME:$PATH"
@@ -24,13 +26,16 @@ check() {
     [ -f "$tsv" ] || fail "no $tsv"
     [ -d "$pdir" ] || fail "no $pdir"
     rows=$(mpy rows "$tsv" "$pdir") || exit 1
+    mpy allowed "$root" "$tsv" > /dev/null || exit 1
     n=0
     for id in $(printf '%s\n' "$rows" | cut -f1); do
-        e=$(git -C "$root" apply --check "$pdir/$id.patch" 2>&1) || fail "$id.patch does not apply to this tree (regenerate it with git diff): $e"
+        e=$(git -C "$root" apply --check -v "$pdir/$id.patch" 2>&1) || fail "$id.patch does not apply to this tree (regenerate it with git diff): $e"
+        # a hunk found at another line may be an identical-looking spot (T6-M2 has three near-identical hunks)
+        if printf '%s\n' "$e" | grep -qiE 'offset|fuzz'; then fail "$id.patch applies only with an offset (regenerate it with git diff): $e"; fi
         n=$((n + 1))
     done
     [ "$n" -gt 0 ] || fail "no rows"
-    echo "mutants: check ok ($n mutants, every patch applies)"
+    echo "mutants: check ok ($n mutants, every patch applies exactly, every allowed_*err predicate has a row)"
 }
 
 # one BASE CRATE MODULE FN: run Verus on FN alone in the worktree; its JSON goes to BASE.json, its stderr to BASE.log.
@@ -78,13 +83,19 @@ run() {
     trap 'git -C "$root" worktree remove --force "$wt" > /dev/null 2>&1 || rmdir "$wt" 2> /dev/null || true; git -C "$root" worktree prune' EXIT
     trap 'exit 1' INT TERM HUP
     git -C "$root" worktree add -q --detach "$wt" HEAD || fail "git worktree add failed"
+    # the worktree's own target dir, not a CARGO_TARGET_DIR shared with other worktrees; MUTANTS_TARGET_DIR (gate-demos
+    # only) keeps vstd built across the demos' throwaway repos
+    unset CARGO_TARGET_DIR
+    [ -z "${MUTANTS_TARGET_DIR:-}" ] || export CARGO_TARGET_DIR="$MUTANTS_TARGET_DIR"
     out=${MUTANTS_OUT:-$root/target/mutants}
     mkdir -p "$out"
     rm -f "$out"/*.log "$out"/*.json
     crates=$(git -C "$wt" rev-parse HEAD:crates)
+    runtree=$(mpy tree "$wt" HEAD) || exit 1
     tsvblob=$(git -C "$wt" rev-parse HEAD:tools/mutants.tsv)
-    res="# tools/mutants-last-run.txt: written by scripts/mutants.sh run on $(date -u +%Y-%m-%dT%H:%MZ); verify.sh's merge gate reads it
+    res="# tools/mutants-last-run.txt: written by scripts/mutants.sh run on $(date -u +%Y-%m-%dT%H:%MZ); verify.sh's main gate reads it
 crates $crates
+tree $runtree
 tsv $tsvblob"
     bad=0
     tab=$(printf '\t')
@@ -126,12 +137,13 @@ EOF
 verify() {
     check
     head=$(git -C "$root" rev-parse HEAD) || fail "git rev-parse HEAD failed"
-    # main's tip, checked out as main or detached (a CI checkout); no main is a failure, not a skipped gate
-    main=$(git -C "$root" rev-parse -q --verify refs/heads/main) || fail "cannot resolve main (refs/heads/main): the merge gate cannot tell whether HEAD is main's merge commit"
-    if [ "$head" = "$main" ] && git -C "$root" rev-parse -q --verify HEAD^2 > /dev/null; then
+    # main's tip (checked out as main, or detached as in a CI checkout), merge or not: a fast-forward or a squash is
+    # gated like a merge. No main is a failure, not a skipped gate.
+    main=$(git -C "$root" rev-parse -q --verify refs/heads/main) || fail "cannot resolve main (refs/heads/main): the gate cannot tell whether HEAD is main's tip"
+    if [ "$head" = "$main" ]; then
         mpy gate "$root" || exit 1
     else
-        echo "mutants: HEAD is not a merge commit at main's tip: merge gate not applicable, check only"
+        echo "mutants: HEAD is not main's tip: main gate not applicable, check only"
     fi
 }
 
