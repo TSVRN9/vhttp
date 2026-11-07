@@ -57,6 +57,15 @@ impl RecvStream {
     pub closed spec fn wf(&self, s: SpecRecv) -> bool {
         self.ins@ == s.ins
     }
+
+    pub closed spec fn rfc(&self) -> SpecRecv;
+
+    pub fn on_data(&mut self, off: u64, data: &[u8], fin: bool, conn_room: u64) -> (r: Result<(), u64>)
+        ensures
+            r matches Err(c) ==> recv_allowed_err(old(self).rfc(), off as nat, data@.len(), fin, conn_room as nat, c),
+    {
+        Ok(())
+    }
 }
 
 #[verifier::opaque]

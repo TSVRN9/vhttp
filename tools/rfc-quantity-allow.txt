@@ -11,7 +11,7 @@
 # Each reason cites `RFC N §x`. A ratchet: ALLOW_DIGEST in tools/rfc_quantity.py pins these lines (--print-digest
 # allowlist), so any change needs that constant changed in the same diff. Stale lines (vouching for nothing) fail.
 root	quic::crypto_stream::crypto_allowed_err	0ec9fd1d1ec4e00ee79221ac01bb410db528b389b4f87090b450209a7b4b7713
-root	quic::recv_stream::recv_allowed_err	06935721bc601fa0f6243468f33f3f005093f25f52cd7856f49ea3b480c6978f
+root	quic::recv_stream::recv_allowed_err	8f652391322528a1b4dcb5f99a1e7935fe6cc0d23893b997231f74af1508273a
 root	quic::tp::allowed_tp_err	ff2d68298278474188253747980796042142f37d33c9bc4cd8e0f9ea327bab04
 root	quic::tp::allowed_tp_err_from	2dd66639cf0582bd3ca2e29eb7faabb6fb96bed2af74a3fbd2d70efad518e299
 pin	quic::crypto_stream::crypto_allowed_err	quic::crypto_stream::CryptoStream::on_crypto
@@ -21,6 +21,8 @@ pin	quic::recv_stream::recv_allowed_err	quic::recv_stream::recv_data
 pin	quic::recv_stream::recv_allowed_err	quic::recv_stream::recv_reset
 pin	quic::recv_stream::recv_allowed_err	quic::recv_stream::recv_inv
 pin	quic::recv_stream::recv_allowed_err	quic::recv_stream::RecvStream::wf
+pin	quic::recv_stream::recv_allowed_err	quic::recv_stream::RecvStream::on_data
+pin	quic::recv_stream::recv_allowed_err	quic::recv_stream::RecvStream::data_gate
 call	quic::crypto_stream::crypto_allowed_err	quic::crypto_stream::crypto_allowed_err	quic::crypto_stream::crypto_contiguous	rfc_contiguous(rfc_received(s.reassembly().inserted())): inserted() holds every non-empty CRYPTO frame on_crypto accepted that reaches past the read offset (frames below it add no bytes), so this is the end of the in-order CRYPTO data received (RFC 9000 §7.5, §19.6)
 name	quic::crypto_stream::crypto_allowed_err	quic::crypto_stream::crypto_allowed_err	c	the error code on_crypto returns, compared with the RFC's CRYPTO_BUFFER_EXCEEDED (RFC 9000 §20.1)
 name	quic::crypto_stream::crypto_allowed_err	quic::crypto_stream::crypto_window_exceeded	contiguous	crypto_contiguous(s), the end of the in-order CRYPTO data received, its one caller's argument (RFC 9000 §7.5)
