@@ -109,6 +109,19 @@ spec fn tp_allowed_err(c: Connection, b: Seq<u8>) -> bool {
     }
 }
 
+/// The end of the Initial data `c` has received (RFC 9001 §4.1.3): every received byte is below
+/// it, and the byte before it was received. `init_end` is set from it when TLS leaves Initial.
+fn initial_end(c: &Connection) -> (r: u64)
+    requires
+        c.wf(),
+    ensures
+        r == c.crypto_end_spec(PacketKind::Initial),
+        forall|p: nat| #[trigger] c.crypto_received(PacketKind::Initial, p) ==> p < r,
+        r > 0 ==> c.crypto_received(PacketKind::Initial, (r - 1) as nat),
+{
+    c.crypto_end(PacketKind::Initial)
+}
+
 /// `tp_allowed_err` is not vacuous: the client's own SCID as its initial_source_connection_id.
 proof fn lemma_tp_allowed_err_rejects(c: Connection)
     requires
@@ -1317,22 +1330,6 @@ impl<'a> QuicServer<'a> {
         self.sync_keys();
     }
 
-    /// `init_end` is the end of the Initial data `init_rx` received: the pins `core_ok` carries.
-    proof fn lemma_init_pins(&self)
-        requires
-            self.init_rx@ == self.h3.conn_spec(),
-            self.init_end == self.h3.conn_spec().crypto_end_spec(PacketKind::Initial),
-            forall|p: nat| #[trigger] self.h3.conn_spec().crypto_received(PacketKind::Initial, p) ==> p < self.h3.conn_spec().crypto_end_spec(PacketKind::Initial),
-            self.h3.conn_spec().crypto_end_spec(PacketKind::Initial) > 0 ==> self.h3.conn_spec().crypto_received(
-                PacketKind::Initial,
-                (self.h3.conn_spec().crypto_end_spec(PacketKind::Initial) - 1) as nat,
-            ),
-        ensures
-            forall|p: nat| #[trigger] self.init_rx@.crypto_received(PacketKind::Initial, p) ==> p < self.init_end,
-            self.init_end > 0 ==> self.init_rx@.crypto_received(PacketKind::Initial, (self.init_end - 1) as nat),
-    {
-    }
-
     /// `Secrets`: the packet keys of level `l`; at Handshake, TLS now receives there.
     #[verifier::spinoff_prover]
     fn on_secrets(&mut self, l: Level, client: &[u8; 32], server: &[u8; 32])
@@ -1354,11 +1351,8 @@ impl<'a> QuicServer<'a> {
             Level::Handshake => {
                 if matches!(self.level, Level::Initial) {
                     // Everything TLS had at Initial (`key_changes` saw nothing unread there).
-                    self.init_end = self.h3.conn().crypto_end(PacketKind::Initial);
+                    self.init_end = initial_end(self.h3.conn());
                     self.init_rx = Ghost(self.h3.conn_spec());
-                    proof {
-                        self.lemma_init_pins();
-                    }
                 }
                 self.keys[1] = Some(kp);
                 self.level = Level::Handshake;
@@ -1402,11 +1396,8 @@ impl<'a> QuicServer<'a> {
         }
         if matches!(self.level, Level::Initial) {
             // TLS leaves Initial here (no `Secrets { Handshake }` before it): as `on_secrets` does.
-            self.init_end = self.h3.conn().crypto_end(PacketKind::Initial);
+            self.init_end = initial_end(self.h3.conn());
             self.init_rx = Ghost(self.h3.conn_spec());
-            proof {
-                self.lemma_init_pins();
-            }
         }
         // Only a completed connection: `core_ok` ties OneRtt to completion.
         self.level = Level::OneRtt;
