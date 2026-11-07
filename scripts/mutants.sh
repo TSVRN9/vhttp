@@ -33,12 +33,13 @@ check() {
     echo "mutants: check ok ($n mutants, every patch applies)"
 }
 
-# one LOGBASE CRATE MODULE FN: run Verus on FN alone in the worktree; the log goes to LOGBASE.log.
+# one BASE CRATE MODULE FN: run Verus on FN alone in the worktree; its JSON goes to BASE.json, its stderr to BASE.log.
 one() {
     # cargo verus decides freshness by content (blake3) and ignores verus args, so an unchanged crate would be a cached
     # no-op that verifies nothing: clean it first (tools/mutants.py also fails a log without a results line).
-    (cd "$wt" && cargo clean -q -p "$2" --target-dir "$wt/target/verus-partial") < /dev/null > "$1.clean-cargo.log" 2>&1 || { echo "cargo clean -p $2 failed" > "$1.log"; return 0; }
-    (cd "$wt/crates/$2" && cargo verus focus -- --verify-only-module "$3" --verify-function "$4") < /dev/null > "$1.log" 2>&1 || true
+    (cd "$wt" && cargo clean -q -p "$2" --target-dir "$wt/target/verus-partial") < /dev/null > "$1.clean-cargo.log" 2>&1 || { : > "$1.json"; echo "cargo clean -p $2 failed" > "$1.log"; return 0; }
+    (cd "$wt/crates/$2" && cargo verus focus -- --verify-only-module "$3" --verify-function "$4" --output-json --time-expanded) \
+        < /dev/null > "$1.json" 2> "$1.log" || true
 }
 
 # tests LOGBASE CRATE TESTS WANT: each target:name of TESTS must print `test name ... WANT` (ok or FAILED).
@@ -76,7 +77,7 @@ run() {
     git -C "$root" worktree add -q --detach "$wt" HEAD || fail "git worktree add failed"
     out=${MUTANTS_OUT:-$root/target/mutants}
     mkdir -p "$out"
-    rm -f "$out"/*.log
+    rm -f "$out"/*.log "$out"/*.json
     crates=$(git -C "$wt" rev-parse HEAD:crates)
     tsvblob=$(git -C "$wt" rev-parse HEAD:tools/mutants.tsv)
     res="# tools/mutants-last-run.txt: written by scripts/mutants.sh run on $(date -u +%Y-%m-%dT%H:%MZ); verify.sh's merge gate reads it
@@ -89,12 +90,12 @@ tsv $tsvblob"
         git -C "$wt" reset -q --hard HEAD && git -C "$wt" clean -fdq -- crates || fail "cannot reset the worktree"
         why=
         one "$out/$id.clean" "$crate" "$mod" "$fn"
-        if ! why=$(mpy clean "$out/$id.clean.log" "$crate" "$mod" "$fn" 2>&1); then :
+        if ! why=$(mpy clean "$out/$id.clean" "$crate" "$mod" "$fn" 2>&1); then :
         elif ! why=$(tests "$out/$id.clean" "$crate" "$tst" ok); then why="unmutated: $why"
         elif ! why=$(git -C "$wt" apply "$wt/tools/mutants/$id.patch" 2>&1); then why="patch does not apply: $why"
         else
             one "$out/$id" "$crate" "$mod" "$fn"
-            if ! why=$(mpy killed "$out/$id.log" "$crate" "$mod" "$fn" "$rx" 2>&1); then :
+            if ! why=$(mpy killed "$out/$id" "$crate" "$mod" "$fn" "$rx" 2>&1); then :
             elif ! why=$(tests "$out/$id" "$crate" "$tst" FAILED); then why="mutant: $why"
             else why=; fi
         fi
