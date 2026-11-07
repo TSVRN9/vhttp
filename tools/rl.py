@@ -2,7 +2,66 @@
 # then the rlimit of each named FN. Run as: python3 -I tools/rl.py LOG [FN...]
 # Gate mode: python3 -I tools/rl.py --gate NAME [--max N] LOG  prints `rlimit-gate: NAME max <fn> <n>` and exits 0, or
 # exits 1 with the reason when LOG is unreadable, has no verification-results object, no rows, a failed run, a FAIL row, or a fn of NAME above N.
+# Ceilings mode: python3 -I tools/rl.py --ceilings FILE [--old FILE] LOG...  checks every fn of every LOG against the ceilings ratchet FILE
+# (`<crate> <fn> <rlimit>` per fn above 8,000,000 in any crate; quic/quictls may not have lines; see rlimit-ceilings.sh for --old).
 import json,sys
+if len(sys.argv)>2 and sys.argv[1]=='--ceilings':
+    CAP=8000000
+    a=sys.argv[2:]; ceil=a[0]; a=a[1:]; old=None
+    if a and a[0]=='--old': old=a[1]; a=a[2:]
+    errs=[]
+    def cfail(m): errs.append(m)
+    def load(fn):
+        d={}
+        try: ls=open(fn).read().splitlines()
+        except OSError: return None
+        for l in ls:
+            w=l.split()
+            if len(w)!=3 or not w[2].isdigit() or not w[1].startswith(w[0]+'::'): cfail('%s: malformed line %r'%(fn,l)); continue
+            if w[1] in d: cfail('%s: duplicate line for %s'%(fn,w[1]))
+            d[w[1]]=(w[0],int(w[2]))
+        return d
+    cl=load(ceil)
+    if not a: cfail('no logs given')
+    rows={}
+    for lg in a:
+        try: t=open(lg).read()
+        except OSError as e: cfail('cannot read %s: %s'%(lg,e)); continue
+        dec=json.JSONDecoder(); i=0; seen=0
+        while True:
+            j=t.find('{',i)
+            if j<0: break
+            try: o,e=dec.raw_decode(t[j:])
+            except ValueError: i=j+1; continue
+            i=j+e
+            if 'verification-results' not in o: continue
+            seen+=1
+            try:
+                for m in o['times-ms']['smt']['smt-run-module-times']:
+                    for f in m['function-breakdown']: rows[f['function']]=max(rows.get(f['function'],0),f['rlimit'])
+            except (KeyError,TypeError): cfail('%s: unreadable results object'%lg)
+        if not seen: cfail('%s: no verification-results object'%lg)
+    if not rows: cfail('no per-fn rows in any log')
+    over={f:r for f,r in rows.items() if r>CAP}
+    if cl is None:
+        if over: cfail('%s is missing but %d fns are above %d'%(ceil,len(over),CAP))
+        cl={}
+    elif not cl and over: cfail('%s is empty but %d fns are above %d'%(ceil,len(over),CAP))
+    for f,(c,n) in sorted(cl.items()):
+        if c in ('quic','quictls'): cfail('%s may not be listed: quic/quictls have a hard %d cap'%(f,CAP))
+        if f not in rows or rows[f]<=CAP: cfail('stale ceiling line, the fn is gone or at or below %d (delete the line): %s %s %d'%(CAP,c,f,n))
+    for f,r in sorted(over.items()):
+        if f not in cl: cfail('unlisted fn above %d: %s at %d (restructure it; the ceilings file only shrinks)'%(CAP,f,r))
+        elif r>cl[f][1]: cfail('%s at %d exceeds its ceiling %d'%(f,r,cl[f][1]))
+    if old is not None:
+        ol=load(old)
+        if ol is None: cfail('cannot read the merge-base ceilings %s'%old); ol={}
+        for f,(c,n) in sorted(cl.items()):
+            if f not in ol: cfail('ceiling line not in the merge-base file (the file only shrinks): %s %s %d'%(c,f,n))
+            elif n>ol[f][1]: cfail('ceiling for %s raised from %d to %d (the file only shrinks)'%(f,ol[f][1],n))
+    for e in errs: print('rlimit-gate: ceilings: '+e,file=sys.stderr)
+    if errs: sys.exit(1)
+    print('rlimit-gate: ceilings ok (%d fns above %d, all listed)'%(len(over),CAP)); sys.exit(0)
 gate=None; mx=None; a=sys.argv[1:]
 if a and a[0]=='--gate':
     gate=a[1]; a=a[2:]
