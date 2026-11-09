@@ -333,6 +333,34 @@ expect_fail "clean-tree: modified tracked file" "clean-tree: tree dirty (1 paths
 rm -rf "${tmp:?}/ctree"; mkdir "$tmp/ctree"
 expect_fail "clean-tree: not a repo" "clean-tree: git status failed" ct
 
+# clean-tree.sh with a recorded HEAD (verify.sh's end-of-run check): a commit mid-run and an edit mid-run fail.
+rm -rf "${tmp:?}/ctree"; mkdir "$tmp/ctree"; git -C "$tmp/ctree" init -q -b main; echo a > "$tmp/ctree/f"
+git -C "$tmp/ctree" add f; gitc ctree commit -qm base
+h0=$(git -C "$tmp/ctree" rev-parse HEAD)
+cth() { "$root/scripts/clean-tree.sh" "$tmp/ctree" "$h0"; }
+expect_pass "clean-tree: HEAD unchanged" cth
+gitc ctree commit -q --allow-empty -m moved
+expect_fail "clean-tree: HEAD moved during the run" "clean-tree: HEAD moved during the run" cth
+h0=$(git -C "$tmp/ctree" rev-parse HEAD); echo c >> "$tmp/ctree/f"
+expect_fail "clean-tree: tree dirtied during the run" "clean-tree: tree dirty (1 paths)" cth
+
+# verify.sh's first steps (before any Verus step): a dirty tree, a Cargo.lock cargo would rewrite, cargo not on PATH.
+vrepo() {  # vrepo <dir>: scripts, the pin and a one-crate workspace with its lock, committed
+    rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/tools" "$tmp/$1/src"
+    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/verus-pin.txt" "$tmp/$1/tools/"
+    printf '[package]\nname = "d"\nversion = "0.1.0"\nedition = "2021"\n' > "$tmp/$1/Cargo.toml"; : > "$tmp/$1/src/lib.rs"
+    (cd "$tmp/$1" && cargo metadata --format-version 1 > /dev/null 2>&1) || die "vrepo: cargo metadata failed on the fixture"
+    git -C "$tmp/$1" init -q -b main; git -C "$tmp/$1" add -A; gitc "$1" commit -qm base
+}
+vfy() { "$tmp/$1/scripts/verify.sh"; }
+vrepo v1; echo x > "$tmp/v1/untracked"
+expect_fail "verify.sh: dirty tree stops the run" "clean-tree: tree dirty (1 paths)" vfy v1
+vrepo v2; sed -i 's/version = "0.1.0"/version = "0.2.0"/' "$tmp/v2/Cargo.lock"; gitc v2 commit -qam stale
+expect_fail "verify.sh: a Cargo.lock cargo would rewrite" "verify.sh: cargo metadata --locked failed" vfy v2
+nocargo=$tmp/nocargo; mkdir -p "$nocargo"; for c in git sh sed dirname wc printf; do ln -sf "$(command -v $c)" "$nocargo/$c"; done
+vnc() { env PATH="$nocargo" "$tmp/v2/scripts/verify.sh"; }
+expect_fail "verify.sh: cargo not on PATH" "verify.sh: cargo metadata --locked failed" vnc
+
 # rlimit ceilings ratchet (scripts/rlimit-ceilings.sh, in throwaway git repos like the acceptance.sh ones): an unlisted fn above 8M;
 # a listed fn above its value; a raised value and a new line against history; a quic line; a stale line; a missing file; server with verus!.
 rcrepo() {  # rcrepo <dir>: scripts, rl.py, the ceilings fixture and server src, one commit on main, then branch feat
