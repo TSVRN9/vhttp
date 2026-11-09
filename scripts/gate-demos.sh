@@ -988,17 +988,82 @@ printf '#[test]\nfn t() {}\n' > "$tmp/tw/crates/a/src/lib.rs"
 printf '#[test]\nfn t() {}\n' > "$tmp/tw/crates/b/src/lib.rs"
 printf '#[test]\nfn t() {}\n' > "$tmp/tw/crates/server/src/lib.rs"
 (cd "$tmp/tw" && cargo generate-lockfile --offline -q) || die "test-gate demo: cannot lock the workspace fixture"
+mkdir -p "$tmp/tw/tools"; printf 'a 1\nb 1\nserver 1\n' > "$tmp/tw/tools/test-floor.txt"
 expect_pass "test-gate: --workspace, every member passes a test" tw
+printf 'a 2\nb 1\nserver 1\n' > "$tmp/tw/tools/test-floor.txt"
+expect_fail "test-gate: --workspace, a crate below its floor" "crate a passed 1 tests, below its floor 2" tw
+printf 'a 1\nserver 1\n' > "$tmp/tw/tools/test-floor.txt"
+expect_fail "test-gate: --workspace, a crate with tests and no floor line" "crate b has tests but no line in tools/test-floor.txt" tw
+printf 'a 1\nb 1\nserver 1\nz 1\n' > "$tmp/tw/tools/test-floor.txt"
+expect_fail "test-gate: --workspace, a floor line naming no crate" "names z, which is not a crate" tw
+: > "$tmp/tw/tools/test-floor.txt"
+expect_fail "test-gate: --workspace, an empty floor file" "is missing or empty" tw
+rm "$tmp/tw/tools/test-floor.txt"
+expect_fail "test-gate: --workspace, no floor file" "is missing or empty" tw
+printf 'a 1\nb 1\nserver 1\n' > "$tmp/tw/tools/test-floor.txt"
 printf '#[test]\n#[ignore]\nfn t() {}\n' > "$tmp/tw/crates/b/src/lib.rs"
 expect_fail "test-gate: --workspace, a member whose tests are all ignored" "crate b has tests but passed no test" tw
 # the required crate (server) with no tests at all
 rm -rf "${tmp:?}/tw/crates/b"
 printf 'pub fn f() {}\n' > "$tmp/tw/crates/server/src/lib.rs"
+printf 'a 1\nserver 1\n' > "$tmp/tw/tools/test-floor.txt"
 printf '[workspace]\nmembers = ["crates/a", "crates/server"]\nresolver = "2"\n' > "$tmp/tw/Cargo.toml"
 (cd "$tmp/tw" && cargo generate-lockfile --offline -q) || die "test-gate demo: cannot lock the workspace fixture"
 expect_fail "test-gate: --workspace, the server crate with its tests deleted" "crate server has tests but passed no test" tw
 rm -rf "$tmp/tw/crates/server"; printf '[workspace]\nmembers = ["crates/a"]\nresolver = "2"\n' > "$tmp/tw/Cargo.toml"
 (cd "$tmp/tw" && cargo generate-lockfile --offline -q) || die "test-gate demo: cannot lock the workspace fixture"
 expect_fail "test-gate: --workspace, the server crate missing" "required-tests crate server is missing" tw
+
+# test floor ratchet (scripts/test-floor.sh, throwaway git repos): lowered or removed against the merge-base; growth then a drop on main.
+tfrepo() {  # tfrepo <dir> <floor text>: one commit on main with the floor file, then branch feat
+    rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/tools"
+    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/ratchet_walk.py" "$tmp/$1/tools/"
+    printf '%s\n' "$2" > "$tmp/$1/tools/test-floor.txt"
+    git -C "$tmp/$1" init -q -b main
+    git -C "$tmp/$1" add -A
+    gitc "$1" commit -qm base
+}
+tfloor() { "$tmp/$1/scripts/test-floor.sh" "$tmp/$1"; }
+tfrepo tf1 "a 5
+b 3"
+gitc tf1 checkout -qb feat
+gitc tf1 commit -q --allow-empty -m feat
+expect_pass "test-floor: unchanged on a branch" tfloor tf1
+printf 'a 6\nb 3\n' > "$tmp/tf1/tools/test-floor.txt"
+expect_pass "test-floor: a raised value on a branch" tfloor tf1
+printf 'a 4\nb 3\n' > "$tmp/tf1/tools/test-floor.txt"
+expect_fail "test-floor: a lowered value against the merge-base" "a at 4, below its highest earlier value 5" tfloor tf1
+printf 'a 5\n' > "$tmp/tf1/tools/test-floor.txt"
+expect_fail "test-floor: a removed line against the merge-base" "b was removed" tfloor tf1
+rm "$tmp/tf1/tools/test-floor.txt"
+expect_fail "test-floor: a missing file against the merge-base" "cannot read tools/test-floor.txt" tfloor tf1
+tfrepo tf2 "a 5"
+expect_pass "test-floor: main, one commit" tfloor tf2
+printf 'a 6\n' > "$tmp/tf2/tools/test-floor.txt"; gitc tf2 commit -qam grow
+expect_pass "test-floor: main, growth" tfloor tf2
+printf 'a 4\n' > "$tmp/tf2/tools/test-floor.txt"; gitc tf2 commit -qam drop
+expect_fail "test-floor: main, growth then a drop" "a at 4, below its highest earlier value 6" tfloor tf2
+tfrepo tf3 "a 5"
+rm -rf "$tmp/tf3/.git"
+expect_fail "test-floor: not a git checkout" "not a git checkout" tfloor tf3
+
+# interop.sh with a fake curl and a fake cargo on PATH (no network, no client): a present client whose test fails; a cargo that
+# ran no test; curl without HTTP3 and no quiche; a present curl that passes; a root with no interop.rs.
+ifake=$tmp/ifake; mkdir -p "$ifake/bin" "$ifake/repo/crates/server/tests"
+git -C "$ifake/repo" init -q -b main; : > "$ifake/repo/crates/server/tests/interop.rs"
+printf '#!/bin/sh\necho "curl 9 HTTP3"\n' > "$ifake/bin/curl"
+printf '#!/bin/sh\nfor a; do last=$a; done\ncase $FAKE in ok) echo "test $last ... ok";; fail) echo "test $last ... FAILED"; exit 101;; none) echo "running 0 tests";; esac\n' > "$ifake/bin/cargo"
+chmod +x "$ifake/bin/curl" "$ifake/bin/cargo"
+iop() { env -u QUICHE_CLIENT PATH="$ifake/bin:$PATH" FAKE=$1 "$root/scripts/interop.sh" "$ifake/repo"; }
+expect_pass "interop: a present curl whose tests pass" iop ok
+expect_fail "interop: a present curl whose test fails" "curl_fetches failed" iop fail
+expect_fail "interop: a present curl whose test printed neither ok nor FAILED" "curl_fetches did not print ok" iop none
+printf '#!/bin/sh\necho "curl 9"\n' > "$ifake/bin/curl"
+out=$(iop fail 2>&1) || die "interop: curl without HTTP3 failed:
+$out"
+[ "$out" = "interop: curl skipped (no HTTP3), quiche skipped (no client)" ] || die "interop: unexpected skip line: $out"
+echo "gate-demos: interop: no HTTP3 and no quiche passes and says skipped"
+rm "$ifake/repo/crates/server/tests/interop.rs"
+expect_fail "interop: no interop.rs" "no crates/server/tests/interop.rs" iop ok
 
 echo "gate-demos: $n demos, all fail as expected"
