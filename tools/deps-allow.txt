@@ -1,0 +1,9 @@
+crypto: vstd
+ctcore: vstd
+ctmir: ctcore vstd
+h3: vest_lib vstd wire
+quic: crypto h3 vest_lib vstd wire
+quictls: crypto h3 quic tls vstd
+server: h3 libc quic quictls tls
+tls: crypto vstd
+wire: vest_lib vstd
