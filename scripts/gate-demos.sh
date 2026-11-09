@@ -274,7 +274,8 @@ printf 'assume_specification[ f ](x: u8);\n' >> "$tmp/escape/crates/demo/src/lib
 expect_fail "escape-gate: assume_specification" "unaccounted escape" esc
 
 # rlimit gate (tools/rl.py --gate): a quic fn at 8,000,001; a FAIL row; empty and rowless logs; a missing log; two JSON objects.
-rl() { python3 -I "$root/tools/rl.py" --gate quic --max 8000000 "$tmp/rl.json"; }
+pin=$root/tools/verus-pin.txt
+rl() { python3 -I "$root/tools/rl.py" --gate quic --pin "$pin" --max 8000000 "$tmp/rl.json"; }
 fresh rlimit; cp "$tmp/rlimit/quic.json" "$tmp/rl.json"
 expect_pass "rlimit-gate" rl
 sed -i 's/"rlimit": 8000000/"rlimit": 8000001/' "$tmp/rl.json"
@@ -299,6 +300,38 @@ cat "$tmp/rlimit/quic.json" "$tmp/rlimit/quic.json" > "$tmp/rl.json"
 expect_pass "rlimit-gate: two clean result objects (a dependency built in the run)" rl
 { cat "$tmp/rlimit/quic.json"; sed 's/"rlimit": 120000, "success": true/"rlimit": 120000, "success": false/' "$tmp/rlimit/quic.json"; } > "$tmp/rl.json"
 expect_fail "rlimit-gate: FAIL row in the second object" "FAIL row" rl
+
+# F5: the log must come from the pinned Verus and a whole-crate run; the pin file must exist and parse.
+cp "$tmp/rlimit/quic.json" "$tmp/rl.json"; sed -i 's/"version": "0.2026.10.04.426d8b0"/"version": "0.2026.10.05.0000000"/' "$tmp/rl.json"
+expect_fail "rlimit-gate: wrong Verus version" "verus.version is '0.2026.10.05.0000000'" rl
+cp "$tmp/rlimit/quic.json" "$tmp/rl.json"; sed -i 's/"commit": "426d8b01/"commit": "000000001/' "$tmp/rl.json"
+expect_fail "rlimit-gate: wrong Verus commit" "verus.commit is" rl
+cp "$tmp/rlimit/quic.json" "$tmp/rl.json"; sed -i 's/"toolchain": "1.98.1-/"toolchain": "1.98.0-/' "$tmp/rl.json"
+expect_fail "rlimit-gate: wrong toolchain" "verus.toolchain is" rl
+cp "$tmp/rlimit/quic.json" "$tmp/rl.json"; sed -i 's/"is-verifying-entire-crate": true/"is-verifying-entire-crate": false/' "$tmp/rl.json"
+expect_fail "rlimit-gate: partial run" "is-verifying-entire-crate is not true" rl
+cp "$tmp/rlimit/quic.json" "$tmp/rl.json"; sed -i 's/"toolchain": "1.98.1-/"toolchain": "1.98.10-/' "$tmp/rl.json"
+expect_fail "rlimit-gate: toolchain prefix without the dash" "verus.toolchain is" rl
+sed 's/^{"verus": {[^}]*}, /{/' "$tmp/rlimit/quic.json" > "$tmp/rl.json"
+expect_fail "rlimit-gate: no verus object" "no verus object" rl
+cp "$tmp/rlimit/quic.json" "$tmp/rl.json"; pin=$tmp/no-such-pin
+expect_fail "rlimit-gate: missing pin file" "cannot read the pin file" rl
+printf 'version 0.2026.10.04.426d8b0\n' > "$tmp/short-pin"; pin=$tmp/short-pin
+expect_fail "rlimit-gate: pin file without commit and toolchain" "lacks a version, commit or toolchain" rl
+pin=$root/tools/verus-pin.txt
+expect_fail "rlimit-gate: no --pin" "no --pin FILE given" python3 -I "$root/tools/rl.py" --gate quic "$tmp/rl.json"
+
+# clean-tree.sh (F5): an untracked file, a modified tracked file and a non-repo dir fail; a clean repo passes.
+ct() { "$root/scripts/clean-tree.sh" "$tmp/ctree"; }
+rm -rf "${tmp:?}/ctree"; mkdir "$tmp/ctree"; git -C "$tmp/ctree" init -q -b main; echo a > "$tmp/ctree/f"
+git -C "$tmp/ctree" add f; gitc ctree commit -qm base
+expect_pass "clean-tree" ct
+echo b > "$tmp/ctree/new"
+expect_fail "clean-tree: untracked file" "clean-tree: tree dirty (1 paths)" ct
+rm "$tmp/ctree/new"; echo c >> "$tmp/ctree/f"
+expect_fail "clean-tree: modified tracked file" "clean-tree: tree dirty (1 paths)" ct
+rm -rf "${tmp:?}/ctree"; mkdir "$tmp/ctree"
+expect_fail "clean-tree: not a repo" "clean-tree: git status failed" ct
 
 # rlimit ceilings ratchet (scripts/rlimit-ceilings.sh, in throwaway git repos like the acceptance.sh ones): an unlisted fn above 8M;
 # a listed fn above its value; a raised value and a new line against history; a quic line; a stale line; a missing file; server with verus!.
@@ -655,7 +688,7 @@ expect_fail "ratchet-walk: a git error (path outside any repo)" "failed" walk w5
 export MUTANTS_TARGET_DIR="${MUTANTS_DEMO_TARGET:-$root/target/mutants-demo}"
 mrepo() {  # mrepo <dir>: scripts, tools/mutants.py and the fixture, one commit on main, then branch feat
     rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/tools"
-    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/mutants.py" "$root/tools/acceptance.py" "$tmp/$1/tools/"
+    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/mutants.py" "$root/tools/acceptance.py" "$root/tools/verus-pin.txt" "$tmp/$1/tools/"
     cp -r "$fx/mutants/Cargo.toml" "$fx/mutants/Cargo.lock" "$fx/mutants/crates" "$root/rust-toolchain.toml" "$tmp/$1/"
     cp -r "$fx/mutants/tools/mutants.tsv" "$fx/mutants/tools/mutants" "$tmp/$1/tools/"
     cp "$fx/acceptance/crates/demo/src/lib.rs" "$tmp/$1/crates/demo/src/acc.rs"

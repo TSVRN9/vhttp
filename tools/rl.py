@@ -1,7 +1,9 @@
 # rl.py LOG [FN...]: print per-module verification results and the six highest-rlimit fns from cargo-verus --time-expanded JSON output,
 # then the rlimit of each named FN. Run as: python3 -I tools/rl.py LOG [FN...]
-# Gate mode: python3 -I tools/rl.py --gate NAME [--max N] LOG  prints `rlimit-gate: NAME max <fn> <n>` and exits 0, or
-# exits 1 with the reason when LOG is unreadable, has no verification-results object, no rows, a failed run, a FAIL row, or a fn of NAME above N.
+# Gate mode: python3 -I tools/rl.py --gate NAME --pin FILE [--max N] LOG  prints `rlimit-gate: NAME max <fn> <n>` and exits 0, or
+# exits 1 with the reason when LOG is unreadable, has no verification-results object, no rows, a failed run, a FAIL row, or a fn of NAME above N, or
+# (per results object) a verus.version/commit/toolchain that differs from the pin FILE (tools/verus-pin.txt: version, commit, toolchain lines)
+# or is-verifying-entire-crate not true; a missing or malformed pin fails.
 # Ceilings mode: python3 -I tools/rl.py --ceilings FILE [--old FILE] LOG...  checks every fn of every LOG against the ceilings ratchet FILE
 # (`<crate> <fn> <rlimit>` per fn above 8,000,000 in any crate; quic/quictls may not have lines; see rlimit-ceilings.sh for --old).
 import json,sys
@@ -62,9 +64,10 @@ if len(sys.argv)>2 and sys.argv[1]=='--ceilings':
     for e in errs: print('rlimit-gate: ceilings: '+e,file=sys.stderr)
     if errs: sys.exit(1)
     print('rlimit-gate: ceilings ok (%d fns above %d, all listed)'%(len(over),CAP)); sys.exit(0)
-gate=None; mx=None; a=sys.argv[1:]
+gate=None; mx=None; pin=None; a=sys.argv[1:]
 if a and a[0]=='--gate':
     gate=a[1]; a=a[2:]
+    if a and a[0]=='--pin': pin=a[1]; a=a[2:]
     if a and a[0]=='--max': mx=int(a[1]); a=a[2:]
     sys.argv=[sys.argv[0]]+a
 try: t=open(sys.argv[1]).read()
@@ -81,6 +84,10 @@ while True:
 want=sys.argv[2:]
 def gfail(m): print('rlimit-gate: %s: %s'%(gate,m),file=sys.stderr); sys.exit(1)
 if gate is not None:
+    if pin is None: gfail('no --pin FILE given')
+    try: pn=dict(l.split(' ',1) for l in open(pin).read().splitlines())
+    except (OSError,ValueError) as e: gfail('cannot read the pin file %s: %s'%(pin,e))
+    if not all(pn.get(k) for k in ('version','commit','toolchain')): gfail('pin file %s lacks a version, commit or toolchain line'%pin)
     # a dependency not yet built is verified inside this crate's run and prints its own object: gate every object
     try: rs=[d for d in objs if 'verification-results' in d]; assert rs
     except AssertionError: gfail('0 verification-results objects in the log')
@@ -91,6 +98,13 @@ if gate is not None:
             ok=v['success'] and not v['errors'] and not v['encountered-error'] and not v['encountered-vir-error'] and v['verified']
             rows=[(f['rlimit'],f['function'],f['success']) for m in d['times-ms']['smt']['smt-run-module-times'] for f in m['function-breakdown']]
         except (KeyError,TypeError): gfail('unreadable results object')
+        try:
+            vz=d['verus']
+            for k in ('version','commit'):
+                if vz[k]!=pn[k]: gfail('verus.%s is %r, the pin says %r'%(k,vz[k],pn[k]))
+            if not vz['toolchain'].startswith(pn['toolchain']+'-'): gfail('verus.toolchain is %r, the pin says %s-*'%(vz['toolchain'],pn['toolchain']))
+            if d['verification-results']['is-verifying-entire-crate'] is not True: gfail('is-verifying-entire-crate is not true (a partial run)')
+        except (KeyError,TypeError): gfail('no verus object or is-verifying-entire-crate in the results object')
         if not ok: gfail('run not clean: %s'%v)
         if not rows: gfail('no per-fn rows')
         for r in rows:

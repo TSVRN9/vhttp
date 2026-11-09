@@ -1,9 +1,19 @@
 #!/bin/sh
 set -eu
 set -o pipefail
-VERUS_HOME="${VERUS_HOME:-$HOME/.local/opt/verus/0.2026.10.04.426d8b0/verus-x86-linux}"
-PATH="$VERUS_HOME:$PATH"
 root=$(cd "$(dirname "$0")/.." && pwd)
+# A green run must describe a commit: a dirty tree stops here unless VERIFY_DIRTY=1 (then the final line says it vouches for no commit).
+pfx="verify.sh:"
+"$root/scripts/clean-tree.sh" "$root" || {
+    [ "${VERIFY_DIRTY:-}" = 1 ] || exit 1
+    echo "verify.sh: tree dirty, not a main-tip run"; pfx="verify.sh (DIRTY TREE, vouches for no commit):"
+}
+# A Cargo.lock that cargo would rewrite fails here, so every later cargo call can rely on it.
+(cd "$root" && cargo metadata --locked --format-version 1 > /dev/null) || { echo "verify.sh: cargo metadata --locked failed" >&2; exit 1; }
+verus_ver=$(sed -n 's/^version //p' "$root/tools/verus-pin.txt")
+[ -n "$verus_ver" ] || { echo "verify.sh: no version line in tools/verus-pin.txt" >&2; exit 1; }
+VERUS_HOME="${VERUS_HOME:-$HOME/.local/opt/verus/$verus_ver/verus-x86-linux}"
+PATH="$VERUS_HOME:$PATH"
 # Every crate verified at --rlimit 4 (replaces the default per-crate run); quic/quictls fns must stay under 8,000,000.
 "$root/scripts/rlimit-gate.sh" "$root" || exit 1
 (cd "$root" && duvet report)
@@ -53,4 +63,4 @@ python3 -I "$root/tools/citations.py" closes "$root" "$root/tools/mutants.tsv" |
 "$root/scripts/gate-demos.sh" || exit 1
 # Tests: the unverified shell (crates/server) has no proofs, so its tests are its only guard.
 "$root/scripts/test-gate.sh" "$root" "$CT_OUT/cargo-test.log" --workspace || exit 1
-echo "verify.sh: all crates verified, duvet ok, ct ok ($d declassify), cost $cost, escapes accounted ($attrs), binary ok ($bin fns)"
+echo "$pfx all crates verified, duvet ok, ct ok ($d declassify), cost $cost, escapes accounted ($attrs), binary ok ($bin fns)"
