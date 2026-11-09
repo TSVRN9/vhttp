@@ -64,6 +64,9 @@ python3 -I "$root/tools/citations.py" closes "$root" "$root/tools/mutants.tsv" |
 "$root/scripts/gate-demos.sh" || exit 1
 # Tests: the unverified shell (crates/server) has no proofs, so its tests are its only guard.
 "$root/scripts/test-gate.sh" "$root" "$CT_OUT/cargo-test.log" --workspace || exit 1
+# The test floor only grows (a deleted test cannot hide behind the others), and every present external client fetches (F13).
+"$root/scripts/test-floor.sh" "$root" || exit 1
+"$root/scripts/interop.sh" "$root" || exit 1
 # The tree must still be the one the run started on: an edit or a commit made mid-run leaves the clean line unearned.
 "$root/scripts/clean-tree.sh" "$root" "$head" || {
     [ "${VERIFY_DIRTY:-}" = 1 ] || exit 1

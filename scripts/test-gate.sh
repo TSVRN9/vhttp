@@ -3,7 +3,9 @@ set -eu
 set -o pipefail
 # test-gate.sh DIR LOG [CARGO TEST ARGS..]: `cargo test --locked -q` in DIR (verify.sh passes
 # --workspace for the repo root), output in LOG, shown on failure. A build failure, a failing test
-# or a run that passed no test at all is a failure.
+# or a run that passed no test at all is a failure. --workspace also holds each crate to DIR/tools/test-floor.txt (CRATE COUNT):
+# fewer passed tests than the floor, a crate with tests and no floor line, or a line naming no crate fails (the file itself only
+# grows: scripts/test-floor.sh).
 [ $# -ge 2 ] || { echo "usage: test-gate.sh DIR LOG [cargo test args..]" >&2; exit 1; }
 dir=$1 log=$2
 shift 2
@@ -16,6 +18,9 @@ is_required() { for r in $required; do [ "$r" != "$1" ] || return 0; done; retur
 if [ "${1-}" = --workspace ] && [ $# -eq 1 ] && [ -d "$dir/crates" ]; then
     : > "$log"
     total=0
+    floor=$dir/tools/test-floor.txt
+    [ -s "$floor" ] || fail "$floor is missing or empty"
+    seen=
     for r in $required; do [ -f "$dir/crates/$r/Cargo.toml" ] || fail "required-tests crate $r is missing"; done
     for m in "$dir"/crates/*/; do
         [ -f "$m/Cargo.toml" ] || continue
@@ -27,7 +32,19 @@ if [ "${1-}" = --workspace ] && [ $# -eq 1 ] && [ -d "$dir/crates" ]; then
         if [ -d "$m/tests" ] || [ -n "$has" ] || is_required "$name"; then
             [ "$n" -gt 0 ] || { cat "$log.m"; fail "crate $name has tests but passed no test"; }
         fi
+        f=$(awk -v c="$name" '$1 == c { print $2 }' "$floor")
+        case $f in *[!0-9]*) fail "$floor has a bad or duplicate line for $name" ;; esac
+        if [ -n "$f" ]; then
+            [ "$n" -ge "$f" ] || { cat "$log.m"; fail "crate $name passed $n tests, below its floor $f in tools/test-floor.txt"; }
+        elif [ "$n" -gt 0 ] || [ -d "$m/tests" ] || [ -n "$has" ]; then
+            fail "crate $name has tests but no line in tools/test-floor.txt"
+        fi
+        echo "test-gate: $name $n"
+        seen="$seen $name"
         total=$((total + n))
+    done
+    for c in $(awk '!/^#/ && NF { print $1 }' "$floor"); do
+        case " $seen " in *" $c "*) ;; *) fail "tools/test-floor.txt names $c, which is not a crate under crates/" ;; esac
     done
     rm -f "$log.m"
     [ "$total" -gt 0 ] || fail "cargo test passed no test"
