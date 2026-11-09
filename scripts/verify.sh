@@ -32,7 +32,7 @@ decl=$("$root/scripts/declassify-gate.sh" "$root" "$CT_OUT/crypto/report-crypto.
 echo "$decl"
 d=$(printf '%s\n' "$decl" | sed -n 's/^declassify-gate: \([0-9]*\) declassify sites accounted$/\1/p')
 [ -n "$d" ] || { echo "verify.sh: no count in declassify-gate's output" >&2; exit 1; }
-# Deps gate (scripts/deps-gate.sh): crypto's normal dependencies are exactly vstd.
+# Deps gate (scripts/deps-gate.sh): every crate's normal depth-1 dependencies equal its line in tools/deps-allow.txt.
 "$root/scripts/deps-gate.sh" "$root" || exit 1
 cd "$root"
 # Escape gate (scripts/escape-gate.sh): every escape hatch in crates/ is an accounted external_body.

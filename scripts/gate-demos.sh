@@ -891,24 +891,41 @@ grep -v '^declassify ' "$fx/declassify/report.txt" > "$tmp/dg/report.txt"
 expect_fail "declassify-gate: report without sites" "no declassify site in" dg
 expect_fail "declassify-gate: no arguments" "usage: declassify-gate.sh" "$root/scripts/declassify-gate.sh"
 
-# deps gate (scripts/deps-gate.sh ROOT TREEFILE): a canned `cargo tree` with a second dep; no dep; a missing and an empty tree.
-mkdir -p "$tmp/dp"
-dpg() { "$root/scripts/deps-gate.sh" "$root" "$tmp/dp/tree.txt"; }
-cp "$fx/deps/tree.txt" "$tmp/dp/tree.txt"
+# deps gate (scripts/deps-gate.sh ROOT TREEDIR): a fake root with crates crypto and wire and one canned `cargo tree` per crate; an extra
+# dep in one crate, crypto with a second dep, a crate without a line, a line without a crate, empty and missing trees, a failing cargo.
+dpr=$tmp/dp/root; dpt=$tmp/dp/trees
+dpg() { "$root/scripts/deps-gate.sh" "$dpr" "$dpt"; }
+mkdir -p "$dpr/crates/crypto" "$dpr/crates/wire" "$dpr/tools" "$dpt"
+: > "$dpr/crates/crypto/Cargo.toml"; : > "$dpr/crates/wire/Cargo.toml"
+printf 'crypto: vstd\nwire: vest_lib vstd\n' > "$dpr/tools/deps-allow.txt"
+printf 'crypto v0.1.0 (/x/crates/crypto)\nvstd v0.0.0\n' > "$dpt/crypto.txt"
+printf 'wire v0.1.0 (/x/crates/wire)\nvest_lib v0.2.2\nvstd v0.0.0\n' > "$dpt/wire.txt"
 expect_pass "deps-gate" dpg
-printf 'vstd-extra v0.1.0\n' >> "$tmp/dp/tree.txt"
-expect_fail "deps-gate: a second dep" "not exactly vstd" dpg
-printf 'crypto v0.1.0 (/x/crates/crypto)\n' > "$tmp/dp/tree.txt"
-expect_fail "deps-gate: no dep" "not exactly vstd" dpg
-printf 'crypto v0.1.0 (/x/crates/crypto)\nvstd v0.0.0\nvstd v0.0.0\n' > "$tmp/dp/tree.txt"
-expect_fail "deps-gate: vstd listed twice" "not exactly vstd" dpg
-: > "$tmp/dp/tree.txt"
-expect_fail "deps-gate: empty tree" "empty cargo tree output" dpg
-rm "$tmp/dp/tree.txt"
-expect_fail "deps-gate: missing tree" "deps-gate: no $tmp/dp/tree.txt" dpg
+printf 'vstd-extra v0.1.0\n' >> "$dpt/crypto.txt"
+expect_fail "deps-gate: crypto with a second dep" "crate crypto: deps" dpg
+printf 'crypto v0.1.0 (/x/crates/crypto)\nvstd v0.0.0\n' > "$dpt/crypto.txt"
+printf 'libc v0.2.191\n' >> "$dpt/wire.txt"
+expect_fail "deps-gate: an extra dep in another crate" "crate wire: deps" dpg
+printf 'wire v0.1.0 (/x/crates/wire)\nvest_lib v0.2.2\nvstd v0.0.0\nvstd v0.0.0\n' > "$dpt/wire.txt"
+expect_fail "deps-gate: vstd listed twice" "crate wire: deps" dpg
+printf 'wire v0.1.0 (/x/crates/wire)\nvstd v0.0.0\n' > "$dpt/wire.txt"
+expect_fail "deps-gate: a dep removed" "crate wire: deps" dpg
+printf 'wire v0.1.0 (/x/crates/wire)\nvest_lib v0.2.2\nvstd v0.0.0\n' > "$dpt/wire.txt"
+printf 'crypto: vstd\n' > "$dpr/tools/deps-allow.txt"
+expect_fail "deps-gate: crate without a line" "crate wire has no line" dpg
+printf 'crypto: vstd\nwire: vest_lib vstd\ngone: vstd\n' > "$dpr/tools/deps-allow.txt"
+expect_fail "deps-gate: line for a removed crate" "lists gone, which is not a crate" dpg
+printf 'crypto: vstd\nwire: vest_lib vstd\n' > "$dpr/tools/deps-allow.txt"
+: > "$dpt/wire.txt"
+expect_fail "deps-gate: empty tree" "empty cargo tree output for wire" dpg
+rm "$dpt/wire.txt"
+expect_fail "deps-gate: missing tree" "deps-gate: no $dpt/wire.txt" dpg
+: > "$dpr/tools/deps-allow.txt"
+expect_fail "deps-gate: empty allow-list" "no or empty" dpg
 mkdir -p "$tmp/dp/bin"
+printf 'crypto: vstd\nwire: vest_lib vstd\n' > "$dpr/tools/deps-allow.txt"
 printf '#!/bin/sh\nexit 1\n' > "$tmp/dp/bin/cargo"; chmod +x "$tmp/dp/bin/cargo"
-expect_fail "deps-gate: cargo tree fails" "cargo tree failed" env PATH="$tmp/dp/bin:$PATH" "$root/scripts/deps-gate.sh" "$root"
+expect_fail "deps-gate: cargo tree fails" "cargo tree failed for crypto" env PATH="$tmp/dp/bin:$PATH" "$root/scripts/deps-gate.sh" "$dpr"
 
 # ct-check's crypto report reader (scripts/ct-report.sh REPORT MANIFEST LABELS OUTDIR): a canned report with a rejected root; a root
 # with no verdict; changed labels; a missing and an empty report.
