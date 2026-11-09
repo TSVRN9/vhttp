@@ -16,7 +16,9 @@ set -o pipefail
 #           rust-toolchain.toml with every id passing; on a branch, the same gate once crates/, the root Cargo files or
 #           the registry differ from the merge-base's (tools/mutants.py gate-branch). check also fails on an allowed_*err predicate with no row.
 root=$(cd "$(dirname "$0")/.." && pwd)
-VERUS_HOME="${VERUS_HOME:-$HOME/.local/opt/verus/0.2026.10.04.426d8b0/verus-x86-linux}"
+verus_ver=$(sed -n 's/^version //p' "$root/tools/verus-pin.txt")
+[ -n "$verus_ver" ] || { echo "mutants.sh: no version line in tools/verus-pin.txt" >&2; exit 1; }
+VERUS_HOME="${VERUS_HOME:-$HOME/.local/opt/verus/$verus_ver/verus-x86-linux}"
 PATH="$VERUS_HOME:$PATH"
 tsv=$root/tools/mutants.tsv
 pdir=$root/tools/mutants
