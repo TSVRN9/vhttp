@@ -4,6 +4,7 @@ set -o pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 # A green run must describe a commit: a dirty tree stops here unless VERIFY_DIRTY=1 (then the final line says it vouches for no commit).
 pfx="verify.sh:"
+head=$(git -C "$root" rev-parse HEAD) || { echo "verify.sh: git rev-parse HEAD failed" >&2; exit 1; }
 "$root/scripts/clean-tree.sh" "$root" || {
     [ "${VERIFY_DIRTY:-}" = 1 ] || exit 1
     echo "verify.sh: tree dirty, not a main-tip run"; pfx="verify.sh (DIRTY TREE, vouches for no commit):"
@@ -63,4 +64,9 @@ python3 -I "$root/tools/citations.py" closes "$root" "$root/tools/mutants.tsv" |
 "$root/scripts/gate-demos.sh" || exit 1
 # Tests: the unverified shell (crates/server) has no proofs, so its tests are its only guard.
 "$root/scripts/test-gate.sh" "$root" "$CT_OUT/cargo-test.log" --workspace || exit 1
+# The tree must still be the one the run started on: an edit or a commit made mid-run leaves the clean line unearned.
+"$root/scripts/clean-tree.sh" "$root" "$head" || {
+    [ "${VERIFY_DIRTY:-}" = 1 ] || exit 1
+    pfx="verify.sh (DIRTY TREE, vouches for no commit):"
+}
 echo "$pfx all crates verified, duvet ok, ct ok ($d declassify), cost $cost, escapes accounted ($attrs), binary ok ($bin fns)"
