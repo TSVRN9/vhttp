@@ -626,18 +626,35 @@ impl<'a> QuicServer<'a> {
         };
         s.sync_keys();
         s.tls_step(now, r);
-        let ghost c0 = s.h3.conn_spec();
-        s.h3.pump(app);
+        s.accept_settle(app);
+        Some(s)
+    }
+
+    /// `accept` after TLS's first step: HTTP/3, then a closed connection's unread CRYPTO bytes
+    /// dropped and the key slots synced (split from `accept` so that a missing step fails a named
+    /// ensures here, not the rlimit there).
+    #[verifier::spinoff_prover]
+    fn accept_settle(&mut self, app: &mut Vec<AppEvent>)
+        requires
+            old(self).wf(),
+            old(self).conn_spec().phase_spec() is Open ==> crypto_all_drained(old(self).conn_spec()),
+        ensures
+            final(self).wf(),
+            final(self).one_rtt_forgotten(),
+            app_grew(old(app)@, final(app)@),
+            crypto_all_drained(final(self).conn_spec()),
+    {
+        let ghost c0 = self.h3.conn_spec();
+        self.h3.pump(app);
         proof {
-            Connection::lemma_crypto_kept_elim(s.h3.conn_spec(), c0);
-            if s.h3.conn_spec().phase_spec() is Open {
-                lemma_all_drained_kept(s.h3.conn_spec(), c0);
+            Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
+            if self.h3.conn_spec().phase_spec() is Open {
+                lemma_all_drained_kept(self.h3.conn_spec(), c0);
             }
         }
-        s.drop_if_closed();
-        s.forget_failed();
-        s.sync_keys();
-        Some(s)
+        self.drop_if_closed();
+        self.forget_failed();
+        self.sync_keys();
     }
 
     /// A datagram for this connection: the pipeline, TLS, the coalesced 1-RTT packet once TLS
