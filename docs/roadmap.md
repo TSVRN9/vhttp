@@ -42,7 +42,7 @@ send and recovery paths; parts of 9b/9c that do not touch them may go earlier. P
 | 8d | verified MIR evaluator | merged | - | `2026-11-05-phase-8d-mir-evaluator.md`; 73cc244 |
 | 9r | RCA catalog and first class catches | merged | - | `2026-11-06-phase-9r-rca-catches.md`; 244e61b |
 | 9r2 | class catches in verify.sh | merged | - | `2026-11-07-phase-9r2-class-catches.md`; f4f0c9c |
-| 9r3 | audit gates and the roadmap | in progress | 2 | `2026-11-09-phase-9r3-audit-gates-and-roadmap.md`; branch phase-9r3 |
+| 9r3 | audit gates and the roadmap | merged | - | `2026-11-09-phase-9r3-audit-gates-and-roadmap.md`; d416f34 |
 | 9a | acceptance pilot, Tasks 0-4 and 6 | merged | - | `2026-11-05-phase-9a-acceptance-pilot.md`; ed35647 |
 | 9a2 | acceptance pilot, Tasks 3b, 5, 3c' (sparse CRYPTO store) | merged | - | `2026-11-05-phase-9a-acceptance-pilot.md`; 680a3f0 |
 | 9b | spec-only acceptance lemmas, rule 2(b) | unplanned | 4 (Task 1 Frags index, P3), 6 (P4) | none; Phase 9 spec `:50`, `:131-141` |
@@ -70,14 +70,6 @@ stays `never`.
 
 ## Open phases
 
-### 9r3: audit gates and the roadmap
-
-- Scope: audit F3, F4, F5, F9, F10, F12 (as the `t1` entry), F13, F17, F18 and the F19 evidence item, each with an
-  RCA in `docs/rca/2026-11-09-audit.md`.
-- Sources: the 9r3 plan.
-- Carryovers: closed: `aud-F3`, `aud-F4`, `aud-F9`, `aud-F10`, `aud-F18`, `aud-F19`, `cat-C3`, `x-duvet`;
-  `r9a2-plan-mut` moved to 12 (Task 2: no cheap sound catch).
-
 ### 10a: admission and bounds
 
 - Scope: the server's DoS goal. The handshake deadline (F2, a bug: RCA, class and catch), MAX_CONNS admission and
@@ -85,6 +77,9 @@ stays `never`.
   index, path-slot eviction, the RSA key loader that establishes `rsa_key_wf`, the shell's per-datagram walk (F14),
   the per-connection memory figure (F15), transmit-loop termination, and proved server-level running-time and
   memory bounds. Owns catalog class C10.
+- Open question for the owner (order, same family as F11): 10a is at order 3 and Phase 6 at order 5. 10a's handshake deadline lands in
+  `open_timeout`, whose timer proof Phase 6 re-proves (`bind-timers`), so 10a's proof may be redone. Whether to reorder is the
+  owner's call; the order is unchanged.
 - Sources: audit F2 (`:72-87`), F10 (`:176-189`), F14, F15; 3d2 plan `:799`, `:804-805`; 3e plan `:445`; 4c plan
   `:680`; `docs/rca/catalog.md:206-209`; TRUSTED.md `:34`.
 - Carryovers: `aud-F2`, `bind-maxconns`, `bind-retry`, `bind-siphash`, `aud-s6`, `tr-34`, `aud-F14`, `aud-F15`,
@@ -102,7 +97,7 @@ stays `never`.
 
 - Scope: RFC 9002 RTT estimation, PTO with probes instead of the E8 placeholder that declares records lost, NewReno,
   per-path congestion state, and the proved invariants (bytes in flight <= cwnd). It rewrites `fire_pto` and
-  `Recovery` in `conn.rs`, which is why it lands before 9b/9c's `conn.rs` parts. 19 requirements rows (33 MUSTs).
+  `Recovery` in `conn.rs`, which is why it lands before 9b/9c's `conn.rs` parts. 21 requirements rows (`open:6`: the 19 RFC 9002 rows and the two RFC 9000 recovery halves, §9.4 and §13.3).
 - Sources: design spec `:118-119`; 3d2 plan `:29` (E8), `:808-815`; TRUSTED.md `:37`.
 - Carryovers: `tr-37`, `bind-amp-path`, `bind-timers`, `bind-path-amp`, `bind-sent-size`, `req-6`.
 
@@ -169,7 +164,7 @@ Each is its own sub-phase with a plan, after 9c (Phase 9 spec `:270-276`).
 - Sources: audit F10 (`:186-188`), "Smaller items" (`:251-258`); design spec `:32` (the missing production-readiness
   document); 4c plan `:680`; TRUSTED.md `:43`, `:65`; `docs/rca/catalog.md` C1, C2, C4, C13, C16, C17.
 - Carryovers: `tr-43`, `tr-66`, `bind-chain-schemes`, `aud-prod`, `aud-s1`, `aud-s2`, `aud-s3`, `aud-s5`, `cat-C1`,
-  `cat-C2`, `cat-C4`, `cat-C13`, `cat-C16`, `cat-C17`, `mem-escape-checked`, `mem-ct-spaces`, `x-shellcheck`, `req-12`, `r9a2-plan-mut`.
+  `cat-C2`, `cat-C4`, `cat-C13`, `cat-C16`, `cat-C17`, `mem-escape-checked`, `mem-ct-spaces`, `x-shellcheck`, `req-12`, `r9a2-plan-mut`, `cat-C3-resid`, `x-dev-deps`.
 
 ### t1: toolchain upgrade procedure (design only)
 
