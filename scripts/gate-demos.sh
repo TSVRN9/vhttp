@@ -880,6 +880,7 @@ printf '%s\n' "$out" | grep -qxF "mutants: fresh run at main's tip matches the c
 $out"
 [ -z "$(git -C "$tmp/m3" status --porcelain)" ] || die "mutants verify at main's tip: the fresh run changed the tree"
 echo "gate-demos: mutants verify: the fresh run at main's tip reproduces the honest run file and leaves the tree clean"
+expect_fail "mutants verify at main's tip: no Verus (the fresh run cannot run)" "verus --version failed" env VERUS_HOME="$tmp/noverus" PATH=/usr/bin:/bin "$tmp/m3/scripts/mutants.sh" verify
 gitc m3 checkout -q main; gitc m3 reset -q --hard "$mbase"; gitc m3 merge -q --ff-only feat
 expect_pass "mutants verify: fast-forward to a branch tip with a fresh run file" mut m3 verify
 mbranch m3 "$fresh_run"; gitc m3 rm -q tools/mutants-last-run.txt; gitc m3 commit -qm "no run file"; mmerge m3
