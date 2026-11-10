@@ -56,7 +56,7 @@ send and recovery paths; parts of 9b/9c that do not touch them may go earlier. P
 | 9t7 | ct-front's `main` and ct-check.sh's decisions in verified code | unplanned | 7 | none; review I3 of 9r3 Task 5 (TRUSTED.md `:46`) |
 | 9t8 | vest_lib's escapes verified in-tree | unplanned | 7 | none; controller ruling, 9r3 Task 5 fix round 1 (TRUSTED.md `:28`) |
 | 9t9 | crypto trust items proved: declassified outcomes, constants | unplanned | 7 | none; review I3 and controller ruling, 9r3 Task 5 fix round 1 (TRUSTED.md `:52-58`, `:66`, `:69`) |
-| 10a | admission and bounds | unplanned | 3 | none; audit F2, F10, F14, F15 |
+| 10a | admission and bounds | unplanned | 6 | none; audit F2, F10, F14, F15 |
 | 11 | composed end-to-end theorem | unplanned | 10 | none; audit F8 |
 | 12 | production readiness | unplanned | 11 | none; audit F10 |
 | t1 | toolchain upgrade procedure (design only) | unplanned | - | none; audit F12 |
@@ -77,9 +77,8 @@ stays `never`.
   index, path-slot eviction, the RSA key loader that establishes `rsa_key_wf`, the shell's per-datagram walk (F14),
   the per-connection memory figure (F15), transmit-loop termination, and proved server-level running-time and
   memory bounds. Owns catalog class C10.
-- Open question for the owner (order, same family as F11): 10a is at order 3 and Phase 6 at order 5. 10a's handshake deadline lands in
-  `open_timeout`, whose timer proof Phase 6 re-proves (`bind-timers`), so 10a's proof may be redone. Whether to reorder is the
-  owner's call; the order is unchanged.
+- Owner decision (2026-11-10): Phase 6 goes before 10a (orders 5 and 6; 10a shares 6 with 9b/9c's `conn.rs` parts), so 10a's handshake deadline is proved once, on
+  Phase 6's re-proved `open_timeout` (`bind-timers`). F2's slot exhaustion stays open until 10a.
 - Sources: audit F2 (`:72-87`), F10 (`:176-189`), F14, F15; 3d2 plan `:799`, `:804-805`; 3e plan `:445`; 4c plan
   `:680`; `docs/rca/catalog.md:206-209`; TRUSTED.md `:34`.
 - Carryovers: `aud-F2`, `bind-maxconns`, `bind-retry`, `bind-siphash`, `aud-s6`, `tr-34`, `aud-F14`, `aud-F15`,
