@@ -69,6 +69,23 @@ def roadmap(root):
     return phases, cell
 
 
+def rs_text(root, tracked):
+    """Every tracked .rs file under crates/ or tools/ct-fixtures/, joined: where `fn:` and `test:` names resolve."""
+    return '\n'.join(read(root, p) for p in sorted(tracked) if p.endswith('.rs') and p.startswith(('crates/', 'tools/ct-fixtures/')))
+
+
+def fn_found(text, kind, name):
+    """`fn NAME` in text; for kind `test`, with `#[test]` (and other attributes) above it."""
+    pat = r'\bfn %s\b' % re.escape(name)
+    if kind == 'test':
+        pat = r'#\[test\]\s*(?:#\[[^\]\n]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?' + pat
+    return re.search(pat, text) is not None
+
+
+def not_found(kind, name):
+    return 'no %s`fn %s` in a tracked .rs file under crates/ or tools/ct-fixtures/' % ('#[test] ' if kind == 'test' else '', name)
+
+
 def check(root):
     tracked = set(git(root, 'ls-files', '-z').split('\0')) - {''}
     if not tracked:
@@ -89,7 +106,6 @@ def check(root):
             raise Fail('merge %s merges phase-%s, which names no phase of docs/roadmap.md' % (m.group(1), name))
         if phases[pid] != 'merged':
             raise Fail('merge %s merges phase-%s, but docs/roadmap.md says %s is %s' % (m.group(1), name, pid, phases[pid]))
-    rs = [f for f in sorted(tracked) if f.endswith('.rs') and f.startswith(('crates/', 'tools/ct-fixtures/'))]
     fns = None
 
     rows = read(root, 'docs/carryovers.tsv').split('\n')
@@ -124,13 +140,9 @@ def check(root):
             if not NAME.match(val):
                 raise Fail('docs/carryovers.tsv:%d: %s: %s is not a fn name' % (i, rid, ev))
             if fns is None:
-                fns = '\n'.join(read(root, p) for p in rs)
-            pat = r'\bfn %s\b' % re.escape(val)
-            if kind == 'test':
-                pat = r'#\[test\]\s*(?:#\[[^\]\n]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?' + pat
-            if not re.search(pat, fns):
-                raise Fail('docs/carryovers.tsv:%d: %s: evidence %s: no %s`fn %s` in a tracked .rs file under crates/ or tools/ct-fixtures/' % (
-                    i, rid, ev, '#[test] ' if kind == 'test' else '', val))
+                fns = rs_text(root, tracked)
+            if not fn_found(fns, kind, val):
+                raise Fail('docs/carryovers.tsv:%d: %s: evidence %s: %s' % (i, rid, ev, not_found(kind, val)))
         elif kind == 'doc':
             if val not in tracked:
                 raise Fail('docs/carryovers.tsv:%d: %s: evidence %s is not a tracked path' % (i, rid, ev))
