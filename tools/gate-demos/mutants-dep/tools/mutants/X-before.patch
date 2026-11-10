@@ -1,0 +1,13 @@
+diff --git a/crates/top/src/m.rs b/crates/top/src/m.rs
+index be51e78..840f1ff 100644
+--- a/crates/top/src/m.rs
++++ b/crates/top/src/m.rs
+@@ -14,7 +14,7 @@ pub fn count(n: u32) -> (r: u64)
+     ensures
+         r == n,
+ {
+-    let mut i: u64 = 0;
++    let mut i: u64 = n as u64 + 1;
+     while i < n as u64
+         invariant
+             i <= n,
