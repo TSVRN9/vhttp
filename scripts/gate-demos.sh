@@ -1068,9 +1068,10 @@ expect_fail "interop: no interop.rs" "no crates/server/tests/interop.rs" iop ok
 
 # carryovers.sh (C3; F3, F18, F19), on throwaway git repos of tools/gate-demos/carryovers: a bad row, owner, evidence or
 # TRUSTED removal cell, an untracked-evidence citation, a deleted row (main across two commits; a branch), missing inputs.
-corepo() {  # corepo <dir>: the fixture as one commit on main
+corepo() {  # corepo <dir>: the fixture on main, its MERGESHA placeholders set to the first commit
     rm -rf "${tmp:?}/$1"; cp -r "$fx/carryovers" "$tmp/$1"
     git -C "$tmp/$1" init -q -b main; git -C "$tmp/$1" add -A; gitc "$1" commit -qm base
+    sed -i "s/MERGESHA/$(git -C "$tmp/$1" rev-parse --short=12 HEAD)/" "$tmp/$1/docs/roadmap.md"; gitc "$1" commit -qam anchor
 }
 co() { "$root/scripts/carryovers.sh" "$tmp/$1"; }
 cot=docs/carryovers.tsv
@@ -1092,10 +1093,10 @@ corepo co1; sed -i 's/^a\t2\topen\t-/a\t2\tclosed\tdoc:TRUSTED.md/' "$tmp/co1/$c
 expect_fail "carryovers: a TRUSTED row naming a merged phase" "the removal cell names 2, which is merged" co co1
 corepo co1; sed -n 2p "$tmp/co1/$cot" >> "$tmp/co1/$cot"
 expect_fail "carryovers: a duplicate id" "duplicate id a" co co1
-corepo co1; printf 'd\t2\topen\t-\tdemo:4\n' >> "$tmp/co1/$cot"
+corepo co1; printf 'e\t2\topen\t-\tdemo:5\n' >> "$tmp/co1/$cot"
 expect_fail "carryovers: a row with 5 columns" "expected 6 non-empty tab-separated columns, got 5" co co1
 corepo co1; sed -i 's/| 2 (the open phase) |/|  |/' "$tmp/co1/TRUSTED.md"
-expect_fail "carryovers: a TRUSTED row with an empty removal cell" "the removal cell '' starts with neither a roadmap id nor" co co1
+expect_fail "carryovers: a TRUSTED row with an empty removal cell" "the removal cell '' starts with neither roadmap ids nor" co co1
 for cell in 'never' 'Phase 2' 'never ()'; do
     corepo co1; sed -i "s/| 2 (the open phase) |/| $cell |/" "$tmp/co1/TRUSTED.md"
     expect_fail "carryovers: a TRUSTED removal cell '$cell'" "the removal cell '$cell' starts with neither" co co1
@@ -1105,7 +1106,7 @@ expect_fail "carryovers: an RCA Evidence line citing a worktree evidence log" "d
 corepo co1; printf -- '- **Evidence**: see vt-8d-evidence/t2/probe.txt.\n' >> "$tmp/co1/docs/rca/a.md"
 expect_fail "carryovers: the other Evidence spelling, a bare evidence dir name" "docs/rca/a.md:4 cites 'vt-8d-evidence'" co co1
 corepo co1; printf '/// steps from vt-8d-evidence/t2/core-steps.txt\n' >> "$tmp/co1/crates/a/src/lib.rs"
-expect_fail "carryovers: a crates .rs comment citing an evidence dir" "crates/a/src/lib.rs:2 cites 'vt-8d-evidence'" co co1
+expect_fail "carryovers: a crates .rs comment citing an evidence dir" "crates/a/src/lib.rs:5 cites 'vt-8d-evidence'" co co1
 corepo co1; sed -i '/^a\t/d' "$tmp/co1/$cot"; gitc co1 commit -qam "delete row a"
 expect_fail "carryovers: main, a row deleted across two commits" "a was removed" co co1
 corepo co1; gitc co1 checkout -qb feat; gitc co1 commit -q --allow-empty -m feat; sed -i '/^a\t/d' "$tmp/co1/$cot"
@@ -1124,5 +1125,32 @@ corepo co1; rm "$tmp/co1/TRUSTED.md"
 expect_fail "carryovers: a missing TRUSTED.md" "cannot read TRUSTED.md" co co1
 corepo co1; rm -rf "$tmp/co1/.git"
 expect_fail "carryovers: not a git checkout" "is not a git checkout" co co1
+corepo co1; git -C "$tmp/co1" branch -qm main trunk
+expect_fail "carryovers: no main branch to compare with" "cannot resolve the merge-base of HEAD and main" co co1
+# fix round 1: merged is anchored (I1), evidence only from crates/ and tools/ct-fixtures and test: needs #[test] (I2),
+# every leading TRUSTED id (M2), Evidence continuation lines (M9).
+corepo co1; sed -i 's/| 1 | first | merged |/| 1 | first | in progress |/' "$tmp/co1/docs/roadmap.md"; gitc co1 commit -qam unmerge
+expect_fail "carryovers: main, a merged phase un-merged across two commits" "phase 1 is no longer merged (a phase once merged stays merged)" co co1
+corepo co1; gitc co1 checkout -qb feat; gitc co1 commit -q --allow-empty -m feat
+sed -i 's/| 1 | first | merged |/| 1 | first | unplanned |/' "$tmp/co1/docs/roadmap.md"
+expect_fail "carryovers: a branch un-merging a phase of the merge-base" "phase 1 is no longer merged (a phase once merged stays merged) against the merge-base" co co1
+corepo co1; sed -i 's/| first | merged | - | [0-9a-f]* |/| first | merged | - | deadbeef0 |/' "$tmp/co1/docs/roadmap.md"
+expect_fail "carryovers: a merged phase naming no commit" "phase 1 is merged but its plan / merge cell names no commit that is an ancestor of HEAD" co co1
+corepo co1; gitc co1 checkout -qb side; gitc co1 commit -q --allow-empty -m side; side=$(git -C "$tmp/co1" rev-parse --short=12 HEAD); gitc co1 checkout -q main
+sed -i "s/| first | merged | - | [0-9a-f]* |/| first | merged | - | $side |/" "$tmp/co1/docs/roadmap.md"
+expect_fail "carryovers: a merged phase naming a commit off HEAD's history" "phase 1 is merged but its plan / merge cell names no commit that is an ancestor of HEAD" co co1
+corepo co1; gitc co1 checkout -qb phase-2; gitc co1 commit -q --allow-empty -m two; gitc co1 checkout -q main; gitc co1 merge -q --no-ff -m "Merge phase-2: demo" phase-2
+expect_fail "carryovers: a Merge phase-2 commit while 2 is in progress" "merges phase-2, but docs/roadmap.md says 2 is in progress" co co1
+corepo co1; gitc co1 checkout -qb phase-zz; gitc co1 commit -q --allow-empty -m zz; gitc co1 checkout -q main; gitc co1 merge -q --no-ff -m "Merge branch 'phase-zz'" phase-zz
+expect_fail "carryovers: a merge of a branch that names no phase" "merges phase-zz, which names no phase of docs/roadmap.md" co co1
+corepo co1; mkdir -p "$tmp/co1/tools/gate-demos/x"; printf 'fn only_fixture() {}\n' > "$tmp/co1/tools/gate-demos/x/lib.rs"; git -C "$tmp/co1" add -A
+sed -i 's/doc:TRUSTED.md/fn:only_fixture/' "$tmp/co1/$cot"
+expect_fail "carryovers: fn: evidence found only in a gate-demos fixture" 'no `fn only_fixture` in a tracked .rs file under crates/' co co1
+corepo co1; sed -i 's/test:good_test/test:good_fn/' "$tmp/co1/$cot"
+expect_fail "carryovers: a non-test fn cited as test:" 'no #[test] `fn good_fn`' co co1
+corepo co1; sed -i 's/| 2 (the open phase) |/| 2, 9zz (two ids) |/' "$tmp/co1/TRUSTED.md"
+expect_fail "carryovers: a TRUSTED cell whose second id is not a phase" "starts with neither roadmap ids nor" co co1
+corepo co1; printf -- '- **Evidence:** the first line,\n  and a continuation naming .worktrees/x/log.\n' >> "$tmp/co1/docs/rca/a.md"
+expect_fail "carryovers: an Evidence continuation line citing a worktree" "docs/rca/a.md:5 cites '.worktrees/'" co co1
 
 echo "gate-demos: $n demos, all fail as expected"
