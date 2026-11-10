@@ -70,7 +70,7 @@ The six `9t` ids are the trust-base sub-phases the Phase 9 spec schedules after 
   close, drain-after-feed), Task 5 (the transport-parameter CID link), Task 3c' (the held-bytes floor of RFC 9000 §7.5
   on a sparse CRYPTO store). In final-review fix on branch phase-9a2.
 - Sources: Phase 9 spec `:55` (status block), `:258-266`; the 9a plan.
-- Carryovers: `tr-64`, `x-9a2-evidence`. When it merges, its status here becomes `merged` in the same merge.
+- Carryovers: `tr-64`; closed: `x-9a2-evidence`. When it merges, its status here becomes `merged` in the same merge.
 
 ### 9r3: audit gates and the roadmap
 
@@ -198,5 +198,5 @@ Each is its own sub-phase with a plan, after 9c (Phase 9 spec `:270-276`).
 - F18 (TRUSTED's removal column): each `TRUSTED.md` row now names a phase above or `never (` and a reason, checked by
   `scripts/carryovers.sh`; row `aud-F18`.
 - F19 (old evidence worktrees): the owner had them deleted; the committed citations of their logs are rewritten and
-  gated (row `aud-F19`); 9a2's own citation is row `x-9a2-evidence`.
+  gated (row `aud-F19`); 9a2's own citation was rewritten on its branch (row `x-9a2-evidence`).
 - Smaller items: `aud-s1`, `aud-s2`, `aud-s3`, `aud-s5` (phase 12), `aud-s4`, `aud-s6` (phase 10a).
