@@ -8,7 +8,9 @@ cell is one or more `; `-separated items:
   false (ID)       known false today: ID is an open docs/carryovers.tsv row whose source cites TRUSTED.md; needs open:<its owner>
   open:P           P is a roadmap phase that is not merged and owns the open tsv row `req-P`
   n/a, declined    alone; a Phase cell `N/A (..)` needs n/a, `Declined (..)` needs declined
-A ticked row (a ✅ in any other cell) must have only proved: items. Each `## RFC` section holds exactly one table with that\nheader (its first table); a row of any other table carrying a ✅ or a Status item fails. A missing file, no table, no row,\nor a git error fails."""
+A ticked row (a ✅ in any other cell) must have only proved: items. Each `## RFC` section holds exactly one table with that
+header (its first table); a row of any other table carrying a ✅ or a Status item fails. A missing file, no table, no row,
+or a git error fails."""
 import importlib.util
 import os
 import re
