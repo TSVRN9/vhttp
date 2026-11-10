@@ -104,7 +104,7 @@ stays `never`.
   `poll_transmit`), and Task 1, a `Frags` index for 9a2's sparse CRYPTO store (C15). Task 1 and P3 touch no
   `conn.rs` send or recovery path and run at order 4, before Phase 6; P4 goes after it, at 6.
 - Sources: Phase 9 spec `:50`, `:131-141`; audit F6, F7 (inputs to the plan); `docs/rca/catalog.md:220-223`.
-- Carryovers: `cat-C15`, `mem-h3-0705`, `mem-h3-21`, `mem-gen-tables`, `mem-naming`.
+- Carryovers: `cat-C15`, `mem-h3-0705`, `mem-h3-21`, `mem-gen-tables`, `mem-naming`, `req-9b`.
 
 ### 6: loss recovery and congestion control
 

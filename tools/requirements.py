@@ -6,15 +6,16 @@ cell is one or more `; `-separated items:
                    `verus!` block of a tracked crates/ .rs file whose path ends in F has an `ensures`
   tested:T[,T..]   T resolves as a carryovers `test:` (a #[test] fn); needs an open: item too (tested is open work)
   false (ID)       known false today: ID is an open docs/carryovers.tsv row whose source cites TRUSTED.md; needs open:<its owner>
-  open:P           P is a roadmap phase that is not merged and owns an open tsv row whose source cites docs/requirements.md
+  open:P           P is a roadmap phase that is not merged and owns the open tsv row `req-P`
   n/a, declined    alone; a Phase cell `N/A (..)` needs n/a, `Declined (..)` needs declined
-A ticked row (a ✅ in any other cell) must have only proved: items. A missing file, no table, no row, or a git error fails."""
+A ticked row (a ✅ in any other cell) must have only proved: items. Each `## RFC` section holds exactly one table with that\nheader (its first table); a row of any other table carrying a ✅ or a Status item fails. A missing file, no table, no row,\nor a git error fails."""
 import importlib.util
 import os
 import re
 import sys
 
 HEADER = ['§', 'Topic', '#MUST/MUST NOT', 'Server applies?', 'Phase', 'Notes', 'Status']
+STATUS_TOKEN = re.compile(r'(?<![A-Za-z])(?:proved|tested|open):|\bfalse \(|\| *(?:n/a|declined) *\|')
 QNAME = re.compile(r'^(?:[A-Za-z_][A-Za-z0-9_]*::)?[A-Za-z_][A-Za-z0-9_]*$')
 
 
@@ -62,21 +63,34 @@ def check(root):
         f = l.split('\t')
         if len(f) == 6:
             tsv[f[0]] = f
-    owners = {f[1] for f in tsv.values() if f[2] == 'open' and 'docs/requirements.md' in f[4]}
+    owners = {f[1] for f in tsv.values() if f[0] == 'req-' + f[1] and f[2] == 'open'}
     rs, ens = None, None
     rows, tables, counts = 0, 0, {}
-    head = False
-    for i, l in enumerate(co.read(root, 'docs/requirements.md').splitlines(), 1):
+    head = intable = False
+    sec, sec_tables = None, 0  # the current `## RFC` heading and its tables
+    lines = co.read(root, 'docs/requirements.md').splitlines()
+    for i, l in enumerate(lines + ['## end'], 1):
+        if l.startswith('## '):
+            if sec is not None and sec_tables != 1:
+                raise Fail('docs/requirements.md: %r has %d tables with the Status header, not 1' % (sec, sec_tables))
+            sec, sec_tables = (l, 0) if l.startswith('## RFC ') else (None, 0)
         if not l.startswith('|'):
-            head = False
+            head = intable = False
             continue
         c = co.cells(l)
-        if c[0] == '§':
-            if c != HEADER:
-                raise Fail('docs/requirements.md:%d: a table header that is not %r' % (i, ' | '.join(HEADER)))
-            head, tables = True, tables + 1
+        if not intable:  # a table's header line
+            intable = True
+            if c == HEADER or c[0] == '§' or (sec is not None and sec_tables == 0):
+                if c != HEADER:
+                    raise Fail('docs/requirements.md:%d: a table header that is not %r' % (i, ' | '.join(HEADER)))
+                head, tables = True, tables + 1
+                sec_tables += sec is not None
+                continue
+        if not head:
+            if '✅' in l or STATUS_TOKEN.search(l):
+                raise Fail('docs/requirements.md:%d: a table row outside a requirements table carries a tick or a Status item' % i)
             continue
-        if not head or set(''.join(c)) <= set('-: '):
+        if set(''.join(c)) <= set('-: '):
             continue
         rows += 1
         if len(c) != 7 or not c[6]:
@@ -90,7 +104,6 @@ def check(root):
                 raise Fail('%s: status item %r is not proved:, tested:, false (..), open:, n/a or declined' % (where, it))
             k, v = m.group(1), m.group(2)
             kinds.append(k)
-            counts[k] = counts.get(k, 0) + 1
             if k in ('proved', 'tested'):
                 if rs is None:
                     rs, ens = co.rs_text(root, tracked), ensured(root, tracked)
@@ -107,13 +120,15 @@ def check(root):
                 if phases[v] == 'merged':
                     raise Fail('%s: open:%s names a merged phase' % (where, v))
                 if v not in owners:
-                    raise Fail('%s: open:%s owns no open docs/carryovers.tsv row whose source cites docs/requirements.md' % (where, v))
+                    raise Fail('%s: open:%s has no open req-%s row (owner %s) in docs/carryovers.tsv' % (where, v, v, v))
             elif k == 'false':
                 r = tsv.get(v)
                 if r is None or r[2] != 'open' or 'TRUSTED.md' not in r[4]:
                     raise Fail('%s: false (%s): not an open docs/carryovers.tsv row whose source cites TRUSTED.md' % (where, v))
                 if 'open:' + r[1] not in items:
                     raise Fail('%s: false (%s) needs open:%s, the owner of %s' % (where, v, r[1], v))
+        for k in set(kinds):
+            counts[k] = counts.get(k, 0) + 1
         if ('n/a' in kinds or 'declined' in kinds) and len(items) != 1:
             raise Fail('%s: n/a and declined stand alone' % where)
         if 'tested' in kinds and 'open' not in kinds:
