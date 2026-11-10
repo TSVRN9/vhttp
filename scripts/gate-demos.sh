@@ -803,7 +803,7 @@ expect_fail "mutants run: a fn name that is not in the module" "D-kill.clean.jso
 # invariant kinds are kills; a dependency patch that breaks dep's own proof is refused, though top's fn fails on it too.
 mdrepo() {  # mdrepo <dir>: as mrepo, with the mutants-dep fixture
     rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/tools"
-    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/mutants.py" "$root/tools/acceptance.py" "$tmp/$1/tools/"
+    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/mutants.py" "$root/tools/acceptance.py" "$root/tools/verus-pin.txt" "$tmp/$1/tools/"
     cp -r "$fx/mutants-dep/Cargo.toml" "$fx/mutants-dep/Cargo.lock" "$fx/mutants-dep/crates" "$root/rust-toolchain.toml" "$tmp/$1/"
     cp -r "$fx/mutants-dep/tools/mutants.tsv" "$fx/mutants-dep/tools/mutants" "$tmp/$1/tools/"
     printf '/.worktrees/\n/target/\n' > "$tmp/$1/.gitignore"

@@ -44,7 +44,7 @@ send and recovery paths; parts of 9b/9c that do not touch them may go earlier. P
 | 9r2 | class catches in verify.sh | merged | - | `2026-11-07-phase-9r2-class-catches.md`; f4f0c9c |
 | 9r3 | audit gates and the roadmap | in progress | 2 | `2026-11-09-phase-9r3-audit-gates-and-roadmap.md`; branch phase-9r3 |
 | 9a | acceptance pilot, Tasks 0-4 and 6 | merged | - | `2026-11-05-phase-9a-acceptance-pilot.md`; ed35647 |
-| 9a2 | acceptance pilot, Tasks 3b, 5, 3c' (sparse CRYPTO store) | in progress | 1 | `2026-11-05-phase-9a-acceptance-pilot.md`; branch phase-9a2 |
+| 9a2 | acceptance pilot, Tasks 3b, 5, 3c' (sparse CRYPTO store) | merged | - | `2026-11-05-phase-9a-acceptance-pilot.md`; 680a3f0 |
 | 9b | spec-only acceptance lemmas, rule 2(b) | unplanned | 4 (Task 1 Frags index, P3), 6 (P4) | none; Phase 9 spec `:50`, `:131-141` |
 | 9c | frame errors, h3 to quic closes, tls own limits | unplanned | 4 (parts that touch no `conn.rs` send or recovery path), 6 (the rest) | none; Phase 9 spec `:51`, `:143-161` |
 | 9t1 | `decode_crate` functional | unplanned | 7 | none; Phase 9 spec `:271` |
@@ -55,7 +55,7 @@ send and recovery paths; parts of 9b/9c that do not touch them may go earlier. P
 | 9t6 | never-Stuck for bounded roots | unplanned | 7 | none; Phase 9 spec `:276` |
 | 9t7 | ct-front's `main` and ct-check.sh's decisions in verified code | unplanned | 7 | none; review I3 of 9r3 Task 5 (TRUSTED.md `:46`) |
 | 9t8 | vest_lib's escapes verified in-tree | unplanned | 7 | none; controller ruling, 9r3 Task 5 fix round 1 (TRUSTED.md `:28`) |
-| 9t9 | crypto trust items proved: declassified outcomes, constants | unplanned | 7 | none; review I3 and controller ruling, 9r3 Task 5 fix round 1 (TRUSTED.md `:52-58`, `:67`, `:70`) |
+| 9t9 | crypto trust items proved: declassified outcomes, constants | unplanned | 7 | none; review I3 and controller ruling, 9r3 Task 5 fix round 1 (TRUSTED.md `:52-58`, `:66`, `:69`) |
 | 10a | admission and bounds | unplanned | 3 | none; audit F2, F10, F14, F15 |
 | 11 | composed end-to-end theorem | unplanned | 10 | none; audit F8 |
 | 12 | production readiness | unplanned | 11 | none; audit F10 |
@@ -70,21 +70,13 @@ stays `never`.
 
 ## Open phases
 
-### 9a2: acceptance pilot, the rest
-
-- Scope: 9a Task 3b (`hist`, `restart`, `crypto_kept`, the `core_ok` invariant, removal of `superseded`'s second
-  close, drain-after-feed), Task 5 (the transport-parameter CID link), Task 3c' (the held-bytes floor of RFC 9000 §7.5
-  on a sparse CRYPTO store). In final-review fix on branch phase-9a2.
-- Sources: Phase 9 spec `:55` (status block), `:258-266`; the 9a plan.
-- Carryovers: `tr-64`, `r9a2-3c`, `req-9a2`, `x-9a2-evidence` (already fixed on the branch at fceacf3). When it merges, its status here becomes `merged` in the same merge.
-
 ### 9r3: audit gates and the roadmap
 
 - Scope: audit F3, F4, F5, F9, F10, F12 (as the `t1` entry), F13, F17, F18 and the F19 evidence item, each with an
   RCA in `docs/rca/2026-11-09-audit.md`.
 - Sources: the 9r3 plan.
-- Carryovers: `aud-F4` (Task 2); closed: `aud-F3`, `aud-F9`, `aud-F10`, `aud-F18`, `aud-F19`, `cat-C3`,
-  `x-duvet`.
+- Carryovers: `aud-F4` (Task 2), `r9a2-plan-mut` (Task 2 if cheap, else 12); closed: `aud-F3`, `aud-F9`,
+  `aud-F10`, `aud-F18`, `aud-F19`, `cat-C3`, `x-duvet`.
 
 ### 10a: admission and bounds
 
@@ -94,7 +86,7 @@ stays `never`.
   the per-connection memory figure (F15), transmit-loop termination, and proved server-level running-time and
   memory bounds. Owns catalog class C10.
 - Sources: audit F2 (`:72-87`), F10 (`:176-189`), F14, F15; 3d2 plan `:799`, `:804-805`; 3e plan `:445`; 4c plan
-  `:680`; `docs/rca/catalog.md:194-197`; TRUSTED.md `:34`.
+  `:680`; `docs/rca/catalog.md:206-209`; TRUSTED.md `:34`.
 - Carryovers: `aud-F2`, `bind-maxconns`, `bind-retry`, `bind-siphash`, `aud-s6`, `tr-34`, `aud-F14`, `aud-F15`,
   `aud-s4`, `cat-C10`, `cat-C15-ratio`, `cat-C18`, `mem-fs-copy`, `req-10a`.
 
@@ -103,7 +95,7 @@ stays `never`.
 - Scope: P3 (one `allowed_x` and one lemma per `rfc_*` codec spec), P4 (the CONNECTION_CLOSE is emitted, through
   `poll_transmit`), and Task 1, a `Frags` index for 9a2's sparse CRYPTO store (C15). Task 1 and P3 touch no
   `conn.rs` send or recovery path and run at order 4, before Phase 6; P4 goes after it, at 6.
-- Sources: Phase 9 spec `:50`, `:131-141`; audit F6, F7 (inputs to the plan); `docs/rca/catalog.md:220-223`.
+- Sources: Phase 9 spec `:50`, `:131-141`; audit F6, F7 (inputs to the plan); `docs/rca/catalog.md:232-235`.
 - Carryovers: `cat-C15`, `mem-h3-0705`, `mem-h3-21`, `mem-gen-tables`, `mem-naming`, `req-9b`.
 
 ### 6: loss recovery and congestion control
@@ -122,7 +114,8 @@ stays `never`.
   gate widening, P7's tls predicates, the h3-side lemmas) may run at order 4; the rest goes after Phase 6, at 6.
 - Sources: Phase 9 spec `:51`, `:143-161`; audit F6 (`:123-136`), F7 (`:138-150`); `docs/rca/catalog.md` C5-C9.
 - Carryovers: `aud-F6`, `aud-F7`, `cat-C5`, `cat-C6`, `cat-C7`, `cat-C8`, `cat-C9`, `mem-tls-close`,
-  `mem-stream-fc`, `r9a2-vstd`, `r9a2-p5`, `cat-C5-insert`, `req-9c`.
+  `mem-stream-fc`, `r9a2-vstd`, `r9a2-p5`, `r9a2-resolver`, `r9a2-sup-body`, `r9a2-accept-rl`,
+  `cat-C5-insert`, `req-9c`.
 
 ### 9t1 to 9t6: trust-base sub-phases
 
@@ -174,7 +167,7 @@ Each is its own sub-phase with a plan, after 9c (Phase 9 spec `:270-276`).
   class catches no phase has taken yet (C1 prose claims, C2 doclint, C4's remaining ct-check stages, C13, C16, C17,
   the smaller gate holes of the audit).
 - Sources: audit F10 (`:186-188`), "Smaller items" (`:251-258`); design spec `:32` (the missing production-readiness
-  document); 4c plan `:680`; TRUSTED.md `:43`, `:66`; `docs/rca/catalog.md` C1, C2, C4, C13, C16, C17.
+  document); 4c plan `:680`; TRUSTED.md `:43`, `:65`; `docs/rca/catalog.md` C1, C2, C4, C13, C16, C17.
 - Carryovers: `tr-43`, `tr-66`, `bind-chain-schemes`, `aud-prod`, `aud-s1`, `aud-s2`, `aud-s3`, `aud-s5`, `cat-C1`,
   `cat-C2`, `cat-C4`, `cat-C13`, `cat-C16`, `cat-C17`, `mem-escape-checked`, `mem-ct-spaces`, `x-shellcheck`, `req-12`.
 
@@ -186,7 +179,7 @@ Each is its own sub-phase with a plan, after 9c (Phase 9 spec `:270-276`).
   objdump or codegen changes (`docs/crypto-binary-audit.md`'s update protocol); how the MIR schema specs that mirror
   rustc 1.98.1 (TRUSTED.md `:45`) are re-checked; how vstd stays equal to vest_lib's pin; and how a dependency version
   bump is gated (deps-gate checks names only).
-- Sources: audit F12 (`:198-201`); `docs/rca/catalog.md:254` (C11).
+- Sources: audit F12 (`:198-201`); `docs/rca/catalog.md:266` (C11).
 - Carryovers: `aud-F12`, `cat-C11`, `x-dep-bump`, `mem-rlimit3-fs`, `mem-case-splits`, `mem-sbox-rl3`.
 
 ## Where each audit finding went (docs/audit-2026-11-09.md)
@@ -213,5 +206,6 @@ Each is its own sub-phase with a plan, after 9c (Phase 9 spec `:270-276`).
 - F18 (TRUSTED's removal column): each `TRUSTED.md` row now names a phase above or `never (` and a reason, checked by
   `scripts/carryovers.sh`; row `aud-F18`.
 - F19 (old evidence worktrees): the owner had them deleted; the committed citations of their logs are rewritten and
-  gated (row `aud-F19`); 9a2's own citation was rewritten on its branch (row `x-9a2-evidence`).
+  gated (row `aud-F19`); 9a2's own citation was rewritten on its branch (row `x-9a2-evidence`, closed
+  with fceacf3 by the merge of main into 9r3).
 - Smaller items: `aud-s1`, `aud-s2`, `aud-s3`, `aud-s5` (phase 12), `aud-s4`, `aud-s6` (phase 10a).
