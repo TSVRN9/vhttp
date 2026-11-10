@@ -76,14 +76,14 @@ stays `never`.
   close, drain-after-feed), Task 5 (the transport-parameter CID link), Task 3c' (the held-bytes floor of RFC 9000 §7.5
   on a sparse CRYPTO store). In final-review fix on branch phase-9a2.
 - Sources: Phase 9 spec `:55` (status block), `:258-266`; the 9a plan.
-- Carryovers: `tr-64`, `r9a2-3c`, `x-9a2-evidence` (already fixed on the branch at fceacf3). When it merges, its status here becomes `merged` in the same merge.
+- Carryovers: `tr-64`, `r9a2-3c`, `req-9a2`, `x-9a2-evidence` (already fixed on the branch at fceacf3). When it merges, its status here becomes `merged` in the same merge.
 
 ### 9r3: audit gates and the roadmap
 
 - Scope: audit F3, F4, F5, F9, F10, F12 (as the `t1` entry), F13, F17, F18 and the F19 evidence item, each with an
   RCA in `docs/rca/2026-11-09-audit.md`.
 - Sources: the 9r3 plan.
-- Carryovers: `aud-F4` (Task 2), `aud-F9` (Task 6); closed: `aud-F3`, `aud-F10`, `aud-F18`, `aud-F19`, `cat-C3`,
+- Carryovers: `aud-F4` (Task 2); closed: `aud-F3`, `aud-F9`, `aud-F10`, `aud-F18`, `aud-F19`, `cat-C3`,
   `x-duvet`.
 
 ### 10a: admission and bounds
@@ -96,7 +96,7 @@ stays `never`.
 - Sources: audit F2 (`:72-87`), F10 (`:176-189`), F14, F15; 3d2 plan `:799`, `:804-805`; 3e plan `:445`; 4c plan
   `:680`; `docs/rca/catalog.md:194-197`; TRUSTED.md `:34`.
 - Carryovers: `aud-F2`, `bind-maxconns`, `bind-retry`, `bind-siphash`, `aud-s6`, `tr-34`, `aud-F14`, `aud-F15`,
-  `aud-s4`, `cat-C10`, `cat-C15-ratio`, `cat-C18`, `mem-fs-copy`.
+  `aud-s4`, `cat-C10`, `cat-C15-ratio`, `cat-C18`, `mem-fs-copy`, `req-10a`.
 
 ### 9b: spec-only acceptance lemmas and rule 2(b)
 
@@ -112,7 +112,7 @@ stays `never`.
   per-path congestion state, and the proved invariants (bytes in flight <= cwnd). It rewrites `fire_pto` and
   `Recovery` in `conn.rs`, which is why it lands before 9b/9c's `conn.rs` parts. 19 requirements rows (33 MUSTs).
 - Sources: design spec `:118-119`; 3d2 plan `:29` (E8), `:808-815`; TRUSTED.md `:37`.
-- Carryovers: `tr-37`, `bind-amp-path`, `bind-timers`, `bind-path-amp`, `bind-sent-size`.
+- Carryovers: `tr-37`, `bind-amp-path`, `bind-timers`, `bind-path-amp`, `bind-sent-size`, `req-6`.
 
 ### 9c: frame errors, h3 to quic closes, tls own limits
 
@@ -122,7 +122,7 @@ stays `never`.
   gate widening, P7's tls predicates, the h3-side lemmas) may run at order 4; the rest goes after Phase 6, at 6.
 - Sources: Phase 9 spec `:51`, `:143-161`; audit F6 (`:123-136`), F7 (`:138-150`); `docs/rca/catalog.md` C5-C9.
 - Carryovers: `aud-F6`, `aud-F7`, `cat-C5`, `cat-C6`, `cat-C7`, `cat-C8`, `cat-C9`, `mem-tls-close`,
-  `mem-stream-fc`, `r9a2-vstd`, `r9a2-p5`, `cat-C5-insert`.
+  `mem-stream-fc`, `r9a2-vstd`, `r9a2-p5`, `cat-C5-insert`, `req-9c`.
 
 ### 9t1 to 9t6: trust-base sub-phases
 
@@ -132,7 +132,7 @@ Each is its own sub-phase with a plan, after 9c (Phase 9 spec `:270-276`).
 - 9t2, `mir_run` fuel monotonicity. Carryovers: `tr-49-fuel`.
 - 9t3, quic packet protection, quictls key handling and the tls key-schedule glue as CT roots (RFC 9001 §9.5), plus
   the other secret compares outside crypto and per-call-site label summaries. Carryovers: `tr-42`, `tr-35-36`,
-  `mem-labels`.
+  `mem-labels`, `req-9t3`.
 - 9t4, cost bounds for network-driven fns (8b's unmet DoS aim). Carryovers: `tr-51`.
 - 9t5, `respond`'s stop-at-first-Busy ordering proved or moved into verified code. Carryovers: `mem-busy`.
 - 9t6, never-Stuck for bounded roots via their cost proofs. Carryovers: `tr-49-stuck`, `mem-signed-cast`.
@@ -149,7 +149,7 @@ Each is its own sub-phase with a plan, after 9c (Phase 9 spec `:270-276`).
 
 - Scope: RFC 9001 §5.3 (third MUST), §5.5, §6.1-§6.4, §6.6; 7 requirements rows (20 MUSTs).
 - Sources: `docs/requirements.md:19`; 4c plan `:674-679`; 3e plan `:444`.
-- Carryovers: `bind-4d`.
+- Carryovers: `bind-4d`, `req-4d`.
 
 ### 7: full conformance and browsers
 
@@ -157,7 +157,7 @@ Each is its own sub-phase with a plan, after 9c (Phase 9 spec `:270-276`).
   no unannotated MUSTs (no script checks this exit today); the binary-level CT items 7a left ("Remains" in the design
   spec).
 - Sources: design spec `:120-122`; 3e plan `:450`; audit F16.
-- Carryovers: `aud-F16`, `cat-C14`, `mem-binary-ct`, `mem-duvet-7541`, `mem-exceptions`.
+- Carryovers: `aud-F16`, `cat-C14`, `mem-binary-ct`, `mem-duvet-7541`, `mem-exceptions`, `req-duvet`.
 
 ### 11: composed end-to-end theorem
 
@@ -165,7 +165,7 @@ Each is its own sub-phase with a plan, after 9c (Phase 9 spec `:270-276`).
   drops (`one_response`), then request to response, which frames may appear in which space, STREAM bytes equal
   written bytes, peer limits respected, a `Request` event comes from authenticated bytes, and the keys are TLS's.
 - Sources: audit F8 (`:152-164`); TRUSTED.md `:38`.
-- Carryovers: `aud-F8`, `tr-38`.
+- Carryovers: `aud-F8`, `tr-38`, `req-11`.
 
 ### 12: production readiness
 
@@ -176,7 +176,7 @@ Each is its own sub-phase with a plan, after 9c (Phase 9 spec `:270-276`).
 - Sources: audit F10 (`:186-188`), "Smaller items" (`:251-258`); design spec `:32` (the missing production-readiness
   document); 4c plan `:680`; TRUSTED.md `:43`, `:66`; `docs/rca/catalog.md` C1, C2, C4, C13, C16, C17.
 - Carryovers: `tr-43`, `tr-66`, `bind-chain-schemes`, `aud-prod`, `aud-s1`, `aud-s2`, `aud-s3`, `aud-s5`, `cat-C1`,
-  `cat-C2`, `cat-C4`, `cat-C13`, `cat-C16`, `cat-C17`, `mem-escape-checked`, `mem-ct-spaces`, `x-shellcheck`.
+  `cat-C2`, `cat-C4`, `cat-C13`, `cat-C16`, `cat-C17`, `mem-escape-checked`, `mem-ct-spaces`, `x-shellcheck`, `req-12`.
 
 ### t1: toolchain upgrade procedure (design only)
 
@@ -200,7 +200,7 @@ Each is its own sub-phase with a plan, after 9c (Phase 9 spec `:270-276`).
 - F6 (acceptance gate skips non-`Result` error paths): phase 9c, row `aud-F6`.
 - F7 (literal-code closes invisible): phase 9c (H3Server's in 9b or 9c), row `aud-F7`.
 - F8 (no end-to-end statement): phase 11, row `aud-F8`.
-- F9 (requirements rows marked done): 9r3 Task 6, row `aud-F9`.
+- F9 (requirements rows marked done): 9r3 Task 6, row `aud-F9` (closed: the Status column and `scripts/requirements.sh`); the rows still open are `req-*` rows of their owner phases.
 - F10 (the DoS goal has no phase): phase 10a for admission and bounds, phase 12 for logging, CI, the handler API and
   the async shell; row `aud-F10` (closed), each item a row owned by 10a or 12.
 - F11 (phase order): decided by the owner; the order column above follows it. No row.
