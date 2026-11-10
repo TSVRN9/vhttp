@@ -62,6 +62,9 @@ python3 -I "$root/tools/citations.py" closes "$root" "$root/tools/mutants.tsv" |
 # evidence resolves, no merged phase owns an open row, TRUSTED.md removal cells name a phase or never (reason), no tracked
 # evidence cites an untracked path; rows are closed, never deleted.
 "$root/scripts/carryovers.sh" "$root" || exit 1
+# Requirements status (C1, scripts/requirements.sh): every docs/requirements.md row has a Status; a ticked row is proved:
+# by a verified fn with an ensures, tested-only rows are open work with an owner phase.
+"$root/scripts/requirements.sh" "$root" || exit 1
 # Script hygiene: every scripts/*.sh has set -eu and pipefail.
 "$root/scripts/lint-scripts.sh" || exit 1
 # Gate demos: each cheap gate rejects its canned bad input.
