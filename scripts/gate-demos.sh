@@ -5,7 +5,7 @@ set -o pipefail
 # tools/gate-demos/ with one change applied) and must exit non-zero with its message; every fixture
 # first passes unchanged, so a demo cannot fail for the wrong reason. Covers lint-scripts,
 # check-quotes, the citation gate, the RFC-quantity gate (its git demos in throwaway repos), acceptance (many bad changes, including real-git runs), escape-gate (three), the rlimit gate and the mutant registry (scripts/mutants.sh; its run demos call Verus
-# on the fixture crate), the declassify and deps gates, ct-check's report reader (ct-report.sh), ct-binary (against its real build) and the test gate. Takes a few seconds, plus about a minute the first time vstd builds in target/mutants-demo.
+# on the fixture crate), the declassify and deps gates, ct-check's report reader (ct-report.sh), ct-binary (against its real build), the test gate, the carryover gate and the requirements status gate (throwaway repos). Takes a few seconds, plus about a minute the first time vstd builds in target/mutants-demo.
 root=$(cd "$(dirname "$0")/.." && pwd)
 fx=$root/tools/gate-demos
 tmp=$(mktemp -d)
@@ -274,7 +274,8 @@ printf 'assume_specification[ f ](x: u8);\n' >> "$tmp/escape/crates/demo/src/lib
 expect_fail "escape-gate: assume_specification" "unaccounted escape" esc
 
 # rlimit gate (tools/rl.py --gate): a quic fn at 8,000,001; a FAIL row; empty and rowless logs; a missing log; two JSON objects.
-rl() { python3 -I "$root/tools/rl.py" --gate quic --max 8000000 "$tmp/rl.json"; }
+pin=$root/tools/verus-pin.txt
+rl() { python3 -I "$root/tools/rl.py" --gate quic --pin "$pin" --max 8000000 "$tmp/rl.json"; }
 fresh rlimit; cp "$tmp/rlimit/quic.json" "$tmp/rl.json"
 expect_pass "rlimit-gate" rl
 sed -i 's/"rlimit": 8000000/"rlimit": 8000001/' "$tmp/rl.json"
@@ -299,6 +300,66 @@ cat "$tmp/rlimit/quic.json" "$tmp/rlimit/quic.json" > "$tmp/rl.json"
 expect_pass "rlimit-gate: two clean result objects (a dependency built in the run)" rl
 { cat "$tmp/rlimit/quic.json"; sed 's/"rlimit": 120000, "success": true/"rlimit": 120000, "success": false/' "$tmp/rlimit/quic.json"; } > "$tmp/rl.json"
 expect_fail "rlimit-gate: FAIL row in the second object" "FAIL row" rl
+
+# F5: the log must come from the pinned Verus and a whole-crate run; the pin file must exist and parse.
+cp "$tmp/rlimit/quic.json" "$tmp/rl.json"; sed -i 's/"version": "0.2026.10.04.426d8b0"/"version": "0.2026.10.05.0000000"/' "$tmp/rl.json"
+expect_fail "rlimit-gate: wrong Verus version" "verus.version is '0.2026.10.05.0000000'" rl
+cp "$tmp/rlimit/quic.json" "$tmp/rl.json"; sed -i 's/"commit": "426d8b01/"commit": "000000001/' "$tmp/rl.json"
+expect_fail "rlimit-gate: wrong Verus commit" "verus.commit is" rl
+cp "$tmp/rlimit/quic.json" "$tmp/rl.json"; sed -i 's/"toolchain": "1.98.1-/"toolchain": "1.98.0-/' "$tmp/rl.json"
+expect_fail "rlimit-gate: wrong toolchain" "verus.toolchain is" rl
+cp "$tmp/rlimit/quic.json" "$tmp/rl.json"; sed -i 's/"is-verifying-entire-crate": true/"is-verifying-entire-crate": false/' "$tmp/rl.json"
+expect_fail "rlimit-gate: partial run" "is-verifying-entire-crate is not true" rl
+cp "$tmp/rlimit/quic.json" "$tmp/rl.json"; sed -i 's/"toolchain": "1.98.1-/"toolchain": "1.98.10-/' "$tmp/rl.json"
+expect_fail "rlimit-gate: toolchain prefix without the dash" "verus.toolchain is" rl
+sed 's/^{"verus": {[^}]*}, /{/' "$tmp/rlimit/quic.json" > "$tmp/rl.json"
+expect_fail "rlimit-gate: no verus object" "no verus object" rl
+cp "$tmp/rlimit/quic.json" "$tmp/rl.json"; pin=$tmp/no-such-pin
+expect_fail "rlimit-gate: missing pin file" "cannot read the pin file" rl
+printf 'version 0.2026.10.04.426d8b0\n' > "$tmp/short-pin"; pin=$tmp/short-pin
+expect_fail "rlimit-gate: pin file without commit and toolchain" "lacks a version, commit or toolchain" rl
+pin=$root/tools/verus-pin.txt
+expect_fail "rlimit-gate: no --pin" "no --pin FILE given" python3 -I "$root/tools/rl.py" --gate quic "$tmp/rl.json"
+
+# clean-tree.sh (F5): an untracked file, a modified tracked file and a non-repo dir fail; a clean repo passes.
+ct() { "$root/scripts/clean-tree.sh" "$tmp/ctree"; }
+rm -rf "${tmp:?}/ctree"; mkdir "$tmp/ctree"; git -C "$tmp/ctree" init -q -b main; echo a > "$tmp/ctree/f"
+git -C "$tmp/ctree" add f; gitc ctree commit -qm base
+expect_pass "clean-tree" ct
+echo b > "$tmp/ctree/new"
+expect_fail "clean-tree: untracked file" "clean-tree: tree dirty (1 paths)" ct
+rm "$tmp/ctree/new"; echo c >> "$tmp/ctree/f"
+expect_fail "clean-tree: modified tracked file" "clean-tree: tree dirty (1 paths)" ct
+rm -rf "${tmp:?}/ctree"; mkdir "$tmp/ctree"
+expect_fail "clean-tree: not a repo" "clean-tree: git status failed" ct
+
+# clean-tree.sh with a recorded HEAD (verify.sh's end-of-run check): a commit mid-run and an edit mid-run fail.
+rm -rf "${tmp:?}/ctree"; mkdir "$tmp/ctree"; git -C "$tmp/ctree" init -q -b main; echo a > "$tmp/ctree/f"
+git -C "$tmp/ctree" add f; gitc ctree commit -qm base
+h0=$(git -C "$tmp/ctree" rev-parse HEAD)
+cth() { "$root/scripts/clean-tree.sh" "$tmp/ctree" "$h0"; }
+expect_pass "clean-tree: HEAD unchanged" cth
+gitc ctree commit -q --allow-empty -m moved
+expect_fail "clean-tree: HEAD moved during the run" "clean-tree: HEAD moved during the run" cth
+h0=$(git -C "$tmp/ctree" rev-parse HEAD); echo c >> "$tmp/ctree/f"
+expect_fail "clean-tree: tree dirtied during the run" "clean-tree: tree dirty (1 paths)" cth
+
+# verify.sh's first steps (before any Verus step): a dirty tree, a Cargo.lock cargo would rewrite, cargo not on PATH.
+vrepo() {  # vrepo <dir>: scripts, the pin and a one-crate workspace with its lock, committed
+    rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/tools" "$tmp/$1/src"
+    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/verus-pin.txt" "$tmp/$1/tools/"
+    printf '[package]\nname = "d"\nversion = "0.1.0"\nedition = "2021"\n' > "$tmp/$1/Cargo.toml"; : > "$tmp/$1/src/lib.rs"
+    (cd "$tmp/$1" && cargo metadata --format-version 1 > /dev/null 2>&1) || die "vrepo: cargo metadata failed on the fixture"
+    git -C "$tmp/$1" init -q -b main; git -C "$tmp/$1" add -A; gitc "$1" commit -qm base
+}
+vfy() { "$tmp/$1/scripts/verify.sh"; }
+vrepo v1; echo x > "$tmp/v1/untracked"
+expect_fail "verify.sh: dirty tree stops the run" "clean-tree: tree dirty (1 paths)" vfy v1
+vrepo v2; sed -i 's/version = "0.1.0"/version = "0.2.0"/' "$tmp/v2/Cargo.lock"; gitc v2 commit -qam stale
+expect_fail "verify.sh: a Cargo.lock cargo would rewrite" "verify.sh: cargo metadata --locked failed" vfy v2
+nocargo=$tmp/nocargo; mkdir -p "$nocargo"; for c in git sh sed dirname wc printf; do ln -sf "$(command -v $c)" "$nocargo/$c"; done
+vnc() { env PATH="$nocargo" "$tmp/v2/scripts/verify.sh"; }
+expect_fail "verify.sh: cargo not on PATH" "verify.sh: cargo metadata --locked failed" vnc
 
 # rlimit ceilings ratchet (scripts/rlimit-ceilings.sh, in throwaway git repos like the acceptance.sh ones): an unlisted fn above 8M;
 # a listed fn above its value; a raised value and a new line against history; a quic line; a stale line; a missing file; server with verus!.
@@ -649,14 +710,19 @@ expect_fail "ratchet-walk: a git error (path outside any repo)" "failed" walk w5
 # patches and the loop-invariant kinds have their own fixture (mutants-dep, below). run (real Verus, seconds:
 # MUTANTS_TARGET_DIR keeps vstd built across runs): the killed mutant (with its named test) passes; a mutant that still
 # verifies, a named test that does not FAIL, one that fails unmutated, a misspelt test and a missing fn fail; a dirty
-# crates/ is refused. The verdict on canned Verus output: rlimit, no or two JSON objects, another fn checked, a non-matching
-# error kind. The main gate (every commit at main's tip): passes after a --no-ff merge or a fast-forward with a fresh run file;
-# fails with none (also detached), crates/ or Cargo.toml changed after the run, a fast-forward without a run, main's own
-# crates/ change in the merge, a fail line, a missing or extra id, an edited tsv or patch, or no main; on the branch, check only.
+# crates/ is refused, and so is a Verus other than the pin's or none at all. The verdict on canned Verus output: rlimit, no
+# or two JSON objects, another fn checked, a non-matching error kind, another Verus version or commit, no verus object. The
+# main gate (every commit at main's tip): passes after a --no-ff merge or a fast-forward with a fresh run file, and the fresh
+# run there reproduces it; fails with none (also detached), crates/ or Cargo.toml changed after the run, a fast-forward
+# without a run, main's own crates/ change in the merge, a fail line, a missing or extra id, an edited tsv or patch, a `#`
+# line naming another Verus or none, or no main; on the branch, check only. A run file forged from git alone (audit F4)
+# passes the gate but fails the fresh run. mutants.py same: equal, differing, missing and empty files.
+pin_v=$(sed -n 's/^version //p' "$root/tools/verus-pin.txt"); pin_c=$(sed -n 's/^commit //p' "$root/tools/verus-pin.txt")
+[ -n "$pin_v" ] && [ -n "$pin_c" ] || die "tools/verus-pin.txt lacks a version or commit line"
 export MUTANTS_TARGET_DIR="${MUTANTS_DEMO_TARGET:-$root/target/mutants-demo}"
 mrepo() {  # mrepo <dir>: scripts, tools/mutants.py and the fixture, one commit on main, then branch feat
     rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/tools"
-    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/mutants.py" "$root/tools/acceptance.py" "$tmp/$1/tools/"
+    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/mutants.py" "$root/tools/acceptance.py" "$root/tools/verus-pin.txt" "$tmp/$1/tools/"
     cp -r "$fx/mutants/Cargo.toml" "$fx/mutants/Cargo.lock" "$fx/mutants/crates" "$root/rust-toolchain.toml" "$tmp/$1/"
     cp -r "$fx/mutants/tools/mutants.tsv" "$fx/mutants/tools/mutants" "$tmp/$1/tools/"
     cp "$fx/acceptance/crates/demo/src/lib.rs" "$tmp/$1/crates/demo/src/acc.rs"
@@ -720,6 +786,9 @@ printf 'D-live\tdemo\tacc\tdemo\t-\tpostcondition not satisfied\tgate-demos: n >
 gitc m4 add -A; gitc m4 commit -qm live
 expect_fail "mutants run: a mutant that still verifies" "the mutant still verifies acc::demo" mut m4 run D-live
 [ -z "$(git -C "$tmp/m4" worktree list --porcelain | grep '^worktree .*/mutants-')" ] || die "mutants run: worktree left behind after a failure"
+mkdir -p "$tmp/fakeverus"; printf '#!/bin/sh\necho Verus\necho "  Version: 0.2025.01.01.0000000"\n' > "$tmp/fakeverus/verus"; chmod +x "$tmp/fakeverus/verus"
+expect_fail "mutants run: another Verus on VERUS_HOME" "verus --version names 0.2025.01.01.0000000, tools/verus-pin.txt says $pin_v" env VERUS_HOME="$tmp/fakeverus" "$tmp/m4/scripts/mutants.sh" run
+expect_fail "mutants run: no Verus at all (VERUS_HOME missing, none on PATH)" "verus --version failed" env VERUS_HOME="$tmp/noverus" PATH=/usr/bin:/bin "$tmp/m4/scripts/mutants.sh" run
 mrepo m5
 printf '// dirty\n' >> "$tmp/m5/crates/demo/src/acc.rs"
 expect_fail "mutants run: uncommitted crates/" "uncommitted changes" mut m5 run
@@ -742,7 +811,7 @@ expect_fail "mutants run: a fn name that is not in the module" "D-kill.clean.jso
 # invariant kinds are kills; a dependency patch that breaks dep's own proof is refused, though top's fn fails on it too.
 mdrepo() {  # mdrepo <dir>: as mrepo, with the mutants-dep fixture
     rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/tools"
-    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/mutants.py" "$root/tools/acceptance.py" "$tmp/$1/tools/"
+    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/mutants.py" "$root/tools/acceptance.py" "$root/tools/verus-pin.txt" "$tmp/$1/tools/"
     cp -r "$fx/mutants-dep/Cargo.toml" "$fx/mutants-dep/Cargo.lock" "$fx/mutants-dep/crates" "$root/rust-toolchain.toml" "$tmp/$1/"
     cp -r "$fx/mutants-dep/tools/mutants.tsv" "$fx/mutants-dep/tools/mutants" "$tmp/$1/tools/"
     printf '/.worktrees/\n/target/\n' > "$tmp/$1/.gitignore"
@@ -770,8 +839,8 @@ expect_fail "mutants run: a dependency patch that breaks the dependency's own pr
 v=$tmp/verdict
 vj() {  # vj <errors> <success> [extra fn]: a one-object Verus JSON with demo::acc::demo checked
     x=; [ -z "${3:-}" ] || x=", {\"function\": \"$3\", \"rlimit\": 5, \"success\": true}"
-    printf '{"verification-results": {"encountered-error": false, "encountered-vir-error": false, "verified": %s, "errors": %s, "is-verifying-entire-crate": false}, "times-ms": {"smt": {"smt-run-module-times": [{"function-breakdown": [{"function": "demo::acc::demo", "rlimit": 900, "success": %s}%s]}]}}}\n' \
-        "$((1 - $1))" "$1" "$2" "$x" > "$v.json"
+    printf '{"verus": {"version": "%s", "commit": "%s", "toolchain": "1.98.1-x86_64-unknown-linux-gnu"}, "verification-results": {"encountered-error": false, "encountered-vir-error": false, "verified": %s, "errors": %s, "is-verifying-entire-crate": false}, "times-ms": {"smt": {"smt-run-module-times": [{"function-breakdown": [{"function": "demo::acc::demo", "rlimit": 900, "success": %s}%s]}]}}}\n' \
+        "${VJ_VERSION:-$pin_v}" "${VJ_COMMIT:-$pin_c}" "$((1 - $1))" "$1" "$2" "$x" > "$v.json"
 }
 vlog() { printf 'error: %s\n   --> crates/demo/src/acc.rs:11:9\n    |\n11  |         r is Err ==> allowed_demo_err(n, r->Err_0),\n' "$1" > "$v.log"; }
 killed() { python3 -I "$root/tools/mutants.py" killed "$v" demo acc demo 'postcondition not satisfied.*allowed_demo_err'; }
@@ -789,6 +858,12 @@ vj 1 false demo::acc::other
 expect_fail "mutants verdict: another fn checked too" "want exactly demo::acc::demo" killed
 vj 0 true
 expect_fail "mutants verdict: still verifies" "the mutant still verifies" killed
+VJ_VERSION=0.2025.01.01.0000000 vj 1 false
+expect_fail "mutants verdict: another Verus version" "verus.version is '0.2025.01.01.0000000', the pin says '$pin_v'" killed
+VJ_COMMIT=0000000000000000000000000000000000000000 vj 1 false
+expect_fail "mutants verdict: another Verus commit" "verus.commit is '0000000000000000000000000000000000000000'" killed
+vj 1 false; sed -i 's/"verus": {[^}]*}, //' "$v.json"
+expect_fail "mutants verdict: no verus object" "no verus object" killed
 vj 1 false
 expect_fail "mutants verdict: the unmutated fn fails" "unmutated acc::demo" python3 -I "$root/tools/mutants.py" clean "$v" demo acc demo
 
@@ -801,6 +876,11 @@ fresh_run=$(git -C "$tmp/m3" rev-parse HEAD)
 expect_pass "mutants verify on the branch (check only, no run file needed there)" mut m3 verify
 mmerge m3
 expect_pass "mutants verify: merge --no-ff with a fresh run file" mut m3 verify
+printf '%s\n' "$out" | grep -qxF "mutants: fresh run at main's tip matches the committed run file (1 mutants)" || die "mutants verify at main's tip: no fresh-run line:
+$out"
+[ -z "$(git -C "$tmp/m3" status --porcelain)" ] || die "mutants verify at main's tip: the fresh run changed the tree"
+echo "gate-demos: mutants verify: the fresh run at main's tip reproduces the honest run file and leaves the tree clean"
+expect_fail "mutants verify at main's tip: no Verus (the fresh run cannot run)" "verus --version failed" env VERUS_HOME="$tmp/noverus" PATH=/usr/bin:/bin "$tmp/m3/scripts/mutants.sh" verify
 gitc m3 checkout -q main; gitc m3 reset -q --hard "$mbase"; gitc m3 merge -q --ff-only feat
 expect_pass "mutants verify: fast-forward to a branch tip with a fresh run file" mut m3 verify
 mbranch m3 "$fresh_run"; gitc m3 rm -q tools/mutants-last-run.txt; gitc m3 commit -qm "no run file"; mmerge m3
@@ -830,9 +910,41 @@ mbranch m3 "$fresh_run"; sed -i 's/gate-demos: Err(8)/gate-demos: Err (8)/' "$tm
 expect_fail "mutants verify: tsv changed after the run" "was written for another tools/mutants.tsv" mut m3 verify
 mbranch m3 "$fresh_run"; sed -i 's/^index .*/index 0000000..1111111 100644/' "$tmp/m3/tools/mutants/D-kill.patch"; gitc m3 commit -qam "patch edited"; mmerge m3
 expect_fail "mutants verify: patch edited after the run" "was run with another patch" mut m3 verify
+mbranch m3 "$fresh_run"; sed -i 's/ under Verus [^;]*;/ under Verus 0.2025.01.01.0000000;/' "$tmp/m3/tools/mutants-last-run.txt"; gitc m3 commit -qam "other Verus"; mmerge m3
+expect_fail "mutants verify: a run file naming another Verus" "names Verus 0.2025.01.01.0000000, the pin says $pin_v" mut m3 verify
+mbranch m3 "$fresh_run"; sed -i '/^#/d' "$tmp/m3/tools/mutants-last-run.txt"; gitc m3 commit -qam "no # line"; mmerge m3
+expect_fail "mutants verify: a run file naming no Verus" "names Verus none" mut m3 verify
 gitc m3 checkout -q feat
 gitc m3 branch -m main trunk
 expect_fail "mutants verify: no main" "cannot resolve main" mut m3 verify
+# audit F4: a run file computed from git alone (no mutant run) for a registry with a live mutant passes the gate; the fresh
+# run at main's tip refuses it.
+mrepo m7
+cp "$fx/mutants/live.patch" "$tmp/m7/tools/mutants/D-live.patch"
+printf 'D-live\tdemo\tacc\tdemo\t-\tpostcondition not satisfied\tgate-demos: n > 11 keeps the clause\n' >> "$tmp/m7/tools/mutants.tsv"
+gitc m7 add -A; gitc m7 commit -qm live
+{
+    echo "# tools/mutants-last-run.txt: forged from git on 2026-11-09T00:00Z under Verus $pin_v; verify.sh's main gate reads it"
+    echo "crates $(git -C "$tmp/m7" rev-parse HEAD:crates)"
+    echo "tree $(python3 -I "$tmp/m7/tools/mutants.py" tree "$tmp/m7" HEAD)"
+    echo "tsv $(git -C "$tmp/m7" rev-parse HEAD:tools/mutants.tsv)"
+    for i in $(awk -F'\t' '!/^#/ && NF { print $1 }' "$tmp/m7/tools/mutants.tsv"); do
+        echo "$i pass $(git -C "$tmp/m7" rev-parse "HEAD:tools/mutants/$i.patch")"
+    done
+} > "$tmp/m7/tools/mutants-last-run.txt"
+gitc m7 add -A; gitc m7 commit -qm "forged run file"
+gitc m7 checkout -q main; gitc m7 merge -q --no-ff feat -m merge
+expect_pass "mutants gate: a run file forged from git passes the text gate alone" python3 -I "$tmp/m7/tools/mutants.py" gate "$tmp/m7"
+expect_fail "mutants verify: a forged run file at main's tip (fresh run)" "the mutant still verifies acc::demo" mut m7 verify
+# same: the committed file against a fresh run, `#` lines aside.
+sd=$tmp/same; mkdir -p "$sd"
+printf '# a\ncrates 1\nD-kill pass 2\n' > "$sd/a"; printf '# b\ncrates 1\nD-kill pass 2\n' > "$sd/b"
+expect_pass "mutants same" python3 -I "$root/tools/mutants.py" same "$sd/a" "$sd/b"
+printf '# b\ncrates 1\nD-kill fail 2\n' > "$sd/b"
+expect_fail "mutants same: a differing line" "+D-kill fail 2" python3 -I "$root/tools/mutants.py" same "$sd/a" "$sd/b"
+printf '# only a comment\n' > "$sd/b"
+expect_fail "mutants same: a fresh file with no run lines" "$sd/b has no run lines" python3 -I "$root/tools/mutants.py" same "$sd/a" "$sd/b"
+expect_fail "mutants same: no fresh file" "cannot read" python3 -I "$root/tools/mutants.py" same "$sd/a" "$sd/none"
 
 # declassify gate (scripts/declassify-gate.sh ROOT REPORT GATEDIR): a report site with no TRUSTED.md row; counts that differ; a source
 # line the report lacks; a lost secret label; no report; an empty report; a report without sites.
@@ -861,24 +973,41 @@ grep -v '^declassify ' "$fx/declassify/report.txt" > "$tmp/dg/report.txt"
 expect_fail "declassify-gate: report without sites" "no declassify site in" dg
 expect_fail "declassify-gate: no arguments" "usage: declassify-gate.sh" "$root/scripts/declassify-gate.sh"
 
-# deps gate (scripts/deps-gate.sh ROOT TREEFILE): a canned `cargo tree` with a second dep; no dep; a missing and an empty tree.
-mkdir -p "$tmp/dp"
-dpg() { "$root/scripts/deps-gate.sh" "$root" "$tmp/dp/tree.txt"; }
-cp "$fx/deps/tree.txt" "$tmp/dp/tree.txt"
+# deps gate (scripts/deps-gate.sh ROOT TREEDIR): a fake root with crates crypto and wire and one canned `cargo tree` per crate; an extra
+# dep in one crate, crypto with a second dep, a crate without a line, a line without a crate, empty and missing trees, a failing cargo.
+dpr=$tmp/dp/root; dpt=$tmp/dp/trees
+dpg() { "$root/scripts/deps-gate.sh" "$dpr" "$dpt"; }
+mkdir -p "$dpr/crates/crypto" "$dpr/crates/wire" "$dpr/tools" "$dpt"
+: > "$dpr/crates/crypto/Cargo.toml"; : > "$dpr/crates/wire/Cargo.toml"
+printf 'crypto: vstd\nwire: vest_lib vstd\n' > "$dpr/tools/deps-allow.txt"
+printf 'crypto v0.1.0 (/x/crates/crypto)\nvstd v0.0.0\n' > "$dpt/crypto.txt"
+printf 'wire v0.1.0 (/x/crates/wire)\nvest_lib v0.2.2\nvstd v0.0.0\n' > "$dpt/wire.txt"
 expect_pass "deps-gate" dpg
-printf 'vstd-extra v0.1.0\n' >> "$tmp/dp/tree.txt"
-expect_fail "deps-gate: a second dep" "not exactly vstd" dpg
-printf 'crypto v0.1.0 (/x/crates/crypto)\n' > "$tmp/dp/tree.txt"
-expect_fail "deps-gate: no dep" "not exactly vstd" dpg
-printf 'crypto v0.1.0 (/x/crates/crypto)\nvstd v0.0.0\nvstd v0.0.0\n' > "$tmp/dp/tree.txt"
-expect_fail "deps-gate: vstd listed twice" "not exactly vstd" dpg
-: > "$tmp/dp/tree.txt"
-expect_fail "deps-gate: empty tree" "empty cargo tree output" dpg
-rm "$tmp/dp/tree.txt"
-expect_fail "deps-gate: missing tree" "deps-gate: no $tmp/dp/tree.txt" dpg
+printf 'vstd-extra v0.1.0\n' >> "$dpt/crypto.txt"
+expect_fail "deps-gate: crypto with a second dep" "crate crypto: deps" dpg
+printf 'crypto v0.1.0 (/x/crates/crypto)\nvstd v0.0.0\n' > "$dpt/crypto.txt"
+printf 'libc v0.2.191\n' >> "$dpt/wire.txt"
+expect_fail "deps-gate: an extra dep in another crate" "crate wire: deps" dpg
+printf 'wire v0.1.0 (/x/crates/wire)\nvest_lib v0.2.2\nvstd v0.0.0\nvstd v0.0.0\n' > "$dpt/wire.txt"
+expect_fail "deps-gate: vstd listed twice" "crate wire: deps" dpg
+printf 'wire v0.1.0 (/x/crates/wire)\nvstd v0.0.0\n' > "$dpt/wire.txt"
+expect_fail "deps-gate: a dep removed" "crate wire: deps" dpg
+printf 'wire v0.1.0 (/x/crates/wire)\nvest_lib v0.2.2\nvstd v0.0.0\n' > "$dpt/wire.txt"
+printf 'crypto: vstd\n' > "$dpr/tools/deps-allow.txt"
+expect_fail "deps-gate: crate without a line" "crate wire has no line" dpg
+printf 'crypto: vstd\nwire: vest_lib vstd\ngone: vstd\n' > "$dpr/tools/deps-allow.txt"
+expect_fail "deps-gate: line for a removed crate" "lists gone, which is not a crate" dpg
+printf 'crypto: vstd\nwire: vest_lib vstd\n' > "$dpr/tools/deps-allow.txt"
+: > "$dpt/wire.txt"
+expect_fail "deps-gate: empty tree" "empty cargo tree output for wire" dpg
+rm "$dpt/wire.txt"
+expect_fail "deps-gate: missing tree" "deps-gate: no $dpt/wire.txt" dpg
+: > "$dpr/tools/deps-allow.txt"
+expect_fail "deps-gate: empty allow-list" "no or empty" dpg
 mkdir -p "$tmp/dp/bin"
+printf 'crypto: vstd\nwire: vest_lib vstd\n' > "$dpr/tools/deps-allow.txt"
 printf '#!/bin/sh\nexit 1\n' > "$tmp/dp/bin/cargo"; chmod +x "$tmp/dp/bin/cargo"
-expect_fail "deps-gate: cargo tree fails" "cargo tree failed" env PATH="$tmp/dp/bin:$PATH" "$root/scripts/deps-gate.sh" "$root"
+expect_fail "deps-gate: cargo tree fails" "cargo tree failed for crypto" env PATH="$tmp/dp/bin:$PATH" "$root/scripts/deps-gate.sh" "$dpr"
 
 # ct-check's crypto report reader (scripts/ct-report.sh REPORT MANIFEST LABELS OUTDIR): a canned report with a rejected root; a root
 # with no verdict; changed labels; a missing and an empty report.
@@ -941,17 +1070,225 @@ printf '#[test]\nfn t() {}\n' > "$tmp/tw/crates/a/src/lib.rs"
 printf '#[test]\nfn t() {}\n' > "$tmp/tw/crates/b/src/lib.rs"
 printf '#[test]\nfn t() {}\n' > "$tmp/tw/crates/server/src/lib.rs"
 (cd "$tmp/tw" && cargo generate-lockfile --offline -q) || die "test-gate demo: cannot lock the workspace fixture"
+mkdir -p "$tmp/tw/tools"; printf 'a 1\nb 1\nserver 1\n' > "$tmp/tw/tools/test-floor.txt"
 expect_pass "test-gate: --workspace, every member passes a test" tw
+printf 'a 2\nb 1\nserver 1\n' > "$tmp/tw/tools/test-floor.txt"
+expect_fail "test-gate: --workspace, a crate below its floor" "crate a passed 1 tests, below its floor 2" tw
+printf 'a 1\nserver 1\n' > "$tmp/tw/tools/test-floor.txt"
+expect_fail "test-gate: --workspace, a crate with tests and no floor line" "crate b has tests but no line in tools/test-floor.txt" tw
+printf 'a 1\nb 1\nserver 1\nz 1\n' > "$tmp/tw/tools/test-floor.txt"
+expect_fail "test-gate: --workspace, a floor line naming no crate" "names z, which is not a crate" tw
+: > "$tmp/tw/tools/test-floor.txt"
+expect_fail "test-gate: --workspace, an empty floor file" "is missing or empty" tw
+rm "$tmp/tw/tools/test-floor.txt"
+expect_fail "test-gate: --workspace, no floor file" "is missing or empty" tw
+printf 'a 1\nb 1\nserver 1\n' > "$tmp/tw/tools/test-floor.txt"
 printf '#[test]\n#[ignore]\nfn t() {}\n' > "$tmp/tw/crates/b/src/lib.rs"
 expect_fail "test-gate: --workspace, a member whose tests are all ignored" "crate b has tests but passed no test" tw
 # the required crate (server) with no tests at all
 rm -rf "${tmp:?}/tw/crates/b"
 printf 'pub fn f() {}\n' > "$tmp/tw/crates/server/src/lib.rs"
+printf 'a 1\nserver 1\n' > "$tmp/tw/tools/test-floor.txt"
 printf '[workspace]\nmembers = ["crates/a", "crates/server"]\nresolver = "2"\n' > "$tmp/tw/Cargo.toml"
 (cd "$tmp/tw" && cargo generate-lockfile --offline -q) || die "test-gate demo: cannot lock the workspace fixture"
 expect_fail "test-gate: --workspace, the server crate with its tests deleted" "crate server has tests but passed no test" tw
 rm -rf "$tmp/tw/crates/server"; printf '[workspace]\nmembers = ["crates/a"]\nresolver = "2"\n' > "$tmp/tw/Cargo.toml"
 (cd "$tmp/tw" && cargo generate-lockfile --offline -q) || die "test-gate demo: cannot lock the workspace fixture"
 expect_fail "test-gate: --workspace, the server crate missing" "required-tests crate server is missing" tw
+
+# test floor ratchet (scripts/test-floor.sh, throwaway git repos): lowered or removed against the merge-base; growth then a drop on main.
+tfrepo() {  # tfrepo <dir> <floor text>: one commit on main with the floor file, then branch feat
+    rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/tools"
+    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/ratchet_walk.py" "$tmp/$1/tools/"
+    printf '%s\n' "$2" > "$tmp/$1/tools/test-floor.txt"
+    git -C "$tmp/$1" init -q -b main
+    git -C "$tmp/$1" add -A
+    gitc "$1" commit -qm base
+}
+tfloor() { "$tmp/$1/scripts/test-floor.sh" "$tmp/$1"; }
+tfrepo tf1 "a 5
+b 3"
+gitc tf1 checkout -qb feat
+gitc tf1 commit -q --allow-empty -m feat
+expect_pass "test-floor: unchanged on a branch" tfloor tf1
+printf 'a 6\nb 3\n' > "$tmp/tf1/tools/test-floor.txt"
+expect_pass "test-floor: a raised value on a branch" tfloor tf1
+printf 'a 4\nb 3\n' > "$tmp/tf1/tools/test-floor.txt"
+expect_fail "test-floor: a lowered value against the merge-base" "a at 4, below its highest earlier value 5" tfloor tf1
+printf 'a 5\n' > "$tmp/tf1/tools/test-floor.txt"
+expect_fail "test-floor: a removed line against the merge-base" "b was removed" tfloor tf1
+rm "$tmp/tf1/tools/test-floor.txt"
+expect_fail "test-floor: a missing file against the merge-base" "cannot read tools/test-floor.txt" tfloor tf1
+tfrepo tf2 "a 5"
+expect_pass "test-floor: main, one commit" tfloor tf2
+printf 'a 6\n' > "$tmp/tf2/tools/test-floor.txt"; gitc tf2 commit -qam grow
+expect_pass "test-floor: main, growth" tfloor tf2
+printf 'a 4\n' > "$tmp/tf2/tools/test-floor.txt"; gitc tf2 commit -qam drop
+expect_fail "test-floor: main, growth then a drop" "a at 4, below its highest earlier value 6" tfloor tf2
+tfrepo tf3 "a 5"
+rm -rf "$tmp/tf3/.git"
+expect_fail "test-floor: not a git checkout" "not a git checkout" tfloor tf3
+
+# interop.sh with a fake curl and a fake cargo on PATH (no network, no client): a present client whose test fails; a cargo that
+# ran no test; curl without HTTP3 and no quiche; a present curl that passes; a root with no interop.rs.
+ifake=$tmp/ifake; mkdir -p "$ifake/bin" "$ifake/repo/crates/server/tests"
+git -C "$ifake/repo" init -q -b main; : > "$ifake/repo/crates/server/tests/interop.rs"
+printf '#!/bin/sh\necho "curl 9 HTTP3"\n' > "$ifake/bin/curl"
+printf '#!/bin/sh\nfor a; do last=$a; done\ncase $FAKE in ok) echo "test $last ... ok";; fail) echo "test $last ... FAILED"; exit 101;; none) echo "running 0 tests";; esac\n' > "$ifake/bin/cargo"
+chmod +x "$ifake/bin/curl" "$ifake/bin/cargo"
+iop() { env -u QUICHE_CLIENT PATH="$ifake/bin:$PATH" FAKE=$1 "$root/scripts/interop.sh" "$ifake/repo"; }
+expect_pass "interop: a present curl whose tests pass" iop ok
+expect_fail "interop: a present curl whose test fails" "curl_fetches failed" iop fail
+expect_fail "interop: a present curl whose test printed neither ok nor FAILED" "curl_fetches did not print ok" iop none
+printf '#!/bin/sh\necho "curl 9"\n' > "$ifake/bin/curl"
+out=$(iop fail 2>&1) || die "interop: curl without HTTP3 failed:
+$out"
+[ "$out" = "interop: curl skipped (no HTTP3), quiche skipped (no client)" ] || die "interop: unexpected skip line: $out"
+echo "gate-demos: interop: no HTTP3 and no quiche passes and says skipped"
+rm "$ifake/repo/crates/server/tests/interop.rs"
+expect_fail "interop: no interop.rs" "no crates/server/tests/interop.rs" iop ok
+
+# carryovers.sh (C3; F3, F18, F19), on throwaway git repos of tools/gate-demos/carryovers: a bad row, owner, evidence or
+# TRUSTED removal cell, an untracked-evidence citation, a deleted row (main across two commits; a branch), missing inputs.
+corepo() {  # corepo <dir>: the fixture on main, its MERGESHA placeholders set to the first commit
+    rm -rf "${tmp:?}/$1"; cp -r "$fx/carryovers" "$tmp/$1"
+    git -C "$tmp/$1" init -q -b main; git -C "$tmp/$1" add -A; gitc "$1" commit -qm base
+    sed -i "s/MERGESHA/$(git -C "$tmp/$1" rev-parse --short=12 HEAD)/" "$tmp/$1/docs/roadmap.md"; gitc "$1" commit -qam anchor
+}
+co() { "$root/scripts/carryovers.sh" "$tmp/$1"; }
+cot=docs/carryovers.tsv
+corepo co1
+expect_pass "carryovers" co co1
+sed -i 's/fn:good_fn/fn:no_such_fn/' "$tmp/co1/$cot"
+expect_fail "carryovers: a closed row whose fn: does not resolve" 'no `fn no_such_fn` in a tracked .rs file' co co1
+corepo co1; sed -i 's/fn:good_fn/fn:good/' "$tmp/co1/$cot"
+expect_fail "carryovers: fn: matches a whole name only" 'no `fn good` in a tracked .rs file' co co1
+corepo co1; sed -i 's/doc:TRUSTED.md/doc:untracked.md/' "$tmp/co1/$cot"; : > "$tmp/co1/untracked.md"
+expect_fail "carryovers: a closed row whose doc: is not tracked" "evidence doc:untracked.md is not a tracked path" co co1
+corepo co1; sed -i 's/doc:TRUSTED.md/commit:deadbeef/' "$tmp/co1/$cot"
+expect_fail "carryovers: a closed row whose commit: does not exist" "evidence commit:deadbeef is not a commit" co co1
+corepo co1; sed -i 's/^a\t2\t/a\t9\t/' "$tmp/co1/$cot"
+expect_fail "carryovers: an owner not in the roadmap" "owner 9 is not a phase of docs/roadmap.md" co co1
+corepo co1; sed -i 's/| 2 | second | in progress |/| 2 | second | merged |/' "$tmp/co1/docs/roadmap.md"
+expect_fail "carryovers: an open row owned by a merged phase" "a is open but its owner 2 is merged" co co1
+corepo co1; sed -i 's/^a\t2\topen\t-/a\t2\tclosed\tdoc:TRUSTED.md/' "$tmp/co1/$cot"; sed -i 's/| 2 | second | in progress |/| 2 | second | merged |/' "$tmp/co1/docs/roadmap.md"
+expect_fail "carryovers: a TRUSTED row naming a merged phase" "the removal cell names 2, which is merged" co co1
+corepo co1; sed -n 2p "$tmp/co1/$cot" >> "$tmp/co1/$cot"
+expect_fail "carryovers: a duplicate id" "duplicate id a" co co1
+corepo co1; printf 'e\t2\topen\t-\tdemo:5\n' >> "$tmp/co1/$cot"
+expect_fail "carryovers: a row with 5 columns" "expected 6 non-empty tab-separated columns, got 5" co co1
+corepo co1; sed -i 's/| 2 (the open phase) |/|  |/' "$tmp/co1/TRUSTED.md"
+expect_fail "carryovers: a TRUSTED row with an empty removal cell" "the removal cell '' starts with neither roadmap ids nor" co co1
+for cell in 'never' 'Phase 2' 'never ()'; do
+    corepo co1; sed -i "s/| 2 (the open phase) |/| $cell |/" "$tmp/co1/TRUSTED.md"
+    expect_fail "carryovers: a TRUSTED removal cell '$cell'" "the removal cell '$cell' starts with neither" co co1
+done
+corepo co1; printf -- '- **Evidence:** the run log `.worktrees/vt-x-evidence/log`.\n' >> "$tmp/co1/docs/rca/a.md"
+expect_fail "carryovers: an RCA Evidence line citing a worktree evidence log" "docs/rca/a.md:4 cites '.worktrees/', an untracked path" co co1
+corepo co1; printf -- '- **Evidence**: see vt-8d-evidence/t2/probe.txt.\n' >> "$tmp/co1/docs/rca/a.md"
+expect_fail "carryovers: the other Evidence spelling, a bare evidence dir name" "docs/rca/a.md:4 cites 'vt-8d-evidence'" co co1
+corepo co1; printf '/// steps from vt-8d-evidence/t2/core-steps.txt\n' >> "$tmp/co1/crates/a/src/lib.rs"
+expect_fail "carryovers: a crates .rs comment citing an evidence dir" "crates/a/src/lib.rs:5 cites 'vt-8d-evidence'" co co1
+corepo co1; sed -i '/^a\t/d' "$tmp/co1/$cot"; gitc co1 commit -qam "delete row a"
+expect_fail "carryovers: main, a row deleted across two commits" "a was removed" co co1
+corepo co1; gitc co1 checkout -qb feat; gitc co1 commit -q --allow-empty -m feat; sed -i '/^a\t/d' "$tmp/co1/$cot"
+expect_fail "carryovers: a branch deleting a row of the merge-base" "a was removed (a floor line once present stays) against the merge-base" co co1
+corepo co1; sed -i 's/^a\t2\topen\t-/a\t2\tclosed\tdoc:TRUSTED.md/' "$tmp/co1/$cot"; gitc co1 commit -qam "close row a"
+expect_pass "carryovers: main, a row closed rather than deleted" co co1
+corepo co1; : > "$tmp/co1/$cot"
+expect_fail "carryovers: an empty tsv" "the first line must be the header" co co1
+corepo co1; sed -i '2,$d' "$tmp/co1/$cot"
+expect_fail "carryovers: a tsv with a header only" "docs/carryovers.tsv has no rows" co co1
+corepo co1; rm "$tmp/co1/docs/roadmap.md"
+expect_fail "carryovers: a missing roadmap file" "cannot read docs/roadmap.md" co co1
+corepo co1; sed -i '/^| [12] /d' "$tmp/co1/docs/roadmap.md"
+expect_fail "carryovers: a roadmap table with no rows" "the phase table has no rows" co co1
+corepo co1; rm "$tmp/co1/TRUSTED.md"
+expect_fail "carryovers: a missing TRUSTED.md" "cannot read TRUSTED.md" co co1
+corepo co1; rm -rf "$tmp/co1/.git"
+expect_fail "carryovers: not a git checkout" "is not a git checkout" co co1
+corepo co1; git -C "$tmp/co1" branch -qm main trunk
+expect_fail "carryovers: no main branch to compare with" "cannot resolve the merge-base of HEAD and main" co co1
+# fix round 1: merged is anchored (I1), evidence only from crates/ and tools/ct-fixtures and test: needs #[test] (I2),
+# every leading TRUSTED id (M2), Evidence continuation lines (M9).
+corepo co1; sed -i 's/| 1 | first | merged |/| 1 | first | in progress |/' "$tmp/co1/docs/roadmap.md"; gitc co1 commit -qam unmerge
+expect_fail "carryovers: main, a merged phase un-merged across two commits" "phase 1 is no longer merged (a phase once merged stays merged)" co co1
+corepo co1; gitc co1 checkout -qb feat; gitc co1 commit -q --allow-empty -m feat
+sed -i 's/| 1 | first | merged |/| 1 | first | unplanned |/' "$tmp/co1/docs/roadmap.md"
+expect_fail "carryovers: a branch un-merging a phase of the merge-base" "phase 1 is no longer merged (a phase once merged stays merged) against the merge-base" co co1
+corepo co1; sed -i 's/| first | merged | - | [0-9a-f]* |/| first | merged | - | deadbeef0 |/' "$tmp/co1/docs/roadmap.md"
+expect_fail "carryovers: a merged phase naming no commit" "phase 1 is merged but its plan / merge cell names no commit that is an ancestor of HEAD" co co1
+corepo co1; gitc co1 checkout -qb side; gitc co1 commit -q --allow-empty -m side; side=$(git -C "$tmp/co1" rev-parse --short=12 HEAD); gitc co1 checkout -q main
+sed -i "s/| first | merged | - | [0-9a-f]* |/| first | merged | - | $side |/" "$tmp/co1/docs/roadmap.md"
+expect_fail "carryovers: a merged phase naming a commit off HEAD's history" "phase 1 is merged but its plan / merge cell names no commit that is an ancestor of HEAD" co co1
+corepo co1; gitc co1 checkout -qb phase-2; gitc co1 commit -q --allow-empty -m two; gitc co1 checkout -q main; gitc co1 merge -q --no-ff -m "Merge phase-2: demo" phase-2
+expect_fail "carryovers: a Merge phase-2 commit while 2 is in progress" "merges phase-2, but docs/roadmap.md says 2 is in progress" co co1
+corepo co1; gitc co1 checkout -qb phase-zz; gitc co1 commit -q --allow-empty -m zz; gitc co1 checkout -q main; gitc co1 merge -q --no-ff -m "Merge branch 'phase-zz'" phase-zz
+expect_fail "carryovers: a merge of a branch that names no phase" "merges phase-zz, which names no phase of docs/roadmap.md" co co1
+corepo co1; mkdir -p "$tmp/co1/tools/gate-demos/x"; printf 'fn only_fixture() {}\n' > "$tmp/co1/tools/gate-demos/x/lib.rs"; git -C "$tmp/co1" add -A
+sed -i 's/doc:TRUSTED.md/fn:only_fixture/' "$tmp/co1/$cot"
+expect_fail "carryovers: fn: evidence found only in a gate-demos fixture" 'no `fn only_fixture` in a tracked .rs file under crates/' co co1
+corepo co1; sed -i 's/test:good_test/test:good_fn/' "$tmp/co1/$cot"
+expect_fail "carryovers: a non-test fn cited as test:" 'no #[test] `fn good_fn`' co co1
+corepo co1; sed -i 's/| 2 (the open phase) |/| 2, 9zz (two ids) |/' "$tmp/co1/TRUSTED.md"
+expect_fail "carryovers: a TRUSTED cell whose second id is not a phase" "starts with neither roadmap ids nor" co co1
+corepo co1; printf -- '- **Evidence:** the first line,\n  and a continuation naming .worktrees/x/log.\n' >> "$tmp/co1/docs/rca/a.md"
+expect_fail "carryovers: an Evidence continuation line citing a worktree" "docs/rca/a.md:5 cites '.worktrees/'" co co1
+
+# requirements.sh (C1; F9), on throwaway git repos of tools/gate-demos/requirements: a ticked row that is not proved:,
+# names that do not resolve, a row without a Status, open: ids that are not open phases, a bad false key, missing inputs.
+rqrepo() {  # rqrepo <dir>: the fixture as a git repo
+    rm -rf "${tmp:?}/$1"; cp -r "$fx/requirements" "$tmp/$1"
+    git -C "$tmp/$1" init -q -b main; git -C "$tmp/$1" add -A; gitc "$1" commit -qm base
+}
+rq() { "$root/scripts/requirements.sh" "$tmp/$1"; }
+rqm=docs/requirements.md
+rqrepo rq1
+expect_pass "requirements" rq rq1
+sed -i 's/| ✅ done | proved:good_fn |/| ✅ done | tested:good_test; open:2 |/' "$tmp/rq1/$rqm"
+expect_fail "requirements: a ticked row with tested: only" "ticked, but its Status 'tested:good_test; open:2' is not proved: alone" rq rq1
+rqrepo rq1; sed -i 's/| ✅ done | proved:good_fn |/| ✅ done | proved:no_such_fn |/' "$tmp/rq1/$rqm"
+expect_fail "requirements: a proved: fn that does not exist" 'no `fn no_such_fn` in a tracked .rs file' rq rq1
+rqrepo rq1; sed -i 's/| ✅ done | proved:good_fn |/| ✅ done | proved:no_ens |/' "$tmp/rq1/$rqm"
+expect_fail "requirements: a proved: fn with no ensures" 'proved no_ens: no fn `no_ens` with an ensures' rq rq1
+rqrepo rq1; sed -i 's/| tested:good_test; open:2 |/| tested:good_fn; open:2 |/' "$tmp/rq1/$rqm"
+expect_fail "requirements: a tested: name that is not a #[test]" 'no #[test] `fn good_fn`' rq rq1
+rqrepo rq1; sed -i 's/| ✅ done | proved:good_fn |/| ✅ done |/' "$tmp/rq1/$rqm"
+expect_fail "requirements: a row with no status" "a row without 7 cells and a Status" rq rq1
+rqrepo rq1; sed -i 's/| detection proved | proved:good_fn; open:2 |/| detection proved | proved:good_fn; open:9 |/' "$tmp/rq1/$rqm"
+expect_fail "requirements: an open: id not in the roadmap" "open:9 is not a phase of docs/roadmap.md" rq rq1
+rqrepo rq1; sed -i 's/| detection proved | proved:good_fn; open:2 |/| detection proved | proved:good_fn; open:1 |/' "$tmp/rq1/$rqm"
+expect_fail "requirements: an open: id of a merged phase" "open:1 names a merged phase" rq rq1
+rqrepo rq1; sed -i 's/| detection proved | proved:good_fn; open:2 |/| detection proved | proved:good_fn; open:3 |/' "$tmp/rq1/$rqm"
+expect_fail "requirements: an open: phase with no req- carryover row" "open:3 has no open req-3 row" rq rq1
+rqrepo rq1; sed -i 's/| detection proved | proved:good_fn; open:2 |/| detection proved | proved:good_fn; open:3 |/' "$tmp/rq1/$rqm"
+printf 'r3\t3\topen\t-\tdocs/requirements.md:1\ta row citing requirements.md that is not req-3\n' >> "$tmp/rq1/docs/carryovers.tsv"
+expect_fail "requirements: an open: phase whose only row is not req-" "open:3 has no open req-3 row" rq rq1
+rqrepo rq1; sed -i 's/| tested:good_test; open:2 |/| tested:good_test |/' "$tmp/rq1/$rqm"
+expect_fail "requirements: tested: without an open: owner" "tested: without open:" rq rq1
+rqrepo rq1; sed -i 's/false (t2)/false (req-2)/' "$tmp/rq1/$rqm"
+expect_fail "requirements: a false key that is not a TRUSTED.md carryover" "false (req-2): not an open docs/carryovers.tsv row whose source cites TRUSTED.md" rq rq1
+rqrepo rq1; sed -i 's/| false (t2); open:2 |/| false (t2) |/' "$tmp/rq1/$rqm"
+expect_fail "requirements: a false row without its owner" "false (t2) needs open:2" rq rq1
+rqrepo rq1; sed -i 's/| N\/A (client-only) | | n\/a |/| N\/A (client-only) | | open:2 |/' "$tmp/rq1/$rqm"
+expect_fail "requirements: an N/A row whose Status is not n/a" "needs Status n/a" rq rq1
+rqrepo rq1; sed -i 's/ Notes | Status |/ Notes |/' "$tmp/rq1/$rqm"
+expect_fail "requirements: a table without the Status column" "a table header that is not" rq rq1
+rqrepo rq1; sed -i '/^|/d; /^## RFC/d' "$tmp/rq1/$rqm"
+expect_fail "requirements: no table rows" 'no `| § | ...` table rows' rq rq1
+rqrepo rq1; rm "$tmp/rq1/$rqm"
+expect_fail "requirements: a missing requirements.md" "cannot read docs/requirements.md" rq rq1
+rqrepo rq1; rm "$tmp/rq1/docs/carryovers.tsv"
+expect_fail "requirements: a missing carryovers.tsv" "cannot read docs/carryovers.tsv" rq rq1
+rqrepo rq1; rm "$tmp/rq1/docs/roadmap.md"
+expect_fail "requirements: a missing roadmap" "cannot read docs/roadmap.md" rq rq1
+rqrepo rq1; printf '\n| Sec | Topic | #MUST/MUST NOT | Server applies? | Phase | Notes | Status |\n|---|---|---|---|---|---|---|\n| 7 | hidden | 1 | yes | 2 | ✅ done | tested:good_test |\n' >> "$tmp/rq1/$rqm"
+expect_fail "requirements: a second table with a | Sec | header and a ticked row" "a table row outside a requirements table carries a tick or a Status item" rq rq1
+rqrepo rq1; sed -i 's/^| § | Topic/| Sec | Topic/' "$tmp/rq1/$rqm"
+expect_fail "requirements: an RFC table whose header is renamed" "a table header that is not" rq rq1
+rqrepo rq1; printf '\n## RFC 2\n\nNo table here.\n' >> "$tmp/rq1/$rqm"
+expect_fail "requirements: an RFC section without its table" "'## RFC 2' has 0 tables with the Status header, not 1" rq rq1
+rqrepo rq1; rm -rf "$tmp/rq1/.git"
+expect_fail "requirements: not a git checkout (git did not run)" "git ls-files -z failed" rq rq1
 
 echo "gate-demos: $n demos, all fail as expected"

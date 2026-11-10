@@ -1,7 +1,6 @@
 /target
 /.superpowers/
 /.duvet/reports/
-/.duvet/specifications/
 /.duvet/requirements/
 .verus-solver-log*
 /tools/*/target
