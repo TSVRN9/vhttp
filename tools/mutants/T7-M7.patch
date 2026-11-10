@@ -1,0 +1,32 @@
+diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
+index 206d62d..8af9e3f 100644
+--- a/crates/quic/src/crypto_stream.rs
++++ b/crates/quic/src/crypto_stream.rs
+@@ -45,7 +45,13 @@ pub open spec fn ooo_received(s: CryptoStream, off: u64, d: Seq<u8>) -> Set<nat>
+ //# received in out-of-order CRYPTO frames.
+ /// The number of out-of-order bytes held once `d` at `off` is in.
+ pub open spec fn ooo_held(s: CryptoStream, off: u64, d: Seq<u8>) -> nat {
+-    ooo_received(s, off, d).len()
++    dup_sum(s.inserted_frames().push((off as nat, d)), rfc_contiguous(rfc_received(s.inserted_frames().push((off as nat, d)))))
++}
++
++pub open spec fn dup_sum(ins: Seq<(nat, Seq<u8>)>, c: nat) -> nat
++    decreases ins.len(),
++{
++    if ins.len() == 0 { 0 } else { dup_sum(ins.drop_last(), c) + if ins.last().0 > c { ins.last().1.len() } else { 0 } }
+ }
+ 
+ /// The number of maximal runs they form.
+diff --git a/crates/quic/src/frags.rs b/crates/quic/src/frags.rs
+index 6f08132..9cf09a8 100644
+--- a/crates/quic/src/frags.rs
++++ b/crates/quic/src/frags.rs
+@@ -1190,7 +1190,7 @@ impl Frags {
+         let md = self.merged(off, data, s, e, i, j, ms, me);
+         let ghost mdv = md@;
+         self.splice_in(i, j, ms, md);
+-        self.held = h;
++        self.held = self.held + data.len() as u64;
+         proof {
+             lemma_insert_post(f, lo as nat, off as nat, data@, s as nat, e as nat, i as int, j as int, mdv);
+         }

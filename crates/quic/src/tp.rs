@@ -1186,10 +1186,12 @@ pub proof fn lemma_tp_err_allowed(b: Seq<u8>)
 }
 
 /// `allowed_tp_err` is not vacuous: a block holding only a valid one-byte
-/// initial_source_connection_id (§7.3) parses and is not refusable.
-proof fn lemma_allowed_tp_err_rejects()
+/// initial_source_connection_id (§7.3) parses, to that ID, and is not refusable.
+pub proof fn lemma_allowed_tp_err_rejects()
     ensures
-        rfc_transport_params(seq![0x0fu8, 0x01u8, 0xabu8], true) is Ok,
+        rfc_transport_params(seq![0x0fu8, 0x01u8, 0xabu8], true) == Ok::<SpecTp, u64>(
+            SpecTp { initial_source_connection_id: Some(seq![0xabu8]), ..spec_default_tp() },
+        ),
         !allowed_tp_err(seq![0x0fu8, 0x01u8, 0xabu8]),
 {
     let b = seq![0x0fu8, 0x01u8, 0xabu8];
@@ -1201,6 +1203,7 @@ proof fn lemma_allowed_tp_err_rejects()
     assert(b.skip(1)[0] == 0x01 && b.skip(1).subrange(1, 1).len() == 0);
     assert(rfc_varint_decode(b.skip(1)) == Some((1nat, 0x01u64)));
     assert(rfc_bytes(b, 2, 1) == Some((b.subrange(2, 3), 3int)));
+    assert(b.subrange(2, 3) =~= seq![0xabu8]);
     reveal_with_fuel(rfc_tp_from, 2);
     reveal_with_fuel(allowed_tp_err_from, 2);
 }

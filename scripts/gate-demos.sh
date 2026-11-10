@@ -645,7 +645,8 @@ expect_fail "ratchet-walk: a git error (path outside any repo)" "failed" walk w5
 # mutant registry (scripts/mutants.sh, C6), in throwaway git repos holding the acceptance fixture crate as crates/demo/src/acc.rs
 # and the one-row registry of tools/gate-demos/mutants. check: a patch that no longer applies, a missing patch, an empty or
 # missing tsv, a duplicate id, an orphan patch, a patch outside its row's crate, a bad regex, a wildcard fn, a patch
-# that applies only at an offset, an allowed_*err predicate with no row or named only in a row's origin. run (real Verus, seconds:
+# that applies only at an offset, an allowed_*err predicate with no row or named only in a row's origin. Path-dependency
+# patches and the loop-invariant kinds have their own fixture (mutants-dep, below). run (real Verus, seconds:
 # MUTANTS_TARGET_DIR keeps vstd built across runs): the killed mutant (with its named test) passes; a mutant that still
 # verifies, a named test that does not FAIL, one that fails unmutated, a misspelt test and a missing fn fail; a dirty
 # crates/ is refused. The verdict on canned Verus output: rlimit, no or two JSON objects, another fn checked, a non-matching
@@ -685,8 +686,8 @@ mrepo m2
 cp "$fx/mutants/live.patch" "$tmp/m2/tools/mutants/D-live.patch"
 expect_fail "mutants check: patch without a row" "patch without a row: D-live" mut m2 check
 mrepo m2
-sed -i 's/^D-kill\tdemo\t/D-kill\twire\t/' "$tmp/m2/tools/mutants.tsv"
-expect_fail "mutants check: patch outside its row's crate" "outside crates/wire/" mut m2 check
+sed -i 's#crates/demo/#crates/wire/#g' "$tmp/m2/tools/mutants/D-kill.patch"
+expect_fail "mutants check: patch outside its row's crate" "outside crates/demo/ and its path dependencies (none)" mut m2 check
 mrepo m2
 sed -i 's/postcondition not satisfied/postcondition (not/' "$tmp/m2/tools/mutants.tsv"
 expect_fail "mutants check: regex that does not compile" "regex does not compile" mut m2 check
@@ -735,6 +736,36 @@ expect_fail "mutants run: a misspelt test name" "test demo/acc:demo_eleven_is_er
 mrow m6 's/\tacc\tdemo\t/\tacc\tdemo2\t/'
 expect_fail "mutants run: a fn name that is not in the module" "D-kill.clean.json: a VIR error, or not a --verify-function run" mut m6 run D-kill
 
+# a patch in a path dependency, and the loop-invariant kinds (tools/gate-demos/mutants-dep: crate top depends on dep).
+# check: a dependency patch passes; a patch outside the row's crate and its path dependencies, and a row crate without a
+# Cargo.toml, fail. run: the dependency patch is killed in top only after dep verifies whole on its own, and both loop-
+# invariant kinds are kills; a dependency patch that breaks dep's own proof is refused, though top's fn fails on it too.
+mdrepo() {  # mdrepo <dir>: as mrepo, with the mutants-dep fixture
+    rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/tools"
+    cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/mutants.py" "$root/tools/acceptance.py" "$tmp/$1/tools/"
+    cp -r "$fx/mutants-dep/Cargo.toml" "$fx/mutants-dep/Cargo.lock" "$fx/mutants-dep/crates" "$root/rust-toolchain.toml" "$tmp/$1/"
+    cp -r "$fx/mutants-dep/tools/mutants.tsv" "$fx/mutants-dep/tools/mutants" "$tmp/$1/tools/"
+    printf '/.worktrees/\n/target/\n' > "$tmp/$1/.gitignore"
+    git -C "$tmp/$1" init -q -b main
+    git -C "$tmp/$1" add -A
+    gitc "$1" commit -qm base
+    gitc "$1" checkout -qb feat
+}
+mdrepo d1
+expect_pass "mutants check: a patch in a path dependency" mut d1 check
+expect_pass "mutants run: a dependency patch killed in the dependent crate, and both loop-invariant kinds" mut d1 run
+mdrepo d2
+sed -i 's/^X-before\ttop\t/X-before\tdep\t/' "$tmp/d2/tools/mutants.tsv"
+expect_fail "mutants check: a patch outside the row's crate and its path dependencies" "outside crates/dep/ and its path dependencies (none)" mut d2 check
+mdrepo d2
+rm "$tmp/d2/crates/top/Cargo.toml"
+expect_fail "mutants check: the row's crate has no Cargo.toml" "cannot read" mut d2 check
+mdrepo d3
+cp "$fx/mutants-dep/depbad.patch" "$tmp/d3/tools/mutants/X-depbad.patch"
+printf 'X-depbad\ttop\tm\tquad\t-\tpostcondition not satisfied.*r == 4 \\* n\tgate-demos: double ensures 2n + 1, code unchanged\n' >> "$tmp/d3/tools/mutants.tsv"
+gitc d3 add -A; gitc d3 commit -qm depbad
+expect_fail "mutants run: a dependency patch that breaks the dependency's own proof" "the patched dependency dep does not verify on its own" mut d3 run X-depbad
+
 # the verdict on canned Verus output (tools/mutants.py killed/clean): a passing kill first.
 v=$tmp/verdict
 vj() {  # vj <errors> <success> [extra fn]: a one-object Verus JSON with demo::acc::demo checked
@@ -749,7 +780,7 @@ expect_pass "mutants verdict" killed
 printf 'error: function body check: Resource limit (rlimit) exceeded\n' >> "$v.log"
 expect_fail "mutants verdict: rlimit is not a kill" "rlimit text" killed
 vlog "possible arithmetic underflow/overflow"
-expect_fail "mutants verdict: another error kind" "no postcondition/precondition/assertion block matches" killed
+expect_fail "mutants verdict: another error kind" "no postcondition/precondition/assertion/invariant block matches" killed
 vlog "postcondition not satisfied"; : > "$v.json"
 expect_fail "mutants verdict: no JSON (cached build or compile error)" "0 Verus result objects" killed
 vj 1 false; cat "$v.json" "$v.json" > "$v.2"; mv "$v.2" "$v.json"

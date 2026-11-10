@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index c97e69c..5c15dfe 100644
+index 84680fd..3755bf8 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -1466,7 +1466,6 @@ impl Connection {
+@@ -1640,7 +1640,6 @@ impl Connection {
              proof {
                  assert(none@.take(0) =~= Seq::<u8>::empty());
              }

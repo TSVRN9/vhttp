@@ -1031,7 +1031,7 @@ impl PeerCids {
     }
 
     /// Every CID the peer gave us, by sequence number (never forgotten, §5.1.2).
-    pub closed spec fn received(&self) -> Map<u64, (Seq<u8>, Option<[u8; 16]>)> {
+    pub closed spec fn received_cids(&self) -> Map<u64, (Seq<u8>, Option<[u8; 16]>)> {
         self.received@
     }
 
@@ -1099,7 +1099,7 @@ impl PeerCids {
             peer_shape(self.entries(), self.largest_rpt_spec()),
             peer_used(self.entries(), self.current_spec()),
             forall|s: u64| #[trigger]
-                self.received().dom().contains(s) ==> peer_has_seq(self.entries(), s)
+                self.received_cids().dom().contains(s) ==> peer_has_seq(self.entries(), s)
                     || self.retire_queued(s) || self.acked().contains(s),
             forall|s: u64| s < self.largest_rpt_spec() ==> #[trigger] self.retired(s),
             forall|s: u64, c: Seq<u8>, t: Seq<u8>|

@@ -35,7 +35,7 @@ clause is meaningful (that is 9a's proof-side non-vacuity lemmas).
 """
 import os, re, subprocess, sys
 
-MAX_BASELINE = 192  # lower this in the commit that deletes baseline lines
+MAX_BASELINE = 191  # lower this in the commit that deletes baseline lines
 ERR_SUBSTR = ['Result', 'Error', 'Err']
 ALLOWED_NAME = re.compile(r'^(?:allowed_\w*err(?:_from)?|\w+_allowed_err)$')
 CLAUSE = re.compile(r'\b(requires|ensures|recommends|decreases|opens_invariants|no_unwind|returns)\b')

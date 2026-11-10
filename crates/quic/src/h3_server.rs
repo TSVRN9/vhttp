@@ -400,6 +400,14 @@ impl H3Server {
         s
     }
 
+    pub proof fn lemma_conn_wf(&self)
+        requires
+            self.wf(),
+        ensures
+            self.conn_spec().wf(),
+    {
+    }
+
     pub fn conn(&self) -> (r: &Connection)
         requires
             self.wf(),
@@ -410,7 +418,7 @@ impl H3Server {
         &self.conn
     }
 
-    /// Only for the TLS calls, `close` and `poll_transmit`; call `pump` after any change made through
+    /// Only for the TLS calls (`crypto_drop` included), `close` and `poll_transmit`; call `pump` after any change made through
     /// it. `stream_write`, `stream_reset` or `poll_stream_events` through it bypass the write log and
     /// h3, so the per-stream prefix and every-event-to-h3 guarantees would no longer hold.
     pub fn conn_mut(&mut self) -> (r: &mut Connection)
@@ -1007,10 +1015,15 @@ impl H3Server {
                 ),
             // No timer moves to a time `on_timeout` has passed (`H3Server::settled_later`).
             final(self).conn_spec().keeps_later(old(self).conn_spec()),
+            final(self).conn_spec().crypto_kept(old(self).conn_spec()),
+            drained_kept(final(self).conn_spec(), old(self).conn_spec()),
+            final(self).conn_spec().phase_spec() is Open ==> old(self).conn_spec().phase_spec() is Open,
+            final(self).conn_spec().live(PacketKind::OneRtt) == old(self).conn_spec().live(PacketKind::OneRtt),
     {
         let ghost a0 = app@;
         proof {
             self.conn.lemma_keeps_refl();
+            Connection::lemma_crypto_kept_refl(self.conn);
         }
         if !self.started {
             if !(self.conn.handshake_complete() && matches!(self.conn.phase(), Phase::Open)) {
@@ -1030,6 +1043,9 @@ impl H3Server {
                 let now = self.conn.now();
                 let none: Vec<u8> = Vec::new();
                 self.conn.close(H3_GENERAL_PROTOCOL_ERROR, true, none.as_slice(), now);
+                proof {
+                    self.conn.lemma_keeps_crypto(old(self).conn);
+                }
                 return;
             }
             let mut outs: Vec<Output> = Vec::new();
@@ -1060,6 +1076,7 @@ impl H3Server {
             c2.lemma_keeps_trans(c1, old(self).conn);
             c3.lemma_keeps_trans(c2, old(self).conn);
             self.conn.lemma_keeps_trans(c3, old(self).conn);
+            self.conn.lemma_keeps_crypto(old(self).conn);
         }
     }
 
@@ -1083,7 +1100,12 @@ impl H3Server {
             r is Ok ==> exists|a: Seq<SpecOutput>| #[trigger] one_response(a, id, resp@)
                 && forall|j: u64| #[trigger] final(self).emitted(j) == old(self).emitted(j) + writes_on(a, j),
             r is Err ==> forall|j: u64| #[trigger] final(self).emitted(j) == old(self).emitted(j),
+            final(self).conn_spec().crypto_kept(old(self).conn_spec()),
+            drained_kept(final(self).conn_spec(), old(self).conn_spec()),
     {
+        proof {
+            Connection::lemma_crypto_kept_refl(self.conn);
+        }
         if self.pending.len() != 0 {
             return Err(SendError::Busy);
         }
@@ -1098,6 +1120,7 @@ impl H3Server {
                 self.apply(outs, app);
                 proof {
                     assert(s1.skip(0) =~= s1);
+                    self.conn.lemma_keeps_crypto(old(self).conn);
                 }
                 Ok(())
             },
@@ -1156,11 +1179,14 @@ impl H3Server {
             // `Connection::on_timeout`'s, kept by `pump`.
             now < u64::MAX ==> final(self).conn_spec().timers_later(now),
             now <= final(self).conn_spec().now_spec(),
+            final(self).conn_spec().crypto_kept(old(self).conn_spec()),
+            drained_kept(final(self).conn_spec(), old(self).conn_spec()),
     {
         self.conn.on_timeout(now, rand);
         let ghost c0 = self.conn;
         self.pump(app);
         proof {
+            Connection::lemma_crypto_kept_trans(old(self).conn, c0, self.conn);
             self.conn.lemma_keeps_now(c0);
             if now < u64::MAX {
                 self.conn.lemma_keeps_elim(c0, now);

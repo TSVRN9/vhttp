@@ -1,0 +1,19 @@
+diff --git a/crates/quic/src/reassembly.rs b/crates/quic/src/reassembly.rs
+index d9851c1..c3035ea 100644
+--- a/crates/quic/src/reassembly.rs
++++ b/crates/quic/src/reassembly.rs
+@@ -534,14 +534,6 @@ impl Reassembly {
+                 &&& old(self).tight() ==> final(self).tight()
+             },
+     {
+-        if data.len() == 0 {
+-            proof {
+-                lemma_received_push(self.ins@, off as nat, data@);
+-                assert(rfc_received(self.ins@.push((off as nat, data@))) =~= rfc_received(self.ins@));
+-            }
+-            self.ins = Ghost(self.ins@.push((off as nat, data@)));
+-            return;
+-        }
+         let ghost m = rfc_received(self.ins@);
+         let ghost hw = (old(self).base + old(self).buf@.len() - old(self).head) as int;
+         let end = off + data.len() as u64;

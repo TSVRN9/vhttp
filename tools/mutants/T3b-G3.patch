@@ -1,0 +1,14 @@
+diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
+index 37201ae..bd5f9fe 100644
+--- a/crates/quictls/src/server.rs
++++ b/crates/quictls/src/server.rs
+@@ -745,8 +745,8 @@ impl<'a> QuicServer<'a> {
+             return;
+         }
+         let ghost c0 = self.h3.conn_spec();
+-        self.h3.conn_mut().crypto_drop();
+         proof {
++            Connection::lemma_crypto_kept_refl(c0);
+             Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
+         }
+     }

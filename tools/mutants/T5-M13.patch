@@ -1,0 +1,50 @@
+diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
+index 37201ae..e2c7cd0 100644
+--- a/crates/quictls/src/server.rs
++++ b/crates/quictls/src/server.rs
+@@ -413,6 +413,8 @@ pub struct QuicServer<'a> {
+     /// The connection when `level` left Initial: `init_end` is the end of what it had received.
+     #[allow(dead_code)]
+     init_rx: Ghost<Connection>,
++    pre_end: u64,
++    pre_rx: Ghost<Connection>,
+     /// Only `wf` and `tls_log()` read it, which a plain `cargo build` erases.
+     #[allow(dead_code)]
+     log: Ghost<Seq<TlsCall>>,
+@@ -621,6 +623,8 @@ impl<'a> QuicServer<'a> {
+             init_end: 0,
+             fed_i: 0,
+             fed_h: 0,
++            pre_end: 0,
++            pre_rx: Ghost(cs),
+             init_rx: Ghost(cs),
+             log: Ghost(Seq::empty()),
+         };
+@@ -672,6 +676,8 @@ impl<'a> QuicServer<'a> {
+     {
+         hide(spec_on_crypto);
+         let was = self.h3.conn().handshake_complete();
++        self.pre_end = initial_end(self.h3.conn());
++        self.pre_rx = Ghost(self.h3.conn_spec());
+         let ghost c0 = self.h3.conn_spec();
+         quic::pipeline::receive(self.h3.conn_mut(), d, path, now, &r.conn, &self.keys);
+         proof {
+@@ -1522,14 +1528,14 @@ impl<'a> QuicServer<'a> {
+         ensures
+             *final(self) == (QuicServer { init_end: final(self).init_end, init_rx: final(self).init_rx, ..*old(self) }),
+             final(self).init_end == old(self).fed_i,
+-            final(self).init_rx@ == old(self).h3.conn_spec(),
+-            final(self).init_end == old(self).h3.conn_spec().crypto_end_spec(PacketKind::Initial),
++            final(self).init_rx == old(self).pre_rx,
++            final(self).init_end == old(self).pre_end,
+             final(self).init_end <= old(self).h3.conn_spec().crypto_base_spec(PacketKind::Initial),
+             forall|p: nat| #[trigger] final(self).init_rx@.crypto_received(PacketKind::Initial, p) ==> p < final(self).init_end,
+             final(self).init_end > 0 ==> final(self).init_rx@.crypto_received(PacketKind::Initial, (final(self).init_end - 1) as nat),
+     {
+-        self.init_end = initial_end(self.h3.conn());
+-        self.init_rx = Ghost(self.h3.conn_spec());
++        self.init_end = self.pre_end;
++        self.init_rx = self.pre_rx;
+     }
+ 
+     /// `Secrets`: the packet keys of level `l`; at Handshake, TLS now receives there.

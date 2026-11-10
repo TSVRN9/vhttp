@@ -1,0 +1,53 @@
+diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
+index 84ffad2..cd9d81a 100644
+--- a/crates/quic/src/crypto_stream.rs
++++ b/crates/quic/src/crypto_stream.rs
+@@ -50,7 +50,13 @@ pub open spec fn ooo_held(s: CryptoStream, off: u64, d: Seq<u8>) -> nat {
+ 
+ /// The number of maximal runs they form.
+ pub open spec fn ooo_runs(s: CryptoStream, off: u64, d: Seq<u8>) -> nat {
+-    runs(ooo_received(s, off, d))
++    frame_count(s.inserted_frames().push((off as nat, d)), rfc_contiguous(rfc_received(s.inserted_frames().push((off as nat, d)))))
++}
++
++pub open spec fn frame_count(ins: Seq<(nat, Seq<u8>)>, c: nat) -> nat
++    decreases ins.len(),
++{
++    if ins.len() == 0 { 0 } else { frame_count(ins.drop_last(), c) + if ins.last().0 > c { 1nat } else { 0nat } }
+ }
+ 
+ /// The errors `on_crypto` may return: CRYPTO_BUFFER_EXCEEDED when a non-empty frame would take
+@@ -160,6 +166,7 @@ pub struct CryptoStream {
+     contig: u64,
+     /// The out-of-order bytes: those received past `contig`.
+     ooo: Frags,
++    frames: u64,
+     /// Every insertion since the last `restart`, which records the bytes below its base (read,
+     /// but not data received anew) as zeros.
+     ins: Ghost<Seq<(nat, Seq<u8>)>>,
+@@ -291,6 +298,7 @@ impl CryptoStream {
+             base: 0,
+             contig: 0,
+             ooo: Frags::new(),
++            frames: 0,
+             ins: Ghost(Seq::empty()),
+             hist: Ghost(Seq::empty()),
+         };
+@@ -420,13 +428,16 @@ impl CryptoStream {
+         proof {
+             lemma_ooo_set(a, offset, data@);
+         }
+-        if h > MAX_CRYPTO_BUFFER || c > MAX_CRYPTO_RANGES {
++        if h > MAX_CRYPTO_BUFFER || self.frames >= MAX_CRYPTO_RANGES as u64 {
+             //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
+             //# If an endpoint does not expand its buffer, it MUST close
+             //# the connection with a CRYPTO_BUFFER_EXCEEDED error code.
+             return Err(CRYPTO_BUFFER_EXCEEDED);
+         }
+         self.ooo.insert(self.contig, offset, data);
++        if self.frames < u64::MAX {
++            self.frames = self.frames + 1;
++        }
+         self.ins = Ghost(self.ins@.push((offset as nat, data@)));
+         self.hist = Ghost(self.hist@.push((offset as nat, data@)));
+         proof {

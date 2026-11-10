@@ -22,6 +22,7 @@ pub mod crypto_stream;
 pub mod datagram;
 mod export_check;
 pub mod flow;
+pub mod frags;
 pub mod frame;
 pub mod h3_server;
 pub mod handshake;

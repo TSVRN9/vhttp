@@ -1,0 +1,13 @@
+diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
+index 37201ae..19a2f38 100644
+--- a/crates/quictls/src/server.rs
++++ b/crates/quictls/src/server.rs
+@@ -1528,7 +1528,7 @@ impl<'a> QuicServer<'a> {
+             forall|p: nat| #[trigger] final(self).init_rx@.crypto_received(PacketKind::Initial, p) ==> p < final(self).init_end,
+             final(self).init_end > 0 ==> final(self).init_rx@.crypto_received(PacketKind::Initial, (final(self).init_end - 1) as nat),
+     {
+-        self.init_end = initial_end(self.h3.conn());
++        self.init_end = { let e = initial_end(self.h3.conn()); if e > 0 { e - 1 } else { 0 } };
+         self.init_rx = Ghost(self.h3.conn_spec());
+     }
+ 
