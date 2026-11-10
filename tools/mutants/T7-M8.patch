@@ -1,5 +1,5 @@
 diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
-index 206d62d..85d80fd 100644
+index 84ffad2..cd9d81a 100644
 --- a/crates/quic/src/crypto_stream.rs
 +++ b/crates/quic/src/crypto_stream.rs
 @@ -50,7 +50,13 @@ pub open spec fn ooo_held(s: CryptoStream, off: u64, d: Seq<u8>) -> nat {
@@ -17,7 +17,7 @@ index 206d62d..85d80fd 100644
  }
  
  /// The errors `on_crypto` may return: CRYPTO_BUFFER_EXCEEDED when a non-empty frame would take
-@@ -149,6 +155,7 @@ pub struct CryptoStream {
+@@ -160,6 +166,7 @@ pub struct CryptoStream {
      contig: u64,
      /// The out-of-order bytes: those received past `contig`.
      ooo: Frags,
@@ -25,7 +25,7 @@ index 206d62d..85d80fd 100644
      /// Every insertion since the last `restart`, which records the bytes below its base (read,
      /// but not data received anew) as zeros.
      ins: Ghost<Seq<(nat, Seq<u8>)>>,
-@@ -280,6 +287,7 @@ impl CryptoStream {
+@@ -291,6 +298,7 @@ impl CryptoStream {
              base: 0,
              contig: 0,
              ooo: Frags::new(),
@@ -33,7 +33,7 @@ index 206d62d..85d80fd 100644
              ins: Ghost(Seq::empty()),
              hist: Ghost(Seq::empty()),
          };
-@@ -409,13 +417,16 @@ impl CryptoStream {
+@@ -420,13 +428,16 @@ impl CryptoStream {
          proof {
              lemma_ooo_set(a, offset, data@);
          }

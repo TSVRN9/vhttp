@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
-index 206d62d..f43fcd5 100644
+index 84ffad2..fca2d25 100644
 --- a/crates/quic/src/crypto_stream.rs
 +++ b/crates/quic/src/crypto_stream.rs
-@@ -409,7 +409,7 @@ impl CryptoStream {
+@@ -420,7 +420,7 @@ impl CryptoStream {
          proof {
              lemma_ooo_set(a, offset, data@);
          }

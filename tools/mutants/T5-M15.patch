@@ -1,0 +1,36 @@
+diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
+index 84680fd..de7465f 100644
+--- a/crates/quic/src/conn.rs
++++ b/crates/quic/src/conn.rs
+@@ -3422,7 +3422,12 @@ impl Connection {
+             ).crypto_contiguous_spec(level),
+             old(self).phase_spec() is Open ==> final(out)@.len() == old(out)@.len() + old(
+                 self,
+-            ).crypto_contiguous_spec(level) - old(self).crypto_base_spec(level),
++            ).crypto_contiguous_spec(level) - old(self).crypto_base_spec(level) - if old(self).crypto_contiguous_spec(level)
++                > old(self).crypto_base_spec(level) {
++                1int
++            } else {
++                0int
++            },
+             old(self).crypto_end_spec(level) <= old(self).crypto_base_spec(level) ==> final(out)@ == old(out)@,
+             // The read hands over exactly the bytes its offset passes; no other level's moves.
+             final(self).crypto_kept_but(*old(self), Some(level)),
+@@ -3441,6 +3446,7 @@ impl Connection {
+         if !matches!(self.lc.phase(), Phase::Open) {
+             return;
+         }
++        let n0 = out.len();
+         match level {
+             PacketKind::Initial => {
+                 proof {
+@@ -3461,6 +3467,9 @@ impl Connection {
+                 self.crx_1.read(out)
+             },
+         }
++        if out.len() > n0 {
++            let _ = out.pop();
++        }
+     }
+ 
+     /// Queues CRYPTO data for `level`; ignored once its space is discarded.

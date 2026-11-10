@@ -1,8 +1,8 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
-index b0c451c..cf92619 100644
+index 37201ae..e2c7cd0 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -346,6 +346,8 @@ pub struct QuicServer<'a> {
+@@ -413,6 +413,8 @@ pub struct QuicServer<'a> {
      /// The connection when `level` left Initial: `init_end` is the end of what it had received.
      #[allow(dead_code)]
      init_rx: Ghost<Connection>,
@@ -11,7 +11,7 @@ index b0c451c..cf92619 100644
      /// Only `wf` and `tls_log()` read it, which a plain `cargo build` erases.
      #[allow(dead_code)]
      log: Ghost<Seq<TlsCall>>,
-@@ -554,6 +556,8 @@ impl<'a> QuicServer<'a> {
+@@ -621,6 +623,8 @@ impl<'a> QuicServer<'a> {
              init_end: 0,
              fed_i: 0,
              fed_h: 0,
@@ -20,7 +20,7 @@ index b0c451c..cf92619 100644
              init_rx: Ghost(cs),
              log: Ghost(Seq::empty()),
          };
-@@ -588,6 +592,8 @@ impl<'a> QuicServer<'a> {
+@@ -672,6 +676,8 @@ impl<'a> QuicServer<'a> {
      {
          hide(spec_on_crypto);
          let was = self.h3.conn().handshake_complete();
@@ -29,7 +29,7 @@ index b0c451c..cf92619 100644
          let ghost c0 = self.h3.conn_spec();
          quic::pipeline::receive(self.h3.conn_mut(), d, path, now, &r.conn, &self.keys);
          proof {
-@@ -1474,14 +1480,14 @@ impl<'a> QuicServer<'a> {
+@@ -1522,14 +1528,14 @@ impl<'a> QuicServer<'a> {
          ensures
              *final(self) == (QuicServer { init_end: final(self).init_end, init_rx: final(self).init_rx, ..*old(self) }),
              final(self).init_end == old(self).fed_i,

@@ -1,8 +1,8 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
-index b0c451c..956f471 100644
+index 37201ae..ce3dd8d 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -622,7 +622,6 @@ impl<'a> QuicServer<'a> {
+@@ -706,7 +706,6 @@ impl<'a> QuicServer<'a> {
                      lemma_one_rtt_rand_free(cfg, tp, st, data, r.tls@, r2);
                  }
              }

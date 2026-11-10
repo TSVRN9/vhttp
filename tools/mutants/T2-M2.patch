@@ -1,8 +1,8 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
-index b0c451c..0d6d675 100644
+index 37201ae..2604442 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -271,7 +271,7 @@ fn report(c: &mut Connection, code: u64, now: u64)
+@@ -285,7 +285,7 @@ fn report(c: &mut Connection, code: u64, now: u64)
          final(c).crypto_kept(*old(c)),
  {
      if CRYPTO_ERROR_BASE <= code && code <= CRYPTO_ERROR_BASE + 0xff {
