@@ -1,11 +1,16 @@
 # mutants.py: the parsing half of scripts/mutants.sh (C6 MUST ONLY TEST-PINNED). Run as python3 -I.
-#   rows TSV PATCHDIR        validate the registry, print one tab-separated row per line (id crate module fn tests regex)
+#   rows ROOT TSV PATCHDIR   validate the registry, print one tab-separated row per line (id crate module fn tests deps
+#                            regex). A patch touches crates/<crate>/ and may touch crates/<d>/ for a path dependency <d>
+#                            of <crate> (its [dependencies] in ROOT/crates/<crate>/Cargo.toml); deps lists those <d> (- if
+#                            none), for run to check that each still verifies on its own with the patch
 #   clean BASE CRATE MOD FN  BASE.json (Verus --output-json --time-expanded) and BASE.log (its stderr): FN, and only FN,
 #                            was checked, and it verified (>= 1 verified, 0 errors), no rlimit text
 #   killed BASE CRATE MOD FN REGEX
 #                            the mutant run checked only FN and FN failed for the stated reason: >= 1 error, REGEX
-#                            (Python re, DOTALL) found in a postcondition, precondition or assertion error block of
-#                            BASE.log, no rlimit text
+#                            (Python re, DOTALL) found in a postcondition, precondition, assertion or loop-invariant
+#                            error block of BASE.log (KINDS), no rlimit text
+#   depok BASE CRATE         BASE.json/BASE.log of a whole-crate run of CRATE (a patched dependency): one result object,
+#                            the entire crate, >= 1 verified, 0 errors, no rlimit text
 #   gate ROOT                the main gate, all read from ROOT's HEAD commit: HEAD:tools/mutants-last-run.txt names
 #                            `tree` (see tree), HEAD:crates, HEAD:tools/mutants.tsv's blob, and every id of that tsv
 #                            (no other) as `pass` with the blob of HEAD:tools/mutants/<id>.patch
@@ -21,8 +26,11 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
 
-KINDS = ('error: postcondition not satisfied', 'error: precondition not satisfied', 'error: assertion failed')
+# Verus 0.2026.10.04's wording; a failed loop invariant is a named proof obligation like an assertion
+KINDS = ('error: postcondition not satisfied', 'error: precondition not satisfied', 'error: assertion failed',
+         'error: invariant not satisfied before loop', 'error: invariant not satisfied at end of loop body')
 COLS = ('id', 'crate', 'module', 'fn', 'tests', 'regex', 'origin')
 
 
@@ -39,7 +47,23 @@ def read(p):
         die('cannot read %s: %s' % (p, e))
 
 
-def rows(tsv, pdir):
+def path_deps(root, crate):
+    """The crates/<d> dirs that ROOT/crates/<crate>/Cargo.toml names as path [dependencies] (dev-dependencies excluded)."""
+    cdir = os.path.join(root, 'crates', crate)
+    try:
+        man = tomllib.loads(read(os.path.join(cdir, 'Cargo.toml')))
+    except tomllib.TOMLDecodeError as e:
+        die('%s/Cargo.toml: %s' % (cdir, e))
+    out = set()
+    for v in man.get('dependencies', {}).values():
+        if isinstance(v, dict) and 'path' in v:
+            d = os.path.normpath(os.path.join(cdir, v['path']))
+            if os.path.dirname(d) == os.path.normpath(os.path.join(root, 'crates')):
+                out.add(os.path.basename(d))
+    return out
+
+
+def rows(root, tsv, pdir):
     out, ids = [], set()
     for n, line in enumerate(read(tsv).split('\n'), 1):
         if not line.strip() or line.startswith('#'):
@@ -70,10 +94,17 @@ def rows(tsv, pdir):
         files = re.findall(r'^(?:---|\+\+\+) (\S+)', text, re.M)
         if not re.search(r'^@@ ', text, re.M) or not files:
             die('%s: no hunk' % p)
+        deps, pd = set(), None
         for x in files:
-            if x != '/dev/null' and not re.match(r'[ab]/crates/%s/' % re.escape(crate), x):
-                die('%s: touches %s, outside crates/%s/ (the row verifies only that crate)' % (p, x, crate))
-        out.append((i, crate, mod, fn, tests, rx))
+            if x == '/dev/null' or re.match(r'[ab]/crates/%s/' % re.escape(crate), x):
+                continue
+            m = re.match(r'[ab]/crates/([a-z0-9_]+)/', x)
+            pd = path_deps(root, crate) if pd is None else pd
+            if not m or m.group(1) not in pd:
+                die('%s: touches %s, outside crates/%s/ and its path dependencies (%s): the row verifies only those'
+                    % (p, x, crate, ' '.join(sorted(pd)) or 'none'))
+            deps.add(m.group(1))
+        out.append((i, crate, mod, fn, tests, ','.join(sorted(deps)) or '-', rx))
     if not out:
         die('%s has no rows' % tsv)
     have = sorted(x[:-6] for x in os.listdir(pdir) if x.endswith('.patch'))
@@ -84,10 +115,8 @@ def rows(tsv, pdir):
         print('\t'.join(r))
 
 
-def scan(base, crate, mod, fn):
-    """BASE.json is Verus's --output-json --time-expanded stdout, BASE.log its stderr. Returns (log text, verified,
-    errors, success of FN's row); FN must be the only fn Verus spent rlimit on."""
-    fqn = '%s::%s::%s' % (crate, mod, fn)
+def results(base):
+    """The JSON objects of BASE.json, Verus's --output-json stdout."""
     raw, dec, objs, i = read(base + '.json'), json.JSONDecoder(), [], 0
     while True:
         j = raw.find('{', i)
@@ -99,6 +128,14 @@ def scan(base, crate, mod, fn):
             die('%s.json: unreadable JSON at offset %d' % (base, j))
         objs.append(o)
         i = j + e
+    return objs
+
+
+def scan(base, crate, mod, fn):
+    """BASE.json is Verus's --output-json --time-expanded stdout, BASE.log its stderr. Returns (log text, verified,
+    errors, success of FN's row); FN must be the only fn Verus spent rlimit on."""
+    fqn = '%s::%s::%s' % (crate, mod, fn)
+    objs = results(base)
     if len(objs) != 1 or not isinstance(objs[0].get('verification-results'), dict):
         die('%s.json: %d Verus result objects, want 1 (a cached build, a compile error or a crash verifies nothing)'
             % (base, len(objs)))
@@ -129,7 +166,23 @@ def killed(base, crate, mod, fn, rx):
         die('%s: the mutant still verifies %s::%s (%s errors)' % (base, mod, fn, bad))
     blocks = re.split(r'\n(?=error)', text)
     if not any(b.split('\n', 1)[0].strip() in KINDS and re.search(rx, b, re.S) for b in blocks):
-        die('%s.log: %d errors, but no postcondition/precondition/assertion block matches %r' % (base, bad, rx))
+        die('%s.log: %d errors, but no postcondition/precondition/assertion/invariant block matches %r' % (base, bad, rx))
+
+
+def depok(base, crate):
+    """A patched dependency still verifies on its own: else a patch breaking its proof would pass as a kill in the
+    dependent crate."""
+    objs = results(base)
+    if len(objs) != 1 or not isinstance(objs[0].get('verification-results'), dict):
+        die('%s.json: %d Verus result objects, want 1 (the dependency %s was not verified)' % (base, len(objs), crate))
+    vr = objs[0]['verification-results']
+    if vr.get('encountered-vir-error') is not False or vr.get('is-verifying-entire-crate') is not True:
+        die('%s.json: a VIR error, or not a whole-crate run of %s: %s' % (base, crate, vr))
+    if re.search('rlimit', read(base + '.log'), re.I):
+        die('%s.log: rlimit text in the patched dependency %s' % (base, crate))
+    ok, bad = vr.get('verified'), vr.get('errors')
+    if not isinstance(ok, int) or ok < 1 or bad != 0:
+        die('the patched dependency %s does not verify on its own (%s verified, %s errors; %s.log)' % (crate, ok, bad, base))
 
 
 def git(root, *args):
@@ -219,8 +272,10 @@ def allowed(root, tsv):
 
 
 def main(a):
-    if a[:1] == ['rows'] and len(a) == 3:
-        rows(a[1], a[2])
+    if a[:1] == ['rows'] and len(a) == 4:
+        rows(a[1], a[2], a[3])
+    elif a[:1] == ['depok'] and len(a) == 3:
+        depok(a[1], a[2])
     elif a[:1] == ['clean'] and len(a) == 5:
         clean(*a[1:])
     elif a[:1] == ['killed'] and len(a) == 6:

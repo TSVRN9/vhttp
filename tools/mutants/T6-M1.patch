@@ -1,17 +1,27 @@
-diff --git a/crates/quic/src/recv_stream.rs b/crates/quic/src/recv_stream.rs
-index a4f824e..18feba1 100644
---- a/crates/quic/src/recv_stream.rs
-+++ b/crates/quic/src/recv_stream.rs
-@@ -435,11 +435,7 @@ fn insert_tight(re: &mut Reassembly, off: u64, data: &[u8])
-         },
- {
-     let ghost re0 = *re;
--    if data.len() > 0 {
--        re.insert(off, data);
--    } else {
--        re.insert_empty(off, data);
--    }
-+    re.insert(off, data);
-     proof {
-         if off + data@.len() <= re0.base() + re0.buf_len() {
-             Reassembly::lemma_insert_tight_within(re0, *re, off, data@);
+diff --git a/crates/quic/src/reassembly.rs b/crates/quic/src/reassembly.rs
+index d9851c1..0168b73 100644
+--- a/crates/quic/src/reassembly.rs
++++ b/crates/quic/src/reassembly.rs
+@@ -526,22 +526,7 @@ impl Reassembly {
+             } else {
+                 off + data@.len()
+             },
+-            // An empty insert is a no-op but for the log, which records no byte.
+-            data@.len() == 0 ==> {
+-                &&& final(self).buf_len() == old(self).buf_len()
+-                &&& final(self).phys_len() == old(self).phys_len()
+-                &&& rfc_received(final(self).inserted()) == rfc_received(old(self).inserted())
+-                &&& old(self).tight() ==> final(self).tight()
+-            },
+     {
+-        if data.len() == 0 {
+-            proof {
+-                lemma_received_push(self.ins@, off as nat, data@);
+-                assert(rfc_received(self.ins@.push((off as nat, data@))) =~= rfc_received(self.ins@));
+-            }
+-            self.ins = Ghost(self.ins@.push((off as nat, data@)));
+-            return;
+-        }
+         let ghost m = rfc_received(self.ins@);
+         let ghost hw = (old(self).base + old(self).buf@.len() - old(self).head) as int;
+         let end = off + data.len() as u64;

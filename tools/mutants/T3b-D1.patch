@@ -1,0 +1,12 @@
+diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
+index 84680fd..60b72d7 100644
+--- a/crates/quic/src/conn.rs
++++ b/crates/quic/src/conn.rs
+@@ -3429,7 +3429,6 @@ impl Connection {
+             final(self).peer_tp_known_spec() == old(self).peer_tp_known_spec(),
+             !(old(self).phase_spec() is Open) ==> final(out)@ == old(out)@,
+             final(self).phase_spec() == old(self).phase_spec(),
+-            old(self).phase_spec() is Open ==> crypto_drained(*final(self), level),
+             drained_kept(*final(self), *old(self)),
+     {
+         // The bound needs only `lemma_wf`; unfolded, these make a missing fact an rlimit failure.

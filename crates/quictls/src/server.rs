@@ -59,6 +59,107 @@ pub open spec fn level_rank(l: Level) -> nat {
     }
 }
 
+//= https://www.rfc-editor.org/rfc/rfc9001#section-4.1.3
+//# *  If the packet is from a previously installed encryption level, it
+//# MUST NOT contain data that extends past the end of previously
+//# received data in that flow.
+//= https://www.rfc-editor.org/rfc/rfc9001#section-4.1.3
+//# Implementations MUST treat any
+//# violations of this requirement as a connection error of type
+//# PROTOCOL_VIOLATION.
+/// Some byte at or past `end` of level `k`'s CRYPTO stream arrived in a CRYPTO frame.
+spec fn past_received(c: Connection, k: PacketKind, end: nat) -> bool {
+    exists|p: nat| p >= end && #[trigger] c.crypto_received(k, p)
+}
+
+//= https://www.rfc-editor.org/rfc/rfc9001#section-4.1.3
+//# *  If the packet is from a previously installed encryption level, it
+//# MUST NOT contain data that extends past the end of previously
+//# received data in that flow.
+//= https://www.rfc-editor.org/rfc/rfc9001#section-4.1.3
+//# Implementations MUST treat any
+//# violations of this requirement as a connection error of type
+//# PROTOCOL_VIOLATION.
+/// `superseded`'s refusal: TLS has left Initial, and Initial CRYPTO data arrived at or past
+/// `init_end`, the end of the Initial data received before the key change.
+spec fn superseded_allowed_err(s: QuicServer) -> bool {
+    !(s.level is Initial) && past_received(s.conn_spec(), PacketKind::Initial, s.init_end as nat)  // rfc-quantity: s.conn_spec(): the server's QUIC connection (QuicServer::conn_spec is h3.conn_spec()), whose CRYPTO receive history past_received reads: the flow of RFC 9001 §4.1.3
+}
+
+/// `superseded_allowed_err` is not vacuous: nothing received past `init_end`.
+proof fn lemma_superseded_allowed_err_rejects(s: QuicServer)
+    requires
+        forall|p: nat| #[trigger] s.conn_spec().crypto_received(PacketKind::Initial, p) ==> p < s.init_end,
+    ensures
+        !superseded_allowed_err(s),
+{
+}
+
+//= https://www.rfc-editor.org/rfc/rfc9000#section-7.4
+//# An endpoint MUST treat receipt of a transport parameter with an
+//# invalid value as a connection error of type
+//# TRANSPORT_PARAMETER_ERROR.
+//= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+//# An endpoint MUST treat the absence of the
+//# initial_source_connection_id transport parameter from either endpoint
+//# or the absence of the original_destination_connection_id transport
+//# parameter from the server as a connection error of type
+//# TRANSPORT_PARAMETER_ERROR.
+//= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+//# An endpoint MUST treat the following as a connection error of type
+//# TRANSPORT_PARAMETER_ERROR or PROTOCOL_VIOLATION:
+//= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+//# a mismatch between values received from a peer in these transport
+//# parameters and the value sent in the corresponding Destination or
+//# Source Connection ID fields of Initial packets.
+//= https://www.rfc-editor.org/rfc/rfc9000#section-17.2
+//# Endpoints that receive a version 1 long header with a
+//# value larger than 20 MUST drop the packet.
+/// The client's transport parameters `b` are refusable on `c` with TRANSPORT_PARAMETER_ERROR: they
+/// do not parse (`allowed_tp_err`), or their initial_source_connection_id is absent or not the
+/// Source Connection ID of the client's first Initial. A parse error carries the §17.2 bound: `c`'s
+/// ID is at most 20 bytes, so `allowed_tp_err`'s over-20 disjunct is a §7.3 mismatch
+/// (`lemma_long_cid_mismatch`).
+spec fn tp_allowed_err(c: Connection, b: Seq<u8>) -> bool {
+    match rfc_transport_params(b, true) {
+        Err(_) => allowed_tp_err(b) && c.client_scid_spec().len() <= MAX_CID_LEN,  // rfc-quantity: c.client_scid_spec(): the Source Connection ID field of the client's first Initial (RFC 9000 §7.3), tied by Connection::accept's ensures client_scid_spec() == first.scid@ (T5-M8' kills a re-anchor); its length bound <= 20 is §17.2's receiver rule via HandshakeIds::wf (Connection::client_scid_len)
+        Ok(t) => t.initial_source_connection_id != Some(c.client_scid_spec()),  // rfc-quantity: c.client_scid_spec(): the Source Connection ID field of the client's first Initial (RFC 9000 §7.3), as on the Err arm
+    }
+}
+
+/// The end of the Initial data `c` has received (RFC 9001 §4.1.3): every received byte is below
+/// it, and the byte before it was received. `init_end` is set from it when TLS leaves Initial.
+fn initial_end(c: &Connection) -> (r: u64)
+    requires
+        c.wf(),
+    ensures
+        r == c.crypto_end_spec(PacketKind::Initial),
+        forall|p: nat| #[trigger] c.crypto_received(PacketKind::Initial, p) ==> p < r,
+        r > 0 ==> c.crypto_received(PacketKind::Initial, (r - 1) as nat),
+{
+    c.crypto_end(PacketKind::Initial)
+}
+
+/// Under `tp_allowed_err`'s bound, a connection ID over 20 bytes is not the client's (§7.3 mismatch).
+proof fn lemma_long_cid_mismatch(c: Connection, v: Seq<u8>)
+    requires
+        c.client_scid_spec().len() <= MAX_CID_LEN,
+        v.len() > MAX_CID_LEN,
+    ensures
+        Some(v) != Some(c.client_scid_spec()),
+{
+}
+
+/// `tp_allowed_err` is not vacuous: the client's own SCID as its initial_source_connection_id.
+proof fn lemma_tp_allowed_err_rejects(c: Connection)
+    requires
+        c.client_scid_spec() == seq![0xabu8],
+    ensures
+        !tp_allowed_err(c, seq![0x0fu8, 0x01u8, 0xabu8]),
+{
+    lemma_allowed_tp_err_rejects();
+}
+
 fn rank(l: Level) -> (r: u8)
     ensures
         r == level_rank(l),
@@ -70,9 +171,19 @@ fn rank(l: Level) -> (r: u8)
     }
 }
 
+/// The packet space of TLS level `l`.
+pub open spec fn level_kind(l: Level) -> PacketKind {
+    match l {
+        Level::Initial => PacketKind::Initial,
+        Level::Handshake => PacketKind::Handshake,
+        Level::OneRtt => PacketKind::OneRtt,
+    }
+}
+
 fn kind(l: Level) -> (k: PacketKind)
     ensures
         (k is OneRtt) == (l is OneRtt),
+        k == level_kind(l),
 {
     match l {
         Level::Initial => PacketKind::Initial,
@@ -105,9 +216,13 @@ fn shut(c: &mut Connection, code: u64, now: u64)
             && final(c).close_spec() == Some((false, code, Seq::<u8>::empty())),
         !(old(c).phase_spec() is Open) ==> final(c).phase_spec() == old(c).phase_spec()
             && final(c).close_spec() == old(c).close_spec(),
+        final(c).crypto_kept(*old(c)),
 {
     let none: Vec<u8> = Vec::new();
     c.close(code, false, none.as_slice(), now);
+    proof {
+        c.lemma_keeps_crypto(*old(c));
+    }
 }
 
 //= https://www.rfc-editor.org/rfc/rfc9001#section-4.8
@@ -167,6 +282,7 @@ fn report(c: &mut Connection, code: u64, now: u64)
             && final(c).close_spec() == Some((false, report_code(code), Seq::<u8>::empty())),
         !(old(c).phase_spec() is Open) ==> final(c).phase_spec() == old(c).phase_spec()
             && final(c).close_spec() == old(c).close_spec(),
+        final(c).crypto_kept(*old(c)),
 {
     if CRYPTO_ERROR_BASE <= code && code <= CRYPTO_ERROR_BASE + 0xff {
         c.on_tls_alert((code - CRYPTO_ERROR_BASE) as u8, now);
@@ -178,21 +294,109 @@ fn report(c: &mut Connection, code: u64, now: u64)
 }
 
 /// Whether `ev` holds `Secrets { Handshake }`, and whether it holds `Complete`.
-fn key_events(ev: &Vec<TlsEvent>) -> (r: (bool, bool)) {
+spec fn spec_key_events(ev: Seq<SpecTlsEvent>) -> (bool, bool) {
+    (
+        exists|i: int| 0 <= i < ev.len() && #[trigger] spec_secrets_level(ev[i], Level::Handshake),
+        exists|i: int| #![trigger ev[i]] 0 <= i < ev.len() && ev[i] is Complete,
+    )
+}
+
+/// The CRYPTO bytes of level `l` handed to TLS so far.
+spec fn tls_fed(s: QuicServer, l: Level) -> nat {
+    match l {
+        Level::Initial => s.fed_i as nat,
+        Level::Handshake => s.fed_h as nat,
+        Level::OneRtt => 0,
+    }
+}
+
+/// RFC 9001 §4.1.3's "data from a previous encryption level that TLS has not consumed" at
+/// level `l` (space `k`): bytes in TLS's reader, or bytes received at or past the end of what
+/// was handed to TLS.
+spec fn tls_unconsumed(s: QuicServer, l: Level, k: PacketKind) -> bool {
+    spec_reader(s.hs@, l).len() > 0 || past_received(s.conn_spec(), k, tls_fed(s, l))  // rfc-quantity: s.conn_spec(): the server's QUIC connection (QuicServer::conn_spec is h3.conn_spec()), whose CRYPTO receive history past_received reads: the flow of RFC 9001 §4.1.3
+}
+
+//= https://www.rfc-editor.org/rfc/rfc9001#section-4.1.3
+//# When TLS
+//# provides keys for a higher encryption level, if there is data from
+//# a previous encryption level that TLS has not consumed, this MUST
+//# be treated as a connection error of type PROTOCOL_VIOLATION.
+/// `key_changes`' refusal: the batch `ev` gives keys above a level whose data TLS has not
+/// consumed: Handshake keys (`Secrets { Handshake }`) above Initial, 1-RTT keys (`Complete`)
+/// above Initial and Handshake.
+spec fn key_changes_allowed_err(s: QuicServer, ev: Seq<SpecTlsEvent>) -> bool {
+    ||| (spec_key_events(ev).0 || spec_key_events(ev).1) && tls_unconsumed(s, Level::Initial, PacketKind::Initial)
+    ||| spec_key_events(ev).1 && tls_unconsumed(s, Level::Handshake, PacketKind::Handshake)
+}
+
+/// `tls_unconsumed` is not vacuous: an empty reader and nothing received past what TLS has.
+proof fn lemma_tls_unconsumed_rejects(s: QuicServer, l: Level, k: PacketKind)
+    requires
+        spec_reader(s.hs@, l).len() == 0,
+        forall|p: nat| #[trigger] s.conn_spec().crypto_received(k, p) ==> p < tls_fed(s, l),
+    ensures
+        !tls_unconsumed(s, l, k),
+{
+}
+
+/// `key_changes_allowed_err` is not vacuous: whatever the batch, nothing unconsumed at either level.
+proof fn lemma_key_changes_allowed_err_rejects(s: QuicServer, ev: Seq<SpecTlsEvent>)
+    requires
+        spec_reader(s.hs@, Level::Initial).len() == 0,
+        spec_reader(s.hs@, Level::Handshake).len() == 0,
+        forall|p: nat| #[trigger] s.conn_spec().crypto_received(PacketKind::Initial, p) ==> p < s.fed_i,
+        forall|p: nat| #[trigger] s.conn_spec().crypto_received(PacketKind::Handshake, p) ==> p < s.fed_h,
+    ensures
+        !key_changes_allowed_err(s, ev),
+{
+    lemma_tls_unconsumed_rejects(s, Level::Initial, PacketKind::Initial);
+    lemma_tls_unconsumed_rejects(s, Level::Handshake, PacketKind::Handshake);
+}
+
+fn key_events(ev: &Vec<TlsEvent>) -> (r: (bool, bool))
+    ensures
+        r == spec_key_events(ev.deep_view()),
+{
     let mut hs = false;
     let mut done = false;
     let mut i: usize = 0;
     while i < ev.len()
+        invariant
+            i <= ev@.len(),
+            hs == exists|j: int| 0 <= j < i && #[trigger] spec_secrets_level(ev.deep_view()[j], Level::Handshake),
+            done == exists|j: int| #![trigger ev.deep_view()[j]] 0 <= j < i && ev.deep_view()[j] is Complete,
         decreases ev.len() - i,
     {
+        let ghost dv = ev.deep_view();
+        assert(dv[i as int] == ev@[i as int].deep_view());
         match &ev[i] {
             TlsEvent::Secrets { level: Level::Handshake, .. } => hs = true,
             TlsEvent::Complete => done = true,
             _ => {},
         }
         i += 1;
+        proof {
+            let k = i - 1;
+            if spec_secrets_level(dv[k], Level::Handshake) {
+                assert(0 <= k < i && spec_secrets_level(dv[k], Level::Handshake));
+            }
+            if dv[k] is Complete {
+                assert(0 <= k < i && dv[k] is Complete);
+            }
+        }
+    }
+    proof {
+        assert(i == ev.deep_view().len());
     }
     (hs, done)
+}
+
+/// From `o` to `c`: an open `c` was open in `o`, every level drained in `o` still is, and a
+/// completed handshake stays completed.
+spec fn fed_kept(c: Connection, o: Connection) -> bool {
+    &&& c.phase_spec() is Open ==> o.phase_spec() is Open && drained_kept(c, o)
+    &&& o.live(PacketKind::OneRtt) ==> c.live(PacketKind::OneRtt)
 }
 
 pub struct QuicServer<'a> {
@@ -201,8 +405,14 @@ pub struct QuicServer<'a> {
     keys: [Option<KeyPair>; 3],
     /// TLS's receive level: Initial; Handshake at `Secrets { Handshake }`; OneRtt at `Complete`.
     level: Level,
-    /// `crypto_end(Initial)` when `level` left Initial (`on_secrets`).
+    /// `crypto_end(Initial)` when `level` left Initial (`on_secrets`, or `on_complete`).
     init_end: u64,
+    /// The Initial and Handshake CRYPTO bytes handed to TLS (`on_crypto`) so far.
+    fed_i: u64,
+    fed_h: u64,
+    /// The connection when `level` left Initial: `init_end` is the end of what it had received.
+    #[allow(dead_code)]
+    init_rx: Ghost<Connection>,
     /// Only `wf` and `tls_log()` read it, which a plain `cargo build` erases.
     #[allow(dead_code)]
     log: Ghost<Seq<TlsCall>>,
@@ -238,6 +448,34 @@ impl<'a> QuicServer<'a> {
         &&& forall|i: int|
             0 <= i < self.log@.len() ==> (#[trigger] self.log@[i] matches TlsCall::KeyChange { unread, .. }
                 ==> unread == 0)
+        // §4.1.3: what TLS had at Initial when it left is read, so `init_end` is the end of the
+        // Initial data received before the key change.
+        &&& !(self.level is Initial) ==> self.h3.conn_spec().crypto_base_spec(PacketKind::Initial) >= self.init_end
+        // §4.1.3's "end of previously received data": `init_end` is the end of the Initial data the
+        // connection had received when TLS left Initial (`init_rx`), no more and no less.
+        &&& !(self.level is Initial) ==> forall|p: nat| #[trigger] self.init_rx@.crypto_received(PacketKind::Initial, p) ==> p < self.init_end
+        &&& !(self.level is Initial) && self.init_end > 0 ==> self.init_rx@.crypto_received(PacketKind::Initial, (self.init_end - 1) as nat)
+        // `init_rx` is this connection's past: what it had received at Initial, it still has.
+        &&& !(self.level is Initial) ==> forall|p: nat| #[trigger] self.init_rx@.crypto_received(PacketKind::Initial, p)
+            ==> self.h3.conn_spec().crypto_received(PacketKind::Initial, p)
+        // TLS leaves Initial at `Secrets { Handshake }` (`on_secrets`) or, if a batch has `Complete`
+        // without it, at `on_complete`; both record `init_end` and `init_rx`.
+        &&& self.level is Initial ==> self.init_end == 0
+        // TLS receives at OneRtt only once the connection has completed (`on_complete`).
+        &&& self.level is OneRtt ==> self.h3.conn_spec().live(PacketKind::OneRtt)
+        // The bytes handed to TLS are the stream's prefix up to the read offset: while open, a
+        // live space's offset moves only in `crypto_read`, which hands TLS exactly the bytes it
+        // passes (`feed`).
+        &&& self.h3.conn_spec().phase_spec() is Open && self.h3.conn_spec().live(PacketKind::Initial)
+            ==> self.h3.conn_spec().crypto_base_spec(PacketKind::Initial) == self.fed_i
+        &&& self.h3.conn_spec().phase_spec() is Open && self.h3.conn_spec().live(PacketKind::Handshake)
+            ==> self.h3.conn_spec().crypto_base_spec(PacketKind::Handshake) == self.fed_h
+        &&& self.fed_i <= self.h3.conn_spec().crypto_end_spec(PacketKind::Initial)
+        // §4.1.3, at the key change: `init_end` is what TLS had been handed at Initial.
+        &&& !(self.level is Initial) ==> self.init_end == self.fed_i
+        // The peer's transport parameters are known only once TLS has left its ClientHello phases
+        // (Start, HrrSent): `PeerParams` comes only from a call leaving them (`theorem_event_discipline`).
+        &&& self.h3.conn_spec().peer_tp_known_spec() ==> spec_rank(self.hs@.phase) <= 1
     }
 
     /// No discarded keys (RFC 9001 §4.9.1, §4.9.2).
@@ -325,6 +563,8 @@ impl<'a> QuicServer<'a> {
             final(self).hs == old(self).hs,
             final(self).level == old(self).level,
             final(self).init_end == old(self).init_end,
+            final(self).fed_i == old(self).fed_i,
+            final(self).fed_h == old(self).fed_h,
             final(self).log == old(self).log,
             final(self).keys@[2] == old(self).keys@[2],
             final(self).keys@[0] == old(self).keys@[0] || final(self).keys@[0] is None,
@@ -354,6 +594,7 @@ impl<'a> QuicServer<'a> {
         ensures
             s matches Some(q) ==> q.wf() && q.one_rtt_forgotten(),
             app_grew(old(app)@, final(app)@),
+            s matches Some(q) ==> crypto_all_drained(q.conn_spec()),
     {
         let dcid = match initial_dcid(d) {
             Some(x) => x,
@@ -371,20 +612,49 @@ impl<'a> QuicServer<'a> {
         };
         let mut tp: Vec<u8> = Vec::new();
         serialize_server_params(c.local_params(), &mut tp);
+        let ghost cs = c;
         let mut s = QuicServer {
             h3: H3Server::new(c),
             hs: ServerHandshake::new(cfg, tp),
             keys,
             level: Level::Initial,
             init_end: 0,
+            fed_i: 0,
+            fed_h: 0,
+            init_rx: Ghost(cs),
             log: Ghost(Seq::empty()),
         };
         s.sync_keys();
         s.tls_step(now, r);
-        s.h3.pump(app);
-        s.forget_failed();
-        s.sync_keys();
+        s.accept_settle(app);
         Some(s)
+    }
+
+    /// `accept` after TLS's first step: HTTP/3, then a closed connection's unread CRYPTO bytes
+    /// dropped and the key slots synced (split from `accept` so that a missing step fails a named
+    /// ensures here, not the rlimit there).
+    #[verifier::spinoff_prover]
+    fn accept_settle(&mut self, app: &mut Vec<AppEvent>)
+        requires
+            old(self).wf(),
+            old(self).conn_spec().phase_spec() is Open ==> crypto_all_drained(old(self).conn_spec()),
+        ensures
+            final(self).wf(),
+            final(self).one_rtt_forgotten(),
+            app_grew(old(app)@, final(app)@),
+            crypto_all_drained(final(self).conn_spec()),
+    {
+        let ghost c0 = self.h3.conn_spec();
+        self.h3.pump(app);
+        proof {
+            Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
+            if self.h3.conn_spec().phase_spec() is Open {
+                lemma_all_drained_kept(self.h3.conn_spec(), c0);
+            }
+        }
+        self.drop_if_closed();
+        self.forget_failed();
+        self.sync_keys();
     }
 
     /// A datagram for this connection: the pipeline, TLS, the coalesced 1-RTT packet once TLS
@@ -396,21 +666,89 @@ impl<'a> QuicServer<'a> {
             final(self).wf(),
             final(self).one_rtt_forgotten(),
             app_grew(old(app)@, final(app)@),
+            // Drain after the datagram: every CRYPTO byte it delivered in order has gone to TLS, or
+            // been dropped because the connection closed.
+            crypto_all_drained(final(self).conn_spec()),
     {
+        hide(spec_on_crypto);
         let was = self.h3.conn().handshake_complete();
+        let ghost c0 = self.h3.conn_spec();
         quic::pipeline::receive(self.h3.conn_mut(), d, path, now, &r.conn, &self.keys);
+        proof {
+            Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
+        }
         self.sync_keys();
         self.tls_step(now, r);
+        let ghost ct = self.h3.conn_spec();
         if !was && self.h3.conn().handshake_complete() {
+            let ghost c1 = self.h3.conn_spec();
             // The same datagram and path as the first pass, with its own randomness: the first
             // pass's `on_datagram` reset the challenge slices it drew.
             refeed_one_rtt(self.h3.conn_mut(), d, path, now, &r.refeed, &self.keys);
+            proof {
+                Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c1);
+            }
             self.sync_keys();
+            // The refed packet's 1-RTT CRYPTO bytes go to TLS now, not at the next datagram: any
+            // such byte is unexpected_message, a close TLS requires at once. `r.tls` is not drawn
+            // on: whatever this feed hands TLS, its answer is the same under any other randomness.
+            proof {
+                let cfg = self.hs.cfg_view();
+                let tp = self.hs.tp_view();
+                assert forall|st: SpecServerHs, data: Seq<u8>, r2: Seq<u8>| data.len() > 0 implies spec_on_crypto(
+                    cfg,
+                    tp,
+                    st,
+                    Level::OneRtt,
+                    data,
+                    r.tls@,
+                ) == #[trigger] spec_on_crypto(cfg, tp, st, Level::OneRtt, data, r2) by {
+                    lemma_one_rtt_rand_free(cfg, tp, st, data, r.tls@, r2);
+                }
+            }
+            let _ = self.feed(Level::OneRtt, now, r, true);
+            proof {
+                let c = self.h3.conn_spec();
+                self.h3.lemma_conn_wf();
+                Connection::lemma_dead_drained(c);
+                assert(c.live(PacketKind::OneRtt));
+                if c.phase_spec() is Open {
+                    lemma_all_drained(c);
+                }
+            }
         }
+        let ghost c2 = self.h3.conn_spec();
         // SETTINGS goes out once 1-RTT is live.
         self.h3.pump(app);
+        proof {
+            Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c2);
+            if self.h3.conn_spec().phase_spec() is Open {
+                lemma_all_drained_kept(self.h3.conn_spec(), c2);
+            }
+        }
+        self.drop_if_closed();
         self.forget_failed();
         self.sync_keys();
+    }
+
+    /// A connection that is no longer open has its unread CRYPTO bytes dropped: TLS reads no more.
+    #[verifier::spinoff_prover]
+    fn drop_if_closed(&mut self)
+        requires
+            old(self).core_ok(),
+            old(self).conn_spec().phase_spec() is Open ==> crypto_all_drained(old(self).conn_spec()),
+        ensures
+            final(self).core_ok(),
+            crypto_all_drained(final(self).conn_spec()),
+    {
+        if matches!(self.h3.conn().phase(), Phase::Open) {
+            return;
+        }
+        let ghost c0 = self.h3.conn_spec();
+        self.h3.conn_mut().crypto_drop();
+        proof {
+            Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
+        }
     }
 
     /// Clears `out`, then protects the next datagram into it and returns its path. A `Some` with
@@ -432,8 +770,13 @@ impl<'a> QuicServer<'a> {
             r is None ==> final(out)@ == Seq::<u8>::empty() && final(self).conn_spec().out_log()
                 == old(self).conn_spec().out_log() && final(self).conn_spec().acks_later(now),
             now < u64::MAX && old(self).conn_spec().timers_later(now) ==> final(self).conn_spec().timers_later(now),
+            drained_kept(final(self).conn_spec(), old(self).conn_spec()),
     {
+        let ghost c0 = self.h3.conn_spec();
         let r = quic::pipeline::transmit(self.h3.conn_mut(), now, &self.keys, out);
+        proof {
+            Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
+        }
         self.forget_failed();
         self.sync_keys();
         r
@@ -448,8 +791,13 @@ impl<'a> QuicServer<'a> {
             app_grew(old(app)@, final(app)@),
             now < u64::MAX ==> final(self).conn_spec().timers_later(now),
             now <= final(self).conn_spec().now_spec(),
+            drained_kept(final(self).conn_spec(), old(self).conn_spec()),
     {
+        let ghost c0 = self.h3.conn_spec();
         self.h3.on_timeout(now, rand, app);
+        proof {
+            Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
+        }
         self.forget_failed();
         self.sync_keys();
     }
@@ -461,8 +809,14 @@ impl<'a> QuicServer<'a> {
             final(self).wf(),
             final(self).one_rtt_forgotten(),
             final(self).conn_spec().keeps_later(old(self).conn_spec()),
+            drained_kept(final(self).conn_spec(), old(self).conn_spec()),
     {
+        let ghost c0 = self.h3.conn_spec();
         self.h3.conn_mut().poll_cid_updates(out);
+        proof {
+            self.h3.conn_spec().lemma_keeps_crypto(c0);
+            Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
+        }
         self.forget_failed();
         self.sync_keys();
     }
@@ -474,9 +828,16 @@ impl<'a> QuicServer<'a> {
             final(self).wf(),
             final(self).one_rtt_forgotten(),
             app_grew(old(app)@, final(app)@),
+            drained_kept(final(self).conn_spec(), old(self).conn_spec()),
     {
+        let ghost c0 = self.h3.conn_spec();
         self.h3.conn_mut().on_reset_candidate(tail, now);
+        let ghost c1 = self.h3.conn_spec();
         self.h3.pump(app);
+        proof {
+            Connection::lemma_crypto_kept_trans(c0, c1, self.h3.conn_spec());
+            Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
+        }
         self.forget_failed();
         self.sync_keys();
     }
@@ -491,8 +852,13 @@ impl<'a> QuicServer<'a> {
             final(self).wf(),
             final(self).one_rtt_forgotten(),
             app_grew(old(app)@, final(app)@),
+            drained_kept(final(self).conn_spec(), old(self).conn_spec()),
     {
+        let ghost c0 = self.h3.conn_spec();
         let r = self.h3.send_response(id, resp, app);
+        proof {
+            Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
+        }
         self.forget_failed();
         self.sync_keys();
         r
@@ -570,25 +936,64 @@ impl<'a> QuicServer<'a> {
             // §4.1.3: Initial data past what TLS had when it left Initial.
             !(old(self).level_spec() is Initial) && old(self).conn_spec().crypto_end_spec(PacketKind::Initial)
                 > old(self).init_end && old(self).conn_spec().phase_spec() is Open ==> !(final(self).conn_spec().phase_spec() is Open),
+            // Drain after feed: at `tls_step`'s return no level holds an in-order byte TLS has not
+            // been given (levels not live are drained by `Connection::wf`).
+            final(self).conn_spec().phase_spec() is Open ==> crypto_all_drained(final(self).conn_spec()),
     {
+        let ghost c0 = self.h3.conn_spec();
+        proof {
+            self.h3.lemma_conn_wf();
+            Connection::lemma_dead_drained(c0);
+        }
         let was = self.h3.conn().handshake_complete();
         if !self.superseded(now) {
             self.sync_keys();
             return ;
         }
         if was {
+            // Initial and Handshake are discarded (`lemma_dead_drained`); OneRtt is read here.
             if !self.feed(Level::OneRtt, now, r, was) {
                 self.sync_keys();
                 return ;
             }
+            proof {
+                let c = self.h3.conn_spec();
+                if c.phase_spec() is Open {
+                    assert(crypto_drained(c0, PacketKind::Initial));
+                    assert(crypto_drained(c0, PacketKind::Handshake));
+                    lemma_all_drained(c);
+                }
+            }
         } else {
+            // OneRtt is not live yet, so drained (`lemma_dead_drained`).
+            let ghost l0 = self.level;
             if rank(self.level) == 0 && !self.feed(Level::Initial, now, r, was) {
                 self.sync_keys();
                 return ;
             }
+            let ghost c1 = self.h3.conn_spec();
+            proof {
+                if c1.phase_spec() is Open {
+                    assert(crypto_drained(c0, PacketKind::OneRtt));
+                    assert(crypto_drained(c1, PacketKind::OneRtt));
+                    assert(crypto_drained(c1, PacketKind::Initial));
+                }
+            }
             if rank(self.level) <= 1 && !self.feed(Level::Handshake, now, r, was) {
                 self.sync_keys();
                 return ;
+            }
+            proof {
+                let c = self.h3.conn_spec();
+                self.h3.lemma_conn_wf();
+                Connection::lemma_dead_drained(c);
+                if c.phase_spec() is Open {
+                    assert(crypto_drained(c, PacketKind::OneRtt));
+                    assert(crypto_drained(c, PacketKind::Initial));
+                    // Not read here only once TLS is at OneRtt, so complete and Handshake discarded.
+                    assert(crypto_drained(c, PacketKind::Handshake));
+                    lemma_all_drained(c);
+                }
             }
         }
         self.sync_keys();
@@ -604,9 +1009,9 @@ impl<'a> QuicServer<'a> {
     //# PROTOCOL_VIOLATION.
     // Initial is the only level TLS leaves with its space still live: Handshake is discarded in
     // the call that leaves it, and its stream reset. Checked before `on_crypto`, which would say
-    // 0x10a. `crypto_end` is read before `crypto_read`, which says nothing about it.
-    /// Step 1: once TLS has left Initial, Initial CRYPTO data past `init_end`, or newly contiguous,
-    /// closes with PROTOCOL_VIOLATION; a retransmission of old bytes does not.
+    // 0x10a. Nothing at Initial is left to read: `core_ok` has `init_end <= crypto_base`.
+    /// Step 1: once TLS has left Initial, Initial CRYPTO data past `init_end` closes with
+    /// PROTOCOL_VIOLATION; a retransmission of old bytes does not.
     #[verifier::spinoff_prover]
     fn superseded(&mut self, now: u64) -> (cont: bool)
         requires
@@ -619,20 +1024,36 @@ impl<'a> QuicServer<'a> {
             final(self).level == old(self).level,
             !(old(self).level is Initial) && old(self).conn_spec().crypto_end_spec(PacketKind::Initial)
                 > old(self).init_end && old(self).conn_spec().phase_spec() is Open ==> !cont && !(final(self).conn_spec().phase_spec() is Open),
+            !cont ==> !(final(self).conn_spec().phase_spec() is Open),
+            cont ==> final(self).h3 == old(self).h3,
+            cont && !(old(self).level is Initial) ==> crypto_drained(final(self).conn_spec(), PacketKind::Initial),
+            // Acceptance: a stop only for Initial data past the end of what was received before the
+            // key change, with PROTOCOL_VIOLATION.
+            !cont ==> !(old(self).level is Initial) && old(self).conn_spec().crypto_end_spec(PacketKind::Initial)
+                > old(self).init_end,
+            !cont && old(self).conn_spec().phase_spec() is Open ==> {
+                &&& superseded_allowed_err(*old(self))
+                &&& final(self).conn_spec().phase_spec() is Closing
+                &&& final(self).conn_spec().close_spec() == Some((false, PROTOCOL_VIOLATION, Seq::<u8>::empty()))
+            },
+            // Rule 1b: every such datagram closes so.
+            old(self).conn_spec().phase_spec() is Open && superseded_allowed_err(*old(self)) ==> !cont
+                && final(self).conn_spec().phase_spec() is Closing && final(self).conn_spec().close_spec()
+                == Some((false, PROTOCOL_VIOLATION, Seq::<u8>::empty())),
     {
         if matches!(self.level, Level::Initial) {
             return true;
         }
         let e = self.h3.conn().crypto_end(PacketKind::Initial);
+        let ghost c0 = self.h3.conn_spec();
         if e > self.init_end {
+            proof {
+                assert(c0.crypto_received(PacketKind::Initial, (e - 1) as nat));
+            }
             shut(self.h3.conn_mut(), PROTOCOL_VIOLATION, now);
-            self.sync_keys();
-            return false;
-        }
-        let mut b: Vec<u8> = Vec::new();
-        self.h3.conn_mut().crypto_read(PacketKind::Initial, &mut b);
-        if b.len() > 0 {
-            shut(self.h3.conn_mut(), PROTOCOL_VIOLATION, now);
+            proof {
+                Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
+            }
             self.sync_keys();
             return false;
         }
@@ -655,10 +1076,38 @@ impl<'a> QuicServer<'a> {
             final(self).hs@.phase is Failed && !(old(self).hs@.phase is Failed) && !was
                 ==> final(self).keys@[2] is None,
             was ==> final(self).keys@[2] == old(self).keys@[2],
+            !cont ==> !(final(self).conn_spec().phase_spec() is Open),
+            fed_kept(final(self).conn_spec(), old(self).conn_spec()),
+            final(self).conn_spec().phase_spec() is Open ==> crypto_drained(final(self).conn_spec(), level_kind(l)),
     {
         hide(spec_on_crypto);
         let mut b: Vec<u8> = Vec::new();
+        let ghost c0 = self.h3.conn_spec();
+        proof {
+            self.h3.lemma_conn_wf();
+            Connection::lemma_dead_drained(c0);
+        }
         self.h3.conn_mut().crypto_read(kind(l), &mut b);
+        // Bounds the count: what TLS has been handed is the stream up to the read offset.
+        let _ = self.h3.conn().crypto_end(kind(l));
+        proof {
+            Connection::lemma_crypto_kept_but_elim(self.h3.conn_spec(), c0, Some(level_kind(l)));
+        }
+        proof {
+            if b.len() > 0 {
+                assert(c0.phase_spec() is Open);
+                if !c0.live(level_kind(l)) {
+                    assert(crypto_drained(c0, level_kind(l)));
+                }
+            }
+        }
+        if b.len() > 0 {
+            match l {
+                Level::Initial => self.fed_i = self.fed_i + b.len() as u64,
+                Level::Handshake => self.fed_h = self.fed_h + b.len() as u64,
+                Level::OneRtt => {},
+            }
+        }
         self.sync_keys();
         if b.len() == 0 {
             return true;
@@ -672,8 +1121,16 @@ impl<'a> QuicServer<'a> {
         let ghost h0 = self.hs@;
         let ghost cfg = self.hs.cfg_view();
         let ghost tp = self.hs.tp_view();
+        proof {
+            lemma_fed(cfg, tp, h0, l, b@, r.tls@);
+        }
+        // TLS's step consumes exactly the bytes `crypto_read` handed over, which `fed` counts.
+        let ghost step = spec_on_crypto(cfg, tp, h0, l, b@, r.tls@);
         match self.hs.on_crypto(l, b.as_slice(), &r.tls, &mut ev) {
             Err(code) => {
+                proof {
+                    assert(step.1 is Err ==> self.hs@ == step.0);
+                }
                 //= https://www.rfc-editor.org/rfc/rfc8446#section-6
                 //# Servers and
                 //# clients MUST forget the secret values and keys established in failed
@@ -686,13 +1143,17 @@ impl<'a> QuicServer<'a> {
                 if !was {
                     self.keys[2] = None;
                 }
+                let ghost c1 = self.h3.conn_spec();
                 report(self.h3.conn_mut(), code, now);
+                proof {
+                    Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c1);
+                }
                 self.sync_keys();
                 false
             },
             Ok(()) => {
                 proof {
-                    lemma_fed(cfg, tp, h0, l, b@, r.tls@);
+                    assert(self.hs@ == step.0);
                 }
                 self.apply(ev, now, r)
             },
@@ -705,14 +1166,30 @@ impl<'a> QuicServer<'a> {
         requires
             old(self).wf(),
             forall|i: int| 0 <= i < ev.deep_view().len() ==> !spec_send_level(#[trigger] ev.deep_view()[i], Level::OneRtt),
+            // `theorem_event_discipline`: one `PeerParams` at most, from a call that left the
+            // ClientHello phases, so none were known before it (`core_ok`).
+            forall|i: int| 0 <= i < ev.deep_view().len() && #[trigger] ev.deep_view()[i] is PeerParams
+                ==> !old(self).conn_spec().peer_tp_known_spec() && old(self).hs@.phase is WaitFinished,
+            forall|i: int, j: int|
+                0 <= i < ev.deep_view().len() && 0 <= j < ev.deep_view().len() && #[trigger] ev.deep_view()[i] is PeerParams
+                    && #[trigger] ev.deep_view()[j] is PeerParams ==> i == j,
+            // `feed` hands TLS bytes only from an open connection.
+            old(self).conn_spec().phase_spec() is Open,
         ensures
             final(self).wf(),
             final(self).conn_spec().out_log() == old(self).conn_spec().out_log(),
             final(self).hs == old(self).hs,
+            !ok ==> !(final(self).conn_spec().phase_spec() is Open),
+            fed_kept(final(self).conn_spec(), old(self).conn_spec()),
     {
         if !self.key_changes(&ev, now) {
             self.sync_keys();
             return false;
+        }
+        proof {
+            // The Initial offset is what TLS was handed (live), or the end (discarded).
+            self.h3.lemma_conn_wf();
+            Connection::lemma_dead_drained(self.conn_spec());
         }
         let mut i: usize = 0;
         while i < ev.len()
@@ -721,20 +1198,66 @@ impl<'a> QuicServer<'a> {
                 self.conn_spec().out_log() == old(self).conn_spec().out_log(),
                 self.hs == old(self).hs,
                 forall|j: int| 0 <= j < ev.deep_view().len() ==> !spec_send_level(#[trigger] ev.deep_view()[j], Level::OneRtt),
+                // `key_changes` saw nothing unread at Initial, and nothing is read or received here.
+                (spec_key_events(ev.deep_view()).0 || spec_key_events(ev.deep_view()).1) && self.level is Initial
+                    ==> self.conn_spec().crypto_end_spec(
+                    PacketKind::Initial,
+                ) <= self.conn_spec().crypto_base_spec(PacketKind::Initial) && self.conn_spec().crypto_end_spec(
+                    PacketKind::Initial,
+                ) <= self.fed_i,
+                fed_kept(self.conn_spec(), old(self).conn_spec()),
+                i <= ev.deep_view().len(),
+                forall|j: int| i <= j < ev.deep_view().len() && #[trigger] ev.deep_view()[j] is PeerParams
+                    ==> !self.conn_spec().peer_tp_known_spec() && self.hs@.phase is WaitFinished,
+                forall|j: int, k: int|
+                    0 <= j < ev.deep_view().len() && 0 <= k < ev.deep_view().len() && #[trigger] ev.deep_view()[j] is PeerParams
+                        && #[trigger] ev.deep_view()[k] is PeerParams ==> j == k,
             decreases ev.len() - i,
         {
+            let ghost c0 = self.conn_spec();
+            let ghost dv = ev.deep_view();
             let ok = match &ev[i] {
-                TlsEvent::PeerParams(b) => self.on_params(b, now),
+                TlsEvent::PeerParams(b) => {
+                    proof {
+                        assert(dv[i as int] == ev@[i as int].deep_view());
+                        assert(dv[i as int] is PeerParams);
+                    }
+                    let ok = self.on_params(b, now);
+                    proof {
+                        Connection::lemma_crypto_kept_base_elim(self.conn_spec(), c0);
+                        assert forall|j: int| i < j < dv.len() implies !(#[trigger] dv[j] is PeerParams) by {
+                            if dv[j] is PeerParams {
+                                assert(dv[i as int] is PeerParams);
+                            }
+                        }
+                    }
+                    ok
+                },
                 TlsEvent::Send { level, data } => {
                     assert(ev.deep_view()[i as int] == ev@[i as int].deep_view());
                     self.on_send(*level, data);
+                    proof {
+                        Connection::lemma_crypto_kept_elim(self.conn_spec(), c0);
+                    }
                     true
                 },
                 TlsEvent::Secrets { level, client, server } => {
+                    proof {
+                        assert(ev.deep_view()[i as int] == ev@[i as int].deep_view());
+                        if *level is Handshake {
+                            assert(spec_secrets_level(ev.deep_view()[i as int], Level::Handshake));
+                        }
+                    }
                     self.on_secrets(*level, client, server);
                     true
                 },
-                TlsEvent::Complete => self.on_complete(now, r),
+                TlsEvent::Complete => {
+                    proof {
+                        assert(ev.deep_view()[i as int] == ev@[i as int].deep_view());
+                        assert(ev.deep_view()[i as int] is Complete);
+                    }
+                    self.on_complete(now, r)
+                },
             };
             if !ok {
                 self.sync_keys();
@@ -770,8 +1293,8 @@ impl<'a> QuicServer<'a> {
     /// reassembly buffer out of order.
     spec fn unread(&self, l: Level, k: PacketKind) -> nat {
         let c = self.h3.conn_spec();
-        spec_reader(self.hs@, l).len() + if c.crypto_end_spec(k) > c.crypto_base_spec(k) {
-            (c.crypto_end_spec(k) - c.crypto_base_spec(k)) as nat
+        spec_reader(self.hs@, l).len() + if c.crypto_end_spec(k) > tls_fed(*self, l) {
+            (c.crypto_end_spec(k) - tls_fed(*self, l)) as nat
         } else {
             0
         }
@@ -781,34 +1304,81 @@ impl<'a> QuicServer<'a> {
     fn unconsumed(&self, l: Level, k: PacketKind) -> (r: bool)
         requires
             self.core_ok(),
+            !(l is OneRtt),
         ensures
             r == (self.unread(l, k) > 0),
+            r == tls_unconsumed(*self, l, k),
     {
-        self.hs.pending(l) || self.h3.conn().crypto_end(k) > self.h3.conn().crypto_base(k)
+        let e = self.h3.conn().crypto_end(k);
+        let f = match l {
+            Level::Initial => self.fed_i,
+            _ => self.fed_h,
+        };
+        proof {
+            if e > f {
+                assert(self.h3.conn_spec().crypto_received(k, (e - 1) as nat));
+            }
+        }
+        self.hs.pending(l) || e > f
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-4.1.3
+    //# When TLS
+    //# provides keys for a higher encryption level, if there is data from
+    //# a previous encryption level that TLS has not consumed, this MUST
+    //# be treated as a connection error of type PROTOCOL_VIOLATION.
     /// The pre-checks: none of `ev` is applied if TLS moves past a level with bytes unread there.
     #[verifier::spinoff_prover]
     fn key_changes(&mut self, ev: &Vec<TlsEvent>, now: u64) -> (ok: bool)
         requires
             old(self).wf(),
         ensures
+            final(self).level == old(self).level,
+            final(self).fed_i == old(self).fed_i,
             final(self).wf(),
             final(self).conn_spec().out_log() == old(self).conn_spec().out_log(),
             final(self).hs == old(self).hs,
+            ok ==> final(self).h3 == old(self).h3,
+            ok && (spec_key_events(ev.deep_view()).0 || spec_key_events(ev.deep_view()).1) ==> old(self).unread(
+                Level::Initial,
+                PacketKind::Initial,
+            ) == 0,
+            !ok ==> !(final(self).conn_spec().phase_spec() is Open),
+            fed_kept(final(self).conn_spec(), old(self).conn_spec()),
+            // Acceptance: keys for a higher level (Handshake at `Secrets { Handshake }`, 1-RTT at
+            // `Complete`) with a lower level's data not consumed, and PROTOCOL_VIOLATION.
+            !ok && old(self).conn_spec().phase_spec() is Open ==> {
+                &&& key_changes_allowed_err(*old(self), ev.deep_view())
+                &&& final(self).conn_spec().phase_spec() is Closing
+                &&& final(self).conn_spec().close_spec() == Some((false, PROTOCOL_VIOLATION, Seq::<u8>::empty()))
+            },
+            // Rule 1b: every such batch closes so.
+            old(self).conn_spec().phase_spec() is Open && key_changes_allowed_err(*old(self), ev.deep_view()) ==> !ok
+                && final(self).conn_spec().phase_spec() is Closing && final(self).conn_spec().close_spec() == Some(
+                (false, PROTOCOL_VIOLATION, Seq::<u8>::empty()),
+            ),
     {
         let (to_hs, done) = key_events(ev);
-        if to_hs && self.unconsumed(Level::Initial, PacketKind::Initial) {
+        let ghost c0 = self.h3.conn_spec();
+        // `Complete` gives 1-RTT keys, above Initial too: TLS leaves Initial there if the batch has
+        // no `Secrets { Handshake }`.
+        if (to_hs || done) && self.unconsumed(Level::Initial, PacketKind::Initial) {
             shut(self.h3.conn_mut(), PROTOCOL_VIOLATION, now);
+            proof {
+                Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
+            }
             self.sync_keys();
             return false;
         }
         if done && self.unconsumed(Level::Handshake, PacketKind::Handshake) {
             shut(self.h3.conn_mut(), PROTOCOL_VIOLATION, now);
+            proof {
+                Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
+            }
             self.sync_keys();
             return false;
         }
-        if to_hs {
+        if to_hs || done {
             let ghost c = TlsCall::KeyChange { lower: Level::Initial, unread: self.unread(Level::Initial, PacketKind::Initial) };
             proof {
                 self.lemma_push(c);
@@ -826,20 +1396,61 @@ impl<'a> QuicServer<'a> {
         true
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4
+    //# An endpoint MUST treat receipt of a transport parameter with an
+    //# invalid value as a connection error of type
+    //# TRANSPORT_PARAMETER_ERROR.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+    //# An endpoint MUST treat the absence of the
+    //# initial_source_connection_id transport parameter from either endpoint
+    //# or the absence of the original_destination_connection_id transport
+    //# parameter from the server as a connection error of type
+    //# TRANSPORT_PARAMETER_ERROR.
     /// `PeerParams`: the client's transport parameters. No keys are installed on a connection
     /// they closed.
     #[verifier::spinoff_prover]
     fn on_params(&mut self, b: &Vec<u8>, now: u64) -> (ok: bool)
         requires
             old(self).wf(),
+            // The first delivery (`apply`, from `theorem_event_discipline`).
+            !old(self).conn_spec().peer_tp_known_spec(),
+            old(self).hs@.phase is WaitFinished,
         ensures
+            final(self).fed_i == old(self).fed_i,
             final(self).wf(),
             final(self).conn_spec().out_log() == old(self).conn_spec().out_log(),
             final(self).hs == old(self).hs,
+            final(self).level == old(self).level,
+            ok ==> final(self).conn_spec().crypto_end_spec(PacketKind::Initial) == old(self).conn_spec().crypto_end_spec(PacketKind::Initial),
+            final(self).conn_spec().crypto_kept_base(old(self).conn_spec()),
+            !ok ==> !(final(self).conn_spec().phase_spec() is Open),
+            fed_kept(final(self).conn_spec(), old(self).conn_spec()),
+            // Acceptance: a stop only for parameters RFC 9000 lets a server refuse, with
+            // TRANSPORT_PARAMETER_ERROR.
+            !ok && old(self).conn_spec().phase_spec() is Open ==> {
+                &&& tp_allowed_err(old(self).conn_spec(), b@)
+                &&& final(self).conn_spec().phase_spec() is Closing
+                &&& final(self).conn_spec().close_spec() == Some((false, TRANSPORT_PARAMETER_ERROR, Seq::<u8>::empty()))
+            },
+            // Rule 1b: refusable parameters close so.
+            old(self).conn_spec().phase_spec() is Open && (allowed_tp_err(b@) || tp_allowed_err(old(self).conn_spec(), b@)) ==> !ok
+                && final(self).conn_spec().phase_spec() is Closing && final(self).conn_spec().close_spec() == Some(
+                (false, TRANSPORT_PARAMETER_ERROR, Seq::<u8>::empty()),
+            ),
     {
+        let ghost c0 = self.h3.conn_spec();
+        // The §17.2 bound `tp_allowed_err` carries.
+        let _ = self.h3.conn().client_scid_len();
+        proof {
+            lemma_tp_err_allowed(b@);
+        }
         match parse_transport_params(b.as_slice(), true) {
             Err(_) => {
                 shut(self.h3.conn_mut(), TRANSPORT_PARAMETER_ERROR, now);
+                proof {
+                    Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
+                    Connection::lemma_crypto_kept_to_base(self.h3.conn_spec(), c0);
+                }
                 self.sync_keys();
                 false
             },
@@ -848,6 +1459,9 @@ impl<'a> QuicServer<'a> {
                     theorem_peer_tp_wf(b@);
                 }
                 self.h3.conn_mut().on_peer_params(&t, now);
+                proof {
+                    Connection::lemma_crypto_kept_base_elim(self.h3.conn_spec(), c0);
+                }
                 if !matches!(self.h3.conn().phase(), Phase::Open) {
                     self.sync_keys();
                     return false;
@@ -879,12 +1493,43 @@ impl<'a> QuicServer<'a> {
             old(self).wf(),
             !(l is OneRtt),
         ensures
+            final(self).fed_i == old(self).fed_i,
             final(self).wf(),
             final(self).conn_spec().out_log() == old(self).conn_spec().out_log(),
             final(self).hs == old(self).hs,
+            final(self).level == old(self).level,
+            final(self).conn_spec().crypto_end_spec(PacketKind::Initial) == old(self).conn_spec().crypto_end_spec(PacketKind::Initial),
+            final(self).conn_spec().crypto_kept(old(self).conn_spec()),
+            fed_kept(final(self).conn_spec(), old(self).conn_spec()),
     {
+        let ghost c0 = self.h3.conn_spec();
         self.h3.conn_mut().crypto_write(kind(l), data.as_slice());
+        proof {
+            Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
+        }
         self.sync_keys();
+    }
+
+    /// TLS leaves Initial: `init_end` and `init_rx` record what the connection has received there.
+    #[verifier::spinoff_prover]
+    fn leave_initial(&mut self)
+        requires
+            old(self).h3.wf(),
+            old(self).h3.conn_spec().crypto_end_spec(PacketKind::Initial) <= old(self).h3.conn_spec().crypto_base_spec(
+                PacketKind::Initial,
+            ),
+            old(self).h3.conn_spec().crypto_end_spec(PacketKind::Initial) == old(self).fed_i,
+        ensures
+            *final(self) == (QuicServer { init_end: final(self).init_end, init_rx: final(self).init_rx, ..*old(self) }),
+            final(self).init_end == old(self).fed_i,
+            final(self).init_rx@ == old(self).h3.conn_spec(),
+            final(self).init_end == old(self).h3.conn_spec().crypto_end_spec(PacketKind::Initial),
+            final(self).init_end <= old(self).h3.conn_spec().crypto_base_spec(PacketKind::Initial),
+            forall|p: nat| #[trigger] final(self).init_rx@.crypto_received(PacketKind::Initial, p) ==> p < final(self).init_end,
+            final(self).init_end > 0 ==> final(self).init_rx@.crypto_received(PacketKind::Initial, (final(self).init_end - 1) as nat),
+    {
+        self.init_end = initial_end(self.h3.conn());
+        self.init_rx = Ghost(self.h3.conn_spec());
     }
 
     /// `Secrets`: the packet keys of level `l`; at Handshake, TLS now receives there.
@@ -892,10 +1537,18 @@ impl<'a> QuicServer<'a> {
     fn on_secrets(&mut self, l: Level, client: &[u8; 32], server: &[u8; 32])
         requires
             old(self).wf(),
+            l is Handshake && old(self).level is Initial ==> old(self).conn_spec().crypto_end_spec(PacketKind::Initial)
+                <= old(self).conn_spec().crypto_base_spec(PacketKind::Initial) && old(self).conn_spec().crypto_end_spec(
+                PacketKind::Initial,
+            ) <= old(self).fed_i,
         ensures
+            final(self).fed_i == old(self).fed_i,
             final(self).wf(),
             final(self).conn_spec().out_log() == old(self).conn_spec().out_log(),
             final(self).hs == old(self).hs,
+            final(self).h3 == old(self).h3,
+            !(l is Handshake) ==> final(self).level == old(self).level,
+            l is Handshake ==> final(self).level is Handshake,
     {
         let kp = KeyPair { rx: packet_keys(client), tx: packet_keys(server) };
         match l {
@@ -903,7 +1556,7 @@ impl<'a> QuicServer<'a> {
             Level::Handshake => {
                 if matches!(self.level, Level::Initial) {
                     // Everything TLS had at Initial (`key_changes` saw nothing unread there).
-                    self.init_end = self.h3.conn().crypto_end(PacketKind::Initial);
+                    self.leave_initial();
                 }
                 self.keys[1] = Some(kp);
                 self.level = Level::Handshake;
@@ -919,10 +1572,20 @@ impl<'a> QuicServer<'a> {
     fn on_complete(&mut self, now: u64, r: &Rand) -> (ok: bool)
         requires
             old(self).wf(),
+            old(self).level is Initial ==> old(self).conn_spec().crypto_end_spec(PacketKind::Initial)
+                <= old(self).conn_spec().crypto_base_spec(PacketKind::Initial) && old(self).conn_spec().crypto_end_spec(
+                PacketKind::Initial,
+            ) <= old(self).fed_i,
         ensures
+            final(self).fed_i == old(self).fed_i,
             final(self).wf(),
             final(self).conn_spec().out_log() == old(self).conn_spec().out_log(),
             final(self).hs == old(self).hs,
+            ok ==> final(self).level is OneRtt,
+            !ok ==> final(self).level == old(self).level,
+            !ok ==> !(final(self).conn_spec().phase_spec() is Open),
+            fed_kept(final(self).conn_spec(), old(self).conn_spec()),
+            final(self).conn_spec().peer_tp_known_spec() ==> old(self).conn_spec().peer_tp_known_spec(),
     {
         let alpn: &[u8] = &H3_ALPN;
         // `on_handshake_complete` sets HANDSHAKE_DONE owed in the call that completes, so the next
@@ -930,12 +1593,21 @@ impl<'a> QuicServer<'a> {
         //= https://www.rfc-editor.org/rfc/rfc9001#section-4.1.2
         //# The server MUST send a
         //# HANDSHAKE_DONE frame as soon as the handshake is complete.
+        let ghost c0 = self.h3.conn_spec();
         self.h3.conn_mut().on_handshake_complete(alpn, now, &r.complete);
-        self.level = Level::OneRtt;
+        proof {
+            Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
+        }
         if !matches!(self.h3.conn().phase(), Phase::Open) {
             self.sync_keys();
             return false;
         }
+        if matches!(self.level, Level::Initial) {
+            // TLS leaves Initial here (no `Secrets { Handshake }` before it): as `on_secrets` does.
+            self.leave_initial();
+        }
+        // Only a completed connection: `core_ok` ties OneRtt to completion.
+        self.level = Level::OneRtt;
         self.sync_keys();
         true
     }
@@ -956,10 +1628,16 @@ proof fn lemma_fed(
     ensures
         ({
             let (s2, res) = spec_on_crypto(cfg, tp, s, l, data, rand);
-            res matches Ok(evs) ==> {
+            &&& spec_rank(s2.phase) <= spec_rank(s.phase)
+            &&& res matches Ok(evs) ==> {
                 &&& !(l is OneRtt)
                 &&& !(s.phase is Failed) ==> !(s2.phase is Failed)
                 &&& forall|i: int| 0 <= i < evs.len() ==> !spec_send_level(#[trigger] evs[i], Level::OneRtt)
+                &&& forall|i: int| 0 <= i < evs.len() && #[trigger] evs[i] is PeerParams ==> (s.phase is Start
+                    || s.phase is HrrSent) && s2.phase is WaitFinished
+                &&& forall|i: int, j: int|
+                    0 <= i < evs.len() && 0 <= j < evs.len() && #[trigger] evs[i] is PeerParams
+                        && #[trigger] evs[j] is PeerParams ==> i == j
             }
         }),
 {
@@ -968,6 +1646,57 @@ proof fn lemma_fed(
         lemma_ok_not_failed(cfg, tp, s, l, data, rand);
     }
     theorem_event_discipline(cfg, tp, s, l, data, rand);
+}
+
+/// All drained in `o`, and every level drained in `o` still is in `c`.
+proof fn lemma_all_drained_kept(c: Connection, o: Connection)
+    requires
+        crypto_all_drained(o),
+        drained_kept(c, o),
+    ensures
+        crypto_all_drained(c),
+{
+    assert forall|k: PacketKind| #[trigger] crypto_drained(c, k) by {
+        assert(crypto_drained(o, k));
+    }
+}
+
+/// The three levels drained: all are.
+proof fn lemma_all_drained(c: Connection)
+    requires
+        crypto_drained(c, PacketKind::Initial),
+        crypto_drained(c, PacketKind::Handshake),
+        crypto_drained(c, PacketKind::OneRtt),
+    ensures
+        crypto_all_drained(c),
+{
+    assert forall|k: PacketKind| #[trigger] crypto_drained(c, k) by {
+        match k {
+            PacketKind::Initial => {},
+            PacketKind::Handshake => {},
+            PacketKind::OneRtt => {},
+        }
+    }
+}
+
+/// TLS's answer to non-empty 1-RTT CRYPTO data does not depend on its randomness: no phase
+/// expects OneRtt, so it is the unexpected_message failure (or the earlier failure) either way.
+/// `receive`'s second OneRtt feed therefore draws nothing from `r.tls`.
+proof fn lemma_one_rtt_rand_free(
+    cfg: Seq<SpecCertChain>,
+    tp: Seq<u8>,
+    s: SpecServerHs,
+    data: Seq<u8>,
+    r1: Seq<u8>,
+    r2: Seq<u8>,
+)
+    requires
+        data.len() > 0,
+    ensures
+        spec_on_crypto(cfg, tp, s, Level::OneRtt, data, r1) == spec_on_crypto(cfg, tp, s, Level::OneRtt, data, r2),
+        spec_on_crypto(cfg, tp, s, Level::OneRtt, data, r1).1 is Err,
+{
+    hide(spec_drain);
 }
 
 } // verus!

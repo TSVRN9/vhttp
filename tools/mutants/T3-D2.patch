@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index c97e69c..05b2ee4 100644
+index 84680fd..f9098c8 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -1468,7 +1468,7 @@ impl Connection {
+@@ -1642,7 +1642,7 @@ impl Connection {
              }
              self.lc.enter_closing(now, pto, false, c, none.as_slice());
              self.streams = None;

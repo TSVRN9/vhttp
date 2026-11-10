@@ -1,0 +1,13 @@
+diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
+index 206d62d..c840750 100644
+--- a/crates/quic/src/crypto_stream.rs
++++ b/crates/quic/src/crypto_stream.rs
+@@ -22,7 +22,7 @@ broadcast use vstd::set_lib::range_set_properties;
+ pub const MAX_CRYPTO_BUFFER: u64 = 16384;
+ 
+ /// Our own limit: the out-of-order bytes held form at most this many runs, one fragment each.
+-pub const MAX_CRYPTO_RANGES: usize = 4096;
++pub const MAX_CRYPTO_RANGES: usize = 4095;
+ 
+ /// The end of the in-order CRYPTO data received: every byte below it has been received, and the
+ /// byte at it has not. Bytes received past it are the out-of-order data of RFC 9000 §7.5.

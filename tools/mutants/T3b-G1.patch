@@ -1,0 +1,12 @@
+diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
+index 37201ae..4b7caa1 100644
+--- a/crates/quictls/src/server.rs
++++ b/crates/quictls/src/server.rs
+@@ -726,7 +726,6 @@ impl<'a> QuicServer<'a> {
+                 lemma_all_drained_kept(self.h3.conn_spec(), c2);
+             }
+         }
+-        self.drop_if_closed();
+         self.forget_failed();
+         self.sync_keys();
+     }

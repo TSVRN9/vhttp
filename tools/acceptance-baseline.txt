@@ -149,7 +149,6 @@ quic::cid::LocalCids::on_retire
 quic::cid::PeerCids::on_new_cid
 quic::conn::Connection::on_ack_frame
 quic::conn::Connection::on_cid_frame
-quic::conn::Connection::on_crypto_frame
 quic::conn::Connection::on_frame
 quic::conn::Connection::on_frames
 quic::conn::Connection::on_packet
