@@ -52,7 +52,7 @@ T3b-G1	quictls	server	QuicServer::receive	-	postcondition not satisfied.*crypto_
 T3b-G2	quic	conn	Connection::crypto_drop	-	assertion failed.*crypto_drained	9a T3b fix round 2 (N1) G2: crypto_drop skips the Handshake read
 T3b-G3	quictls	server	QuicServer::drop_if_closed	-	postcondition not satisfied.*crypto_all_drained	9a T3b re-review r2-m3 (added 9a T8): accept's drop is drop_if_closed without its crypto_drop (deleting the call in accept itself exhausts rlimit in accept, not a kill)
 T3b-G4	quictls	server	QuicServer::accept_settle	-	postcondition not satisfied.*crypto_all_drained	9a T3b re-review r2-m3 accept-drop (added 9a2 final fix I2c): delete the drop_if_closed call after accept's tls_step (accept_settle, split from accept so this fails by name)
-T5-M1	quictls	server	QuicServer::superseded	quictls/server:initial_retransmit_after_switch_ok,quictls/server:empty_initial_after_switch_ok	postcondition not satisfied.*superseded_allowed_err	9a T5 T5-M1: superseded tests e >= init_end
+T5-M1	quictls	server	QuicServer::superseded	quictls/server:initial_retransmit_after_switch_ok,quictls/server:empty_initial_after_switch_ok	postcondition not satisfied.*init_end	9a T5 T5-M1: superseded tests e >= init_end
 T5-M2	quictls	server	QuicServer::key_changes	-	postcondition not satisfied.*key_changes_allowed_err	9a T5 T5-M2: key_changes tests crypto_end(Initial) > 0
 T5-M3	quictls	server	QuicServer::on_params	-	postcondition not satisfied.*TRANSPORT_PARAMETER_ERROR	9a T5 T5-M3: on_params' Err arm shuts with PROTOCOL_VIOLATION
 T5-M4	quictls	server	QuicServer::on_params	-	postcondition not satisfied.*tp_allowed_err	9a T5 T5-M4: delete lemma_tp_err_allowed(b@) in on_params
@@ -71,6 +71,7 @@ T5-M13	quictls	server	QuicServer::leave_initial	quictls/server:initial_retransmi
 T5-M14	quictls	server	QuicServer::feed	-	precondition not satisfied.*core_ok\(\)	9a T5 fix round 2 (m3, rule 1d) T5-M14: the fed counter one byte short
 T5-M15	quictls	server	QuicServer::feed	quictls/e2e:rustls_quic_handshake	precondition not satisfied.*core_ok\(\)	9a T5 fix round 2 (m3) T5-M15 (rebuilt 9a2 final fix I2a; patch in quic): crypto_read hands one byte short while its offset advances, model and code; quic verifies, feed fails core_ok
 T5-M16	quictls	server	QuicServer::feed	-	assertion failed.*step\.1 is Err ==> self\.hs@ == step\.0	9a T5 fix round 3 (n1) T5-M16: on_crypto handed b[1..], lemma_fed re-anchored
+T5-M17	quictls	server	QuicServer::superseded	-	postcondition not satisfied.*superseded_allowed_err	9a2 final fix (I1): superseded shuts with INTERNAL_ERROR; fails the acceptance clause and its converse, both over superseded_allowed_err (T5-M1 fails the earlier init_end clause first)
 T5-D1	quictls	server	QuicServer::superseded	-	postcondition not satisfied.*!cont && !\(final\(self\)\.conn_spec\(\)\.phase_spec\(\) is Open\)	9a T5 (rule 1b) D1: delete superseded's shut
 T5-D2	quictls	server	QuicServer::key_changes	-	postcondition not satisfied.*!ok ==> !\(final\(self\)\.conn_spec\(\)\.phase_spec\(\) is Open\)	9a T5 (rule 1b) D2: delete key_changes' first shut
 T5-D3	quictls	server	QuicServer::key_changes	-	postcondition not satisfied.*!ok ==> !\(final\(self\)\.conn_spec\(\)\.phase_spec\(\) is Open\)	9a T5 (rule 1b) D3: delete key_changes' second shut
