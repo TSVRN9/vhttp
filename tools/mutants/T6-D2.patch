@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/recv_stream.rs b/crates/quic/src/recv_stream.rs
-index a4f824e..ead162f 100644
+index c881c1f..0d99955 100644
 --- a/crates/quic/src/recv_stream.rs
 +++ b/crates/quic/src/recv_stream.rs
-@@ -1592,9 +1592,6 @@ impl RecvStream {
+@@ -1588,9 +1588,6 @@ impl RecvStream {
          //# STREAM frames received after sending a STOP_SENDING frame are still
          //# counted toward connection and stream flow control, even though these
          //# frames can be discarded upon receipt.

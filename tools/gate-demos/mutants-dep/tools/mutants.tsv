@@ -1,0 +1,4 @@
+# demo registry: a patch in a path dependency (dep) killed in the dependent crate (top), and the two loop-invariant kinds
+X-dep	top	m	quad	-	postcondition not satisfied.*r == 4 \* n	gate-demos: double returns 2n + 1, model and code; dep verifies, quad fails
+X-before	top	m	count	-	invariant not satisfied before loop.*i <= n	gate-demos: the loop starts past n
+X-end	top	m	count	-	invariant not satisfied at end of loop body.*i <= n	gate-demos: the loop steps by 2

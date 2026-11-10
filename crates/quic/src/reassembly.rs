@@ -1,6 +1,7 @@
 //! Stream reassembly (RFC 9000 §2.2): ranges received in any order are buffered past the
 //! delivered offset and popped as an ordered byte stream. The first bytes received at an
-//! offset win. Shared by STREAM and CRYPTO data.
+//! offset win. STREAM data uses it; CRYPTO data, whose span no flow control bounds, uses
+//! `frags`.
 use vstd::prelude::*;
 // Used only in ghost code, which a plain `cargo build` erases.
 #[allow(unused_imports)]
@@ -366,44 +367,6 @@ impl Reassembly {
         }
     }
 
-    /// The byte before the window's end is received: the last byte held, or, with nothing
-    /// held, the byte before `base`, which is below `rfc_contiguous`.
-    pub proof fn lemma_end_received(&self)
-        requires
-            self.wf(),
-            self.tight(),
-        ensures
-            self.base() + self.buf_len() > 0 ==> rfc_received(self.inserted()).contains_key(
-                (self.base() + self.buf_len() - 1) as nat,
-            ),
-    {
-        lemma_contiguous_exists(rfc_received(self.inserted()));
-    }
-
-    /// Nothing buffered, and everything below `base` delivered (as zeros, in the ghost record).
-    pub fn new_at(base: u64) -> (r: Reassembly)
-        requires
-            base <= VARINT_MAX,
-        ensures
-            r.wf(),
-            r.base() == base,
-            r.buf_len() == 0,
-    {
-        let ghost d = Seq::new(base as nat, |_i: int| 0u8);
-        let r = Reassembly {
-            base,
-            head: 0,
-            buf: Vec::new(),
-            have: Vec::new(),
-            ins: Ghost(Seq::<(nat, Seq<u8>)>::empty().push((0nat, d))),
-        };
-        proof {
-            lemma_received_push(Seq::<(nat, Seq<u8>)>::empty(), 0, d);
-            lemma_contiguous_is(rfc_received(r.ins@), base as nat);
-        }
-        r
-    }
-
     pub fn new() -> (r: Reassembly)
         ensures
             r.wf(),
@@ -422,59 +385,6 @@ impl Reassembly {
             lemma_contiguous_exists(rfc_received(r.ins@));
         }
         r
-    }
-
-    /// The least offset not received is at most the window's end.
-    pub proof fn lemma_contiguous_le_end(&self)
-        requires
-            self.wf(),
-        ensures
-            rfc_contiguous(rfc_received(self.inserted())) <= self.base() + self.buf_len(),
-    {
-        let m = rfc_received(self.inserted());
-        lemma_contiguous_exists(m);
-        if rfc_contiguous(m) > self.base() + self.buf_len() {
-            assert(m.contains_key((self.base() + self.buf_len()) as nat));
-        }
-    }
-
-    /// The least offset not received, scanning the window from `from`, at most that offset.
-    pub fn contiguous_from(&self, from: u64) -> (r: u64)
-        requires
-            self.wf(),
-            self.base() <= from,
-            from <= rfc_contiguous(rfc_received(self.inserted())),
-        ensures
-            r == rfc_contiguous(rfc_received(self.inserted())),
-            r <= self.base() + self.buf_len(),
-    {
-        let ghost m = rfc_received(self.ins@);
-        proof {
-            self.lemma_contiguous_le_end();
-            lemma_contiguous_exists(m);
-        }
-        let mut i: usize = self.head + (from - self.base) as usize;
-        while i < self.have.len() && self.have[i]
-            invariant
-                self.wf(),
-                m == rfc_received(self.ins@),
-                self.head <= i <= self.have@.len(),
-                forall|j: nat| j < self.base + (i - self.head) ==> #[trigger] m.contains_key(j),
-            decreases self.have@.len() - i,
-        {
-            proof {
-                assert(m.contains_key((self.base + i - self.head) as nat));
-            }
-            i = i + 1;
-        }
-        let n = self.base + (i - self.head) as u64;
-        proof {
-            if i < self.have@.len() {
-                assert(!self.have@[i as int]);
-            }
-            lemma_contiguous_is(m, n as nat);
-        }
-        n
     }
 
     pub fn base_exec(&self) -> (r: u64)
@@ -600,7 +510,8 @@ impl Reassembly {
     // The MAY that follows (different data at the same offset as PROTOCOL_VIOLATION) is
     // declined: the first bytes received win, and later different bytes are discarded.
     /// Buffers `data` at `off`. Bytes below `base`, or at an offset already held, are dropped.
-    /// The caller bounds `off + data.len()`, which bounds the buffer.
+    /// The caller bounds `off + data.len()`, which bounds the buffer. Empty data changes only the
+    /// ghost log: extending the window to `off` would add unreceived slots.
     pub fn insert(&mut self, off: u64, data: &[u8])
         requires
             old(self).wf(),
@@ -615,7 +526,22 @@ impl Reassembly {
             } else {
                 off + data@.len()
             },
+            // An empty insert is a no-op but for the log, which records no byte.
+            data@.len() == 0 ==> {
+                &&& final(self).buf_len() == old(self).buf_len()
+                &&& final(self).phys_len() == old(self).phys_len()
+                &&& rfc_received(final(self).inserted()) == rfc_received(old(self).inserted())
+                &&& old(self).tight() ==> final(self).tight()
+            },
     {
+        if data.len() == 0 {
+            proof {
+                lemma_received_push(self.ins@, off as nat, data@);
+                assert(rfc_received(self.ins@.push((off as nat, data@))) =~= rfc_received(self.ins@));
+            }
+            self.ins = Ghost(self.ins@.push((off as nat, data@)));
+            return;
+        }
         let ghost m = rfc_received(self.ins@);
         let ghost hw = (old(self).base + old(self).buf@.len() - old(self).head) as int;
         let end = off + data.len() as u64;
@@ -666,27 +592,6 @@ impl Reassembly {
             assert(self.base <= rfc_contiguous(m2));
             assert(forall|k: nat| #[trigger] m2.contains_key(k) ==> k < self.base + len - h);
         }
-    }
-
-    /// Records an insertion of no bytes without touching the buffers: `insert` would extend
-    /// the window to `off` with unreceived slots.
-    pub fn insert_empty(&mut self, _off: u64, _data: &[u8])
-        requires
-            old(self).wf(),
-            _data@.len() == 0,
-        ensures
-            final(self).wf(),
-            final(self).inserted() == old(self).inserted().push((_off as nat, _data@)),
-            final(self).base() == old(self).base(),
-            final(self).buf_len() == old(self).buf_len(),
-            final(self).phys_len() == old(self).phys_len(),
-            old(self).tight() ==> final(self).tight(),
-    {
-        proof {
-            lemma_received_push(self.ins@, _off as nat, _data@);
-            assert(rfc_received(self.ins@.push((_off as nat, _data@))) =~= rfc_received(self.ins@));
-        }
-        self.ins = Ghost(self.ins@.push((_off as nat, _data@)));
     }
 
     /// `pop`'s scan: appends the held run starting at `head` to `out` and returns its end

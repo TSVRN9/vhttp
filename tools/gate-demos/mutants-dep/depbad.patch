@@ -1,0 +1,13 @@
+diff --git a/crates/dep/src/m.rs b/crates/dep/src/m.rs
+index 193c432..342469b 100644
+--- a/crates/dep/src/m.rs
++++ b/crates/dep/src/m.rs
+@@ -4,7 +4,7 @@ verus! {
+ 
+ pub fn double(n: u32) -> (r: u64)
+     ensures
+-        r == 2 * n,
++        r == 2 * n + 1,
+ {
+     (n as u64) * 2
+ }

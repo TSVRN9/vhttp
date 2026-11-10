@@ -1,0 +1,12 @@
+diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
+index 37201ae..09c69ae 100644
+--- a/crates/quictls/src/server.rs
++++ b/crates/quictls/src/server.rs
+@@ -1604,7 +1604,6 @@ impl<'a> QuicServer<'a> {
+         }
+         if matches!(self.level, Level::Initial) {
+             // TLS leaves Initial here (no `Secrets { Handshake }` before it): as `on_secrets` does.
+-            self.leave_initial();
+         }
+         // Only a completed connection: `core_ok` ties OneRtt to completion.
+         self.level = Level::OneRtt;

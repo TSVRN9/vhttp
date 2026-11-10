@@ -1,0 +1,12 @@
+diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
+index 84680fd..b46af8b 100644
+--- a/crates/quic/src/conn.rs
++++ b/crates/quic/src/conn.rs
+@@ -3241,7 +3241,6 @@ impl Connection {
+                 }
+                 self.live_h = false;
+                 self.sent_h.drain_inflight(&mut lost);
+-                self.crx_h = CryptoStream::new();
+                 self.ctx_h = SendStream::new(VARINT_MAX);
+                 self.recv_h = RecvPns::new(k);
+             },

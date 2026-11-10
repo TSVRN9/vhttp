@@ -1,5 +1,5 @@
 diff --git a/crates/quic/src/tp.rs b/crates/quic/src/tp.rs
-index 17d8601..508ed1f 100644
+index 86ff91b..ad44fd4 100644
 --- a/crates/quic/src/tp.rs
 +++ b/crates/quic/src/tp.rs
 @@ -299,7 +299,7 @@ pub open spec fn rfc_tp_apply(id: u64, v: Seq<u8>, from_client: bool, t: SpecTp,
@@ -11,7 +11,7 @@ index 17d8601..508ed1f 100644
              None => None,
          }
      }
-@@ -1333,7 +1333,7 @@ fn tp_apply(id: u64, v: &[u8], from_client: bool, t: TransportParams, seen: u32)
+@@ -1336,7 +1336,7 @@ fn tp_apply(id: u64, v: &[u8], from_client: bool, t: TransportParams, seen: u32)
          return None;
      }
      match tp_value(id, v, t) {

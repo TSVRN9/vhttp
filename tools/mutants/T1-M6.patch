@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index c97e69c..fbda4ae 100644
+index 84680fd..41305a1 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -3101,7 +3101,6 @@ impl Connection {
+@@ -3280,7 +3280,6 @@ impl Connection {
      {
          let now = self.now;
          let none: Vec<u8> = Vec::new();

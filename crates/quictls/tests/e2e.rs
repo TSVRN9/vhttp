@@ -547,6 +547,20 @@ fn finished_coalesced_with_one_rtt() {
     assert_eq!(s.conn().largest_pn(PacketKind::OneRtt), Some(0));
 }
 
+/// A 1-RTT CRYPTO frame coalesced behind the client's Finished: `refeed_one_rtt` processes it
+/// after TLS completes, and TLS must see it in the same datagram (any 1-RTT CRYPTO byte is
+/// unexpected_message), not at the client's next datagram.
+#[test]
+fn finished_coalesced_with_one_rtt_crypto_0x10a() {
+    let (mut s, mut c, mut log) = flight();
+    let d = c.datagrams(Some(vec![Frame::Crypto { offset: 0, data: vec![0x18, 0, 0, 1, 0] }]));
+    send(&mut s, &d[0], 3);
+    assert!(s.conn().handshake_complete());
+    assert_eq!(s.conn().phase(), Phase::Closing);
+    pull_server(&mut s, &mut c, &mut log);
+    assert!(close_in(&log, PacketKind::OneRtt, 0x10a), "{:?}", log);
+}
+
 #[test]
 fn finished_trailing_bytes_pv() {
     let (mut s, mut c, mut log) = flight();
@@ -647,6 +661,21 @@ fn initial_data_past_end_with_handshake_pv() {
     assert!(close_in(&log, PacketKind::Handshake, 0x0a), "{:?}", log);
     assert!(!close_in(&log, PacketKind::Initial, 0x0a), "{:?}", log);
     assert!(!done(&log));
+}
+
+/// The datagram that closes leaves nothing unread: the Finished in its Handshake packet was never
+/// fed (`superseded` closed first), and its bytes are dropped, not kept for a TLS that reads no more.
+#[test]
+fn closing_datagram_drops_unread_crypto() {
+    let (mut s, mut c, _) = flight();
+    let mut parts = c.crypto_parts();
+    parts.push((Level::Initial, vec![Frame::Crypto { offset: c.tx_off[0], data: vec![7; 5] }]));
+    let d = c.dgram(parts);
+    send(&mut s, &d, 3);
+    assert_eq!(s.conn().phase(), Phase::Closing);
+    let h = PacketKind::Handshake;
+    assert!(s.conn().crypto_end(h) > 0);
+    assert_eq!(s.conn().crypto_base(h), s.conn().crypto_end(h));
 }
 
 /// RFC 9001 §4.1.3 (M1, Handshake to 1-RTT): Handshake CRYPTO bytes buffered past a gap when the

@@ -3,12 +3,15 @@ set -eu
 set -o pipefail
 # mutants.sh check|run [id..]|verify: the mutant registry (C6 MUST ONLY TEST-PINNED). tools/mutants.tsv rows are
 # `id crate module fn tests regex origin` (tab-separated); tools/mutants/<id>.patch is one deliberate bug.
-#   check   every row is well formed and has a patch touching only crates/<crate>/, no orphan patch, no duplicate id,
+#   check   every row is well formed and has a patch touching only crates/<crate>/ and its path dependencies, no orphan
+#           patch, no duplicate id,
 #           the tsv is non-empty, and every patch `git apply --check`s against this tree.
 #   run     in a throwaway `git worktree` of HEAD (never the caller's tree), for each row: the unmutated fn verifies
-#           and its named tests pass; then with the patch applied alone, `cargo verus focus -- --verify-only-module
-#           <module> --verify-function <fn>` reports >= 1 error and a postcondition/precondition/assertion block
-#           matching <regex> with no rlimit text, and every named test prints `test <name> ... FAILED`. `focus`
+#           and its named tests pass; then with the patch applied alone, each path dependency it touches still verifies
+#           whole on its own (`cargo verus focus` in that crate: 0 errors, no rlimit text; otherwise a patch breaking the
+#           dependency's proof would pass as a kill here), `cargo verus focus -- --verify-only-module
+#           <module> --verify-function <fn>` reports >= 1 error and a postcondition/precondition/assertion/loop-invariant
+#           block matching <regex> with no rlimit text, and every named test prints `test <name> ... FAILED`. `focus`
 #           verifies only the crate (plain `verify -- ARGS` passes ARGS to the dependencies too). A full run (no ids)
 #           writes tools/mutants-last-run.txt; a run of some ids only prints. Last step on a branch before merging.
 #   verify  what verify.sh runs: `check`, and at main's tip (every commit there, merge or not) the gate
@@ -28,7 +31,7 @@ fail() { echo "mutants: $*" >&2; exit 1; }
 check() {
     [ -f "$tsv" ] || fail "no $tsv"
     [ -d "$pdir" ] || fail "no $pdir"
-    rows=$(mpy rows "$tsv" "$pdir") || exit 1
+    rows=$(mpy rows "$root" "$tsv" "$pdir") || exit 1
     mpy allowed "$root" "$tsv" > /dev/null || exit 1
     n=0
     for id in $(printf '%s\n' "$rows" | cut -f1); do
@@ -50,6 +53,17 @@ one() {
         < /dev/null > "$1.json" 2> "$1.log" || true
 }
 
+# deps BASE DEPS: each crate of DEPS (comma-separated, - for none), a patched path dependency, verifies whole on its own;
+# focus's own run of the row's crate only rebuilds it.
+deps() {
+    [ "$2" = - ] && return 0
+    for d in $(printf '%s\n' "$2" | tr ',' ' '); do
+        (cd "$wt" && cargo clean -q -p "$d" --target-dir "${CARGO_TARGET_DIR:-$wt/target}/verus-partial") < /dev/null > "$1.dep-$d.clean-cargo.log" 2>&1 || { echo "cargo clean -p $d failed"; return 1; }
+        (cd "$wt/crates/$d" && cargo verus focus -- --output-json) < /dev/null > "$1.dep-$d.json" 2> "$1.dep-$d.log" || true
+        mpy depok "$1.dep-$d" "$d" 2>&1 || return 1
+    done
+}
+
 # tests LOGBASE CRATE TESTS WANT: each [package/]target:name of TESTS (package defaults to CRATE) must print
 # `test name ... WANT` (ok or FAILED); a misspelt name runs 0 tests and prints neither.
 tests() {
@@ -66,7 +80,7 @@ run() {
     check > /dev/null
     st=$(git -C "$root" status --porcelain -- crates tools/mutants tools/mutants.tsv tools/mutants.py scripts/mutants.sh) || fail "git status failed"
     [ -z "$st" ] || fail "crates/, the registry or the mutants tools have uncommitted changes; the run uses HEAD, so commit first"
-    rows=$(mpy rows "$tsv" "$pdir") || exit 1
+    rows=$(mpy rows "$root" "$tsv" "$pdir") || exit 1
     full=1
     if [ $# -gt 0 ]; then
         full=0
@@ -102,7 +116,7 @@ tree $runtree
 tsv $tsvblob"
     bad=0
     tab=$(printf '\t')
-    while IFS=$tab read -r id crate mod fn tst rx; do
+    while IFS=$tab read -r id crate mod fn tst dep rx; do
         t0=$(date +%s)
         git -C "$wt" reset -q --hard HEAD && git -C "$wt" clean -fdq -- crates || fail "cannot reset the worktree"
         why=
@@ -110,6 +124,7 @@ tsv $tsvblob"
         if ! why=$(mpy clean "$out/$id.clean" "$crate" "$mod" "$fn" 2>&1); then :
         elif ! why=$(tests "$out/$id.clean" "$crate" "$tst" ok); then why="unmutated: $why"
         elif ! why=$(git -C "$wt" apply "$wt/tools/mutants/$id.patch" 2>&1); then why="patch does not apply: $why"
+        elif ! why=$(deps "$out/$id" "$dep"); then why="dependency: $why"
         else
             one "$out/$id" "$crate" "$mod" "$fn"
             if ! why=$(mpy killed "$out/$id" "$crate" "$mod" "$fn" "$rx" 2>&1); then :
