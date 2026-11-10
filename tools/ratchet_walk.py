@@ -1,11 +1,12 @@
 """First-parent history walk for the shrink-only ratchet files (Phase 9r2 R5).
-Usage: python3 -I tools/ratchet_walk.py ROOT FILE MODE [BASE]   (MODE: lines | open | ceilings | floors)
+Usage: python3 -I tools/ratchet_walk.py ROOT FILE MODE [BASE]   (MODE: lines | open | ceilings | floors | ids)
 Walks the first-parent history of HEAD in ROOT from the commit that introduced FILE. The floor is the keys present in
 every copy, each at its lowest value (lines: the stripped non-comment lines; open: ROOT<TAB>FN<TAB>READ keyed, COUNT;
 ceilings: CRATE FN VALUE, FN keyed, VALUE). HEAD's copy and the working tree must lie within the floor: growth that was
 shrunk back passes, growth that persists (or a shrink then a re-grow) fails. floors (test counts that only grow): CRATE COUNT; the floor is each key's highest value over the history, a key once present may
-not disappear, and HEAD's copy and the working tree must be at or above it. With BASE (floors only), the floor is BASE's copy
-alone: no value lower, no key removed (the branch check). A commit that deletes the file is not a
+not disappear, and HEAD's copy and the working tree must be at or above it. ids (docs/carryovers.tsv): the key is a line's
+first tab-separated field, and a key present in any copy may not disappear (a row is closed, never deleted). With BASE
+(floors and ids only), the floor is BASE's copy alone: no value lower, no key removed (the branch check). A commit that deletes the file is not a
 reset. Commit messages are ignored (there is no reset). Any git error, and a shallow clone, fail (fail closed)."""
 import os, subprocess, sys
 
@@ -28,6 +29,8 @@ def parse(text, mode):
             continue
         if mode == 'lines':
             d[l.strip()] = 0
+        elif mode == 'ids':
+            d[l.split('\t')[0]] = 0
         elif mode == 'open':
             f = l.split('\t')
             d[tuple(f[:3]) if len(f) >= 4 and f[3].isdigit() else l] = int(f[3]) if len(f) >= 4 and f[3].isdigit() else 0
@@ -75,7 +78,8 @@ def outside(cur, fl):
 
 
 def main(root, path, mode, base=None):
-    if mode not in ('lines', 'open', 'ceilings', 'floors') or (base and mode != 'floors'):
+    grows = mode in ('floors', 'ids')  # a key once present stays; values only grow
+    if mode not in ('lines', 'open', 'ceilings', 'floors', 'ids') or (base and not grows):
         raise Fail('unknown mode %s' % mode)
     if git(root, 'rev-parse', '--is-shallow-repository').strip() != 'false':
         raise Fail('the clone is shallow (history missing): %s cannot be walked; fetch the full history' % path)
@@ -109,7 +113,7 @@ def main(root, path, mode, base=None):
     except OSError as e:
         raise Fail('cannot read %s: %s' % (path, e))
     if versions:
-        if mode == 'floors':
+        if grows:
             fl = {}
             for v in versions:
                 for k, n in v.items():
@@ -117,9 +121,10 @@ def main(root, path, mode, base=None):
         else:
             fl = floor_of(versions)
         for what, cur in checks:
-            bad = below(cur, fl) if mode == 'floors' else outside(cur, fl)
+            bad = below(cur, fl) if grows else outside(cur, fl)
             if bad:
-                raise Fail('%s: %s is outside the floor of its first-parent history: %s (the file only shrinks)' % (path, what, bad))
+                raise Fail('%s: %s is outside the floor of its first-parent history: %s (%s)' % (
+                    path, what, bad, 'a key once present stays' if grows else 'the file only shrinks'))
     print('ratchet-walk: %s ok (%d commits touch it)' % (path, len(commits)))
 
 
