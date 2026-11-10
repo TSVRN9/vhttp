@@ -75,8 +75,8 @@ stays `never`.
 - Scope: audit F3, F4, F5, F9, F10, F12 (as the `t1` entry), F13, F17, F18 and the F19 evidence item, each with an
   RCA in `docs/rca/2026-11-09-audit.md`.
 - Sources: the 9r3 plan.
-- Carryovers: `aud-F4` (Task 2), `r9a2-plan-mut` (Task 2 if cheap, else 12); closed: `aud-F3`, `aud-F9`,
-  `aud-F10`, `aud-F18`, `aud-F19`, `cat-C3`, `x-duvet`.
+- Carryovers: closed: `aud-F3`, `aud-F4`, `aud-F9`, `aud-F10`, `aud-F18`, `aud-F19`, `cat-C3`, `x-duvet`;
+  `r9a2-plan-mut` moved to 12 (Task 2: no cheap sound catch).
 
 ### 10a: admission and bounds
 
@@ -169,7 +169,7 @@ Each is its own sub-phase with a plan, after 9c (Phase 9 spec `:270-276`).
 - Sources: audit F10 (`:186-188`), "Smaller items" (`:251-258`); design spec `:32` (the missing production-readiness
   document); 4c plan `:680`; TRUSTED.md `:43`, `:65`; `docs/rca/catalog.md` C1, C2, C4, C13, C16, C17.
 - Carryovers: `tr-43`, `tr-66`, `bind-chain-schemes`, `aud-prod`, `aud-s1`, `aud-s2`, `aud-s3`, `aud-s5`, `cat-C1`,
-  `cat-C2`, `cat-C4`, `cat-C13`, `cat-C16`, `cat-C17`, `mem-escape-checked`, `mem-ct-spaces`, `x-shellcheck`, `req-12`.
+  `cat-C2`, `cat-C4`, `cat-C13`, `cat-C16`, `cat-C17`, `mem-escape-checked`, `mem-ct-spaces`, `x-shellcheck`, `req-12`, `r9a2-plan-mut`.
 
 ### t1: toolchain upgrade procedure (design only)
 
@@ -188,7 +188,7 @@ Each is its own sub-phase with a plan, after 9c (Phase 9 spec `:270-276`).
   No row.
 - F2 (a client holds a slot forever): phase 10a, row `aud-F2`. It is a bug and needs an RCA, a class and a catch there.
 - F3 (no roadmap): this file and `docs/carryovers.tsv`, gated by `scripts/carryovers.sh` (9r3 Task 5), row `aud-F3`.
-- F4 (the mutant gate accepts an unrun run): 9r3 Task 2, after 9a2 merges, row `aud-F4`.
+- F4 (the mutant gate accepts an unrun run): fixed in 9r3 Task 2 (`docs/rca/2026-11-09-audit.md`), row `aud-F4`.
 - F5 (a green run not tied to its commit or Verus): fixed in 9r3 Task 1 (`docs/rca/2026-11-09-audit.md`).
 - F6 (acceptance gate skips non-`Result` error paths): phase 9c, row `aud-F6`.
 - F7 (literal-code closes invisible): phase 9c (H3Server's in 9b or 9c), row `aud-F7`.
