@@ -1,6 +1,6 @@
-# tools/mutants-last-run.txt: written by scripts/mutants.sh run on 2026-11-10T02:01Z; verify.sh's main gate reads it
-crates 4146ecae2cdeda9dd6e36c7e1131478b6a4d29ed
-tree acfd24555f5996cba3f4b2bd20daaa21b41212d9103a05a3e98bf0ec0e1b503f
+# tools/mutants-last-run.txt: written by scripts/mutants.sh run on 2026-11-10T03:32Z under Verus 0.2026.10.04.426d8b0; verify.sh's main gate reads it
+crates 9e81a9b2118ee78f506b494e1991f57b9636f38b
+tree 38e1adfc95c0e0249a940af1f5669c7fa952b3d23c786dfb51f127ebeab6edf4
 tsv deaf58319ecfe3cf780d82f2a3a122ae19d34518
 T0-M1 pass 95b5a55019271269e25bcb097d57a1b321a00bd9
 T1-M1 pass 6570285e5f5bb35b98547e05521ef8687577f0d5
