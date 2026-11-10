@@ -270,15 +270,24 @@ impl Connection {
             PacketKind::Handshake => self.crx_h,
             PacketKind::OneRtt => self.crx_1,
         };
-        (s.reassembly().base() + s.reassembly().buf_len()) as nat
+        (s.base_spec() + s.buf_len_spec()) as nat
+    }
+
+    /// Level `k`'s CRYPTO stream.
+    spec fn crx_spec(&self, k: PacketKind) -> CryptoStream {
+        match k {
+            PacketKind::Initial => self.crx_i,
+            PacketKind::Handshake => self.crx_h,
+            PacketKind::OneRtt => self.crx_1,
+        }
     }
 
     /// How far level `k`'s CRYPTO data has been read (`crypto_read`).
     pub closed spec fn crypto_base_spec(&self, k: PacketKind) -> nat {
         match k {
-            PacketKind::Initial => self.crx_i.reassembly().base(),
-            PacketKind::Handshake => self.crx_h.reassembly().base(),
-            PacketKind::OneRtt => self.crx_1.reassembly().base(),
+            PacketKind::Initial => self.crx_i.base_spec(),
+            PacketKind::Handshake => self.crx_h.base_spec(),
+            PacketKind::OneRtt => self.crx_1.base_spec(),
         }
     }
 
@@ -295,16 +304,157 @@ impl Connection {
     //# *  If the packet is from a previously installed encryption level, it
     //# MUST NOT contain data that extends past the end of previously
     //# received data in that flow.
-    /// Byte `p` of level `k`'s CRYPTO stream has been received, or lies below the point where
-    /// `discard` restarted the stream (whose ghost record then counts as received). `crypto_end`
-    /// uses it only for the byte before the end, which was received before any restart.
+    /// Byte `p` of level `k`'s CRYPTO stream arrived in a CRYPTO frame. The Initial record
+    /// survives the space's discard (`CryptoStream::restart`).
     pub closed spec fn crypto_received(&self, k: PacketKind, p: nat) -> bool {
-        let s = match k {
-            PacketKind::Initial => self.crx_i,
-            PacketKind::Handshake => self.crx_h,
-            PacketKind::OneRtt => self.crx_1,
-        };
-        crate::reassembly::rfc_received(s.reassembly().inserted()).contains_key(p)
+        match k {
+            PacketKind::Initial => self.crx_i.received(p),
+            PacketKind::Handshake => self.crx_h.received(p),
+            PacketKind::OneRtt => self.crx_1.received(p),
+        }
+    }
+
+    /// The Initial CRYPTO read offset has not gone back since `o`: with `crypto_read`'s drain,
+    /// what quictls reads when TLS leaves Initial stays read (RFC 9001 §4.1.3). Nor has the
+    /// handshake's completion been undone. Nor have the peer's transport parameters appeared:
+    /// only `on_peer_params` sets them (it ensures `crypto_kept_base`).
+    pub closed spec fn crypto_kept(&self, o: Connection) -> bool {
+        &&& self.crypto_kept_base(o)
+        &&& self.peer_tp is Some ==> o.peer_tp is Some
+    }
+
+    /// `crypto_kept` without the transport-parameters frame.
+    pub closed spec fn crypto_kept_base(&self, o: Connection) -> bool {
+        self.crypto_kept_but(o, None)
+    }
+
+    /// The frame of `crypto_kept_base`, but level `skip`'s read offset may move (`crypto_read`):
+    /// the Initial offset and end do not go back, the Initial history only grows, completion is
+    /// not undone, the connection does not reopen, no space comes back, and while open the read
+    /// offset of a live Initial or Handshake space other than `skip` stays where it was.
+    pub closed spec fn crypto_kept_but(&self, o: Connection, skip: Option<PacketKind>) -> bool {
+        &&& self.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial)
+        &&& self.crypto_end_spec(PacketKind::Initial) >= o.crypto_end_spec(PacketKind::Initial)
+        &&& o.complete ==> self.complete
+        &&& forall|p: nat| #[trigger] o.crx_i.received(p) ==> self.crx_i.received(p)
+        &&& self.lc.phase_spec() is Open ==> o.lc.phase_spec() is Open
+        &&& self.live_i ==> o.live_i
+        &&& self.live_h ==> o.live_h
+        &&& skip != Some(PacketKind::Initial) && self.lc.phase_spec() is Open && self.live_i ==> self.crx_i.base_spec()
+            == o.crx_i.base_spec()
+        &&& skip != Some(PacketKind::Handshake) && self.lc.phase_spec() is Open && self.live_h ==> self.crx_h.base_spec()
+            == o.crx_h.base_spec()
+    }
+
+    /// The three CRYPTO streams, and the handshake's completion, are as in `o`; no transport
+    /// parameters appeared.
+    pub closed spec fn crypto_same(&self, o: Connection) -> bool {
+        &&& self.crx_i == o.crx_i
+        &&& self.crx_h == o.crx_h
+        &&& self.crx_1 == o.crx_1
+        &&& self.complete == o.complete
+        &&& self.peer_tp is Some ==> o.peer_tp is Some
+        &&& self.live_i == o.live_i
+        &&& self.live_h == o.live_h
+        &&& self.lc.phase_spec() is Open ==> o.lc.phase_spec() is Open
+    }
+
+    /// A level whose space is discarded or not yet live holds no unread in-order byte: its packets
+    /// never reach `on_crypto_frame`. After completion Initial and Handshake are discarded.
+    pub proof fn lemma_dead_drained(c: Connection)
+        requires
+            c.wf(),
+        ensures
+            forall|k: PacketKind| !c.live(k) ==> #[trigger] crypto_drained(c, k),
+            c.live(PacketKind::OneRtt) ==> !c.live(PacketKind::Initial) && !c.live(PacketKind::Handshake),
+            // A discarded Initial space buffers nothing: its read offset is its end.
+            !c.live(PacketKind::Initial) ==> c.crypto_base_spec(PacketKind::Initial) == c.crypto_end_spec(PacketKind::Initial),
+    {
+        reveal(crx_ok);
+    }
+
+    pub proof fn lemma_crypto_kept_refl(c: Connection)
+        ensures
+            c.crypto_kept(c),
+    {
+    }
+
+    pub proof fn lemma_crypto_kept_trans(a: Connection, b: Connection, c: Connection)
+        requires
+            b.crypto_kept(a),
+            c.crypto_kept(b),
+        ensures
+            c.crypto_kept(a),
+    {
+    }
+
+    pub proof fn lemma_crypto_kept_to_base(c: Connection, o: Connection)
+        requires
+            c.crypto_kept(o),
+        ensures
+            c.crypto_kept_base(o),
+    {
+    }
+
+    pub proof fn lemma_crypto_kept_base_elim(c: Connection, o: Connection)
+        requires
+            c.crypto_kept_base(o),
+        ensures
+            c.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial),
+            o.live(PacketKind::OneRtt) ==> c.live(PacketKind::OneRtt),
+            forall|p: nat| #[trigger] o.crypto_received(PacketKind::Initial, p) ==> c.crypto_received(PacketKind::Initial, p),
+            c.crypto_end_spec(PacketKind::Initial) >= o.crypto_end_spec(PacketKind::Initial),
+            c.phase_spec() is Open ==> o.phase_spec() is Open,
+            c.live(PacketKind::Initial) ==> o.live(PacketKind::Initial),
+            c.live(PacketKind::Handshake) ==> o.live(PacketKind::Handshake),
+            c.phase_spec() is Open && c.live(PacketKind::Initial) ==> c.crypto_base_spec(PacketKind::Initial) == o.crypto_base_spec(
+                PacketKind::Initial,
+            ),
+            c.phase_spec() is Open && c.live(PacketKind::Handshake) ==> c.crypto_base_spec(PacketKind::Handshake)
+                == o.crypto_base_spec(PacketKind::Handshake),
+    {
+    }
+
+    /// What `crypto_kept_but` says, in terms quictls can read.
+    pub proof fn lemma_crypto_kept_but_elim(c: Connection, o: Connection, skip: Option<PacketKind>)
+        requires
+            c.crypto_kept_but(o, skip),
+        ensures
+            c.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial),
+            c.crypto_end_spec(PacketKind::Initial) >= o.crypto_end_spec(PacketKind::Initial),
+            o.live(PacketKind::OneRtt) ==> c.live(PacketKind::OneRtt),
+            forall|p: nat| #[trigger] o.crypto_received(PacketKind::Initial, p) ==> c.crypto_received(PacketKind::Initial, p),
+            c.phase_spec() is Open ==> o.phase_spec() is Open,
+            c.live(PacketKind::Initial) ==> o.live(PacketKind::Initial),
+            c.live(PacketKind::Handshake) ==> o.live(PacketKind::Handshake),
+            skip != Some(PacketKind::Initial) && c.phase_spec() is Open && c.live(PacketKind::Initial) ==> c.crypto_base_spec(
+                PacketKind::Initial,
+            ) == o.crypto_base_spec(PacketKind::Initial),
+            skip != Some(PacketKind::Handshake) && c.phase_spec() is Open && c.live(PacketKind::Handshake) ==> c.crypto_base_spec(
+                PacketKind::Handshake,
+            ) == o.crypto_base_spec(PacketKind::Handshake),
+    {
+    }
+
+    pub proof fn lemma_crypto_kept_elim(c: Connection, o: Connection)
+        requires
+            c.crypto_kept(o),
+        ensures
+            c.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial),
+            o.live(PacketKind::OneRtt) ==> c.live(PacketKind::OneRtt),
+            c.peer_tp_known_spec() ==> o.peer_tp_known_spec(),
+            // RFC 9001 §4.1.3's "previously received data" only grows.
+            forall|p: nat| #[trigger] o.crypto_received(PacketKind::Initial, p) ==> c.crypto_received(PacketKind::Initial, p),
+            c.crypto_end_spec(PacketKind::Initial) >= o.crypto_end_spec(PacketKind::Initial),
+            c.phase_spec() is Open ==> o.phase_spec() is Open,
+            c.live(PacketKind::Initial) ==> o.live(PacketKind::Initial),
+            c.live(PacketKind::Handshake) ==> o.live(PacketKind::Handshake),
+            c.phase_spec() is Open && c.live(PacketKind::Initial) ==> c.crypto_base_spec(PacketKind::Initial) == o.crypto_base_spec(
+                PacketKind::Initial,
+            ),
+            c.phase_spec() is Open && c.live(PacketKind::Handshake) ==> c.crypto_base_spec(PacketKind::Handshake)
+                == o.crypto_base_spec(PacketKind::Handshake),
+    {
     }
 
     /// The client's original Destination Connection ID.
@@ -363,7 +513,7 @@ impl Connection {
         &&& self.sent_i.wf()
         &&& self.sent_h.wf()
         &&& self.sent_1.wf()
-        &&& crx_ok(self.crx_i, self.crx_h, self.crx_1)
+        &&& crx_ok(self.crx_i, self.crx_h, self.crx_1, self.live_i, self.live_h, self.complete)
         &&& self.ctx_i.wf()
         &&& self.ctx_h.wf()
         &&& self.local_cids.wf()
@@ -484,6 +634,16 @@ impl Connection {
                 > MAX_CID_LEN || !local_tp_ok(local_tp@)),
             r matches Some(c) ==> c.wf() && c.out_log() == Seq::<SpecOutDatagram>::empty(),
             r matches Some(c) ==> c.odcid_spec() == first.dcid@,
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+            //# a mismatch between values received from a peer in these transport
+            //# parameters and the value sent in the corresponding Destination or
+            //# Source Connection ID fields of Initial packets.
+            // The value `on_peer_params` checks initial_source_connection_id against: the Source
+            // Connection ID field of the client's first Initial.
+            r matches Some(c) ==> c.client_scid_spec() == first.scid@,
+            // No transport parameters yet: TLS delivers them later (`on_peer_params`).
+            r matches Some(c) ==> !c.peer_tp_known_spec(),
+            r matches Some(c) ==> c.crypto_base_spec(PacketKind::Initial) == 0 && c.crypto_base_spec(PacketKind::Handshake) == 0,
     {
         if datagram_len < MIN_INITIAL_DATAGRAM || !is_local_tp_ok(local_tp) {
             return None;
@@ -590,6 +750,7 @@ impl Connection {
         &&& self.live_i == o.live_i
         &&& self.live_h == o.live_h
         &&& self.complete == o.complete
+        &&& self.crypto_kept(o)
     }
 
     /// What `gate_packet` accepts. Biconditional, so what is absent is proved absent: no size rule
@@ -652,6 +813,7 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
+            final(self).crypto_kept(*old(self)),
             // §8.1: a datagram on a known path is counted, and nothing after undoes the count.
             old(self).has_path(path) && !(old(self).phase_spec() is Draining) && !(old(
                 self,
@@ -717,6 +879,7 @@ impl Connection {
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
             final(self).amp_grew(*old(self)),
+            final(self).crypto_kept(*old(self)),
             packets@.len() == 0 && old(self).phase_spec() is Open ==> (error matches Some((_, h)) && old(
                 self,
             ).gate_spec(path, datagram_len, &h) && old(self).paths.has(path) ==> final(self).phase_spec() is Closing),
@@ -766,6 +929,7 @@ impl Connection {
                     known == self.paths.has(path),
                     self.phase_spec() is Open,
                     self.amp_grew(s1),
+                    self.crypto_kept(s1),
                     s1 == *old(self),
                     forall|j: int| 0 <= j < it.seq().len() ==> plain_wf(#[trigger] it.seq()[j]@),
             {
@@ -852,6 +1016,7 @@ impl Connection {
             final(self).amp_grew(*old(self)),
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
+            final(self).crypto_kept(*old(self)),
             !(h.dcid@ == first@ && old(self).gate_spec(path, len, h)) ==> *final(self) == *old(self),
             h.dcid@ == first@ && old(self).gate_spec(path, len, h) && old(self).paths.has(path)
                 ==> final(self).phase_spec() is Closing,
@@ -985,6 +1150,7 @@ impl Connection {
             final(self).out_log() == old(self).out_log(),
             final(self).paths.ids() == old(self).paths.ids(),
             final(self).peer_used_kept(*old(self)),
+            final(self).crypto_kept(*old(self)),
     {
         let ghost s0 = *self;
         self.paths.set_validated(self.hs_path);
@@ -1177,6 +1343,7 @@ impl Connection {
             plain_wf(p@),
             !old(self).recv(p.kind).is_duplicate_spec(p.pn),
             p.kind is OneRtt ==> old(self).complete,
+            old(self).live(p.kind),
         ensures
             final(self).amp_grew(*old(self)),
             final(self).wf(),
@@ -1186,6 +1353,7 @@ impl Connection {
             r is Err ==> final(self).recv(p.kind).seen() == old(self).recv(p.kind).seen(),
             r is Ok && final(self).phase_spec() is Open ==> final(self).paths.path(path).peer_used
                 == Some(p.dcid@),
+            final(self).crypto_kept(*old(self)),
     {
         let k = p.kind;
         let pn = p.pn;
@@ -1240,6 +1408,7 @@ impl Connection {
             frames_received(frames_view(frames@), k),
             dcid@.len() <= MAX_CID_LEN,
             k is OneRtt ==> old(self).complete,
+            old(self).live(k),
         ensures
             final(self).amp_grew(*old(self)),
             final(self).wf(),
@@ -1258,6 +1427,7 @@ impl Connection {
                 frames_received(frames_view(fs), k),
                 dcid@.len() <= MAX_CID_LEN,
                 k is OneRtt ==> self.complete,
+                self.live(k),
         {
             proof {
                 let i = it.index();
@@ -1295,6 +1465,7 @@ impl Connection {
             !(f@ is HandshakeDone),
             dcid@.len() <= MAX_CID_LEN,
             k is OneRtt ==> old(self).complete,
+            old(self).live(k),
         ensures
             final(self).amp_grew(*old(self)),
             final(self).wf(),
@@ -1430,23 +1601,26 @@ impl Connection {
     fn on_crypto_frame(&mut self, k: PacketKind, offset: u64, data: &[u8], now: u64) -> (r: Result<(), u64>)
         requires
             old(self).wf(),
+            old(self).live(k),
             offset + data@.len() <= VARINT_MAX,
         ensures
             final(self).paths == old(self).paths,
             final(self).wf(),
             final(self).frames_kept(*old(self)),
             r matches Err(c) ==> c <= VARINT_MAX,
-            r matches Err(c) ==> c == CRYPTO_BUFFER_EXCEEDED && crypto_window_exceeded(
-                old(self).crypto_contiguous_spec(k),
+            r matches Err(c) ==> c == CRYPTO_BUFFER_EXCEEDED && crypto_allowed_err(
+                old(self).crx_spec(k),
                 offset,
                 data@.len(),
+                c,
             ),
-            crypto_window_exceeded(old(self).crypto_contiguous_spec(k), offset, data@.len()) ==> r
+            crypto_allowed_err(old(self).crx_spec(k), offset, data@.len(), CRYPTO_BUFFER_EXCEEDED) ==> r
                 == Err::<(), u64>(CRYPTO_BUFFER_EXCEEDED),
-            old(self).phase_spec() is Open && crypto_window_exceeded(
-                old(self).crypto_contiguous_spec(k),
+            old(self).phase_spec() is Open && crypto_allowed_err(
+                old(self).crx_spec(k),
                 offset,
                 data@.len(),
+                CRYPTO_BUFFER_EXCEEDED,
             ) ==> final(self).phase_spec() is Closing && final(self).close_spec() == Some(
                 (false, CRYPTO_BUFFER_EXCEEDED, Seq::<u8>::empty()),
             ),
@@ -1730,6 +1904,7 @@ impl Connection {
             old(self).paths.has(q),
             d matches Some(c) ==> c@.len() <= MAX_CID_LEN,
         ensures
+            final(self).crypto_same(*old(self)),
             final(self).amp_grew(*old(self)),
             final(self).wf_rest(),
             final(self).frames_kept(*old(self)),
@@ -1771,6 +1946,7 @@ impl Connection {
                     ) ==> old(self).paths.path(r).peer_used == old(self).paths.path(q).peer_used
             },
         ensures
+            final(self).crypto_same(*old(self)),
             final(self).amp_grew(*old(self)),
             final(self).wf_rest(),
             final(self).dcids_weak(),
@@ -1873,6 +2049,7 @@ impl Connection {
             old(self).dcids_weak(),
             old(self).paths.has(q),
         ensures
+            final(self).crypto_same(*old(self)),
             final(self).amp_grew(*old(self)),
             final(self).wf_rest(),
             final(self).dcids_weak(),
@@ -2951,6 +3128,7 @@ impl Connection {
         requires
             old(self).wf(),
         ensures
+            final(self).crypto_same(*old(self)),
             final(self).wf(),
             final(self).frames_kept(*old(self)),
             final(self).paths == old(self).paths,
@@ -3036,6 +3214,9 @@ impl Connection {
             final(self).peer_tp == old(self).peer_tp,
             final(self).streams == old(self).streams,
             final(self).crypto_end_spec(PacketKind::Initial) == old(self).crypto_end_spec(PacketKind::Initial),
+            final(self).crypto_kept(*old(self)),
+            drained_kept(*final(self), *old(self)),
+            crypto_drained(*final(self), k),
     {
         proof {
             reveal(crx_ok);
@@ -3049,10 +3230,7 @@ impl Connection {
                 self.live_i = false;
                 self.sent_i.drain_inflight(&mut lost);
                 // Restarted empty at its end, which the glue still checks (RFC 9001 §4.1.3).
-                proof {
-                    self.crx_i.reassembly().lemma_wf();
-                }
-                self.crx_i = CryptoStream::new_at(self.crx_i.end());
+                self.crx_i.restart();
                 self.ctx_i = SendStream::new(VARINT_MAX);
                 self.recv_i = RecvPns::new(k);
                 self.cid_updates.push(CidUpdate::Remove(slice_to_vec(self.ids.odcid())));
@@ -3098,6 +3276,7 @@ impl Connection {
                 && final(self).close_spec() == Some((false, code, Seq::<u8>::empty())),
             !(old(self).phase_spec() is Open) ==> final(self).phase_spec() == old(self).phase_spec()
                 && final(self).close_spec() == old(self).close_spec(),
+            final(self).crypto_same(*old(self)),
     {
         let now = self.now;
         let none: Vec<u8> = Vec::new();
@@ -3123,6 +3302,7 @@ impl Connection {
             !(old(self).phase_spec() is Open) ==> final(self).close_spec() == old(self).close_spec(),
             final(self).events_spec() == old(self).events_spec(),
             final(self).keeps_later(*old(self)),
+            final(self).crypto_same(*old(self)),
     {
         let ghost o = *self;
         if now > self.now {
@@ -3182,6 +3362,49 @@ impl Connection {
     // The TLS boundary
     // =========================================================================
 
+    /// A connection no longer open: every level's unread in-order CRYPTO bytes are dropped, since
+    /// TLS is fed nothing more after a close (RFC 8446 §6.2). The ends and the received history
+    /// stay, for RFC 9001 §4.1.3.
+    #[verifier::spinoff_prover]
+    pub fn crypto_drop(&mut self)
+        requires
+            old(self).wf(),
+            !(old(self).phase_spec() is Open),
+        ensures
+            final(self).wf(),
+            final(self).out_log() == old(self).out_log(),
+            final(self).phase_spec() == old(self).phase_spec(),
+            final(self).close_spec() == old(self).close_spec(),
+            forall|k: PacketKind| #[trigger] final(self).live(k) == old(self).live(k),
+            forall|k: PacketKind| #[trigger] final(self).crypto_end_spec(k) == old(self).crypto_end_spec(k),
+            forall|k: PacketKind, p: nat| #[trigger] final(self).crypto_received(k, p) == old(self).crypto_received(k, p),
+            final(self).crypto_kept(*old(self)),
+            crypto_all_drained(*final(self)),
+    {
+        hide(crate::reassembly::rfc_received);
+        hide(crate::reassembly::rfc_contiguous);
+        proof {
+            reveal(crx_ok);
+            self.crx_i.lemma_wf();
+            self.crx_h.lemma_wf();
+            self.crx_1.lemma_wf();
+        }
+        // shortcut: the bytes are copied out and dropped (`read`); a copy-free pop only if this shows up.
+        let mut sink: Vec<u8> = Vec::new();
+        self.crx_i.read(&mut sink);
+        self.crx_h.read(&mut sink);
+        self.crx_1.read(&mut sink);
+        proof {
+            assert forall|k: PacketKind| #[trigger] crypto_drained(*self, k) by {
+                match k {
+                    PacketKind::Initial => {},
+                    PacketKind::Handshake => {},
+                    PacketKind::OneRtt => {},
+                }
+            }
+        }
+    }
+
     /// Appends the newly contiguous CRYPTO bytes of `level` to `out`.
     #[verifier::spinoff_prover]
     pub fn crypto_read(&mut self, level: PacketKind, out: &mut Vec<u8>)
@@ -3200,6 +3423,14 @@ impl Connection {
             old(self).phase_spec() is Open ==> final(out)@.len() == old(out)@.len() + old(
                 self,
             ).crypto_contiguous_spec(level) - old(self).crypto_base_spec(level),
+            old(self).crypto_end_spec(level) <= old(self).crypto_base_spec(level) ==> final(out)@ == old(out)@,
+            // The read hands over exactly the bytes its offset passes; no other level's moves.
+            final(self).crypto_kept_but(*old(self), Some(level)),
+            final(self).peer_tp_known_spec() == old(self).peer_tp_known_spec(),
+            !(old(self).phase_spec() is Open) ==> final(out)@ == old(out)@,
+            final(self).phase_spec() == old(self).phase_spec(),
+            old(self).phase_spec() is Open ==> crypto_drained(*final(self), level),
+            drained_kept(*final(self), *old(self)),
     {
         // The bound needs only `lemma_wf`; unfolded, these make a missing fact an rlimit failure.
         hide(crate::reassembly::rfc_received);
@@ -3213,19 +3444,19 @@ impl Connection {
         match level {
             PacketKind::Initial => {
                 proof {
-                    self.crx_i.reassembly().lemma_wf();
+                    self.crx_i.lemma_wf();
                 }
                 self.crx_i.read(out)
             },
             PacketKind::Handshake => {
                 proof {
-                    self.crx_h.reassembly().lemma_wf();
+                    self.crx_h.lemma_wf();
                 }
                 self.crx_h.read(out)
             },
             PacketKind::OneRtt => {
                 proof {
-                    self.crx_1.reassembly().lemma_wf();
+                    self.crx_1.lemma_wf();
                 }
                 self.crx_1.read(out)
             },
@@ -3241,6 +3472,10 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
+            final(self).crypto_kept(*old(self)),
+            final(self).crypto_end_spec(PacketKind::Initial) == old(self).crypto_end_spec(PacketKind::Initial),
+            final(self).phase_spec() == old(self).phase_spec(),
+            drained_kept(*final(self), *old(self)),
     {
         if !matches!(self.lc.phase(), Phase::Open) {
             return;
@@ -3292,6 +3527,9 @@ impl Connection {
                 && final(self).close_spec() == Some((false, TRANSPORT_PARAMETER_ERROR, Seq::<u8>::empty())),
             !(old(self).phase_spec() is Open) ==> final(self).phase_spec() == old(self).phase_spec()
                 && final(self).close_spec() == old(self).close_spec(),
+            final(self).crypto_kept_base(*old(self)),
+            final(self).crypto_end_spec(PacketKind::Initial) == old(self).crypto_end_spec(PacketKind::Initial),
+            drained_kept(*final(self), *old(self)),
     {
         if now > self.now {
             self.now = now;
@@ -3311,20 +3549,44 @@ impl Connection {
         self.peer_tp = Some(copy_tp(tp));
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-8.1
+    //# When using ALPN, endpoints MUST immediately close a connection (see
+    //# Section 10.2 of [QUIC-TRANSPORT]) with a no_application_protocol TLS
+    //# alert (QUIC error code 0x0178; see Section 4.8) if an application
+    //# protocol is not negotiated.
     /// TLS finished, with this ALPN. After this no long-header packet is built.
     #[verifier::spinoff_prover]
     pub fn on_handshake_complete(&mut self, alpn: &[u8], now: u64, rand: &[u8; RAND_LEN])
         requires
             old(self).wf(),
         ensures
+            // §8.1: an open, not yet complete connection whose ALPN is not `h3` closes with 0x0178.
+            old(self).phase_spec() is Open && !old(self).live(PacketKind::OneRtt) && alpn@ != seq![0x68u8, 0x33u8]
+                ==> final(self).phase_spec() is Closing
+                && final(self).close_spec() == Some((false, (CRYPTO_ERROR_BASE + 0x78) as u64, Seq::<u8>::empty())),
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
+            final(self).crypto_kept(*old(self)),
+            final(self).crypto_end_spec(PacketKind::Initial) == old(self).crypto_end_spec(PacketKind::Initial),
+            final(self).phase_spec() is Open ==> old(self).phase_spec() is Open,
+            drained_kept(*final(self), *old(self)),
+            final(self).phase_spec() is Open ==> final(self).live(PacketKind::OneRtt),
+            final(self).live(PacketKind::OneRtt) ==> crypto_drained(*final(self), PacketKind::Initial)
+                && crypto_drained(*final(self), PacketKind::Handshake),
     {
         if now > self.now {
             self.now = now;
         }
         self.chal_used = 0;
         if !matches!(self.lc.phase(), Phase::Open) || self.complete {
+            proof {
+                reveal(crx_ok);
+            }
+            return;
+        }
+        // ALPN first: §8.1's close is owed whatever else is wrong.
+        if let Err(c) = check_alpn(alpn) {
+            self.close_internal(c);
             return;
         }
         // `streams.is_none()` is unreachable (`on_peer_params` sets both); `wf`'s `complete` clause
@@ -3333,16 +3595,26 @@ impl Connection {
             self.close_internal(INTERNAL_ERROR);
             return;
         }
-        if let Err(c) = check_alpn(alpn) {
-            self.close_internal(c);
-            return;
-        }
+        let ghost s0 = *self;
         self.discard(PacketKind::Initial);
+        let ghost s1 = *self;
         self.discard(PacketKind::Handshake);
+        let ghost s2 = *self;
+        proof {
+            reveal(crx_ok);
+        }
         self.complete = true;
         self.hs_done = HsDone::Pending;
         self.spin = rand[128] & 1 == 1;
         self.issue_cids(rand);
+        proof {
+            reveal(crx_ok);
+            assert forall|k: PacketKind| #[trigger] crypto_drained(*old(self), k) implies crypto_drained(*self, k) by {
+                assert(crypto_drained(s0, k));
+                assert(crypto_drained(s1, k));
+                assert(crypto_drained(s2, k));
+            }
+        }
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9001#section-4.8
@@ -3363,6 +3635,7 @@ impl Connection {
                 && final(self).close_spec() == Some((false, (CRYPTO_ERROR_BASE + alert as u64) as u64, Seq::<u8>::empty())),
             !(old(self).phase_spec() is Open) ==> final(self).phase_spec() == old(self).phase_spec()
                 && final(self).close_spec() == old(self).close_spec(),
+            final(self).crypto_kept(*old(self)),
     {
         if now > self.now {
             self.now = now;
@@ -3383,6 +3656,7 @@ impl Connection {
             final(self).paths == old(self).paths,
             final(self).lc == old(self).lc,
             final(self).clocks_kept(*old(self)),
+            final(self).crypto_same(*old(self)),
     {
         if !self.complete {
             return;
@@ -3543,6 +3817,8 @@ impl Connection {
             old(self).reset_matches(tail@) ==> !(final(self).phase_spec() is Open),
             !old(self).reset_matches(tail@) ==> final(self).phase_spec() == old(self).phase_spec(),
             forall|q: PathId| #[trigger] final(self).amp_trace(q) == old(self).amp_trace(q),
+            final(self).crypto_kept(*old(self)),
+            drained_kept(*final(self), *old(self)),
     {
         if now > self.now {
             self.now = now;
@@ -4417,6 +4693,7 @@ impl Connection {
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
             final(self).phase_spec() is Open ==> final(self).tx_kept(*old(self)),
+            final(self).crypto_same(*old(self)),
             r is None ==> final(self).now == old(self).now,
             final(self).phase_spec() is Open || final(self).phase_spec() is Closed,
             r is None ==> final(self).polled@.len() == 0,
@@ -5717,8 +5994,7 @@ impl Connection {
         self.add_space_packet(PacketKind::Handshake, budget, can_pad, now, d, pad, Ghost(o));
         if !matches!(self.lc.phase(), Phase::Open) {
             proof {
-                self.lemma_tx_phase(s01, now);
-                self.lemma_tx_closed(s00, now);
+                self.lemma_tx_trans(s01, s00, now);
             }
             return;
         }
@@ -5730,8 +6006,7 @@ impl Connection {
         self.add_space_packet(PacketKind::OneRtt, budget, can_pad, now, d, pad, Ghost(o));
         if !matches!(self.lc.phase(), Phase::Open) {
             proof {
-                self.lemma_tx_phase(s02, now);
-                self.lemma_tx_closed(s00, now);
+                self.lemma_tx_trans(s02, s00, now);
             }
             return;
         }
@@ -6808,6 +7083,8 @@ impl Connection {
             // The nonce's domain (3e `protect_ok`): every packet number is below 2^62 - 1.
             r matches Some(d) ==> forall|i: int|
                 0 <= i < d@.packets.len() ==> (#[trigger] d@.packets[i]).pn < PN_MAX,
+            final(self).crypto_kept(*old(self)),
+            drained_kept(*final(self), *old(self)),
     {
         let ghost o = *old(self);
         let ghost n0 = now;
@@ -6864,6 +7141,51 @@ impl Connection {
                 }
             }
         }
+        proof {
+            assert(self.tx_kept(o));
+        }
+        self.poll_open(Ghost(n0), Ghost(o))
+    }
+
+    /// `poll_transmit` once Open with every live space's packet number below `PN_MAX`: PATH frames
+    /// first, then data. `o` is the connection `poll_transmit` was called on.
+    #[verifier::spinoff_prover]
+    fn poll_open(&mut self, Ghost(n0): Ghost<u64>, Ghost(o): Ghost<Connection>) -> (r: Option<OutDatagram>)
+        requires
+            o.wf(),
+            old(self).wf(),
+            old(self).phase_spec() is Open,
+            old(self).polled@.len() == 0,
+            old(self).tx_kept(o),
+            o.now <= old(self).now,
+            n0 <= old(self).now,
+            forall|k: PacketKind| #[trigger] o.live(k) ==> o.sent(k).next_pn_spec() < PN_MAX,
+        ensures
+            final(self).wf(),
+            final(self).out_log() == match r {
+                Some(d) => o.out_log().push(d@),
+                None => o.out_log(),
+            },
+            r matches Some(d) ==> transmit_ok(o, *final(self), d@),
+            final(self).polled().len() > 0 ==> r is Some,
+            r matches Some(d) ==> polled_placed(final(self).polled(), d@),
+            r matches Some(d) ==> initial_padded(d@),
+            r matches Some(d) ==> same_dcid(d@),
+            r matches Some(d) ==> (o.mtu_failed_at(d@.path) ==> mtu_failed_frames(d@)),
+            r matches Some(d) ==> final(self).responses_echoed(o, d@),
+            r matches Some(d) ==> o.challenges_recorded(d@),
+            r matches Some(d) ==> path_expanded(d@, o.budget_at(d@.path)),
+            r matches Some(d) ==> final(self).dcid_unshared(d@),
+            n0 < u64::MAX && o.timers_later(n0) ==> final(self).timers_later(n0),
+            r is None ==> final(self).acks_later(n0),
+            r matches Some(d) ==> forall|i: int|
+                0 <= i < d@.packets.len() ==> (#[trigger] d@.packets[i]).pn < PN_MAX,
+            final(self).crypto_kept(o),
+            drained_kept(*final(self), o),
+    {
+        proof {
+            reveal(Connection::path_rules);
+        }
         let now = self.now;
         let ghost s0 = *self;
         proof {
@@ -6872,6 +7194,7 @@ impl Connection {
         if let Some(d) = self.build_path_datagram(now, Ghost(o)) {
             proof {
                 self.lemma_tx_trans(s0, o, now);
+                self.lemma_tx_crypto(o, now);
                 if n0 < u64::MAX && o.timers_later(n0) {
                     self.lemma_tx_later(o, now, n0);
                 }
@@ -6882,6 +7205,8 @@ impl Connection {
         if !matches!(self.lc.phase(), Phase::Open) {
             proof {
                 self.lemma_tx_phase(s0, now);
+                self.lemma_tx_trans(s0, o, now);
+                self.lemma_tx_crypto(o, now);
             }
             return None;
         }
@@ -6897,6 +7222,7 @@ impl Connection {
         let r = self.data_datagram(now, Ghost(o));
         proof {
             self.lemma_tx_trans(s1, o, now);
+            self.lemma_tx_crypto(o, now);
             if n0 < u64::MAX && o.timers_later(n0) {
                 self.lemma_tx_later(o, now, n0);
             }
@@ -7093,6 +7419,7 @@ impl Connection {
 
     /// Every validation's deadline is where it was: what a Closing send leaves.
     closed spec fn expiries_kept(&self, o: Connection) -> bool {
+        &&& self.crypto_same(o)
         &&& self.paths.ids() == o.paths.ids()
         &&& self.recovery == o.recovery
         &&& self.peer_tp == o.peer_tp
@@ -7114,8 +7441,9 @@ impl Connection {
         &&& self.sent_1 == o.sent_1
     }
 
-    /// What a send leaves alone among what the timer terms read.
+    /// What a send leaves alone among what the timer terms read, and the Initial CRYPTO stream.
     closed spec fn tx_fixed(&self, o: Connection) -> bool {
+        &&& self.crypto_same(o)
         &&& self.idle == o.idle
         &&& self.local_tp == o.local_tp
         &&& self.peer_tp == o.peer_tp
@@ -7128,10 +7456,12 @@ impl Connection {
         &&& self.lc == o.lc
     }
 
-    /// A send from `o` at `t` moved a timer only to a start at or after `t`.
+    /// A send from `o` at `t` moved a timer only to a start at or after `t`, and left the
+    /// CRYPTO streams alone (`crypto_same`).
     #[verifier::opaque]
     closed spec fn tx_timers(&self, o: Connection, t: u64) -> bool {
-        self.lc.phase_spec() is Closed || {
+        &&& self.crypto_same(o)
+        &&& self.lc.phase_spec() is Closed || {
             &&& self.lc.phase_spec() == o.lc.phase_spec()
             &&& self.paths.ids() == o.paths.ids()
             &&& self.local_tp == o.local_tp
@@ -7183,8 +7513,19 @@ impl Connection {
     proof fn lemma_tx_closed(&self, o: Connection, t: u64)
         requires
             self.lc.phase_spec() is Closed,
+            self.crypto_same(o),
         ensures
             self.tx_timers(o, t),
+    {
+        reveal(Connection::tx_timers);
+    }
+
+    proof fn lemma_tx_crypto(&self, o: Connection, t: u64)
+        requires
+            self.tx_timers(o, t),
+        ensures
+            self.crypto_kept(o),
+            drained_kept(*self, o),
     {
         reveal(Connection::tx_timers);
     }
@@ -7201,6 +7542,7 @@ impl Connection {
     /// `commit_record`'s step: space `k` gained a record stamped `now`, and the idle timer may have restarted.
     proof fn lemma_tx_recorded(&self, o: Connection, k: PacketKind, g: SentPacket, now: u64)
         requires
+            self.crypto_same(o),
             self.lc == o.lc,
             self.paths == o.paths,
             self.local_tp == o.local_tp,
@@ -7318,9 +7660,24 @@ impl Connection {
 
     /// From `o`, the clock has not gone back, and every timer `o` had later than a `t` up to its
     /// clock still is: what a call between `on_timeout` and the `poll_transmit` loop must keep.
+    /// Also the CRYPTO streams and completion unchanged, and no reopening, which every fn that
+    /// keeps this keeps too (`lemma_keeps_crypto`).
     pub closed spec fn keeps_later(&self, o: Connection) -> bool {
         &&& o.now <= self.now
         &&& forall|t: u64| t < u64::MAX && t <= o.now && #[trigger] o.timers_later(t) ==> self.timers_later(t)
+        &&& self.crypto_same(o)
+        &&& self.lc.phase_spec() is Open ==> o.lc.phase_spec() is Open
+    }
+
+    pub proof fn lemma_keeps_crypto(&self, o: Connection)
+        requires
+            self.keeps_later(o),
+        ensures
+            self.crypto_kept(o),
+            drained_kept(*self, o),
+            self.phase_spec() is Open ==> o.phase_spec() is Open,
+            self.live(PacketKind::OneRtt) == o.live(PacketKind::OneRtt),
+    {
     }
 
     pub proof fn lemma_keeps_refl(&self)
@@ -7730,6 +8087,7 @@ impl Connection {
         requires
             old(self).wf(),
         ensures
+            final(self).crypto_same(*old(self)),
             final(self).wf(),
             final(self).frames_kept(*old(self)),
             final(self).paths == old(self).paths,
@@ -7758,6 +8116,7 @@ impl Connection {
                 i <= lost@.len(),
                 self.wf(),
                 self.frames_kept(s0),
+                self.crypto_same(s0),
                 self.paths == s0.paths,
                 self.lc == s0.lc,
                 self.clocks_kept(s1),
@@ -7770,6 +8129,7 @@ impl Connection {
                     j <= frames@.len(),
                     self.wf(),
                     self.frames_kept(s0),
+                    self.crypto_same(s0),
                     self.paths == s0.paths,
                     self.lc == s0.lc,
                     self.clocks_kept(s1),
@@ -7814,6 +8174,7 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).frames_kept(*old(self)),
+            final(self).crypto_same(*old(self)),
             final(self).paths == old(self).paths,
             final(self).lc == old(self).lc,
             final(self).idle == old(self).idle,
@@ -7951,6 +8312,7 @@ impl Connection {
         requires
             old(self).wf(),
         ensures
+            final(self).crypto_same(*old(self)),
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
             final(self).frames_kept(*old(self)),
@@ -8012,6 +8374,7 @@ impl Connection {
             final(self).frames_kept(*old(self)),
             final(self).paths == old(self).paths,
             final(self).clocks_kept(*old(self)),
+            final(self).crypto_same(*old(self)),
             final(self).lc == old(self).lc || final(self).lc.phase_spec() is Closed,
             final(self).lc.phase_spec() is Open ==> later(final(self).idle_term(), t),
             !(final(self).lc.phase_spec() is Open) ==> final(self).lc.phase_spec() is Closed || later(final(self).lc.deadline_spec(), t),
@@ -8050,6 +8413,7 @@ impl Connection {
             final(self).out_log() == old(self).out_log(),
             final(self).frames_kept(*old(self)),
             final(self).clocks_kept(*old(self)),
+            final(self).crypto_same(*old(self)),
             final(self).lc == old(self).lc || final(self).lc.phase_spec() is Closed,
             expired(old(self).paths.path(old(self).paths.active_spec()), t, pto0) ==> usable(
                 final(self).paths.path(final(self).paths.active_spec()),
@@ -8088,6 +8452,8 @@ impl Connection {
             final(self).timed_out(*old(self), now),
             final(self).timers_later(now),
             now <= final(self).now_spec(),
+            final(self).crypto_kept(*old(self)),
+            drained_kept(*final(self), *old(self)),
     {
         let ghost o = *self;
         if now > self.now {
@@ -8200,13 +8566,22 @@ impl Connection {
             r == self.crypto_end_spec(k),
             self.crypto_base_spec(k) <= r,
             r > 0 ==> self.crypto_received(k, (r - 1) as nat),
+            self.crypto_base_spec(k) <= self.crypto_contiguous_spec(k) <= r,
+            // No byte at or past the end was received: `r` is the end of the data received.
+            forall|p: nat| #[trigger] self.crypto_received(k, p) ==> p < r,
     {
         proof {
             reveal(crx_ok);
             match k {
-                PacketKind::Initial => self.crx_i.lemma_end_received(),
-                PacketKind::Handshake => self.crx_h.lemma_end_received(),
-                PacketKind::OneRtt => self.crx_1.lemma_end_received(),
+                PacketKind::Initial => {
+                    self.crx_i.lemma_wf();
+                },
+                PacketKind::Handshake => {
+                    self.crx_h.lemma_wf();
+                },
+                PacketKind::OneRtt => {
+                    self.crx_1.lemma_wf();
+                },
             }
         }
         match k {
@@ -8229,6 +8604,20 @@ impl Connection {
             PacketKind::Handshake => self.crx_h.start(),
             PacketKind::OneRtt => self.crx_1.start(),
         }
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2
+    //# Endpoints that receive a version 1 long header
+    //# with a value larger than 20 MUST drop the packet.
+    /// The length of the client's first Initial SCID, at most 20 (`HandshakeIds::wf`).
+    pub fn client_scid_len(&self) -> (r: usize)
+        requires
+            self.wf(),
+        ensures
+            r == self.client_scid_spec().len(),
+            r <= MAX_CID_LEN,
+    {
+        self.ids.client_scid().len()
     }
 
     /// Our transport parameters, filled in.
@@ -8341,11 +8730,31 @@ impl Connection {
 // Helpers
 // =============================================================================
 
-/// The three CRYPTO streams' `wf`. Opaque, so fns that do not touch a CRYPTO stream carry it by
-/// field congruence without unfolding it.
+/// The three CRYPTO streams' `wf`, and a stream whose space is not live is drained. Opaque, so a
+/// fn that changes neither a CRYPTO stream nor `live_i`, `live_h`, `complete` carries it by field
+/// congruence; the fns that do (`on_crypto_frame`, `crypto_read`, `crypto_drop`, `discard`,
+/// `on_handshake_complete`, `crypto_end`'s proof, the constructor) reveal it.
 #[verifier::opaque]
-spec fn crx_ok(i: CryptoStream, h: CryptoStream, o: CryptoStream) -> bool {
-    i.wf() && h.wf() && o.wf()
+spec fn crx_ok(i: CryptoStream, h: CryptoStream, o: CryptoStream, live_i: bool, live_h: bool, complete: bool) -> bool {
+    &&& i.wf() && h.wf() && o.wf()
+    &&& !live_i ==> i.drained() && i.buf_len_spec() == 0
+    &&& !live_h ==> h.drained()
+    &&& !complete ==> o.drained()
+}
+
+/// No level holds an unread in-order CRYPTO byte.
+pub open spec fn crypto_all_drained(c: Connection) -> bool {
+    forall|k: PacketKind| #[trigger] crypto_drained(c, k)
+}
+
+/// Level `k` holds no unread in-order CRYPTO byte: it has been read to its contiguous end.
+pub open spec fn crypto_drained(c: Connection, k: PacketKind) -> bool {
+    c.crypto_base_spec(k) == c.crypto_contiguous_spec(k)
+}
+
+/// Every level drained in `o` is drained in `c`.
+pub open spec fn drained_kept(c: Connection, o: Connection) -> bool {
+    forall|k: PacketKind| #[trigger] crypto_drained(o, k) ==> crypto_drained(c, k)
 }
 
 /// §8.1: trace `t1` starts with `t0` and then the receipt of an `n`-byte datagram. Opaque, so a

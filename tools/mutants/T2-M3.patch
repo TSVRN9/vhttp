@@ -1,13 +1,13 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
-index f0ecd46..8b81f5f 100644
+index 37201ae..072c78d 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -107,7 +107,7 @@ fn shut(c: &mut Connection, code: u64, now: u64)
-             && final(c).close_spec() == old(c).close_spec(),
+@@ -219,7 +219,7 @@ fn shut(c: &mut Connection, code: u64, now: u64)
+         final(c).crypto_kept(*old(c)),
  {
      let none: Vec<u8> = Vec::new();
 -    c.close(code, false, none.as_slice(), now);
 +    c.close(code, true, none.as_slice(), now);
- }
- 
- //= https://www.rfc-editor.org/rfc/rfc9001#section-4.8
+     proof {
+         c.lemma_keeps_crypto(*old(c));
+     }

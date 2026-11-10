@@ -1,0 +1,13 @@
+diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
+index 37201ae..faed1d3 100644
+--- a/crates/quictls/src/server.rs
++++ b/crates/quictls/src/server.rs
+@@ -1103,7 +1103,7 @@ impl<'a> QuicServer<'a> {
+         }
+         if b.len() > 0 {
+             match l {
+-                Level::Initial => self.fed_i = self.fed_i + b.len() as u64,
++                Level::Initial => self.fed_i = self.fed_i + b.len() as u64 - 1,
+                 Level::Handshake => self.fed_h = self.fed_h + b.len() as u64,
+                 Level::OneRtt => {},
+             }

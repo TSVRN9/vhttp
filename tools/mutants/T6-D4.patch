@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/recv_stream.rs b/crates/quic/src/recv_stream.rs
-index a4f824e..a51d92d 100644
+index c881c1f..c3a0d97 100644
 --- a/crates/quic/src/recv_stream.rs
 +++ b/crates/quic/src/recv_stream.rs
-@@ -1501,7 +1501,7 @@ impl RecvStream {
+@@ -1497,7 +1497,7 @@ impl RecvStream {
          let n_new = match self.data_gate(off, data, fin, conn_room) {
              Ok(n) => n,
              Err(c) => {

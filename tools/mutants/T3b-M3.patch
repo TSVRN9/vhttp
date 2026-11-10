@@ -1,0 +1,26 @@
+diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
+index 37201ae..4cabb6c 100644
+--- a/crates/quictls/src/server.rs
++++ b/crates/quictls/src/server.rs
+@@ -1057,6 +1057,21 @@ impl<'a> QuicServer<'a> {
+             self.sync_keys();
+             return false;
+         }
++        let mut b: Vec<u8> = Vec::new();
++        self.h3.conn_mut().crypto_read(PacketKind::Initial, &mut b);
++        proof {
++            Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
++        }
++        assert(b@.len() == 0);
++        if b.len() > 0 {
++            let ghost c1 = self.h3.conn_spec();
++            shut(self.h3.conn_mut(), PROTOCOL_VIOLATION, now);
++            proof {
++                Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c1);
++            }
++            self.sync_keys();
++            return false;
++        }
+         self.sync_keys();
+         true
+     }

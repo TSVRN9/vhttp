@@ -1,0 +1,13 @@
+diff --git a/crates/quic/src/frags.rs b/crates/quic/src/frags.rs
+index 6f08132..9cf09a8 100644
+--- a/crates/quic/src/frags.rs
++++ b/crates/quic/src/frags.rs
+@@ -1190,7 +1190,7 @@ impl Frags {
+         let md = self.merged(off, data, s, e, i, j, ms, me);
+         let ghost mdv = md@;
+         self.splice_in(i, j, ms, md);
+-        self.held = h;
++        self.held = self.held + data.len() as u64;
+         proof {
+             lemma_insert_post(f, lo as nat, off as nat, data@, s as nat, e as nat, i as int, j as int, mdv);
+         }

@@ -1,0 +1,12 @@
+diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
+index 84680fd..b8d12cd 100644
+--- a/crates/quic/src/conn.rs
++++ b/crates/quic/src/conn.rs
+@@ -1601,7 +1601,6 @@ impl Connection {
+     fn on_crypto_frame(&mut self, k: PacketKind, offset: u64, data: &[u8], now: u64) -> (r: Result<(), u64>)
+         requires
+             old(self).wf(),
+-            old(self).live(k),
+             offset + data@.len() <= VARINT_MAX,
+         ensures
+             final(self).paths == old(self).paths,
