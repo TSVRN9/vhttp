@@ -1178,21 +1178,34 @@ expect_fail "requirements: an open: id not in the roadmap" "open:9 is not a phas
 rqrepo rq1; sed -i 's/| detection proved | proved:good_fn; open:2 |/| detection proved | proved:good_fn; open:1 |/' "$tmp/rq1/$rqm"
 expect_fail "requirements: an open: id of a merged phase" "open:1 names a merged phase" rq rq1
 rqrepo rq1; sed -i 's/| detection proved | proved:good_fn; open:2 |/| detection proved | proved:good_fn; open:3 |/' "$tmp/rq1/$rqm"
-expect_fail "requirements: an open: phase with no req- carryover row" "open:3 owns no open docs/carryovers.tsv row" rq rq1
+expect_fail "requirements: an open: phase with no req- carryover row" "open:3 has no open req-3 row" rq rq1
+rqrepo rq1; sed -i 's/| detection proved | proved:good_fn; open:2 |/| detection proved | proved:good_fn; open:3 |/' "$tmp/rq1/$rqm"
+printf 'r3\t3\topen\t-\tdocs/requirements.md:1\ta row citing requirements.md that is not req-3\n' >> "$tmp/rq1/docs/carryovers.tsv"
+expect_fail "requirements: an open: phase whose only row is not req-" "open:3 has no open req-3 row" rq rq1
 rqrepo rq1; sed -i 's/| tested:good_test; open:2 |/| tested:good_test |/' "$tmp/rq1/$rqm"
 expect_fail "requirements: tested: without an open: owner" "tested: without open:" rq rq1
-rqrepo rq1; sed -i 's/false (t2)/false (r2)/' "$tmp/rq1/$rqm"
-expect_fail "requirements: a false key that is not a TRUSTED.md carryover" "false (r2): not an open docs/carryovers.tsv row whose source cites TRUSTED.md" rq rq1
+rqrepo rq1; sed -i 's/false (t2)/false (req-2)/' "$tmp/rq1/$rqm"
+expect_fail "requirements: a false key that is not a TRUSTED.md carryover" "false (req-2): not an open docs/carryovers.tsv row whose source cites TRUSTED.md" rq rq1
 rqrepo rq1; sed -i 's/| false (t2); open:2 |/| false (t2) |/' "$tmp/rq1/$rqm"
 expect_fail "requirements: a false row without its owner" "false (t2) needs open:2" rq rq1
 rqrepo rq1; sed -i 's/| N\/A (client-only) | | n\/a |/| N\/A (client-only) | | open:2 |/' "$tmp/rq1/$rqm"
 expect_fail "requirements: an N/A row whose Status is not n/a" "needs Status n/a" rq rq1
 rqrepo rq1; sed -i 's/ Notes | Status |/ Notes |/' "$tmp/rq1/$rqm"
 expect_fail "requirements: a table without the Status column" "a table header that is not" rq rq1
-rqrepo rq1; sed -i '/^|/d' "$tmp/rq1/$rqm"
+rqrepo rq1; sed -i '/^|/d; /^## RFC/d' "$tmp/rq1/$rqm"
 expect_fail "requirements: no table rows" 'no `| § | ...` table rows' rq rq1
 rqrepo rq1; rm "$tmp/rq1/$rqm"
 expect_fail "requirements: a missing requirements.md" "cannot read docs/requirements.md" rq rq1
+rqrepo rq1; rm "$tmp/rq1/docs/carryovers.tsv"
+expect_fail "requirements: a missing carryovers.tsv" "cannot read docs/carryovers.tsv" rq rq1
+rqrepo rq1; rm "$tmp/rq1/docs/roadmap.md"
+expect_fail "requirements: a missing roadmap" "cannot read docs/roadmap.md" rq rq1
+rqrepo rq1; printf '\n| Sec | Topic | #MUST/MUST NOT | Server applies? | Phase | Notes | Status |\n|---|---|---|---|---|---|---|\n| 7 | hidden | 1 | yes | 2 | ✅ done | tested:good_test |\n' >> "$tmp/rq1/$rqm"
+expect_fail "requirements: a second table with a | Sec | header and a ticked row" "a table row outside a requirements table carries a tick or a Status item" rq rq1
+rqrepo rq1; sed -i 's/^| § | Topic/| Sec | Topic/' "$tmp/rq1/$rqm"
+expect_fail "requirements: an RFC table whose header is renamed" "a table header that is not" rq rq1
+rqrepo rq1; printf '\n## RFC 2\n\nNo table here.\n' >> "$tmp/rq1/$rqm"
+expect_fail "requirements: an RFC section without its table" "'## RFC 2' has 0 tables with the Status header, not 1" rq rq1
 rqrepo rq1; rm -rf "$tmp/rq1/.git"
 expect_fail "requirements: not a git checkout (git did not run)" "git ls-files -z failed" rq rq1
 
