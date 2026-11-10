@@ -123,8 +123,8 @@ def main(root, path, mode, base=None):
         for what, cur in checks:
             bad = below(cur, fl) if grows else outside(cur, fl)
             if bad:
-                raise Fail('%s: %s is outside the floor of its first-parent history: %s (%s)' % (
-                    path, what, bad, 'a key once present stays' if grows else 'the file only shrinks'))
+                raise Fail('%s: %s is outside the floor of its first-parent history: %s%s' % (
+                    path, what, bad, '' if grows else ' (the file only shrinks)'))
     print('ratchet-walk: %s ok (%d commits touch it)' % (path, len(commits)))
 
 

@@ -5,7 +5,7 @@ set -o pipefail
 # tools/gate-demos/ with one change applied) and must exit non-zero with its message; every fixture
 # first passes unchanged, so a demo cannot fail for the wrong reason. Covers lint-scripts,
 # check-quotes, the citation gate, the RFC-quantity gate (its git demos in throwaway repos), acceptance (many bad changes, including real-git runs), escape-gate (three), the rlimit gate and the mutant registry (scripts/mutants.sh; its run demos call Verus
-# on the fixture crate), the declassify and deps gates, ct-check's report reader (ct-report.sh), ct-binary (against its real build) and the test gate. Takes a few seconds, plus about a minute the first time vstd builds in target/mutants-demo.
+# on the fixture crate), the declassify and deps gates, ct-check's report reader (ct-report.sh), ct-binary (against its real build), the test gate and the carryover gate (throwaway repos). Takes a few seconds, plus about a minute the first time vstd builds in target/mutants-demo.
 root=$(cd "$(dirname "$0")/.." && pwd)
 fx=$root/tools/gate-demos
 tmp=$(mktemp -d)
@@ -1065,5 +1065,64 @@ $out"
 echo "gate-demos: interop: no HTTP3 and no quiche passes and says skipped"
 rm "$ifake/repo/crates/server/tests/interop.rs"
 expect_fail "interop: no interop.rs" "no crates/server/tests/interop.rs" iop ok
+
+# carryovers.sh (C3; F3, F18, F19), on throwaway git repos of tools/gate-demos/carryovers: a bad row, owner, evidence or
+# TRUSTED removal cell, an untracked-evidence citation, a deleted row (main across two commits; a branch), missing inputs.
+corepo() {  # corepo <dir>: the fixture as one commit on main
+    rm -rf "${tmp:?}/$1"; cp -r "$fx/carryovers" "$tmp/$1"
+    git -C "$tmp/$1" init -q -b main; git -C "$tmp/$1" add -A; gitc "$1" commit -qm base
+}
+co() { "$root/scripts/carryovers.sh" "$tmp/$1"; }
+cot=docs/carryovers.tsv
+corepo co1
+expect_pass "carryovers" co co1
+sed -i 's/fn:good_fn/fn:no_such_fn/' "$tmp/co1/$cot"
+expect_fail "carryovers: a closed row whose fn: does not resolve" 'no `fn no_such_fn` in a tracked .rs file' co co1
+corepo co1; sed -i 's/fn:good_fn/fn:good/' "$tmp/co1/$cot"
+expect_fail "carryovers: fn: matches a whole name only" 'no `fn good` in a tracked .rs file' co co1
+corepo co1; sed -i 's/doc:TRUSTED.md/doc:untracked.md/' "$tmp/co1/$cot"; : > "$tmp/co1/untracked.md"
+expect_fail "carryovers: a closed row whose doc: is not tracked" "evidence doc:untracked.md is not a tracked path" co co1
+corepo co1; sed -i 's/doc:TRUSTED.md/commit:deadbeef/' "$tmp/co1/$cot"
+expect_fail "carryovers: a closed row whose commit: does not exist" "evidence commit:deadbeef is not a commit" co co1
+corepo co1; sed -i 's/^a\t2\t/a\t9\t/' "$tmp/co1/$cot"
+expect_fail "carryovers: an owner not in the roadmap" "owner 9 is not a phase of docs/roadmap.md" co co1
+corepo co1; sed -i 's/| 2 | second | in progress |/| 2 | second | merged |/' "$tmp/co1/docs/roadmap.md"
+expect_fail "carryovers: an open row owned by a merged phase" "a is open but its owner 2 is merged" co co1
+corepo co1; sed -i 's/^a\t2\topen\t-/a\t2\tclosed\tdoc:TRUSTED.md/' "$tmp/co1/$cot"; sed -i 's/| 2 | second | in progress |/| 2 | second | merged |/' "$tmp/co1/docs/roadmap.md"
+expect_fail "carryovers: a TRUSTED row naming a merged phase" "the removal cell names 2, which is merged" co co1
+corepo co1; sed -n 2p "$tmp/co1/$cot" >> "$tmp/co1/$cot"
+expect_fail "carryovers: a duplicate id" "duplicate id a" co co1
+corepo co1; printf 'd\t2\topen\t-\tdemo:4\n' >> "$tmp/co1/$cot"
+expect_fail "carryovers: a row with 5 columns" "expected 6 non-empty tab-separated columns, got 5" co co1
+corepo co1; sed -i 's/| 2 (the open phase) |/|  |/' "$tmp/co1/TRUSTED.md"
+expect_fail "carryovers: a TRUSTED row with an empty removal cell" "the removal cell '' starts with neither a roadmap id nor" co co1
+for cell in 'never' 'Phase 2' 'never ()'; do
+    corepo co1; sed -i "s/| 2 (the open phase) |/| $cell |/" "$tmp/co1/TRUSTED.md"
+    expect_fail "carryovers: a TRUSTED removal cell '$cell'" "the removal cell '$cell' starts with neither" co co1
+done
+corepo co1; printf -- '- **Evidence:** the run log `.worktrees/vt-x-evidence/log`.\n' >> "$tmp/co1/docs/rca/a.md"
+expect_fail "carryovers: an RCA Evidence line citing a worktree evidence log" "docs/rca/a.md:4 cites '.worktrees/', an untracked path" co co1
+corepo co1; printf -- '- **Evidence**: see vt-8d-evidence/t2/probe.txt.\n' >> "$tmp/co1/docs/rca/a.md"
+expect_fail "carryovers: the other Evidence spelling, a bare evidence dir name" "docs/rca/a.md:4 cites 'vt-8d-evidence'" co co1
+corepo co1; printf '/// steps from vt-8d-evidence/t2/core-steps.txt\n' >> "$tmp/co1/crates/a/src/lib.rs"
+expect_fail "carryovers: a crates .rs comment citing an evidence dir" "crates/a/src/lib.rs:2 cites 'vt-8d-evidence'" co co1
+corepo co1; sed -i '/^a\t/d' "$tmp/co1/$cot"; gitc co1 commit -qam "delete row a"
+expect_fail "carryovers: main, a row deleted across two commits" "a was removed" co co1
+corepo co1; gitc co1 checkout -qb feat; gitc co1 commit -q --allow-empty -m feat; sed -i '/^a\t/d' "$tmp/co1/$cot"
+expect_fail "carryovers: a branch deleting a row of the merge-base" "a was removed (a floor line once present stays) against the merge-base" co co1
+corepo co1; sed -i 's/^a\t2\topen\t-/a\t2\tclosed\tdoc:TRUSTED.md/' "$tmp/co1/$cot"; gitc co1 commit -qam "close row a"
+expect_pass "carryovers: main, a row closed rather than deleted" co co1
+corepo co1; : > "$tmp/co1/$cot"
+expect_fail "carryovers: an empty tsv" "the first line must be the header" co co1
+corepo co1; sed -i '2,$d' "$tmp/co1/$cot"
+expect_fail "carryovers: a tsv with a header only" "docs/carryovers.tsv has no rows" co co1
+corepo co1; rm "$tmp/co1/docs/roadmap.md"
+expect_fail "carryovers: a missing roadmap file" "cannot read docs/roadmap.md" co co1
+corepo co1; sed -i '/^| [12] /d' "$tmp/co1/docs/roadmap.md"
+expect_fail "carryovers: a roadmap table with no rows" "the phase table has no rows" co co1
+corepo co1; rm "$tmp/co1/TRUSTED.md"
+expect_fail "carryovers: a missing TRUSTED.md" "cannot read TRUSTED.md" co co1
+corepo co1; rm -rf "$tmp/co1/.git"
+expect_fail "carryovers: not a git checkout" "is not a git checkout" co co1
 
 echo "gate-demos: $n demos, all fail as expected"
