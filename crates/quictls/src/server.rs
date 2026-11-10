@@ -72,12 +72,26 @@ spec fn past_received(c: Connection, k: PacketKind, end: nat) -> bool {
     exists|p: nat| p >= end && #[trigger] c.crypto_received(k, p)
 }
 
-/// `past_received` is not vacuous: nothing past the end of what was received.
-proof fn lemma_past_received_rejects(c: Connection, k: PacketKind, end: nat)
+//= https://www.rfc-editor.org/rfc/rfc9001#section-4.1.3
+//# *  If the packet is from a previously installed encryption level, it
+//# MUST NOT contain data that extends past the end of previously
+//# received data in that flow.
+//= https://www.rfc-editor.org/rfc/rfc9001#section-4.1.3
+//# Implementations MUST treat any
+//# violations of this requirement as a connection error of type
+//# PROTOCOL_VIOLATION.
+/// `superseded`'s refusal: TLS has left Initial, and Initial CRYPTO data arrived at or past
+/// `init_end`, the end of the Initial data received before the key change.
+spec fn superseded_allowed_err(s: QuicServer) -> bool {
+    !(s.level is Initial) && past_received(s.conn_spec(), PacketKind::Initial, s.init_end as nat)  // rfc-quantity: s.conn_spec(): the server's QUIC connection (QuicServer::conn_spec is h3.conn_spec()), whose CRYPTO receive history past_received reads: the flow of RFC 9001 §4.1.3
+}
+
+/// `superseded_allowed_err` is not vacuous: nothing received past `init_end`.
+proof fn lemma_superseded_allowed_err_rejects(s: QuicServer)
     requires
-        forall|p: nat| #[trigger] c.crypto_received(k, p) ==> p < end,
+        forall|p: nat| #[trigger] s.conn_spec().crypto_received(PacketKind::Initial, p) ==> p < s.init_end,
     ensures
-        !past_received(c, k, end),
+        !superseded_allowed_err(s),
 {
 }
 
@@ -285,6 +299,59 @@ spec fn spec_key_events(ev: Seq<SpecTlsEvent>) -> (bool, bool) {
         exists|i: int| 0 <= i < ev.len() && #[trigger] spec_secrets_level(ev[i], Level::Handshake),
         exists|i: int| #![trigger ev[i]] 0 <= i < ev.len() && ev[i] is Complete,
     )
+}
+
+/// The CRYPTO bytes of level `l` handed to TLS so far.
+spec fn tls_fed(s: QuicServer, l: Level) -> nat {
+    match l {
+        Level::Initial => s.fed_i as nat,
+        Level::Handshake => s.fed_h as nat,
+        Level::OneRtt => 0,
+    }
+}
+
+/// RFC 9001 §4.1.3's "data from a previous encryption level that TLS has not consumed" at
+/// level `l` (space `k`): bytes in TLS's reader, or bytes received at or past the end of what
+/// was handed to TLS.
+spec fn tls_unconsumed(s: QuicServer, l: Level, k: PacketKind) -> bool {
+    spec_reader(s.hs@, l).len() > 0 || past_received(s.conn_spec(), k, tls_fed(s, l))  // rfc-quantity: s.conn_spec(): the server's QUIC connection (QuicServer::conn_spec is h3.conn_spec()), whose CRYPTO receive history past_received reads: the flow of RFC 9001 §4.1.3
+}
+
+//= https://www.rfc-editor.org/rfc/rfc9001#section-4.1.3
+//# When TLS
+//# provides keys for a higher encryption level, if there is data from
+//# a previous encryption level that TLS has not consumed, this MUST
+//# be treated as a connection error of type PROTOCOL_VIOLATION.
+/// `key_changes`' refusal: the batch `ev` gives keys above a level whose data TLS has not
+/// consumed: Handshake keys (`Secrets { Handshake }`) above Initial, 1-RTT keys (`Complete`)
+/// above Initial and Handshake.
+spec fn key_changes_allowed_err(s: QuicServer, ev: Seq<SpecTlsEvent>) -> bool {
+    ||| (spec_key_events(ev).0 || spec_key_events(ev).1) && tls_unconsumed(s, Level::Initial, PacketKind::Initial)
+    ||| spec_key_events(ev).1 && tls_unconsumed(s, Level::Handshake, PacketKind::Handshake)
+}
+
+/// `tls_unconsumed` is not vacuous: an empty reader and nothing received past what TLS has.
+proof fn lemma_tls_unconsumed_rejects(s: QuicServer, l: Level, k: PacketKind)
+    requires
+        spec_reader(s.hs@, l).len() == 0,
+        forall|p: nat| #[trigger] s.conn_spec().crypto_received(k, p) ==> p < tls_fed(s, l),
+    ensures
+        !tls_unconsumed(s, l, k),
+{
+}
+
+/// `key_changes_allowed_err` is not vacuous: whatever the batch, nothing unconsumed at either level.
+proof fn lemma_key_changes_allowed_err_rejects(s: QuicServer, ev: Seq<SpecTlsEvent>)
+    requires
+        spec_reader(s.hs@, Level::Initial).len() == 0,
+        spec_reader(s.hs@, Level::Handshake).len() == 0,
+        forall|p: nat| #[trigger] s.conn_spec().crypto_received(PacketKind::Initial, p) ==> p < s.fed_i,
+        forall|p: nat| #[trigger] s.conn_spec().crypto_received(PacketKind::Handshake, p) ==> p < s.fed_h,
+    ensures
+        !key_changes_allowed_err(s, ev),
+{
+    lemma_tls_unconsumed_rejects(s, Level::Initial, PacketKind::Initial);
+    lemma_tls_unconsumed_rejects(s, Level::Handshake, PacketKind::Handshake);
 }
 
 fn key_events(ev: &Vec<TlsEvent>) -> (r: (bool, bool))
@@ -948,16 +1015,13 @@ impl<'a> QuicServer<'a> {
             !cont ==> !(old(self).level is Initial) && old(self).conn_spec().crypto_end_spec(PacketKind::Initial)
                 > old(self).init_end,
             !cont && old(self).conn_spec().phase_spec() is Open ==> {
-                &&& past_received(old(self).conn_spec(), PacketKind::Initial, old(self).init_end as nat)
+                &&& superseded_allowed_err(*old(self))
                 &&& final(self).conn_spec().phase_spec() is Closing
                 &&& final(self).conn_spec().close_spec() == Some((false, PROTOCOL_VIOLATION, Seq::<u8>::empty()))
             },
             // Rule 1b: every such datagram closes so.
-            !(old(self).level is Initial) && old(self).conn_spec().phase_spec() is Open && past_received(
-                old(self).conn_spec(),
-                PacketKind::Initial,
-                old(self).init_end as nat,
-            ) ==> !cont && final(self).conn_spec().phase_spec() is Closing && final(self).conn_spec().close_spec()
+            old(self).conn_spec().phase_spec() is Open && superseded_allowed_err(*old(self)) ==> !cont
+                && final(self).conn_spec().phase_spec() is Closing && final(self).conn_spec().close_spec()
                 == Some((false, PROTOCOL_VIOLATION, Seq::<u8>::empty())),
     {
         if matches!(self.level, Level::Initial) {
@@ -1212,44 +1276,11 @@ impl<'a> QuicServer<'a> {
     /// reassembly buffer out of order.
     spec fn unread(&self, l: Level, k: PacketKind) -> nat {
         let c = self.h3.conn_spec();
-        spec_reader(self.hs@, l).len() + if c.crypto_end_spec(k) > self.fed_spec(l) {
-            (c.crypto_end_spec(k) - self.fed_spec(l)) as nat
+        spec_reader(self.hs@, l).len() + if c.crypto_end_spec(k) > tls_fed(*self, l) {
+            (c.crypto_end_spec(k) - tls_fed(*self, l)) as nat
         } else {
             0
         }
-    }
-
-    /// The CRYPTO bytes of level `l` handed to TLS so far.
-    spec fn fed_spec(&self, l: Level) -> nat {
-        match l {
-            Level::Initial => self.fed_i as nat,
-            Level::Handshake => self.fed_h as nat,
-            Level::OneRtt => 0,
-        }
-    }
-
-    /// RFC 9001 §4.1.3's "data from a previous encryption level that TLS has not consumed" at
-    /// level `l` (space `k`): bytes in TLS's reader, or bytes received at or past the end of what
-    /// was handed to TLS.
-    spec fn tls_unconsumed(&self, l: Level, k: PacketKind) -> bool {
-        spec_reader(self.hs@, l).len() > 0 || past_received(self.h3.conn_spec(), k, self.fed_spec(l))
-    }
-
-    /// The batch `ev` gives keys above a level whose data TLS has not consumed: Handshake keys
-    /// (`Secrets { Handshake }`) above Initial, 1-RTT keys (`Complete`) above Initial and Handshake.
-    spec fn key_change_unconsumed(&self, ev: Seq<SpecTlsEvent>) -> bool {
-        ||| (spec_key_events(ev).0 || spec_key_events(ev).1) && self.tls_unconsumed(Level::Initial, PacketKind::Initial)
-        ||| spec_key_events(ev).1 && self.tls_unconsumed(Level::Handshake, PacketKind::Handshake)
-    }
-
-    /// `tls_unconsumed` is not vacuous: an empty reader and nothing received past what TLS has.
-    proof fn lemma_tls_unconsumed_rejects(&self, l: Level, k: PacketKind)
-        requires
-            spec_reader(self.hs@, l).len() == 0,
-            forall|p: nat| #[trigger] self.h3.conn_spec().crypto_received(k, p) ==> p < self.fed_spec(l),
-        ensures
-            !self.tls_unconsumed(l, k),
-    {
     }
 
     #[verifier::spinoff_prover]
@@ -1259,7 +1290,7 @@ impl<'a> QuicServer<'a> {
             !(l is OneRtt),
         ensures
             r == (self.unread(l, k) > 0),
-            r == self.tls_unconsumed(l, k),
+            r == tls_unconsumed(*self, l, k),
     {
         let e = self.h3.conn().crypto_end(k);
         let f = match l {
@@ -1300,12 +1331,12 @@ impl<'a> QuicServer<'a> {
             // Acceptance: keys for a higher level (Handshake at `Secrets { Handshake }`, 1-RTT at
             // `Complete`) with a lower level's data not consumed, and PROTOCOL_VIOLATION.
             !ok && old(self).conn_spec().phase_spec() is Open ==> {
-                &&& old(self).key_change_unconsumed(ev.deep_view())
+                &&& key_changes_allowed_err(*old(self), ev.deep_view())
                 &&& final(self).conn_spec().phase_spec() is Closing
                 &&& final(self).conn_spec().close_spec() == Some((false, PROTOCOL_VIOLATION, Seq::<u8>::empty()))
             },
             // Rule 1b: every such batch closes so.
-            old(self).conn_spec().phase_spec() is Open && old(self).key_change_unconsumed(ev.deep_view()) ==> !ok
+            old(self).conn_spec().phase_spec() is Open && key_changes_allowed_err(*old(self), ev.deep_view()) ==> !ok
                 && final(self).conn_spec().phase_spec() is Closing && final(self).conn_spec().close_spec() == Some(
                 (false, PROTOCOL_VIOLATION, Seq::<u8>::empty()),
             ),
