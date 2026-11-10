@@ -5,7 +5,7 @@ set -o pipefail
 # tools/gate-demos/ with one change applied) and must exit non-zero with its message; every fixture
 # first passes unchanged, so a demo cannot fail for the wrong reason. Covers lint-scripts,
 # check-quotes, the citation gate, the RFC-quantity gate (its git demos in throwaway repos), acceptance (many bad changes, including real-git runs), escape-gate (three), the rlimit gate and the mutant registry (scripts/mutants.sh; its run demos call Verus
-# on the fixture crate), the declassify and deps gates, ct-check's report reader (ct-report.sh), ct-binary (against its real build), the test gate and the carryover gate (throwaway repos). Takes a few seconds, plus about a minute the first time vstd builds in target/mutants-demo.
+# on the fixture crate), the declassify and deps gates, ct-check's report reader (ct-report.sh), ct-binary (against its real build), the test gate, the carryover gate and the requirements status gate (throwaway repos). Takes a few seconds, plus about a minute the first time vstd builds in target/mutants-demo.
 root=$(cd "$(dirname "$0")/.." && pwd)
 fx=$root/tools/gate-demos
 tmp=$(mktemp -d)
@@ -1152,5 +1152,48 @@ corepo co1; sed -i 's/| 2 (the open phase) |/| 2, 9zz (two ids) |/' "$tmp/co1/TR
 expect_fail "carryovers: a TRUSTED cell whose second id is not a phase" "starts with neither roadmap ids nor" co co1
 corepo co1; printf -- '- **Evidence:** the first line,\n  and a continuation naming .worktrees/x/log.\n' >> "$tmp/co1/docs/rca/a.md"
 expect_fail "carryovers: an Evidence continuation line citing a worktree" "docs/rca/a.md:5 cites '.worktrees/'" co co1
+
+# requirements.sh (C1; F9), on throwaway git repos of tools/gate-demos/requirements: a ticked row that is not proved:,
+# names that do not resolve, a row without a Status, open: ids that are not open phases, a bad false key, missing inputs.
+rqrepo() {  # rqrepo <dir>: the fixture as a git repo
+    rm -rf "${tmp:?}/$1"; cp -r "$fx/requirements" "$tmp/$1"
+    git -C "$tmp/$1" init -q -b main; git -C "$tmp/$1" add -A; gitc "$1" commit -qm base
+}
+rq() { "$root/scripts/requirements.sh" "$tmp/$1"; }
+rqm=docs/requirements.md
+rqrepo rq1
+expect_pass "requirements" rq rq1
+sed -i 's/| ✅ done | proved:good_fn |/| ✅ done | tested:good_test; open:2 |/' "$tmp/rq1/$rqm"
+expect_fail "requirements: a ticked row with tested: only" "ticked, but its Status 'tested:good_test; open:2' is not proved: alone" rq rq1
+rqrepo rq1; sed -i 's/| ✅ done | proved:good_fn |/| ✅ done | proved:no_such_fn |/' "$tmp/rq1/$rqm"
+expect_fail "requirements: a proved: fn that does not exist" 'no `fn no_such_fn` in a tracked .rs file' rq rq1
+rqrepo rq1; sed -i 's/| ✅ done | proved:good_fn |/| ✅ done | proved:no_ens |/' "$tmp/rq1/$rqm"
+expect_fail "requirements: a proved: fn with no ensures" 'proved no_ens: no fn `no_ens` with an ensures' rq rq1
+rqrepo rq1; sed -i 's/| tested:good_test; open:2 |/| tested:good_fn; open:2 |/' "$tmp/rq1/$rqm"
+expect_fail "requirements: a tested: name that is not a #[test]" 'no #[test] `fn good_fn`' rq rq1
+rqrepo rq1; sed -i 's/| ✅ done | proved:good_fn |/| ✅ done |/' "$tmp/rq1/$rqm"
+expect_fail "requirements: a row with no status" "a row without 7 cells and a Status" rq rq1
+rqrepo rq1; sed -i 's/| detection proved | proved:good_fn; open:2 |/| detection proved | proved:good_fn; open:9 |/' "$tmp/rq1/$rqm"
+expect_fail "requirements: an open: id not in the roadmap" "open:9 is not a phase of docs/roadmap.md" rq rq1
+rqrepo rq1; sed -i 's/| detection proved | proved:good_fn; open:2 |/| detection proved | proved:good_fn; open:1 |/' "$tmp/rq1/$rqm"
+expect_fail "requirements: an open: id of a merged phase" "open:1 names a merged phase" rq rq1
+rqrepo rq1; sed -i 's/| detection proved | proved:good_fn; open:2 |/| detection proved | proved:good_fn; open:3 |/' "$tmp/rq1/$rqm"
+expect_fail "requirements: an open: phase with no req- carryover row" "open:3 owns no open docs/carryovers.tsv row" rq rq1
+rqrepo rq1; sed -i 's/| tested:good_test; open:2 |/| tested:good_test |/' "$tmp/rq1/$rqm"
+expect_fail "requirements: tested: without an open: owner" "tested: without open:" rq rq1
+rqrepo rq1; sed -i 's/false (t2)/false (r2)/' "$tmp/rq1/$rqm"
+expect_fail "requirements: a false key that is not a TRUSTED.md carryover" "false (r2): not an open docs/carryovers.tsv row whose source cites TRUSTED.md" rq rq1
+rqrepo rq1; sed -i 's/| false (t2); open:2 |/| false (t2) |/' "$tmp/rq1/$rqm"
+expect_fail "requirements: a false row without its owner" "false (t2) needs open:2" rq rq1
+rqrepo rq1; sed -i 's/| N\/A (client-only) | | n\/a |/| N\/A (client-only) | | open:2 |/' "$tmp/rq1/$rqm"
+expect_fail "requirements: an N/A row whose Status is not n/a" "needs Status n/a" rq rq1
+rqrepo rq1; sed -i 's/ Notes | Status |/ Notes |/' "$tmp/rq1/$rqm"
+expect_fail "requirements: a table without the Status column" "a table header that is not" rq rq1
+rqrepo rq1; sed -i '/^|/d' "$tmp/rq1/$rqm"
+expect_fail "requirements: no table rows" 'no `| § | ...` table rows' rq rq1
+rqrepo rq1; rm "$tmp/rq1/$rqm"
+expect_fail "requirements: a missing requirements.md" "cannot read docs/requirements.md" rq rq1
+rqrepo rq1; rm -rf "$tmp/rq1/.git"
+expect_fail "requirements: not a git checkout (git did not run)" "git ls-files -z failed" rq rq1
 
 echo "gate-demos: $n demos, all fail as expected"
