@@ -11,7 +11,7 @@ This is an experiment to write an http server from scratch proving its correctne
 AI generated text below:
 
 ## Design
-Rust + Verus. Design: `docs/superpowers/specs/2026-10-27-verified-http3-design.md`.
+Rust + Verus. Design: `docs/superpowers/specs/2026-10-27-verified-http3-design.md`. Phases, their order and the open work: `docs/roadmap.md`.
 
 ## Install Verus (pinned)
 

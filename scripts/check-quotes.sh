@@ -3,7 +3,7 @@ set -eu
 set -o pipefail
 # check-quotes.sh [CRATES_DIR [SPEC_DIR]]: every Duvet `//#` quote in every .rs under CRATES_DIR (default:
 # crates/) must occur in its RFC section (`duvet report` exits 0 even when it does not). Needs
-# .duvet/specifications, which is git-ignored: a missing directory, no .rs file or no citation is
+# .duvet/specifications (tracked since 9r3: the six RFC texts duvet fetched): a missing directory, no .rs file or no citation is
 # a failure, not a skip.
 root=$(cd "$(dirname "$0")/.." && pwd)
 src=${1:-$root/crates}

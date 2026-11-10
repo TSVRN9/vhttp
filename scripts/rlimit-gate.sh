@@ -9,9 +9,11 @@ set -o pipefail
 # (otherwise a cached crate verifies nothing and prints no JSON). `server` is unverified shell code (cargo verus
 # only type-checks it, no rows), so it is the one crate named as ungated; rlimit-ceilings.sh fails if its src has proofs.
 root=${1:-$(cd "$(dirname "$0")/.." && pwd)}
-VERUS_HOME="${VERUS_HOME:-$HOME/.local/opt/verus/0.2026.10.04.426d8b0/verus-x86-linux}"
-PATH="$VERUS_HOME:$PATH"
 tools=$(cd "$(dirname "$0")/../tools" && pwd)
+verus_ver=$(sed -n 's/^version //p' "$tools/verus-pin.txt")
+[ -n "$verus_ver" ] || { echo "rlimit-gate: no version line in tools/verus-pin.txt" >&2; exit 1; }
+VERUS_HOME="${VERUS_HOME:-$HOME/.local/opt/verus/$verus_ver/verus-x86-linux}"
+PATH="$VERUS_HOME:$PATH"
 ungated=server
 cap=8000000
 out=${RL_OUT:-$root/target/rlimit}
@@ -40,7 +42,7 @@ for c in "$@"; do
     (cd "$c" && cargo verus verify -- --rlimit 4 --output-json --time-expanded > "$out/$n.json" 2> "$out/$n.err") || { cat "$out/$n.err"; fail "$n failed at rlimit 4 (see $out/$n.json)"; }
     case $n in quic|quictls) lim="--max $cap" ;; *) lim= ;; esac
     # shellcheck disable=SC2086
-    line=$(python3 -I "$tools/rl.py" --gate "$n" $lim "$out/$n.json") || exit 1
+    line=$(python3 -I "$tools/rl.py" --gate "$n" --pin "$root/tools/verus-pin.txt" $lim "$out/$n.json") || exit 1
     echo "$line"
     v=${line##* }
     if [ "$v" -gt "$best" ]; then best=$v; bestfn=$(printf '%s\n' "$line" | cut -d' ' -f4); fi

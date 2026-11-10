@@ -4,7 +4,9 @@
 #                            of <crate> (its [dependencies] in ROOT/crates/<crate>/Cargo.toml); deps lists those <d> (- if
 #                            none), for run to check that each still verifies on its own with the patch
 #   clean BASE CRATE MOD FN  BASE.json (Verus --output-json --time-expanded) and BASE.log (its stderr): FN, and only FN,
-#                            was checked, and it verified (>= 1 verified, 0 errors), no rlimit text
+#                            was checked, and it verified (>= 1 verified, 0 errors), no rlimit text. clean, killed and
+#                            depok also require the JSON's verus object to match tools/verus-pin.txt (version, commit,
+#                            toolchain prefix), the pin read next to this script
 #   killed BASE CRATE MOD FN REGEX
 #                            the mutant run checked only FN and FN failed for the stated reason: >= 1 error, REGEX
 #                            (Python re, DOTALL) found in a postcondition, precondition, assertion or loop-invariant
@@ -13,12 +15,17 @@
 #                            the entire crate, >= 1 verified, 0 errors, no rlimit text
 #   gate ROOT                the main gate, all read from ROOT's HEAD commit: HEAD:tools/mutants-last-run.txt names
 #                            `tree` (see tree), HEAD:crates, HEAD:tools/mutants.tsv's blob, and every id of that tsv
-#                            (no other) as `pass` with the blob of HEAD:tools/mutants/<id>.patch
+#                            (no other) as `pass` with the blob of HEAD:tools/mutants/<id>.patch; its `#` line says
+#                            `under Verus V;` with V the version of HEAD:tools/verus-pin.txt
+#   same COMMITTED FRESH     the two run files are equal after dropping `#` lines (mutants.sh verify at main's tip: the
+#                            committed file against a fresh run); else the differing lines. A missing file, or one
+#                            with no run lines, fails
 #   gate-branch ROOT         on a branch: nothing to demand while crates/, the root Cargo files and the registry equal the
 #                            merge-base's, else `gate`
 #   tree ROOT REV            sha256 of `git ls-tree REV -- Cargo.lock Cargo.toml crates rust-toolchain.toml` (all four needed)
 #   allowed ROOT TSV         every allowed_*err / *_allowed_err spec fn under ROOT/crates is named by a row's fn or regex column
 # Every mode exits 1 with a "mutants: ..." message on failure, and fails closed on a missing or empty input.
+import difflib
 import hashlib
 import importlib.util
 import json
@@ -32,6 +39,7 @@ import tomllib
 KINDS = ('error: postcondition not satisfied', 'error: precondition not satisfied', 'error: assertion failed',
          'error: invariant not satisfied before loop', 'error: invariant not satisfied at end of loop body')
 COLS = ('id', 'crate', 'module', 'fn', 'tests', 'regex', 'origin')
+PIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'verus-pin.txt')
 
 
 def die(msg):
@@ -115,6 +123,29 @@ def rows(root, tsv, pdir):
         print('\t'.join(r))
 
 
+def pin_of(text, where):
+    """The version, commit and toolchain lines of a tools/verus-pin.txt text."""
+    try:
+        p = dict(l.split(' ', 1) for l in text.split('\n') if l)
+    except ValueError:
+        die('%s: a line without a space' % where)
+    if not all(p.get(k) for k in ('version', 'commit', 'toolchain')):
+        die('%s lacks a version, commit or toolchain line' % where)
+    return p
+
+
+def pinned(base, o):
+    """The Verus that wrote BASE.json is the pinned one: VERUS_HOME is env-overridable and falls back to PATH."""
+    p, v = pin_of(read(PIN), PIN), o.get('verus')
+    if not isinstance(v, dict):
+        die('%s.json: no verus object (which Verus ran is unknown)' % base)
+    for k in ('version', 'commit'):
+        if v.get(k) != p[k]:
+            die('%s.json: verus.%s is %r, the pin says %r' % (base, k, v.get(k), p[k]))
+    if not str(v.get('toolchain')).startswith(p['toolchain'] + '-'):
+        die('%s.json: verus.toolchain is %r, the pin says %s-*' % (base, v.get('toolchain'), p['toolchain']))
+
+
 def results(base):
     """The JSON objects of BASE.json, Verus's --output-json stdout."""
     raw, dec, objs, i = read(base + '.json'), json.JSONDecoder(), [], 0
@@ -139,6 +170,7 @@ def scan(base, crate, mod, fn):
     if len(objs) != 1 or not isinstance(objs[0].get('verification-results'), dict):
         die('%s.json: %d Verus result objects, want 1 (a cached build, a compile error or a crash verifies nothing)'
             % (base, len(objs)))
+    pinned(base, objs[0])
     vr = objs[0]['verification-results']
     if vr.get('encountered-vir-error') is not False or vr.get('is-verifying-entire-crate') is not False:
         die('%s.json: a VIR error, or not a --verify-function run: %s' % (base, vr))
@@ -175,6 +207,7 @@ def depok(base, crate):
     objs = results(base)
     if len(objs) != 1 or not isinstance(objs[0].get('verification-results'), dict):
         die('%s.json: %d Verus result objects, want 1 (the dependency %s was not verified)' % (base, len(objs), crate))
+    pinned(base, objs[0])
     vr = objs[0]['verification-results']
     if vr.get('encountered-vir-error') is not False or vr.get('is-verifying-entire-crate') is not True:
         die('%s.json: a VIR error, or not a whole-crate run of %s: %s' % (base, crate, vr))
@@ -212,7 +245,13 @@ def gate(root):
     if not want:
         die('HEAD:tools/mutants.tsv has no rows')
     run = 'HEAD:tools/mutants-last-run.txt'
-    lines = [l for l in git(root, 'show', run).split('\n') if l and not l.startswith('#')]
+    raw = git(root, 'show', run).split('\n')
+    pv = pin_of(git(root, 'show', 'HEAD:tools/verus-pin.txt'), 'HEAD:tools/verus-pin.txt')['version']
+    named = [m.group(1) for m in (re.search(r' under Verus (\S+);', l) for l in raw if l.startswith('#')) if m]
+    if named != [pv]:
+        die('%s names Verus %s, the pin says %s (re-run `scripts/mutants.sh run` under the pinned Verus)'
+            % (run, ' '.join(named) or 'none', pv))
+    lines = [l for l in raw if l and not l.startswith('#')]
     keys = ('crates', 'tree', 'tsv')
     head = dict(l.split(' ', 1) for l in lines if l.split(' ', 1)[0] in keys)
     if head.get('tree') != want_tree or head.get('crates') != git(root, 'rev-parse', 'HEAD:crates').strip():
@@ -252,6 +291,15 @@ def gate_branch(root):
         gate(root)
 
 
+def same(a, b):
+    """The committed run file and a fresh run's agree line for line, `#` lines (the date) aside."""
+    x, y = ([l for l in read(p).split('\n') if l and not l.startswith('#')] for p in (a, b))
+    if not x or not y:
+        die('%s has no run lines (the run did not happen)' % (a if not x else b))
+    if x != y:
+        die('%s and %s differ:\n%s' % (a, b, '\n'.join(difflib.unified_diff(x, y, a, b, lineterm='', n=0))))
+
+
 def allowed(root, tsv):
     """Every allowed_*err / *_allowed_err spec fn under ROOT/crates (tools/acceptance.py's scanner) is named, as a whole
     word, in some row's fn or regex column (not origin): a new acceptance predicate needs a mutant."""
@@ -284,6 +332,8 @@ def main(a):
         gate(a[1])
     elif a[:1] == ['gate-branch'] and len(a) == 2:
         gate_branch(a[1])
+    elif a[:1] == ['same'] and len(a) == 3:
+        same(a[1], a[2])
     elif a[:1] == ['tree'] and len(a) == 3:
         print(tree(a[1], a[2]))
     elif a[:1] == ['allowed'] and len(a) == 3:

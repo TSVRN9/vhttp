@@ -143,8 +143,8 @@ fn done(e: Ev) -> (String, u64) {
 
 fn abcd() -> CVal { CVal::Shr(Box::new(bytes(&[0x0a, 0x0b, 0x0c, 0x0d]))) }
 
-/// The step counts are the core interpreter's `steps=` for the same vectors (selftest at 0b0061c's
-/// core path, vt-8d-evidence/t2/core-steps.txt).
+/// The step counts are the core interpreter's `steps=` for the same vectors (its selftest at
+/// 0b0061c's core path).
 #[test]
 fn eval_tiny() {
     let m = dec(TINY);
@@ -169,7 +169,7 @@ fn eval_panic() {
 /// The timing probe: `CT_DUMP_DIR` is a ct-check output dir; `CT_PROBE_EXTRA` optionally names a
 /// file of more crypto vectors (the RSA spike vector, `CT_PROBE_EXTRA_STEPS` its core step count).
 /// Each runs on `mir_eval`, and its steps must equal the deleted core interpreter's for the same
-/// vector (recorded at 0b0061c: vt-8d-evidence/t2/probe.txt, spike/out-w.txt). Arguments are shaped
+/// vector (recorded at 0b0061c). Arguments are shaped
 /// by hand: a non-`Shr` value at a `&` parameter is wrapped in `Shr`.
 #[test]
 #[ignore]

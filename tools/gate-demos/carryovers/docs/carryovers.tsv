@@ -1,0 +1,5 @@
+#id	owner	status	evidence	source	text
+a	2	open	-	demo:1	an open row of an open phase
+b	1	closed	fn:good_fn	demo:2	closed by a fn
+c	1	closed	doc:TRUSTED.md	demo:3	closed by a tracked doc
+d	1	closed	test:good_test	demo:4	closed by a test

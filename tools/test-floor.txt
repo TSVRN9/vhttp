@@ -1,0 +1,10 @@
+# CRATE COUNT: the fewest tests each crate must pass (scripts/test-gate.sh --workspace). Only grows: scripts/test-floor.sh.
+crypto 79
+ctcore 73
+ctmir 51
+h3 81
+quic 449
+quictls 34
+server 32
+tls 129
+wire 5
