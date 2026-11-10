@@ -710,10 +710,15 @@ expect_fail "ratchet-walk: a git error (path outside any repo)" "failed" walk w5
 # patches and the loop-invariant kinds have their own fixture (mutants-dep, below). run (real Verus, seconds:
 # MUTANTS_TARGET_DIR keeps vstd built across runs): the killed mutant (with its named test) passes; a mutant that still
 # verifies, a named test that does not FAIL, one that fails unmutated, a misspelt test and a missing fn fail; a dirty
-# crates/ is refused. The verdict on canned Verus output: rlimit, no or two JSON objects, another fn checked, a non-matching
-# error kind. The main gate (every commit at main's tip): passes after a --no-ff merge or a fast-forward with a fresh run file;
-# fails with none (also detached), crates/ or Cargo.toml changed after the run, a fast-forward without a run, main's own
-# crates/ change in the merge, a fail line, a missing or extra id, an edited tsv or patch, or no main; on the branch, check only.
+# crates/ is refused, and so is a Verus other than the pin's or none at all. The verdict on canned Verus output: rlimit, no
+# or two JSON objects, another fn checked, a non-matching error kind, another Verus version or commit, no verus object. The
+# main gate (every commit at main's tip): passes after a --no-ff merge or a fast-forward with a fresh run file, and the fresh
+# run there reproduces it; fails with none (also detached), crates/ or Cargo.toml changed after the run, a fast-forward
+# without a run, main's own crates/ change in the merge, a fail line, a missing or extra id, an edited tsv or patch, a `#`
+# line naming another Verus or none, or no main; on the branch, check only. A run file forged from git alone (audit F4)
+# passes the gate but fails the fresh run. mutants.py same: equal, differing, missing and empty files.
+pin_v=$(sed -n 's/^version //p' "$root/tools/verus-pin.txt"); pin_c=$(sed -n 's/^commit //p' "$root/tools/verus-pin.txt")
+[ -n "$pin_v" ] && [ -n "$pin_c" ] || die "tools/verus-pin.txt lacks a version or commit line"
 export MUTANTS_TARGET_DIR="${MUTANTS_DEMO_TARGET:-$root/target/mutants-demo}"
 mrepo() {  # mrepo <dir>: scripts, tools/mutants.py and the fixture, one commit on main, then branch feat
     rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/tools"
@@ -781,6 +786,9 @@ printf 'D-live\tdemo\tacc\tdemo\t-\tpostcondition not satisfied\tgate-demos: n >
 gitc m4 add -A; gitc m4 commit -qm live
 expect_fail "mutants run: a mutant that still verifies" "the mutant still verifies acc::demo" mut m4 run D-live
 [ -z "$(git -C "$tmp/m4" worktree list --porcelain | grep '^worktree .*/mutants-')" ] || die "mutants run: worktree left behind after a failure"
+mkdir -p "$tmp/fakeverus"; printf '#!/bin/sh\necho Verus\necho "  Version: 0.2025.01.01.0000000"\n' > "$tmp/fakeverus/verus"; chmod +x "$tmp/fakeverus/verus"
+expect_fail "mutants run: another Verus on VERUS_HOME" "verus --version names 0.2025.01.01.0000000, tools/verus-pin.txt says $pin_v" env VERUS_HOME="$tmp/fakeverus" "$tmp/m4/scripts/mutants.sh" run
+expect_fail "mutants run: no Verus at all (VERUS_HOME missing, none on PATH)" "verus --version failed" env VERUS_HOME="$tmp/noverus" PATH=/usr/bin:/bin "$tmp/m4/scripts/mutants.sh" run
 mrepo m5
 printf '// dirty\n' >> "$tmp/m5/crates/demo/src/acc.rs"
 expect_fail "mutants run: uncommitted crates/" "uncommitted changes" mut m5 run
@@ -831,8 +839,8 @@ expect_fail "mutants run: a dependency patch that breaks the dependency's own pr
 v=$tmp/verdict
 vj() {  # vj <errors> <success> [extra fn]: a one-object Verus JSON with demo::acc::demo checked
     x=; [ -z "${3:-}" ] || x=", {\"function\": \"$3\", \"rlimit\": 5, \"success\": true}"
-    printf '{"verification-results": {"encountered-error": false, "encountered-vir-error": false, "verified": %s, "errors": %s, "is-verifying-entire-crate": false}, "times-ms": {"smt": {"smt-run-module-times": [{"function-breakdown": [{"function": "demo::acc::demo", "rlimit": 900, "success": %s}%s]}]}}}\n' \
-        "$((1 - $1))" "$1" "$2" "$x" > "$v.json"
+    printf '{"verus": {"version": "%s", "commit": "%s", "toolchain": "1.98.1-x86_64-unknown-linux-gnu"}, "verification-results": {"encountered-error": false, "encountered-vir-error": false, "verified": %s, "errors": %s, "is-verifying-entire-crate": false}, "times-ms": {"smt": {"smt-run-module-times": [{"function-breakdown": [{"function": "demo::acc::demo", "rlimit": 900, "success": %s}%s]}]}}}\n' \
+        "${VJ_VERSION:-$pin_v}" "${VJ_COMMIT:-$pin_c}" "$((1 - $1))" "$1" "$2" "$x" > "$v.json"
 }
 vlog() { printf 'error: %s\n   --> crates/demo/src/acc.rs:11:9\n    |\n11  |         r is Err ==> allowed_demo_err(n, r->Err_0),\n' "$1" > "$v.log"; }
 killed() { python3 -I "$root/tools/mutants.py" killed "$v" demo acc demo 'postcondition not satisfied.*allowed_demo_err'; }
@@ -850,6 +858,12 @@ vj 1 false demo::acc::other
 expect_fail "mutants verdict: another fn checked too" "want exactly demo::acc::demo" killed
 vj 0 true
 expect_fail "mutants verdict: still verifies" "the mutant still verifies" killed
+VJ_VERSION=0.2025.01.01.0000000 vj 1 false
+expect_fail "mutants verdict: another Verus version" "verus.version is '0.2025.01.01.0000000', the pin says '$pin_v'" killed
+VJ_COMMIT=0000000000000000000000000000000000000000 vj 1 false
+expect_fail "mutants verdict: another Verus commit" "verus.commit is '0000000000000000000000000000000000000000'" killed
+vj 1 false; sed -i 's/"verus": {[^}]*}, //' "$v.json"
+expect_fail "mutants verdict: no verus object" "no verus object" killed
 vj 1 false
 expect_fail "mutants verdict: the unmutated fn fails" "unmutated acc::demo" python3 -I "$root/tools/mutants.py" clean "$v" demo acc demo
 
@@ -862,6 +876,10 @@ fresh_run=$(git -C "$tmp/m3" rev-parse HEAD)
 expect_pass "mutants verify on the branch (check only, no run file needed there)" mut m3 verify
 mmerge m3
 expect_pass "mutants verify: merge --no-ff with a fresh run file" mut m3 verify
+printf '%s\n' "$out" | grep -qxF "mutants: fresh run at main's tip matches the committed run file (1 mutants)" || die "mutants verify at main's tip: no fresh-run line:
+$out"
+[ -z "$(git -C "$tmp/m3" status --porcelain)" ] || die "mutants verify at main's tip: the fresh run changed the tree"
+echo "gate-demos: mutants verify: the fresh run at main's tip reproduces the honest run file and leaves the tree clean"
 gitc m3 checkout -q main; gitc m3 reset -q --hard "$mbase"; gitc m3 merge -q --ff-only feat
 expect_pass "mutants verify: fast-forward to a branch tip with a fresh run file" mut m3 verify
 mbranch m3 "$fresh_run"; gitc m3 rm -q tools/mutants-last-run.txt; gitc m3 commit -qm "no run file"; mmerge m3
@@ -891,9 +909,41 @@ mbranch m3 "$fresh_run"; sed -i 's/gate-demos: Err(8)/gate-demos: Err (8)/' "$tm
 expect_fail "mutants verify: tsv changed after the run" "was written for another tools/mutants.tsv" mut m3 verify
 mbranch m3 "$fresh_run"; sed -i 's/^index .*/index 0000000..1111111 100644/' "$tmp/m3/tools/mutants/D-kill.patch"; gitc m3 commit -qam "patch edited"; mmerge m3
 expect_fail "mutants verify: patch edited after the run" "was run with another patch" mut m3 verify
+mbranch m3 "$fresh_run"; sed -i 's/ under Verus [^;]*;/ under Verus 0.2025.01.01.0000000;/' "$tmp/m3/tools/mutants-last-run.txt"; gitc m3 commit -qam "other Verus"; mmerge m3
+expect_fail "mutants verify: a run file naming another Verus" "names Verus 0.2025.01.01.0000000, the pin says $pin_v" mut m3 verify
+mbranch m3 "$fresh_run"; sed -i '/^#/d' "$tmp/m3/tools/mutants-last-run.txt"; gitc m3 commit -qam "no # line"; mmerge m3
+expect_fail "mutants verify: a run file naming no Verus" "names Verus none" mut m3 verify
 gitc m3 checkout -q feat
 gitc m3 branch -m main trunk
 expect_fail "mutants verify: no main" "cannot resolve main" mut m3 verify
+# audit F4: a run file computed from git alone (no mutant run) for a registry with a live mutant passes the gate; the fresh
+# run at main's tip refuses it.
+mrepo m7
+cp "$fx/mutants/live.patch" "$tmp/m7/tools/mutants/D-live.patch"
+printf 'D-live\tdemo\tacc\tdemo\t-\tpostcondition not satisfied\tgate-demos: n > 11 keeps the clause\n' >> "$tmp/m7/tools/mutants.tsv"
+gitc m7 add -A; gitc m7 commit -qm live
+{
+    echo "# tools/mutants-last-run.txt: forged from git on 2026-11-09T00:00Z under Verus $pin_v; verify.sh's main gate reads it"
+    echo "crates $(git -C "$tmp/m7" rev-parse HEAD:crates)"
+    echo "tree $(python3 -I "$tmp/m7/tools/mutants.py" tree "$tmp/m7" HEAD)"
+    echo "tsv $(git -C "$tmp/m7" rev-parse HEAD:tools/mutants.tsv)"
+    for i in $(awk -F'\t' '!/^#/ && NF { print $1 }' "$tmp/m7/tools/mutants.tsv"); do
+        echo "$i pass $(git -C "$tmp/m7" rev-parse "HEAD:tools/mutants/$i.patch")"
+    done
+} > "$tmp/m7/tools/mutants-last-run.txt"
+gitc m7 add -A; gitc m7 commit -qm "forged run file"
+gitc m7 checkout -q main; gitc m7 merge -q --no-ff feat -m merge
+expect_pass "mutants gate: a run file forged from git passes the text gate alone" python3 -I "$tmp/m7/tools/mutants.py" gate "$tmp/m7"
+expect_fail "mutants verify: a forged run file at main's tip (fresh run)" "the mutant still verifies acc::demo" mut m7 verify
+# same: the committed file against a fresh run, `#` lines aside.
+sd=$tmp/same; mkdir -p "$sd"
+printf '# a\ncrates 1\nD-kill pass 2\n' > "$sd/a"; printf '# b\ncrates 1\nD-kill pass 2\n' > "$sd/b"
+expect_pass "mutants same" python3 -I "$root/tools/mutants.py" same "$sd/a" "$sd/b"
+printf '# b\ncrates 1\nD-kill fail 2\n' > "$sd/b"
+expect_fail "mutants same: a differing line" "+D-kill fail 2" python3 -I "$root/tools/mutants.py" same "$sd/a" "$sd/b"
+printf '# only a comment\n' > "$sd/b"
+expect_fail "mutants same: a fresh file with no run lines" "$sd/b has no run lines" python3 -I "$root/tools/mutants.py" same "$sd/a" "$sd/b"
+expect_fail "mutants same: no fresh file" "cannot read" python3 -I "$root/tools/mutants.py" same "$sd/a" "$sd/none"
 
 # declassify gate (scripts/declassify-gate.sh ROOT REPORT GATEDIR): a report site with no TRUSTED.md row; counts that differ; a source
 # line the report lacks; a lost secret label; no report; an empty report; a report without sites.

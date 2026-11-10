@@ -56,7 +56,8 @@ python3 -I "$root/tools/citations.py" closes "$root" "$root/tools/mutants.tsv" |
 # quantity (a `// rfc-quantity:` line, or tools/rfc-quantity-allow.txt, a digest-pinned list) or listed in the shrinking tools/rfc-quantity-open.txt.
 "$root/scripts/rfc-quantity.sh" || exit 1
 # Mutant registry (C6): every tools/mutants/ patch applies exactly and every allowed_*err predicate has a row; at main's
-# tip, tools/mutants-last-run.txt must name this commit's crates/ and root Cargo files with every mutant killed.
+# tip, tools/mutants-last-run.txt must name this commit's crates/, root Cargo files and pinned Verus with every mutant
+# killed, and a fresh full run there (about 10 minutes) must reproduce it.
 "$root/scripts/mutants.sh" verify || exit 1
 # Carryover gate (C3, scripts/carryovers.sh): every docs/carryovers.tsv owner is a docs/roadmap.md phase, closed rows'
 # evidence resolves, no merged phase owns an open row, TRUSTED.md removal cells name a phase or never (reason), no tracked
