@@ -1,0 +1,13 @@
+diff --git a/crates/top/src/m.rs b/crates/top/src/m.rs
+index be51e78..5d3b97d 100644
+--- a/crates/top/src/m.rs
++++ b/crates/top/src/m.rs
+@@ -20,7 +20,7 @@ pub fn count(n: u32) -> (r: u64)
+             i <= n,
+         decreases n - i,
+     {
+-        i += 1;
++        i += 2;
+     }
+     i
+ }
