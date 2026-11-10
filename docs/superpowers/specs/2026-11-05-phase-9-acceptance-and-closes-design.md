@@ -251,6 +251,7 @@ rlimit as reported by `--output-json --time-expanded` at `--rlimit 4`. The per-f
 | `quic::conn::Connection::on_handshake_complete` (T5, ALPN converse) | 3670618 (T3b fix 2) | 3526972 (T5), 3421770 (T5 fix 1) | 5 |
 | `quic::conn::Connection::client_scid_len` (new, T5) | — | 41584 (T5), 41609 (T5 fix 1) | 5 |
 | `quic::conn::Connection::{accept, on_peer_params, crypto_read, discard, on_datagram, poll_transmit, lemma_crypto_kept_elim}` (T5 fix 1 frames) | 331959, 900334, 2239678, 1077995, 2527188, 3352386, 27842 (9f2aedd) | 353826, 849032, 2451250, 1126675, 2717282, 3391008, 28915 | 5 |
+| `quictls::server::QuicServer::{accept, accept_settle}` (9a2 final fix I2c: `accept`'s tail after `tls_step` split off, so deleting its `drop_if_closed` fails `accept_settle`'s `crypto_all_drained` by name, T3b-G4) | 5817500, — (T5 fix 2 through 3e4f014) | 6542546, 100108 (ad46ccd, quictls at `--rlimit 4`) | 9a2 final |
 | `quic::conn::Connection::{lemma_crypto_kept_to_base, lemma_crypto_kept_base_elim}` (new, T5 fix 1); `quic::crypto_stream::CryptoStream::{on_crypto, restart}`; `quic::pipeline::accept_datagram` | —; 321971, 53642; 61770 | 15733, 28516; 325351, 60859; 63449 | 5 |
 | `quic::tp::lemma_allowed_tp_err_rejects` (T5, pub, ID ensured) | 77747 (T4 fix 1) | 71574 | 5 |
 | `quictls::server::key_events` | 77403 | 561968 (T3b) | 3b |
