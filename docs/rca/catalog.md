@@ -149,7 +149,8 @@ Existing-gate abbreviations: V = `scripts/verify.sh` (verus verify of all crates
 **C1 DOC-OVERCLAIM** (doc/TRUSTED/matrix/comment says proved, checked, native, live, bounded beyond the evidence; hand-typed numbers and provenance).
  EXISTING NOW: V checks only declassify/escape rows against source; `duvet report` checks RFC quotes exist; CC pins counts of bounded roots and pass lines. No check on prose.
  PROPOSED: (1) generated claims: replace hand-typed counts and verdicts in TRUSTED.md/spec/requirements with `<!--gen:KEY-->` markers that `scripts/claims.sh` (in V, fail-closed) diffs against ct-check/ct-binary/verify output (S). (2) Evidence-tagged rows: every requirements.md row marked done carries `[proved:<fn>|tested:<test>|review]` and V greps that the fn/test exists, and TRUSTED rows containing "proved|verified|native" need a tag (M). (3) Provenance column in selftest/semconf vectors (`native|derived|hand-traced`), the gate prints counts per kind and TRUSTED embeds the generated line (S). (4) `//= exception` and TRUSTED-row pairing check like the declassify 3-way diff (S).
- STATUS: partial (R3: quote existence caught now; prose claims open)
+ EXISTING NOW (9r3 T6, audit F9): proposal (2) for requirements.md: a Status column (`proved:`/`tested:`/`false (ID)`/`open:`/`n/a`/`declined`) on every row, `scripts/requirements.sh` in V: proved: names a verified fn with an ensures, tested: needs an open: owner, a ticked row is proved: alone, open: names an unmerged phase with a `req-*` carryover row.
+ STATUS: partial (R3: quote existence caught now; 9r3 T6: requirements.md rows; TRUSTED.md tags, generated counts and the rest of the prose claims open, carryover cat-C1)
 
 **C2 STALE-TEXT** (plan/audit/comment not updated after a ruling or code change).
  EXISTING NOW: none (plans/ledgers not linted).
