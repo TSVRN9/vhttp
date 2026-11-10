@@ -53,11 +53,12 @@ There is no reset. Open item: a toolchain upgrade that raises measured rlimits c
 On main, every commit at main's tip (merges to main are `--no-ff` only; anything else that lands there is gated the same) must carry a `tools/mutants-last-run.txt` written for exactly its tree: `scripts/verify.sh` fails unless the file names this commit's `crates/` tree and its `tree` hash (crates/ plus the root Cargo.toml, Cargo.lock and rust-toolchain.toml), the committed tsv's blob, and every registry id as `pass` with its patch's blob. On a branch verify.sh runs `scripts/mutants.sh check` (every patch still applies, with no line offset, and every `allowed_*err`/`*_allowed_err` spec fn under crates/ is named by some row) and, once crates/, the root Cargo files or the registry differ from the merge-base's, the same run-file gate (`python3 -I tools/mutants.py gate-branch .`), so a stale run file shows before the merge; while they equal the merge-base's no run file is demanded. So the last steps on a branch are:
 
 1. Merge main into the branch, so the merge into main changes nothing.
-2. Run `scripts/mutants.sh run` after the last commit that touches crates/, the root Cargo files, `tools/mutants.tsv` or a patch. It applies each patch alone in a throwaway git worktree and needs every mutant killed; rlimit is not a kill.
-3. Commit `tools/mutants-last-run.txt`.
-4. On the clean branch tip, `python3 -I tools/mutants.py gate .` must pass.
-5. `git merge --no-ff` the branch into main. The merge commit's tree equals the branch tip's when main has no new changes, so the run file holds.
-6. Run `scripts/verify.sh` on main after the merge: it is the only run of the main gate and of the three history walks.
+2. Set the phase's status in `docs/roadmap.md` to `merged`, naming the merge to come: `scripts/carryovers.sh` then fails while the phase still owns an open row of `docs/carryovers.tsv` or a TRUSTED.md removal cell.
+3. Run `scripts/mutants.sh run` after the last commit that touches crates/, the root Cargo files, `tools/mutants.tsv` or a patch. It applies each patch alone in a throwaway git worktree and needs every mutant killed; rlimit is not a kill.
+4. Commit `tools/mutants-last-run.txt`.
+5. On the clean branch tip, `python3 -I tools/mutants.py gate .` must pass.
+6. `git merge --no-ff` the branch into main. The merge commit's tree equals the branch tip's when main has no new changes, so the run file holds.
+7. Run `scripts/verify.sh` on main after the merge: it is the only run of the main gate and of the history walks.
 
 If a change to crates/ makes a patch stop applying, or apply only at an offset, regenerate it: `git apply` what still applies, redo the edit, `git diff > tools/mutants/<id>.patch`. Then re-run.
 
