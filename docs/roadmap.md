@@ -70,7 +70,7 @@ The six `9t` ids are the trust-base sub-phases the Phase 9 spec schedules after 
   close, drain-after-feed), Task 5 (the transport-parameter CID link), Task 3c' (the held-bytes floor of RFC 9000 §7.5
   on a sparse CRYPTO store). In final-review fix on branch phase-9a2.
 - Sources: Phase 9 spec `:55` (status block), `:258-266`; the 9a plan.
-- Carryovers: `tr-64`; closed: `x-9a2-evidence`. When it merges, its status here becomes `merged` in the same merge.
+- Carryovers: `tr-64`, `x-9a2-evidence` (already fixed on the branch at fceacf3). When it merges, its status here becomes `merged` in the same merge.
 
 ### 9r3: audit gates and the roadmap
 
