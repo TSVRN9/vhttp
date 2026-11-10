@@ -81,9 +81,9 @@ The lift through `on_frame`/`on_counted` and quictls `apply`/`feed`/`tls_step` i
 
 1. **An empty CRYPTO or STREAM frame at any offset** never closes the connection and never grows a buffer. For CRYPTO that covers below the read offset, inside the window, past the window, and after the key change. Task 3: `crypto_empty_past_window_ok`, `crypto_empty_keeps_end`, `empty_initial_past_window_ok`. Task 6: `empty_stream_frame_keeps_window`. Already pinned: `empty_gapped_initial_ok`, `empty_initial_after_switch_ok`.
 2. **An Initial frame straddling `init_end` by one byte** after the key change closes with 0x0a; one ending exactly at `init_end` does not (already pinned by `initial_retransmit_after_switch_ok`). Task 5: `initial_straddle_after_switch_pv` [m4].
-3. **Two errors in one flight:** the first error's code is the one sent. Task 5: `trailing_bytes_before_bad_tp_pv` (0x0a, not 0x08), with mutation T5-M5 [m11]. Task 1: `alert_after_close_keeps_code`.
+3. **Two errors in one flight:** the first error's code is the one sent. Task 5: `trailing_bytes_before_bad_tp_pv` (0x0a, not 0x08), with mutation T5-M5 [m11] (registered by the phase-9a2 final fix: it fails `apply`'s loop invariant before the loop, a kill kind since then). Task 1: `alert_after_close_keeps_code`.
 4. **TLS alert 0xff** closes with 0x1ff, the top of the CRYPTO_ERROR range (RFC 9001 §4.8). Task 1: `tls_alert_top_of_range`.
-5. **A CRYPTO frame ending exactly at `crypto_contiguous + 16384`** is accepted; one byte more closes with 0x0d (the window was anchored at `base` until T3 review I2). Pinned by `crypto_limit`, which must stay green after Task 3's reorder. The `crypto_contiguous + 4096` floor is proved (Task 3, [m9]).
+5. **A CRYPTO frame after which 16384 out-of-order bytes are held** is accepted; one that makes it 16385 closes with 0x0d. Since Task 7 the limit counts bytes held past `crypto_contiguous`, wherever they lie (it was a span past `crypto_contiguous`, and anchored at `base` until T3 review I2). Pinned by `crypto_limit` and `crypto_held_bytes_limit`. The floor, 4096 out-of-order bytes held, is proved (`lemma_crypto_floor`, Task 7, [m9]).
 
 ---
 
