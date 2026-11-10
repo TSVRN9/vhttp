@@ -88,13 +88,24 @@ pub proof fn lemma_ooo_bytes_free(s: CryptoStream, off: u64, d: Seq<u8>)
     assert(ooo_received(s, off, d) =~= ooo_received(s, off, z));
 }
 
-/// `crypto_allowed_err` is not vacuous: an empty frame is never refused, and no other code is
-/// allowed.
+/// `crypto_allowed_err` is not vacuous: an empty frame is never refused, no other code is
+/// allowed, and on a stream that has received nothing a one-byte frame is not refused.
 proof fn lemma_crypto_allowed_err_rejects(s: CryptoStream, offset: u64)
     ensures
         !crypto_allowed_err(s, offset, 0, CRYPTO_BUFFER_EXCEEDED),
         !crypto_allowed_err(s, offset, 1, PROTOCOL_VIOLATION),
+        s.inserted_frames() == Seq::<(nat, Seq<u8>)>::empty() ==> !crypto_allowed_err(s, 1, 1, CRYPTO_BUFFER_EXCEEDED),
 {
+    if s.inserted_frames() == Seq::<(nat, Seq<u8>)>::empty() {
+        let e = Seq::<(nat, Seq<u8>)>::empty();
+        let b = Seq::new(1, |_i: int| 0u8);
+        lemma_received_push(e, 1, b);
+        let m = rfc_received(e.push((1nat, b)));
+        assert(rfc_received(e) =~= Map::<nat, u8>::empty());
+        lemma_contiguous_is(m, 0);
+        assert(ooo_received(s, 1, b) =~= Set::<nat>::range(1, 2));
+        crate::frags::lemma_runs_le_len(ooo_received(s, 1, b));
+    }
 }
 
 /// And it allows the refusal: with 16384 out-of-order bytes held, a frame adding a 16385th may
