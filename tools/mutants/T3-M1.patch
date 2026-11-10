@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
-index 206d62d..858ae73 100644
+index 84ffad2..7ded550 100644
 --- a/crates/quic/src/crypto_stream.rs
 +++ b/crates/quic/src/crypto_stream.rs
-@@ -341,9 +341,8 @@ impl CryptoStream {
+@@ -352,9 +352,8 @@ impl CryptoStream {
              r is Err <==> crypto_allowed_err(*old(self), offset, data@.len(), CRYPTO_BUFFER_EXCEEDED),
              r is Err ==> r == Err::<(), u64>(CRYPTO_BUFFER_EXCEEDED),
              r matches Err(c) ==> crypto_allowed_err(*old(self), offset, data@.len(), c),
@@ -14,7 +14,7 @@ index 206d62d..858ae73 100644
                  &&& final(self).inserted_frames() == old(self).inserted_frames().push((offset as nat, data@))
                  &&& final(self).base_spec() == old(self).base_spec()
              },
-@@ -366,11 +365,6 @@ impl CryptoStream {
+@@ -377,11 +376,6 @@ impl CryptoStream {
              }
              return Ok(());
          }

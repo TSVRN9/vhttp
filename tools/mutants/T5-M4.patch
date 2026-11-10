@@ -1,8 +1,8 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
-index b0c451c..f1cba21 100644
+index 37201ae..eb4fc88 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -1393,9 +1393,6 @@ impl<'a> QuicServer<'a> {
+@@ -1441,9 +1441,6 @@ impl<'a> QuicServer<'a> {
          let ghost c0 = self.h3.conn_spec();
          // The §17.2 bound `tp_allowed_err` carries.
          let _ = self.h3.conn().client_scid_len();

@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
-index 206d62d..0b8c237 100644
+index 84ffad2..ad6e041 100644
 --- a/crates/quic/src/crypto_stream.rs
 +++ b/crates/quic/src/crypto_stream.rs
-@@ -301,8 +301,7 @@ impl CryptoStream {
+@@ -312,8 +312,7 @@ impl CryptoStream {
              final(self).wf(),
              final(self).base_spec() == old(self).end_spec(),
              final(self).buf_len_spec() == 0,
@@ -12,7 +12,7 @@ index 206d62d..0b8c237 100644
              crypto_contiguous(*final(self)) == old(self).end_spec(),
      {
          proof {
-@@ -316,6 +315,7 @@ impl CryptoStream {
+@@ -327,6 +326,7 @@ impl CryptoStream {
          self.contig = end;
          self.ooo = Frags::new();
          self.ins = Ghost(Seq::<(nat, Seq<u8>)>::empty().push((0nat, d)));

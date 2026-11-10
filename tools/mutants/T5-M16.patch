@@ -1,8 +1,8 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
-index b0c451c..0790d07 100644
+index 37201ae..3a82dbc 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -1041,11 +1041,11 @@ impl<'a> QuicServer<'a> {
+@@ -1122,11 +1122,11 @@ impl<'a> QuicServer<'a> {
          let ghost cfg = self.hs.cfg_view();
          let ghost tp = self.hs.tp_view();
          proof {

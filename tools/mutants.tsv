@@ -37,9 +37,11 @@ T6-V1	quic	recv_stream	lemma_recv_err_rfc	-	assertion failed.*data_final_bad\(s,
 T6-V2	quic	recv_stream	lemma_recv_err_rfc	-	assertion failed.*data_final_bad\(s, end, fin\) <==> final_size_trigger	9a T6 (rule 1c) V2: that disjunct widened to <=
 T6-V3	quic	recv_stream	lemma_recv_err_rfc	-	postcondition not satisfied.*s2\.err matches Some\(c\) ==> recv_allowed_err	9a T6 fix round 1 (review M3) V3: flow_trigger end > s.limit becomes >=
 T6-V4	quic	recv_stream	lemma_recv_err_rfc	-	assertion failed.*credit_after\(s, end, fin\)	9a T6 fix round 1 (review M3) V4: credit_after's known-final-size branch returns end
+T3b-M1	quictls	server	QuicServer::feed	-	precondition not satisfied.*lemma_crypto_kept_but_elim	9a T3b Step 4 T3b-M1 (added 9a2 final fix I2a; patch in quic, a path dependency): crypto_read loses its crypto_kept_but ensures; quic verifies, feed fails the elim lemma's precondition
 T3b-M2	quic	crypto_stream	CryptoStream::restart	-	postcondition not satisfied.*base_spec\(\) == old\(self\)\.end_spec\(\)	9a T3b Step 4 T3b-M2: restart builds new_at(0) (regenerated 9a T8: new_at is gone; restart keeps base 0)
 T3b-M3	quictls	server	QuicServer::superseded	-	postcondition not satisfied.*cont ==> final\(self\)\.h3 == old\(self\)\.h3	9a T3b Step 4 T3b-M3 (R6): the deleted newly-contiguous crypto_read and close restored with assert(b@.len() == 0)
 T3b-M4	quictls	server	QuicServer::apply	-	precondition not satisfied.*self\.on_secrets\(.*crypto_end_spec	9a T3b Step 4 T3b-M4 (fix round 1 re-run): drop apply's loop-invariant conjunct end(Initial) <= base(Initial)
+T3b-D1	quictls	server	QuicServer::feed	-	postcondition not satisfied.*crypto_drained\(final\(self\)\.conn_spec\(\), level_kind\(l\)\)	9a T3b D1 (added 9a2 final fix I2a; patch in quic): crypto_read loses its drained ensures; quic verifies, feed fails its drained postcondition
 T3b-D2	quictls	server	QuicServer::tls_step	-	assertion failed.*crypto_drained\(c1, PacketKind::Initial\)	9a T3b D2 (fix round 1 re-run): drop superseded's drained ensures
 T3b-F1	quictls	server	QuicServer::receive	quictls/e2e:finished_coalesced_with_one_rtt_crypto_0x10a	precondition not satisfied.*crypto_drained\(c, PacketKind::OneRtt\)	9a T3b fix round 1 (I1) F1: delete the refeed's OneRtt feed in receive
 T3b-F2	quic	conn	Connection::discard	-	postcondition not satisfied.*crypto_drained\(\*final\(self\), k\)	9a T3b fix round 1 (I2) F2: discard(Initial) without restart
@@ -49,10 +51,12 @@ T3b-F5	quic	conn	Connection::on_crypto_frame	-	postcondition not satisfied.*wf\(
 T3b-G1	quictls	server	QuicServer::receive	-	postcondition not satisfied.*crypto_all_drained	9a T3b fix round 2 (N1) G1: delete the drop_if_closed call in receive
 T3b-G2	quic	conn	Connection::crypto_drop	-	assertion failed.*crypto_drained	9a T3b fix round 2 (N1) G2: crypto_drop skips the Handshake read
 T3b-G3	quictls	server	QuicServer::drop_if_closed	-	postcondition not satisfied.*crypto_all_drained	9a T3b re-review r2-m3 (added 9a T8): accept's drop is drop_if_closed without its crypto_drop (deleting the call in accept itself exhausts rlimit in accept, not a kill)
-T5-M1	quictls	server	QuicServer::superseded	quictls/server:initial_retransmit_after_switch_ok,quictls/server:empty_initial_after_switch_ok	postcondition not satisfied.*init_end	9a T5 T5-M1: superseded tests e >= init_end
-T5-M2	quictls	server	QuicServer::key_changes	-	postcondition not satisfied.*old\(self\)\.unread\(	9a T5 T5-M2: key_changes tests crypto_end(Initial) > 0
+T3b-G4	quictls	server	QuicServer::accept_settle	-	postcondition not satisfied.*crypto_all_drained	9a T3b re-review r2-m3 accept-drop (added 9a2 final fix I2c): delete the drop_if_closed call after accept's tls_step (accept_settle, split from accept so this fails by name)
+T5-M1	quictls	server	QuicServer::superseded	quictls/server:initial_retransmit_after_switch_ok,quictls/server:empty_initial_after_switch_ok	postcondition not satisfied.*superseded_allowed_err	9a T5 T5-M1: superseded tests e >= init_end
+T5-M2	quictls	server	QuicServer::key_changes	-	postcondition not satisfied.*key_changes_allowed_err	9a T5 T5-M2: key_changes tests crypto_end(Initial) > 0
 T5-M3	quictls	server	QuicServer::on_params	-	postcondition not satisfied.*TRANSPORT_PARAMETER_ERROR	9a T5 T5-M3: on_params' Err arm shuts with PROTOCOL_VIOLATION
 T5-M4	quictls	server	QuicServer::on_params	-	postcondition not satisfied.*tp_allowed_err	9a T5 T5-M4: delete lemma_tp_err_allowed(b@) in on_params
+T5-M5	quictls	server	QuicServer::apply	quictls/server:trailing_bytes_before_bad_tp_pv,quictls/server:gapped_initial_at_key_change_pv,quictls/server:trailing_initial_bytes_pv	invariant not satisfied before loop.*<= self\.fed_i	9a T5 T5-M5 (Review Focus 3; added 9a2 final fix I2b): key_changes after apply's loop
 T5-M6	quictls	server	initial_end	quictls/server:initial_retransmit_after_switch_ok	postcondition not satisfied.*crypto_received	9a T5 T5-M6 (rule 1d, past_received): initial_end returns end - 1, model re-anchored
 T5-M6b	quictls	server	initial_end	-	postcondition not satisfied.*crypto_received	9a T5 T5-M6b: initial_end returns end + 1, model re-anchored
 T5-M6c	quictls	server	QuicServer::leave_initial	-	postcondition not satisfied.*init_end	9a T5 fix round 1 (m6) T5-M6c: initial_end(..) - 1 at the record
@@ -65,6 +69,7 @@ T5-M11	quic	crypto_stream	CryptoStream::restart	-	assertion failed.*a\.received\
 T5-M12	quictls	server	QuicServer::apply	-	precondition not satisfied.*peer_tp_known_spec	9a T5 fix round 1 (I1) T5-M12: on_params called twice in apply
 T5-M13	quictls	server	QuicServer::leave_initial	quictls/server:initial_retransmit_after_switch_ok	postcondition not satisfied.*init_end	9a T5 fix round 2 (m7) T5-M13: init_end/init_rx snapshot before pipeline::receive, model re-anchored
 T5-M14	quictls	server	QuicServer::feed	-	precondition not satisfied.*core_ok\(\)	9a T5 fix round 2 (m3, rule 1d) T5-M14: the fed counter one byte short
+T5-M15	quictls	server	QuicServer::feed	quictls/e2e:rustls_quic_handshake	precondition not satisfied.*core_ok\(\)	9a T5 fix round 2 (m3) T5-M15 (rebuilt 9a2 final fix I2a; patch in quic): crypto_read hands one byte short while its offset advances, model and code; quic verifies, feed fails core_ok
 T5-M16	quictls	server	QuicServer::feed	-	assertion failed.*step\.1 is Err ==> self\.hs@ == step\.0	9a T5 fix round 3 (n1) T5-M16: on_crypto handed b[1..], lemma_fed re-anchored
 T5-D1	quictls	server	QuicServer::superseded	-	postcondition not satisfied.*!cont && !\(final\(self\)\.conn_spec\(\)\.phase_spec\(\) is Open\)	9a T5 (rule 1b) D1: delete superseded's shut
 T5-D2	quictls	server	QuicServer::key_changes	-	postcondition not satisfied.*!ok ==> !\(final\(self\)\.conn_spec\(\)\.phase_spec\(\) is Open\)	9a T5 (rule 1b) D2: delete key_changes' first shut
@@ -77,7 +82,6 @@ T7-M1	quic	crypto_stream	lemma_crypto_floor	crypto_stream:crypto_far_single_byte
 T7-M2	quic	crypto_stream	lemma_crypto_floor	crypto_stream:crypto_range_limit	postcondition not satisfied.*crypto_allowed_err	9a T7 M2-ranges4095: MAX_CRYPTO_RANGES = 4095
 T7-M3b2	quic	frags	Frags::locate	crypto_stream:crypto_range_limit,crypto_stream:crypto_held_bytes_limit	postcondition not satisfied.*located\(	9a T7 fix round 1 M3b2 (the brief's M3, M3b regenerated on the binary-search locate): merging disabled in the code only
 T7-M4	quic	frags	Frags::insert	-	postcondition not satisfied.*final\(self\)\.wf\(\)	9a T7 M4-held-dups: held += data.len() in Frags::insert (9a T8: its test passes since T7 fix round 1, an exact duplicate now returns before the count)
-T7-M5	quic	conn	Connection::on_crypto_frame	-	postcondition not satisfied.*CRYPTO_BUFFER_EXCEEDED	9a T7 M5-noclose (rule 1b): delete on_crypto_frame's enter_closing
 T7-M6	quic	reassembly	Reassembly::insert	recv_stream:empty_stream_frame_keeps_window	postcondition not satisfied.*data@\.len\(\) == 0 ==>	9a T7 M6-empty-extends: Reassembly::insert loses its empty early return
 T7-M7	quic	crypto_stream	lemma_crypto_floor	-	postcondition not satisfied.*crypto_allowed_err	9a T7 fix round 1 (I2, rule 1d) M7-held-dups-model: ooo_held counts duplicates (model) and held += data.len() (code)
 T7-M8	quic	crypto_stream	lemma_crypto_floor	crypto_alloc:duplicate_ooo_frames_allocate_nothing	postcondition not satisfied.*crypto_allowed_err	9a T7 fix round 1 (I2, rule 1d) M8-runs-as-frames: ooo_runs counts frames (model) and a frames counter (code)

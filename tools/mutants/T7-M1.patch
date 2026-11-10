@@ -1,5 +1,5 @@
 diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
-index 206d62d..8031e04 100644
+index 84ffad2..cadee24 100644
 --- a/crates/quic/src/crypto_stream.rs
 +++ b/crates/quic/src/crypto_stream.rs
 @@ -69,7 +69,7 @@ pub open spec fn crypto_allowed_err(s: CryptoStream, offset: u64, len: nat, c: u
@@ -11,7 +11,7 @@ index 206d62d..8031e04 100644
  }
  
  /// The out-of-order positions depend on the frame's length, not its bytes.
-@@ -409,7 +409,7 @@ impl CryptoStream {
+@@ -420,7 +420,7 @@ impl CryptoStream {
          proof {
              lemma_ooo_set(a, offset, data@);
          }

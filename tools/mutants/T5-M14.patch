@@ -1,8 +1,8 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
-index b0c451c..e8eb35e 100644
+index 37201ae..faed1d3 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -1022,7 +1022,7 @@ impl<'a> QuicServer<'a> {
+@@ -1103,7 +1103,7 @@ impl<'a> QuicServer<'a> {
          }
          if b.len() > 0 {
              match l {
