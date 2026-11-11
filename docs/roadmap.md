@@ -60,7 +60,7 @@ send and recovery paths; parts of 9b/9c that do not touch them may go earlier. P
 | 11 | composed end-to-end theorem | unplanned | 10 | none; audit F8 |
 | 12 | production readiness | unplanned | 11 | none; audit F10 |
 | t1 | toolchain upgrade procedure (design only) | unplanned | - | none; audit F12 |
-| q1 | scripts/quick.sh, a scoped inner-loop check (owner request 2026-11-10) | in progress | - | none; branch phase-q1 |
+| q1 | scripts/quick.sh, a scoped inner-loop check (owner request 2026-11-10) | merged | - | none (owner request); aed556e |
 
 "design spec" is `docs/superpowers/specs/2026-10-27-verified-http3-design.md`; "Phase 9 spec" is
 `docs/superpowers/specs/2026-11-05-phase-9-acceptance-and-closes-design.md`; "audit" is `docs/audit-2026-11-09.md`.
