@@ -23,6 +23,11 @@ Download `verus-0.2026.10.04.426d8b0-x86-linux.zip` from the GitHub release `rel
 
 verify.sh also needs binutils (`objdump`, `nm`, `ar`): its binary gate (`scripts/ct-binary.sh`) pins the `objdump --version` line, so a different binutils fails it until update protocol step 7 in `docs/crypto-binary-audit.md` is followed.
 
+While working, `scripts/quick.sh` checks only what changed since the merge-base with main: Verus on the touched crates and
+their dependents, their tests, the cheap gates, and ct-check, ct-binary, interop or gate-demos when the paths call for them.
+`scripts/quick.sh quic/frags` (a module) or `scripts/quick.sh quic/conn/Connection::accept` (one fn) runs Verus alone.
+Each step prints its time. A quick run is not a gate and vouches for no commit; only a clean verify.sh run does.
+
 `cargo build` and `cargo test` work with plain stable Rust.
 
 ## Requirements coverage (Duvet)
