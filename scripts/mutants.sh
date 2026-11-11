@@ -6,7 +6,8 @@ set -o pipefail
 #   check   every row is well formed and has a patch touching only crates/<crate>/ and its path dependencies, no orphan
 #           patch, no duplicate id,
 #           the tsv is non-empty, and every patch `git apply --check`s against this tree.
-#   run     in a throwaway `git worktree` of HEAD (never the caller's tree), for each row: the unmutated fn verifies
+#   run     in throwaway `git worktree`s of HEAD (never the caller's tree; MUTANTS_JOBS of them, default 4, each taking
+#           every MUTANTS_JOBS-th row), for each row: the unmutated fn verifies
 #           and its named tests pass; then with the patch applied alone, each path dependency it touches still verifies
 #           whole on its own (`cargo verus focus` in that crate: 0 errors, no rlimit text; otherwise a patch breaking the
 #           dependency's proof would pass as a kill here), `cargo verus focus -- --verify-only-module
@@ -81,6 +82,37 @@ tests() {
     done
 }
 
+# worker WT ROWS RES: each row of file ROWS in worktree WT (one, deps and tests read $wt), one `<id> pass|fail <patch blob>`
+# line per row appended to RES. Runs as a background subshell of run, so its wt is its own.
+worker() {
+    wt=$1
+    tab=$(printf '\t')
+    while IFS=$tab read -r id crate mod fn tst dep rx; do
+        t0=$(date +%s)
+        git -C "$wt" reset -q --hard HEAD && git -C "$wt" clean -fdq -- crates || fail "cannot reset the worktree $wt"
+        why=
+        one "$out/$id.clean" "$crate" "$mod" "$fn"
+        if ! why=$(mpy clean "$out/$id.clean" "$crate" "$mod" "$fn" 2>&1); then :
+        elif ! why=$(tests "$out/$id.clean" "$crate" "$tst" ok); then why="unmutated: $why"
+        elif ! why=$(git -C "$wt" apply "$wt/tools/mutants/$id.patch" 2>&1); then why="patch does not apply: $why"
+        elif ! why=$(deps "$out/$id" "$dep"); then why="dependency: $why"
+        else
+            one "$out/$id" "$crate" "$mod" "$fn"
+            if ! why=$(mpy killed "$out/$id" "$crate" "$mod" "$fn" "$rx" 2>&1); then :
+            elif ! why=$(tests "$out/$id" "$crate" "$tst" FAILED); then why="mutant: $why"
+            else why=; fi
+        fi
+        blob=$(git -C "$wt" rev-parse "HEAD:tools/mutants/$id.patch") || fail "git rev-parse HEAD:tools/mutants/$id.patch failed"
+        if [ -z "$why" ]; then
+            echo "mutants: $id: killed ($crate $mod::$fn, $(($(date +%s) - t0))s)"
+            echo "$id pass $blob" >> "$3"
+        else
+            echo "mutants: $id: FAILED: $why" >&2
+            echo "$id fail $blob" >> "$3"
+        fi
+    done < "$2"
+}
+
 run() {
     dest=$root/tools/mutants-last-run.txt
     if [ "${1:-}" = --out ]; then
@@ -111,16 +143,33 @@ run() {
     common=$(git -C "$root" rev-parse --path-format=absolute --git-common-dir) || fail "not a git repo"
     parent=$(dirname "$common")/.worktrees
     mkdir -p "$parent"
-    wt=$(mktemp -d "$parent/mutants-XXXXXX")
-    trap 'git -C "$root" worktree remove --force "$wt" > /dev/null 2>&1 || rmdir "$wt" 2> /dev/null || true; git -C "$root" worktree prune' EXIT
+    # MUTANTS_JOBS workers (default 4), each with its own worktree of one HEAD and its own target dir, take every
+    # MUTANTS_JOBS-th row; the mutants are independent, so the run file is the one a single worker writes. A shared
+    # MUTANTS_TARGET_DIR (gate-demos only) cannot take parallel cargo cleans, so it gets one worker.
+    jobs=${MUTANTS_JOBS:-4}
+    case $jobs in '' | *[!0-9]* | 0*) fail "MUTANTS_JOBS must be a positive integer, not '$jobs'" ;; esac
+    [ -z "${MUTANTS_TARGET_DIR:-}" ] || jobs=1
+    nrows=$(printf '%s\n' "$rows" | wc -l | tr -d ' ')
+    [ "$jobs" -le "$nrows" ] || jobs=$nrows
+    rev=$(git -C "$root" rev-parse HEAD) || fail "git rev-parse HEAD failed"
+    wts=
+    trap 'for w in $wts; do git -C "$root" worktree remove --force "$w" > /dev/null 2>&1 || rmdir "$w" 2> /dev/null || true; done; git -C "$root" worktree prune' EXIT
     trap 'exit 1' INT TERM HUP
-    git -C "$root" worktree add -q --detach "$wt" HEAD || fail "git worktree add failed"
-    # the worktree's own target dir, not a CARGO_TARGET_DIR shared with other worktrees; MUTANTS_TARGET_DIR (gate-demos
+    k=0
+    while [ "$k" -lt "$jobs" ]; do
+        w=$(mktemp -d "$parent/mutants-XXXXXX")
+        wts="$wts $w"
+        git -C "$root" worktree add -q --detach "$w" "$rev" || fail "git worktree add failed"
+        k=$((k + 1))
+    done
+    # each worktree's own target dir, not a CARGO_TARGET_DIR shared with other worktrees; MUTANTS_TARGET_DIR (gate-demos
     # only) keeps vstd built across the demos' throwaway repos
     unset CARGO_TARGET_DIR
     [ -z "${MUTANTS_TARGET_DIR:-}" ] || export CARGO_TARGET_DIR="$MUTANTS_TARGET_DIR"
     mkdir -p "$out"
-    rm -f "$out"/*.log "$out"/*.json
+    rm -f "$out"/*.log "$out"/*.json "$out"/shard-*
+    wt=${wts# }
+    wt=${wt%% *}
     crates=$(git -C "$wt" rev-parse HEAD:crates)
     runtree=$(mpy tree "$wt" HEAD) || exit 1
     tsvblob=$(git -C "$wt" rev-parse HEAD:tools/mutants.tsv)
@@ -128,33 +177,28 @@ run() {
 crates $crates
 tree $runtree
 tsv $tsvblob"
-    bad=0
     tab=$(printf '\t')
-    while IFS=$tab read -r id crate mod fn tst dep rx; do
-        t0=$(date +%s)
-        git -C "$wt" reset -q --hard HEAD && git -C "$wt" clean -fdq -- crates || fail "cannot reset the worktree"
-        why=
-        one "$out/$id.clean" "$crate" "$mod" "$fn"
-        if ! why=$(mpy clean "$out/$id.clean" "$crate" "$mod" "$fn" 2>&1); then :
-        elif ! why=$(tests "$out/$id.clean" "$crate" "$tst" ok); then why="unmutated: $why"
-        elif ! why=$(git -C "$wt" apply "$wt/tools/mutants/$id.patch" 2>&1); then why="patch does not apply: $why"
-        elif ! why=$(deps "$out/$id" "$dep"); then why="dependency: $why"
-        else
-            one "$out/$id" "$crate" "$mod" "$fn"
-            if ! why=$(mpy killed "$out/$id" "$crate" "$mod" "$fn" "$rx" 2>&1); then :
-            elif ! why=$(tests "$out/$id" "$crate" "$tst" FAILED); then why="mutant: $why"
-            else why=; fi
-        fi
-        if [ -z "$why" ]; then
-            echo "mutants: $id: killed ($crate $mod::$fn, $(($(date +%s) - t0))s)"
-            res="$res
-$id pass $(git -C "$wt" rev-parse "HEAD:tools/mutants/$id.patch")"
-        else
-            echo "mutants: $id: FAILED: $why" >&2
-            res="$res
-$id fail $(git -C "$wt" rev-parse "HEAD:tools/mutants/$id.patch")"
-            bad=$((bad + 1))
-        fi
+    k=0
+    pids=
+    for w in $wts; do
+        printf '%s\n' "$rows" | awk -v j="$jobs" -v k="$k" '(NR - 1) % j == k' > "$out/shard-$k.rows"
+        : > "$out/shard-$k.res"
+        worker "$w" "$out/shard-$k.rows" "$out/shard-$k.res" &
+        pids="$pids $!"
+        k=$((k + 1))
+    done
+    dead=0
+    for p in $pids; do wait "$p" || dead=$((dead + 1)); done
+    [ "$dead" -eq 0 ] || fail "$dead of $jobs mutant workers died (logs in $out)"
+    # the run file lists the rows in registry order, whichever worker ran them; each row has exactly one result line
+    bad=0
+    while IFS=$tab read -r id _; do
+        l=$(awk -v i="$id" '$1 == i' "$out"/shard-*.res)
+        c=$(printf '%s' "$l" | awk 'NF' | wc -l | tr -d ' ')
+        [ "$c" = 1 ] || fail "$id has $c result lines, want 1"
+        case $l in "$id pass "*) ;; *) bad=$((bad + 1)) ;; esac
+        res="$res
+$l"
     done <<EOF
 $rows
 EOF
