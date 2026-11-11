@@ -58,7 +58,7 @@ On main, every commit at main's tip (merges to main are `--no-ff` only; anything
 4. Commit `tools/mutants-last-run.txt`.
 5. On the clean branch tip, `python3 -I tools/mutants.py gate .` must pass.
 6. `git merge --no-ff` the branch into main. The merge commit's tree equals the branch tip's when main has no new changes, so the run file holds.
-7. Run `scripts/verify.sh` on main after the merge: it is the only run of the main gate, of the fresh mutant run (about 20 minutes for 86 mutants) and of the history walks.
+7. Run `scripts/verify.sh` on main after the merge: it is the only run of the main gate, of the fresh mutant run (86 mutants: 1135 s with the default 4 parallel workers, 1263 s serial, measured 2026-11-10; CPU-bound, so slower on a busy machine) and of the history walks.
 
 If a change to crates/ makes a patch stop applying, or apply only at an offset, regenerate it: `git apply` what still applies, redo the edit, `git diff > tools/mutants/<id>.patch`. Then re-run.
 
