@@ -35,6 +35,12 @@ $out"
 # fresh <dir>: a clean copy of the fixture tree in $tmp/<dir>.
 fresh() { rm -rf "${tmp:?}/$1"; cp -r "$fx/$1" "$tmp/$1"; }
 
+# quick.sh's scope (tools/quick.py): a changed crate pulls in its dependents, and the paths pick the extra gates.
+expect_pass "quick.py scope selftest" python3 -I "$root/tools/quick.py" selftest
+: > "$tmp/noquick.json"
+: > "$tmp/noquick.log"
+expect_fail "quick.py check: a run with no results object" "0 Verus result objects" python3 -I "$root/tools/quick.py" check "$tmp/noquick"
+
 # lint-scripts: a script without pipefail; an empty directory.
 fresh lint
 expect_pass "lint-scripts" "$root/scripts/lint-scripts.sh" "$tmp/lint"
