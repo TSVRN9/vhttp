@@ -786,6 +786,28 @@ grep -qx "crates $(git -C "$tmp/m3" rev-parse HEAD:crates)" "$tmp/m3/tools/mutan
 [ "$(git -C "$tmp/m3" status --porcelain)" = "?? tools/mutants-last-run.txt" ] || die "mutants run: the caller's tree changed beyond the run file:
 $(git -C "$tmp/m3" status --porcelain)"
 echo "gate-demos: mutants run: caller's tree unchanged except tools/mutants-last-run.txt"
+# run with two workers (MUTANTS_JOBS=2, one row each): both kills land in the run file in tsv order, no worktree left.
+mrepo m3j
+cp "$tmp/m3j/tools/mutants/D-kill.patch" "$tmp/m3j/tools/mutants/D-kill2.patch"
+awk -F'\t' -v OFS='\t' '{ print } $1 == "D-kill" { $1 = "D-kill2"; print }' "$tmp/m3j/tools/mutants.tsv" > "$tmp/m3j.tsv"
+mv "$tmp/m3j.tsv" "$tmp/m3j/tools/mutants.tsv"
+git -C "$tmp/m3j" add -A
+gitc m3j commit -qm two
+mj() { MUTANTS_JOBS=2 mut m3j run; }
+expect_pass "mutants run: two workers" mj
+[ "$(awk '!/^#/ && $2 == "pass" { printf "%s ", $1 }' "$tmp/m3j/tools/mutants-last-run.txt")" = "D-kill D-kill2 " ] || die "mutants run: two workers: run file lacks D-kill and D-kill2 in order:
+$(cat "$tmp/m3j/tools/mutants-last-run.txt")"
+[ -z "$(git -C "$tmp/m3j" worktree list --porcelain | grep '^worktree .*/mutants-')" ] || die "mutants run: two workers: worktree left behind"
+echo "gate-demos: mutants run: two workers: both rows in tsv order, no worktree left"
+# mutants.py assemble (the workers' result lines): a row with no line (a worker stopped early), two lines, a line for no row.
+printf 'A\tc\nB\tc\n' > "$tmp/as.rows"
+printf 'A pass a1\n' > "$tmp/as.0"
+printf 'B fail b1\n' > "$tmp/as.1"
+printf 'C pass c1\n' > "$tmp/as.2"
+expect_pass "mutants.py assemble" python3 -I "$root/tools/mutants.py" assemble "$tmp/as.rows" "$tmp/as.1" "$tmp/as.0"
+expect_fail "mutants.py assemble: a row with no line" "no result line for B" python3 -I "$root/tools/mutants.py" assemble "$tmp/as.rows" "$tmp/as.0"
+expect_fail "mutants.py assemble: two lines for a row" "A has two result lines" python3 -I "$root/tools/mutants.py" assemble "$tmp/as.rows" "$tmp/as.0" "$tmp/as.0" "$tmp/as.1"
+expect_fail "mutants.py assemble: a line for no row" "result lines for no row: C" python3 -I "$root/tools/mutants.py" assemble "$tmp/as.rows" "$tmp/as.0" "$tmp/as.1" "$tmp/as.2"
 mrepo m4
 cp "$fx/mutants/live.patch" "$tmp/m4/tools/mutants/D-live.patch"
 printf 'D-live\tdemo\tacc\tdemo\t-\tpostcondition not satisfied\tgate-demos: n > 11 keeps the clause\n' >> "$tmp/m4/tools/mutants.tsv"

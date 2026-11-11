@@ -83,7 +83,7 @@ tests() {
 }
 
 # worker WT ROWS RES: each row of file ROWS in worktree WT (one, deps and tests read $wt), one `<id> pass|fail <patch blob>`
-# line per row appended to RES. Runs as a background subshell of run, so its wt is its own.
+# line per row appended to RES. run starts each as `mutants.sh worker ..` in its own session (setsid).
 worker() {
     wt=$1
     tab=$(printf '\t')
@@ -144,16 +144,15 @@ run() {
     parent=$(dirname "$common")/.worktrees
     mkdir -p "$parent"
     # MUTANTS_JOBS workers (default 4), each with its own worktree of one HEAD and its own target dir, take every
-    # MUTANTS_JOBS-th row; the mutants are independent, so the run file is the one a single worker writes. A shared
-    # MUTANTS_TARGET_DIR (gate-demos only) cannot take parallel cargo cleans, so it gets one worker.
+    # MUTANTS_JOBS-th row; the mutants are independent, so the run file is the one a single worker writes.
     jobs=${MUTANTS_JOBS:-4}
     case $jobs in '' | *[!0-9]* | 0*) fail "MUTANTS_JOBS must be a positive integer, not '$jobs'" ;; esac
-    [ -z "${MUTANTS_TARGET_DIR:-}" ] || jobs=1
     nrows=$(printf '%s\n' "$rows" | wc -l | tr -d ' ')
     [ "$jobs" -le "$nrows" ] || jobs=$nrows
     rev=$(git -C "$root" rev-parse HEAD) || fail "git rev-parse HEAD failed"
-    wts=
-    trap 'for w in $wts; do git -C "$root" worktree remove --force "$w" > /dev/null 2>&1 || rmdir "$w" 2> /dev/null || true; done; git -C "$root" worktree prune' EXIT
+    wts= pids=
+    # a stopped run stops its workers before their worktrees go
+    trap 'for p in $pids; do kill -- "-$p" 2> /dev/null || true; done; for p in $pids; do wait "$p" 2> /dev/null || true; done; for w in $wts; do git -C "$root" worktree remove --force "$w" > /dev/null 2>&1 || rmdir "$w" 2> /dev/null || true; done; git -C "$root" worktree prune' EXIT
     trap 'exit 1' INT TERM HUP
     k=0
     while [ "$k" -lt "$jobs" ]; do
@@ -163,9 +162,8 @@ run() {
         k=$((k + 1))
     done
     # each worktree's own target dir, not a CARGO_TARGET_DIR shared with other worktrees; MUTANTS_TARGET_DIR (gate-demos
-    # only) keeps vstd built across the demos' throwaway repos
+    # only) keeps vstd built across the demos' throwaway repos, one subdir per worker (parallel cargo cleans cannot share one)
     unset CARGO_TARGET_DIR
-    [ -z "${MUTANTS_TARGET_DIR:-}" ] || export CARGO_TARGET_DIR="$MUTANTS_TARGET_DIR"
     mkdir -p "$out"
     rm -f "$out"/*.log "$out"/*.json "$out"/shard-*
     wt=${wts# }
@@ -177,31 +175,29 @@ run() {
 crates $crates
 tree $runtree
 tsv $tsvblob"
-    tab=$(printf '\t')
     k=0
-    pids=
+    printf '%s\n' "$rows" > "$out/shard-all.rows"
     for w in $wts; do
-        printf '%s\n' "$rows" | awk -v j="$jobs" -v k="$k" '(NR - 1) % j == k' > "$out/shard-$k.rows"
+        awk -v j="$jobs" -v k="$k" '(NR - 1) % j == k' "$out/shard-all.rows" > "$out/shard-$k.rows"
         : > "$out/shard-$k.res"
-        worker "$w" "$out/shard-$k.rows" "$out/shard-$k.res" &
+        # its own session, so the trap's kill of the group reaches the worker's cargo and Verus too
+        if [ -n "${MUTANTS_TARGET_DIR:-}" ]; then
+            CARGO_TARGET_DIR="$MUTANTS_TARGET_DIR/w$k" setsid "$root/scripts/mutants.sh" worker "$w" "$out/shard-$k.rows" "$out/shard-$k.res" &
+        else
+            setsid "$root/scripts/mutants.sh" worker "$w" "$out/shard-$k.rows" "$out/shard-$k.res" &
+        fi
         pids="$pids $!"
         k=$((k + 1))
     done
     dead=0
     for p in $pids; do wait "$p" || dead=$((dead + 1)); done
+    pids=
     [ "$dead" -eq 0 ] || fail "$dead of $jobs mutant workers died (logs in $out)"
-    # the run file lists the rows in registry order, whichever worker ran them; each row has exactly one result line
-    bad=0
-    while IFS=$tab read -r id _; do
-        l=$(awk -v i="$id" '$1 == i' "$out"/shard-*.res)
-        c=$(printf '%s' "$l" | awk 'NF' | wc -l | tr -d ' ')
-        [ "$c" = 1 ] || fail "$id has $c result lines, want 1"
-        case $l in "$id pass "*) ;; *) bad=$((bad + 1)) ;; esac
-        res="$res
-$l"
-    done <<EOF
-$rows
-EOF
+    # the run file lists the rows in registry order, whichever worker ran them
+    lines=$(mpy assemble "$out/shard-all.rows" "$out"/shard-[0-9]*.res) || exit 1
+    bad=$(printf '%s\n' "$lines" | awk '$2 != "pass"' | wc -l | tr -d ' ')
+    res="$res
+$lines"
     if [ "$full" -eq 1 ]; then
         printf '%s\n' "$res" > "$dest" || fail "cannot write $dest"
         echo "mutants: wrote ${dest#"$root"/} (crates tree $crates)"
@@ -236,6 +232,7 @@ verify() {
     case ${1:-} in
     check) check ;;
     run) shift; run "$@" ;;
+    worker) [ $# -eq 4 ] || fail "usage: mutants.sh worker WT ROWS RES (run's own)"; shift; worker "$@" ;;
     verify) verify ;;
     *) fail "usage: mutants.sh check | run [--out FILE] [id..] | verify" ;;
     esac
