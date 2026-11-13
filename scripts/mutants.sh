@@ -83,8 +83,11 @@ tests() {
 }
 
 # worker WT ROWS RES: each row of file ROWS in worktree WT (one, deps and tests read $wt), one `<id> pass|fail <patch blob>`
-# line per row appended to RES. run starts each as `mutants.sh worker ..` in its own session (setsid).
+# line per row appended to RES. run starts each as `mutants.sh worker ..` in its own session (setsid), as its direct child
+# (MUTANTS_RUN is run's pid): a setsid that forked would leave run waiting on the wrong pid and killing the wrong group.
 worker() {
+    [ "$(ps -o sid= -p $$ | tr -d ' ')" = "$$" ] || fail "worker: not a session leader (run starts workers with setsid)"
+    [ "$PPID" = "${MUTANTS_RUN:-}" ] || fail "worker: not started by mutants.sh run (parent $PPID, MUTANTS_RUN '${MUTANTS_RUN:-}')"
     wt=$1
     tab=$(printf '\t')
     while IFS=$tab read -r id crate mod fn tst dep rx; do
@@ -113,6 +116,27 @@ worker() {
     done < "$2"
 }
 
+# addwt: one more worktree of $rev in $parent, its path appended to $wts.
+addwt() {
+    w=$(mktemp -d "$parent/mutants-XXXXXX") || fail "mktemp in $parent failed"
+    wts="$wts $w"
+    git -C "$root" worktree add -q --detach "$w" "$rev" || fail "git worktree add failed"
+}
+
+# stop (run's EXIT trap): a stopped run stops its workers' sessions (TERM, then KILL after 10 s) before their worktrees go,
+# else a cargo or Verus still writing in one makes its removal fail.
+stop() {
+    for p in $pids; do kill -- "-$p" 2> /dev/null || true; done
+    for p in $pids; do
+        wait "$p" 2> /dev/null || true  # the worker itself; a zombie would keep its group alive below
+        i=0
+        while kill -0 -- "-$p" 2> /dev/null && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+        kill -KILL -- "-$p" 2> /dev/null || true
+    done
+    for w in $wts; do git -C "$root" worktree remove --force "$w" > /dev/null 2>&1 || rmdir "$w" 2> /dev/null || true; done
+    git -C "$root" worktree prune || true
+}
+
 run() {
     dest=$root/tools/mutants-last-run.txt
     if [ "${1:-}" = --out ]; then
@@ -123,7 +147,31 @@ run() {
     check > /dev/null
     st=$(git -C "$root" status --porcelain -- crates tools/mutants tools/mutants.tsv tools/mutants.py tools/verus-pin.txt scripts/mutants.sh) || fail "git status failed"
     [ -z "$st" ] || fail "crates/, the registry or the mutants tools have uncommitted changes; the run uses HEAD, so commit first"
-    rows=$(mpy rows "$root" "$tsv" "$pdir") || exit 1
+    # VERUS_HOME is env-overridable and a missing one falls back to PATH; tools/mutants.py checks each JSON's verus object too
+    vv=$(verus --version 2>&1) || fail "verus --version failed (VERUS_HOME=$VERUS_HOME): $vv"
+    got=$(printf '%s\n' "$vv" | sed -n 's/^ *Version: //p')
+    [ "$got" = "$verus_ver" ] || fail "verus --version names ${got:-no version}, tools/verus-pin.txt says $verus_ver (VERUS_HOME=$VERUS_HOME)"
+    jobs=${MUTANTS_JOBS:-4}
+    case $jobs in '' | *[!0-9]* | 0*) fail "MUTANTS_JOBS must be a positive integer, not '$jobs'" ;; esac
+    # one run per output dir: workers outlive a SIGKILLed run (their own sessions) and would write into the next run's
+    # files; they and their cargo and Verus inherit fd 9, so the lock lasts until the last of them exits
+    mkdir -p "$out"
+    exec 9> "$out/.lock"
+    flock -n 9 || fail "another mutants run, or the orphaned workers of a killed one, still holds $out/.lock"
+    set +m  # job control off: setsid then never forks, so $! is the worker and its session
+    common=$(git -C "$root" rev-parse --path-format=absolute --git-common-dir) || fail "not a git repo"
+    parent=$(dirname "$common")/.worktrees
+    mkdir -p "$parent"
+    rev=$(git -C "$root" rev-parse HEAD) || fail "git rev-parse HEAD failed"
+    wts= pids=
+    trap stop EXIT
+    trap 'exit 1' INT TERM HUP
+    # MUTANTS_JOBS workers (default 4), each with its own worktree of one HEAD and its own target dir, take every
+    # MUTANTS_JOBS-th row; the mutants are independent, so the run file is the one a single worker writes. The rows come
+    # from the first worktree, so they and the patches the workers apply are of one commit.
+    addwt
+    wt=${wts# }
+    rows=$(mpy rows "$wt" "$wt/tools/mutants.tsv" "$wt/tools/mutants") || exit 1
     full=1
     if [ $# -gt 0 ]; then
         full=0
@@ -136,38 +184,17 @@ run() {
         done
         rows=$(printf '%s' "$sel")
     fi
-    # VERUS_HOME is env-overridable and a missing one falls back to PATH; tools/mutants.py checks each JSON's verus object too
-    vv=$(verus --version 2>&1) || fail "verus --version failed (VERUS_HOME=$VERUS_HOME): $vv"
-    got=$(printf '%s\n' "$vv" | sed -n 's/^ *Version: //p')
-    [ "$got" = "$verus_ver" ] || fail "verus --version names ${got:-no version}, tools/verus-pin.txt says $verus_ver (VERUS_HOME=$VERUS_HOME)"
-    common=$(git -C "$root" rev-parse --path-format=absolute --git-common-dir) || fail "not a git repo"
-    parent=$(dirname "$common")/.worktrees
-    mkdir -p "$parent"
-    # MUTANTS_JOBS workers (default 4), each with its own worktree of one HEAD and its own target dir, take every
-    # MUTANTS_JOBS-th row; the mutants are independent, so the run file is the one a single worker writes.
-    jobs=${MUTANTS_JOBS:-4}
-    case $jobs in '' | *[!0-9]* | 0*) fail "MUTANTS_JOBS must be a positive integer, not '$jobs'" ;; esac
     nrows=$(printf '%s\n' "$rows" | wc -l | tr -d ' ')
     [ "$jobs" -le "$nrows" ] || jobs=$nrows
-    rev=$(git -C "$root" rev-parse HEAD) || fail "git rev-parse HEAD failed"
-    wts= pids=
-    # a stopped run stops its workers before their worktrees go
-    trap 'for p in $pids; do kill -- "-$p" 2> /dev/null || true; done; for p in $pids; do wait "$p" 2> /dev/null || true; done; for w in $wts; do git -C "$root" worktree remove --force "$w" > /dev/null 2>&1 || rmdir "$w" 2> /dev/null || true; done; git -C "$root" worktree prune' EXIT
-    trap 'exit 1' INT TERM HUP
-    k=0
+    k=1
     while [ "$k" -lt "$jobs" ]; do
-        w=$(mktemp -d "$parent/mutants-XXXXXX")
-        wts="$wts $w"
-        git -C "$root" worktree add -q --detach "$w" "$rev" || fail "git worktree add failed"
+        addwt
         k=$((k + 1))
     done
     # each worktree's own target dir, not a CARGO_TARGET_DIR shared with other worktrees; MUTANTS_TARGET_DIR (gate-demos
     # only) keeps vstd built across the demos' throwaway repos, one subdir per worker (parallel cargo cleans cannot share one)
     unset CARGO_TARGET_DIR
-    mkdir -p "$out"
     rm -f "$out"/*.log "$out"/*.json "$out"/shard-*
-    wt=${wts# }
-    wt=${wt%% *}
     crates=$(git -C "$wt" rev-parse HEAD:crates)
     runtree=$(mpy tree "$wt" HEAD) || exit 1
     tsvblob=$(git -C "$wt" rev-parse HEAD:tools/mutants.tsv)
@@ -175,11 +202,13 @@ run() {
 crates $crates
 tree $runtree
 tsv $tsvblob"
-    k=0
+    k=0 resf=
     printf '%s\n' "$rows" > "$out/shard-all.rows"
+    export MUTANTS_RUN=$$
     for w in $wts; do
         awk -v j="$jobs" -v k="$k" '(NR - 1) % j == k' "$out/shard-all.rows" > "$out/shard-$k.rows"
         : > "$out/shard-$k.res"
+        resf="$resf $out/shard-$k.res"
         # its own session, so the trap's kill of the group reaches the worker's cargo and Verus too
         if [ -n "${MUTANTS_TARGET_DIR:-}" ]; then
             CARGO_TARGET_DIR="$MUTANTS_TARGET_DIR/w$k" setsid "$root/scripts/mutants.sh" worker "$w" "$out/shard-$k.rows" "$out/shard-$k.res" &
@@ -191,10 +220,12 @@ tsv $tsvblob"
     done
     dead=0
     for p in $pids; do wait "$p" || dead=$((dead + 1)); done
-    pids=
+    # a dead worker's group may still hold its cargo or Verus: the trap kills it. Live ones exited after their last row.
     [ "$dead" -eq 0 ] || fail "$dead of $jobs mutant workers died (logs in $out)"
+    pids=
     # the run file lists the rows in registry order, whichever worker ran them
-    lines=$(mpy assemble "$out/shard-all.rows" "$out"/shard-[0-9]*.res) || exit 1
+    # shellcheck disable=SC2086 # one path per word
+    lines=$(mpy assemble "$out/shard-all.rows" $resf) || exit 1
     bad=$(printf '%s\n' "$lines" | awk '$2 != "pass"' | wc -l | tr -d ' ')
     res="$res
 $lines"

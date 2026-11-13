@@ -716,7 +716,9 @@ expect_fail "ratchet-walk: a git error (path outside any repo)" "failed" walk w5
 # patches and the loop-invariant kinds have their own fixture (mutants-dep, below). run (real Verus, seconds:
 # MUTANTS_TARGET_DIR keeps vstd built across runs): the killed mutant (with its named test) passes; a mutant that still
 # verifies, a named test that does not FAIL, one that fails unmutated, a misspelt test and a missing fn fail; a dirty
-# crates/ is refused, and so is a Verus other than the pin's or none at all. The verdict on canned Verus output: rlimit, no
+# crates/ is refused, and so is a Verus other than the pin's or none at all. Its parallel workers: two of them assemble the
+# run file in tsv order; a bad MUTANTS_JOBS, a held output-dir lock, a worker outside its own session or not run's child,
+# and a dead worker fail; a TERM leaves no worker process and no worktree. The verdict on canned Verus output: rlimit, no
 # or two JSON objects, another fn checked, a non-matching error kind, another Verus version or commit, no verus object. The
 # main gate (every commit at main's tip): passes after a --no-ff merge or a fast-forward with a fresh run file, and the fresh
 # run there reproduces it; fails with none (also detached), crates/ or Cargo.toml changed after the run, a fast-forward
@@ -739,6 +741,13 @@ mrepo() {  # mrepo <dir>: scripts, tools/mutants.py and the fixture, one commit 
     gitc "$1" checkout -qb feat
 }
 mut() { d=$1; shift; "$tmp/$d/scripts/mutants.sh" "$@"; }
+nowt() {  # nowt <dir> <name>: no mutants-* worktree left in $tmp/<dir> (a failing git worktree list is a failure)
+    wl=$(git -C "$tmp/$1" worktree list --porcelain) || die "$2: git worktree list failed"
+    case $wl in *"/mutants-"*) die "$2: worktree left behind:
+$wl" ;; esac
+}
+# upto <tenths> <cmd..>: poll <cmd> every 0.1 s until it passes; 1 after <tenths> tries.
+upto() { n=$1; shift; i=0; until "$@"; do [ "$i" -lt "$n" ] || return 1; sleep 0.1; i=$((i + 1)); done; }
 mrepo m1
 expect_pass "mutants check" mut m1 check
 sed -i 's/if n > 10 { Err(7) }/if n > 10 { Err(9) }/' "$tmp/m1/crates/demo/src/acc.rs"
@@ -782,7 +791,7 @@ expect_fail "mutants check: an allowed_*err predicate named only in a row's orig
 mrepo m3
 expect_pass "mutants run: killed mutant" mut m3 run
 grep -qx "crates $(git -C "$tmp/m3" rev-parse HEAD:crates)" "$tmp/m3/tools/mutants-last-run.txt" || die "mutants run: run file lacks the crates tree"
-[ -z "$(git -C "$tmp/m3" worktree list --porcelain | grep '^worktree .*/mutants-')" ] || die "mutants run: worktree left behind"
+nowt m3 "mutants run"
 [ "$(git -C "$tmp/m3" status --porcelain)" = "?? tools/mutants-last-run.txt" ] || die "mutants run: the caller's tree changed beyond the run file:
 $(git -C "$tmp/m3" status --porcelain)"
 echo "gate-demos: mutants run: caller's tree unchanged except tools/mutants-last-run.txt"
@@ -797,7 +806,7 @@ mj() { MUTANTS_JOBS=2 mut m3j run; }
 expect_pass "mutants run: two workers" mj
 [ "$(awk '!/^#/ && $2 == "pass" { printf "%s ", $1 }' "$tmp/m3j/tools/mutants-last-run.txt")" = "D-kill D-kill2 " ] || die "mutants run: two workers: run file lacks D-kill and D-kill2 in order:
 $(cat "$tmp/m3j/tools/mutants-last-run.txt")"
-[ -z "$(git -C "$tmp/m3j" worktree list --porcelain | grep '^worktree .*/mutants-')" ] || die "mutants run: two workers: worktree left behind"
+nowt m3j "mutants run: two workers"
 echo "gate-demos: mutants run: two workers: both rows in tsv order, no worktree left"
 # mutants.py assemble (the workers' result lines): a row with no line (a worker stopped early), two lines, a line for no row.
 printf 'A\tc\nB\tc\n' > "$tmp/as.rows"
@@ -808,12 +817,40 @@ expect_pass "mutants.py assemble" python3 -I "$root/tools/mutants.py" assemble "
 expect_fail "mutants.py assemble: a row with no line" "no result line for B" python3 -I "$root/tools/mutants.py" assemble "$tmp/as.rows" "$tmp/as.0"
 expect_fail "mutants.py assemble: two lines for a row" "A has two result lines" python3 -I "$root/tools/mutants.py" assemble "$tmp/as.rows" "$tmp/as.0" "$tmp/as.0" "$tmp/as.1"
 expect_fail "mutants.py assemble: a line for no row" "result lines for no row: C" python3 -I "$root/tools/mutants.py" assemble "$tmp/as.rows" "$tmp/as.0" "$tmp/as.1" "$tmp/as.2"
+# run's workers: a bad MUTANTS_JOBS; another run (or a killed run's orphaned workers) holding the output dir's lock; a
+# worker that is not a session leader, or not run's child; a run whose worker dies (a fake setsid that starts no session).
+mrepo m7
+expect_fail "mutants run: MUTANTS_JOBS=0" "MUTANTS_JOBS must be a positive integer, not '0'" env MUTANTS_JOBS=0 "$tmp/m7/scripts/mutants.sh" run
+mkdir -p "$tmp/m7/target/mutants"
+expect_fail "mutants run: another run holds the output dir" "still holds $tmp/m7/target/mutants/.lock" flock "$tmp/m7/target/mutants/.lock" "$tmp/m7/scripts/mutants.sh" run
+expect_fail "mutants worker: not a session leader" "worker: not a session leader" mut m7 worker a b c
+expect_fail "mutants worker: not started by run" "worker: not started by mutants.sh run" setsid -w "$tmp/m7/scripts/mutants.sh" worker a b c
+mkdir -p "$tmp/fakesetsid"; printf '#!/bin/sh\nexec "$@"\n' > "$tmp/fakesetsid/setsid"; chmod +x "$tmp/fakesetsid/setsid"
+expect_fail "mutants run: a worker dies" "1 of 1 mutant workers died" env PATH="$tmp/fakesetsid:$PATH" "$tmp/m7/scripts/mutants.sh" run
+nowt m7 "mutants run: a worker dies"
+# a run stopped by TERM while its worker runs Verus: the worker's whole session is gone and so are the worktrees.
+mrepo mt
+"$tmp/mt/scripts/mutants.sh" run > "$tmp/mt.out" 2>&1 &
+rp=$!
+busy() { wp=$(pgrep -o -f "$tmp/mt/scripts/mutants.sh worker") && [ "$(pgrep -s "$wp" | wc -l)" -ge 2 ]; }
+upto 1200 busy || die "mutants run: TERM: no worker with a child within 120 s:
+$(cat "$tmp/mt.out")"
+kill -TERM "$rp"
+rc=0
+wait "$rp" || rc=$?
+[ "$rc" -ne 0 ] || die "mutants run: TERM: the run exited 0"
+rc=0
+pgrep -s "$wp" > /dev/null || rc=$?
+[ "$rc" -eq 1 ] || die "mutants run: TERM: the worker's session $wp still has processes, or pgrep failed (rc=$rc):
+$(ps -s "$wp" -o pid,args || true)"
+nowt mt "mutants run: TERM"
+echo "gate-demos: mutants run: TERM stops the worker's whole session and removes the worktrees"
 mrepo m4
 cp "$fx/mutants/live.patch" "$tmp/m4/tools/mutants/D-live.patch"
 printf 'D-live\tdemo\tacc\tdemo\t-\tpostcondition not satisfied\tgate-demos: n > 11 keeps the clause\n' >> "$tmp/m4/tools/mutants.tsv"
 gitc m4 add -A; gitc m4 commit -qm live
 expect_fail "mutants run: a mutant that still verifies" "the mutant still verifies acc::demo" mut m4 run D-live
-[ -z "$(git -C "$tmp/m4" worktree list --porcelain | grep '^worktree .*/mutants-')" ] || die "mutants run: worktree left behind after a failure"
+nowt m4 "mutants run: after a failure"
 mkdir -p "$tmp/fakeverus"; printf '#!/bin/sh\necho Verus\necho "  Version: 0.2025.01.01.0000000"\n' > "$tmp/fakeverus/verus"; chmod +x "$tmp/fakeverus/verus"
 expect_fail "mutants run: another Verus on VERUS_HOME" "verus --version names 0.2025.01.01.0000000, tools/verus-pin.txt says $pin_v" env VERUS_HOME="$tmp/fakeverus" "$tmp/m4/scripts/mutants.sh" run
 expect_fail "mutants run: no Verus at all (VERUS_HOME missing, none on PATH)" "verus --version failed" env VERUS_HOME="$tmp/noverus" PATH=/usr/bin:/bin "$tmp/m4/scripts/mutants.sh" run
