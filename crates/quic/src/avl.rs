@@ -1,5 +1,6 @@
 //! A verified AVL tree keyed by `u64`, viewed as its in-order sequence of entries. Ops return a ghost
 //! cost (one unit per node visited, an empty child included) bounded in their ensures.
+//! `join` charges one unit per node exposed or created; its O(1) height reads and empty children per level go uncharged.
 use vstd::prelude::*;
 // Used only in ghost code, which a plain `cargo build` erases.
 #[allow(unused_imports)]
@@ -371,6 +372,24 @@ pub proof fn lemma_keys_cat<V>(t: Tree<V>, l: Tree<V>, x: (u64, V), r: Tree<V>, 
     } by {}
 }
 
+/// A rotation's reshaping of three parts and two entries keeps their order.
+proof fn lemma_seq_rot<T>(a: Seq<T>, x: T, b: Seq<T>, y: T, c: Seq<T>)
+    ensures
+        (a + seq![x] + b) + seq![y] + c == a + seq![x] + (b + seq![y] + c),
+{
+    assert((a + seq![x] + b) + seq![y] + c =~= a + seq![x] + (b + seq![y] + c));
+}
+
+/// A double rotation's reshaping of four parts and three entries keeps their order, from either side.
+proof fn lemma_seq_rot2<T>(a: Seq<T>, x: T, b: Seq<T>, y: T, c: Seq<T>, z: T, d: Seq<T>)
+    ensures
+        (a + seq![x] + b) + seq![y] + (c + seq![z] + d) == a + seq![x] + ((b + seq![y] + c) + seq![z] + d),
+        (a + seq![x] + b) + seq![y] + (c + seq![z] + d) == (a + seq![x] + (b + seq![y] + c)) + seq![z] + d,
+{
+    assert((a + seq![x] + b) + seq![y] + (c + seq![z] + d) =~= a + seq![x] + ((b + seq![y] + c) + seq![z] + d));
+    assert((a + seq![x] + b) + seq![y] + (c + seq![z] + d) =~= (a + seq![x] + (b + seq![y] + c)) + seq![z] + d);
+}
+
 /// A node over balanced, ordered parts: its height is one above the taller part.
 fn mk<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>) -> (t: Tree<V>)
     requires
@@ -438,21 +457,18 @@ fn rot_left1<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>) -> (res: (Tree<V>, Ghost<n
         res.1@ <= 5,
 {
     let ghost r0 = r;
+    proof {
+        lemma_rot_single(l, k, v, r0);
+    }
     let rb = r.unwrap();
     let Node { key: rk, val: rv, h: _, left: rl, right: rr } = *rb;
-    proof {
-        assert(wf(rl) && wf(rr) && keys_lt(rl, rk) && keys_gt(rr, rk));
-        lemma_seq_node(r0);
-        lemma_keys_cat(r0, rl, (rk, rv), rr, k);
-    }
     let x = mk(l, k, v, rl);
     proof {
-        assert(keys_lt(l, rk));
         lemma_keys_cat(x, l, (k, v), rl, rk);
     }
     let t = mk(x, rk, rv, rr);
     proof {
-        assert(seq(t) =~= seq(l) + seq![(k, v)] + seq(r0));
+        lemma_seq_rot(seq(l), (k, v), seq(rl), (rk, rv), seq(rr));
     }
     (t, Ghost(3))
 }
@@ -480,7 +496,6 @@ fn rot_left2<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>) -> (res: (Tree<V>, Ghost<n
     }
     let rb = r.unwrap();
     let Node { key: rk, val: rv, h: _, left: rl, right: rr } = *rb;
-    let ghost rl0 = rl;
     let lb = rl.unwrap();
     let Node { key: lk, val: lv, h: _, left: rll, right: rlr } = *lb;
     let x = mk(l, k, v, rll);
@@ -491,11 +506,38 @@ fn rot_left2<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>) -> (res: (Tree<V>, Ghost<n
     }
     let t = mk(x, lk, lv, y);
     proof {
-        assert(seq(r0) == seq(rl0) + seq![(rk, rv)] + seq(rr));
-        assert(seq(rl0) == seq(rll) + seq![(lk, lv)] + seq(rlr));
-        assert(seq(t) =~= seq(l) + seq![(k, v)] + seq(r0));
+        lemma_seq_rot2(seq(l), (k, v), seq(rll), (lk, lv), seq(rlr), (rk, rv), seq(rr));
     }
     (t, Ghost(5))
+}
+
+/// The facts the single left rotation needs, on `r = Node(rl, rk, rr)` not leaning left.
+proof fn lemma_rot_single<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>)
+    requires
+        wf(l),
+        wf(r),
+        keys_lt(l, k),
+        keys_gt(r, k),
+        ht(r) == ht(l) + 2,
+        seq(l).len() + seq(r).len() + 1 < pow2(63),
+        r is Some ==> ht(r->0.left) <= ht(r->0.right),
+    ensures
+        r is Some,
+        ({
+            let (rk, rl, rr) = (r->0.key, r->0.left, r->0.right);
+            &&& wf(rl) && wf(rr)
+            &&& keys_gt(rl, k) && keys_lt(rl, rk) && keys_gt(rr, rk) && keys_lt(l, rk)
+            &&& k < rk
+            &&& ht(rl) <= ht(rr) && ht(rr) <= ht(rl) + 1 && ht(rr) == ht(l) + 1
+            &&& seq(l).len() + seq(rl).len() + 1 < pow2(63)
+            &&& seq(l).len() + seq(rl).len() + seq(rr).len() + 2 < pow2(63)
+            &&& seq(r) == seq(rl) + seq![(rk, r->0.val)] + seq(rr)
+        }),
+{
+    let (rk, rl, rr) = (r->0.key, r->0.left, r->0.right);
+    assert(wf(rl) && wf(rr) && keys_lt(rl, rk) && keys_gt(rr, rk));
+    lemma_seq_node(r);
+    lemma_keys_cat(r, rl, (rk, r->0.val), rr, k);
 }
 
 /// The facts the double left rotation needs, on `r = Node(Node(rll, lk, rlr), rk, rr)` leaning left.
@@ -522,6 +564,7 @@ proof fn lemma_rot_double<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>)
             &&& seq(l).len() + seq(rll).len() + 1 < pow2(63)
             &&& seq(rlr).len() + seq(rr).len() + 1 < pow2(63)
             &&& seq(l).len() + seq(rll).len() + seq(rlr).len() + seq(rr).len() + 3 < pow2(63)
+            &&& seq(r) == (seq(rll) + seq![(lk, rl->0.val)] + seq(rlr)) + seq![(rk, r->0.val)] + seq(rr)
         }),
 {
     let (rk, rl, rr) = (r->0.key, r->0.left, r->0.right);
@@ -578,20 +621,18 @@ fn rot_right1<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>) -> (res: (Tree<V>, Ghost<
         res.1@ <= 5,
 {
     let ghost l0 = l;
+    proof {
+        lemma_rot_single_mirror(l0, k, v, r);
+    }
     let lb = l.unwrap();
     let Node { key: lk, val: lv, h: _, left: ll, right: lr } = *lb;
-    proof {
-        assert(wf(ll) && wf(lr) && keys_lt(ll, lk) && keys_gt(lr, lk));
-        lemma_seq_node(l0);
-        lemma_keys_cat(l0, ll, (lk, lv), lr, k);
-    }
     let x = mk(lr, k, v, r);
     proof {
         lemma_keys_cat(x, lr, (k, v), r, lk);
     }
     let t = mk(ll, lk, lv, x);
     proof {
-        assert(seq(t) =~= seq(l0) + seq![(k, v)] + seq(r));
+        lemma_seq_rot(seq(ll), (lk, lv), seq(lr), (k, v), seq(r));
     }
     (t, Ghost(3))
 }
@@ -619,7 +660,6 @@ fn rot_right2<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>) -> (res: (Tree<V>, Ghost<
     }
     let lb = l.unwrap();
     let Node { key: lk, val: lv, h: _, left: ll, right: lr } = *lb;
-    let ghost lr0 = lr;
     let rb = lr.unwrap();
     let Node { key: rk, val: rv, h: _, left: lrl, right: lrr } = *rb;
     let x = mk(ll, lk, lv, lrl);
@@ -630,11 +670,38 @@ fn rot_right2<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>) -> (res: (Tree<V>, Ghost<
     }
     let t = mk(x, rk, rv, y);
     proof {
-        assert(seq(l0) == seq(ll) + seq![(lk, lv)] + seq(lr0));
-        assert(seq(lr0) == seq(lrl) + seq![(rk, rv)] + seq(lrr));
-        assert(seq(t) =~= seq(l0) + seq![(k, v)] + seq(r));
+        lemma_seq_rot2(seq(ll), (lk, lv), seq(lrl), (rk, rv), seq(lrr), (k, v), seq(r));
     }
     (t, Ghost(5))
+}
+
+/// The facts the single right rotation needs, on `l = Node(ll, lk, lr)` not leaning right.
+proof fn lemma_rot_single_mirror<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>)
+    requires
+        wf(l),
+        wf(r),
+        keys_lt(l, k),
+        keys_gt(r, k),
+        ht(l) == ht(r) + 2,
+        seq(l).len() + seq(r).len() + 1 < pow2(63),
+        l is Some ==> ht(l->0.right) <= ht(l->0.left),
+    ensures
+        l is Some,
+        ({
+            let (lk, ll, lr) = (l->0.key, l->0.left, l->0.right);
+            &&& wf(ll) && wf(lr)
+            &&& keys_lt(ll, lk) && keys_gt(lr, lk) && keys_lt(lr, k) && keys_gt(r, lk)
+            &&& lk < k
+            &&& ht(lr) <= ht(ll) && ht(ll) <= ht(lr) + 1 && ht(ll) == ht(r) + 1
+            &&& seq(lr).len() + seq(r).len() + 1 < pow2(63)
+            &&& seq(ll).len() + seq(lr).len() + seq(r).len() + 2 < pow2(63)
+            &&& seq(l) == seq(ll) + seq![(lk, l->0.val)] + seq(lr)
+        }),
+{
+    let (lk, ll, lr) = (l->0.key, l->0.left, l->0.right);
+    assert(wf(ll) && wf(lr) && keys_lt(ll, lk) && keys_gt(lr, lk));
+    lemma_seq_node(l);
+    lemma_keys_cat(l, ll, (lk, l->0.val), lr, k);
 }
 
 /// The facts the double right rotation needs, on `l = Node(ll, lk, Node(lrl, rk, lrr))` leaning right.
@@ -661,6 +728,7 @@ proof fn lemma_rot_double_mirror<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>)
             &&& seq(ll).len() + seq(lrl).len() + 1 < pow2(63)
             &&& seq(lrr).len() + seq(r).len() + 1 < pow2(63)
             &&& seq(ll).len() + seq(lrl).len() + seq(lrr).len() + seq(r).len() + 3 < pow2(63)
+            &&& seq(l) == seq(ll) + seq![(lk, l->0.val)] + (seq(lrl) + seq![(rk, lr->0.val)] + seq(lrr))
         }),
 {
     let (lk, ll, lr) = (l->0.key, l->0.left, l->0.right);
@@ -786,10 +854,12 @@ pub fn join<V>(a: Tree<V>, k: u64, v: V, b: Tree<V>) -> (r: (Tree<V>, Ghost<nat>
         wf(r.0),
         seq(r.0) == seq(a) + seq![(k, v)] + seq(b),
         vstd::math::max(ht(a) as int, ht(b) as int) <= ht(r.0) <= vstd::math::max(ht(a) as int, ht(b) as int) + 1,
+        ht(a) <= ht(b) + 1 && ht(b) <= ht(a) + 1 ==> ht(r.0) == vstd::math::max(ht(a) as int, ht(b) as int) + 1,
         r.1@ <= c_join() * (vstd::math::abs(ht(a) - ht(b)) + 1),
     decreases ht(a) + ht(b),
 {
     let ghost (a0, b0) = (a, b);
+    let ghost mut work: nat = 1;
     let ha = height(&a);
     let hb = height(&b);
     if ha > hb && ha - hb > 1 {
@@ -803,7 +873,10 @@ pub fn join<V>(a: Tree<V>, k: u64, v: V, b: Tree<V>) -> (r: (Tree<V>, Ghost<nat>
             lemma_join_right(a0, k, v, b0, c);
         }
         let (t, Ghost(bc)) = bal(al, ak, av, c);
-        (t, Ghost(1 + cc + bc))
+        proof {
+            work = work + cc + bc;
+        }
+        (t, Ghost(work))
     } else if hb > ha && hb - ha > 1 {
         let n = b.unwrap();
         let Node { key: bk, val: bv, h: _, left: bl, right: br } = *n;
@@ -815,9 +888,12 @@ pub fn join<V>(a: Tree<V>, k: u64, v: V, b: Tree<V>) -> (r: (Tree<V>, Ghost<nat>
             lemma_join_left(a0, k, v, b0, c);
         }
         let (t, Ghost(bc)) = bal(c, bk, bv, br);
-        (t, Ghost(1 + cc + bc))
+        proof {
+            work = work + cc + bc;
+        }
+        (t, Ghost(work))
     } else {
-        (mk(a, k, v, b), Ghost(1))
+        (mk(a, k, v, b), Ghost(work))
     }
 }
 
