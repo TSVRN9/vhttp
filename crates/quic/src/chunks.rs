@@ -2561,8 +2561,7 @@ proof fn lemma_gather_pop(
 /// and is not `Lc`), then `B`'s first chunk into `mv` if it starts where the merged bytes end and holds fewer than
 /// `K`. `me2` ends the merged bytes; `rest` is `z` then what is left of `B`.
 fn gather(m: Tree<Vec<u8>>, b: Tree<Vec<u8>>, _s: u64, e: u64, _s0: u64, lc: bool) -> (r: (
-    Vec<(u64, Vec<u8>)>,
-    Option<(u64, Vec<u8>)>,
+    (Vec<(u64, Vec<u8>)>, Option<(u64, Vec<u8>)>),
     Tree<Vec<u8>>,
     u64,
     Ghost<nat>,
@@ -2574,13 +2573,13 @@ fn gather(m: Tree<Vec<u8>>, b: Tree<Vec<u8>>, _s: u64, e: u64, _s0: u64, lc: boo
         keys_ge(b, e),
         mfacts(mp(seq(m)), mp(seq(b)), _s0 as nat, _s as nat, e as nat, lc),
     ensures
-        gat(mp(r.0@), zs(r.1) + mp(seq(r.2)), mp(seq(m)), mp(seq(b)), _s0 as nat, r.3 as nat, _s as nat, e as nat, lc),
-        crate::avl::wf(r.2),
-        ht(r.2) <= ht(b),
-        seq(r.2).len() <= seq(b).len(),
-        r.1 is Some ==> (r.1->0).0 == r.3 && keys_gt(r.2, r.3),
-        r.1 is None ==> keys_ge(r.2, r.3),
-        r.4@ <= 4 * seq(m).len() + 7 * (ht(b) + 1) + 3,
+        gat(mp(r.0.0@), zs(r.0.1) + mp(seq(r.1)), mp(seq(m)), mp(seq(b)), _s0 as nat, r.2 as nat, _s as nat, e as nat, lc),
+        crate::avl::wf(r.1),
+        ht(r.1) <= ht(b),
+        seq(r.1).len() <= seq(b).len(),
+        r.0.1 is Some ==> (r.0.1->0).0 == r.2 && keys_gt(r.1, r.2),
+        r.0.1 is None ==> keys_ge(r.1, r.2),
+        r.3@ <= 4 * seq(m).len() + 7 * (ht(b) + 1) + 3,
 {
     let ghost fm = mp(seq(m));
     let ghost fb = mp(seq(b));
@@ -2619,7 +2618,7 @@ fn gather(m: Tree<Vec<u8>>, b: Tree<Vec<u8>>, _s: u64, e: u64, _s0: u64, lc: boo
                     assert(fb[j].0 == seq(b)[j].0);
                 }
             }
-            return (mv, z, b, me, Ghost(work));
+            return ((mv, z), b, me, Ghost(work));
         } else if ze > e {
             me = ze;
         }
@@ -2651,7 +2650,7 @@ fn gather(m: Tree<Vec<u8>>, b: Tree<Vec<u8>>, _s: u64, e: u64, _s0: u64, lc: boo
                     assert(mp(seq(b2))[j].0 == seq(b2)[j].0);
                 }
             }
-            return (mv, z, b2, me + wl as u64, Ghost(work));
+            return ((mv, z), b2, me + wl as u64, Ghost(work));
         }
     }
     proof {
@@ -2661,7 +2660,7 @@ fn gather(m: Tree<Vec<u8>>, b: Tree<Vec<u8>>, _s: u64, e: u64, _s0: u64, lc: boo
         lemma_gather_nopop(fm, fb, _s0 as nat, _s as nat, e as nat, lc, me as nat);
         assert(zs(z) + fb =~= fb);
     }
-    (mv, z, b, me, Ghost(work))
+    ((mv, z), b, me, Ghost(work))
 }
 
 /// Chunks all starting in `[a, b]` all count in `nm`.
@@ -3039,12 +3038,8 @@ proof fn lemma_open_end(
 /// D3 steps 1-4 on the tree `t` of chunks `f`: find `Lc`, split at `s0` and at `e` into `A`, `M`, `B`, and gather
 /// `M` (and maybe `B`'s first chunk) into `mv`. Returns `A`, `mv`, the kept `Rc`, what is left of `B`, `s0`, `me2`.
 fn open_up(t: Tree<Vec<u8>>, s: u64, e: u64, _f: Ghost<Seq<(nat, Seq<u8>)>>) -> (r: (
-    Tree<Vec<u8>>,
-    Vec<(u64, Vec<u8>)>,
-    Option<(u64, Vec<u8>)>,
-    Tree<Vec<u8>>,
-    u64,
-    u64,
+    (Tree<Vec<u8>>, Vec<(u64, Vec<u8>)>, Option<(u64, Vec<u8>)>, Tree<Vec<u8>>),
+    (u64, u64),
     Ghost<nat>,
 ))
     requires
@@ -3055,17 +3050,17 @@ fn open_up(t: Tree<Vec<u8>>, s: u64, e: u64, _f: Ghost<Seq<(nat, Seq<u8>)>>) -> 
         s < e <= VARINT_MAX,
     ensures
         ({
-            let (a, cl, z, b2, s0, me2) = (r.0, mp(r.1@), r.2, r.3, r.4 as nat, r.5 as nat);
+            let (a, cl, z, b2, s0, me2) = (r.0.0, mp(r.0.1@), r.0.2, r.0.3, r.1.0 as nat, r.1.1 as nat);
             let (fa, rest) = (mp(seq(a)), zs(z) + mp(seq(b2)));
             &&& opened(_f@, fa, cl, rest, s0, me2, s as nat, e as nat)
             &&& s0 <= s < me2 <= VARINT_MAX
-            &&& crate::avl::wf(a) && keys_lt(a, r.4) && ht(a) <= ht(t)
+            &&& crate::avl::wf(a) && keys_lt(a, r.1.0) && ht(a) <= ht(t)
             &&& crate::avl::wf(b2) && ht(b2) <= ht(t)
-            &&& z is Some ==> (z->0).0 == r.5 && keys_gt(b2, r.5)
-            &&& z is None ==> keys_ge(b2, r.5)
+            &&& z is Some ==> (z->0).0 == r.1.1 && keys_gt(b2, r.1.1)
+            &&& z is None ==> keys_ge(b2, r.1.1)
             &&& seq(a).len() + seq(b2).len() <= _f@.len()
         }),
-        r.6@ <= 82 * (ht(t) + 1) + 4 * (e - s) + 4,
+        r.2@ <= 82 * (ht(t) + 1) + 4 * (e - s) + 4,
 {
     let ghost _f = _f@;
     let ghost mut work: nat = 1;
@@ -3096,13 +3091,13 @@ fn open_up(t: Tree<Vec<u8>>, s: u64, e: u64, _f: Ghost<Seq<(nat, Seq<u8>)>>) -> 
         }
         lemma_mfacts(_f, fa, fm, fb, s0 as nat, s as nat, e as nat, lc);
     }
-    let (mv, z, b2, me2, Ghost(c3)) = gather(m, b, s, e, s0, lc);
+    let ((mv, z), b2, me2, Ghost(c3)) = gather(m, b, s, e, s0, lc);
     proof {
         lemma_open_end(_f, fa, fm, fb, mp(mv@), zs(z) + mp(seq(b2)), s0 as nat, me2 as nat, s as nat, e as nat, lc);
         assert(c_split6() == 37);
         work = work + c0 + c1 + c2 + c3;
     }
-    (a, mv, z, b2, s0, me2, Ghost(work))
+    ((a, mv, z, b2), (s0, me2), Ghost(work))
 }
 
 /// The pieces' starts lie in `[s0, me2)`.
@@ -3435,7 +3430,7 @@ impl Chunks {
             lemma2_to64_rest();
         }
         let t = self.t.take();
-        let (a, mv, z, b2, s0, me2, Ghost(c1)) = open_up(t, s, e, Ghost(f));
+        let ((a, mv, z, b2), (s0, me2), Ghost(c1)) = open_up(t, s, e, Ghost(f));
         let ghost fa = mp(seq(a));
         let ghost cl = mp(mv@);
         let ghost rest = zs(z) + mp(seq(b2));
