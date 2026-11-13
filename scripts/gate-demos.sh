@@ -675,6 +675,13 @@ fresh rfcq; printf 'pub struct DemoT {}\nimpl DemoT {\n    pub const DEMO_K: u64
 sed -i 's/^    ||| c == FLOW_CONTROL_ERROR && flow_trigger(s, off + len, fin, conn_room)$/& \&\& c != DemoT::DEMO_K/' "$qx/recv_stream.rs"; qredig
 sed -i 's/^    pub const DEMO_K: u64 = 3;$/    pub const DEMO_K: u64 = 4;/' "$qx/recv_stream.rs"
 expect_fail "rfc-quantity: an associated constant read as Type::NAME changes (digests re-pinned)" "re-review the vouches for $RR" rqn
+# a type the gate cannot find (a generic parameter, a macro-made type) whose NAME is a constant of ours fails closed
+fresh rfcq; printf 'pub trait DemoTr {\n    const DEMO_K: u64 = 3;\n}\n' >> "$qx/recv_stream.rs"
+sed -i 's/^    ||| c == FLOW_CONTROL_ERROR && flow_trigger(s, off + len, fin, conn_room)$/& \&\& c != T::DEMO_K/' "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: T::NAME with T a generic parameter and NAME a trait constant of ours" "is no type the gate can find" rq
+fresh rfcq; printf 'macro_rules! mk {\n    ($n:ident) => { pub struct $n {} impl $n { pub const DEMO_K: u64 = 3; } }\n}\nmk!(DemoQ);\n' >> "$qx/recv_stream.rs"
+sed -i 's/^    ||| c == FLOW_CONTROL_ERROR && flow_trigger(s, off + len, fin, conn_room)$/& \&\& c != DemoQ::DEMO_K/' "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: Type::NAME with a macro-made Type and NAME a constant of ours" "is no type the gate can find" rq
 fresh rfcq; sed -i '/^pub const FLOW_CONTROL_ERROR: u64 = 0x03;$/d' "$qx/recv_stream.rs"
 sed -i 's/^pub const MAX_CRYPTO_BUFFER: u64 = 16384;$/&\npub const FLOW_CONTROL_ERROR: u64 = 0x03;/' "$qx/crypto_stream.rs"
 sed -i 's/^use vstd::prelude::\*;$/&\nuse crate::crypto_stream::FLOW_CONTROL_ERROR;/' "$qx/recv_stream.rs"

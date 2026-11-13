@@ -62,7 +62,10 @@
   name, or a name a `use` line imports, `use a::{self}` included) to exactly one item, else fails. A path ending in a
   type, `T::NAME` (also `T::<..>::NAME`), or `Self::NAME` (the enclosing impl's type, and the trait it implements)
   resolves to exactly one associated item of that name, else fails; a `T` that no struct, enum, union, trait or type
-  alias in the crates' src/ declares (a std or vstd type) is not ours and its constant is not hashed. A qualified-self
+  alias in the crates' src/ declares (a std or vstd type, but also a generic parameter or a type a macro names) fails
+  when any item or associated constant of ours is called NAME, and otherwise is not hashed (a name we never define
+  cannot be ours; the 2026-11-13 final check found the generic-parameter and macro-made-type fail-opens of the earlier
+  "not ours" rule, gate demos "T::NAME with T a generic parameter..." and "...a macro-made Type..."). A qualified-self
   read `<T as Tr>::NAME` of a name one of our items has fails (not resolved). A path rooted in vstd, std or a primitive
   type is not hashed.
 - Other gates sharing the scan: `acceptance` (src/ only, refusing `verus!` elsewhere); `cost_charge` reads a fixed file

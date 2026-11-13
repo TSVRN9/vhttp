@@ -525,7 +525,14 @@ class Gate:
                 if blk is None: raise Fail('%s reads Self::%s outside an impl or trait; refused' % (os.path.relpath(f, self.root), name))
                 last, tr = blk[2], blk[3]
             elif last not in self._types:
-                return None  # a type outside the crates (vstd, std): not one of ours
+                # No declaration of ours names `last`: a std/vstd type, but also a generic parameter or a macro-made
+                # type, which may resolve to one of ours. Fail closed whenever any of our items or associated
+                # constants is called `name`; only a name we never define is safely not ours.
+                if any(a[0] == name for its in self._assoc.values() for a in its) or \
+                        any(d[0] == name for its in self.items().values() for d in its):
+                    raise Fail('%s reads %s: %s is no type the gate can find, and a constant of ours is called %s; '
+                               'refused' % (os.path.relpath(f, self.root), '::'.join(segs + [name]), last, name))
+                return None
             ds = [a for (c, t), its in self._assoc.items() if t in (last, tr) for a in its if a[0] == name]
             d = self.one(f, name, ds, '::'.join(segs) + '::')
             if d is None:
