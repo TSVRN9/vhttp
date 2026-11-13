@@ -670,6 +670,29 @@ fresh rfcq; mkdir -p "$tmp/rfcq/crates/aux/src"; printf 'pub const AUX_ONLY: u64
 sed -i 's/^    ||| c == FLOW_CONTROL_ERROR && flow_trigger(s, off + len, fin, conn_room)$/& \&\& c != aux::AUX_ONLY/' "$qx/recv_stream.rs"; qredig
 sed -i 's/= 7;/= 8;/' "$tmp/rfcq/crates/aux/src/lib.rs"
 expect_fail "rfc-quantity: a path-qualified constant no import names changes (digests re-pinned)" "re-review the vouches for $RR" rqn
+# associated constants: `Type::NAME` hashes exactly that impl's item; a bare name never resolves to one
+fresh rfcq; printf 'pub struct DemoT {}\nimpl DemoT {\n    pub const DEMO_K: u64 = 3;\n}\n' >> "$qx/recv_stream.rs"
+sed -i 's/^    ||| c == FLOW_CONTROL_ERROR && flow_trigger(s, off + len, fin, conn_room)$/& \&\& c != DemoT::DEMO_K/' "$qx/recv_stream.rs"; qredig
+sed -i 's/^    pub const DEMO_K: u64 = 3;$/    pub const DEMO_K: u64 = 4;/' "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: an associated constant read as Type::NAME changes (digests re-pinned)" "re-review the vouches for $RR" rqn
+fresh rfcq; sed -i '/^pub const FLOW_CONTROL_ERROR: u64 = 0x03;$/d' "$qx/recv_stream.rs"
+sed -i 's/^pub const MAX_CRYPTO_BUFFER: u64 = 16384;$/&\npub const FLOW_CONTROL_ERROR: u64 = 0x03;/' "$qx/crypto_stream.rs"
+sed -i 's/^use vstd::prelude::\*;$/&\nuse crate::crypto_stream::FLOW_CONTROL_ERROR;/' "$qx/recv_stream.rs"
+printf 'pub struct DemoT {}\nimpl DemoT {\n    pub const FLOW_CONTROL_ERROR: u64 = 9;\n}\n' >> "$qx/recv_stream.rs"
+expect_pass "rfc-quantity: a bare name with an associated and an imported constant resolves to the imported one" rq
+# modules: an inline `mod a {}`'s constant is not the file's own; a #[cfg(test)] module, inline or a file, is not read
+fresh rfcq; printf 'mod a {\n    pub const FLOW_CONTROL_ERROR: u64 = 9;\n}\n' >> "$qx/recv_stream.rs"
+expect_pass "rfc-quantity: an inline module's constant is not the file's own" rq
+fresh rfcq; sed -i '/^pub const FLOW_CONTROL_ERROR: u64 = 0x03;$/d' "$qx/recv_stream.rs"
+sed -i 's/^pub const MAX_CRYPTO_BUFFER: u64 = 16384;$/&\npub const FLOW_CONTROL_ERROR: u64 = 0x03;/' "$qx/crypto_stream.rs"
+printf '#[cfg(test)]\nmod tests {\n    pub const FLOW_CONTROL_ERROR: u64 = 9;\n}\n#[cfg(all(test, feature = "x"))]\nmod t2;\n' >> "$qx/tp.rs"
+mkdir -p "$qx/tp"; printf 'pub const FLOW_CONTROL_ERROR: u64 = 8;\n' > "$qx/tp/t2.rs"
+expect_pass "rfc-quantity: test modules (inline, and a file declared #[cfg(all(test, ..))]) are not read" rq
+# `use a::{self}` imports `a`: `a::NAME` resolves through it
+fresh rfcq; sed -i 's/^use vstd::prelude::\*;$/&\nuse crate::{crypto_stream::{self}};/' "$qx/recv_stream.rs"
+sed -i 's/^    ||| c == FLOW_CONTROL_ERROR && flow_trigger(s, off + len, fin, conn_room)$/& \&\& c != crypto_stream::MAX_CRYPTO_BUFFER/' "$qx/recv_stream.rs"; qredig
+sed -i 's/^pub const MAX_CRYPTO_BUFFER: u64 = 16384;$/pub const MAX_CRYPTO_BUFFER: u64 = 0;/' "$qx/crypto_stream.rs"
+expect_fail "rfc-quantity: a constant read through a \`use a::{self}\` module changes (digests re-pinned)" "re-review the vouches for $RR" rqn
 fresh rfcq; sed -i 's/^    ||| end > s.limit$/& || s.high > 0 \/\/ rfc-quantity: s.limit: the largest maximum stream data sent (RFC 9000 §19.10)/' "$qx/recv_stream.rs"
 sed -i '/\ts\.limit\t/d' "$qop"; qredig
 expect_fail "rfc-quantity: probe I, s.high on a line whose annotation names s.limit (digests re-pinned)" "flow_trigger (from recv_allowed_err) reads \`s.high\`" rqn

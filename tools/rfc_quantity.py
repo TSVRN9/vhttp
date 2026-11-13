@@ -35,8 +35,9 @@ reason relies on outside the walk: what the model pushes, an invariant, a wf tie
 `const`/`static` item that text names, read from the crates' src/ only (an inline `mod` is its own module, a
 #[cfg(test)] one is skipped), each item whole (to its first `;` outside brackets); a bare name resolves from the module
 of the text that names it: its own item, else what its `use` lines import (explicit, then glob, `pub use` followed),
-else its crate's; `a::b::NAME` resolves through the path to exactly one item; more than one candidate, or a path to no
-item, fails closed, and a generic parameter `<const N: ..>` is no item (RCA 2026-11-13-gate-scan-scope); each fn's text
+else its crate's (never an associated constant); `a::b::NAME` resolves through the path, and `T::NAME`/`Self::NAME` to
+the type's associated item, to exactly one item; more than one candidate, a path to no item, or `<T as Tr>::NAME` fails
+closed, and a generic parameter `<const N: ..>` is no item (RCA 2026-11-13-gate-scan-scope); each fn's text
 starts after the item before it, so its attributes
 and doc comment are in, and comments and annotations are included. A `use .. as` rename of a name
 that text uses, in a file holding any of it, is refused (the gate reads names, not what they stand
@@ -81,6 +82,7 @@ IDENT = re.compile(r'(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*')
 EXTERNAL = {'vstd', 'std', 'core', 'alloc', 'builtin', 'verus_builtin', 'vest_lib', 'u8', 'u16', 'u32', 'u64', 'u128', 'usize',
             'i8', 'i16', 'i32', 'i64', 'i128', 'isize', 'f32', 'f64', 'bool', 'char', 'str', 'nat', 'int'}
 # a `const`/`static` (Verus: `spec const`) item's head; a match after `<` or `,` is a generic parameter, skipped in items()
+TEST_CFG = re.compile(r'#\s*\[\s*cfg\s*\(\s*(?:test\s*\)|all\s*\((?:[^()]|\([^()]*\))*(?<![A-Za-z0-9_])test(?![A-Za-z0-9_]))')
 ITEM = re.compile(r'(?<![A-Za-z0-9_])((?:pub(?:\s*\([^)]*\))?\s+)?)((?:spec\s+|exec\s+|proof\s+)?)(?:const|static)\s+(?:mut\s+)?([A-Z][A-Z0-9_]*)\s*:')
 
 
@@ -302,35 +304,61 @@ class Gate:
     def items(self):
         """Index the crates' src/ (acceptance.rs_files) by module: {(crate, module path): [(NAME, visibility, key, raw
         text)]} of every `const`/`static` ITEM (a generic parameter `<const N: usize>` is not one), each ended at its first
-        `;` outside brackets (`[u8; 2]` is inside). An inline `mod NAME {` is its own module; a `#[cfg(test)]` one is not
-        indexed (test code, like tests/)."""
+        `;` outside brackets (`[u8; 2]` is inside). An inline `mod NAME {` is its own module; a test module (`#[cfg(test)]`
+        or `#[cfg(all(test, ..))]` on `mod NAME {` or on `mod NAME;`, which takes the file and everything under it) is not
+        indexed (test code, like tests/). A const in an `impl` or `trait` block is an associated item, kept apart in
+        self._assoc {(crate, type or trait name): [(NAME, visibility, key, raw text, trait or None)]}: a bare name never
+        resolves to one."""
         if not hasattr(self, '_items'):
             self._items, self._fmod, self._mod, self._inline, self._crates = {}, {}, {}, {}, set()
-            for crate, rel, f in self.acc.rs_files(self.root):
+            self._assoc, self._blocks, self._types, tests = {}, {}, set(), set()
+            files = list(self.acc.rs_files(self.root))
+            for crate, rel, f in files:
                 st = self.src(f)
                 parts = rel.split(os.sep)[1:]
                 parts[-1] = parts[-1][:-3]
                 if parts[-1] in ('lib', 'main', 'mod'): parts = parts[:-1]
-                fm = (crate, tuple(parts))
-                self._fmod[f] = fm
-                self._mod.setdefault(fm, (f, 0, len(st)))
+                self._fmod[f] = (crate, tuple(parts))
                 self._crates.add(crate)
                 inl = self._inline[f] = []  # (lo, hi, module, test): an inline module's braces, outer ones first
-                for m in re.finditer(r'(?<![A-Za-z0-9_])mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{', st):
+                for m in re.finditer(r'(?<![A-Za-z0-9_])mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*([{;])', st):
+                    outer = self.mod_at(f, m.start())
+                    test = TEST_CFG.search(self.attrs(st, m.start())) is not None or outer is None
+                    key = (crate, outer[1] + (m.group(1),)) if outer else None
+                    if m.group(2) == ';':
+                        if test and key: tests.add(key)
+                        continue
                     e = self.acc.match_brace(st, m.end() - 1)
                     if e < 0: raise Fail('%s: unbalanced `mod %s {`' % (os.path.relpath(f, self.root), m.group(1)))
-                    outer = self.mod_at(f, m.start())
-                    j = max(st.rfind(';', 0, m.start()), st.rfind('}', 0, m.start()), st.rfind('{', 0, m.start()))
-                    test = bool(re.search(r'#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]', st[j + 1:m.start()])) or outer is None
-                    key = (crate, outer[1] + (m.group(1),)) if outer else None
                     inl.append((m.end(), e - 1, key, test))
-                    if not test: self._mod.setdefault(key, (f, m.end(), e - 1))
+            for crate, rel, f in files:
+                fm = self._fmod[f]
+                if any(fm[0] == t[0] and fm[1][:len(t[1])] == t[1] for t in tests): continue  # a `#[cfg(test)] mod x;` file
+                st = self.src(f)
+                self._mod.setdefault(fm, (f, 0, len(st)))
+                for lo, hi, key, test in self._inline[f]:
+                    if key and not test and self.mod_at(f, lo) == key: self._mod.setdefault(key, (f, lo, hi))
+                for m in re.finditer(r'(?<![A-Za-z0-9_])(?:struct|enum|union|trait|type)\s+([A-Za-z_][A-Za-z0-9_]*)', st):
+                    if self.mod_at(f, m.start()) is not None: self._types.add(m.group(1))
+                blocks = self._blocks[f] = []  # (lo, hi, type or trait name, trait or None)
+                for m in re.finditer(r'(?<![A-Za-z0-9_])(impl|trait)\b', st):
+                    j = m.start() - 1
+                    while j >= 0 and st[j].isspace(): j -= 1
+                    w = re.search(r'([A-Za-z_][A-Za-z0-9_]*)$', st[:j + 1])
+                    if not (j < 0 or st[j] in ';{}]' or (w and w.group(1) in ('pub', 'unsafe')) or st[j] == ')'): continue
+                    b = st.find('{', m.end())
+                    if b < 0 or ';' in st[m.end():b]: continue
+                    e = self.acc.match_brace(st, b)
+                    if e < 0: raise Fail('%s: unbalanced `%s` block' % (os.path.relpath(f, self.root), m.group(1)))
+                    name, tr = self.block_type(st[m.end():b], m.group(1) == 'trait')
+                    if name is None: raise Fail('%s:%d: cannot read the `%s` header' % (os.path.relpath(f, self.root), self.line(f, m.start()), m.group(1)))
+                    blocks.append((b + 1, e - 1, name, tr))
                 for m in ITEM.finditer(st):
                     j = m.start() - 1
                     while j >= 0 and st[j].isspace(): j -= 1
                     if j >= 0 and st[j] not in ';{}]': continue  # `<const N: ..>`, `, const M: ..`: a generic parameter
                     mod = self.mod_at(f, m.start())
-                    if mod is None: continue  # inside a #[cfg(test)] module
+                    if mod is None: continue  # inside a test module
                     e, d = m.end(), 0
                     while e < len(st) and not (st[e] == ';' and d == 0):
                         if st[e] in '([{': d += 1
@@ -339,12 +367,58 @@ class Gate:
                     if e >= len(st) or d < 0: raise Fail('%s: const %s: no `;` ends it' % (os.path.relpath(f, self.root), m.group(3)))
                     v = m.group(1).split()
                     vis = 'priv' if not v else ('pub' if m.group(1).strip() == 'pub' else 'crate')
-                    self._items.setdefault(mod, []).append((m.group(3), vis, (f, m.start()), self.rawstr[f][m.end(2):e + 1]))
+                    it = (m.group(3), vis, (f, m.start()), self.rawstr[f][m.end(2):e + 1])
+                    blk = self.block_at(f, m.start())
+                    if blk: self._assoc.setdefault((mod[0], blk[2]), []).append(it + (blk[3],))
+                    else: self._items.setdefault(mod, []).append(it)
         return self._items
+
+    @staticmethod
+    def attrs(st, off):
+        """The text between the item before offset off and off: its attributes."""
+        j = max(st.rfind(';', 0, off), st.rfind('}', 0, off), st.rfind('{', 0, off))
+        return st[j + 1:off]
+
+    @staticmethod
+    def block_type(h, trait):
+        """(type name, trait name or None) of an `impl` header `<..> Tr<..> for T<..> where ..`, or (Tr, None) of a
+        `trait Tr<..>: .. where ..` header; (None, None) when unreadable."""
+        if trait:
+            m = re.match(r'\s*([A-Za-z_][A-Za-z0-9_]*)', h)
+            return (m.group(1), None) if m else (None, None)
+        h, d = h.strip(), 0
+        if h.startswith('<'):  # the impl's own generics
+            for i, c in enumerate(h):
+                d += (c == '<') - (c == '>')
+                if d == 0:
+                    h = h[i + 1:]
+                    break
+        d, tr, lo, hi = 0, None, 0, len(h)
+        for i, c in enumerate(h):  # a top-level ` for ` splits trait and type; `where` ends the type
+            d += (c in '<([') - (c in '>)]')
+            w = re.match(r'(for|where)(?![A-Za-z0-9_])', h[i:])
+            if d == 0 and w and (i == 0 or not (h[i - 1].isalnum() or h[i - 1] == '_')):
+                if w.group(1) == 'for' and tr is None:
+                    tr, lo = h[:i], i + 3
+                else:
+                    hi = i
+                    break
+
+        def last(x):
+            ids = re.findall(r'[A-Za-z_][A-Za-z0-9_]*', re.sub(r"'[A-Za-z_]+|\bmut\b|\bdyn\b", ' ', re.sub(r'<.*', '', x, flags=re.S)))
+            return ids[-1] if ids else None
+        return (last(h[lo:hi]), last(tr) if tr else None)
+
+    def block_at(self, f, off):
+        """The innermost `impl`/`trait` block (lo, hi, type, trait) around offset off of file f, or None."""
+        best = None
+        for b in self._blocks.get(f, []):
+            if b[0] <= off < b[1] and (best is None or b[0] > best[0]): best = b
+        return best
 
     def mod_at(self, f, off):
         """The module holding offset off of file f: the innermost inline `mod` around it, else the file's; None inside a
-        #[cfg(test)] module."""
+        test module."""
         best = (self._fmod[f], -1)
         for lo, hi, key, test in self._inline.get(f, []):
             if lo <= off < hi and lo > best[1]: best = (None if test else key, lo)
@@ -381,6 +455,7 @@ class Gate:
                     return [(path, None, False)], i
                 raise Fail('%s: cannot read `use %s`' % (os.path.relpath(f, self.root), u.group(2).strip()))
             for path, alias, glob in tree(0, [])[0]:
+                if path[-1:] == ['self'] and len(path) > 1: path = path[:-1]  # `use a::{self}` imports `a`
                 out.append((path, alias, glob, bool(u.group(1))))
         return out
 
@@ -442,12 +517,27 @@ class Gate:
         """The definition `a::b::NAME` names from text at offset off of file f: exactly one, or Fail; None when the path
         leads outside the crates (vstd, std, a primitive or a type's associated constant)."""
         mod = self.mod_at(f, off) or self._fmod[f]
+        last = segs[-1]
+        if last == 'Self' or last[:1].isupper():  # `Type::NAME`, `Self::NAME`: an associated constant
+            tr = None
+            if last == 'Self':
+                blk = self.block_at(f, off)
+                if blk is None: raise Fail('%s reads Self::%s outside an impl or trait; refused' % (os.path.relpath(f, self.root), name))
+                last, tr = blk[2], blk[3]
+            elif last not in self._types:
+                return None  # a type outside the crates (vstd, std): not one of ours
+            ds = [a for (c, t), its in self._assoc.items() if t in (last, tr) for a in its if a[0] == name]
+            d = self.one(f, name, ds, '::'.join(segs) + '::')
+            if d is None:
+                raise Fail('%s reads %s: no associated constant of ours by that name; refused' % (
+                    os.path.relpath(f, self.root), '::'.join(segs + [name])))
+            return d
         target = self.module(mod, segs)
         if target is None:
             imp = [p for p, a, g, _ in self.uses(mod) if not g and (a or p[-1]) == segs[0]]
             if len(imp) == 1: target = self.module(mod, imp[0] + segs[1:])
         if target is None:
-            if segs[0] in EXTERNAL or segs[0][:1].isupper(): return None
+            if segs[0] in EXTERNAL: return None
             raise Fail('%s reads %s: the path names no module the gate can find; refused' % (
                 os.path.relpath(f, self.root), '::'.join(segs + [name])))
         d = self.one(f, name, self.visible(target, name, mod, frozenset()), '::'.join(segs) + '::')
@@ -476,7 +566,7 @@ class Gate:
                     if r.group(2) in toks:
                         raise Fail('%s: `use .. %s` renames a name that the text %s rests on uses: the gate reads and hashes '
                                    'the name, not the item it stands for; refused' % (os.path.relpath(f, self.root), r.group(0), rp))
-        names = {d[0] for its in self.items().values() for d in its}
+        names = {d[0] for its in list(self.items().values()) + list(self._assoc.values()) for d in its}
         used = {}  # NAME: {key: raw}, each definition resolved from where the text that names it sits
         for p in sorted(texts):
             t, (f, off) = texts[p], tsite[p]
@@ -484,11 +574,25 @@ class Gate:
                 n = m.group(0)
                 if n not in names: continue
                 segs, j = [], m.start()
-                while True:  # `a::b::NAME`: the path before it
+                while True:  # `a::b::NAME`: the path before it; `Foo::<T>::NAME` reads as `Foo::NAME`
                     k = j
                     while k > 0 and t[k - 1].isspace(): k -= 1
                     if t[k - 2:k] != '::': break
-                    q = re.search(r'([A-Za-z_][A-Za-z0-9_]*)\s*$', t[:k - 2])
+                    k -= 2
+                    while k > 0 and t[k - 1].isspace(): k -= 1
+                    if t[k - 1:k] == '>':
+                        dd, i = 0, k - 1
+                        while i >= 0:
+                            dd += (t[i] == '>') - (t[i] == '<')
+                            if dd == 0: break
+                            i -= 1
+                        i2 = i
+                        while i2 > 0 and t[i2 - 1].isspace(): i2 -= 1
+                        if i < 0 or t[i2 - 2:i2] != '::':
+                            raise Fail('%s reads %s through a qualified type (`<T as Tr>::`); the gate cannot resolve it; '
+                                       'refused' % (os.path.relpath(f, self.root), n))
+                        k = i2 - 2
+                    q = re.search(r'([A-Za-z_][A-Za-z0-9_]*)\s*$', t[:k])
                     if not q: break
                     segs.insert(0, q.group(1))
                     j = q.start()

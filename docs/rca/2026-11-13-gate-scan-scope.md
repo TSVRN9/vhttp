@@ -15,7 +15,9 @@
     and `H3_ALPN` next to quic's, in all seven roots.
   And a path-qualified read `a::b::NAME` was looked up by `NAME` alone, so another crate's constant named that way was
   hashed only if the bare name happened to match (fail open), and the reading crate's same-named one could be hashed in
-  its place.
+  its place. Associated constants (`impl T { const X .. }`) were read as module items, so a bare `X` could pin `T::X`,
+  and a read `T::X` or `Self::X` hashed whatever bare `X` resolved to (found in Task 1's round-4 review: a reviewer's
+  `DemoT::DEMO_K` changed from 3 to 4 left the digest unchanged).
 - **Incidents**: 2026-11-12, an untracked `crates/quic/examples/frags_measure.rs` (a 9b1 measurement) moved root digests;
   2026-11-13, `crates/quic/tests/input_cost.rs` and `crates/tls/tests/reader_cost.rs` (9b2 Task 1) defined `const A`,
   `const B`, `const G` and moved five digests (`quick: rfc-quantity failed`). Both times the gate asked for a re-review
@@ -45,17 +47,24 @@
   file, and the rfc-quantity annotation check still reads every file, so a stray `// rfc-quantity:` outside `src/`
   fails as stale.
 - `Gate.items()` indexes `const`/`static` (and Verus `spec const`) items only (a match after `<` or `,` is a generic
-  parameter and skipped), by module: an inline `mod NAME {` is its own module; a `#[cfg(test)]` module is not indexed,
-  so test constants are excluded wherever they live. Each item ends at its first `;` outside `()`, `[]` and `{}` (string
-  and char literals are blanked before the scan).
+  parameter and skipped), by module: an inline `mod NAME {` is its own module; a module whose attributes hold
+  `#[cfg(test)]` or `#[cfg(all(.., test, ..))]`, inline or declared `mod NAME;` (the file and everything under it), is
+  not indexed, so test constants are excluded wherever they live (a `cfg(any(test, ..))` module is indexed). Each item
+  ends at its first `;` outside `()`, `[]` and `{}` (string and char literals are blanked before the scan). A constant
+  inside an `impl` or `trait` block is an associated item, indexed apart by its type (the impl's self type, or the
+  trait); a bare name never resolves to one.
 - `Gate.const_of(name, file, offset)` resolves a bare name from the module holding the text: the module's own item; else
   what its `use` lines import (explicit, then glob, following `pub use`; `pub` items across crates, `pub(..)` within
   one, private ones into the module and its descendants); else an item anywhere in its crate. It never takes another
   crate's item that no `use` line imports. More than one candidate at the first level that has any fails ("reads the
   constant N, which names k definitions ...: ambiguous").
 - `Gate.const_at` resolves a qualified `a::b::NAME` through the path (`crate`, `self`, `super`, a child module, a crate
-  name, or a name a `use` line imports) to exactly one item, else fails; a path rooted outside the crates (vstd, std, a
-  primitive or a type, i.e. an associated constant) names none of ours and is not hashed.
+  name, or a name a `use` line imports, `use a::{self}` included) to exactly one item, else fails. A path ending in a
+  type, `T::NAME` (also `T::<..>::NAME`), or `Self::NAME` (the enclosing impl's type, and the trait it implements)
+  resolves to exactly one associated item of that name, else fails; a `T` that no struct, enum, union, trait or type
+  alias in the crates' src/ declares (a std or vstd type) is not ours and its constant is not hashed. A qualified-self
+  read `<T as Tr>::NAME` of a name one of our items has fails (not resolved). A path rooted in vstd, std or a primitive
+  type is not hashed.
 - Other gates sharing the scan: `acceptance` (src/ only, refusing `verus!` elsewhere); `cost_charge` reads a fixed file
   list (no name lookup); `quick.py scope` maps changed paths to crates (a test change still re-runs that crate, as it
   should); `escape-gate.sh` greps every `.rs` file (wider is the fail-closed direction). None looks a name up across
@@ -69,7 +78,12 @@ scripts/gate-demos.sh, RFC-quantity section, each checked against the tool befor
 - a bare constant two modules define, imported by neither, fails closed; the same constant imported explicitly resolves;
 - an array constant's value change moves the digest (passed before: Defect 2);
 - a path-qualified constant of another crate, same-named as the reading file's own, and one only that crate defines:
-  each value change moves the digest (both passed before).
+  each value change moves the digest (both passed before);
+- an associated constant read as `Type::NAME`: its value change moves the digest (passed before); a bare name with an
+  associated and an imported constant of that name resolves to the imported one (moved the digest before);
+- an inline module's constant is not the file's own (ambiguous before round 4); test modules, inline and a file
+  declared `#[cfg(all(test, ..))]`, are not read (ambiguous before); a constant read through a `use a::{self}` module
+  resolves and its value change moves the digest.
 
 ## Re-pin
 
