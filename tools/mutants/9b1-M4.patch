@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/frags.rs b/crates/quic/src/frags.rs
-index 4eccf9f..3e5d575 100644
+index a863411..36026a7 100644
 --- a/crates/quic/src/frags.rs
 +++ b/crates/quic/src/frags.rs
-@@ -1935,7 +1935,7 @@ spec fn zs(z: Option<(u64, Vec<u8>)>) -> Seq<(nat, Seq<u8>)> {
+@@ -1956,7 +1956,7 @@ spec fn zs(z: Option<(u64, Vec<u8>)>) -> Seq<(nat, Seq<u8>)> {
  /// The length of the next piece with `rem` merged bytes left: `CAP`, but the last two split evenly if the last would
  /// hold fewer than `K`.
  spec fn plen(rem: nat) -> nat {
@@ -11,7 +11,7 @@ index 4eccf9f..3e5d575 100644
          rem
      } else if rem < CAP + K {
          rem / 2
-@@ -2199,7 +2199,7 @@ fn fill_all(cl: &Vec<(u64, Vec<u8>)>, data: &[u8], off: u64, s0: u64, me2: u64,
+@@ -2220,7 +2220,7 @@ fn fill_all(cl: &Vec<(u64, Vec<u8>)>, data: &[u8], off: u64, s0: u64, me2: u64,
          decreases me2 - q,
      {
          let rem = me2 - q;

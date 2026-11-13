@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/frags.rs b/crates/quic/src/frags.rs
-index 4eccf9f..0d74cf7 100644
+index a863411..8e75740 100644
 --- a/crates/quic/src/frags.rs
 +++ b/crates/quic/src/frags.rs
-@@ -2787,7 +2787,7 @@ fn gather(m: Tree<Vec<u8>>, b: Tree<Vec<u8>>, _s: u64, e: u64, _s0: u64, lc: boo
+@@ -2808,7 +2808,7 @@ fn gather(m: Tree<Vec<u8>>, b: Tree<Vec<u8>>, _s: u64, e: u64, _s0: u64, lc: boo
          work = work + c3;
      }
      if let Some(wl) = fl {
