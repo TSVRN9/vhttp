@@ -3855,7 +3855,7 @@ fn merge(
         }
     }
     let (t2, Ghost(_p), Ghost(c2)) = rebuild(&mv, a, z, b2, data, lo, off, s0, me2, Ghost(h), Ghost(f));
-    // `mv` (M's drained chunks) drops at the end of this fn: an implicit O(|M|) free, bounded by drain's charge.
+    // `mv` (M's drained chunks) drops at the end of this fn: an implicit O(|M|) free that the ghost cost does not count (frees are outside the cost model, TRUSTED.md's Vec row).
     proof {
         work = work + c1 + c2;
     }

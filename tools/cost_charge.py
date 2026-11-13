@@ -7,7 +7,7 @@ found by tools/acceptance.py's parser):
     `Ghost<nat>` (the whole return, or a top-level tuple element) that its ensures read: `NAME@`, or `NAME.K@` for
     element K; a recursive one's body updates `work = work + E` with E not `0`;
   - every assignment to `work` is `work = work + E;`;
-  - no callee cost is dropped: a call to an exec fn of these files that returns a `Ghost<nat>` (the costs) is the tail
+  - no bound callee cost is left unmentioned in its fn: a call to an exec fn of these files that returns a `Ghost<nat>` (the costs) is the tail
     of a block (its value passes on), or a `let` whose pattern binds each cost as `Ghost(x)`, and from there to the next
     binding of the same name `x` appears in a `work = work + E` update, in a `Ghost(..)` the fn builds (not a call
     argument), or, in the public wrappers insert, after_insert and take_front only, in an `assert`; any other fn that
@@ -15,7 +15,7 @@ found by tools/acceptance.py's parser):
   - no `loop`, `for .. in` or `exec_allows_no_decreases_clause` (loops and recursion this gate does not see).
 Fails naming file:line; fails closed on a missing file, no verus! block, or no looping or recursive fn or bound cost.
 Limit: a structural check, not a proof that the amount charged is right (the cost ensures are upper bounds, so an
-undercharge still verifies; carryover cat-C15-semantic-cost); recursion is recognised by a fn-level `decreases`,
+undercharge still verifies; carryover cat-C15-semantic-cost); a cost used on one path and dropped on another, a Ghost(x) built and then discarded, a charge written work += E or work + 0 + 0, and calls through a receiver other than self or a bare name are not seen (the same carryover); recursion is recognised by a fn-level `decreases`,
 which Verus requires of every recursive exec fn here (the attribute that waives it is refused)."""
 import os, re, sys
 
