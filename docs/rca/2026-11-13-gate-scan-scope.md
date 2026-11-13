@@ -70,8 +70,8 @@
   type is not hashed.
 - Other gates sharing the scan: `acceptance` (src/ only, refusing `verus!` elsewhere); `cost_charge` reads a fixed file
   list, but looked its wrapper exemption up by bare name (Defect 3); `quick.py scope` maps changed paths to crates (a test change still re-runs that crate, as it
-  should); `escape-gate.sh` greps every `.rs` file (wider is the fail-closed direction). None looks a name up across
-  files.
+  should); `escape-gate.sh` greps every `.rs` file (wider is the fail-closed direction). Only cost_charge's cost
+  table looks a name up across files, and a clash there fails closed.
 
 ## Defect 3: the cost-charge gate's wrapper exemption keyed by bare name
 
@@ -80,10 +80,14 @@
   adds `crates/byteq/src/queue.rs`, whose `ByteQueue::take_front` is no wrapper: with its `work = work + c1` replaced by
   `assert(c1 == n)` the gate passed (checked on a copy), and so did Verus, the cost ensures being an upper bound.
 - **Escape**: until this task each wrapper name occurred in one gated file; the demos never put a same-named fn in
-  another file.
+  another file or another impl. The file list was hand-written too, so a new byteq file would have gone ungated
+  silently (found in Task 3's review).
 - **Class**: C8's (a gate resolving by bare name what Rust resolves by path), here in the cost-charge gate.
-- **Catch**: `WRAPPERS` holds `(file, name)` pairs; gate demo "queue.rs's take_front is no wrapper" (the mutation above)
-  fails. The gate's other name table (cost fns) is global by name too, but there a clash fails closed (two same-named
+- **Catch**: `WRAPPERS` holds `(file, impl path)` pairs (`Frags::insert`, `Frags::after_insert`, `Frags::take_front`);
+  the gate reads avl.rs, frags.rs and every `crates/byteq/src/*.rs` (the directory listed; a byteq file without a
+  `verus!` block may hold no fn). Gate demos, each passing under the old tool: queue.rs's take_front with the mutation
+  above, a fn `insert` in another impl of frags.rs asserting `insert_w`'s cost, and a new byteq file with an uncharged
+  `while` all fail; so does a byteq file with a fn and no `verus!` block. The gate's other name table (cost fns) is global by name too, but there a clash fails closed (two same-named
   cost fns returning their cost at different places is an error; a same-named non-cost call is flagged).
 
 ## Evidence

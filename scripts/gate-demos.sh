@@ -299,16 +299,18 @@ fresh escape
 printf 'assume_specification[ f ](x: u8);\n' >> "$tmp/escape/crates/demo/src/lib.rs"
 expect_fail "escape-gate: assume_specification" "unaccounted escape" esc
 
-# cost-charge gate (scripts/cost-charge.sh, 9b1 D6a), on copies of the real avl.rs, frags.rs and byteq's capvec.rs and
-# queue.rs: fill's while without its `work` invariant line (named by its line), a recursive exec fn returning no
+# cost-charge gate (scripts/cost-charge.sh, 9b1 D6a), on copies of the real avl.rs, frags.rs and every byteq src/*.rs:
+# fill's while without its `work` invariant line (named by its line), a recursive exec fn returning no
 # Ghost<nat>, fill's ensures not reading its cost, fill's charge deleted or made `+ 0`, take_run's in-loop charge deleted, open_up dropping gather's
 # cost, merge binding rebuild's cost as a plain name, a call on a receiver other than self dropping push_slice's cost
 # (9b2 ruling 1), queue.rs's take_front naming push_slice's cost only in an assert (frags.rs's wrapper exemption is
-# keyed by file), a `loop` and a `for`, a missing file; the real tree passes.
+# keyed by file), a fn named insert in another impl of frags.rs asserting insert_w's cost (keyed by impl path), a new
+# byteq file with an uncharged while (byteq's src/ is listed, not named), a byteq file with a fn and no verus! block, a
+# `loop` and a `for`, a missing file; the real tree passes.
 expect_pass "cost-charge: the real tree" "$root/scripts/cost-charge.sh" "$root"
 ccq=$tmp/cost/crates/quic/src
 ccb=$tmp/cost/crates/byteq/src
-cfresh() { rm -rf "${tmp:?}/cost"; mkdir -p "$ccq" "$ccb"; cp "$root/crates/quic/src/avl.rs" "$root/crates/quic/src/frags.rs" "$ccq/"; cp "$root/crates/byteq/src/capvec.rs" "$root/crates/byteq/src/queue.rs" "$ccb/"; }
+cfresh() { rm -rf "${tmp:?}/cost"; mkdir -p "$ccq" "$ccb"; cp "$root/crates/quic/src/avl.rs" "$root/crates/quic/src/frags.rs" "$ccq/"; cp "$root"/crates/byteq/src/*.rs "$ccb/"; }
 cc() { "$root/scripts/cost-charge.sh" "$tmp/cost"; }
 cfresh
 expect_pass "cost-charge: an unchanged copy" cc
@@ -353,6 +355,16 @@ cfresh
 once '^            work = work \+ c1;$' "$ccb/queue.rs"
 sed -i 's/^            work = work + c1;$/            assert(c1 == n);/' "$ccb/queue.rs"
 expect_fail "cost-charge: queue.rs's take_front is no wrapper (an assert does not charge)" "ByteQueue::take_front drops the cost c1 binds from push_slice" cc
+cfresh
+once '^} // verus!$' "$ccq/frags.rs"
+sed -i 's|^} // verus!$|struct DemoW;\n\nimpl DemoW {\n    fn insert(f: \&mut Frags, lo: u64, off: u64, data: \&[u8])\n        requires\n            old(f).wf(),\n            off + data@.len() <= VARINT_MAX,\n    {\n        let Ghost(c) = f.insert_w(lo, off, data);\n        proof {\n            assert(c >= 0);\n        }\n    }\n}\n\n} // verus!|' "$ccq/frags.rs"
+expect_fail "cost-charge: an insert in another impl of frags.rs is no wrapper (keyed by impl path)" "DemoW::insert binds the cost insert_w returns but returns no Ghost<nat> cost and is not a public wrapper" cc
+cfresh
+printf 'use vstd::prelude::*;\n\nverus! {\n\nfn spin_demo(n: u64) {\n    let mut i: u64 = 0;\n    while i < n\n        invariant\n            i <= n,\n        decreases n - i,\n    {\n        i = i + 1;\n    }\n}\n\n} // verus!\n' > "$ccb/spin_demo.rs"
+expect_fail "cost-charge: a new byteq file with an uncharged while (src/ listed, not named)" "crates/byteq/src/spin_demo.rs:7: while without an invariant naming work" cc
+cfresh
+printf 'pub fn outside_demo() -> u8 {\n    0\n}\n' > "$ccb/outside_demo.rs"
+expect_fail "cost-charge: a byteq file with a fn and no verus! block" "crates/byteq/src/outside_demo.rs: no verus! block" cc
 cfresh
 once '^    let mut v: Vec<u8> = Vec::with_capacity\(n as usize\);$' "$ccq/frags.rs"
 sed -i 's/^    let mut v: Vec<u8> = Vec::with_capacity(n as usize);$/&\n    loop { break; }/' "$ccq/frags.rs"

@@ -1,7 +1,7 @@
 """Cost-charge gate (9b1 D6a). Usage: python3 -I tools/cost_charge.py ROOT
-In ROOT/crates/quic/src/avl.rs, ROOT/crates/quic/src/frags.rs, ROOT/crates/byteq/src/capvec.rs and
-ROOT/crates/byteq/src/queue.rs, inside `verus!`
-(comments and strings blanked, fns found by tools/acceptance.py's parser):
+In ROOT/crates/quic/src/avl.rs, ROOT/crates/quic/src/frags.rs and every ROOT/crates/byteq/src/*.rs (found by listing
+the directory, so a new byteq file is gated; one with no `verus!` block may hold no fn), inside `verus!` (comments and
+strings blanked, fns found by tools/acceptance.py's parser):
   - every `while` has an `invariant` (or `invariant_except_break`) clause naming `work`, the ghost cost accumulator, and
     its body updates `work = work + E` with E not `0`;
   - every exec fn (not spec/proof) with a fn-level `decreases` or a `while` in its body returns a named result holding a
@@ -12,11 +12,11 @@ ROOT/crates/byteq/src/queue.rs, inside `verus!`
     (the costs; `NAME(`, `path::NAME(` or `.NAME(` on any receiver, for NAME such a fn; a std method of another name,
     such as `out.append(..)`, is not one) is the tail of a block (its value passes on), or a `let` whose pattern binds each cost as `Ghost(x)`, and from there to the next
     binding of the same name `x` appears in a `work = work + E` update, in a `Ghost(..)` the fn builds (not a call
-    argument), or, in frags.rs's public wrappers insert, after_insert and take_front only (keyed by file: queue.rs's
-    take_front is no wrapper), in an `assert`; any other fn that
-    calls one returns a cost itself;
+    argument), or, in frags.rs's public wrappers Frags::insert, Frags::after_insert and Frags::take_front only (keyed
+    by file and impl path: queue.rs's ByteQueue::take_front is no wrapper), in an `assert`; any other fn that calls one
+    returns a cost itself;
   - no `loop`, `for .. in` or `exec_allows_no_decreases_clause` (loops and recursion this gate does not see).
-Fails naming file:line; fails closed on a missing file, no verus! block, or no looping or recursive fn or bound cost.
+Fails naming file:line; fails closed on a missing file (avl.rs, frags.rs, or no byteq src/*.rs), no verus! block, or no looping or recursive fn or bound cost.
 Limit: a structural check, not a proof that the amount charged is right (the cost ensures are upper bounds, so an
 undercharge still verifies; carryover cat-C15-semantic-cost); a cost used on one path and dropped on another, a Ghost(x) built and then discarded, and a charge written work += E or work + 0 + 0 are not seen (the same carryover); a call is matched by name, so a
 std method named like one of these cost fns would be flagged (fails closed); recursion is recognised by a fn-level `decreases`,
@@ -26,9 +26,10 @@ import os, re, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import acceptance as acc  # noqa: E402
 
-FILES = ['crates/quic/src/avl.rs', 'crates/quic/src/frags.rs', 'crates/byteq/src/capvec.rs', 'crates/byteq/src/queue.rs']
+FILES = ['crates/quic/src/avl.rs', 'crates/quic/src/frags.rs']
+DIRS = ['crates/byteq/src']
 INV = re.compile(r'\b(invariant_except_break|invariant|ensures|decreases)\b')
-WRAPPERS = {('crates/quic/src/frags.rs', n) for n in ('insert', 'after_insert', 'take_front')}
+WRAPPERS = {('crates/quic/src/frags.rs', 'Frags::' + n) for n in ('insert', 'after_insert', 'take_front')}
 UPDATE = re.compile(r'\bwork\s*=\s*work\s*\+\s*([^;]*?)\s*;')
 ASSIGN = re.compile(r'(?<![\w.])work\s*=(?!=)')
 
@@ -83,8 +84,15 @@ def ghost_reads(ret):
 
 def bodies(root):
     """[(rel, s, path, name, ret, clauses, k, body start, body end)] for every exec fn with a body, per file."""
-    out = []
-    for rel in FILES:
+    out, rels = [], list(FILES)
+    for d in DIRS:
+        try:
+            rs = sorted(f for f in os.listdir(os.path.join(root, d)) if f.endswith('.rs'))
+        except OSError as e:
+            raise ValueError('cannot list %s: %s' % (d, e))
+        if not rs: raise ValueError('%s: no .rs file' % d)
+        rels += [d + '/' + f for f in rs]
+    for rel in rels:
         full = os.path.join(root, rel)
         try:
             raw = open(full, encoding='utf-8').read()
@@ -92,7 +100,9 @@ def bodies(root):
             raise ValueError('cannot read %s: %s' % (rel, e))
         s = acc.strip(raw)
         blocks = [m for m in re.finditer(r'(?<![A-Za-z0-9_])verus!\s*\{', s)]
-        if not blocks: raise ValueError('%s: no verus! block' % rel)
+        if not blocks:
+            if rel in FILES or re.search(r'\bfn\b', s): raise ValueError('%s: no verus! block' % rel)
+            continue
         fl = []
         for m in blocks:
             a = m.end() - 1
@@ -158,7 +168,7 @@ def check(root):
                     errs.append('%s: while whose body does not charge work (`work = work + E`, E not 0)' % line(w))
             if rec and not charges(body):
                 errs.append('%s: %s recurses but its body does not charge work (`work = work + E`, E not 0)' % (line(k), path))
-            errs += dropped(s, line, path, name, ret, end, e2, costs, call, (rel, name) in WRAPPERS)
+            errs += dropped(s, line, path, name, ret, end, e2, costs, call, (rel, path) in WRAPPERS)
             nbound += len(binds_in(s, end, e2, call))
             if not (rec or whiles): continue
             nfn += 1

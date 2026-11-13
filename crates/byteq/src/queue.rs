@@ -68,7 +68,7 @@ impl ByteQueue {
         &&& self.a@.len() <= self.ca
         &&& self@.len() <= self.pk@ <= MAX_QUEUE
         &&& self.ca <= vstd::math::max(MIN_CAP as int, (3 * self.pk@) as int)
-        &&& self@.len() == 0 ==> self.ca == 0 && self.mig is None
+        &&& self@.len() == 0 ==> self.ca == 0 && self.mig is None && self.pk@ == 0
         &&& match self.mig {
             None => 2 * self.a@.len() <= self.ca,
             Some(m) => self.mig_wf(m),
@@ -102,6 +102,7 @@ impl ByteQueue {
         ensures
             r.wf(),
             r@ == Seq::<u8>::empty(),
+            r.peak() == 0,
     {
         let r = ByteQueue { a: CapVec::new(0), ca: 0, head: 0, mig: None, pk: Ghost(0) };
         assert(r@ =~= Seq::<u8>::empty());
@@ -144,6 +145,7 @@ impl ByteQueue {
         ensures
             final(self).wf(),
             final(self)@ == old(self)@.skip(n as int),
+            final(self)@.len() > 0 ==> final(self).peak() == old(self).peak(),
             r@ <= 2,
     {
         let ghost v0 = self@;
@@ -174,6 +176,7 @@ impl ByteQueue {
             r.0@ == old(self)@.take(n as int),
             r.0.cap() == n,
             r.1@ <= n + 3,
+            final(self)@.len() > 0 ==> final(self).peak() == old(self).peak(),
             n == 0 ==> *final(self) == *old(self),
     {
         let ghost mut work: nat = 1;
@@ -205,6 +208,7 @@ impl ByteQueue {
             final(self).wf(),
             final(self)@ == old(self)@.skip(n as int),
             r@ <= 2,
+            final(self)@.len() > 0 ==> final(self).peak() == old(self).peak(),
             n == 0 ==> *final(self) == *old(self),
     {
         if n == 0 {
