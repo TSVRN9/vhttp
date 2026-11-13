@@ -40,6 +40,11 @@ esc=$("$root/scripts/escape-gate.sh" "$root") || exit 1
 echo "$esc"
 attrs=$(printf '%s\n' "$esc" | sed -n 's/^escape-gate: \([0-9]*\) escapes accounted$/\1/p')
 [ -n "$attrs" ] || { echo "verify.sh: no count in escape-gate's output" >&2; exit 1; }
+# Cost-charge gate (9b1 D6a, scripts/cost-charge.sh): every `while` in quic's avl.rs and frags.rs names the ghost `work`
+# in its invariant and charges it in its body, every exec fn there that loops or recurses returns a Ghost<nat> cost its
+# ensures read, and no bound callee cost is left unmentioned (structural: the amount charged, per-path use and
+# built-then-discarded Ghosts are not checked; cat-C15-semantic-cost).
+"$root/scripts/cost-charge.sh" "$root" || exit 1
 # Binary gate: crates/crypto's shipped object code must match docs/crypto-binary-digests.txt.
 bin=$("$root/scripts/ct-binary.sh") || exit 1
 bin=$(printf '%s\n' "$bin" | sed -n 's/^ct-binary: ok (\([0-9]*\) fns)$/\1/p')

@@ -1,37 +1,13 @@
 diff --git a/crates/quic/src/frags.rs b/crates/quic/src/frags.rs
-index 6f08132..d6b5a8a 100644
+index a863411..8e75740 100644
 --- a/crates/quic/src/frags.rs
 +++ b/crates/quic/src/frags.rs
-@@ -143,10 +143,10 @@ spec fn mhi(f: Seq<(nat, Seq<u8>)>, i: int, j: int, e: nat) -> nat {
- /// `s - 1`, those after start past `e`.
- spec fn located(f: Seq<(nat, Seq<u8>)>, s: nat, e: nat, i: int, j: int) -> bool {
-     &&& 0 <= i <= j <= f.len()
--    &&& forall|t: int| #![trigger f[t]] 0 <= t < i ==> f[t].0 + f[t].1.len() < s
--    &&& i < f.len() ==> f[i].0 + f[i].1.len() >= s
--    &&& forall|t: int| #![trigger f[t]] i <= t < j ==> f[t].0 <= e
--    &&& j < f.len() ==> f[j].0 > e
-+    &&& forall|t: int| #![trigger f[t]] 0 <= t < i ==> f[t].0 + f[t].1.len() <= s
-+    &&& i < f.len() ==> f[i].0 + f[i].1.len() > s
-+    &&& forall|t: int| #![trigger f[t]] i <= t < j ==> f[t].0 < e
-+    &&& j < f.len() ==> f[j].0 >= e
- }
- 
- proof fn lemma_sep_sub(f: Seq<(nat, Seq<u8>)>, a: int, b: int)
-@@ -1007,7 +1007,7 @@ impl Frags {
-         {
-             let mid = i + (hi - i) / 2;
-             assert(f[mid as int] == (self.v@[mid as int].0 as nat, self.v@[mid as int].1@));
--            if self.v[mid].0 + (self.v[mid].1.len() as u64) < s {
-+            if self.v[mid].0 + (self.v[mid].1.len() as u64) <= s {
-                 assert forall|t: int| #![trigger f[t]] 0 <= t <= mid implies f[t].0 + f[t].1.len() < s by {
-                     if t < mid {
-                         assert(f[t].0 + f[t].1.len() < f[mid as int].0);
-@@ -1029,7 +1029,7 @@ impl Frags {
-             }
-         }
-         let mut j: usize = i;
--        while j < n && self.v[j].0 <= e
-+        while j < n && self.v[j].0 < e
-             invariant
-                 f == self.fs(),
-                 sep(f),
+@@ -2808,7 +2808,7 @@ fn gather(m: Tree<Vec<u8>>, b: Tree<Vec<u8>>, _s: u64, e: u64, _s0: u64, lc: boo
+         work = work + c3;
+     }
+     if let Some(wl) = fl {
+-        if (wl as u64) < K {
++        if false && (wl as u64) < K {
+             let (b2, wk, wv, Ghost(c4)) = pop_min(b);
+             let ghost w = (wk as nat, wv@);
+             mv.push((wk, wv));

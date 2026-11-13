@@ -4,8 +4,9 @@ set -o pipefail
 # gate-demos.sh: each cheap gate gets a canned bad input (a temp copy of a fixture in
 # tools/gate-demos/ with one change applied) and must exit non-zero with its message; every fixture
 # first passes unchanged, so a demo cannot fail for the wrong reason. Covers lint-scripts,
-# check-quotes, the citation gate, the RFC-quantity gate (its git demos in throwaway repos), acceptance (many bad changes, including real-git runs), escape-gate (three), the rlimit gate and the mutant registry (scripts/mutants.sh; its run demos call Verus
-# on the fixture crate), the declassify and deps gates, ct-check's report reader (ct-report.sh), ct-binary (against its real build), the test gate, the carryover gate and the requirements status gate (throwaway repos). Takes a few seconds, plus about a minute the first time vstd builds in target/mutants-demo.
+# check-quotes, the citation gate, the RFC-quantity gate (its git demos in throwaway repos), acceptance (many bad changes, including real-git runs), escape-gate (three), the cost-charge gate, crypto_cost's realloc count (a debug build of a workspace copy), the rlimit gate and the mutant registry (scripts/mutants.sh; its run demos call Verus
+# on the fixture crate), the declassify and deps gates, ct-check's report reader (ct-report.sh), ct-binary (against its real build), the test gate, the carryover gate and the requirements status gate (throwaway repos). Takes a few seconds, plus about a minute the first time vstd builds in target/mutants-demo (and a debug build in
+# target/realloc-demo).
 root=$(cd "$(dirname "$0")/.." && pwd)
 fx=$root/tools/gate-demos
 tmp=$(mktemp -d)
@@ -297,6 +298,76 @@ expect_fail "escape-gate: external_body in crypto without a TRUSTED row" "has no
 fresh escape
 printf 'assume_specification[ f ](x: u8);\n' >> "$tmp/escape/crates/demo/src/lib.rs"
 expect_fail "escape-gate: assume_specification" "unaccounted escape" esc
+
+# cost-charge gate (scripts/cost-charge.sh, 9b1 D6a), on copies of the real avl.rs and frags.rs: fill's while without its
+# `work` invariant line (named by its line), a recursive exec fn returning no Ghost<nat>, fill's ensures not reading its
+# cost, fill's charge deleted or made `+ 0`, take_run's in-loop charge deleted, open_up dropping gather's cost, merge
+# binding rebuild's cost as a plain name, a `loop` and a `for`, a missing file; the real tree passes.
+expect_pass "cost-charge: the real tree" "$root/scripts/cost-charge.sh" "$root"
+ccq=$tmp/cost/crates/quic/src
+cfresh() { rm -rf "${tmp:?}/cost"; mkdir -p "$ccq"; cp "$root/crates/quic/src/avl.rs" "$root/crates/quic/src/frags.rs" "$ccq/"; }
+cc() { "$root/scripts/cost-charge.sh" "$tmp/cost"; }
+cfresh
+expect_pass "cost-charge: an unchanged copy" cc
+sed -i '/^            work <= 1 + j,$/d' "$ccq/frags.rs"
+wl=$(grep -n '^    while j < n$' "$ccq/frags.rs" | cut -d: -f1)
+[ -n "$wl" ] || die "cost-charge demo: fill's while not found in the copy"
+expect_fail "cost-charge: a while whose invariant lacks work" "crates/quic/src/frags.rs:$wl: while without an invariant naming work" cc
+cfresh
+sed -i 's|^} // verus!$|fn depth<V>(t: \&Tree<V>) -> (r: u64)\n    decreases *t,\n{\n    match t {\n        None => 0,\n        Some(b) => depth(\&b.left),\n    }\n}\n\n} // verus!|' "$ccq/avl.rs"
+expect_fail "cost-charge: a recursive exec fn without a Ghost<nat> return" "depth recurses but returns no named Ghost<nat> cost" cc
+cfresh
+sed -i 's/^        r\.2@ <= n + 1,$/        true,/' "$ccq/frags.rs"
+expect_fail "cost-charge: a loop whose ensures do not read its cost" "fill loops but its ensures do not read its cost r.2@" cc
+# once <ERE> <file>: the demo's sed anchor is exactly one line of the copy.
+once() { [ "$(grep -cE -- "$1" "$2")" = 1 ] || die "cost-charge demo: '$1' is not exactly one line of $2"; }
+fw=$(grep -n '^    while j < n$' "$ccq/frags.rs" | cut -d: -f1)
+[ -n "$fw" ] || die "cost-charge demo: fill's while not found in the copy"
+cfresh
+once '^            work = work \+ 1;$' "$ccq/frags.rs"
+sed -i '/^            work = work + 1;$/d' "$ccq/frags.rs"
+expect_fail "cost-charge: fill's while without its charge (review I1)" "crates/quic/src/frags.rs:$fw: while whose body does not charge work" cc
+cfresh
+sed -i 's/^            work = work + 1;$/            work = work + 0;/' "$ccq/frags.rs"
+expect_fail "cost-charge: fill's charge made + 0" "crates/quic/src/frags.rs:$fw: while whose body does not charge work" cc
+cfresh
+once '^            work = work \+ cp \+ n as nat \+ c \+ 1;$' "$ccq/frags.rs"
+sed -i '/^            work = work + cp + n as nat + c + 1;$/d' "$ccq/frags.rs"
+expect_fail "cost-charge: take_run's in-loop charge deleted (review I1)" "take_run drops the cost cp binds from pop_min" cc
+cfresh
+once '^        work = work \+ c0 \+ c3;$' "$ccq/frags.rs"
+sed -i 's/^        work = work + c0 + c3;$/        work = work + c0;/' "$ccq/frags.rs"
+expect_fail "cost-charge: open_up drops gather's cost" "open_up drops the cost c3 binds from gather" cc
+cfresh
+once '^    let \(t2, Ghost\(_p\), Ghost\(c2\)\) = rebuild\(' "$ccq/frags.rs"
+sed -i 's/^    let (t2, Ghost(_p), Ghost(c2)) = rebuild(/    let (t2, Ghost(_p), c2) = rebuild(/' "$ccq/frags.rs"
+expect_fail "cost-charge: merge binds rebuild's cost as a plain name" "merge does not bind the cost rebuild returns as Ghost(x)" cc
+cfresh
+once '^    let mut v: Vec<u8> = Vec::with_capacity\(n as usize\);$' "$ccq/frags.rs"
+sed -i 's/^    let mut v: Vec<u8> = Vec::with_capacity(n as usize);$/&\n    loop { break; }/' "$ccq/frags.rs"
+expect_fail "cost-charge: a loop" "\`loop\` in fill: only \`while\` loops are checked" cc
+cfresh
+sed -i 's/^    let mut v: Vec<u8> = Vec::with_capacity(n as usize);$/&\n    for _x in 0..1u8 {}/' "$ccq/frags.rs"
+expect_fail "cost-charge: a for" "\`for\` in fill: only \`while\` loops are checked" cc
+cfresh
+rm "$ccq/avl.rs"
+expect_fail "cost-charge: a missing file" "cannot read crates/quic/src/avl.rs" cc
+
+# The no-realloc claim (spec "The bound", TRUSTED.md's Vec row): fill's fresh piece made by Vec::new() instead of
+# Vec::with_capacity(n) must fail crypto_ooo_cost_linear on reallocs. A copy of the workspace in target/realloc-demo
+# (stable path, mtimes kept and frags.rs touched, so only quic rebuilds), its own target dir; two debug builds and runs, about half a
+# minute after the first.
+rd=$root/target/realloc-demo
+rm -rf "$rd/ws"
+mkdir -p "$rd/ws"
+(cd "$root" && tar -cf - --exclude=target Cargo.toml Cargo.lock rust-toolchain.toml crates) | tar -C "$rd/ws" -xf - || die "realloc demo: cannot copy the workspace"
+# the last run left a patched quic build, older than frags.rs's restored mtime: touch it so cargo rebuilds quic.
+touch "$rd/ws/crates/quic/src/frags.rs"
+rdt() { env CARGO_TARGET_DIR="$rd/target" cargo test --offline --locked -q --manifest-path "$rd/ws/Cargo.toml" -p quic --test crypto_cost; }
+expect_pass "crypto_cost: an unchanged workspace copy" rdt
+once '^    let mut v: Vec<u8> = Vec::with_capacity\(n as usize\);$' "$rd/ws/crates/quic/src/frags.rs"
+sed -i 's/^    let mut v: Vec<u8> = Vec::with_capacity(n as usize);$/    let mut v: Vec<u8> = Vec::new();/' "$rd/ws/crates/quic/src/frags.rs"
+expect_fail "crypto_cost: fill's pieces grown from Vec::new()" "reallocs" rdt
 
 # rlimit gate (tools/rl.py --gate): a quic fn at 8,000,001; a FAIL row; empty and rowless logs; a missing log; two JSON objects.
 pin=$root/tools/verus-pin.txt

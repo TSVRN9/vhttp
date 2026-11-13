@@ -45,7 +45,12 @@ send and recovery paths; parts of 9b/9c that do not touch them may go earlier. P
 | 9r3 | audit gates and the roadmap | merged | - | `2026-11-09-phase-9r3-audit-gates-and-roadmap.md`; d416f34 |
 | 9a | acceptance pilot, Tasks 0-4 and 6 | merged | - | `2026-11-05-phase-9a-acceptance-pilot.md`; ed35647 |
 | 9a2 | acceptance pilot, Tasks 3b, 5, 3c' (sparse CRYPTO store) | merged | - | `2026-11-05-phase-9a-acceptance-pilot.md`; 680a3f0 |
-| 9b | spec-only acceptance lemmas, rule 2(b) | unplanned | 4 (Task 1 Frags index, P3), 6 (P4) | none; Phase 9 spec `:50`, `:131-141` |
+| 9b | spec-only acceptance lemmas, rule 2(b) | unplanned | 4 (P3), 6 (P4) | none; Phase 9 spec `:50`, `:131-141` |
+| 9b1 | a Frags index: the out-of-order CRYPTO store on a verified AVL of chunks, cost proved per call (C15) | merged | 4 | `2026-11-12-phase-9b1-frags-index.md`; 1875a00 |
+| 9b2 | a verified de-amortized byte queue for every quic/tls byte buffer on input paths (CryptoStream buf and read, HsReader, Reassembly, send_stream, the TLS transcript) | unplanned | 4 (after 9b1, before Phase 6) | none; 9b1 spec D10 (owner decision 2026-11-12); `docs/rca/2026-11-12-cost-sweep.md` |
+| 9b3 | h3 input costs (the quadratic cookie merge first, with its RCA; reqs/unis remove+insert; request buffers) | unplanned | 4 (after 9b1, before Phase 6) | none; 9b1 spec D10 (owner decision 2026-11-12); `docs/rca/2026-11-12-cost-sweep.md` |
+| 9b4 | the remaining sites of docs/rca/2026-11-12-cost-sweep.md (server conns table, tls ext bitmap, ack/inflight/route tables, builders) and the sweep as a gate; a semantic check of 9b1's cost charge (MIR-step bounds for Frags::insert/after_insert/take_front by ctmir's verified cost analysis, or a ghost-cost discipline Verus enforces) | unplanned | 4 (after 9b1, before Phase 6) | none; 9b1 spec D10 (owner decision 2026-11-12); `docs/rca/2026-11-12-cost-sweep.md` |
+| 9b5 | incremental parsing: TLS handshake messages, h3 frames and QPACK field sections parsed as bytes arrive, so no call does more than O(d + log n) | unplanned | 4 (after 9b4, before Phase 6) | none; owner decision 2026-11-12 |
 | 9c | frame errors, h3 to quic closes, tls own limits | unplanned | 4 (parts that touch no `conn.rs` send or recovery path), 6 (the rest) | none; Phase 9 spec `:51`, `:143-161` |
 | 9t1 | `decode_crate` functional | unplanned | 7 | none; Phase 9 spec `:271` |
 | 9t2 | `mir_run` fuel monotonicity | unplanned | 7 | none; Phase 9 spec `:272` |
@@ -88,11 +93,30 @@ stays `never`.
 
 ### 9b: spec-only acceptance lemmas and rule 2(b)
 
-- Scope: P3 (one `allowed_x` and one lemma per `rfc_*` codec spec), P4 (the CONNECTION_CLOSE is emitted, through
-  `poll_transmit`), and Task 1, a `Frags` index for 9a2's sparse CRYPTO store (C15). Task 1 and P3 touch no
-  `conn.rs` send or recovery path and run at order 4, before Phase 6; P4 goes after it, at 6.
-- Sources: Phase 9 spec `:50`, `:131-141`; audit F6, F7 (inputs to the plan); `docs/rca/catalog.md:232-235`.
-- Carryovers: `cat-C15`, `mem-h3-0705`, `mem-h3-21`, `mem-gen-tables`, `mem-naming`, `req-9b`.
+- Scope: P3 (one `allowed_x` and one lemma per `rfc_*` codec spec) and P4 (the CONNECTION_CLOSE is emitted, through
+  `poll_transmit`). P3 touches no `conn.rs` send or recovery path and runs at order 4, before Phase 6; P4 goes after
+  it, at 6. The `Frags` index that was Task 1 is phase 9b1.
+- Sources: Phase 9 spec `:50`, `:131-141`; audit F6, F7 (inputs to the plan).
+- Carryovers: `mem-h3-0705`, `mem-h3-21`, `mem-gen-tables`, `mem-naming`, `req-9b`.
+
+### 9b1: a Frags index (C15)
+
+- Scope: 9a2's sparse CRYPTO store (`quic::frags::Frags`) on a verified join-based AVL of chunks (`quic::avl`), with a
+  worst-case cost per call proved in the ensures, the cost-charge gate and its demos, and mutants 9b1-M1..M4.
+- Sources: `docs/superpowers/specs/2026-11-10-phase-9b1-frags-index-design.md`; `docs/rca/catalog.md:232-235`.
+- Carryovers: `cat-C15` (closed by this phase).
+
+### 9b2, 9b3, 9b4, 9b5: the 2026-11-12 cost sweep and the per-call rule
+
+- Scope: the sites of `docs/rca/2026-11-12-cost-sweep.md` where network input pays std's amortized growth, a front
+  drain or a shift: 9b2 the quic/tls byte buffers (one verified de-amortized byte queue), 9b3 h3 (the quadratic
+  cookie merge first, with its RCA), 9b4 the rest and the sweep as a gate, and a semantic check of 9b1's cost charge
+  (`cat-C15-semantic-cost`: 9b1's cost-charge gate is structural, so the amount charged is checked by hand). Owner decision 2026-11-12: they run after
+  9b1, before Phase 6. Owner decision 2026-11-12: the per-call rule is O(d + log n), d the bytes that call was given,
+  so a call delivering a run of r bytes does not meet it: 9b2 also makes in-order delivery lazy (CRYPTO and
+  Reassembly), and 9b5, after 9b4, parses TLS handshake messages, h3 frames and QPACK field sections incrementally.
+- Sources: 9b1 spec D10 and D6; `docs/rca/2026-11-12-cost-sweep.md`; owner decision 2026-11-12 (9b5).
+- Carryovers: `cat-C15-9b2`, `cat-C15-9b3`, `cat-C15-9b4`, `cat-C15-semantic-cost`, `cat-C15-stream-parse`.
 
 ### 6: loss recovery and congestion control
 

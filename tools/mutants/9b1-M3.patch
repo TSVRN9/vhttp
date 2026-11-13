@@ -1,0 +1,13 @@
+diff --git a/crates/quic/src/frags.rs b/crates/quic/src/frags.rs
+index a863411..a4a4ffa 100644
+--- a/crates/quic/src/frags.rs
++++ b/crates/quic/src/frags.rs
+@@ -2780,7 +2780,7 @@ fn gather(m: Tree<Vec<u8>>, b: Tree<Vec<u8>>, _s: u64, e: u64, _s0: u64, lc: boo
+         }
+         let zk = mv[zi].0;
+         let ze = zk + mv[zi].1.len() as u64;
+-        if ze > e && mv[zi].1.len() as u64 >= K && !(lc && zi == 0) {
++        if ze > e && !(lc && zi == 0) {
+             z = mv.pop();
+             me = zk;
+             proof {

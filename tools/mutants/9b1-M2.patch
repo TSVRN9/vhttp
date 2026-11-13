@@ -1,0 +1,22 @@
+diff --git a/crates/quic/src/avl.rs b/crates/quic/src/avl.rs
+index fd1eb14..53a4196 100644
+--- a/crates/quic/src/avl.rs
++++ b/crates/quic/src/avl.rs
+@@ -872,7 +872,7 @@ pub fn join<V>(a: Tree<V>, k: u64, v: V, b: Tree<V>) -> (r: (Tree<V>, Ghost<nat>
+         proof {
+             lemma_join_right(a0, k, v, b0, c);
+         }
+-        let (t, Ghost(bc)) = bal(al, ak, av, c);
++        let (t, Ghost(bc)) = (mk(al, ak, av, c), Ghost(1nat));
+         proof {
+             work = work + cc + bc;
+         }
+@@ -887,7 +887,7 @@ pub fn join<V>(a: Tree<V>, k: u64, v: V, b: Tree<V>) -> (r: (Tree<V>, Ghost<nat>
+         proof {
+             lemma_join_left(a0, k, v, b0, c);
+         }
+-        let (t, Ghost(bc)) = bal(c, bk, bv, br);
++        let (t, Ghost(bc)) = (mk(c, bk, bv, br), Ghost(1nat));
+         proof {
+             work = work + cc + bc;
+         }
