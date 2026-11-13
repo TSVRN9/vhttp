@@ -50,9 +50,14 @@ sizes). Bounds checked:
 
 - per call (the allocator is deterministic): no `realloc`; requested bytes at most `8·d + 4096`, `d` the bytes the call
   was given (`A = 8` from the spec's `7d + 4` push and `n + 3` take, `B = 4096` for the constant terms: a 56-byte node
-  per chunk, at most 258 eight-byte ring slots and two 256-byte page arrays); a delivering call hands over at most `d`
-  bytes. An ACK call is given no stream bytes (`d = 0`); `next_message` is given none and is held to `8·message + 4096`
-  (one copy of the completed unit, D14);
+  per chunk, at most 258 eight-byte ring slots and two 256-byte page arrays), except that one allocation of a call may
+  exceed that budget if it can be a queue buffer: requested capacity is memory, not work (an uninitialized
+  `with_capacity` is one allocator call, and D4 bounds the copies into it at 3 per byte pushed), so the call must have
+  been given bytes (D4 allocates only in `push_slice` with `d > 0`; an ACK or a read creates no buffer), the allocation
+  must be at most `3·(bytes held after the call) + MIN_CAP` (D4's memory bound, `MIN_CAP` = 64), and the rest of the
+  call stays within the budget (controller ruling, 2026-11-13); a delivering call hands over at most `d` bytes. An ACK
+  call is given no stream bytes (`d = 0`); `next_message` is given none and is held to `8·message + 4096` (one copy of
+  the completed unit, D14);
 - across sizes: bytes at most 3x per doubling; total time at 4n at most 8x that at n plus 20 ms; the slowest call at 4n
   at most 4x that at n plus 1 ms; the gap fill at most 8x the slowest other call plus 1 ms.
 
@@ -81,13 +86,13 @@ patterns; a read after every in-order frame never finds more than one byte).
 `alloc_zeroed` was 0 in every run; deallocs equal allocs except in `reader_one_byte_push` (the message `Vec` is
 returned). Every test fails today; the assertions that fail (at n, 2n, 4n):
 
-| test | per-call realloc | per-call bytes > 8·d + 4096 | hands over > d | across sizes |
+| test | per-call realloc | per-call bytes over budget (beyond one queue buffer) | hands over > d | across sizes |
 |---|---|---|---|---|
-| `crypto_one_byte_frames` | 2, 4, 8 calls (each closing frame, 7 reallocs) | 2, 4, 8 calls (37752 bytes for d = 1) | 2, 4, 8 calls (8192 bytes for d = 1) | hold |
-| `crypto_runs_then_fill` | the fill (3, 4, 5 reallocs) | the fill (43400, 86464, 173096 for d = 2048, 4096, 8192) | hold (2n for d = 2n) | hold |
-| `send_ack_1k` | hold | 6, 7, 8 ACKs (the largest 131136, 262208, 524352 for d = 0: `split_off` copies half the stream, Q7) | n/a | hold |
-| `stream_reverse_fill` | 2 calls (the worst the first frame: 22, 24, 26 reallocs) | 2 calls (the worst the first frame: 65520, 131056, 262128 for d = 1) | the last frame (W bytes for d = 1, Q3) | hold |
-| `reader_one_byte_push` | 11, 12, 13 pushes (1 each, T1) | 2, 3, 4 pushes (the largest 16384, 32768, 65536 for d = 1) | n/a | hold |
+| `crypto_one_byte_frames` | 2, 4, 8 calls (each closing frame, 7 reallocs) | 2, 4, 8 calls (37752 bytes for d = 1, largest single 8256, 0 held after) | 2, 4, 8 calls (8192 bytes for d = 1) | hold |
+| `crypto_runs_then_fill` | the fill (3, 4, 5 reallocs) | the fill (43400, 86464, 173096 for d = 2048, 4096, 8192; 0 held after) | hold (2n for d = 2n) | hold |
+| `send_ack_1k` | hold | 6, 7, 8 ACKs (the largest 131136, 262208, 524352 for d = 0: `split_off` copies half the stream, Q7; a call given no bytes gets no queue-buffer allowance) | n/a | hold |
+| `stream_reverse_fill` | 2 calls (the worst the first frame: 22, 24, 26 reallocs) | 2 calls (the worst the first frame: 65520, 131056, 262128 for d = 1, of which the largest single 16384, 32768, 65536) | the last frame (W bytes for d = 1, Q3) | hold |
+| `reader_one_byte_push` | 11, 12, 13 pushes (1 each, T1) | hold (each realloc is at most twice the bytes held, inside the queue-buffer allowance; the realloc itself fails) | n/a | hold |
 
 Per call kind: `crypto_one_byte_frames`' 1-byte frames that do not close a gap request at most 1281 bytes;
 `crypto_runs_then_fill`'s runs at most 1521; `send_ack_1k`'s write requests exactly n and each 1200-byte poll at most
