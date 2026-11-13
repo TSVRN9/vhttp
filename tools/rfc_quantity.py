@@ -32,10 +32,12 @@ Every vouch is keyed by its ROOT, and the ROOT's `root` line pins a sha256 of th
 ROOT, of every fn its walk reaches or calls unfollowed and every fn those call, transitively (methods
 resolved by name in the crate; an ambiguous name fails), of the fns its `pin` lines name (text a
 reason relies on outside the walk: what the model pushes, an invariant, a wf tie), and of every
-`const`/`static` item that text names, read from the crates' src/ only and resolved from the file of the text that
-names it: its own item, else what its `use` lines import (explicit, then glob, `pub use` followed), else its crate's;
-more than one candidate fails closed, and a generic parameter `<const N: ..>` is no item (RCA
-2026-11-13-gate-scan-scope); each fn's text starts after the item before it, so its attributes
+`const`/`static` item that text names, read from the crates' src/ only (an inline `mod` is its own module, a
+#[cfg(test)] one is skipped), each item whole (to its first `;` outside brackets); a bare name resolves from the module
+of the text that names it: its own item, else what its `use` lines import (explicit, then glob, `pub use` followed),
+else its crate's; `a::b::NAME` resolves through the path to exactly one item; more than one candidate, or a path to no
+item, fails closed, and a generic parameter `<const N: ..>` is no item (RCA 2026-11-13-gate-scan-scope); each fn's text
+starts after the item before it, so its attributes
 and doc comment are in, and comments and annotations are included. A `use .. as` rename of a name
 that text uses, in a file holding any of it, is refused (the gate reads names, not what they stand
 for). The
@@ -64,7 +66,7 @@ import hashlib, importlib.util, os, re, sys
 
 # sha256 of the allowlist's non-comment lines, sorted and joined by newlines: any change to the vouched-for set (a
 # new line, a swap, an edited reason) needs this constant changed in the same diff, so it is reviewed
-ALLOW_DIGEST = '2d53130753ddfae9f1b001151ea6c69dc7f1dd22a638946821da82f8d3f7c23c'
+ALLOW_DIGEST = '41476f98c717ba234ee66789b0b5237e9e47e045518e7c96ae014d9fcd507830'
 VSTD_TYPES = {'Seq', 'Set', 'Map', 'Multiset'}
 VSTD_METHODS = {'len', 'skip', 'take', 'subrange', 'push', 'last', 'first', 'drop_last', 'drop_first',
                 'contains', 'contains_key', 'insert', 'remove', 'union', 'intersect', 'difference', 'dom',
@@ -75,6 +77,9 @@ KEYWORDS = {'if', 'else', 'match', 'let', 'true', 'false', 'as', 'is', 'has', 'm
 CITE = re.compile(r'RFC \d+ §\d+(?:\.\d+)*')
 ANNOT = re.compile(r'//\s*rfc-quantity:(.*)$')
 IDENT = re.compile(r'(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*')
+# path roots outside the crates: a `a::b::NAME` path starting here names no constant item of ours
+EXTERNAL = {'vstd', 'std', 'core', 'alloc', 'builtin', 'verus_builtin', 'vest_lib', 'u8', 'u16', 'u32', 'u64', 'u128', 'usize',
+            'i8', 'i16', 'i32', 'i64', 'i128', 'isize', 'f32', 'f64', 'bool', 'char', 'str', 'nat', 'int'}
 # a `const`/`static` (Verus: `spec const`) item's head; a match after `<` or `,` is a generic parameter, skipped in items()
 ITEM = re.compile(r'(?<![A-Za-z0-9_])((?:pub(?:\s*\([^)]*\))?\s+)?)((?:spec\s+|exec\s+|proof\s+)?)(?:const|static)\s+(?:mut\s+)?([A-Z][A-Z0-9_]*)\s*:')
 
@@ -295,34 +300,64 @@ class Gate:
         return out
 
     def items(self):
-        """Index the crates' src/ (acceptance.rs_files): {file: [(NAME, visibility, key, raw text)]} of every `const` or
-        `static` ITEM (a generic parameter `<const N: usize>` is not one), and each file's (crate, module path)."""
+        """Index the crates' src/ (acceptance.rs_files) by module: {(crate, module path): [(NAME, visibility, key, raw
+        text)]} of every `const`/`static` ITEM (a generic parameter `<const N: usize>` is not one), each ended at its first
+        `;` outside brackets (`[u8; 2]` is inside). An inline `mod NAME {` is its own module; a `#[cfg(test)]` one is not
+        indexed (test code, like tests/)."""
         if not hasattr(self, '_items'):
-            self._items, self._fmod, self._mod, self._crates = {}, {}, {}, set()
+            self._items, self._fmod, self._mod, self._inline, self._crates = {}, {}, {}, {}, set()
             for crate, rel, f in self.acc.rs_files(self.root):
                 st = self.src(f)
                 parts = rel.split(os.sep)[1:]
                 parts[-1] = parts[-1][:-3]
                 if parts[-1] in ('lib', 'main', 'mod'): parts = parts[:-1]
-                self._fmod[f] = (crate, tuple(parts))
-                self._mod.setdefault((crate, tuple(parts)), f)
+                fm = (crate, tuple(parts))
+                self._fmod[f] = fm
+                self._mod.setdefault(fm, (f, 0, len(st)))
                 self._crates.add(crate)
-                its = self._items.setdefault(f, [])
+                inl = self._inline[f] = []  # (lo, hi, module, test): an inline module's braces, outer ones first
+                for m in re.finditer(r'(?<![A-Za-z0-9_])mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{', st):
+                    e = self.acc.match_brace(st, m.end() - 1)
+                    if e < 0: raise Fail('%s: unbalanced `mod %s {`' % (os.path.relpath(f, self.root), m.group(1)))
+                    outer = self.mod_at(f, m.start())
+                    j = max(st.rfind(';', 0, m.start()), st.rfind('}', 0, m.start()), st.rfind('{', 0, m.start()))
+                    test = bool(re.search(r'#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]', st[j + 1:m.start()])) or outer is None
+                    key = (crate, outer[1] + (m.group(1),)) if outer else None
+                    inl.append((m.end(), e - 1, key, test))
+                    if not test: self._mod.setdefault(key, (f, m.end(), e - 1))
                 for m in ITEM.finditer(st):
                     j = m.start() - 1
                     while j >= 0 and st[j].isspace(): j -= 1
                     if j >= 0 and st[j] not in ';{}]': continue  # `<const N: ..>`, `, const M: ..`: a generic parameter
-                    e = st.find(';', m.end())
-                    if e < 0: raise Fail('%s: const %s: no `;`' % (f, m.group(3)))
+                    mod = self.mod_at(f, m.start())
+                    if mod is None: continue  # inside a #[cfg(test)] module
+                    e, d = m.end(), 0
+                    while e < len(st) and not (st[e] == ';' and d == 0):
+                        if st[e] in '([{': d += 1
+                        elif st[e] in ')]}': d -= 1
+                        e += 1
+                    if e >= len(st) or d < 0: raise Fail('%s: const %s: no `;` ends it' % (os.path.relpath(f, self.root), m.group(3)))
                     v = m.group(1).split()
                     vis = 'priv' if not v else ('pub' if m.group(1).strip() == 'pub' else 'crate')
-                    its.append((m.group(3), vis, (f, m.start()), self.rawstr[f][m.end(2):e + 1]))  # hashed from `const`, as before
+                    self._items.setdefault(mod, []).append((m.group(3), vis, (f, m.start()), self.rawstr[f][m.end(2):e + 1]))
         return self._items
 
-    def uses(self, f):
-        """[(path segments, alias, glob, pub)] of each `use` in f, use trees expanded."""
+    def mod_at(self, f, off):
+        """The module holding offset off of file f: the innermost inline `mod` around it, else the file's; None inside a
+        #[cfg(test)] module."""
+        best = (self._fmod[f], -1)
+        for lo, hi, key, test in self._inline.get(f, []):
+            if lo <= off < hi and lo > best[1]: best = (None if test else key, lo)
+        return best[0]
+
+    def uses(self, mod):
+        """[(path segments, alias, glob, pub)] of each `use` directly in module mod (not in a module nested in it)."""
+        self.items()
+        if mod not in self._mod: return []
+        f, lo, hi = self._mod[mod]
         out = []
         for u in re.finditer(r'(?<![A-Za-z0-9_])(pub(?:\s*\([^)]*\))?\s+)?use\s+([^;]*);', self.src(f)):
+            if not lo <= u.start() < hi or self.mod_at(f, u.start()) != mod: continue
             toks = re.findall(r'::|[{},*]|[A-Za-z_][A-Za-z0-9_]*', u.group(2))
             if toks[:1] == ['::']: toks = toks[1:]
 
@@ -349,9 +384,9 @@ class Gate:
                 out.append((path, alias, glob, bool(u.group(1))))
         return out
 
-    def module(self, f, segs):
-        """(crate, module path) a `use` path names from file f; None outside the crates (vstd, std, ...)."""
-        crate, mp = self._fmod[f]
+    def module(self, mod, segs):
+        """The module (crate, path) a path names from module mod; None for a path outside the crates (vstd, std, a type)."""
+        crate, mp = mod
         segs = list(segs)
         if not segs: return None
         if segs[0] == 'crate': base, segs = (), segs[1:]
@@ -364,52 +399,74 @@ class Gate:
         else: return None
         return (crate, base + tuple(segs))
 
-    def visible(self, mod, name, crate, seen):
-        """The definitions of `name` that module `mod` makes importable from `crate`: its own items (`pub`, or
-        `pub(..)` within its crate) and its `pub use` re-exports."""
+    def visible(self, mod, name, importer, seen):
+        """The definitions of `name` that module mod makes importable into module importer: its own items (`pub`;
+        `pub(..)` within its crate; private ones into mod itself and its descendants) and its `pub use` re-exports."""
         if mod is None or mod in seen or mod not in self._mod: return []
         seen = seen | {mod}
-        f = self._mod[mod]
-        ds = [d for d in self._items.get(f, []) if d[0] == name and (d[1] == 'pub' or (d[1] == 'crate' and mod[0] == crate))]
-        for path, alias, glob, pub in self.uses(f):
+        inside = importer[0] == mod[0] and importer[1][:len(mod[1])] == mod[1]
+        ds = [d for d in self.items().get(mod, []) if d[0] == name and
+              (d[1] == 'pub' or (d[1] == 'crate' and mod[0] == importer[0]) or inside)]
+        for path, alias, glob, pub in self.uses(mod):
             if not pub: continue
-            if glob: ds += self.visible(self.module(f, path), name, crate, seen)
-            elif (alias or path[-1]) == name: ds += self.visible(self.module(f, path[:-1]), path[-1], crate, seen)
+            if glob: ds += self.visible(self.module(mod, path), name, importer, seen)
+            elif (alias or path[-1]) == name: ds += self.visible(self.module(mod, path[:-1]), path[-1], importer, seen)
         return ds
 
-    def const_of(self, name, f):
-        """The definition of the constant `name` that text in file f reads: f's own item; else what f's `use` lines
-        import (explicit before glob); else its crate's item. More than one candidate at the first level that has any
-        fails closed; None when nothing defines it (a local, a generic parameter: not a constant)."""
-        items = self.items()
-        crate = self._fmod[f][0]
+    def one(self, f, name, ds, what):
+        ks = {d[2]: d for d in ds}
+        if len(ks) > 1:
+            raise Fail('%s reads the constant %s%s, which names %d definitions (%s): ambiguous; import one explicitly or '
+                       'rename' % (os.path.relpath(f, self.root), what, name, len(ks),
+                                   ', '.join(sorted('%s:%d' % (os.path.relpath(k[0], self.root), self.line(k[0], k[1])) for k in ks))))
+        return next(iter(ks.values())) if ks else None
+
+    def const_of(self, name, f, off):
+        """The definition of the bare constant `name` that text at offset off of file f reads: its module's own item;
+        else what the module's `use` lines import (explicit before glob); else an item anywhere in its crate. More than
+        one candidate at the first level that has any fails closed; None when no item has the name (a local, a generic
+        parameter). Never an item of another crate that no `use` line imports."""
+        mod = self.mod_at(f, off) or self._fmod[f]
         expl, glob = [], []
-        for path, alias, g, _ in self.uses(f):
-            if g: glob += self.visible(self.module(f, path), name, crate, frozenset())
-            elif (alias or path[-1]) == name: expl += self.visible(self.module(f, path[:-1]), path[-1], crate, frozenset())
-        own = [d for d in items.get(f, []) if d[0] == name]
-        incr = [d for g2, its in items.items() if self._fmod[g2][0] == crate for d in its if d[0] == name]
+        for path, alias, g, _ in self.uses(mod):
+            if g: glob += self.visible(self.module(mod, path), name, mod, frozenset())
+            elif (alias or path[-1]) == name: expl += self.visible(self.module(mod, path[:-1]), path[-1], mod, frozenset())
+        own = [d for d in self.items().get(mod, []) if d[0] == name]
+        incr = [d for m, its in self.items().items() if m[0] == mod[0] for d in its if d[0] == name]
         for lvl in (own, expl, glob, incr):
-            ks = {d[2]: d for d in lvl}
-            if len(ks) > 1:
-                raise Fail('%s reads the constant %s, which names %d definitions (%s): ambiguous; import one explicitly or '
-                           'rename' % (os.path.relpath(f, self.root), name, len(ks),
-                                       ', '.join(sorted('%s:%d' % (os.path.relpath(k[0], self.root), self.line(k[0], k[1])) for k in ks))))
-            if ks: return next(iter(ks.values()))
+            d = self.one(f, name, lvl, '')
+            if d is not None: return d
         return None
+
+    def const_at(self, name, f, off, segs):
+        """The definition `a::b::NAME` names from text at offset off of file f: exactly one, or Fail; None when the path
+        leads outside the crates (vstd, std, a primitive or a type's associated constant)."""
+        mod = self.mod_at(f, off) or self._fmod[f]
+        target = self.module(mod, segs)
+        if target is None:
+            imp = [p for p, a, g, _ in self.uses(mod) if not g and (a or p[-1]) == segs[0]]
+            if len(imp) == 1: target = self.module(mod, imp[0] + segs[1:])
+        if target is None:
+            if segs[0] in EXTERNAL or segs[0][:1].isupper(): return None
+            raise Fail('%s reads %s: the path names no module the gate can find; refused' % (
+                os.path.relpath(f, self.root), '::'.join(segs + [name])))
+        d = self.one(f, name, self.visible(target, name, mod, frozenset()), '::'.join(segs) + '::')
+        if d is None:
+            raise Fail('%s reads %s: no such constant item; refused' % (os.path.relpath(f, self.root), '::'.join(segs + [name])))
+        return d
 
     def digest(self, rp, walk, allowed, pins):
         """sha256 of the source text a root's vouches rest on: the walk's fns, every fn they or an unfollowed callee call,
-        transitively, the pinned fns, and the definition of every constant any of that text names; also refuse a
-        `use .. as` rename of a name that text uses, in a file holding any of it."""
-        texts, tfile, work = {}, {}, list(walk) + list(allowed)
+        transitively, the pinned fns, and the definition of every constant any of that text names (const_of, const_at);
+        also refuse a `use .. as` rename of a name that text uses, in a file holding any of it."""
+        texts, tsite, work = {}, {}, list(walk) + list(allowed)
         while work:
             x = work.pop()
             if x[2] in texts: continue
-            texts[x[2]], tfile[x[2]] = self.fn_text(x), x[0]
+            texts[x[2]], tsite[x[2]] = self.fn_text(x), (x[0], x[1])
             work += self.callees_any(x)
         for x in pins:
-            if x[2] not in texts: texts[x[2]], tfile[x[2]] = self.fn_text(x), x[0]
+            if x[2] not in texts: texts[x[2]], tsite[x[2]] = self.fn_text(x), (x[0], x[1])
         files = {x[0] for x in list(walk) + list(allowed) + list(pins)}
         files |= {x[0] for x in self.sites + self.allsites if x[2] in texts}
         toks = {m.group(0) for v in texts.values() for m in IDENT.finditer(v)}
@@ -420,10 +477,22 @@ class Gate:
                         raise Fail('%s: `use .. %s` renames a name that the text %s rests on uses: the gate reads and hashes '
                                    'the name, not the item it stands for; refused' % (os.path.relpath(f, self.root), r.group(0), rp))
         names = {d[0] for its in self.items().values() for d in its}
-        used = {}  # NAME: {key: raw}, each definition resolved from the file of the text that names it
+        used = {}  # NAME: {key: raw}, each definition resolved from where the text that names it sits
         for p in sorted(texts):
-            for n in sorted({m.group(0) for m in IDENT.finditer(texts[p])} & names):
-                d = self.const_of(n, tfile[p])
+            t, (f, off) = texts[p], tsite[p]
+            for m in IDENT.finditer(t):
+                n = m.group(0)
+                if n not in names: continue
+                segs, j = [], m.start()
+                while True:  # `a::b::NAME`: the path before it
+                    k = j
+                    while k > 0 and t[k - 1].isspace(): k -= 1
+                    if t[k - 2:k] != '::': break
+                    q = re.search(r'([A-Za-z_][A-Za-z0-9_]*)\s*$', t[:k - 2])
+                    if not q: break
+                    segs.insert(0, q.group(1))
+                    j = q.start()
+                d = self.const_at(n, f, off, segs) if segs else self.const_of(n, f, off)
                 if d is not None: used.setdefault(n, {})[d[2]] = d[3]
         body = ''.join('%s\n%s\n' % (p, texts[p]) for p in sorted(texts))
         body += ''.join('const %s\n%s\n' % (n, '\n'.join(used[n][k] for k in sorted(used[n]))) for n in sorted(used))

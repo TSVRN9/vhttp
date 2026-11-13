@@ -15,7 +15,7 @@ root	quic::recv_stream::recv_allowed_err	eb1a2204e4ef3d8c272e16968098c474662665d
 root	quic::tp::allowed_tp_err	00825bb5f0ee687737b52913893166ec56e38839b9908efaccb79a40aa958dff
 root	quic::tp::allowed_tp_err_from	897e3fd606b35f770fee348b3adf2eaffdab6b8d30f2206641b46079c54ceb14
 root	quictls::server::tp_allowed_err	19c0cb1e16db72640a2fece2a068bf0dfeaa6301d67424f9703819e4c5e5184a
-root	quictls::server::superseded_allowed_err	97e1089f0b4f4e8986f8e0ee01400df87d831828ec19c7df5770f7bd093c0c6b
+root	quictls::server::superseded_allowed_err	9cfb68632fead50545d103eecb348a3318e818507399b83f878d5be7c272bb2c
 root	quictls::server::key_changes_allowed_err	79cd9425ffd5fd2fafaadb456a18c9f49364cfdbe5183c9e17e656a995f1c19f
 pin	quic::crypto_stream::crypto_allowed_err	quic::crypto_stream::CryptoStream::on_crypto
 pin	quic::crypto_stream::crypto_allowed_err	quic::crypto_stream::CryptoStream::restart

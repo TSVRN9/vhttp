@@ -655,6 +655,21 @@ sed -i 's/^pub const TP_PREFERRED_ADDRESS: u64 = 0x0d;$/&\npub const FLOW_CONTRO
 expect_fail "rfc-quantity: a bare constant two modules define, imported by neither" "reads the constant FLOW_CONTROL_ERROR, which names 2 definitions" rq
 sed -i 's/^use vstd::prelude::\*;$/&\nuse crate::crypto_stream::FLOW_CONTROL_ERROR;/' "$qx/recv_stream.rs"
 expect_pass "rfc-quantity: the same constant imported explicitly resolves to one definition" rq
+# a constant's whole item is hashed: its first `;` outside brackets ends it (`[u8; 2]` does not)
+fresh rfcq; sed -i 's/^pub const FLOW_CONTROL_ERROR: u64 = 0x03;$/&\npub const DEMO_ALPN: [u8; 2] = *b"h3";/' "$qx/recv_stream.rs"
+sed -i 's/^    ||| c == FLOW_CONTROL_ERROR && flow_trigger(s, off + len, fin, conn_room)$/& \&\& DEMO_ALPN[0] == 0x68/' "$qx/recv_stream.rs"; qredig
+sed -i 's/^pub const DEMO_ALPN: \[u8; 2\] = \*b"h3";$/pub const DEMO_ALPN: [u8; 2] = *b"h4";/' "$qx/recv_stream.rs"
+expect_fail "rfc-quantity: an array constant's value changes (digests re-pinned)" "re-review the vouches for $RR" rqn
+# `a::b::NAME` resolves through the path, to exactly one item: another crate's constant is hashed, not the reading
+# file's same-named one, and a constant only that crate defines is hashed at all
+fresh rfcq; mkdir -p "$tmp/rfcq/crates/aux/src"; printf 'pub const FLOW_CONTROL_ERROR: u64 = 0x03;\npub const AUX_ONLY: u64 = 7;\n' > "$tmp/rfcq/crates/aux/src/lib.rs"
+sed -i 's/^    ||| c == FLOW_CONTROL_ERROR && flow_trigger(s, off + len, fin, conn_room)$/    ||| c == aux::FLOW_CONTROL_ERROR \&\& flow_trigger(s, off + len, fin, conn_room)/' "$qx/recv_stream.rs"; qredig
+sed -i 's/^pub const FLOW_CONTROL_ERROR: u64 = 0x03;$/pub const FLOW_CONTROL_ERROR: u64 = 0x04;/' "$tmp/rfcq/crates/aux/src/lib.rs"
+expect_fail "rfc-quantity: a path-qualified constant of another crate changes (digests re-pinned)" "re-review the vouches for $RR" rqn
+fresh rfcq; mkdir -p "$tmp/rfcq/crates/aux/src"; printf 'pub const AUX_ONLY: u64 = 7;\n' > "$tmp/rfcq/crates/aux/src/lib.rs"
+sed -i 's/^    ||| c == FLOW_CONTROL_ERROR && flow_trigger(s, off + len, fin, conn_room)$/& \&\& c != aux::AUX_ONLY/' "$qx/recv_stream.rs"; qredig
+sed -i 's/= 7;/= 8;/' "$tmp/rfcq/crates/aux/src/lib.rs"
+expect_fail "rfc-quantity: a path-qualified constant no import names changes (digests re-pinned)" "re-review the vouches for $RR" rqn
 fresh rfcq; sed -i 's/^    ||| end > s.limit$/& || s.high > 0 \/\/ rfc-quantity: s.limit: the largest maximum stream data sent (RFC 9000 §19.10)/' "$qx/recv_stream.rs"
 sed -i '/\ts\.limit\t/d' "$qop"; qredig
 expect_fail "rfc-quantity: probe I, s.high on a line whose annotation names s.limit (digests re-pinned)" "flow_trigger (from recv_allowed_err) reads \`s.high\`" rqn
