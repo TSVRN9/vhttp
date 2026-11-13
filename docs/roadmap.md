@@ -50,6 +50,7 @@ send and recovery paths; parts of 9b/9c that do not touch them may go earlier. P
 | 9b2 | a verified de-amortized byte queue for every quic/tls byte buffer on input paths (CryptoStream buf and read, HsReader, Reassembly, send_stream, the TLS transcript) | unplanned | 4 (after 9b1, before Phase 6) | none; 9b1 spec D10 (owner decision 2026-11-12); `docs/rca/2026-11-12-cost-sweep.md` |
 | 9b3 | h3 input costs (the quadratic cookie merge first, with its RCA; reqs/unis remove+insert; request buffers) | unplanned | 4 (after 9b1, before Phase 6) | none; 9b1 spec D10 (owner decision 2026-11-12); `docs/rca/2026-11-12-cost-sweep.md` |
 | 9b4 | the remaining sites of docs/rca/2026-11-12-cost-sweep.md (server conns table, tls ext bitmap, ack/inflight/route tables, builders) and the sweep as a gate | unplanned | 4 (after 9b1, before Phase 6) | none; 9b1 spec D10 (owner decision 2026-11-12); `docs/rca/2026-11-12-cost-sweep.md` |
+| 9b5 | incremental parsing: TLS handshake messages, h3 frames and QPACK field sections parsed as bytes arrive, so no call does more than O(d + log n) | unplanned | 4 (after 9b4, before Phase 6) | none; owner decision 2026-11-12; 9b2 spec Open questions 1 |
 | 9c | frame errors, h3 to quic closes, tls own limits | unplanned | 4 (parts that touch no `conn.rs` send or recovery path), 6 (the rest) | none; Phase 9 spec `:51`, `:143-161` |
 | 9t1 | `decode_crate` functional | unplanned | 7 | none; Phase 9 spec `:271` |
 | 9t2 | `mir_run` fuel monotonicity | unplanned | 7 | none; Phase 9 spec `:272` |
@@ -104,14 +105,16 @@ stays `never`.
 - Sources: `docs/superpowers/specs/2026-11-10-phase-9b1-frags-index-design.md`; `docs/rca/catalog.md:232-235`.
 - Carryovers: `cat-C15` (closed by this phase).
 
-### 9b2, 9b3, 9b4: the 2026-11-12 cost sweep
+### 9b2, 9b3, 9b4, 9b5: the 2026-11-12 cost sweep and the per-call rule
 
 - Scope: the sites of `docs/rca/2026-11-12-cost-sweep.md` where network input pays std's amortized growth, a front
   drain or a shift: 9b2 the quic/tls byte buffers (one verified de-amortized byte queue), 9b3 h3 (the quadratic
   cookie merge first, with its RCA), 9b4 the rest and the sweep as a gate. Owner decision 2026-11-12: they run after
-  9b1, before Phase 6.
-- Sources: 9b1 spec D10; `docs/rca/2026-11-12-cost-sweep.md`.
-- Carryovers: `cat-C15-9b2`, `cat-C15-9b3`, `cat-C15-9b4`.
+  9b1, before Phase 6. Owner decision 2026-11-12: the per-call rule is O(d + log n), d the bytes that call was given,
+  so a call delivering a run of r bytes does not meet it: 9b2 also makes in-order delivery lazy (CRYPTO and
+  Reassembly), and 9b5, after 9b4, parses TLS handshake messages, h3 frames and QPACK field sections incrementally.
+- Sources: 9b1 spec D10; `docs/rca/2026-11-12-cost-sweep.md`; the 9b2 spec's Open questions 1 (9b5).
+- Carryovers: `cat-C15-9b2`, `cat-C15-9b3`, `cat-C15-9b4`, `cat-C15-stream-parse`.
 
 ### 6: loss recovery and congestion control
 

@@ -144,7 +144,10 @@ on its out-of-order patterns. `take_front` appends to `out`; that buffer's growt
   front with `split_off` (O(unread) per message). All three grow or shift by std's amortized behaviour. Phase 9b2,
   next after 9b1, replaces them with one verified byte queue (de-amortized growth: on reaching half capacity a buffer
   of twice the size is allocated and each append also moves two old bytes, so every append is O(d) worst case with
-  every copy counted; front removal copies only the message), so the strict bound covers them too. 9b1 closes
+  every copy counted; front removal copies only the message). Owner decision 2026-11-12: the per-call rule is
+  O(d + log n), d the bytes a call was given, so `take_front`'s O(log n + r) delivery of a whole run does not meet it
+  either; 9b2 also makes in-order delivery lazy (`cat-C15-9b2`) and 9b5 parses incrementally
+  (`cat-C15-stream-parse`). 9b1 closes
   `cat-C15` for the out-of-order store. A sweep (docs/rca/2026-11-12-cost-sweep.md) found about 60 such sites across
   quic, tls, h3 and server; owner decision 2026-11-12: phases 9b2 (quic/tls byte buffers), 9b3 (h3, the quadratic
   cookie merge first) and 9b4 (the rest, and the sweep as a gate) run next, before Phase 6, each with a carryover row.
