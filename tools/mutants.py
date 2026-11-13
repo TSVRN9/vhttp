@@ -24,6 +24,8 @@
 #                            merge-base's, else `gate`
 #   tree ROOT REV            sha256 of `git ls-tree REV -- Cargo.lock Cargo.toml crates rust-toolchain.toml` (all four needed)
 #   allowed ROOT TSV         every allowed_*err / *_allowed_err spec fn under ROOT/crates is named by a row's fn or regex column
+#   assemble ROWS RES..      mutants.sh run's parallel workers: one `<id> pass|fail <blob>` line per row of ROWS across the
+#                            RES files, printed in ROWS order; a row with no line or two, a line for no row, or a malformed line fails
 # Every mode exits 1 with a "mutants: ..." message on failure, and fails closed on a missing or empty input.
 import difflib
 import hashlib
@@ -300,6 +302,30 @@ def same(a, b):
         die('%s and %s differ:\n%s' % (a, b, '\n'.join(difflib.unified_diff(x, y, a, b, lineterm='', n=0))))
 
 
+def assemble(rows_file, *res):
+    """The parallel run's result lines (`<id> pass|fail <blob>`, from the RES files of its workers), one per row of
+    ROWS_FILE, printed in row order: a row with no line or two, or a line for no row, fails."""
+    ids = [l.split('\t', 1)[0] for l in read(rows_file).split('\n') if l]
+    got = {}
+    for p in res:
+        for l in read(p).split('\n'):
+            if not l:
+                continue
+            w = l.split(' ')
+            if len(w) != 3 or w[1] not in ('pass', 'fail'):
+                die('%s: malformed result line %r' % (p, l))
+            if w[0] in got:
+                die('%s has two result lines' % w[0])
+            got[w[0]] = l
+    extra = sorted(set(got) - set(ids))
+    if extra:
+        die('result lines for no row: %s' % ' '.join(extra))
+    miss = [i for i in ids if i not in got]
+    if miss:
+        die('no result line for %s (a worker stopped early)' % ' '.join(miss))
+    print('\n'.join(got[i] for i in ids))
+
+
 def allowed(root, tsv):
     """Every allowed_*err / *_allowed_err spec fn under ROOT/crates (tools/acceptance.py's scanner) is named, as a whole
     word, in some row's fn or regex column (not origin): a new acceptance predicate needs a mutant."""
@@ -336,6 +362,8 @@ def main(a):
         same(a[1], a[2])
     elif a[:1] == ['tree'] and len(a) == 3:
         print(tree(a[1], a[2]))
+    elif a[:1] == ['assemble'] and len(a) >= 3:
+        assemble(*a[1:])
     elif a[:1] == ['allowed'] and len(a) == 3:
         allowed(a[1], a[2])
     else:
