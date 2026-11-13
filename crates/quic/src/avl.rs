@@ -1092,6 +1092,7 @@ proof fn lemma_split_eq<V>(l: Tree<V>, x: u64, v: V, r: Tree<V>, c: Tree<V>, k: 
 {
     lemma_keys_ge_cat(c, None, (x, v), r, k);
     assert(seq(c) =~= seq![(x, v)] + seq(r));
+    // Only the `a + (seq![x] + b)` clause is used; the second `seq(r)` fills the unused `c`.
     lemma_seq_assoc(seq(l), seq(r), (x, v), seq(r));
 }
 
@@ -1129,6 +1130,7 @@ pub fn split<V>(t: Tree<V>, k: u64) -> (r: (Tree<V>, Tree<V>, Ghost<nat>))
             if k < x {
                 let (a, b, Ghost(cs)) = split(l, k);
                 proof {
+                    // `b` stands in for the join result: only the unconditional clauses are used here.
                     lemma_split_lt(l, x, v, r, a, b, b, k);
                 }
                 let (c, Ghost(cj)) = join(b, x, v, r);
@@ -1149,6 +1151,7 @@ pub fn split<V>(t: Tree<V>, k: u64) -> (r: (Tree<V>, Tree<V>, Ghost<nat>))
             } else {
                 let (a, b, Ghost(cs)) = split(r, k);
                 proof {
+                    // `a` stands in for the join result: only the unconditional clauses are used here.
                     lemma_split_gt(l, x, v, r, a, b, a, k);
                 }
                 let (c, Ghost(cj)) = join(l, x, v, a);
@@ -1202,6 +1205,27 @@ proof fn lemma_pop_keys<V>(l: Tree<V>, m: u64, mv: V, l2: Tree<V>, x: u64)
     }
 }
 
+/// A wf tree's first entry `(m, mv)` is below the rest's keys and at most every key of the tree.
+proof fn lemma_pop_order<V>(t: Tree<V>, m: u64, mv: V, rest: Tree<V>)
+    requires
+        wf(t),
+        seq![(m, mv)] + seq(rest) == seq(t),
+    ensures
+        keys_gt(rest, m),
+        keys_ge(t, m),
+{
+    lemma_wf_sorted(t);
+    assert(seq(t)[0] == (m, mv));
+    assert forall|j: int| 0 <= j < seq(rest).len() implies #[trigger] seq(rest)[j].0 > m by {
+        assert(seq(t)[j + 1] == seq(rest)[j]);
+    }
+    assert forall|i: int| 0 <= i < seq(t).len() implies #[trigger] seq(t)[i].0 >= m by {
+        if i > 0 {
+            assert(seq(t)[0].0 < seq(t)[i].0);
+        }
+    }
+}
+
 /// The first entry of `t`, and the rest; the height drops by at most one.
 pub fn pop_min<V>(t: Tree<V>) -> (r: (Tree<V>, u64, V, Ghost<nat>))
     requires
@@ -1212,6 +1236,8 @@ pub fn pop_min<V>(t: Tree<V>) -> (r: (Tree<V>, u64, V, Ghost<nat>))
         wf(r.0),
         seq![(r.1, r.2)] + seq(r.0) == seq(t),
         ht(t) - 1 <= ht(r.0) <= ht(t),
+        keys_gt(r.0, r.1),
+        keys_ge(t, r.1),
         r.3@ <= c_pop() * (ht(t) + 1),
     decreases ht(t),
 {
@@ -1225,6 +1251,9 @@ pub fn pop_min<V>(t: Tree<V>) -> (r: (Tree<V>, u64, V, Ghost<nat>))
     if l.is_none() {
         proof {
             assert(seq(t0) =~= seq![(x, v)] + seq(r));
+            lemma_pop_order(t0, x, v, r);
+            // The empty left child.
+            work = work + 1;
         }
         (r, x, v, Ghost(work))
     } else {
@@ -1236,6 +1265,7 @@ pub fn pop_min<V>(t: Tree<V>) -> (r: (Tree<V>, u64, V, Ghost<nat>))
         proof {
             lemma_seq_assoc(seq![(m, mv)], seq(l2), (x, v), seq(r));
             lemma_pop_ht(ht(l), ht(r), ht(t0), ht(l2), ht(c));
+            lemma_pop_order(t0, m, mv, c);
             work = work + cp + bc;
         }
         (c, m, mv, Ghost(work))
@@ -1261,6 +1291,17 @@ proof fn lemma_join2_keys<V>(a: Tree<V>, b: Tree<V>, m: u64, mv: V, b2: Tree<V>)
     assert forall|j: int| 0 <= j < seq(b2).len() implies #[trigger] seq(b2)[j].0 > m by {
         assert(seq(b)[j + 1] == seq(b2)[j]);
     }
+}
+
+/// `join2`'s order requirement, from a key separating the two trees.
+pub proof fn lemma_join2_order<V>(a: Tree<V>, b: Tree<V>, k: u64)
+    requires
+        keys_lt(a, k),
+        keys_ge(b, k),
+    ensures
+        forall|i: int, j: int|
+            0 <= i < seq(a).len() && 0 <= j < seq(b).len() ==> #[trigger] seq(a)[i].0 < #[trigger] seq(b)[j].0,
+{
 }
 
 /// `a`'s entries then `b`'s, every key of `a` being below every key of `b`.
@@ -1320,6 +1361,7 @@ pub fn drain<V>(t: Tree<V>, out: &mut Vec<(u64, V)>) -> (r: Ghost<nat>)
             let ghost o1 = out@;
             out.push((x, v));
             proof {
+                // Only the `a.push(x) + b` clause is used; the second `seq(r)` fills the unused `c`.
                 lemma_seq_assoc(o1, seq(r), (x, v), seq(r));
             }
             let Ghost(cr) = drain(r, out);
