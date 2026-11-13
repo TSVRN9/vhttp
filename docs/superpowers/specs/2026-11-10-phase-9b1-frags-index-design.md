@@ -58,8 +58,8 @@ std's amortized doubling, unchanged by this phase and named in the same row.
 
 ## Decisions
 
-- **D1 Public contract unchanged.** `view`, `wf`, `held`, `count`, `hi`, `new`, `after_insert`, `insert`, `take_front`
-  keep their signatures and ensures; none is weakened. `crypto_stream.rs` does not change, apart from tests. Cost cannot
+- **D1 Public contract unchanged.** `view`, `wf`, `held`, `count`, `hi`, `hi_spec`, `lemma_wf`, `new`, `after_insert`,
+  `insert`, `take_front` keep their signatures and ensures; none is weakened. `crypto_stream.rs` does not change, apart from tests. Cost cannot
   be a field (the `&self` fns could not charge it, and `insert`'s all-held return ensures `*final(self) == *old(self)`),
   so each public fn is a one-line wrapper over a private worker (`after_insert_w`, `insert_w`, `take_front_w`, and the
   `avl` ops themselves) that returns its result and a `Ghost<nat>` cost bounded in its ensures; the wrapper asserts the
@@ -87,9 +87,10 @@ std's amortized doubling, unchanged by this phase and named in the same row.
   6. `join` `A`, the pieces, `Rc` if kept, and `B`, in order: at most `d / K + 4` joins of cost `c · (h + 1)` each.
   The run delta for `count` comes from the walk (runs met in `[s, e)`, plus adjacency at `s − 1` and `e`).
 - **D3a `after_insert_w` without mutation.** `&self`: a range walk over the chunks meeting `[s − 1, e]` (recursion
-  that enters a subtree only if it can meet the range), proved to visit at most `2(h + 1) + |M| + 2` nodes (a two-mode
-  induction: a one-sided walk visits at most `k + h + 1`, a two-sided one splits into two one-sided ones); returns the
-  held and run counts after the frame.
+  that enters a subtree only if it can meet the range), proved to cost at most `c_walk() · (2(h + 1) + |M| + 2)`
+  with `c_walk() = 2` (empty children count as visits: a one-sided walk over `k` in-range chunks visits at most
+  `2k + h + 1`, a two-sided one at most `2k + 2h + 2`, plus `get_le`'s `h + 1`); returns the held and run counts after
+  the frame.
 - **D3b `take_front_w`.** `pop_min` while the next chunk starts where the taken bytes end (the whole run, never part of
   a chunk): `t` chunks, `t <= 1 + r / K` (every chunk after the first is a follower), so `t · (h + 1) <= h + 1 + r`
   since `h + 1 <= K`. `pop_min` ensures the height does not grow.

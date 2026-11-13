@@ -23,7 +23,8 @@ are binding; section numbers below refer to it).
 - Every fn under the quic rlimit cap: `--rlimit 4` and `rl.py --max 8000000`. Split proofs into lemmas; never raise
   the cap.
 - `crates/quic/src/crypto_stream.rs` changes nothing outside tests. Public `Frags` items keep signatures and ensures
-  (D1): `view`, `wf`, `held`, `count`, `hi`, `new`, `after_insert`, `insert`, `take_front`, `capacity`, and the pub
+  (D1): `view`, `wf`, `held`, `count`, `hi`, `hi_spec`, `lemma_wf`, `new`, `after_insert`, `insert`, `take_front`,
+  `capacity`, and the pub
   spec fns/lemmas `run_start`, `starts`, `runs`, `put`, `lemma_runs_le_len`, `lemma_runs_cut`.
 - `K: u64 = 128`, `CAP: u64 = 256` (pub consts in frags.rs).
 - Cost convention (spec "The bound"): one unit per tree node visited (an empty `None` child included), created or
