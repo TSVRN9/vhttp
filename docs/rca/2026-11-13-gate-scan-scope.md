@@ -69,9 +69,22 @@
   read `<T as Tr>::NAME` of a name one of our items has fails (not resolved). A path rooted in vstd, std or a primitive
   type is not hashed.
 - Other gates sharing the scan: `acceptance` (src/ only, refusing `verus!` elsewhere); `cost_charge` reads a fixed file
-  list (no name lookup); `quick.py scope` maps changed paths to crates (a test change still re-runs that crate, as it
+  list, but looked its wrapper exemption up by bare name (Defect 3); `quick.py scope` maps changed paths to crates (a test change still re-runs that crate, as it
   should); `escape-gate.sh` greps every `.rs` file (wider is the fail-closed direction). None looks a name up across
   files.
+
+## Defect 3: the cost-charge gate's wrapper exemption keyed by bare name
+
+- **Defect**: `tools/cost_charge.py` lets a callee's cost be "used" by an `assert` alone in frags.rs's public wrappers
+  `insert`, `after_insert` and `take_front` (9b1 D6a), and matched them by bare fn name over every gated file. 9b2 Task 3
+  adds `crates/byteq/src/queue.rs`, whose `ByteQueue::take_front` is no wrapper: with its `work = work + c1` replaced by
+  `assert(c1 == n)` the gate passed (checked on a copy), and so did Verus, the cost ensures being an upper bound.
+- **Escape**: until this task each wrapper name occurred in one gated file; the demos never put a same-named fn in
+  another file.
+- **Class**: C8's (a gate resolving by bare name what Rust resolves by path), here in the cost-charge gate.
+- **Catch**: `WRAPPERS` holds `(file, name)` pairs; gate demo "queue.rs's take_front is no wrapper" (the mutation above)
+  fails. The gate's other name table (cost fns) is global by name too, but there a clash fails closed (two same-named
+  cost fns returning their cost at different places is an error; a same-named non-cost call is flagged).
 
 ## Evidence
 

@@ -299,15 +299,16 @@ fresh escape
 printf 'assume_specification[ f ](x: u8);\n' >> "$tmp/escape/crates/demo/src/lib.rs"
 expect_fail "escape-gate: assume_specification" "unaccounted escape" esc
 
-# cost-charge gate (scripts/cost-charge.sh, 9b1 D6a), on copies of the real avl.rs, frags.rs and byteq's capvec.rs: fill's
-# while without its `work` invariant line (named by its line), a recursive exec fn returning no Ghost<nat>, fill's ensures
-# not reading its cost, fill's charge deleted or made `+ 0`, take_run's in-loop charge deleted, open_up dropping gather's
+# cost-charge gate (scripts/cost-charge.sh, 9b1 D6a), on copies of the real avl.rs, frags.rs and byteq's capvec.rs and
+# queue.rs: fill's while without its `work` invariant line (named by its line), a recursive exec fn returning no
+# Ghost<nat>, fill's ensures not reading its cost, fill's charge deleted or made `+ 0`, take_run's in-loop charge deleted, open_up dropping gather's
 # cost, merge binding rebuild's cost as a plain name, a call on a receiver other than self dropping push_slice's cost
-# (9b2 ruling 1), a `loop` and a `for`, a missing file; the real tree passes.
+# (9b2 ruling 1), queue.rs's take_front naming push_slice's cost only in an assert (frags.rs's wrapper exemption is
+# keyed by file), a `loop` and a `for`, a missing file; the real tree passes.
 expect_pass "cost-charge: the real tree" "$root/scripts/cost-charge.sh" "$root"
 ccq=$tmp/cost/crates/quic/src
 ccb=$tmp/cost/crates/byteq/src
-cfresh() { rm -rf "${tmp:?}/cost"; mkdir -p "$ccq" "$ccb"; cp "$root/crates/quic/src/avl.rs" "$root/crates/quic/src/frags.rs" "$ccq/"; cp "$root/crates/byteq/src/capvec.rs" "$ccb/"; }
+cfresh() { rm -rf "${tmp:?}/cost"; mkdir -p "$ccq" "$ccb"; cp "$root/crates/quic/src/avl.rs" "$root/crates/quic/src/frags.rs" "$ccq/"; cp "$root/crates/byteq/src/capvec.rs" "$root/crates/byteq/src/queue.rs" "$ccb/"; }
 cc() { "$root/scripts/cost-charge.sh" "$tmp/cost"; }
 cfresh
 expect_pass "cost-charge: an unchanged copy" cc
@@ -348,6 +349,10 @@ cfresh
 once '^} // verus!$' "$ccb/capvec.rs"
 sed -i 's|^} // verus!$|fn fill_demo(q: \&mut CapVec<u8>, s: \&[u8])\n    requires\n        old(q).wf(),\n        old(q)@.len() + s@.len() <= old(q).cap(),\n{\n    q.push_slice(s);\n}\n\n} // verus!|' "$ccb/capvec.rs"
 expect_fail "cost-charge: a receiver call drops push_slice's cost (9b2 ruling 1)" "fill_demo drops the cost push_slice returns" cc
+cfresh
+once '^            work = work \+ c1;$' "$ccb/queue.rs"
+sed -i 's/^            work = work + c1;$/            assert(c1 == n);/' "$ccb/queue.rs"
+expect_fail "cost-charge: queue.rs's take_front is no wrapper (an assert does not charge)" "ByteQueue::take_front drops the cost c1 binds from push_slice" cc
 cfresh
 once '^    let mut v: Vec<u8> = Vec::with_capacity\(n as usize\);$' "$ccq/frags.rs"
 sed -i 's/^    let mut v: Vec<u8> = Vec::with_capacity(n as usize);$/&\n    loop { break; }/' "$ccq/frags.rs"

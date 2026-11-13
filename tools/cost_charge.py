@@ -1,5 +1,6 @@
 """Cost-charge gate (9b1 D6a). Usage: python3 -I tools/cost_charge.py ROOT
-In ROOT/crates/quic/src/avl.rs, ROOT/crates/quic/src/frags.rs and ROOT/crates/byteq/src/capvec.rs, inside `verus!`
+In ROOT/crates/quic/src/avl.rs, ROOT/crates/quic/src/frags.rs, ROOT/crates/byteq/src/capvec.rs and
+ROOT/crates/byteq/src/queue.rs, inside `verus!`
 (comments and strings blanked, fns found by tools/acceptance.py's parser):
   - every `while` has an `invariant` (or `invariant_except_break`) clause naming `work`, the ghost cost accumulator, and
     its body updates `work = work + E` with E not `0`;
@@ -11,7 +12,8 @@ In ROOT/crates/quic/src/avl.rs, ROOT/crates/quic/src/frags.rs and ROOT/crates/by
     (the costs; `NAME(`, `path::NAME(` or `.NAME(` on any receiver, for NAME such a fn; a std method of another name,
     such as `out.append(..)`, is not one) is the tail of a block (its value passes on), or a `let` whose pattern binds each cost as `Ghost(x)`, and from there to the next
     binding of the same name `x` appears in a `work = work + E` update, in a `Ghost(..)` the fn builds (not a call
-    argument), or, in the public wrappers insert, after_insert and take_front only, in an `assert`; any other fn that
+    argument), or, in frags.rs's public wrappers insert, after_insert and take_front only (keyed by file: queue.rs's
+    take_front is no wrapper), in an `assert`; any other fn that
     calls one returns a cost itself;
   - no `loop`, `for .. in` or `exec_allows_no_decreases_clause` (loops and recursion this gate does not see).
 Fails naming file:line; fails closed on a missing file, no verus! block, or no looping or recursive fn or bound cost.
@@ -24,9 +26,9 @@ import os, re, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import acceptance as acc  # noqa: E402
 
-FILES = ['crates/quic/src/avl.rs', 'crates/quic/src/frags.rs', 'crates/byteq/src/capvec.rs']
+FILES = ['crates/quic/src/avl.rs', 'crates/quic/src/frags.rs', 'crates/byteq/src/capvec.rs', 'crates/byteq/src/queue.rs']
 INV = re.compile(r'\b(invariant_except_break|invariant|ensures|decreases)\b')
-WRAPPERS = {'insert', 'after_insert', 'take_front'}
+WRAPPERS = {('crates/quic/src/frags.rs', n) for n in ('insert', 'after_insert', 'take_front')}
 UPDATE = re.compile(r'\bwork\s*=\s*work\s*\+\s*([^;]*?)\s*;')
 ASSIGN = re.compile(r'(?<![\w.])work\s*=(?!=)')
 
@@ -156,7 +158,7 @@ def check(root):
                     errs.append('%s: while whose body does not charge work (`work = work + E`, E not 0)' % line(w))
             if rec and not charges(body):
                 errs.append('%s: %s recurses but its body does not charge work (`work = work + E`, E not 0)' % (line(k), path))
-            errs += dropped(s, line, path, name, ret, end, e2, costs, call)
+            errs += dropped(s, line, path, name, ret, end, e2, costs, call, (rel, name) in WRAPPERS)
             nbound += len(binds_in(s, end, e2, call))
             if not (rec or whiles): continue
             nfn += 1
@@ -189,7 +191,7 @@ def binds_in(s, a, b, call):
     return out
 
 
-def dropped(s, line, path, name, ret, a, b, costs, call):
+def dropped(s, line, path, name, ret, a, b, costs, call, wrap):
     """Errors for callee costs fn `path` (body s[a:b]) drops."""
     errs, ours = [], cost_idx(ret) is not None
     lets = binds_in(s, a, b, call)
@@ -222,14 +224,14 @@ def dropped(s, line, path, name, ret, a, b, costs, call):
                 errs.append('%s: %s does not bind the cost %s returns as Ghost(x)' % (line(l), path, '/'.join(sorted(names))))
             else:
                 xs.append(g.group(1))
-        if xs and not ours and name not in WRAPPERS:
+        if xs and not ours and not wrap:
             errs.append('%s: %s binds the cost %s returns but returns no Ghost<nat> cost and is not a public wrapper' % (line(l), path, '/'.join(sorted(names))))
             continue
         for x in xs:
             rb = re.compile(r'\bGhost\(\s*%s\s*\)' % re.escape(x))
             nxt = [l2 for l2, p2, _, e2 in lets if l2 > l and rb.search(p2)]
             scope = s[e:nxt[0] if nxt else b]
-            if not used(scope, x, name in WRAPPERS):
+            if not used(scope, x, wrap):
                 errs.append('%s: %s drops the cost %s binds from %s (no `work = work + E` update, built Ghost(..) or wrapper assert names it)' % (line(l), path, x, '/'.join(sorted(names))))
     return errs
 

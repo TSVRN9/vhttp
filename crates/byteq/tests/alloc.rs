@@ -1,5 +1,7 @@
-//! 9b2 D3: a `CapVec` allocates once, at `new`, with the capacity it was asked for, and never reallocates.
+//! 9b2 D3: a `CapVec` allocates once, at `new`, with the capacity it was asked for, and never reallocates; a
+//! `ByteQueue` allocates only where D4's branches say.
 use byteq::capvec::CapVec;
+use byteq::queue::ByteQueue;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
@@ -82,4 +84,25 @@ fn capvec_allocs_exact() {
     assert_eq!(c2[0] - c0[0], 3, "into_vec and drop allocate nothing");
     assert_eq!(c2[3] - c0[3], 3, "each allocation freed once");
     assert_eq!(std::mem::size_of::<CapVec<u8>>(), std::mem::size_of::<Vec<u8>>(), "the ghost capacity takes no space");
+}
+
+#[test]
+fn queue_new_allocates_nothing() {
+    let c0 = counts();
+    let q = ByteQueue::new();
+    let c1 = counts();
+    assert_eq!(c1[0] - c0[0], 0, "new allocates nothing");
+    assert_eq!((q.len(), q.as_slice(), q.caps()), (0, &[][..], (0, 0)));
+}
+
+#[test]
+fn take_and_drop_zero() {
+    let mut q = ByteQueue::new();
+    let c0 = counts();
+    let (t, _) = q.take_front(0);
+    let _ = q.drop_front(0);
+    let c1 = counts();
+    assert_eq!(c1[0] - c0[0], 0, "take_front(0) and drop_front(0) allocate nothing");
+    assert_eq!(c1[2] - c0[2], 0, "no realloc");
+    assert_eq!((t.len(), q.len(), q.caps()), (0, 0, (0, 0)));
 }
