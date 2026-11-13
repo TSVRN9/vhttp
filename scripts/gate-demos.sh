@@ -336,12 +336,14 @@ expect_fail "cost-charge: a missing file" "cannot read crates/quic/src/avl.rs" c
 
 # The no-realloc claim (spec "The bound", TRUSTED.md's Vec row): fill's fresh piece made by Vec::new() instead of
 # Vec::with_capacity(n) must fail crypto_ooo_cost_linear on reallocs. A copy of the workspace in target/realloc-demo
-# (stable path, mtimes kept, so only quic rebuilds), its own target dir; two debug builds and runs, about half a
+# (stable path, mtimes kept and frags.rs touched, so only quic rebuilds), its own target dir; two debug builds and runs, about half a
 # minute after the first.
 rd=$root/target/realloc-demo
 rm -rf "$rd/ws"
 mkdir -p "$rd/ws"
 (cd "$root" && tar -cf - --exclude=target Cargo.toml Cargo.lock rust-toolchain.toml crates) | tar -C "$rd/ws" -xf - || die "realloc demo: cannot copy the workspace"
+# the last run left a patched quic build, older than frags.rs's restored mtime: touch it so cargo rebuilds quic.
+touch "$rd/ws/crates/quic/src/frags.rs"
 rdt() { env CARGO_TARGET_DIR="$rd/target" cargo test --offline --locked -q --manifest-path "$rd/ws/Cargo.toml" -p quic --test crypto_cost; }
 expect_pass "crypto_cost: an unchanged workspace copy" rdt
 once '^    let mut v: Vec<u8> = Vec::with_capacity\(n as usize\);$' "$rd/ws/crates/quic/src/frags.rs"

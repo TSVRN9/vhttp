@@ -49,8 +49,8 @@ call:
 - `take_front`: at most `c1 · (h + 1) + c2 · (r + K)`.
 - `size + 1 >= 2^(h/2)` (AVL; no `log` in the proofs, vstd's is opaque) and `K · (n − runs) <= held`; the private
   lemma `Frags::lemma_caps_height` proves `n <= 4096 + 128` and `h <= 25` for any wf `Frags` with `held <= 16384` and
-  `count <= 4096` (`CryptoStream`'s caps; no caller applies it, since `crypto_stream.rs` does not change and the bounds
-  above need only `h + 1 <= 126`). For any store,
+  `count <= 4096` (`MAX_CRYPTO_BUFFER` and `MAX_CRYPTO_RANGES`, which `CryptoStream::wf` gives; no caller applies it,
+  since `crypto_stream.rs` does not change and the bounds above need only `h + 1 <= 126`). For any store,
   `held <= VARINT_MAX < 2^62` gives `h + 1 <= 126 <= K`, which the bounds above use.
 
 So a frame costs O(log n + d) in the store and `take_front` O(log n + r), worst case per call, with no amortization.
