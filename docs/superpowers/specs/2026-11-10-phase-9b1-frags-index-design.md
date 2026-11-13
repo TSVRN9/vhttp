@@ -49,7 +49,10 @@ call:
   `CryptoStream`'s caps that gives `n <= 4096 + 128` and `h <= 25`, derived where the caps apply. For any store,
   `held <= VARINT_MAX < 2^62` gives `h + 1 <= 126 <= K`, which the bounds above use.
 
-So a frame costs O(log n + d) and an in-order fill O(log n + r), worst case per call, with no amortization. No chunk
+So a frame costs O(log n + d) in the store and `take_front` O(log n + r), worst case per call, with no amortization.
+Owner decision 2026-11-12: the per-call rule is O(d + log n) with `d` the bytes the call was given, so a call that
+delivers `r` bytes (`on_fill`'s `take_front` when a 1-byte frame closes a gap) does not meet it; lazy delivery of
+in-order bytes is 9b2's (`cat-C15-9b2`), and parsing as bytes arrive is 9b5's (`cat-C15-stream-parse`). No chunk
 `Vec` ever reallocates (owner request 2026-11-12, after a review found the earlier draft relied on bounded but
 uncounted reallocation): every piece D3 step 5 makes is a fresh `Vec::with_capacity(len)` filled by counted pushes of
 exactly `len` bytes, and no chunk is grown afterwards, so every byte copy inside `Frags` is in the ghost cost. vstd
