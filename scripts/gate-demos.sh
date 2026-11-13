@@ -39,7 +39,21 @@ fresh() { rm -rf "${tmp:?}/$1"; cp -r "$fx/$1" "$tmp/$1"; }
 expect_pass "quick.py scope selftest" python3 -I "$root/tools/quick.py" selftest
 : > "$tmp/noquick.json"
 : > "$tmp/noquick.log"
-expect_fail "quick.py check: a run with no results object" "0 Verus result objects" python3 -I "$root/tools/quick.py" check "$tmp/noquick"
+expect_fail "quick.py check: a run with no results object" "0 Verus result objects" python3 -I "$root/tools/quick.py" check "$tmp/noquick" demo acc demo
+# scope reads cargo metadata's own form: NUL-separated paths (one with a space), a dev-dependency counted as a dependent.
+printf '{"packages": [{"name": "wire", "dependencies": []}, {"name": "h3", "dependencies": [{"name": "wire", "path": "/w", "kind": null}]}, {"name": "tls", "dependencies": [{"name": "wire", "path": "/w", "kind": "dev"}]}]}' > "$tmp/qmeta.json"
+printf 'crates/wire/a b.rs\0docs/x.md\0' > "$tmp/qpaths"
+sc=$(python3 -I "$root/tools/quick.py" scope "$tmp/qmeta.json" "$tmp/qpaths") || die "quick.py scope failed on cargo metadata's form"
+[ "$sc" = "tls wire h3
+ct" ] || die "quick.py scope: want crates [tls wire h3] (dependency order) and extra [ct], got:
+$sc"
+echo "gate-demos: quick.py scope: NUL-separated paths, a dev-dependent included"
+# quick.sh's scope: a failing git diff or git ls-files is a failure, not an empty change set (a fake git fails that one command).
+mkdir -p "$tmp/fakegit"
+printf '#!/bin/sh\n[ "$1" != "$FAKEGIT_FAIL" ] || exit 1\nexec %s "$@"\n' "$(command -v git)" > "$tmp/fakegit/git"
+chmod +x "$tmp/fakegit/git"
+expect_fail "quick.sh: git diff fails" "git diff against the merge-base failed" env PATH="$tmp/fakegit:$PATH" FAKEGIT_FAIL=diff QUICK_OUT="$tmp/quick" "$root/scripts/quick.sh"
+expect_fail "quick.sh: git ls-files fails" "git ls-files (untracked files) failed" env PATH="$tmp/fakegit:$PATH" FAKEGIT_FAIL=ls-files QUICK_OUT="$tmp/quick" "$root/scripts/quick.sh"
 
 # lint-scripts: a script without pipefail; an empty directory.
 fresh lint
@@ -931,6 +945,30 @@ vj 1 false; sed -i 's/"verus": {[^}]*}, //' "$v.json"
 expect_fail "mutants verdict: no verus object" "no verus object" killed
 vj 1 false
 expect_fail "mutants verdict: the unmutated fn fails" "unmutated acc::demo" python3 -I "$root/tools/mutants.py" clean "$v" demo acc demo
+
+# quick.py check (quick.sh CRATE/MOD[/FN]) on the same canned output: a clean run of the fn, of its module, and with a
+# dependency's own object beside it pass; errors, a FAIL row, nothing verified, a VIR error, rlimit text, another Verus,
+# and only another module's rows fail.
+qc() { python3 -I "$root/tools/quick.py" check "$v" demo acc "$@"; }
+vj 0 true; : > "$v.log"
+expect_pass "quick.py check: a clean fn run" qc demo
+expect_pass "quick.py check: a clean module run" qc
+sed 's/demo::acc::demo/dep::m::f/' "$v.json" > "$v.dep"; cat "$v.dep" >> "$v.json"
+expect_pass "quick.py check: a dependency's object beside the crate's" qc demo
+vj 1 false
+expect_fail "quick.py check: errors" "1 errors" qc demo
+vj 0 false
+expect_fail "quick.py check: a FAIL row" "FAIL rows demo::acc::demo" qc demo
+vj 0 true; sed -i 's/"verified": 1/"verified": 0/' "$v.json"
+expect_fail "quick.py check: nothing verified" "no results object verified demo::acc::demo" qc demo
+vj 0 true; sed -i 's/"encountered-vir-error": false/"encountered-vir-error": true/' "$v.json"
+expect_fail "quick.py check: a VIR error" "encountered-vir-error True" qc demo
+vj 0 true; printf 'error: Resource limit (rlimit) exceeded\n' > "$v.log"
+expect_fail "quick.py check: rlimit text" "rlimit text" qc demo
+: > "$v.log"; VJ_VERSION=0.2025.01.01.0000000 vj 0 true
+expect_fail "quick.py check: another Verus version" "verus.version is '0.2025.01.01.0000000'" qc demo
+vj 0 true; sed -i 's/demo::acc::demo/demo::other::demo/' "$v.json"
+expect_fail "quick.py check: only another module's rows" "no results object verified demo::acc::*" qc
 
 # the main gate (mutants.sh verify at main's tip, merge or not), on m3's real run file.
 mmerge() { gitc "$1" checkout -q main; gitc "$1" reset -q --hard "$mbase"; gitc "$1" merge -q --no-ff feat -m merge; }

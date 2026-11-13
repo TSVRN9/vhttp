@@ -5,9 +5,9 @@ set -o pipefail
 # scripts/verify.sh run does. Dirty trees are fine. Verus runs through `cargo verus focus` (the crate's own fns, its
 # dependencies type-checked only, target/verus-partial) at --rlimit 4, the full gate's limit.
 #   quick.sh                      every crate changed since `git merge-base HEAD main` (commits, edits, untracked files)
-#                                 and its dependents (tools/quick.py scope): Verus per crate (tools/rl.py --gate, the 8,000,000
-#                                 cap on quic and quictls), their tests, the cheap gates, and, when the paths call for them,
-#                                 ct-check + declassify, ct-binary, interop and gate-demos.
+#                                 and its dependents, dev-dependents too (tools/quick.py scope): Verus per crate
+#                                 (tools/rl.py --gate, the 8,000,000 cap on quic and quictls), their tests, the cheap gates,
+#                                 and, when the paths call for them, ct-check + declassify, ct-binary, interop and gate-demos.
 #   quick.sh CRATE[/MOD[/FN]]..   Verus only, on each target: a whole crate, one module (--verify-only-module, e.g. quic/frags)
 #                                 or one fn in it (--verify-function, e.g. quic/conn/Connection::accept).
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -32,7 +32,7 @@ step() {
 # verus CRATE [MOD [FN]]: cargo does not fingerprint verus args, so the crate is cleaned first (else a cached crate verifies nothing).
 verus() {
     b=$out/$(printf '%s' "$*" | tr ' :' '._')
-    cargo clean -q -p "$1" --target-dir "$root/target/verus-partial" || return 1
+    cargo clean -q -p "$1" --target-dir "${CARGO_TARGET_DIR:-$root/target}/verus-partial" || return 1
     case $# in
         1) a= ;;
         2) a="--verify-only-module $2" ;;
@@ -45,7 +45,7 @@ verus() {
         # shellcheck disable=SC2086
         python3 -I "$tools/rl.py" --gate "$1" --pin "$tools/verus-pin.txt" $lim "$b.json"
     else
-        python3 -I "$tools/quick.py" check "$b"
+        python3 -I "$tools/quick.py" check "$b" "$@"
     fi
 }
 
@@ -65,10 +65,11 @@ if [ $# -gt 0 ]; then
 fi
 
 base=$(git merge-base HEAD main) || fail "cannot resolve the merge-base of HEAD and main"
-paths=$(git diff --name-only "$base"; git ls-files --others --exclude-standard)
+# NUL-separated and unquoted (-z), both sides of a rename (--no-renames): a file moved out of a crate changes that crate too
+git diff --name-only --no-renames -z "$base" > "$out/paths" || fail "git diff against the merge-base failed"
+git ls-files -z --others --exclude-standard >> "$out/paths" || fail "git ls-files (untracked files) failed"
 cargo metadata --no-deps --locked --format-version 1 > "$out/meta.json" || fail "cargo metadata --locked failed"
-# shellcheck disable=SC2086 # one path per word (no tracked path has a space)
-sc=$(python3 -I "$tools/quick.py" scope "$out/meta.json" $paths) || exit 1
+sc=$(python3 -I "$tools/quick.py" scope "$out/meta.json" "$out/paths") || exit 1
 crates=$(printf '%s\n' "$sc" | sed -n 1p)
 extra=$(printf '%s\n' "$sc" | sed -n 2p)
 echo "quick: since $(git rev-parse --short "$base"): crates [$crates], extra [$extra]"
