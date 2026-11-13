@@ -1355,4 +1355,527 @@ impl Chunks {
     }
 }
 
+// ---- `insert` and `take_front`.
+
+/// `insert`'s cost constants: at most `c_ins1() · (h + 1) · (d / K + 4) + c_ins2() · (d + 4K)`.
+spec fn c_ins1() -> nat {
+    28
+}
+
+spec fn c_ins2() -> nat {
+    8
+}
+
+/// `take_front`'s: at most `c_take1() · (h + 1) + c_take2() · (r + K)`.
+spec fn c_take1() -> nat {
+    8
+}
+
+spec fn c_take2() -> nat {
+    9
+}
+
+/// A stored height is at most 126.
+proof fn lemma_ht_le<V>(t: Tree<V>)
+    requires
+        crate::avl::wf(t),
+    ensures
+        ht(t) <= 126,
+{
+    if let Some(b) = t {
+        assert(b.h <= 126);
+    }
+}
+
+/// Under `ok` a position is in at most one chunk, whose byte `at` gives.
+proof fn lemma_at_ok(f: Seq<(nat, Seq<u8>)>)
+    requires
+        ok(f),
+    ensures
+        forall|i: int, k: nat| #[trigger] inf(f, i, k) ==> pos(f).contains(k) && at(f, k) == f[i].1[k - f[i].0],
+{
+    assert forall|i: int, k: nat| #[trigger] inf(f, i, k) implies pos(f).contains(k) && at(f, k) == f[i].1[k
+        - f[i].0] by {
+        let t = choose|t: int| inf(f, t, k);
+        if t < i {
+            assert(end(f[t]) <= f[i].0);
+        } else if t > i {
+            assert(end(f[i]) <= f[t].0);
+        }
+        assert(end(f[i]) <= VARINT_MAX);
+    }
+}
+
+/// A slice of chunks in order is in order.
+proof fn lemma_ok_sub(f: Seq<(nat, Seq<u8>)>, a: int, b: int)
+    requires
+        ok(f),
+        0 <= a <= b <= f.len(),
+    ensures
+        ok(f.subrange(a, b)),
+{
+    let g = f.subrange(a, b);
+    assert forall|i: int| #![trigger g[i]] 0 <= i < g.len() implies 0 < g[i].1.len() <= CAP && end(g[i])
+        <= VARINT_MAX by {
+        assert(g[i] == f[a + i]);
+    }
+    assert forall|i: int, j: int| #![trigger g[i], g[j]] 0 <= i < j < g.len() implies end(g[i]) <= g[j].0 by {
+        assert(g[i] == f[a + i] && g[j] == f[a + j]);
+    }
+    assert forall|i: int| #[trigger] fol(g, i) implies g[i].1.len() >= K by {
+        assert(g[i] == f[a + i] && g[i - 1] == f[a + i - 1]);
+        assert(fol(f, a + i));
+    }
+}
+
+/// Both halves of chunks in order are in order.
+proof fn lemma_ok_split(x: Seq<(nat, Seq<u8>)>, y: Seq<(nat, Seq<u8>)>)
+    requires
+        ok(x + y),
+    ensures
+        ok(x),
+        ok(y),
+{
+    lemma_ok_sub(x + y, 0, x.len() as int);
+    lemma_ok_sub(x + y, x.len() as int, (x + y).len() as int);
+    assert((x + y).subrange(0, x.len() as int) =~= x);
+    assert((x + y).subrange(x.len() as int, (x + y).len() as int) =~= y);
+}
+
+/// Two runs of chunks in order, the second starting at or after the first's end (as a follower if there).
+proof fn lemma_ok_cat(a: Seq<(nat, Seq<u8>)>, b: Seq<(nat, Seq<u8>)>)
+    requires
+        ok(a),
+        ok(b),
+        a.len() > 0 && b.len() > 0 ==> end(a.last()) <= b[0].0,
+        a.len() > 0 && b.len() > 0 && end(a.last()) == b[0].0 ==> b[0].1.len() >= K,
+    ensures
+        ok(a + b),
+{
+    let g = a + b;
+    let n = a.len() as int;
+    assert forall|i: int| #![trigger g[i]] 0 <= i < g.len() implies 0 < g[i].1.len() <= CAP && end(g[i])
+        <= VARINT_MAX by {
+        if i < n {
+            assert(g[i] == a[i]);
+        } else {
+            assert(g[i] == b[i - n]);
+        }
+    }
+    assert forall|i: int, j: int| #![trigger g[i], g[j]] 0 <= i < j < g.len() implies end(g[i]) <= g[j].0 by {
+        if j < n {
+            assert(g[i] == a[i] && g[j] == a[j]);
+        } else if i >= n {
+            assert(g[i] == b[i - n] && g[j] == b[j - n]);
+        } else {
+            assert(g[i] == a[i] && g[j] == b[j - n]);
+            assert(a.last() == a[n - 1]);
+            if i < n - 1 {
+                assert(end(a[i]) <= a[n - 1].0);
+            }
+            if j > n {
+                assert(end(b[0]) <= b[j - n].0);
+            }
+        }
+    }
+    assert forall|i: int| #[trigger] fol(g, i) implies g[i].1.len() >= K by {
+        if i < n {
+            assert(g[i] == a[i] && g[i - 1] == a[i - 1]);
+            assert(fol(a, i));
+        } else if i == n {
+            assert(g[i] == b[0] && g[i - 1] == a[n - 1]);
+            assert(a.last() == a[n - 1]);
+        } else {
+            assert(g[i] == b[i - n] && g[i - 1] == b[i - n - 1]);
+            assert(fol(b, i - n));
+        }
+    }
+}
+
+/// The positions of a concatenation.
+proof fn lemma_pos_cat(a: Seq<(nat, Seq<u8>)>, b: Seq<(nat, Seq<u8>)>)
+    ensures
+        pos(a + b) == pos(a) + pos(b),
+{
+    let g = a + b;
+    let n = a.len() as int;
+    assert forall|k: nat| #[trigger] pos(g).contains(k) <==> (pos(a) + pos(b)).contains(k) by {
+        if pos(g).contains(k) {
+            let i = choose|i: int| inf(g, i, k);
+            if i < n {
+                assert(g[i] == a[i]);
+                assert(inf(a, i, k));
+            } else {
+                assert(g[i] == b[i - n]);
+                assert(inf(b, i - n, k));
+            }
+        }
+        if pos(a).contains(k) {
+            let i = choose|i: int| inf(a, i, k);
+            assert(g[i] == a[i]);
+            assert(inf(g, i, k));
+        }
+        if pos(b).contains(k) {
+            let i = choose|i: int| inf(b, i, k);
+            assert(g[n + i] == b[i]);
+            assert(inf(g, n + i, k));
+        }
+    }
+    assert(pos(g) =~= pos(a) + pos(b));
+}
+
+/// `mp` over a concatenation.
+proof fn lemma_mp_cat(a: Seq<(u64, Vec<u8>)>, b: Seq<(u64, Vec<u8>)>)
+    ensures
+        mp(a + b) == mp(a) + mp(b),
+{
+    assert(mp(a + b) =~= mp(a) + mp(b));
+}
+
+/// The length of `t`'s first chunk if it starts at `r`, every key being at least `r`.
+fn front_at(t: &Tree<Vec<u8>>, r: u64) -> (res: (Option<usize>, Ghost<nat>))
+    requires
+        crate::avl::wf(*t),
+        keys_ge(*t, r),
+    ensures
+        res.0 is Some <==> seq(*t).len() > 0 && seq(*t)[0].0 == r,
+        res.0 is Some ==> res.0->0 == seq(*t)[0].1@.len(),
+        res.0 is None ==> keys_gt(*t, r),
+        res.1@ <= ht(*t) + 1,
+{
+    let (g, Ghost(c)) = get_le(t, r);
+    match g {
+        Some((k, v)) => {
+            proof {
+                let i = choose|i: int| #[trigger] last_le(seq(*t), r, i, k, *v);
+                lemma_wf_sorted(*t);
+                assert(seq(*t)[0].0 >= r);
+                if i > 0 {
+                    assert(seq(*t)[0].0 < seq(*t)[i].0);
+                }
+            }
+            (Some(v.len()), Ghost(c))
+        },
+        None => {
+            proof {
+                if seq(*t).len() > 0 {
+                    assert(seq(*t)[0].0 > r);
+                }
+            }
+            (None, Ghost(c))
+        },
+    }
+}
+
+/// Removing a run `[end, r)` that starts `p` removes one run and `r - end` positions.
+proof fn lemma_runs_front(p: Set<nat>, q: Set<nat>, st: nat, r: nat)
+    requires
+        st < r,
+        forall|k: nat| #[trigger] p.contains(k) ==> k >= st,
+        forall|k: nat| st <= k < r ==> #[trigger] p.contains(k),
+        !p.contains(r),
+        forall|k: nat| #[trigger] q.contains(k) <==> p.contains(k) && k > r,
+    ensures
+        runs(q) + 1 == runs(p),
+        q.len() + (r - st) == p.len(),
+{
+    assert(q =~= p.filter(|k: nat| k > r));
+    assert forall|x: nat| #[trigger] starts(p).contains(x) <==> starts(q).insert(st).contains(x) by {
+        if x > 0 {
+            if x > r {
+                assert(p.contains((x - 1) as nat) <==> q.contains((x - 1) as nat));
+            }
+            if st < x < r {
+                assert(p.contains((x - 1) as nat));
+            }
+        }
+    }
+    assert(starts(p) =~= starts(q).insert(st));
+    assert(!starts(q).contains(st));
+    assert(p =~= q + Set::range(st, r));
+    assert(q.disjoint(Set::range(st, r)));
+    vstd::set_lib::lemma_set_disjoint_lens(q, Set::range(st, r));
+}
+
+/// Taking the run at `end`: chunks before `i` hold `[end, r)`, the rest start past `r`.
+proof fn lemma_take_rest(f: Seq<(nat, Seq<u8>)>, i: int, st: nat, r: nat)
+    requires
+        ok(f),
+        0 <= i <= f.len(),
+        forall|k: nat| #[trigger] pos(f).contains(k) ==> k >= st,
+        forall|j: int| 0 <= j < i ==> end(#[trigger] f[j]) <= r,
+        forall|j: int| i <= j < f.len() ==> #[trigger] f[j].0 > r,
+    ensures
+        !pos(f).contains(r),
+        ok(f.skip(i)),
+        forall|k: nat| #[trigger] pos(f.skip(i)).contains(k) <==> pos(f).contains(k) && k > r,
+        forall|k: nat| #[trigger] pos(f.skip(i)).contains(k) ==> vw(f.skip(i))[k] == vw(f)[k],
+{
+    let g = f.skip(i);
+    lemma_ok_sub(f, i, f.len() as int);
+    assert(g =~= f.subrange(i, f.len() as int));
+    lemma_at_ok(f);
+    lemma_at_ok(g);
+    if pos(f).contains(r) {
+        let j = choose|j: int| inf(f, j, r);
+        assert(j < i ==> end(f[j]) <= r);
+    }
+    assert forall|k: nat| #[trigger] pos(g).contains(k) <==> pos(f).contains(k) && k > r by {
+        if pos(g).contains(k) {
+            let j = choose|j: int| inf(g, j, k);
+            assert(g[j] == f[i + j]);
+            assert(inf(f, i + j, k));
+        }
+        if pos(f).contains(k) && k > r {
+            let j = choose|j: int| inf(f, j, k);
+            assert(j < i ==> end(f[j]) <= r);
+            assert(g[j - i] == f[j]);
+            assert(inf(g, j - i, k));
+        }
+    }
+    assert forall|k: nat| #[trigger] pos(g).contains(k) implies vw(g)[k] == vw(f)[k] by {
+        let j = choose|j: int| inf(g, j, k);
+        assert(g[j] == f[i + j]);
+        assert(inf(f, i + j, k));
+    }
+}
+
+/// One step of `take_front_w`: the chunk popped at `r` is `f[i]`, which holds the view's bytes there; the rest
+/// start at or past its end.
+proof fn lemma_take_step(f: Seq<(nat, Seq<u8>)>, i: int, t: Tree<Vec<u8>>, t2: Tree<Vec<u8>>, k: u64, v: Vec<u8>)
+    requires
+        ok(f),
+        0 <= i < f.len(),
+        mp(seq(t)) == f.skip(i),
+        seq![(k, v)] + seq(t2) == seq(t),
+    ensures
+        f[i] == (k as nat, v@),
+        end(f[i]) <= VARINT_MAX,
+        i > 0 && end(f[i - 1]) == k ==> v@.len() >= K,
+        mp(seq(t2)) == f.skip(i + 1),
+        forall|j: int| 0 <= j < seq(t2).len() ==> #[trigger] seq(t2)[j].0 >= end(f[i]),
+        forall|j: int| 0 <= j < v@.len() ==> #[trigger] v@[j] == vw(f)[(k + j) as nat],
+        forall|j: int| 0 <= j < v@.len() ==> #[trigger] pos(f).contains((k + j) as nat),
+{
+    let a = mp(seq![(k, v)]);
+    lemma_mp_cat(seq![(k, v)], seq(t2));
+    assert(a =~= seq![(k as nat, v@)]);
+    assert(mp(seq(t)) == a + mp(seq(t2)));
+    assert(f.skip(i)[0] == f[i]);
+    assert forall|j: int| 0 <= j < mp(seq(t2)).len() implies #[trigger] mp(seq(t2))[j] == f.skip(i + 1)[j] by {
+        assert(mp(seq(t2))[j] == (a + mp(seq(t2)))[j + 1]);
+        assert(f.skip(i)[j + 1] == f[i + 1 + j]);
+    }
+    assert(mp(seq(t2)) =~= f.skip(i + 1));
+    assert forall|j: int| 0 <= j < seq(t2).len() implies #[trigger] seq(t2)[j].0 >= end(f[i]) by {
+        assert(mp(seq(t2))[j] == f[i + 1 + j]);
+    }
+    if i > 0 {
+        if end(f[i - 1]) == k {
+            assert(fol(f, i));
+        }
+    }
+    lemma_at_ok(f);
+    assert forall|j: int| 0 <= j < v@.len() implies #[trigger] v@[j] == vw(f)[(k + j) as nat] by {
+        assert(inf(f, i, (k + j) as nat));
+    }
+    assert forall|j: int| 0 <= j < v@.len() implies #[trigger] pos(f).contains((k + j) as nat) by {
+        assert(inf(f, i, (k + j) as nat));
+    }
+}
+
+/// The bytes `take_front_w` appends: `vv` continues `o1` with the view's bytes from `r0`.
+proof fn lemma_take_out(o: Seq<u8>, o1: Seq<u8>, vv: Seq<u8>, f: Seq<(nat, Seq<u8>)>, st: nat, r0: nat)
+    requires
+        st <= r0,
+        o1 == o + Seq::new((r0 - st) as nat, |j: int| vw(f)[(st + j) as nat]),
+        forall|j: int| 0 <= j < vv.len() ==> #[trigger] vv[j] == vw(f)[(r0 + j) as nat],
+    ensures
+        o1 + vv == o + Seq::new((r0 + vv.len() - st) as nat, |j: int| vw(f)[(st + j) as nat]),
+{
+    let n = (r0 - st) as int;
+    assert forall|j: int| 0 <= j < (o1 + vv).len() implies #[trigger] (o1 + vv)[j] == (o + Seq::new(
+        (r0 + vv.len() - st) as nat,
+        |j: int| vw(f)[(st + j) as nat],
+    ))[j] by {
+        if j >= o.len() + n {
+            assert((o1 + vv)[j] == vv[j - o.len() - n]);
+        }
+    }
+    assert(o1 + vv =~= o + Seq::new((r0 + vv.len() - st) as nat, |j: int| vw(f)[(st + j) as nat]));
+}
+
+/// After `take_front_w`'s loop: the store is `f.skip(i)`, the run `[st, r)` gone.
+proof fn lemma_take_end(f: Seq<(nat, Seq<u8>)>, i: int, st: nat, r: u64, t: Tree<Vec<u8>>)
+    requires
+        ok(f),
+        0 <= i <= f.len(),
+        mp(seq(t)) == f.skip(i),
+        keys_gt(t, r),
+        r <= VARINT_MAX,
+        i == 0 ==> r == st,
+        i > 0 ==> r == end(f[i - 1]),
+        forall|k: nat| #[trigger] pos(f).contains(k) ==> k >= st,
+        forall|k: nat| st <= k < r ==> #[trigger] pos(f).contains(k),
+    ensures
+        !pos(f).contains(r as nat),
+        ok(f.skip(i)),
+        forall|k: nat| #[trigger] pos(f.skip(i)).contains(k) <==> pos(f).contains(k) && k > r,
+        forall|k: nat| #[trigger] pos(f.skip(i)).contains(k) ==> vw(f.skip(i))[k] == vw(f)[k],
+        pos(f.skip(i)).len() == sum_len(f.skip(i)),
+        st < r ==> runs(pos(f.skip(i))) + 1 == runs(pos(f)) && pos(f.skip(i)).len() + (r - st) == pos(f).len(),
+        f.skip(i).len() > 0 ==> f.skip(i).last() == f.last(),
+{
+    assert forall|j: int| 0 <= j < i implies end(#[trigger] f[j]) <= r by {
+        if j < i - 1 {
+            assert(end(f[j]) <= f[i - 1].0);
+        }
+    }
+    assert forall|j: int| i <= j < f.len() implies #[trigger] f[j].0 > r by {
+        assert(mp(seq(t))[j - i] == f[j]);
+        assert(seq(t)[j - i].0 > r);
+    }
+    lemma_take_rest(f, i, st, r as nat);
+    lemma_len(f.skip(i));
+    if st < r {
+        lemma_runs_front(pos(f), pos(f.skip(i)), st, r as nat);
+    }
+}
+
+impl Chunks {
+    /// `take_front`, and its cost: `pop_min` while the next chunk starts where the bytes taken end.
+    fn take_front_w(&mut self, st: u64, out: &mut Vec<u8>) -> (r: (u64, Ghost<nat>))
+        requires
+            old(self).wf(),
+            st <= VARINT_MAX,
+            forall|k: nat| #[trigger] old(self).view().contains_key(k) ==> k >= st,
+        ensures
+            final(self).wf(),
+            st <= r.0 <= VARINT_MAX,
+            forall|k: nat| st <= k < r.0 ==> #[trigger] old(self).view().contains_key(k),
+            !old(self).view().contains_key(r.0 as nat),
+            final(out)@ == old(out)@ + Seq::new((r.0 - st) as nat, |i: int| old(self).view()[(st + i) as nat]),
+            forall|k: nat| #[trigger]
+                final(self).view().contains_key(k) <==> old(self).view().contains_key(k) && k > r.0,
+            forall|k: nat| #[trigger]
+                final(self).view().contains_key(k) ==> final(self).view()[k] == old(self).view()[k],
+            r.1@ <= c_take1() * (ht(old(self).t) + 1) + c_take2() * ((r.0 - st) + K),
+    {
+        let ghost f = self.fs();
+        let ghost h = ht(self.t);
+        let ghost mut work: nat = 1;
+        proof {
+            self.lemma_size();
+            lemma_ht_le(self.t);
+            lemma_at_ok(f);
+            assert(self.view().dom() =~= pos(f));
+            assert forall|j: int| 0 <= j < f.len() implies #[trigger] f[j].0 >= st by {
+                assert(inf(f, j, f[j].0));
+            }
+            assert(f.skip(0) =~= f);
+            assert forall|j: int| 0 <= j < seq(self.t).len() implies #[trigger] seq(self.t)[j].0 >= st by {
+                assert(f[j].0 == seq(self.t)[j].0);
+            }
+        }
+        let mut t = self.t.take();
+        let mut r = st;
+        let ghost mut i: int = 0;
+        let (fl, Ghost(c)) = front_at(&t, r);
+        let mut go = fl.is_some();
+        proof {
+            work = work + c;
+            assert(out@ =~= old(out)@ + Seq::new((r - st) as nat, |j: int| vw(f)[(st + j) as nat]));
+        }
+        while go
+            invariant
+                ok(f),
+                f.len() < pow2(63),
+                0 <= i <= f.len(),
+                crate::avl::wf(t),
+                mp(seq(t)) == f.skip(i),
+                ht(t) <= h <= 126,
+                st <= r <= VARINT_MAX,
+                i == 0 ==> r == st,
+                i > 0 ==> r == end(f[i - 1]),
+                forall|k: nat| #[trigger] pos(f).contains(k) ==> k >= st,
+                forall|k: nat| st <= k < r ==> #[trigger] pos(f).contains(k),
+                out@ == old(out)@ + Seq::new((r - st) as nat, |j: int| vw(f)[(st + j) as nat]),
+                go ==> seq(t).len() > 0 && seq(t)[0].0 == r,
+                !go ==> keys_gt(t, r),
+                work <= 1 + (h + 1) + (if i > 0 { 7 * (h + 1) } else { 0 }) + 9 * (r - st),
+            decreases seq(t).len(),
+        {
+            proof {
+                assert(seq(t).len() == f.skip(i).len());
+            }
+            let (t2, k, mut v, Ghost(cp)) = pop_min(t);
+            proof {
+                lemma_take_step(f, i, t, t2, k, v);
+            }
+            let ghost o1 = out@;
+            let ghost vv = v@;
+            let n = v.len() as u64;
+            out.append(&mut v);
+            let ghost r0 = r;
+            r = r + n;
+            proof {
+                lemma_take_out(old(out)@, o1, vv, f, st as nat, r0 as nat);
+                assert forall|kk: nat| st <= kk < r implies #[trigger] pos(f).contains(kk) by {
+                    if kk >= r0 {
+                        assert(pos(f).contains((k + (kk - k)) as nat));
+                    }
+                }
+            }
+            let (fl, Ghost(c)) = front_at(&t2, r);
+            t = t2;
+            go = fl.is_some();
+            proof {
+                work = work + cp + n as nat + c + 1;
+                i = i + 1;
+            }
+        }
+        proof {
+            lemma_take_end(f, i, st as nat, r, t);
+        }
+        self.t = t;
+        if r > st {
+            self.held = self.held - (r - st);
+            self.count = self.count - 1;
+            if self.t.is_none() {
+                self.hi = 0;
+            }
+        }
+        proof {
+            assert(self.fs() == f.skip(i));
+            assert(self.view().dom() =~= pos(f.skip(i)));
+        }
+        (r, Ghost(work))
+    }
+
+    /// If a chunk starts at `end`, appends the bytes of the run from `end` to `out` and removes its chunks;
+    /// returns the end of that run (`end` itself if none starts there).
+    pub fn take_front(&mut self, end: u64, out: &mut Vec<u8>) -> (r: u64)
+        requires
+            old(self).wf(),
+            end <= VARINT_MAX,
+            forall|k: nat| #[trigger] old(self).view().contains_key(k) ==> k >= end,
+        ensures
+            final(self).wf(),
+            end <= r <= VARINT_MAX,
+            forall|k: nat| end <= k < r ==> #[trigger] old(self).view().contains_key(k),
+            !old(self).view().contains_key(r as nat),
+            final(out)@ == old(out)@ + Seq::new((r - end) as nat, |i: int| old(self).view()[(end + i) as nat]),
+            forall|k: nat| #[trigger]
+                final(self).view().contains_key(k) <==> old(self).view().contains_key(k) && k > r,
+            forall|k: nat| #[trigger]
+                final(self).view().contains_key(k) ==> final(self).view()[k] == old(self).view()[k],
+    {
+        let (r, Ghost(c)) = self.take_front_w(end, out);
+        proof {
+            assert(c <= c_take1() * (ht(old(self).t) + 1) + c_take2() * ((r - end) + K));
+        }
+        r
+    }
+}
+
 } // verus!
