@@ -1,5 +1,5 @@
 diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
-index 206d62d..8af9e3f 100644
+index 84ffad2..b88d7ac 100644
 --- a/crates/quic/src/crypto_stream.rs
 +++ b/crates/quic/src/crypto_stream.rs
 @@ -45,7 +45,13 @@ pub open spec fn ooo_received(s: CryptoStream, off: u64, d: Seq<u8>) -> Set<nat>
@@ -18,15 +18,15 @@ index 206d62d..8af9e3f 100644
  
  /// The number of maximal runs they form.
 diff --git a/crates/quic/src/frags.rs b/crates/quic/src/frags.rs
-index 6f08132..9cf09a8 100644
+index a863411..c979b8b 100644
 --- a/crates/quic/src/frags.rs
 +++ b/crates/quic/src/frags.rs
-@@ -1190,7 +1190,7 @@ impl Frags {
-         let md = self.merged(off, data, s, e, i, j, ms, me);
-         let ghost mdv = md@;
-         self.splice_in(i, j, ms, md);
--        self.held = h;
+@@ -4022,7 +4022,7 @@ impl Frags {
+         let t = self.t.take();
+         let (t2, hi, Ghost(c1)) = merge(t, self.hi, _lo, off, data, s, e, Ghost(f));
+         self.t = t2;
+-        self.held = nh;
 +        self.held = self.held + data.len() as u64;
+         self.count = nc;
+         self.hi = hi;
          proof {
-             lemma_insert_post(f, lo as nat, off as nat, data@, s as nat, e as nat, i as int, j as int, mdv);
-         }
