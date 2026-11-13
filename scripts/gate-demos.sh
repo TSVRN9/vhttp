@@ -842,12 +842,13 @@ expect_fail "mutants worker: not started by run" "worker: not started by mutants
 mkdir -p "$tmp/fakesetsid"; printf '#!/bin/sh\nexec "$@"\n' > "$tmp/fakesetsid/setsid"; chmod +x "$tmp/fakesetsid/setsid"
 expect_fail "mutants run: a worker dies" "1 of 1 mutant workers died" env PATH="$tmp/fakesetsid:$PATH" "$tmp/m7/scripts/mutants.sh" run
 nowt m7 "mutants run: a worker dies"
-# a run stopped by TERM while its worker runs Verus: the worker's whole session is gone and so are the worktrees.
+# a run stopped by TERM while its worker runs Verus (rust_verify in its session): the worker's whole session is gone and so
+# are the worktrees.
 mrepo mt
 "$tmp/mt/scripts/mutants.sh" run > "$tmp/mt.out" 2>&1 &
 rp=$!
-busy() { wp=$(pgrep -o -f "$tmp/mt/scripts/mutants.sh worker") && [ "$(pgrep -s "$wp" | wc -l)" -ge 2 ]; }
-upto 1200 busy || die "mutants run: TERM: no worker with a child within 120 s:
+busy() { wp=$(pgrep -o -f "$tmp/mt/scripts/mutants.sh worker") && pgrep -s "$wp" -x rust_verify > /dev/null; }
+upto 1200 busy || die "mutants run: TERM: no worker running Verus (rust_verify) within 120 s:
 $(cat "$tmp/mt.out")"
 kill -TERM "$rp"
 rc=0
@@ -858,7 +859,7 @@ pgrep -s "$wp" > /dev/null || rc=$?
 [ "$rc" -eq 1 ] || die "mutants run: TERM: the worker's session $wp still has processes, or pgrep failed (rc=$rc):
 $(ps -s "$wp" -o pid,args || true)"
 nowt mt "mutants run: TERM"
-echo "gate-demos: mutants run: TERM stops the worker's whole session and removes the worktrees"
+echo "gate-demos: mutants run: TERM mid-Verus stops the worker's whole session and removes the worktrees"
 mrepo m4
 cp "$fx/mutants/live.patch" "$tmp/m4/tools/mutants/D-live.patch"
 printf 'D-live\tdemo\tacc\tdemo\t-\tpostcondition not satisfied\tgate-demos: n > 11 keeps the clause\n' >> "$tmp/m4/tools/mutants.tsv"
