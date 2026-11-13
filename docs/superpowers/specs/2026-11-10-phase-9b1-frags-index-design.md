@@ -130,10 +130,10 @@ appends to `out`; that buffer's growth is the caller's (D10).
   verify.sh and quick.sh, with gate demos), structural only: in avl.rs and frags.rs every `while` has an invariant
   naming `work` (the ghost accumulator) and a body updating `work = work + E` with `E` not `0`; every exec fn that
   loops or recurses returns a `Ghost<nat>` named in its ensures, and a recursive one's body updates `work` the same
-  way; every assignment to `work` is such an update; no callee cost is dropped (each `Ghost<nat>` a callee returns is
+  way; every assignment to `work` is such an update; no bound callee cost is left unmentioned in its fn (each `Ghost<nat>` a callee returns is
   bound as `Ghost(x)` and `x` is charged to `work`, built into the fn's returned `Ghost`, or, in the public wrappers
   `insert`, `after_insert` and `take_front` only, asserted; or the call is a block's tail and passes on); `loop`,
-  `for` and the attribute waiving `decreases` are refused. Charging the right amount stays by hand: a semantic check of
+  `for` and the attribute waiving `decreases` are refused in fn bodies. Not seen: a cost used on one path and dropped on another, a `Ghost(x)` built and then discarded, a charge written `work += E` or `work + 0 + 0`, and calls through a receiver other than `self` or a bare name are not seen. Charging the right amount stays by hand: a semantic check of
   the charge is carryover `cat-C15-semantic-cost` (9b4). Demos: a while without the `work` invariant line, a recursive
   fn returning no cost, fill's ensures not reading its cost, fill's charge deleted or made `+ 0`, take_run's in-loop
   charge deleted, a dropped and a plainly bound callee cost, a `loop`, a `for`; (b) tests: keep `duplicate_ooo_frames_allocate_nothing`'s time pin, add a
