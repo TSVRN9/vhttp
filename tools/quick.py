@@ -89,7 +89,7 @@ def check(base, crate, mod, fn=None):
     if not objs:
         die('%s.json: 0 Verus result objects (a compile error verifies nothing)' % base)
     want = '%s::%s::%s' % (crate, mod, fn) if fn else None
-    hit = 0
+    hit, names = 0, []
     # a dependency built during the run prints its own object (tools/rl.py): every object must be clean, and the
     # target's rows must be in one that verified something
     for o in objs:
@@ -106,6 +106,7 @@ def check(base, crate, mod, fn=None):
                 % (base, v.get('errors'), v.get('encountered-error'), v.get('encountered-vir-error'), base))
         rows = [e for m in o.get('times-ms', {}).get('smt', {}).get('smt-run-module-times', [])
                 for e in m.get('function-breakdown', [])]
+        names += [str(e.get('function')) for e in rows]
         bad = [e.get('function') for e in rows if e.get('success') is not True]
         if bad:
             die('%s.json: FAIL rows %s' % (base, ' '.join(map(str, bad))))
@@ -113,7 +114,9 @@ def check(base, crate, mod, fn=None):
         if mine and isinstance(v.get('verified'), int) and v['verified'] >= 1:
             hit = v['verified']
     if not hit:
-        die('%s.json: no results object verified %s (want >= 1 verified, with its row)' % (base, want or '%s::%s::*' % (crate, mod)))
+        near = sorted({n for n in names if n.startswith('%s::%s::' % (crate, mod))}) or sorted(set(names))
+        die('%s.json: no results object verified %s (want >= 1 verified, with its row); its rows: %s'
+            % (base, want or '%s::%s::*' % (crate, mod), ' '.join(near[:40]) + (' ..' if len(near) > 40 else '') or 'none'))
     if re.search('rlimit', log, re.I):
         die('%s.log: rlimit text' % base)
     print('%s verified' % hit)
