@@ -125,17 +125,25 @@ addwt() {
     git -C "$root" worktree add -q --detach "$w" "$rev" || fail "git worktree add failed"
 }
 
-# stop (run's EXIT trap): a stopped run stops its workers' sessions (TERM, then KILL after 10 s) before their worktrees go,
-# else a cargo or Verus still writing in one makes its removal fail.
+# drain PID: the worker PID is reaped; TERM what is left of its group (a straggler, or its cargo and Verus if it died),
+# KILL after 10 s, and wait (5 s at most) for the group to empty.
+drain() {
+    kill -- "-$1" 2> /dev/null || true
+    i=0
+    while kill -0 -- "-$1" 2> /dev/null && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+    kill -KILL -- "-$1" 2> /dev/null || true
+    i=0
+    while kill -0 -- "-$1" 2> /dev/null && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+}
+
+# stop (run's EXIT trap): a stopped run stops the sessions of its unreaped workers (pids) before their worktrees go, else a
+# cargo or Verus still writing in one makes its removal fail. A second signal must not cut it short.
 stop() {
+    trap '' INT TERM HUP
     for p in $pids; do kill -- "-$p" 2> /dev/null || true; done
     for p in $pids; do
-        wait "$p" 2> /dev/null || true  # the worker itself; a zombie would keep its group alive below
-        i=0
-        while kill -0 -- "-$p" 2> /dev/null && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
-        kill -KILL -- "-$p" 2> /dev/null || true
-        i=0
-        while kill -0 -- "-$p" 2> /dev/null && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+        wait "$p" 2> /dev/null || true  # the worker itself; a zombie would keep its group alive in drain
+        drain "$p"
     done
     for w in $wts; do git -C "$root" worktree remove --force "$w" > /dev/null 2>&1 || rmdir "$w" 2> /dev/null || true; done
     git -C "$root" worktree prune || true
@@ -223,10 +231,14 @@ tsv $tsvblob"
         k=$((k + 1))
     done
     dead=0
-    for p in $pids; do wait "$p" || dead=$((dead + 1)); done
-    # a dead worker's group may still hold its cargo or Verus: the trap kills it. Live ones exited after their last row.
+    # each worker's group is drained as soon as it is reaped (a dead one's may still hold its cargo or Verus) and its pid
+    # dropped, so stop never signals a reaped pid's group (the pid may be reused by then)
+    for p in $pids; do
+        wait "$p" || dead=$((dead + 1))
+        drain "$p"
+        pids=${pids#" $p"}
+    done
     [ "$dead" -eq 0 ] || fail "$dead of $jobs mutant workers died (logs in $out)"
-    pids=
     # the run file lists the rows in registry order, whichever worker ran them
     # shellcheck disable=SC2086 # one path per word
     lines=$(mpy assemble "$out/shard-all.rows" $resf) || exit 1

@@ -54,6 +54,11 @@ printf '#!/bin/sh\n[ "$1" != "$FAKEGIT_FAIL" ] || exit 1\nexec %s "$@"\n' "$(com
 chmod +x "$tmp/fakegit/git"
 expect_fail "quick.sh: git diff fails" "git diff against the merge-base failed" env PATH="$tmp/fakegit:$PATH" FAKEGIT_FAIL=diff QUICK_OUT="$tmp/quick" "$root/scripts/quick.sh"
 expect_fail "quick.sh: git ls-files fails" "git ls-files (untracked files) failed" env PATH="$tmp/fakegit:$PATH" FAKEGIT_FAIL=ls-files QUICK_OUT="$tmp/quick" "$root/scripts/quick.sh"
+# quick.sh cleans under cargo's own target dir: a cargo metadata that fails (a fake cargo) stops it before any Verus.
+mkdir -p "$tmp/fakecargo"
+printf '#!/bin/sh\n[ "$1" != metadata ] || exit 1\nexec %s "$@"\n' "$(command -v cargo)" > "$tmp/fakecargo/cargo"
+chmod +x "$tmp/fakecargo/cargo"
+expect_fail "quick.sh: cargo metadata fails" "cargo metadata gave no target_directory" env PATH="$tmp/fakecargo:$PATH" QUICK_OUT="$tmp/quick" "$root/scripts/quick.sh" wire/varint
 
 # lint-scripts: a script without pipefail; an empty directory.
 fresh lint
@@ -761,7 +766,7 @@ nowt() {  # nowt <dir> <name>: no mutants-* worktree left in $tmp/<dir> (a faili
 $wl" ;; esac
 }
 # upto <tenths> <cmd..>: poll <cmd> every 0.1 s until it passes; 1 after <tenths> tries.
-upto() { n=$1; shift; i=0; until "$@"; do [ "$i" -lt "$n" ] || return 1; sleep 0.1; i=$((i + 1)); done; }
+upto() { ut=$1; shift; i=0; until "$@"; do [ "$i" -lt "$ut" ] || return 1; sleep 0.1; i=$((i + 1)); done; }
 mrepo m1
 expect_pass "mutants check" mut m1 check
 sed -i 's/if n > 10 { Err(7) }/if n > 10 { Err(9) }/' "$tmp/m1/crates/demo/src/acc.rs"
@@ -842,15 +847,35 @@ expect_fail "mutants worker: not started by run" "worker: not started by mutants
 mkdir -p "$tmp/fakesetsid"; printf '#!/bin/sh\nexec "$@"\n' > "$tmp/fakesetsid/setsid"; chmod +x "$tmp/fakesetsid/setsid"
 expect_fail "mutants run: a worker dies" "1 of 1 mutant workers died" env PATH="$tmp/fakesetsid:$PATH" "$tmp/m7/scripts/mutants.sh" run
 nowt m7 "mutants run: a worker dies"
-# a run stopped by TERM while its worker runs Verus (rust_verify in its session): the worker's whole session is gone and so
-# are the worktrees.
+# a worker that dies leaving a TERM-ignoring straggler in its group (a fake git fails the worker's reset after starting
+# it): the run drains the dead worker's group, KILL included.
+straggler="sh -c \"trap '' TERM; exec sleep 600\" < /dev/null > /dev/null 2>&1 &"
+mkdir -p "$tmp/deadgit"
+printf '#!/bin/sh\ncase $3 in reset)\n    %s\n    ps -o sid= -p $$ | tr -d " " >> %s\n    exit 1 ;;\nesac\nexec %s "$@"\n' "$straggler" "$tmp/deadgit/sids" "$(command -v git)" > "$tmp/deadgit/git"
+chmod +x "$tmp/deadgit/git"
+expect_fail "mutants run: a worker dies leaving a TERM-ignoring straggler" "1 of 1 mutant workers died" env PATH="$tmp/deadgit:$PATH" "$tmp/m7/scripts/mutants.sh" run
+ds=$(cat "$tmp/deadgit/sids") || die "mutants run: dead worker: the fake git recorded no session"
+rc=0
+pgrep -s "$ds" > /dev/null || rc=$?
+[ "$rc" -eq 1 ] || die "mutants run: dead worker: its session $ds still has processes, or pgrep failed (rc=$rc):
+$(ps -s "$ds" -o pid,args || true)"
+nowt m7 "mutants run: a worker dies leaving a straggler"
+echo "gate-demos: mutants run: a dead worker's straggler is killed"
+# a run stopped by TERM while its worker runs Verus (rust_verify in its session), with a TERM-ignoring straggler beside it
+# (a cargo wrapper starts one), and TERMed again while it stops: the worker's whole session is gone (the straggler only
+# by KILL) and so are the worktrees.
 mrepo mt
-"$tmp/mt/scripts/mutants.sh" run > "$tmp/mt.out" 2>&1 &
+mkdir -p "$tmp/stragcargo"
+printf '#!/bin/sh\n%s\nexec %s "$@"\n' "$straggler" "$(command -v cargo)" > "$tmp/stragcargo/cargo"
+chmod +x "$tmp/stragcargo/cargo"
+env PATH="$tmp/stragcargo:$PATH" "$tmp/mt/scripts/mutants.sh" run > "$tmp/mt.out" 2>&1 &
 rp=$!
 busy() { wp=$(pgrep -o -f "$tmp/mt/scripts/mutants.sh worker") && pgrep -s "$wp" -x rust_verify > /dev/null; }
-upto 1200 busy || die "mutants run: TERM: no worker running Verus (rust_verify) within 120 s:
-$(cat "$tmp/mt.out")"
+upto 1200 busy || { kill "$rp"; wait "$rp" || true; die "mutants run: TERM: no worker running Verus (rust_verify) within 120 s:
+$(cat "$tmp/mt.out")"; }
 kill -TERM "$rp"
+sleep 1  # stop is draining now (the straggler holds the group for 10 s)
+kill -TERM "$rp" 2> /dev/null || true
 rc=0
 wait "$rp" || rc=$?
 [ "$rc" -ne 0 ] || die "mutants run: TERM: the run exited 0"
@@ -859,7 +884,7 @@ pgrep -s "$wp" > /dev/null || rc=$?
 [ "$rc" -eq 1 ] || die "mutants run: TERM: the worker's session $wp still has processes, or pgrep failed (rc=$rc):
 $(ps -s "$wp" -o pid,args || true)"
 nowt mt "mutants run: TERM"
-echo "gate-demos: mutants run: TERM mid-Verus stops the worker's whole session and removes the worktrees"
+echo "gate-demos: mutants run: TERM mid-Verus, and again while stopping, stops the worker's whole session and removes the worktrees"
 mrepo m4
 cp "$fx/mutants/live.patch" "$tmp/m4/tools/mutants/D-live.patch"
 printf 'D-live\tdemo\tacc\tdemo\t-\tpostcondition not satisfied\tgate-demos: n > 11 keeps the clause\n' >> "$tmp/m4/tools/mutants.tsv"
@@ -969,7 +994,7 @@ expect_fail "quick.py check: rlimit text" "rlimit text" qc demo
 : > "$v.log"; VJ_VERSION=0.2025.01.01.0000000 vj 0 true
 expect_fail "quick.py check: another Verus version" "verus.version is '0.2025.01.01.0000000'" qc demo
 vj 0 true; sed -i 's/demo::acc::demo/demo::other::demo/' "$v.json"
-expect_fail "quick.py check: only another module's rows" "no results object verified demo::acc::*" qc
+expect_fail "quick.py check: only another module's rows (listed)" "no results object verified demo::acc::* (want >= 1 verified, with its row); its rows: demo::other::demo" qc
 
 # the main gate (mutants.sh verify at main's tip, merge or not), on m3's real run file.
 mmerge() { gitc "$1" checkout -q main; gitc "$1" reset -q --hard "$mbase"; gitc "$1" merge -q --no-ff feat -m merge; }

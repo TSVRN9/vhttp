@@ -3,7 +3,7 @@ set -eu
 set -o pipefail
 # quick.sh [TARGET..]: the inner loop. NOT a gate: it never prints verify.sh's line and vouches for no commit; only a clean
 # scripts/verify.sh run does. Dirty trees are fine. Verus runs through `cargo verus focus` (the crate's own fns, its
-# dependencies type-checked only, target/verus-partial) at --rlimit 4, the full gate's limit.
+# dependencies type-checked only, <cargo's target dir>/verus-partial) at --rlimit 4, the full gate's limit.
 #   quick.sh                      every crate changed since `git merge-base HEAD main` (commits, edits, untracked files)
 #                                 and its dependents, dev-dependents too (tools/quick.py scope): Verus per crate
 #                                 (tools/rl.py --gate, the 8,000,000 cap on quic and quictls), their tests, the cheap gates,
@@ -21,6 +21,8 @@ mkdir -p "$out"
 fail() { echo "quick: $*" >&2; exit 1; }
 cd "$root"
 t0=$(date +%s)
+# cargo's own target dir (CARGO_TARGET_DIR, build.target-dir or target/): cargo verus focus builds under its verus-partial
+tdir=$(cargo metadata --no-deps --format-version 1 | python3 -I -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])') || fail "cargo metadata gave no target_directory"
 # step NAME CMD..: run CMD, print its time; its failure ends the run.
 step() {
     s=$1
@@ -32,7 +34,7 @@ step() {
 # verus CRATE [MOD [FN]]: cargo does not fingerprint verus args, so the crate is cleaned first (else a cached crate verifies nothing).
 verus() {
     b=$out/$(printf '%s' "$*" | tr ' :' '._')
-    cargo clean -q -p "$1" --target-dir "${CARGO_TARGET_DIR:-$root/target}/verus-partial" || return 1
+    cargo clean -q -p "$1" --target-dir "$tdir/verus-partial" || return 1
     case $# in
         1) a= ;;
         2) a="--verify-only-module $2" ;;
