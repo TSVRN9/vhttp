@@ -268,6 +268,9 @@ moved frags.rs lines (the citations gate reports them).
   assertion in `crypto_ooo_cost_linear` (spec "The bound"). `cat-C15`: owner `9b1`,
   status closed, evidence the cost ensures (`crates/quic/src/frags.rs`), the gate and `crypto_ooo_cost_linear`, in
   the evidence format `scripts/carryovers.sh` accepts. Roadmap: a `9b1` row (status `in progress`; the controller
-  sets merged), and row 9b's order cell loses "Task 1 Frags index". catalog.md's C15 row: closed by 9b1.
+  sets merged), a `9b2` row ("a verified de-amortized byte queue for CryptoStream's buf, read and tls HsReader", order
+  right after 9b1, `unplanned`), and row 9b's order cell loses "Task 1 Frags index". A new carryover
+  `cat-C15-inorder` (owner 9b2, open; spec D10's text). catalog.md's C15 row: the out-of-order store closed by 9b1,
+  the in-order buffers open for 9b2.
 - [ ] **Step 5:** `scripts/quick.sh` → ok, `scripts/gate-demos.sh` → ok. Commit
   `9b1: cost-charge gate and demos, mutants regenerated and added, TRUSTED/carryovers/roadmap/catalog`.
