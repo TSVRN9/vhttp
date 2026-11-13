@@ -1,7 +1,8 @@
 //! 9b2 Task 1: the per-call cost of quic's input-path byte buffers (spec "The cost today", D15). Each pattern runs at
 //! n, 2n and 4n under a per-thread counting allocator; every input call is measured on its own. The bounds: requested
 //! bytes at most 3x per doubling, total time at most 8x (+ 20 ms) from n to 4n, no `realloc`, a delivering call hands
-//! over at most its own input's bytes, and the slowest call at 4n at most 4x the slowest at n (+ 1 ms).
+//! over at most its own input's bytes, and the slowest call at 4n at most 4x the slowest at n (+ 1 ms). Per call
+//! (the allocator is deterministic): no `realloc`, and requested bytes at most `COST_A·d + COST_B` (`per_call_ok`).
 use quic::crypto_stream::CryptoStream;
 use quic::recv_stream::{RecvStream, StreamEvent};
 use quic::send_stream::{SendState, SendStream};
@@ -46,6 +47,41 @@ unsafe impl GlobalAlloc for Counting {
 
 #[global_allocator]
 static ALLOC: Counting = Counting;
+
+/// The owner's rule is O(d + log n) per call; the spec's per-call bounds are `7d + 4` units for a queue push and `n + 3`
+/// for a take (D4), so `COST_A = 8` per byte given, and `COST_B = 4096` covers the constant terms (a 56-byte node per chunk, at
+/// most 258 ring slots of 8 bytes and two 256-byte page arrays, D11).
+const COST_A: usize = 8;
+const COST_B: usize = 4096;
+
+/// Each call: no realloc, and at most `COST_A·d + COST_B` requested bytes. Returns the failures, worst call first.
+fn per_call_ok(name: &str, m: usize, c: &[Call]) -> Vec<String> {
+    let mut f = Vec::new();
+    let re: Vec<_> = c.iter().enumerate().filter(|(_, x)| x.k[2] != 0).collect();
+    if let Some((i, x)) = re.iter().max_by_key(|(_, x)| x.k[2]) {
+        f.push(format!(
+            "{name} n={m}: {} calls realloc (worst: call {i} ({}), {} reallocs)",
+            re.len(),
+            x.tag,
+            x.k[2]
+        ));
+    }
+    let over: Vec<_> = c
+        .iter()
+        .enumerate()
+        .filter(|(_, x)| x.k[4] > COST_A * x.d + COST_B)
+        .collect();
+    if let Some((i, x)) = over.iter().max_by_key(|(_, x)| x.k[4] - (COST_A * x.d + COST_B)) {
+        f.push(format!(
+            "{name} n={m}: {} calls request more than {COST_A}·d + {COST_B} bytes (worst: call {i} ({}), {} bytes for d = {})",
+            over.len(),
+            x.tag,
+            x.k[4],
+            x.d
+        ));
+    }
+    f
+}
 
 /// One input call: its kind, allocator counts, wall time, the bytes it was given, the bytes it handed over (None:
 /// delivers nothing).
@@ -110,9 +146,7 @@ fn check(name: &str, n: usize, pat: fn(usize, &mut Run), fill: bool) {
             .filter_map(|x| x.out.map(|o| (o, x.d)))
             .max_by_key(|&(o, d)| o as i64 - d as i64);
         let over = c.iter().filter(|x| x.out.is_some_and(|o| o > x.d)).count();
-        if k[2] != 0 {
-            fails.push(format!("{name} n={m}: {} reallocs", k[2]));
-        }
+        fails.extend(per_call_ok(name, m, c));
         if over != 0 {
             fails.push(format!(
                 "{name} n={m}: {over} calls hand over more than their input (worst {worst:?} (out, d))"
@@ -143,8 +177,12 @@ fn check(name: &str, n: usize, pat: fn(usize, &mut Run), fill: bool) {
             k[2],
             k[3]
         );
-        let mut tags: Vec<&str> = c.iter().map(|x| x.tag).collect();
-        tags.dedup();
+        let mut tags: Vec<&str> = Vec::new();
+        for x in c {
+            if !tags.contains(&x.tag) {
+                tags.push(x.tag);
+            }
+        }
         for tag in tags {
             let of = |r: &Run| r.0.iter().filter(|x| x.tag == tag).map(|x| x.t).max().unwrap();
             let b = c.iter().filter(|x| x.tag == tag).map(|x| x.k[4]).max().unwrap();
@@ -188,11 +226,18 @@ fn crypto_call(r: &mut Run, tag: &'static str, c: &mut CryptoStream, off: usize,
     });
 }
 
+/// Bytes per gap-closed run in `one_byte_frames`: held out of order below `MAX_CRYPTO_BUFFER`, constant in n.
+const GAP_RUN: usize = 8192;
+
+/// The stream one byte per frame, in runs of `GAP_RUN`: bytes `b+1..b+GAP_RUN` in order, then `b`, which closes the gap.
 fn one_byte_frames(m: usize, r: &mut Run) {
     let s = bytes(m);
     let mut c = CryptoStream::new();
-    for i in 0..m {
-        crypto_call(r, "frame", &mut c, i, &s[i..i + 1]);
+    for b in (0..m).step_by(GAP_RUN) {
+        for i in b + 1..b + GAP_RUN {
+            crypto_call(r, "frame", &mut c, i, &s[i..i + 1]);
+        }
+        crypto_call(r, "close", &mut c, b, &s[b..b + 1]);
     }
 }
 
@@ -220,6 +265,7 @@ fn write_send_ack(m: usize, r: &mut Run) {
         });
     }
     for i in 0..m / 1024 {
+        // An ACK range carries no stream bytes: d = 0.
         r.call("ack", 0, || {
             st.on_data_acked((i * 1024) as u64, 1024, i == m / 1024 - 1);
             None
@@ -256,7 +302,7 @@ fn reverse_fill(m: usize, r: &mut Run) {
 }
 
 #[test]
-#[ignore = "9b2: passes today (a read after every 1-byte frame finds 1 byte), kept for Task 6's CapVec read; un-ignored by Task 6"]
+#[ignore = "9b2: fails today, a 1-byte frame closing a gap copies and hands over the whole run (Q4, Q5); un-ignored by Task 6"]
 fn crypto_one_byte_frames() {
     check("crypto_one_byte_frames", 16 << 10, one_byte_frames, false);
 }
@@ -268,7 +314,7 @@ fn crypto_runs_then_fill() {
 }
 
 #[test]
-#[ignore = "9b2: passes today (split_off copies the tail into fresh Vecs, within the slack), kept for Task 8; un-ignored by Task 8"]
+#[ignore = "9b2: fails today, one ACK's split_off copies up to half the stream (Q7); un-ignored by Task 8"]
 fn send_ack_1k() {
     check("send_ack_1k", 256 << 10, write_send_ack, false);
 }

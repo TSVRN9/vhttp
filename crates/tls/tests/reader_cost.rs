@@ -1,8 +1,9 @@
 //! 9b2 Task 1: the per-call cost of `HsReader` (spec "The cost today" T1, T2; D15). The pattern runs at n, 2n and 4n
 //! under a per-thread counting allocator; every call is measured on its own. The bounds: requested bytes at most 3x per
 //! doubling, total time at most 8x (+ 20 ms) from n to 4n, no `realloc`, and the slowest call at 4n at most 4x the
-//! slowest at n (+ 1 ms). `next_message` hands over a whole message, which stays O(message) until 9b5 (D14), so no call
-//! here is held to its input's size.
+//! slowest at n (+ 1 ms). Per call (the allocator is deterministic): no `realloc`, and requested bytes at most `COST_A·d + COST_B`,
+//! `d` the bytes the call was given; `next_message` is given none and hands over a whole message, one copy of the
+//! completed unit that stays O(message) until 9b5 (D14), so it is held to `COST_A·message + COST_B`.
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::time::{Duration, Instant};
@@ -46,36 +47,43 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOC: Counting = Counting;
 
-/// One call's allocator counts and wall time; the record is pushed after the counters are read.
-fn call(r: &mut Vec<([usize; 5], Duration)>, f: impl FnOnce()) {
+/// The owner's rule is O(d + log n) per call; the spec's per-call bounds are `7d + 4` units for a queue push and `n + 3`
+/// for a take (D4), so `COST_A = 8` per byte, and `COST_B = 4096` covers the constant terms.
+const COST_A: usize = 8;
+const COST_B: usize = 4096;
+
+type Rec = ([usize; 5], Duration, usize);
+
+/// One call's allocator counts, wall time and byte allowance `d`; the record is pushed after the counters are read.
+fn call(r: &mut Vec<Rec>, d: usize, f: impl FnOnce()) {
     let a = K.with(|k| k.get());
     let t = Instant::now();
     f();
     let t = t.elapsed();
     let b = K.with(|k| k.get());
-    r.push(([0, 1, 2, 3, 4].map(|i| b[i] - a[i]), t));
+    r.push(([0, 1, 2, 3, 4].map(|i| b[i] - a[i]), t, d));
 }
 
 /// One ClientHello-typed message of `m` bytes, header included, pushed one byte per call; `next_message` once it is
 /// complete.
-fn one_byte_push(m: usize) -> Vec<([usize; 5], Duration)> {
+fn one_byte_push(m: usize) -> Vec<Rec> {
     let body = m - 4;
     let mut s = vec![1u8, (body >> 16) as u8, (body >> 8) as u8, body as u8];
     s.extend((0..body).map(|i| i as u8));
     let mut h = HsReader::new();
     let mut r = Vec::new();
     for i in 0..m {
-        call(&mut r, || h.push(&s[i..i + 1]));
+        call(&mut r, 1, || h.push(&s[i..i + 1]));
     }
     let mut got = None;
-    call(&mut r, || got = Some(h.next_message(1)));
+    call(&mut r, m, || got = Some(h.next_message(1)));
     assert!(matches!(got, Some(Ok(Some(ref v))) if v.len() == m));
     assert!(h.is_empty());
     r
 }
 
 #[test]
-#[ignore = "9b2: fails today, per-byte push grows the reader by realloc (T1); un-ignored by Task 7"]
+#[ignore = "9b2: fails today, a 1-byte push reallocs the whole reader (T1); un-ignored by Task 7"]
 fn reader_one_byte_push() {
     let mut fails = Vec::new();
     let mut rows = Vec::new();
@@ -90,8 +98,26 @@ fn reader_one_byte_push() {
             .unwrap();
         let slow = runs.iter().map(|r| r.iter().map(|x| x.1).max().unwrap()).min().unwrap();
         let big = c.iter().map(|x| x.0[4]).max().unwrap();
-        if k[2] != 0 {
-            fails.push(format!("n={m}: {} reallocs", k[2]));
+        let re: Vec<_> = c.iter().enumerate().filter(|(_, x)| x.0[2] != 0).collect();
+        if let Some((i, x)) = re.iter().max_by_key(|(_, x)| x.0[2]) {
+            fails.push(format!(
+                "n={m}: {} calls realloc (worst: call {i}, {} reallocs)",
+                re.len(),
+                x.0[2]
+            ));
+        }
+        let over: Vec<_> = c
+            .iter()
+            .enumerate()
+            .filter(|(_, x)| x.0[4] > COST_A * x.2 + COST_B)
+            .collect();
+        if let Some((i, x)) = over.iter().max_by_key(|(_, x)| x.0[4] - (COST_A * x.2 + COST_B)) {
+            fails.push(format!(
+                "n={m}: {} calls request more than {COST_A}·d + {COST_B} bytes (worst: call {i}, {} bytes for d = {})",
+                over.len(),
+                x.0[4],
+                x.2
+            ));
         }
         eprintln!(
             "reader_one_byte_push n={m}: calls {} bytes {} alloc {} alloc_zeroed {} realloc {} dealloc {} \

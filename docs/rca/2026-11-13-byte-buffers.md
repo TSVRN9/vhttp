@@ -24,7 +24,7 @@ table puts it; the cost column says where the re-read and the measurement refine
 
 | row | site (spec, d0f4392) | site at 0d7c37c | cost, re-read |
 |---|---|---|---|
-| Q4 | `CryptoStream::read`, crypto_stream.rs:491 | same (fn at :471, `out.append(&mut self.buf)` at :491, `self.buf = Vec::new()` at :493) | as the spec: hands over every unread byte. "std's growth of `out`": quictls passes a fresh empty `b` (Q-T1), and `append` into an empty `Vec` reserves once (one alloc, no realloc, measured below); growth happens only into a non-empty `out`, i.e. `crypto_drop`'s `sink` (Q6) |
+| Q4 | `CryptoStream::read`, crypto_stream.rs:491 | same (fn at :471, `out.append(&mut self.buf)` at :491, `self.buf = Vec::new()` at :493) | as the spec: hands over every unread byte. "std's growth of `out`": quictls passes a fresh empty `b` (Q-T1), and `append` into an empty `Vec` reserves once (one alloc, no realloc); growth happens only into a non-empty `out`, i.e. `crypto_drop`'s `sink` (Q6) |
 | Q5 | `CryptoStream::on_fill`, crypto_stream.rs:457 | same (`on_fill` at :443, `self.ooo.take_front(self.contig, &mut self.buf)` at :457); `Frags::take_front` is now 9b1's at frags.rs:4164 (`take_front_w`) | as the spec: the newly contiguous run is pushed into `buf`, whose reallocs copy the unread bytes (3-5 reallocs per fill, measured below). Bounded by `MAX_CRYPTO_BUFFER` held bytes plus the frame |
 | Q6 | `Connection::crypto_drop`, conn.rs:3392-3396 | same (`shortcut:` at :3392, `sink` at :3393, three `read`s :3394-3396) | as the spec |
 | Q-T1 | quictls `feed`, quictls/src/server.rs:1084-1090 | same (`let mut b: Vec<u8> = Vec::new()` at :1084, `crypto_read` at :1090) | `b` is fresh and empty, so each feed is one exact allocation of every unread byte, not std's doubling; the cost is the byte count (Q4/Q5's), not growth |
@@ -46,45 +46,51 @@ table puts it; the cost column says where the re-read and the measurement refine
 `cargo test --release -p quic --test input_cost -- --ignored --test-threads=1 --nocapture` and
 `cargo test --release -p tls --test reader_cost -- --ignored --nocapture`). A per-thread counting allocator; each input
 call measured on its own; time is the fastest of 3 runs. "bytes" is requested bytes (alloc sizes plus realloc new
-sizes). Bounds checked: bytes at most 3x per doubling; total time at 4n at most 8x that at n plus 20 ms; `realloc == 0`;
-a delivering call hands over at most its own input's bytes; the slowest call at 4n at most 4x that at n plus 1 ms; for
-the gap fill, its time at most 8x the slowest other call plus 1 ms.
+sizes). Bounds checked:
 
-| test (Task) | n | calls | bytes | alloc | realloc | dealloc | total time | slowest call | largest call (bytes) | verdict today |
-|---|---|---|---|---|---|---|---|---|---|---|
-| `crypto_one_byte_frames` (6) | 16 KiB | 16384 | 3162112 | 114688 | 0 | 114688 | 3.00 ms | 7.3 µs | 193 | passes |
-| | 32 KiB | 32768 | 6324224 | 229376 | 0 | 229376 | 5.37 ms | 3.8 µs | 193 | |
-| | 64 KiB | 65536 | 12648448 | 458752 | 0 | 458752 | 7.95 ms | 4.4 µs | 193 | |
-| `crypto_runs_then_fill` (6) | 1024 | 1025 | 1199160 | 22577 | 3 | 22577 | 0.73 ms | 90.8 µs (fill) | 43400 (fill) | FAILS: realloc |
-| | 2048 | 2049 | 2627640 | 49241 | 4 | 49241 | 1.49 ms | 169.1 µs (fill) | 86464 (fill) | |
-| | 4096 | 4097 | 5714536 | 106675 | 5 | 106675 | 3.13 ms | 325.2 µs (fill) | 173096 (fill) | |
-| `send_ack_1k` (8) | 256 KiB | 477 | 801792 | 484 | 0 | 484 | 0.06 ms | 8.2 µs (write) | 262144 (write); ACK 131136 | passes |
-| | 512 KiB | 951 | 1604608 | 959 | 0 | 959 | 0.12 ms | 18.1 µs (write) | 524288 (write); ACK 262208 | |
-| | 1 MiB | 1900 | 3210240 | 1909 | 0 | 1909 | 0.31 ms | 64.2 µs | 1048576 (write); ACK 524352 | |
-| `stream_reverse_fill` (10) | 16 KiB | 16384 | 98440 | 4 | 33 | 4 | 0.94 ms | 25.7 µs | 65520 | FAILS: realloc; 1 call hands over 16384 bytes for d = 1 |
-| | 32 KiB | 32768 | 196744 | 4 | 36 | 4 | 1.79 ms | 43.0 µs | 131056 | 1 call: 32768 for d = 1 |
-| | 64 KiB | 65536 | 393352 | 4 | 39 | 4 | 3.51 ms | 81.2 µs | 262128 | 1 call: 65536 for d = 1 |
-| `reader_one_byte_push` (7) | 16 KiB | 16385 | 32760 | 1 | 11 | 0 | 0.50 ms | 4.1 µs | 16384 | FAILS: realloc |
-| | 32 KiB | 32769 | 65528 | 1 | 12 | 0 | 1.00 ms | 3.8 µs | 32768 | |
-| | 64 KiB | 65537 | 131064 | 1 | 13 | 0 | 1.99 ms | 8.4 µs | 65536 | |
+- per call (the allocator is deterministic): no `realloc`; requested bytes at most `8·d + 4096`, `d` the bytes the call
+  was given (`A = 8` from the spec's `7d + 4` push and `n + 3` take, `B = 4096` for the constant terms: a 56-byte node
+  per chunk, at most 258 eight-byte ring slots and two 256-byte page arrays); a delivering call hands over at most `d`
+  bytes. An ACK call is given no stream bytes (`d = 0`); `next_message` is given none and is held to `8·message + 4096`
+  (one copy of the completed unit, D14);
+- across sizes: bytes at most 3x per doubling; total time at 4n at most 8x that at n plus 20 ms; the slowest call at 4n
+  at most 4x that at n plus 1 ms; the gap fill at most 8x the slowest other call plus 1 ms.
 
-`alloc_zeroed` was 0 in every run. Per call kind:
+`crypto_one_byte_frames` sends the stream one byte per frame in runs of 8192: bytes `b+1..b+8192` in order (held out
+of order), then `b`, whose frame closes the gap and makes the run deliverable (the shape of 9b1's `crypto_cost`
+patterns; a read after every in-order frame never finds more than one byte).
 
-- `crypto_runs_then_fill`: the runs' slowest call 1.2, 3.2, 3.8 µs and largest 1297, 1409, 1521 bytes; the fill call
-  (2n bytes given, 2n handed over) 90.8, 169.1, 325.2 µs, within 8x the slowest run plus 1 ms. It fails only on the
-  fill's reallocs.
-- `send_ack_1k`: write 8.2, 17.4, 45.2 µs; poll (1200-byte chunks) at most 1200 bytes and 0.3 µs; the slowest 1 KiB
-  ACK 5.1, 9.1, 40.3 µs, requesting half the stream (Q7). Every bound holds: the ACK's copy is linear in n, which the
-  "4x + 1 ms" bound on the slowest call admits, and the `split_off`s are fresh allocations (about 3n bytes in all), not
-  reallocs.
-- `crypto_one_byte_frames`: 193 bytes and 7 allocations per 1-byte frame (the `Frags` chunk, `buf`, `out`), flat in
-  n; a read after every frame finds one byte, so Q4's and Q5's copies never exceed the frame. It passes every bound.
-- `stream_reverse_fill`: the first call (1 byte at W-1) is the largest by bytes (Q1's zero fill of `buf` and `have`);
-  the last (1 byte at 0) hands over all W bytes (Q3).
-- `reader_one_byte_push`: the single `next_message` returns the whole message by moving the reader's `Vec` (the
-  `split_off` tail is empty); the cost is the push reallocs (T1).
+| test (Task) | n | calls | bytes | alloc | realloc | total time | slowest call | largest call: bytes for d |
+|---|---|---|---|---|---|---|---|---|
+| `crypto_one_byte_frames` (6) | 16 KiB | 16384 | 14974208 | 231634 | 14 | 16.9 ms | 10.1 µs | 37752 for 1 (close) |
+| | 32 KiB | 32768 | 29948416 | 463268 | 28 | 33.7 ms | 8.8 µs | 37752 for 1 |
+| | 64 KiB | 65536 | 59896832 | 926536 | 56 | 67.6 ms | 18.9 µs | 37752 for 1 |
+| `crypto_runs_then_fill` (6) | 1024 | 1025 | 1199160 | 22577 | 3 | 0.60 ms | 77.3 µs (fill) | 43400 for 2048 (fill) |
+| | 2048 | 2049 | 2627640 | 49241 | 4 | 1.20 ms | 137.6 µs (fill) | 86464 for 4096 |
+| | 4096 | 4097 | 5714536 | 106675 | 5 | 2.55 ms | 276.3 µs (fill) | 173096 for 8192 |
+| `send_ack_1k` (8) | 256 KiB | 477 | 801792 | 484 | 0 | 0.05 ms | 7.3 µs (write) | ACK: 131136 for 0 |
+| | 512 KiB | 951 | 1604608 | 959 | 0 | 0.10 ms | 14.7 µs (write) | ACK: 262208 for 0 |
+| | 1 MiB | 1900 | 3210240 | 1909 | 0 | 0.19 ms | 31.3 µs (write) | ACK: 524352 for 0 |
+| `stream_reverse_fill` (10) | 16 KiB | 16384 | 98440 | 4 | 33 | 0.60 ms | 28.0 µs | 65520 for 1 (first frame) |
+| | 32 KiB | 32768 | 196744 | 4 | 36 | 1.14 ms | 54.1 µs | 131056 for 1 |
+| | 64 KiB | 65536 | 393352 | 4 | 39 | 2.31 ms | 115.3 µs | 262128 for 1 |
+| `reader_one_byte_push` (7) | 16 KiB | 16385 | 32760 | 1 | 11 | 0.63 ms | 4.1 µs | 16384 for 1 |
+| | 32 KiB | 32769 | 65528 | 1 | 12 | 1.24 ms | 4.1 µs | 32768 for 1 |
+| | 64 KiB | 65537 | 131064 | 1 | 13 | 2.39 ms | 6.4 µs | 65536 for 1 |
 
-Two of the five tests pass on today's code at the brief's sizes: `crypto_one_byte_frames` and `send_ack_1k`. They are
-kept `#[ignore]`d with that stated, to be un-ignored by Tasks 6 and 8 with the converted code. The assertion set cannot
-see Q7's per-ACK copy at these sizes (it is linear per call, and per-call requested bytes are not bounded by `d`, since
-a queue migration allocates `3·S` at once), nor Q8 (one write) or T2 (no tail).
+`alloc_zeroed` was 0 in every run; deallocs equal allocs except in `reader_one_byte_push` (the message `Vec` is
+returned). Every test fails today; the assertions that fail (at n, 2n, 4n):
+
+| test | per-call realloc | per-call bytes > 8·d + 4096 | hands over > d | across sizes |
+|---|---|---|---|---|
+| `crypto_one_byte_frames` | 2, 4, 8 calls (each closing frame, 7 reallocs) | 2, 4, 8 calls (37752 bytes for d = 1) | 2, 4, 8 calls (8192 bytes for d = 1) | hold |
+| `crypto_runs_then_fill` | the fill (3, 4, 5 reallocs) | the fill (43400, 86464, 173096 for d = 2048, 4096, 8192) | hold (2n for d = 2n) | hold |
+| `send_ack_1k` | hold | 6, 7, 8 ACKs (the largest 131136, 262208, 524352 for d = 0: `split_off` copies half the stream, Q7) | n/a | hold |
+| `stream_reverse_fill` | 2 calls (the worst the first frame: 22, 24, 26 reallocs) | 2 calls (the worst the first frame: 65520, 131056, 262128 for d = 1) | the last frame (W bytes for d = 1, Q3) | hold |
+| `reader_one_byte_push` | 11, 12, 13 pushes (1 each, T1) | 2, 3, 4 pushes (the largest 16384, 32768, 65536 for d = 1) | n/a | hold |
+
+Per call kind: `crypto_one_byte_frames`' 1-byte frames that do not close a gap request at most 1281 bytes;
+`crypto_runs_then_fill`'s runs at most 1521; `send_ack_1k`'s write requests exactly n and each 1200-byte poll at most
+1200; `reader_one_byte_push`'s single `next_message` moves the reader's `Vec` (the `split_off` tail is empty), so its
+cost is the push reallocs (T1). The patterns do not exercise Q2 (one pop takes everything), Q8 (one write) or T2 (no
+tail).
