@@ -5,6 +5,9 @@ use crate::avl::*;
 use vstd::prelude::*;
 // Used only in ghost code, which a plain `cargo build` erases.
 #[allow(unused_imports)]
+use vstd::arithmetic::power2::*;
+// Used only in ghost code, which a plain `cargo build` erases.
+#[allow(unused_imports)]
 use crate::frags::*;
 #[allow(unused_imports)]
 use wire::varint::*;
@@ -302,6 +305,48 @@ proof fn lemma_k(f: Seq<(nat, Seq<u8>)>)
         lemma_starts_last(f);
         if fol(f, f.len() - 1) {
             assert(f[f.len() - 1].1.len() >= K);
+        }
+    }
+}
+
+/// The positions held number the chunks' total length.
+proof fn lemma_len(f: Seq<(nat, Seq<u8>)>)
+    requires
+        ok(f),
+    ensures
+        pos(f).len() == sum_len(f),
+    decreases f.len(),
+{
+    if f.len() == 0 {
+        lemma_pos_empty(f);
+    } else {
+        let g = f.drop_last();
+        let r = Set::range(f.last().0, end(f.last()));
+        lemma_pos_last(f);
+        lemma_len(g);
+        assert(pos(g).disjoint(r));
+        vstd::set_lib::lemma_set_disjoint_lens(pos(g), r);
+    }
+}
+
+/// Every chunk holds a byte, and the first starts a run.
+proof fn lemma_some(f: Seq<(nat, Seq<u8>)>)
+    requires
+        ok(f),
+    ensures
+        f.len() <= sum_len(f),
+        f.len() > 0 ==> runs(pos(f)) > 0,
+    decreases f.len(),
+{
+    if f.len() > 0 {
+        let g = f.drop_last();
+        lemma_ok_drop(f);
+        lemma_some(g);
+        lemma_starts_last(f);
+        assert(f[f.len() - 1].1.len() > 0);
+        if g.len() == 0 {
+            lemma_pos_empty(g);
+            assert(!fol(f, 0));
         }
     }
 }
@@ -673,7 +718,8 @@ spec fn pi(pe: Option<u64>) -> int {
     }
 }
 
-/// The calls `walk` makes on `t`: one per node it visits and one per empty child it reaches.
+/// The calls `walk` makes on `t`: one per node it visits and one per empty child it reaches. It enters a subtree
+/// only if it can hold a key in `[s, e]`.
 spec fn vis(t: Tree<Vec<u8>>, s: u64, e: u64) -> nat
     decreases t,
 {
@@ -684,7 +730,15 @@ spec fn vis(t: Tree<Vec<u8>>, s: u64, e: u64) -> nat
         } else if b.key > e {
             1 + vis(b.left, s, e)
         } else {
-            1 + vis(b.left, s, e) + vis(b.right, s, e)
+            1 + (if b.key > s {
+                vis(b.left, s, e)
+            } else {
+                0
+            }) + (if b.key < e {
+                vis(b.right, s, e)
+            } else {
+                0
+            })
         },
     }
 }
@@ -775,23 +829,23 @@ proof fn lemma_walk_skip(t: Tree<Vec<u8>>, s: u64, e: u64, pe: int, pr: int)
         crate::avl::wf(t),
         t is Some,
     ensures
-        t->0.key < s ==> nm(mp(seq(t->0.left)), s as nat, e as nat) == 0 && cvf(mp(seq(t->0.left)), s as nat, e as nat)
+        t->0.key <= s ==> nm(mp(seq(t->0.left)), s as nat, e as nat) == 0 && cvf(mp(seq(t->0.left)), s as nat, e as nat)
             == 0 && hds(mp(seq(t->0.left)), s as nat, e as nat, pe) == 0 && lp(mp(seq(t->0.left)), s as nat, e as nat, pe)
             == pe,
-        t->0.key > e ==> nm(mp(seq(t->0.right)), s as nat, e as nat) == 0 && cvf(mp(seq(t->0.right)), s as nat, e as nat)
+        t->0.key >= e ==> nm(mp(seq(t->0.right)), s as nat, e as nat) == 0 && cvf(mp(seq(t->0.right)), s as nat, e as nat)
             == 0 && hds(mp(seq(t->0.right)), s as nat, e as nat, pr) == 0 && lp(mp(seq(t->0.right)), s as nat, e as nat, pr)
             == pr,
 {
     let b = t->0;
     let (l, r) = (mp(seq(b.left)), mp(seq(b.right)));
     assert(keys_lt(b.left, b.key) && keys_gt(b.right, b.key));
-    if b.key < s {
+    if b.key <= s {
         assert forall|i: int| #![trigger l[i]] 0 <= i < l.len() implies !inr(l[i], s as nat, e as nat) by {
             assert(l[i].0 == seq(b.left)[i].0);
         }
         lemma_out(l, s as nat, e as nat, pe);
     }
-    if b.key > e {
+    if b.key >= e {
         assert forall|i: int| #![trigger r[i]] 0 <= i < r.len() implies !inr(r[i], s as nat, e as nat) by {
             assert(r[i].0 == seq(b.right)[i].0);
         }
@@ -967,7 +1021,11 @@ fn walk(t: &Tree<Vec<u8>>, s: u64, e: u64, pe: Option<u64>) -> (r: (u64, usize, 
                 }
                 (c, h, p, Ghost(work))
             } else {
-                let (c1, h1, p1, Ghost(w1)) = walk(&b.left, s, e, pe);
+                let (c1, h1, p1, Ghost(w1)) = if b.key > s {
+                    walk(&b.left, s, e, pe)
+                } else {
+                    (0, 0, pe, Ghost(0))
+                };
                 let len = b.val.len() as u64;
                 let en = b.key + len;
                 let c2 = if en < e {
@@ -983,7 +1041,14 @@ fn walk(t: &Tree<Vec<u8>>, s: u64, e: u64, pe: Option<u64>) -> (r: (u64, usize, 
                     },
                     None => 1,
                 };
-                let (c3, h3, p3, Ghost(w3)) = walk(&b.right, s, e, Some(en));
+                proof {
+                    lemma_walk_skip(*t, s, e, pi(pe), en as int);
+                }
+                let (c3, h3, p3, Ghost(w3)) = if b.key < e {
+                    walk(&b.right, s, e, Some(en))
+                } else {
+                    (0, 0, Some(en), Ghost(0))
+                };
                 proof {
                     work = work + w1 + w3;
                 }
@@ -1048,6 +1113,50 @@ impl Chunks {
             K * (self.fs().len() - self.count) <= self.held,
     {
         lemma_k(self.fs());
+    }
+
+    /// The invariant, in terms of the accessors (`Frags::lemma_wf`'s contract).
+    pub proof fn lemma_wf(&self)
+        requires
+            self.wf(),
+        ensures
+            self.held() <= VARINT_MAX,
+            self.hi_spec() <= VARINT_MAX,
+            forall|k: nat| #[trigger] self.view().contains_key(k) ==> k < self.hi_spec(),
+            self.count() > 0 ==> self.hi_spec() > 0 && self.view().contains_key(
+                (self.hi_spec() - 1) as nat,
+            ),
+            self.count() == 0 ==> self.view().dom() =~= Set::<nat>::empty(),
+            self.count() <= VARINT_MAX,
+            self.held() == self.view().dom().len(),
+            self.count() == runs(self.view().dom()),
+    {
+        let f = self.fs();
+        assert(self.view().dom() =~= pos(f));
+        lemma_runs_le_len(pos(f));
+        vstd::set_lib::lemma_len_subset(pos(f), Set::range(0, VARINT_MAX as nat));
+        lemma_some(f);
+        if f.len() > 0 {
+            lemma_pos_last(f);
+            assert(f.last() == f[f.len() - 1]);
+        } else {
+            lemma_pos_empty(f);
+        }
+    }
+
+    /// The chunk count is at most `held`, so it fits the AVL's `seq(t).len() < 2^63`.
+    proof fn lemma_size(&self)
+        requires
+            self.wf(),
+        ensures
+            seq(self.t).len() == self.fs().len(),
+            self.fs().len() <= self.held <= VARINT_MAX,
+            self.fs().len() < pow2(63),
+    {
+        let f = self.fs();
+        lemma_some(f);
+        self.lemma_wf();
+        vstd::arithmetic::power2::lemma2_to64_rest();
     }
 
     /// `|M| <= d + 1`: the chunks of `M` start at distinct positions of `[s, e]`.
@@ -1191,6 +1300,8 @@ impl Chunks {
         };
         proof {
             work = work + c1;
+            assert(c1 <= 2 * self.m_len(lo, off, data@) + 2 * ht(self.t) + 2);
+            assert(work <= 2 * (2 * (ht(self.t) + 1) + self.m_len(lo, off, data@) + 2));
             assert(put(self.view(), lo as nat, off as nat, data@).dom() =~= pos(f) + Set::range(s as nat, e as nat));
         }
         ((self.held + ((e - s) - ov - cov), self.count - hd + nx), Ghost(work))
