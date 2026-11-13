@@ -63,8 +63,16 @@ fn duplicate_ooo_frames_allocate_nothing() {
     }
     let took = t.elapsed();
     assert_eq!(allocated() - before, 0);
-    // `locate` is a binary search: 2-6 ms here in a debug build; a linear scan over the 4096
-    // fragments took about 165 ms (9a T7 fix round 2).
+    // The all-held walk is O(log n): a linear scan over the 4096 fragments took about 165 ms in a
+    // debug build (9a T7 fix round 2).
     eprintln!("10,000 duplicates over 4096 fragments: {:?}", took);
     assert!(took.as_millis() < 50, "took {:?}", took);
+    // 300 bytes at 2 are a head [2,152) and a follower [152,302); [147,157) crosses the boundary.
+    let mut c = CryptoStream::new();
+    assert_eq!(c.on_crypto(2, &[3; 300]), Ok(()));
+    let before = allocated();
+    for _ in 0..10_000 {
+        assert_eq!(c.on_crypto(147, &[3; 10]), Ok(()));
+    }
+    assert_eq!(allocated() - before, 0);
 }

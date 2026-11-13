@@ -8,6 +8,7 @@ struct Counting;
 
 thread_local! {
     static BYTES: Cell<usize> = const { Cell::new(0) };
+    static REALLOCS: Cell<usize> = const { Cell::new(0) };
 }
 
 fn count(n: usize) {
@@ -25,6 +26,7 @@ unsafe impl GlobalAlloc for Counting {
     }
     unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
         count(n);
+        let _ = REALLOCS.try_with(|r| r.set(r.get() + 1));
         System.realloc(p, l, n)
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
@@ -35,20 +37,23 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOC: Counting = Counting;
 
-fn allocated() -> usize {
-    BYTES.with(|b| b.get())
+fn allocated() -> (usize, usize) {
+    (BYTES.with(|b| b.get()), REALLOCS.with(|r| r.get()))
 }
 
 type Frames = Vec<(u64, Vec<u8>)>;
 
-fn cost(frames: &Frames) -> (usize, Duration) {
+/// Bytes allocated, `realloc` calls and wall time for the frames.
+fn cost(frames: &Frames) -> (usize, usize, Duration) {
     let mut c = CryptoStream::new();
-    let before = allocated();
+    let (b0, r0) = allocated();
     let t = Instant::now();
     for (o, d) in frames {
         assert_eq!(c.on_crypto(*o, d), Ok(()));
     }
-    (allocated() - before, t.elapsed())
+    let took = t.elapsed();
+    let (b1, r1) = allocated();
+    (b1 - b0, r1 - r0, took)
 }
 
 fn descending(n: u64) -> Frames {
@@ -72,8 +77,9 @@ fn w(f: &Frames) -> u128 {
     f.len() as u128 + f.iter().map(|(_, d)| d.len() as u128).sum::<u128>()
 }
 
+/// No pattern fills from offset 0, so CryptoStream's in-order buffer stays empty and every `realloc` would be a
+/// `Frags` chunk grown past its `with_capacity` (spec "The bound": none is).
 #[test]
-#[ignore = "9b1: quadratic on the Vec store; un-ignored by Task 7"]
 fn crypto_ooo_cost_linear() {
     let patterns: [(&str, fn(u64) -> Frames); 4] = [
         ("descending", descending),
@@ -87,7 +93,10 @@ fn crypto_ooo_cost_linear() {
             .iter()
             .map(|&n| {
                 let fr = f(n);
-                let (b, t) = cost(&fr);
+                let (b, r, t) = cost(&fr);
+                if r != 0 {
+                    fails.push(format!("{name} n={n}: {r} reallocs"));
+                }
                 (b as u128, t, w(&fr))
             })
             .collect();

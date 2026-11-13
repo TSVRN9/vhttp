@@ -16,9 +16,6 @@ pub mod ack_track;
 pub mod aead;
 pub mod amp;
 pub mod avl;
-// Task 7 renames it `Frags` in frags.rs; until then nothing outside it calls it.
-#[allow(dead_code)]
-mod chunks;
 pub mod cid;
 pub mod codes;
 pub mod conn;
