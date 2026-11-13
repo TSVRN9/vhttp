@@ -135,12 +135,13 @@ on its out-of-order patterns. `take_front` appends to `out`; that buffer's growt
 - **D8 Out of scope.** `MAX_CRYPTO_BUFFER` and `MAX_CRYPTO_RANGES` stay byte and run caps (an offset window changes an
   RFC-justified close predicate). `Reassembly` (STREAM data) is untouched. P3 (codec acceptance lemmas) is its own
   later phase.
-- **D10 The in-order buffer (pending owner decision, 2026-11-12).** `take_front` appends to `CryptoStream`'s `buf`,
-  and `CryptoStream::read` appends `buf` to the caller's `out` (TLS's input). Both are `Vec<u8>`s grown by std's
-  amortized doubling: one call can copy the whole unread buffer. That is outside `Frags` and predates this phase, and
-  no proved bound exists on unread in-order bytes (they wait for the caller's `read`), so a fixed capacity cannot be
-  chosen from the code as it is. Until the owner decides, 9b1 does not claim a strict bound for it: `cat-C15` closes
-  for the out-of-order store only, and a new carryover row names the in-order buffers.
+- **D10 The in-order buffers go to phase 9b2 (owner decision 2026-11-12).** `take_front` appends to `CryptoStream`'s
+  `buf`, `CryptoStream::read` appends it to TLS's input, and `tls::HsReader::next_message` drains each message from the
+  front with `split_off` (O(unread) per message). All three grow or shift by std's amortized behaviour. Phase 9b2,
+  next after 9b1, replaces them with one verified byte queue (de-amortized growth: on reaching half capacity a buffer
+  of twice the size is allocated and each append also moves two old bytes, so every append is O(d) worst case with
+  every copy counted; front removal copies only the message), so the strict bound covers them too. 9b1 closes
+  `cat-C15` for the out-of-order store and opens `cat-C15-inorder` (owner 9b2) for the rest; 9b2 closes it.
 - **D9 Bookkeeping.** `cat-C15` closes with the `work` ensures, the gate and the test as evidence; the `shortcut:`
   comment at `insert` goes; mutant patches T7-M3b2 and T7-M4 (frags) are regenerated (T7-M6 is `Reassembly`'s and
   stays); roadmap row 9b1 and 9b's text lose Task 1; TRUSTED.md's Vec row names the push-below-capacity guarantee
