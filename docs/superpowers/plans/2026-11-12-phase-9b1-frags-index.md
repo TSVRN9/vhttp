@@ -206,11 +206,12 @@ if it can hold such a key (two-mode induction: one-sided walk `<= k + h + 1` vis
 `chunk_lens(&self) -> Vec<(u64, usize)>` (outside `verus!`, `#[doc(hidden)]`, test support). All with exactly
 `Frags::insert`'s / `Frags::take_front`'s current ensures, plus cost ensures from the spec ("The bound").
 
-D3 steps 0-6 as the spec states them. Step 5's cut, exactly: let `L` be the merged length. The first piece is `Lc`'s
-`Vec` (or a fresh one when no `Lc`) filled to `min(L, CAP)`; then fresh pieces of `CAP`; if the last piece would hold
-`q < K` bytes and there is a previous piece, the last two pieces (total `CAP + q`) are cut at `(CAP + q) / 2`
-(moving bytes out of the previous piece with `split_off`). Fresh `Vec`s use `Vec::with_capacity(piece_len)`; `Lc`'s
-is grown with `reserve_exact` to at most `CAP`. D3b for `take_front_w`.
+D3 steps 0-6 as the spec states them. Step 5's cut, exactly: let `L` be the merged length (computed before any copy).
+Piece lengths: `CAP` each, except that if `L mod CAP` is in `1..K` and there are at least two pieces, the last two
+take `(CAP + q) / 2` and the rest (`q = L mod CAP`); a single piece takes `L`. Every piece is a fresh
+`Vec::with_capacity(len)` filled by exactly `len` counted pushes (`Lc`'s bytes first, then the frame's/held bytes,
+then the merged small tails); no `Vec` is ever grown past its initial capacity (no `reserve`, `reserve_exact`,
+`append` or `extend` on a chunk), and `Lc`'s old `Vec` is dropped. D3b for `take_front_w`.
 
 - [ ] **Step 1:** `insert_w` steps 0-2 (all-held return before any split; `get_le`; two splits).
 - [ ] **Step 2:** steps 3-6 (drain `M`, merge, pop small `B` head, cut, joins), the `put` view proof via lemmas.
@@ -234,7 +235,9 @@ the name `Frags`; delete what no longer has a caller; remove the `shortcut:` com
     `frags_big_frame_pieces` (via `chunk_lens`: every len `<= 256`, every chunk starting at the previous end has len
     `>= 128`, for a 16384-byte frame and for a 250-byte frame followed by a 300-byte frame adjacent above it);
     extend `frags_lo_cuts_below` with `lo` inside a follower chain.
-  - Remove the `#[ignore]` from `crypto_ooo_cost_linear`; it passes.
+  - Remove the `#[ignore]` from `crypto_ooo_cost_linear`; it passes. Extend its allocator to count `realloc` calls
+    separately and assert 0 reallocs on every pattern (none fills from offset 0, so CryptoStream's in-order buffer is
+    untouched); check that it fails if a chunk is grown with `push` past `with_capacity`.
 - [ ] **Step 3:** `crypto_ooo_capacity_bounded` passes unchanged (bound 266240). If not, STOP and report (D7: owner).
 - [ ] **Step 4:** `scripts/quick.sh` (no args) → `quick: ok`. Commit `9b1: Frags is the chunk AVL; cost, follower and dup-across-chunks tests`.
 
@@ -260,8 +263,9 @@ moved frags.rs lines (the citations gate reports them).
   `tools/mutants.tsv`); `scripts/mutants.sh check` passes; `scripts/mutants.sh run 9b1-M1 9b1-M2 9b1-M3 9b1-M4
   T7-M3b2 T7-M4` kills all six.
 - [ ] **Step 4: Docs.** TRUSTED.md:7's Frags sentences → the chunk layout (chunks of at most 256 bytes, each its own
-  `Vec`, nodes `Box`ed, `capacity` checked by `crypto_ooo_capacity_bounded`) and the Vec row's reallocation residual
-  (spec "The bound": copies at most `CAP` per chunk touched; `out`'s growth in `take_front`). `cat-C15`: owner `9b1`,
+  `Vec` allocated at its exact length and never grown, nodes `Box`ed, `capacity` checked by
+  `crypto_ooo_capacity_bounded`) and the Vec row: std's push-below-capacity guarantee, pinned by the 0-realloc
+  assertion in `crypto_ooo_cost_linear` (spec "The bound"). `cat-C15`: owner `9b1`,
   status closed, evidence the cost ensures (`crates/quic/src/frags.rs`), the gate and `crypto_ooo_cost_linear`, in
   the evidence format `scripts/carryovers.sh` accepts. Roadmap: a `9b1` row (status `in progress`; the controller
   sets merged), and row 9b's order cell loses "Task 1 Frags index". catalog.md's C15 row: closed by 9b1.

@@ -41,20 +41,21 @@ Let `n` be the number of chunks (below), `h` the tree height, `d = data.len()`, 
 unit per tree node visited (an empty child included), created or relinked, and per byte copied. Proved, worst case per
 call:
 
-- `insert` and `after_insert`: cost at most `c1 · (h + 1) · (d / K + 4) + c2 · (d + 3K)` (the walk, two splits and
-  at most `d / K + 4` joins; bytes: `d`, two tails under `K`, and up to `K` moved out of `Lc` in D3 step 5), which is
-  at most `(c1 + c2) · (d + 4 · (h + 1) + 3K)` since `h + 1 <= K`. The constants are fixed numbers in the ensures.
+- `insert` and `after_insert`: cost at most `c1 · (h + 1) · (d / K + 4) + c2 · (d + 4K)` (the walk, two splits and
+  at most `d / K + 4` joins; bytes: `d`, two tails under `K`, and `Lc`'s bytes, at most `CAP`, copied into a fresh
+  piece in D3 step 5), which is at most `(c1 + c2) · (d + 4 · (h + 1) + 4K)` since `h + 1 <= K`. The constants are fixed numbers in the ensures.
 - `take_front`: at most `c1 · (h + 1) + c2 · (r + K)`.
 - `size + 1 >= 2^(h/2)` (AVL; no `log` in the proofs, vstd's is opaque) and `K · (n − runs) <= held`; under
   `CryptoStream`'s caps that gives `n <= 4096 + 128` and `h <= 25`, derived where the caps apply. For any store,
   `held <= VARINT_MAX < 2^62` gives `h + 1 <= 126 <= K`, which the bounds above use.
 
-So a frame costs O(log n + d) and an in-order fill O(log n + r), worst case per call, with no amortization. `Vec`
-reallocation is not in vstd's model (length only, TRUSTED.md's Vec row), so it is bounded by construction instead of by
-the ghost cost: no chunk ever holds more than `CAP` bytes, so a reallocation copies at most `CAP` bytes, and a call
-touches at most `d / K + 4` chunks. The residual, named in TRUSTED.md: that std's `Vec` copies no more than its length
-on reallocation. Outside `Frags`, `take_front` appends to the caller's `out` (CryptoStream's `read`), whose growth is
-std's amortized doubling, unchanged by this phase and named in the same row.
+So a frame costs O(log n + d) and an in-order fill O(log n + r), worst case per call, with no amortization. No chunk
+`Vec` ever reallocates (owner request 2026-11-12, after a review found the earlier draft relied on bounded but
+uncounted reallocation): every piece D3 step 5 makes is a fresh `Vec::with_capacity(len)` filled by counted pushes of
+exactly `len` bytes, and no chunk is grown afterwards, so every byte copy inside `Frags` is in the ghost cost. vstd
+models length, not capacity, so "a push below capacity does not reallocate" is std's documented guarantee, trusted
+(TRUSTED.md's Vec row), and pinned mechanically: `crypto_ooo_cost_linear` counts `realloc` calls and requires none
+on its out-of-order patterns. `take_front` appends to `out`; that buffer's growth is the caller's (D10).
 
 ## Decisions
 
@@ -80,10 +81,10 @@ std's amortized doubling, unchanged by this phase and named in the same row.
      chunk `Rc` of `M` if it runs past `e`: if `Rc` holds fewer than `K` bytes it is merged whole, else it is kept
      untouched as a follower and the merged bytes stop at `Rc.start`. Held and new bytes in `[s, e)` total at most `d`.
   4. If `B`'s first chunk starts where the merged bytes end and holds fewer than `K` bytes, `pop_min` it and merge it.
-  5. Cut the merged bytes into chunks of at most `CAP`: `Lc`'s `Vec` is the first (no copy of its bytes beyond one
-     reallocation of at most `CAP`), filled to `CAP`, then fresh chunks of `CAP`; if the last piece would hold fewer
-     than `K`, the last two pieces are split evenly (each at least `K`, at most `CAP`; this may move up to `K` bytes
-     out of `Lc`). At most `(d + 2K) / K + 2 <= d / K + 4` chunks result.
+  5. Cut the merged bytes into chunks of at most `CAP`, each a fresh `Vec::with_capacity` of its exact length filled
+     by counted pushes (`Lc`'s bytes, at most `CAP`, are copied into the first; its old `Vec` is dropped): pieces of
+     `CAP`, and if the last piece would hold fewer than `K`, the last two are split evenly (each at least `K`, at most
+     `CAP`; lengths are computed before any piece is filled). At most `(d + 2K) / K + 2 <= d / K + 4` chunks result.
   6. `join` `A`, the pieces, `Rc` if kept, and `B`, in order: at most `d / K + 4` joins of cost `c · (h + 1)` each.
   The run delta for `count` comes from the walk (runs met in `[s, e)`, plus adjacency at `s − 1` and `e`).
 - **D3a `after_insert_w` without mutation.** `&self`: a range walk over the chunks meeting `[s − 1, e]` (recursion
@@ -134,10 +135,16 @@ std's amortized doubling, unchanged by this phase and named in the same row.
 - **D8 Out of scope.** `MAX_CRYPTO_BUFFER` and `MAX_CRYPTO_RANGES` stay byte and run caps (an offset window changes an
   RFC-justified close predicate). `Reassembly` (STREAM data) is untouched. P3 (codec acceptance lemmas) is its own
   later phase.
+- **D10 The in-order buffer (pending owner decision, 2026-11-12).** `take_front` appends to `CryptoStream`'s `buf`,
+  and `CryptoStream::read` appends `buf` to the caller's `out` (TLS's input). Both are `Vec<u8>`s grown by std's
+  amortized doubling: one call can copy the whole unread buffer. That is outside `Frags` and predates this phase, and
+  no proved bound exists on unread in-order bytes (they wait for the caller's `read`), so a fixed capacity cannot be
+  chosen from the code as it is. Until the owner decides, 9b1 does not claim a strict bound for it: `cat-C15` closes
+  for the out-of-order store only, and a new carryover row names the in-order buffers.
 - **D9 Bookkeeping.** `cat-C15` closes with the `work` ensures, the gate and the test as evidence; the `shortcut:`
   comment at `insert` goes; mutant patches T7-M3b2 and T7-M4 (frags) are regenerated (T7-M6 is `Reassembly`'s and
-  stays); roadmap row 9b1 and 9b's text lose Task 1; TRUSTED.md's Vec row names the reallocation residual (D2's `CAP`
-  bound, and `out`'s growth).
+  stays); roadmap row 9b1 and 9b's text lose Task 1; TRUSTED.md's Vec row names the push-below-capacity guarantee
+  and the realloc-count test.
 
 ## Task outline (the plan refines)
 
