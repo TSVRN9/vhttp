@@ -85,7 +85,7 @@ pub proof fn lemma_seq_node<V>(t: Tree<V>)
             &&& seq(t).len() == l.len() + 1 + r.len()
             &&& seq(t)[l.len() as int] == (b.key, b.val)
             &&& forall|i: int| 0 <= i < l.len() ==> #[trigger] seq(t)[i] == l[i]
-            &&& forall|j: int| 0 <= j < r.len() ==> #[trigger] seq(t)[l.len() + 1 + j] == r[j]
+            &&& forall|j: int| l.len() + 1 <= j < seq(t).len() ==> #[trigger] seq(t)[j] == r[j - l.len() - 1]
         }),
 {
     let b = t->0;
@@ -182,6 +182,36 @@ pub proof fn lemma_height<V>(t: Tree<V>)
     }
 }
 
+/// Two wf trees of balanced heights, with fewer than `2^63` entries in all, fit under a node of height at most 126.
+pub proof fn lemma_node_cap<V>(l: Tree<V>, r: Tree<V>)
+    requires
+        wf(l),
+        wf(r),
+        ht(l) <= ht(r) + 1,
+        ht(r) <= ht(l) + 1,
+        seq(l).len() + seq(r).len() + 1 < pow2(63),
+    ensures
+        1 + (if ht(l) >= ht(r) { ht(l) } else { ht(r) }) <= 126,
+{
+    // A stored height is at most 126, so the bound fails only if a child has height 126, which lemma_height forbids.
+    assert(ht(l) <= 126 && ht(r) <= 126) by {
+        if let Some(b) = l {
+            assert(b.h <= 126);
+        }
+        if let Some(b) = r {
+            assert(b.h <= 126);
+        }
+    }
+    lemma_height(l);
+    lemma_height(r);
+    if ht(l) == 126 {
+        assert(ht(l) / 2 == 63);
+    }
+    if ht(r) == 126 {
+        assert(ht(r) / 2 == 63);
+    }
+}
+
 pub fn height<V>(t: &Tree<V>) -> (r: u8)
     ensures
         r == ht(*t),
@@ -210,12 +240,7 @@ proof fn lemma_get_le_here<V>(t: Tree<V>, k: u64)
     ensures
         last_le(seq(t), k, seq(t->0.left).len() as int, t->0.key, t->0.val),
 {
-    let b = t->0;
     lemma_seq_node(t);
-    let n = seq(b.left).len() as int;
-    assert forall|j: int| n < j < seq(t).len() implies #[trigger] seq(t)[j].0 > k by {
-        assert(seq(t)[n + 1 + (j - n - 1)] == seq(b.right)[j - n - 1]);
-    }
 }
 
 /// An answer in the left subtree is the answer, when the node's key exceeds `k`.
@@ -228,15 +253,8 @@ proof fn lemma_get_le_left<V>(t: Tree<V>, k: u64, i: int, key: u64, v: V)
     ensures
         last_le(seq(t), k, i, key, v),
 {
-    let b = t->0;
     lemma_seq_node(t);
-    assert(keys_gt(b.right, b.key));
-    let n = seq(b.left).len() as int;
-    assert forall|j: int| i < j < seq(t).len() implies #[trigger] seq(t)[j].0 > k by {
-        if j > n {
-            assert(seq(t)[n + 1 + (j - n - 1)] == seq(b.right)[j - n - 1]);
-        }
-    }
+    assert(keys_gt(t->0.right, t->0.key));
 }
 
 /// No answer in the left subtree means none in the tree, when the node's key exceeds `k`.
@@ -249,15 +267,8 @@ proof fn lemma_get_le_none<V>(t: Tree<V>, k: u64)
     ensures
         keys_gt(t, k),
 {
-    let b = t->0;
     lemma_seq_node(t);
-    assert(keys_gt(b.right, b.key));
-    let n = seq(b.left).len() as int;
-    assert forall|j: int| 0 <= j < seq(t).len() implies #[trigger] seq(t)[j].0 > k by {
-        if j > n {
-            assert(seq(t)[n + 1 + (j - n - 1)] == seq(b.right)[j - n - 1]);
-        }
-    }
+    assert(keys_gt(t->0.right, t->0.key));
 }
 
 /// An answer in the right subtree is the answer, shifted past the left subtree and the node.
@@ -268,12 +279,7 @@ proof fn lemma_get_le_right<V>(t: Tree<V>, k: u64, i: int, key: u64, v: V)
     ensures
         last_le(seq(t), k, seq(t->0.left).len() + 1 + i, key, v),
 {
-    let b = t->0;
     lemma_seq_node(t);
-    let n = seq(b.left).len() as int;
-    assert forall|j: int| n + 1 + i < j < seq(t).len() implies #[trigger] seq(t)[j].0 > k by {
-        assert(seq(t)[n + 1 + (j - n - 1)] == seq(b.right)[j - n - 1]);
-    }
 }
 
 /// The entry with the greatest key at most `k`, if any.
