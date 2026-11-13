@@ -66,23 +66,23 @@ pub proof fn lemma_runs_cut(s: Set<nat>, t: Set<nat>, r: nat)
 }
 
 /// Fragment `i` of `f` holds position `k`.
-spec fn inf(f: Seq<(nat, Seq<u8>)>, i: int, k: nat) -> bool {
+pub(crate) open spec fn inf(f: Seq<(nat, Seq<u8>)>, i: int, k: nat) -> bool {
     0 <= i < f.len() && f[i].0 <= k < f[i].0 + f[i].1.len()
 }
 
 /// The positions the fragments hold.
-spec fn pos(f: Seq<(nat, Seq<u8>)>) -> Set<nat> {
+pub(crate) open spec fn pos(f: Seq<(nat, Seq<u8>)>) -> Set<nat> {
     Set::range(0, VARINT_MAX as nat).filter(|k: nat| exists|i: int| inf(f, i, k))
 }
 
 /// The byte at `k`: that of a fragment holding it (the only one, under `sep`).
-spec fn at(f: Seq<(nat, Seq<u8>)>, k: nat) -> u8 {
+pub(crate) open spec fn at(f: Seq<(nat, Seq<u8>)>, k: nat) -> u8 {
     let i = choose|i: int| inf(f, i, k);
     f[i].1[k - f[i].0]
 }
 
 /// The bytes the fragments hold, by position.
-spec fn vw(f: Seq<(nat, Seq<u8>)>) -> Map<nat, u8> {
+pub(crate) open spec fn vw(f: Seq<(nat, Seq<u8>)>) -> Map<nat, u8> {
     Map::new(pos(f), |k: nat| at(f, k))
 }
 
@@ -97,7 +97,7 @@ spec fn sep(f: Seq<(nat, Seq<u8>)>) -> bool {
         0 <= i < j < f.len() ==> f[i].0 + f[i].1.len() < f[j].0
 }
 
-spec fn sum_len(f: Seq<(nat, Seq<u8>)>) -> nat
+pub(crate) open spec fn sum_len(f: Seq<(nat, Seq<u8>)>) -> nat
     decreases f.len(),
 {
     if f.len() == 0 {
