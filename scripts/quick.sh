@@ -85,6 +85,7 @@ fi
 step duvet duvet report
 step deps "$root/scripts/deps-gate.sh" "$root"
 step escape "$root/scripts/escape-gate.sh" "$root"
+step cost-charge "$root/scripts/cost-charge.sh" "$root"
 step quotes "$root/scripts/check-quotes.sh"
 step acceptance "$root/scripts/acceptance.sh"
 step citations python3 -I "$tools/citations.py" cite "$root"

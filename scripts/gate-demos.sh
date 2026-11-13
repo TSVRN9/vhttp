@@ -4,7 +4,7 @@ set -o pipefail
 # gate-demos.sh: each cheap gate gets a canned bad input (a temp copy of a fixture in
 # tools/gate-demos/ with one change applied) and must exit non-zero with its message; every fixture
 # first passes unchanged, so a demo cannot fail for the wrong reason. Covers lint-scripts,
-# check-quotes, the citation gate, the RFC-quantity gate (its git demos in throwaway repos), acceptance (many bad changes, including real-git runs), escape-gate (three), the rlimit gate and the mutant registry (scripts/mutants.sh; its run demos call Verus
+# check-quotes, the citation gate, the RFC-quantity gate (its git demos in throwaway repos), acceptance (many bad changes, including real-git runs), escape-gate (three), the cost-charge gate, the rlimit gate and the mutant registry (scripts/mutants.sh; its run demos call Verus
 # on the fixture crate), the declassify and deps gates, ct-check's report reader (ct-report.sh), ct-binary (against its real build), the test gate, the carryover gate and the requirements status gate (throwaway repos). Takes a few seconds, plus about a minute the first time vstd builds in target/mutants-demo.
 root=$(cd "$(dirname "$0")/.." && pwd)
 fx=$root/tools/gate-demos
@@ -278,6 +278,29 @@ expect_fail "escape-gate: external_body in crypto without a TRUSTED row" "has no
 fresh escape
 printf 'assume_specification[ f ](x: u8);\n' >> "$tmp/escape/crates/demo/src/lib.rs"
 expect_fail "escape-gate: assume_specification" "unaccounted escape" esc
+
+# cost-charge gate (scripts/cost-charge.sh, 9b1 D6a), on copies of the real avl.rs and frags.rs: fill's while without its
+# `work` invariant line (named by its line), a recursive exec fn returning no Ghost<nat>, fill's ensures not reading its
+# cost, a missing file; the real tree passes.
+expect_pass "cost-charge: the real tree" "$root/scripts/cost-charge.sh" "$root"
+ccq=$tmp/cost/crates/quic/src
+cfresh() { rm -rf "${tmp:?}/cost"; mkdir -p "$ccq"; cp "$root/crates/quic/src/avl.rs" "$root/crates/quic/src/frags.rs" "$ccq/"; }
+cc() { "$root/scripts/cost-charge.sh" "$tmp/cost"; }
+cfresh
+expect_pass "cost-charge: an unchanged copy" cc
+sed -i '/^            work <= 1 + j,$/d' "$ccq/frags.rs"
+wl=$(grep -n '^    while j < n$' "$ccq/frags.rs" | cut -d: -f1)
+[ -n "$wl" ] || die "cost-charge demo: fill's while not found in the copy"
+expect_fail "cost-charge: a while whose invariant lacks work" "crates/quic/src/frags.rs:$wl: while without an invariant naming work" cc
+cfresh
+sed -i 's|^} // verus!$|fn depth<V>(t: \&Tree<V>) -> (r: u64)\n    decreases *t,\n{\n    match t {\n        None => 0,\n        Some(b) => depth(\&b.left),\n    }\n}\n\n} // verus!|' "$ccq/avl.rs"
+expect_fail "cost-charge: a recursive exec fn without a Ghost<nat> return" "depth recurses but returns no named Ghost<nat> cost" cc
+cfresh
+sed -i 's/^        r\.2@ <= n + 1,$/        true,/' "$ccq/frags.rs"
+expect_fail "cost-charge: a loop whose ensures do not read its cost" "fill loops but its ensures do not read its cost r.2@" cc
+cfresh
+rm "$ccq/avl.rs"
+expect_fail "cost-charge: a missing file" "cannot read crates/quic/src/avl.rs" cc
 
 # rlimit gate (tools/rl.py --gate): a quic fn at 8,000,001; a FAIL row; empty and rowless logs; a missing log; two JSON objects.
 pin=$root/tools/verus-pin.txt
