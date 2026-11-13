@@ -40,7 +40,26 @@ fresh() { rm -rf "${tmp:?}/$1"; cp -r "$fx/$1" "$tmp/$1"; }
 expect_pass "quick.py scope selftest" python3 -I "$root/tools/quick.py" selftest
 : > "$tmp/noquick.json"
 : > "$tmp/noquick.log"
-expect_fail "quick.py check: a run with no results object" "0 Verus result objects" python3 -I "$root/tools/quick.py" check "$tmp/noquick"
+expect_fail "quick.py check: a run with no results object" "0 Verus result objects" python3 -I "$root/tools/quick.py" check "$tmp/noquick" demo acc demo
+# scope reads cargo metadata's own form: NUL-separated paths (one with a space), a dev-dependency counted as a dependent.
+printf '{"packages": [{"name": "wire", "dependencies": []}, {"name": "h3", "dependencies": [{"name": "wire", "path": "/w", "kind": null}]}, {"name": "tls", "dependencies": [{"name": "wire", "path": "/w", "kind": "dev"}]}]}' > "$tmp/qmeta.json"
+printf 'crates/wire/a b.rs\0docs/x.md\0' > "$tmp/qpaths"
+sc=$(python3 -I "$root/tools/quick.py" scope "$tmp/qmeta.json" "$tmp/qpaths") || die "quick.py scope failed on cargo metadata's form"
+[ "$sc" = "tls wire h3
+ct" ] || die "quick.py scope: want crates [tls wire h3] (dependency order) and extra [ct], got:
+$sc"
+echo "gate-demos: quick.py scope: NUL-separated paths, a dev-dependent included"
+# quick.sh's scope: a failing git diff or git ls-files is a failure, not an empty change set (a fake git fails that one command).
+mkdir -p "$tmp/fakegit"
+printf '#!/bin/sh\n[ "$1" != "$FAKEGIT_FAIL" ] || exit 1\nexec %s "$@"\n' "$(command -v git)" > "$tmp/fakegit/git"
+chmod +x "$tmp/fakegit/git"
+expect_fail "quick.sh: git diff fails" "git diff against the merge-base failed" env PATH="$tmp/fakegit:$PATH" FAKEGIT_FAIL=diff QUICK_OUT="$tmp/quick" "$root/scripts/quick.sh"
+expect_fail "quick.sh: git ls-files fails" "git ls-files (untracked files) failed" env PATH="$tmp/fakegit:$PATH" FAKEGIT_FAIL=ls-files QUICK_OUT="$tmp/quick" "$root/scripts/quick.sh"
+# quick.sh cleans under cargo's own target dir: a cargo metadata that fails (a fake cargo) stops it before any Verus.
+mkdir -p "$tmp/fakecargo"
+printf '#!/bin/sh\n[ "$1" != metadata ] || exit 1\nexec %s "$@"\n' "$(command -v cargo)" > "$tmp/fakecargo/cargo"
+chmod +x "$tmp/fakecargo/cargo"
+expect_fail "quick.sh: cargo metadata fails" "cargo metadata gave no target_directory" env PATH="$tmp/fakecargo:$PATH" QUICK_OUT="$tmp/quick" "$root/scripts/quick.sh" wire/varint
 
 # lint-scripts: a script without pipefail; an empty directory.
 fresh lint
@@ -787,7 +806,9 @@ expect_fail "ratchet-walk: a git error (path outside any repo)" "failed" walk w5
 # patches and the loop-invariant kinds have their own fixture (mutants-dep, below). run (real Verus, seconds:
 # MUTANTS_TARGET_DIR keeps vstd built across runs): the killed mutant (with its named test) passes; a mutant that still
 # verifies, a named test that does not FAIL, one that fails unmutated, a misspelt test and a missing fn fail; a dirty
-# crates/ is refused, and so is a Verus other than the pin's or none at all. The verdict on canned Verus output: rlimit, no
+# crates/ is refused, and so is a Verus other than the pin's or none at all. Its parallel workers: two of them assemble the
+# run file in tsv order; a bad MUTANTS_JOBS, a held output-dir lock, a worker outside its own session or not run's child,
+# and a dead worker fail; a TERM leaves no worker process and no worktree. The verdict on canned Verus output: rlimit, no
 # or two JSON objects, another fn checked, a non-matching error kind, another Verus version or commit, no verus object. The
 # main gate (every commit at main's tip): passes after a --no-ff merge or a fast-forward with a fresh run file, and the fresh
 # run there reproduces it; fails with none (also detached), crates/ or Cargo.toml changed after the run, a fast-forward
@@ -810,6 +831,13 @@ mrepo() {  # mrepo <dir>: scripts, tools/mutants.py and the fixture, one commit 
     gitc "$1" checkout -qb feat
 }
 mut() { d=$1; shift; "$tmp/$d/scripts/mutants.sh" "$@"; }
+nowt() {  # nowt <dir> <name>: no mutants-* worktree left in $tmp/<dir> (a failing git worktree list is a failure)
+    wl=$(git -C "$tmp/$1" worktree list --porcelain) || die "$2: git worktree list failed"
+    case $wl in *"/mutants-"*) die "$2: worktree left behind:
+$wl" ;; esac
+}
+# upto <tenths> <cmd..>: poll <cmd> every 0.1 s until it passes; 1 after <tenths> tries.
+upto() { ut=$1; shift; i=0; until "$@"; do [ "$i" -lt "$ut" ] || return 1; sleep 0.1; i=$((i + 1)); done; }
 mrepo m1
 expect_pass "mutants check" mut m1 check
 sed -i 's/if n > 10 { Err(7) }/if n > 10 { Err(9) }/' "$tmp/m1/crates/demo/src/acc.rs"
@@ -853,16 +881,87 @@ expect_fail "mutants check: an allowed_*err predicate named only in a row's orig
 mrepo m3
 expect_pass "mutants run: killed mutant" mut m3 run
 grep -qx "crates $(git -C "$tmp/m3" rev-parse HEAD:crates)" "$tmp/m3/tools/mutants-last-run.txt" || die "mutants run: run file lacks the crates tree"
-[ -z "$(git -C "$tmp/m3" worktree list --porcelain | grep '^worktree .*/mutants-')" ] || die "mutants run: worktree left behind"
+nowt m3 "mutants run"
 [ "$(git -C "$tmp/m3" status --porcelain)" = "?? tools/mutants-last-run.txt" ] || die "mutants run: the caller's tree changed beyond the run file:
 $(git -C "$tmp/m3" status --porcelain)"
 echo "gate-demos: mutants run: caller's tree unchanged except tools/mutants-last-run.txt"
+# run with two workers (MUTANTS_JOBS=2, one row each): both kills land in the run file in tsv order, no worktree left.
+mrepo m3j
+cp "$tmp/m3j/tools/mutants/D-kill.patch" "$tmp/m3j/tools/mutants/D-kill2.patch"
+awk -F'\t' -v OFS='\t' '{ print } $1 == "D-kill" { $1 = "D-kill2"; print }' "$tmp/m3j/tools/mutants.tsv" > "$tmp/m3j.tsv"
+mv "$tmp/m3j.tsv" "$tmp/m3j/tools/mutants.tsv"
+git -C "$tmp/m3j" add -A
+gitc m3j commit -qm two
+mj() { MUTANTS_JOBS=2 mut m3j run; }
+expect_pass "mutants run: two workers" mj
+[ "$(awk '!/^#/ && $2 == "pass" { printf "%s ", $1 }' "$tmp/m3j/tools/mutants-last-run.txt")" = "D-kill D-kill2 " ] || die "mutants run: two workers: run file lacks D-kill and D-kill2 in order:
+$(cat "$tmp/m3j/tools/mutants-last-run.txt")"
+nowt m3j "mutants run: two workers"
+echo "gate-demos: mutants run: two workers: both rows in tsv order, no worktree left"
+# mutants.py assemble (the workers' result lines): a row with no line (a worker stopped early), two lines, a line for no row.
+printf 'A\tc\nB\tc\n' > "$tmp/as.rows"
+printf 'A pass a1\n' > "$tmp/as.0"
+printf 'B fail b1\n' > "$tmp/as.1"
+printf 'C pass c1\n' > "$tmp/as.2"
+expect_pass "mutants.py assemble" python3 -I "$root/tools/mutants.py" assemble "$tmp/as.rows" "$tmp/as.1" "$tmp/as.0"
+expect_fail "mutants.py assemble: a row with no line" "no result line for B" python3 -I "$root/tools/mutants.py" assemble "$tmp/as.rows" "$tmp/as.0"
+expect_fail "mutants.py assemble: two lines for a row" "A has two result lines" python3 -I "$root/tools/mutants.py" assemble "$tmp/as.rows" "$tmp/as.0" "$tmp/as.0" "$tmp/as.1"
+expect_fail "mutants.py assemble: a line for no row" "result lines for no row: C" python3 -I "$root/tools/mutants.py" assemble "$tmp/as.rows" "$tmp/as.0" "$tmp/as.1" "$tmp/as.2"
+# run's workers: a bad MUTANTS_JOBS; another run (or a killed run's orphaned workers) holding the output dir's lock; a
+# worker that is not a session leader, or not run's child; a run whose worker dies (a fake setsid that starts no session).
+mrepo m7
+expect_fail "mutants run: MUTANTS_JOBS=0" "MUTANTS_JOBS must be a positive integer, not '0'" env MUTANTS_JOBS=0 "$tmp/m7/scripts/mutants.sh" run
+mkdir -p "$tmp/m7/target/mutants"
+expect_fail "mutants run: another run holds the output dir" "still holds $tmp/m7/target/mutants/.lock" flock "$tmp/m7/target/mutants/.lock" "$tmp/m7/scripts/mutants.sh" run
+expect_fail "mutants worker: not a session leader" "worker: not a session leader" mut m7 worker a b c
+expect_fail "mutants worker: not started by run" "worker: not started by mutants.sh run" setsid -w "$tmp/m7/scripts/mutants.sh" worker a b c
+mkdir -p "$tmp/fakesetsid"; printf '#!/bin/sh\nexec "$@"\n' > "$tmp/fakesetsid/setsid"; chmod +x "$tmp/fakesetsid/setsid"
+expect_fail "mutants run: a worker dies" "1 of 1 mutant workers died" env PATH="$tmp/fakesetsid:$PATH" "$tmp/m7/scripts/mutants.sh" run
+nowt m7 "mutants run: a worker dies"
+# a worker that dies leaving a TERM-ignoring straggler in its group (a fake git fails the worker's reset after starting
+# it): the run drains the dead worker's group, KILL included.
+straggler="sh -c \"trap '' TERM; exec sleep 600\" < /dev/null > /dev/null 2>&1 &"
+mkdir -p "$tmp/deadgit"
+printf '#!/bin/sh\ncase $3 in reset)\n    %s\n    ps -o sid= -p $$ | tr -d " " >> %s\n    exit 1 ;;\nesac\nexec %s "$@"\n' "$straggler" "$tmp/deadgit/sids" "$(command -v git)" > "$tmp/deadgit/git"
+chmod +x "$tmp/deadgit/git"
+expect_fail "mutants run: a worker dies leaving a TERM-ignoring straggler" "1 of 1 mutant workers died" env PATH="$tmp/deadgit:$PATH" "$tmp/m7/scripts/mutants.sh" run
+ds=$(cat "$tmp/deadgit/sids") || die "mutants run: dead worker: the fake git recorded no session"
+rc=0
+pgrep -s "$ds" > /dev/null || rc=$?
+[ "$rc" -eq 1 ] || die "mutants run: dead worker: its session $ds still has processes, or pgrep failed (rc=$rc):
+$(ps -s "$ds" -o pid,args || true)"
+nowt m7 "mutants run: a worker dies leaving a straggler"
+echo "gate-demos: mutants run: a dead worker's straggler is killed"
+# a run stopped by TERM while its worker runs Verus (rust_verify in its session), with a TERM-ignoring straggler beside it
+# (a cargo wrapper starts one), and TERMed again while it stops: the worker's whole session is gone (the straggler only
+# by KILL) and so are the worktrees.
+mrepo mt
+mkdir -p "$tmp/stragcargo"
+printf '#!/bin/sh\n%s\nexec %s "$@"\n' "$straggler" "$(command -v cargo)" > "$tmp/stragcargo/cargo"
+chmod +x "$tmp/stragcargo/cargo"
+env PATH="$tmp/stragcargo:$PATH" "$tmp/mt/scripts/mutants.sh" run > "$tmp/mt.out" 2>&1 &
+rp=$!
+busy() { wp=$(pgrep -o -f "$tmp/mt/scripts/mutants.sh worker") && pgrep -s "$wp" -x rust_verify > /dev/null; }
+upto 1200 busy || { kill "$rp"; wait "$rp" || true; die "mutants run: TERM: no worker running Verus (rust_verify) within 120 s:
+$(cat "$tmp/mt.out")"; }
+kill -TERM "$rp"
+sleep 1  # stop is draining now (the straggler holds the group for 10 s)
+kill -TERM "$rp" 2> /dev/null || true
+rc=0
+wait "$rp" || rc=$?
+[ "$rc" -ne 0 ] || die "mutants run: TERM: the run exited 0"
+rc=0
+pgrep -s "$wp" > /dev/null || rc=$?
+[ "$rc" -eq 1 ] || die "mutants run: TERM: the worker's session $wp still has processes, or pgrep failed (rc=$rc):
+$(ps -s "$wp" -o pid,args || true)"
+nowt mt "mutants run: TERM"
+echo "gate-demos: mutants run: TERM mid-Verus, and again while stopping, stops the worker's whole session and removes the worktrees"
 mrepo m4
 cp "$fx/mutants/live.patch" "$tmp/m4/tools/mutants/D-live.patch"
 printf 'D-live\tdemo\tacc\tdemo\t-\tpostcondition not satisfied\tgate-demos: n > 11 keeps the clause\n' >> "$tmp/m4/tools/mutants.tsv"
 gitc m4 add -A; gitc m4 commit -qm live
 expect_fail "mutants run: a mutant that still verifies" "the mutant still verifies acc::demo" mut m4 run D-live
-[ -z "$(git -C "$tmp/m4" worktree list --porcelain | grep '^worktree .*/mutants-')" ] || die "mutants run: worktree left behind after a failure"
+nowt m4 "mutants run: after a failure"
 mkdir -p "$tmp/fakeverus"; printf '#!/bin/sh\necho Verus\necho "  Version: 0.2025.01.01.0000000"\n' > "$tmp/fakeverus/verus"; chmod +x "$tmp/fakeverus/verus"
 expect_fail "mutants run: another Verus on VERUS_HOME" "verus --version names 0.2025.01.01.0000000, tools/verus-pin.txt says $pin_v" env VERUS_HOME="$tmp/fakeverus" "$tmp/m4/scripts/mutants.sh" run
 expect_fail "mutants run: no Verus at all (VERUS_HOME missing, none on PATH)" "verus --version failed" env VERUS_HOME="$tmp/noverus" PATH=/usr/bin:/bin "$tmp/m4/scripts/mutants.sh" run
@@ -943,6 +1042,30 @@ vj 1 false; sed -i 's/"verus": {[^}]*}, //' "$v.json"
 expect_fail "mutants verdict: no verus object" "no verus object" killed
 vj 1 false
 expect_fail "mutants verdict: the unmutated fn fails" "unmutated acc::demo" python3 -I "$root/tools/mutants.py" clean "$v" demo acc demo
+
+# quick.py check (quick.sh CRATE/MOD[/FN]) on the same canned output: a clean run of the fn, of its module, and with a
+# dependency's own object beside it pass; errors, a FAIL row, nothing verified, a VIR error, rlimit text, another Verus,
+# and only another module's rows fail.
+qc() { python3 -I "$root/tools/quick.py" check "$v" demo acc "$@"; }
+vj 0 true; : > "$v.log"
+expect_pass "quick.py check: a clean fn run" qc demo
+expect_pass "quick.py check: a clean module run" qc
+sed 's/demo::acc::demo/dep::m::f/' "$v.json" > "$v.dep"; cat "$v.dep" >> "$v.json"
+expect_pass "quick.py check: a dependency's object beside the crate's" qc demo
+vj 1 false
+expect_fail "quick.py check: errors" "1 errors" qc demo
+vj 0 false
+expect_fail "quick.py check: a FAIL row" "FAIL rows demo::acc::demo" qc demo
+vj 0 true; sed -i 's/"verified": 1/"verified": 0/' "$v.json"
+expect_fail "quick.py check: nothing verified" "no results object verified demo::acc::demo" qc demo
+vj 0 true; sed -i 's/"encountered-vir-error": false/"encountered-vir-error": true/' "$v.json"
+expect_fail "quick.py check: a VIR error" "encountered-vir-error True" qc demo
+vj 0 true; printf 'error: Resource limit (rlimit) exceeded\n' > "$v.log"
+expect_fail "quick.py check: rlimit text" "rlimit text" qc demo
+: > "$v.log"; VJ_VERSION=0.2025.01.01.0000000 vj 0 true
+expect_fail "quick.py check: another Verus version" "verus.version is '0.2025.01.01.0000000'" qc demo
+vj 0 true; sed -i 's/demo::acc::demo/demo::other::demo/' "$v.json"
+expect_fail "quick.py check: only another module's rows (listed)" "no results object verified demo::acc::* (want >= 1 verified, with its row); its rows: demo::other::demo" qc
 
 # the main gate (mutants.sh verify at main's tip, merge or not), on m3's real run file.
 mmerge() { gitc "$1" checkout -q main; gitc "$1" reset -q --hard "$mbase"; gitc "$1" merge -q --no-ff feat -m merge; }
