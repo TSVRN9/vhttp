@@ -638,6 +638,23 @@ fresh rfcq; sed -i 's/^use vstd::prelude::\*;$/&\nuse crate::crypto_stream::rfc_
 expect_fail "rfc-quantity: probe N4, a use .. as alias of a name the hashed text calls" "renames a name that the text" rq
 fresh rfcq; printf 'pin\t%s\tquic::recv_stream::no_such_fn\n' "$RR" >> "$qal"
 expect_fail "rfc-quantity: a pin line naming no fn" "names quic::recv_stream::no_such_fn, which is not a fn" rq
+# constants are read from the crates' src/ only, items only, resolved from the reading file (RCA 2026-11-13-gate-scan-scope):
+# a test's or an untracked example's same-named const (the 2026-11-13 and 2026-11-12 incidents) and a const generic
+# parameter leave every digest unchanged; a bare name two modules define, imported by neither, fails closed; an explicit
+# `use` picks one.
+qdecoy='const A: u64 = 1;\nconst MAX_CRYPTO_BUFFER: u64 = 0;\nconst FINAL_SIZE_ERROR: u64 = 9;\nfn main() {}\n'
+fresh rfcq; mkdir -p "$tmp/rfcq/crates/quic/tests"; printf "$qdecoy" > "$tmp/rfcq/crates/quic/tests/decoy.rs"
+expect_pass "rfc-quantity: a test file's same-named consts change no digest" rq
+fresh rfcq; mkdir -p "$tmp/rfcq/crates/quic/examples"; printf "$qdecoy" > "$tmp/rfcq/crates/quic/examples/decoy.rs"
+expect_pass "rfc-quantity: an untracked example's same-named consts change no digest" rq
+fresh rfcq; qadd tp.rs 'pub open spec fn demo_generic<const TP_PREFERRED_ADDRESS: usize, const N: usize>() -> bool { true }'
+expect_pass "rfc-quantity: a const generic parameter is not read as a constant" rq
+fresh rfcq; sed -i '/^pub const FLOW_CONTROL_ERROR: u64 = 0x03;$/d' "$qx/recv_stream.rs"
+sed -i 's/^pub const MAX_CRYPTO_BUFFER: u64 = 16384;$/&\npub const FLOW_CONTROL_ERROR: u64 = 0x03;/' "$qx/crypto_stream.rs"
+sed -i 's/^pub const TP_PREFERRED_ADDRESS: u64 = 0x0d;$/&\npub const FLOW_CONTROL_ERROR: u64 = 0x03;/' "$qx/tp.rs"
+expect_fail "rfc-quantity: a bare constant two modules define, imported by neither" "reads the constant FLOW_CONTROL_ERROR, which names 2 definitions" rq
+sed -i 's/^use vstd::prelude::\*;$/&\nuse crate::crypto_stream::FLOW_CONTROL_ERROR;/' "$qx/recv_stream.rs"
+expect_pass "rfc-quantity: the same constant imported explicitly resolves to one definition" rq
 fresh rfcq; sed -i 's/^    ||| end > s.limit$/& || s.high > 0 \/\/ rfc-quantity: s.limit: the largest maximum stream data sent (RFC 9000 §19.10)/' "$qx/recv_stream.rs"
 sed -i '/\ts\.limit\t/d' "$qop"; qredig
 expect_fail "rfc-quantity: probe I, s.high on a line whose annotation names s.limit (digests re-pinned)" "flow_trigger (from recv_allowed_err) reads \`s.high\`" rqn

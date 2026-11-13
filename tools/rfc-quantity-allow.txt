@@ -10,13 +10,13 @@
 #                                                  quantity the reason names
 # Each reason cites `RFC N §x`. A ratchet: ALLOW_DIGEST in tools/rfc_quantity.py pins these lines (--print-digest
 # allowlist), so any change needs that constant changed in the same diff. Stale lines (vouching for nothing) fail.
-root	quic::crypto_stream::crypto_allowed_err	277d1814fb923ce176c1d1ce1b50902b4ee55bc6da75062de6451f38b861de44
-root	quic::recv_stream::recv_allowed_err	8f652391322528a1b4dcb5f99a1e7935fe6cc0d23893b997231f74af1508273a
-root	quic::tp::allowed_tp_err	ff2d68298278474188253747980796042142f37d33c9bc4cd8e0f9ea327bab04
-root	quic::tp::allowed_tp_err_from	2dd66639cf0582bd3ca2e29eb7faabb6fb96bed2af74a3fbd2d70efad518e299
-root	quictls::server::tp_allowed_err	9b9bfdf51312730ecb55e2612334d0b199b75be5292d916729410dd1f1dd99f8
-root	quictls::server::superseded_allowed_err	bbbc0fd4d3e565ca041bbc76bf366a3c6eae861424d3c78289d93c257cecd6eb
-root	quictls::server::key_changes_allowed_err	cb711ce4cc65ec76995a75f61d8a415d9d882dd54120953ec62544ffeb725eb1
+root	quic::crypto_stream::crypto_allowed_err	04855f900bf7d3b6c51db30f8587e9e93bd71e75dc8d970fa165218e6ac032b3
+root	quic::recv_stream::recv_allowed_err	eb1a2204e4ef3d8c272e16968098c474662665de24e912760a4bdff6f32d0eab
+root	quic::tp::allowed_tp_err	00825bb5f0ee687737b52913893166ec56e38839b9908efaccb79a40aa958dff
+root	quic::tp::allowed_tp_err_from	897e3fd606b35f770fee348b3adf2eaffdab6b8d30f2206641b46079c54ceb14
+root	quictls::server::tp_allowed_err	19c0cb1e16db72640a2fece2a068bf0dfeaa6301d67424f9703819e4c5e5184a
+root	quictls::server::superseded_allowed_err	97e1089f0b4f4e8986f8e0ee01400df87d831828ec19c7df5770f7bd093c0c6b
+root	quictls::server::key_changes_allowed_err	79cd9425ffd5fd2fafaadb456a18c9f49364cfdbe5183c9e17e656a995f1c19f
 pin	quic::crypto_stream::crypto_allowed_err	quic::crypto_stream::CryptoStream::on_crypto
 pin	quic::crypto_stream::crypto_allowed_err	quic::crypto_stream::CryptoStream::restart
 pin	quic::recv_stream::recv_allowed_err	quic::recv_stream::recv_data

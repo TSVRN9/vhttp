@@ -214,7 +214,8 @@ def fns(s, lo, hi, path):
     return res
 
 
-def rs_files(root):
+def all_rs_files(root):
+    """(crate, path relative to the crate, full path, under src/) for every .rs file under crates/ (target/ skipped)."""
     for crate in sorted(os.listdir(os.path.join(root, 'crates'))):
         src = os.path.join(root, 'crates', crate)
         for dp, dn, fs in os.walk(src):
@@ -222,7 +223,17 @@ def rs_files(root):
             for f in sorted(fs):
                 if f.endswith('.rs'):
                     full = os.path.join(dp, f)
-                    yield crate, os.path.relpath(full, src), full
+                    rel = os.path.relpath(full, src)
+                    yield crate, rel, full, rel.split(os.sep)[0] == 'src'
+
+
+def rs_files(root):
+    """The crates' own sources, crates/<crate>/src/**.rs: tests/, examples/, benches/ and build scripts are not the
+    verified code, and a name defined there (an untracked example's or a test's `const A`) must not reach what the gates
+    read (RCA 2026-11-13-gate-scan-scope). scan() refuses a verus! block outside src/, so none goes unscanned."""
+    for crate, rel, full, in_src in all_rs_files(root):
+        if in_src:
+            yield crate, rel, full
 
 
 def scan(root):
@@ -230,6 +241,9 @@ def scan(root):
     found, allowed, aliases, nblocks, examined = {}, [], {}, 0, 0
     sites, apos = [], []  # every fn in a scanned verus! block (file, offset of `fn`, path, clauses, is_exec); allowed spec fns (file, offset, name)
     texts = []
+    for crate, rel, full, in_src in all_rs_files(root):
+        if not in_src and re.search(r'(?<![A-Za-z0-9_])verus!', strip(open(full, encoding='utf-8').read())):
+            raise ValueError(f'{full}: a verus! block outside src/ is not scanned')
     for crate, rel, full in rs_files(root):
         s = strip(open(full, encoding='utf-8').read())
         texts.append((crate, rel, full, s))
