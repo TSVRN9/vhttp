@@ -94,6 +94,8 @@ fn crypto_ooo_cost_linear() {
             .map(|&n| {
                 let fr = f(n);
                 let (b, r, t) = cost(&fr);
+                // the time check takes the fastest of 3 runs, so other load on the machine does not fail it
+                let t = (0..2).map(|_| cost(&fr).2).fold(t, Duration::min);
                 if r != 0 {
                     fails.push(format!("{name} n={n}: {r} reallocs"));
                 }
