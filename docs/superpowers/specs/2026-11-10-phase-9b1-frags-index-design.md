@@ -85,7 +85,8 @@ on its out-of-order patterns. `take_front` appends to `out`; that buffer's growt
      by counted pushes (`Lc`'s bytes, at most `CAP`, are copied into the first; its old `Vec` is dropped): pieces of
      `CAP`, and if the last piece would hold fewer than `K`, the last two are split evenly (each at least `K`, at most
      `CAP`; lengths are computed before any piece is filled). At most `(d + 2K) / K + 2 <= d / K + 4` chunks result.
-  6. `join` `A`, the pieces, `Rc` if kept, and `B`, in order: at most `d / K + 4` joins of cost `c · (h + 1)` each.
+  6. Build the pieces into one balanced tree `P` (O(np)), then `join2(A, P)` and one `join` with `Rc` (if kept) and
+     `B`: O(h + np). (Joining the pieces one at a time would not do: the accumulator grows taller with each join.)
   The run delta for `count` comes from the walk (runs met in `[s, e)`, plus adjacency at `s − 1` and `e`).
 - **D3a `after_insert_w` without mutation.** `&self`: a range walk over the chunks meeting `[s − 1, e]` (recursion
   that enters a subtree only if it can meet the range), proved to cost at most `c_walk() · (2(h + 1) + |M| + 2)`
