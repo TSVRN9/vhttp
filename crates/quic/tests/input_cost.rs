@@ -60,16 +60,30 @@ const COST_B: usize = 4096;
 const QUEUE_MIN_CAP: usize = 64;
 
 /// Requested capacity is memory, not work: an uninitialized `with_capacity` is one allocator call, and D4 bounds the copies
-/// into it at 3 per byte pushed. So one allocation of a call may exceed the budget if it can be a queue buffer: the call
-/// was given bytes (D4 allocates only in `push_slice` with `d > 0`; an ACK or a read creates none) and the allocation is
-/// at most `3·(bytes held after the call) + MIN_CAP` (D4's memory bound); the rest of the call stays within it.
-fn bytes_ok(x: &Call) -> bool {
-    let budget = COST_A * x.d + COST_B;
-    x.k[4] <= budget || (x.d > 0 && x.k[4] - x.k[5] <= budget && x.k[5] <= 3 * x.held + QUEUE_MIN_CAP)
+/// into it at 3 per byte pushed. So, in a test whose structure is a `ByteQueue` after 9b2 (`queue`), one allocation of a
+/// call may exceed the budget if it can be a queue buffer: the call was given bytes (D4 allocates only in `push_slice`
+/// with `d > 0`; an ACK or a read creates none) and the allocation is at most `3·(bytes held after the call) + MIN_CAP`
+/// (D4's memory bound); the rest of the call stays within the budget. The allocator sees no copy into that buffer: the
+/// work bound on it rests on D15's proved cost (`push_slice` at most `7d + 4`), not on this test. `exempt_cap` bounds
+/// how many calls a run may excuse so.
+fn bytes_ok(x: &Call, queue: bool) -> bool {
+    x.k[4] <= COST_A * x.d + COST_B || exempt(x, queue)
 }
 
-/// Each call: no realloc, and `bytes_ok`. Returns the failures, worst call first.
-fn per_call_ok(name: &str, m: usize, c: &[Call]) -> Vec<String> {
+/// The call passes only by its queue-buffer allowance.
+fn exempt(x: &Call, queue: bool) -> bool {
+    let budget = COST_A * x.d + COST_B;
+    queue && x.k[4] > budget && x.d > 0 && x.k[4] - x.k[5] <= budget && x.k[5] <= 3 * x.held + QUEUE_MIN_CAP
+}
+
+/// A queue allocates a new buffer when its length reaches half the old one's capacity (D4), at most twice per doubling
+/// of its peak from `MIN_CAP`: `2·log2(peak / MIN_CAP) + 4` excused calls per run.
+fn exempt_cap(peak: usize) -> usize {
+    2 * (peak / QUEUE_MIN_CAP).max(1).ilog2() as usize + 4
+}
+
+/// Each call: no realloc, and `bytes_ok`; at most `exempt_cap` excused calls. Returns the failures, worst call first.
+fn per_call_ok(name: &str, m: usize, c: &[Call], queue: bool) -> Vec<String> {
     let mut f = Vec::new();
     let re: Vec<_> = c.iter().enumerate().filter(|(_, x)| x.k[2] != 0).collect();
     if let Some((i, x)) = re.iter().max_by_key(|(_, x)| x.k[2]) {
@@ -80,15 +94,24 @@ fn per_call_ok(name: &str, m: usize, c: &[Call]) -> Vec<String> {
             x.k[2]
         ));
     }
-    let over: Vec<_> = c.iter().enumerate().filter(|(_, x)| !bytes_ok(x)).collect();
+    let peak = c.iter().map(|x| x.held).max().unwrap_or(0);
+    let ex = c.iter().filter(|x| exempt(x, queue)).count();
+    if ex > exempt_cap(peak) {
+        f.push(format!(
+            "{name} n={m}: {ex} calls excused as queue buffers, more than {} (peak {peak} held)",
+            exempt_cap(peak)
+        ));
+    }
+    let over: Vec<_> = c.iter().enumerate().filter(|(_, x)| !bytes_ok(x, queue)).collect();
     if let Some((i, x)) = over
         .iter()
         .max_by_key(|(_, x)| x.k[4] - (COST_A * x.d + COST_B).min(x.k[4]))
     {
         f.push(format!(
-            "{name} n={m}: {} calls request more than {COST_A}·d + {COST_B} bytes beyond one queue buffer (worst: call {i} \
-             ({}), {} bytes for d = {}, largest single {}, {} held after)",
+            "{name} n={m}: {} calls request more than {COST_A}·d + {COST_B} bytes{} (worst: call {i} ({}), {} bytes \
+             for d = {}, largest single {}, {} held after)",
             over.len(),
+            if queue { " beyond one queue buffer" } else { "" },
             x.tag,
             x.k[4],
             x.d,
@@ -138,9 +161,10 @@ impl Run {
     }
 }
 
-/// Runs `pat` at n, 2n, 4n (three times each; times are the fastest run's) and checks the bounds. With `fill`, the
+/// Runs `pat` at n, 2n, 4n (three times each; times are the fastest run's) and checks the bounds; `queue`: the structure
+/// is a `ByteQueue` after 9b2 (`bytes_ok`). With `fill`, the
 /// last call is the gap fill and must take at most 8x the slowest other call + 1 ms.
-fn check(name: &str, n: usize, pat: fn(usize, &mut Run), fill: bool) {
+fn check(name: &str, n: usize, pat: fn(usize, &mut Run), fill: bool, queue: bool) {
     let mut fails = Vec::new();
     let mut rows = Vec::new();
     for m in [n, 2 * n, 4 * n] {
@@ -169,7 +193,7 @@ fn check(name: &str, n: usize, pat: fn(usize, &mut Run), fill: bool) {
             .filter_map(|x| x.out.map(|o| (o, x.d)))
             .max_by_key(|&(o, d)| o as i64 - d as i64);
         let over = c.iter().filter(|x| x.out.is_some_and(|o| o > x.d)).count();
-        fails.extend(per_call_ok(name, m, c));
+        fails.extend(per_call_ok(name, m, c, queue));
         if over != 0 {
             fails.push(format!(
                 "{name} n={m}: {over} calls hand over more than their input (worst {worst:?} (out, d))"
@@ -310,7 +334,7 @@ fn write_send_ack(m: usize, r: &mut Run) {
 fn reverse_fill(m: usize, r: &mut Run) {
     let s = bytes(m);
     let mut st = RecvStream::new(0, m as u64);
-    let mut got = 0;
+    let (mut got, mut recvd) = (0, 0);
     for off in (0..m).rev() {
         r.call("frame", 1, || {
             let mut ev = Vec::new();
@@ -328,7 +352,8 @@ fn reverse_fill(m: usize, r: &mut Run) {
                 })
                 .sum();
             got += n;
-            (Some(n), st.buffered_len())
+            recvd += 1;
+            (Some(n), recvd - got)
         });
     }
     assert_eq!(got, m);
@@ -337,23 +362,23 @@ fn reverse_fill(m: usize, r: &mut Run) {
 #[test]
 #[ignore = "9b2: fails today, a 1-byte frame closing a gap copies and hands over the whole run (Q4, Q5); un-ignored by Task 6"]
 fn crypto_one_byte_frames() {
-    check("crypto_one_byte_frames", 16 << 10, one_byte_frames, false);
+    check("crypto_one_byte_frames", 16 << 10, one_byte_frames, false, false);
 }
 
 #[test]
 #[ignore = "9b2: fails today, the fill's take_front grows buf by realloc (Q5); un-ignored by Task 6"]
 fn crypto_runs_then_fill() {
-    check("crypto_runs_then_fill", 1024, runs_then_fill, true);
+    check("crypto_runs_then_fill", 1024, runs_then_fill, true, false);
 }
 
 #[test]
 #[ignore = "9b2: fails today, one ACK's split_off copies up to half the stream (Q7); un-ignored by Task 8"]
 fn send_ack_1k() {
-    check("send_ack_1k", 256 << 10, write_send_ack, false);
+    check("send_ack_1k", 256 << 10, write_send_ack, false, true);
 }
 
 #[test]
 #[ignore = "9b2: fails today, zero-fill reallocs and eager whole-run delivery (Q1, Q3); un-ignored by Task 10"]
 fn stream_reverse_fill() {
-    check("stream_reverse_fill", 16 << 10, reverse_fill, false);
+    check("stream_reverse_fill", 16 << 10, reverse_fill, false, false);
 }

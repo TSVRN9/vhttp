@@ -62,10 +62,23 @@ type Rec = ([usize; 6], Duration, usize, usize);
 /// Requested capacity is memory, not work: an uninitialized `with_capacity` is one allocator call, and D4 bounds the copies
 /// into it at 3 per byte pushed. So one allocation of a push may exceed the budget if it can be a queue buffer: the call
 /// was given bytes (D4 allocates only in `push_slice` with `d > 0`) and the allocation is at most `3·(bytes held after the
-/// call) + MIN_CAP` (D4's memory bound); the rest of the call stays within the budget.
+/// call) + MIN_CAP` (D4's memory bound); the rest of the call stays within the budget. The allocator sees no copy into
+/// that buffer: the work bound on it rests on D15's proved cost (`push_slice` at most `7d + 4`), not on this test.
+/// `exempt_cap` bounds how many calls a run may excuse so.
 fn bytes_ok(x: &Rec, push: bool) -> bool {
+    x.0[4] <= COST_A * x.2 + COST_B || exempt(x, push)
+}
+
+/// The call passes only by its queue-buffer allowance.
+fn exempt(x: &Rec, push: bool) -> bool {
     let budget = COST_A * x.2 + COST_B;
-    x.0[4] <= budget || (push && x.0[4] - x.0[5] <= budget && x.0[5] <= 3 * x.3 + QUEUE_MIN_CAP)
+    push && x.0[4] > budget && x.0[4] - x.0[5] <= budget && x.0[5] <= 3 * x.3 + QUEUE_MIN_CAP
+}
+
+/// A queue allocates a new buffer when its length reaches half the old one's capacity (D4), at most twice per doubling
+/// of its peak from `MIN_CAP`: `2·log2(peak / MIN_CAP) + 4` excused calls per run.
+fn exempt_cap(peak: usize) -> usize {
+    2 * (peak / QUEUE_MIN_CAP).max(1).ilog2() as usize + 4
 }
 
 /// One call's allocator counts, wall time, byte allowance `d` and the bytes `f` reports held after it; the record is
@@ -135,6 +148,18 @@ fn reader_one_byte_push() {
                 "n={m}: {} calls realloc (worst: call {i}, {} reallocs)",
                 re.len(),
                 x.0[2]
+            ));
+        }
+        let peak = c.iter().map(|x| x.3).max().unwrap_or(0);
+        let ex = c
+            .iter()
+            .enumerate()
+            .filter(|(i, x)| exempt(x, *i + 1 < c.len()))
+            .count();
+        if ex > exempt_cap(peak) {
+            fails.push(format!(
+                "n={m}: {ex} calls excused as queue buffers, more than {} (peak {peak} held)",
+                exempt_cap(peak)
             ));
         }
         let over: Vec<_> = c
