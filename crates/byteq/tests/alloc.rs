@@ -106,3 +106,170 @@ fn take_and_drop_zero() {
     assert_eq!(c1[2] - c0[2], 0, "no realloc");
     assert_eq!((t.len(), q.len(), q.caps()), (0, 0, (0, 0)));
 }
+
+/// The cap of the buffer a push would have made last: `b` while migrating, else `a`.
+fn newest_cap(q: &ByteQueue) -> usize {
+    let (a, b) = q.caps();
+    if b != 0 {
+        b
+    } else {
+        a
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Op {
+    Push(usize),
+    Take(usize),
+    Drop(usize),
+}
+
+/// The queue under test beside its `VecDeque` model and `P`, the largest length plus push since the model was last empty.
+struct Run {
+    q: ByteQueue,
+    m: std::collections::VecDeque<u8>,
+    p: usize,
+}
+
+impl Run {
+    fn new() -> Run {
+        Run { q: ByteQueue::new(), m: std::collections::VecDeque::with_capacity(1 << 16), p: 0 }
+    }
+
+    /// Runs `op` (a push takes `src[..d]`) and checks it: the view equals the model, no realloc, and the allocations
+    /// are exactly those of D4's branch: one queue buffer of `max(64, 3·S)` bytes (`S` the length after the push)
+    /// when a new buffer became the newest one (a swap only moves `b` into `a`), plus `take_front`'s exact `n` bytes.
+    fn op(&mut self, op: Op, src: &[u8]) {
+        let (caps0, new0, len0) = (self.q.caps(), self.q.newest(), self.q.len());
+        let c0 = counts();
+        let got = match op {
+            Op::Push(d) => {
+                let _ = self.q.push_slice(&src[..d]);
+                None
+            }
+            Op::Take(n) => Some(self.q.take_front(n).0),
+            Op::Drop(n) => {
+                let _ = self.q.drop_front(n);
+                None
+            }
+        };
+        let c1 = counts();
+        let fresh = self.q.newest() != new0 && newest_cap(&self.q) != 0;
+        let out = if let Op::Take(n) = op { n } else { 0 };
+        assert_eq!(c1[2] - c0[2], 0, "{op:?}: no realloc");
+        assert_eq!(c1[0] - c0[0], fresh as usize + (out > 0) as usize, "{op:?}: the branch's allocations, caps {caps0:?} -> {:?}", self.q.caps());
+        assert_eq!(c1[1] - c0[1], if fresh { newest_cap(&self.q) } else { 0 } + out, "{op:?}: allocated bytes");
+        if fresh {
+            assert!(matches!(op, Op::Push(_)), "{op:?}: only a push allocates a queue buffer");
+            assert_eq!(newest_cap(&self.q), 64.max(3 * self.q.len()), "{op:?}: a new buffer is max(MIN_CAP, 3·S)");
+        }
+        match op {
+            Op::Push(d) => {
+                self.m.extend(&src[..d]);
+                self.p = self.p.max(len0 + d);
+            }
+            Op::Take(n) => {
+                let t: Vec<u8> = self.m.drain(..n).collect();
+                assert_eq!(got.unwrap().as_slice(), &t[..], "{op:?}: take_front hands over the front");
+            }
+            Op::Drop(n) => {
+                self.m.drain(..n);
+            }
+        }
+        if self.m.is_empty() {
+            self.p = 0;
+            assert_eq!(self.q.caps(), (0, 0), "{op:?}: a drained queue holds no buffer");
+        }
+        assert!(self.q.as_slice().iter().eq(self.m.iter()), "{op:?}: view equals the model");
+        assert_eq!(self.q.len(), self.m.len());
+        let (a, b) = self.q.caps();
+        assert!(a + b <= 2 * 64.max(3 * self.p), "{op:?}: requested {a} + {b} within 2·max(64, 3·{})", self.p);
+    }
+}
+
+fn xorshift(x: &mut u64) -> u64 {
+    *x ^= *x << 13;
+    *x ^= *x >> 7;
+    *x ^= *x << 17;
+    *x
+}
+
+#[test]
+fn queue_model_random() {
+    let (mut migs, mut swaps) = (0, 0);
+    for seed in 1..=8u64 {
+        let mut x = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        let mut r = Run::new();
+        let mut src = [0u8; 300];
+        for _ in 0..20_000 {
+            let v = xorshift(&mut x);
+            let op = match v % 5 {
+                0..=2 => {
+                    for b in src.iter_mut() {
+                        *b = xorshift(&mut x) as u8;
+                    }
+                    Op::Push((v >> 8) as usize % 301)
+                }
+                3 => Op::Take((v >> 8) as usize % (r.m.len() + 1)),
+                _ => Op::Drop((v >> 8) as usize % (r.m.len() + 1)),
+            };
+            let b0 = r.q.caps().1;
+            r.op(op, &src);
+            let b1 = r.q.caps().1;
+            migs += (b1 != 0 && b1 != b0) as usize;
+            swaps += (b0 != 0 && b1 == 0 && r.q.len() > 0) as usize;
+        }
+    }
+    assert!(migs > 100 && swaps > 100, "the runs migrate and swap ({migs}, {swaps})");
+}
+
+#[test]
+fn consume_during_migration_then_swap() {
+    let src: [u8; 100] = core::array::from_fn(|i| i as u8 ^ 0x5a);
+    let mut r = Run::new();
+    r.op(Op::Push(100), &src);
+    assert_eq!(r.q.caps(), (300, 0), "case 4 from empty");
+    r.op(Op::Push(40), &src);
+    assert_eq!(r.q.caps(), (300, 0), "case 2: 140 <= 150");
+    r.op(Op::Push(20), &src);
+    assert_eq!(r.q.caps(), (300, 480), "case 3: a migration into 3·160");
+    r.op(Op::Drop(70), &src);
+    r.op(Op::Take(10), &src);
+    assert_eq!(r.q.caps(), (300, 480), "consuming keeps the migration");
+    // 60 of 160 copied: R = 100 falls by 2 per 1-byte push (3 copied, 1 appended), so the 50th push swaps.
+    for k in 1..=50 {
+        r.op(Op::Push(1), &src[k..]);
+        assert_eq!(r.q.caps(), if k < 50 { (300, 480) } else { (480, 0) }, "push {k}");
+    }
+    r.op(Op::Push(1), &src);
+    assert_eq!(r.q.caps(), (480, 0));
+}
+
+#[test]
+fn push_empty_is_noop() {
+    let src = [7u8; 160];
+    let mut r = Run::new();
+    r.op(Op::Push(0), &src);
+    assert_eq!(r.q.caps(), (0, 0));
+    r.op(Op::Push(100), &src);
+    r.op(Op::Push(40), &src);
+    r.op(Op::Push(20), &src);
+    assert_eq!(r.q.caps(), (300, 480), "migrating");
+    let c0 = counts();
+    r.op(Op::Push(0), &src);
+    assert_eq!(counts()[0] - c0[0], 0, "push_slice(&[]) allocates nothing");
+    assert_eq!(r.q.caps(), (300, 480));
+}
+
+#[test]
+fn boundary_sizes() {
+    let src: [u8; 64] = core::array::from_fn(|i| 200 - i as u8);
+    // (d, caps after): from ca = 64 holding 10 bytes, C/2 = 32.
+    for (d, caps) in [(22, (64, 0)), (23, (99, 0)), (32, (126, 0)), (33, (129, 0))] {
+        let mut r = Run::new();
+        r.op(Op::Push(10), &src);
+        assert_eq!(r.q.caps(), (64, 0));
+        r.op(Op::Push(d), &src[10..]);
+        assert_eq!(r.q.caps(), caps, "d = {d}: L_a + d == C/2 is case 2, d <= C/2 case 3 (all copied: swap), d > C/2 case 4");
+    }
+}

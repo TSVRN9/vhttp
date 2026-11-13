@@ -1,5 +1,5 @@
 # CRATE COUNT: the fewest tests each crate must pass (scripts/test-gate.sh --workspace). Only grows: scripts/test-floor.sh.
-byteq 3
+byteq 7
 crypto 79
 ctcore 73
 ctmir 51
