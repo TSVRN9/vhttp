@@ -160,5 +160,5 @@ fn frags_big_frame_pieces() {
     put(&mut f, 0, 250, &[2; 300]);
     assert_eq!((f.held(), f.count()), (550, 1));
     pieces_ok(&f);
-    assert_eq!(f.chunk_lens().iter().map(|c| c.1).sum::<usize>(), 550);
+    assert_eq!(f.chunk_lens(), vec![(0, 256), (256, 147), (403, 147)]);
 }
