@@ -123,14 +123,15 @@ def check(base, crate, mod, fn=None):
 
 
 def selftest():
-    deps = {'wire': set(), 'crypto': set(), 'ctcore': set(), 'ctmir': {'ctcore'}, 'h3': {'wire'}, 'tls': {'crypto'},
-            'quic': {'crypto', 'h3', 'wire'}, 'quictls': {'crypto', 'h3', 'quic', 'tls'},
+    deps = {'byteq': set(), 'wire': set(), 'crypto': set(), 'ctcore': set(), 'ctmir': {'ctcore'}, 'h3': {'wire'},
+            'tls': {'byteq', 'crypto'}, 'quic': {'byteq', 'crypto', 'h3', 'wire'}, 'quictls': {'crypto', 'h3', 'quic', 'tls'},
             'server': {'h3', 'quic', 'quictls', 'tls'}}
     # dev edges: ctcore's tests use ctmir (a cycle with ctmir's normal edge), tls's tests use wire
     up = {n: ds | {'ctcore': {'ctmir'}, 'tls': {'wire'}}.get(n, set()) for n, ds in deps.items()}
     cases = [
         (['crates/wire/src/varint.rs'], ['wire', 'h3', 'quic', 'quictls', 'server'], ['ct', 'interop']),
         (['crates/quictls/src/server.rs'], ['quictls', 'server'], ['interop']),
+        (['crates/byteq/src/capvec.rs'], ['byteq', 'tls', 'quic', 'quictls', 'server'], ['ct', 'interop']),
         (['crates/ctcore/src/lib.rs'], ['ctcore', 'ctmir'], ['ct']),
         (['crates/crypto/src/sha256.rs'], ['crypto', 'tls', 'quic', 'quictls', 'server'], ['ct', 'binary', 'interop']),
         (['Cargo.lock'], order(deps), ['ct', 'binary', 'interop']),
