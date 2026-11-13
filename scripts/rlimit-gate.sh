@@ -2,7 +2,7 @@
 set -eu
 set -o pipefail
 # rlimit-gate.sh [ROOT]: verify every crate under ROOT/crates at `--rlimit 4` (the gate replaces the default
-# `cargo verus verify` loop) and fail on any FAIL row, a run that left no JSON, or (quic, quictls) a fn above
+# `cargo verus verify` loop) and fail on any FAIL row, a run that left no JSON, or (quic, quictls, byteq) a fn above
 # 8,000,000, and every fn above 8,000,000 in any other crate must be in the shrink-only tools/rlimit-ceilings.txt. C11 PROOF-BUDGET FRAGILITY. Measured on a fresh target: `-- --rlimit 4` reaches vstd, whose
 # lemma_indistinguishable_quotients needs more than 4, so vstd is built first at the default limit (via the
 # smallest crate); and cargo does not fingerprint verus args, so each crate is cleaned before its rlimit-4 run
@@ -23,7 +23,7 @@ fail() { echo "rlimit-gate: $*" >&2; exit 1; }
 cd "$root"
 # Dependency order, so a crate is verified once (its dependencies are already built and cached); a crate dir missing from
 # this list, or a name here with no dir, fails.
-order="wire crypto ctcore ctmir h3 tls quic quictls server"
+order="wire byteq crypto ctcore ctmir h3 tls quic quictls server"
 have=$(for d in crates/*/; do [ -d "$d" ] && basename "$d"; done | LC_ALL=C sort | tr '\n' ' ')
 want=$(printf '%s\n' $order | LC_ALL=C sort | tr '\n' ' ')
 [ -n "$have" ] || fail "no crates under crates/"
@@ -40,7 +40,7 @@ for c in "$@"; do
         continue
     fi
     (cd "$c" && cargo verus verify -- --rlimit 4 --output-json --time-expanded > "$out/$n.json" 2> "$out/$n.err") || { cat "$out/$n.err"; fail "$n failed at rlimit 4 (see $out/$n.json)"; }
-    case $n in quic|quictls) lim="--max $cap" ;; *) lim= ;; esac
+    case $n in quic|quictls|byteq) lim="--max $cap" ;; *) lim= ;; esac
     # shellcheck disable=SC2086
     line=$(python3 -I "$tools/rl.py" --gate "$n" --pin "$root/tools/verus-pin.txt" $lim "$out/$n.json") || exit 1
     echo "$line"

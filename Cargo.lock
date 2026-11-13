@@ -59,6 +59,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "byteq"
+version = "0.1.0"
+dependencies = [
+ "vstd",
+]
+
+[[package]]
 name = "cc"
 version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -458,6 +465,7 @@ dependencies = [
 name = "quic"
 version = "0.1.0"
 dependencies = [
+ "byteq",
  "crypto",
  "h3",
  "vest_lib",
@@ -704,6 +712,7 @@ dependencies = [
 name = "tls"
 version = "0.1.0"
 dependencies = [
+ "byteq",
  "crypto",
  "ring",
  "rustls",
