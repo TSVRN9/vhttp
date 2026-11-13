@@ -897,4 +897,440 @@ pub fn join<V>(a: Tree<V>, k: u64, v: V, b: Tree<V>) -> (r: (Tree<V>, Ghost<nat>
     }
 }
 
+/// Every key of `t` is at least `k`.
+pub open spec fn keys_ge<V>(t: Tree<V>, k: u64) -> bool {
+    forall|i: int| 0 <= i < seq(t).len() ==> #[trigger] seq(t)[i].0 >= k
+}
+
+/// The cost constant of `split`'s own visits (its joins are charged at `c_join()`).
+pub open spec fn c_split() -> nat {
+    1
+}
+
+/// The constant of `split`'s corollary bound: `6 * c_join() + c_split()`.
+pub open spec fn c_split6() -> nat {
+    37
+}
+
+/// The cost constant of `pop_min`.
+pub open spec fn c_pop() -> nat {
+    6
+}
+
+/// The cost constant of `join2`.
+pub open spec fn c_join2() -> nat {
+    13
+}
+
+/// The cost constant of `drain`.
+pub open spec fn c_drain() -> nat {
+    1
+}
+
+/// The keys of a tree whose entries are `seq(a)` then `seq(b)` are all below (above, at least) `k` exactly when those of
+/// each part are.
+pub proof fn lemma_keys_app<V>(t: Tree<V>, a: Tree<V>, b: Tree<V>, k: u64)
+    requires
+        seq(t) == seq(a) + seq(b),
+    ensures
+        keys_lt(t, k) <==> keys_lt(a, k) && keys_lt(b, k),
+        keys_gt(t, k) <==> keys_gt(a, k) && keys_gt(b, k),
+        keys_ge(t, k) <==> keys_ge(a, k) && keys_ge(b, k),
+{
+    let (s, sa, sb) = (seq(t), seq(a), seq(b));
+    let n = sa.len() as int;
+    assert forall|i: int| 0 <= i < n implies #[trigger] sa[i] == s[i] by {}
+    assert forall|j: int| 0 <= j < sb.len() implies #[trigger] sb[j] == s[n + j] by {}
+    assert forall|i: int| 0 <= i < s.len() implies {
+        ||| i < n && #[trigger] s[i] == sa[i]
+        ||| n <= i && s[i] == sb[i - n]
+    } by {}
+}
+
+/// `lemma_keys_cat` for `keys_ge`.
+pub proof fn lemma_keys_ge_cat<V>(t: Tree<V>, l: Tree<V>, x: (u64, V), r: Tree<V>, k: u64)
+    requires
+        seq(t) == seq(l) + seq![x] + seq(r),
+    ensures
+        keys_ge(t, k) <==> keys_ge(l, k) && x.0 >= k && keys_ge(r, k),
+{
+    let (s, sl, sr) = (seq(t), seq(l), seq(r));
+    let n = sl.len() as int;
+    assert(s.len() == n + 1 + sr.len());
+    assert(s[n] == x);
+    assert forall|i: int| 0 <= i < n implies #[trigger] sl[i] == s[i] by {}
+    assert forall|j: int| 0 <= j < sr.len() implies #[trigger] sr[j] == s[n + 1 + j] by {}
+    assert forall|i: int| 0 <= i < s.len() implies {
+        ||| i < n && #[trigger] s[i] == sl[i]
+        ||| i == n && s[i] == x
+        ||| n < i && s[i] == sr[i - n - 1]
+    } by {}
+}
+
+/// A wf node's parts: both subtrees wf and ordered about the key, its entries, its height and balance.
+proof fn lemma_node<V>(t: Tree<V>)
+    requires
+        wf(t),
+        t is Some,
+    ensures
+        ({
+            let (l, x, v, r) = (t->0.left, t->0.key, t->0.val, t->0.right);
+            &&& wf(l) && wf(r)
+            &&& keys_lt(l, x) && keys_gt(r, x)
+            &&& seq(t) == seq(l) + seq![(x, v)] + seq(r)
+            &&& seq(t).len() == seq(l).len() + 1 + seq(r).len()
+            &&& ht(t) == 1 + vstd::math::max(ht(l) as int, ht(r) as int)
+            &&& ht(l) <= ht(r) + 1 && ht(r) <= ht(l) + 1
+        }),
+{
+    let b = t->0;
+    assert(wf(b.left) && wf(b.right) && keys_lt(b.left, b.key) && keys_gt(b.right, b.key));
+    assert(seq(t) == seq(b.left) + seq![(b.key, b.val)] + seq(b.right));
+}
+
+/// The reassociations `split`, `pop_min`, `join2` and `drain` need.
+proof fn lemma_seq_assoc<T>(a: Seq<T>, b: Seq<T>, x: T, c: Seq<T>)
+    ensures
+        a + (b + seq![x] + c) == (a + b) + seq![x] + c,
+        (a + seq![x] + b) + c == a + seq![x] + (b + c),
+        a.push(x) + b == a + seq![x] + b,
+        a + (seq![x] + b) == a + seq![x] + b,
+{
+    assert(a + (b + seq![x] + c) =~= (a + b) + seq![x] + c);
+    assert((a + seq![x] + b) + c =~= a + seq![x] + (b + c));
+    assert(a.push(x) + b =~= a + seq![x] + b);
+    assert(a + (seq![x] + b) =~= a + seq![x] + b);
+}
+
+/// Split's cost in case `k < x` (and its mirror): the subtree `s` split into `kept` and `joined`, `joined` rejoined with
+/// the other subtree `o` into `c`. Join's lower bound telescopes: `cj <= C·(hc − hj + 2)`.
+proof fn lemma_split_cost_side(hs: nat, ho: nat, h: nat, hk: nat, hj: nat, hc: nat, cs: nat, cj: nat)
+    requires
+        h == 1 + vstd::math::max(hs as int, ho as int),
+        hs <= ho + 1,
+        hk <= hs,
+        hj <= hs,
+        vstd::math::max(hj as int, ho as int) <= hc <= vstd::math::max(hj as int, ho as int) + 1,
+        cs <= c_join() * (hk + hj + 4 * (hs + 1)) + c_split() * (hs + 1),
+        cj <= c_join() * (vstd::math::abs(hj - ho) + 1),
+    ensures
+        hk <= h,
+        hc <= h,
+        1 + cs + cj <= c_join() * (hk + hc + 4 * (h + 1)) + c_split() * (h + 1),
+{
+    assert(cj <= c_join() * (hc - hj + 2));
+}
+
+/// Split's cost in case `k == x`: `l` kept whole, `c = join(None, x, r)`.
+proof fn lemma_split_cost_eq(hl: nat, hr: nat, h: nat, hc: nat, cj: nat)
+    requires
+        h == 1 + vstd::math::max(hl as int, hr as int),
+        hr <= hc <= hr + 1,
+        cj <= c_join() * (vstd::math::abs(0 - hr) + 1),
+    ensures
+        hl <= h,
+        hc <= h,
+        1 + cj <= c_join() * (hl + hc + 4 * (h + 1)) + c_split() * (h + 1),
+{
+}
+
+/// Split's case `k < x`: `(a, b)` split from `l`, `c = join(b, x, r)`.
+proof fn lemma_split_lt<V>(l: Tree<V>, x: u64, v: V, r: Tree<V>, a: Tree<V>, b: Tree<V>, c: Tree<V>, k: u64)
+    requires
+        seq(a) + seq(b) == seq(l),
+        keys_lt(l, x),
+        keys_ge(b, k),
+        k < x,
+        keys_gt(r, x),
+    ensures
+        keys_lt(b, x),
+        seq(b).len() <= seq(l).len(),
+        seq(c) == seq(b) + seq![(x, v)] + seq(r) ==> {
+            &&& seq(a) + seq(c) == seq(l) + seq![(x, v)] + seq(r)
+            &&& keys_ge(c, k)
+        },
+{
+    lemma_keys_app(l, a, b, x);
+    if seq(c) == seq(b) + seq![(x, v)] + seq(r) {
+        lemma_keys_ge_cat(c, b, (x, v), r, k);
+        lemma_seq_assoc(seq(a), seq(b), (x, v), seq(r));
+    }
+}
+
+/// Split's case `k > x`: `(a, b)` split from `r`, `c = join(l, x, a)`.
+proof fn lemma_split_gt<V>(l: Tree<V>, x: u64, v: V, r: Tree<V>, a: Tree<V>, b: Tree<V>, c: Tree<V>, k: u64)
+    requires
+        seq(a) + seq(b) == seq(r),
+        keys_gt(r, x),
+        keys_lt(a, k),
+        x < k,
+        keys_lt(l, x),
+    ensures
+        keys_gt(a, x),
+        seq(a).len() <= seq(r).len(),
+        seq(c) == seq(l) + seq![(x, v)] + seq(a) ==> {
+            &&& seq(c) + seq(b) == seq(l) + seq![(x, v)] + seq(r)
+            &&& keys_lt(c, k)
+        },
+{
+    lemma_keys_app(r, a, b, x);
+    if seq(c) == seq(l) + seq![(x, v)] + seq(a) {
+        lemma_keys_cat(c, l, (x, v), a, k);
+        lemma_seq_assoc(seq(l), seq(a), (x, v), seq(b));
+    }
+}
+
+/// Split's case `k == x`: `l` kept, `c = join(None, x, r)`.
+proof fn lemma_split_eq<V>(l: Tree<V>, x: u64, v: V, r: Tree<V>, c: Tree<V>, k: u64)
+    requires
+        seq(c) == seq::<V>(None) + seq![(x, v)] + seq(r),
+        keys_gt(r, x),
+        k == x,
+    ensures
+        seq(l) + seq(c) == seq(l) + seq![(x, v)] + seq(r),
+        keys_ge(c, k),
+{
+    lemma_keys_ge_cat(c, None, (x, v), r, k);
+    assert(seq(c) =~= seq![(x, v)] + seq(r));
+    lemma_seq_assoc(seq(l), seq(r), (x, v), seq(r));
+}
+
+/// The entries of `t` below `k`, and the rest. Its cost telescopes: each level's join is paid for by the growth of the
+/// piece it builds, so the total is a constant times the input and output heights.
+pub fn split<V>(t: Tree<V>, k: u64) -> (r: (Tree<V>, Tree<V>, Ghost<nat>))
+    requires
+        wf(t),
+        seq(t).len() < pow2(63),
+    ensures
+        wf(r.0),
+        wf(r.1),
+        seq(r.0) + seq(r.1) == seq(t),
+        keys_lt(r.0, k),
+        keys_ge(r.1, k),
+        ht(r.0) <= ht(t),
+        ht(r.1) <= ht(t),
+        r.2@ <= c_join() * (ht(r.0) + ht(r.1) + 4 * (ht(t) + 1)) + c_split() * (ht(t) + 1),
+    decreases ht(t),
+{
+    let ghost t0 = t;
+    let ghost mut work: nat = 1;
+    match t {
+        None => {
+            proof {
+                assert(seq(t0) + seq(t0) =~= seq(t0));
+            }
+            (None, None, Ghost(work))
+        },
+        Some(n) => {
+            proof {
+                lemma_node(t0);
+            }
+            let Node { key: x, val: v, h: _, left: l, right: r } = *n;
+            if k < x {
+                let (a, b, Ghost(cs)) = split(l, k);
+                proof {
+                    lemma_split_lt(l, x, v, r, a, b, b, k);
+                }
+                let (c, Ghost(cj)) = join(b, x, v, r);
+                proof {
+                    lemma_split_lt(l, x, v, r, a, b, c, k);
+                    lemma_split_cost_side(ht(l), ht(r), ht(t0), ht(a), ht(b), ht(c), cs, cj);
+                    work = work + cs + cj;
+                }
+                (a, c, Ghost(work))
+            } else if k == x {
+                let (c, Ghost(cj)) = join(None, x, v, r);
+                proof {
+                    lemma_split_eq(l, x, v, r, c, k);
+                    lemma_split_cost_eq(ht(l), ht(r), ht(t0), ht(c), cj);
+                    work = work + cj;
+                }
+                (l, c, Ghost(work))
+            } else {
+                let (a, b, Ghost(cs)) = split(r, k);
+                proof {
+                    lemma_split_gt(l, x, v, r, a, b, a, k);
+                }
+                let (c, Ghost(cj)) = join(l, x, v, a);
+                proof {
+                    lemma_split_gt(l, x, v, r, a, b, c, k);
+                    assert(vstd::math::abs(ht(l) - ht(a)) == vstd::math::abs(ht(a) - ht(l)));
+                    lemma_split_cost_side(ht(r), ht(l), ht(t0), ht(b), ht(a), ht(c), cs, cj);
+                    work = work + cs + cj;
+                }
+                (c, b, Ghost(work))
+            }
+        },
+    }
+}
+
+/// The corollary: split's cost is at most `c_split6() · (ht(t) + 1)`, its pieces being no taller than `t`.
+pub proof fn lemma_split_cost<V>(t: Tree<V>, a: Tree<V>, b: Tree<V>, cost: nat)
+    requires
+        ht(a) <= ht(t),
+        ht(b) <= ht(t),
+        cost <= c_join() * (ht(a) + ht(b) + 4 * (ht(t) + 1)) + c_split() * (ht(t) + 1),
+    ensures
+        cost <= c_split6() * (ht(t) + 1),
+{
+}
+
+/// The height of `bal(l2, x, r)`, `l2` being `l` less its first entry: at most one below `t`'s, and no taller.
+proof fn lemma_pop_ht(hl: nat, hr: nat, h: nat, hl2: nat, hc: nat)
+    requires
+        h == 1 + vstd::math::max(hl as int, hr as int),
+        hl <= hr + 1,
+        hr <= hl + 1,
+        hl - 1 <= hl2 <= hl,
+        vstd::math::max(hl2 as int, hr as int) <= hc <= vstd::math::max(hl2 as int, hr as int) + 1,
+        hl2 <= hr + 1 && hr <= hl2 + 1 ==> hc == vstd::math::max(hl2 as int, hr as int) + 1,
+    ensures
+        h - 1 <= hc <= h,
+{
+}
+
+/// The keys left in `l2` after its first entry `(m, mv)` popped from `l` are those of `l`.
+proof fn lemma_pop_keys<V>(l: Tree<V>, m: u64, mv: V, l2: Tree<V>, x: u64)
+    requires
+        seq![(m, mv)] + seq(l2) == seq(l),
+        keys_lt(l, x),
+    ensures
+        keys_lt(l2, x),
+{
+    assert forall|i: int| 0 <= i < seq(l2).len() implies #[trigger] seq(l2)[i].0 < x by {
+        assert(seq(l)[i + 1] == seq(l2)[i]);
+    }
+}
+
+/// The first entry of `t`, and the rest; the height drops by at most one.
+pub fn pop_min<V>(t: Tree<V>) -> (r: (Tree<V>, u64, V, Ghost<nat>))
+    requires
+        wf(t),
+        t is Some,
+        seq(t).len() < pow2(63),
+    ensures
+        wf(r.0),
+        seq![(r.1, r.2)] + seq(r.0) == seq(t),
+        ht(t) - 1 <= ht(r.0) <= ht(t),
+        r.3@ <= c_pop() * (ht(t) + 1),
+    decreases ht(t),
+{
+    let ghost t0 = t;
+    let ghost mut work: nat = 1;
+    proof {
+        lemma_node(t0);
+    }
+    let n = t.unwrap();
+    let Node { key: x, val: v, h: _, left: l, right: r } = *n;
+    if l.is_none() {
+        proof {
+            assert(seq(t0) =~= seq![(x, v)] + seq(r));
+        }
+        (r, x, v, Ghost(work))
+    } else {
+        let (l2, m, mv, Ghost(cp)) = pop_min(l);
+        proof {
+            lemma_pop_keys(l, m, mv, l2, x);
+        }
+        let (c, Ghost(bc)) = bal(l2, x, v, r);
+        proof {
+            lemma_seq_assoc(seq![(m, mv)], seq(l2), (x, v), seq(r));
+            lemma_pop_ht(ht(l), ht(r), ht(t0), ht(l2), ht(c));
+            work = work + cp + bc;
+        }
+        (c, m, mv, Ghost(work))
+    }
+}
+
+/// `b`'s first entry `(m, mv)` sits between `a`'s keys and the rest of `b`'s.
+proof fn lemma_join2_keys<V>(a: Tree<V>, b: Tree<V>, m: u64, mv: V, b2: Tree<V>)
+    requires
+        wf(b),
+        forall|i: int, j: int|
+            0 <= i < seq(a).len() && 0 <= j < seq(b).len() ==> #[trigger] seq(a)[i].0 < #[trigger] seq(b)[j].0,
+        seq![(m, mv)] + seq(b2) == seq(b),
+    ensures
+        keys_lt(a, m),
+        keys_gt(b2, m),
+{
+    lemma_wf_sorted(b);
+    assert(seq(b)[0] == (m, mv));
+    assert forall|i: int| 0 <= i < seq(a).len() implies #[trigger] seq(a)[i].0 < m by {
+        assert(seq(a)[i].0 < seq(b)[0].0);
+    }
+    assert forall|j: int| 0 <= j < seq(b2).len() implies #[trigger] seq(b2)[j].0 > m by {
+        assert(seq(b)[j + 1] == seq(b2)[j]);
+    }
+}
+
+/// `a`'s entries then `b`'s, every key of `a` being below every key of `b`.
+pub fn join2<V>(a: Tree<V>, b: Tree<V>) -> (r: (Tree<V>, Ghost<nat>))
+    requires
+        wf(a),
+        wf(b),
+        forall|i: int, j: int|
+            0 <= i < seq(a).len() && 0 <= j < seq(b).len() ==> #[trigger] seq(a)[i].0 < #[trigger] seq(b)[j].0,
+        seq(a).len() + seq(b).len() < pow2(63),
+    ensures
+        wf(r.0),
+        seq(r.0) == seq(a) + seq(b),
+        ht(r.0) <= vstd::math::max(ht(a) as int, ht(b) as int) + 1,
+        r.1@ <= c_join2() * (vstd::math::max(ht(a) as int, ht(b) as int) + 1),
+{
+    let ghost (a0, b0) = (a, b);
+    let ghost mut work: nat = 1;
+    if b.is_none() {
+        proof {
+            assert(seq(a0) + seq(b0) =~= seq(a0));
+        }
+        return (a, Ghost(work));
+    }
+    let (b2, m, mv, Ghost(cp)) = pop_min(b);
+    proof {
+        lemma_join2_keys(a0, b0, m, mv, b2);
+    }
+    let (c, Ghost(cj)) = join(a, m, mv, b2);
+    proof {
+        lemma_seq_assoc(seq(a0), seq(b2), (m, mv), seq(b0));
+        work = work + cp + cj;
+    }
+    (c, Ghost(work))
+}
+
+/// Appends `t`'s entries, in order, to `out`, consuming `t`.
+pub fn drain<V>(t: Tree<V>, out: &mut Vec<(u64, V)>) -> (r: Ghost<nat>)
+    ensures
+        final(out)@ == old(out)@ + seq(t),
+        r@ <= c_drain() * (2 * seq(t).len() + 1),
+    decreases t,
+{
+    let ghost t0 = t;
+    let ghost mut work: nat = 1;
+    match t {
+        None => {
+            proof {
+                assert(out@ + seq(t0) =~= out@);
+            }
+            Ghost(work)
+        },
+        Some(n) => {
+            let Node { key, val, h: _, left, right } = *n;
+            let ghost o0 = out@;
+            let Ghost(cl) = drain(left, out);
+            let ghost o1 = out@;
+            out.push((key, val));
+            proof {
+                lemma_seq_assoc(o1, seq(right), (key, val), seq(right));
+            }
+            let Ghost(cr) = drain(right, out);
+            proof {
+                lemma_seq_assoc(o0, seq(left), (key, val), seq(right));
+                assert(seq(t0) == seq(left) + seq![(key, val)] + seq(right));
+                work = work + cl + cr;
+            }
+            Ghost(work)
+        },
+    }
+}
+
 } // verus!
