@@ -39,7 +39,6 @@ fn allocated() -> usize {
     BYTES.with(|b| b.get())
 }
 
-
 type Frames = Vec<(u64, Vec<u8>)>;
 
 fn cost(frames: &Frames) -> (usize, Duration) {
@@ -67,7 +66,12 @@ fn grow_down_full(n: u64) -> Frames {
     (1..4 * n).rev().map(|o| (o, vec![1; (4 * n - o) as usize])).collect()
 }
 
-/// Bytes allocated and time must grow linearly in the scale (n, 2n, 4n).
+/// The target store costs O(log n + d) per frame, and grow-down-full's input is itself quadratic,
+/// so the bounds are per unit of input w = frames + input bytes, not absolute.
+fn w(f: &Frames) -> u128 {
+    f.len() as u128 + f.iter().map(|(_, d)| d.len() as u128).sum::<u128>()
+}
+
 #[test]
 #[ignore = "9b1: quadratic on the Vec store; un-ignored by Task 7"]
 fn crypto_ooo_cost_linear() {
@@ -79,13 +83,26 @@ fn crypto_ooo_cost_linear() {
     ];
     let mut fails = Vec::new();
     for (name, f) in patterns {
-        let m: Vec<_> = [1024, 2048, 4096].iter().map(|&n| cost(&f(n))).collect();
+        let m: Vec<_> = [1024, 2048, 4096]
+            .iter()
+            .map(|&n| {
+                let fr = f(n);
+                let (b, t) = cost(&fr);
+                (b as u128, t, w(&fr))
+            })
+            .collect();
         eprintln!("{name}: {:?}", m);
-        if m[1].0 > 3 * m[0].0 || m[2].0 > 3 * m[1].0 {
-            fails.push(format!("{name}: bytes {} -> {} -> {}", m[0].0, m[1].0, m[2].0));
+        for i in 0..2 {
+            let (b0, _, w0) = m[i];
+            let (b1, _, w1) = m[i + 1];
+            if b1 * w0 > 3 * b0 * w1 / 2 {
+                fails.push(format!("{name}: bytes {b0} -> {b1} (w {w0} -> {w1})"));
+            }
         }
-        if m[2].1 > 8 * m[0].1 + Duration::from_millis(20) {
-            fails.push(format!("{name}: time {:?} -> {:?}", m[0].1, m[2].1));
+        let (_, t0, w0) = m[0];
+        let (_, t2, w2) = m[2];
+        if t2.as_nanos() > 2 * t0.as_nanos() * w2 / w0 + 20_000_000 {
+            fails.push(format!("{name}: time {t0:?} -> {t2:?} (w {w0} -> {w2})"));
         }
     }
     assert!(fails.is_empty(), "{fails:#?}");
