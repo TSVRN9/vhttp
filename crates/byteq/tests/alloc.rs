@@ -273,3 +273,22 @@ fn boundary_sizes() {
         assert_eq!(r.q.caps(), caps, "d = {d}: L_a + d == C/2 is case 2, d <= C/2 case 3 (all copied: swap), d > C/2 case 4");
     }
 }
+
+#[test]
+fn drained_queue_holds_nothing() {
+    let src = [3u8; 160];
+    let mut r = Run::new();
+    r.op(Op::Push(100), &src);
+    r.op(Op::Push(40), &src);
+    r.op(Op::Push(20), &src);
+    assert_eq!(r.q.caps(), (300, 480), "migrating: two buffers");
+    let c0 = counts();
+    r.op(Op::Drop(160), &src);
+    assert_eq!(counts()[3] - c0[3], 2, "draining frees both buffers");
+    assert_eq!(r.q.caps(), (0, 0));
+    // The peak restarts: a 10-byte push gets max(MIN_CAP, 3·10), not 3·160.
+    r.op(Op::Push(10), &src);
+    assert_eq!(r.q.caps(), (64, 0));
+    r.op(Op::Take(10), &src);
+    assert_eq!(r.q.caps(), (0, 0));
+}
