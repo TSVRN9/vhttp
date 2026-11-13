@@ -142,7 +142,9 @@ on its out-of-order patterns. `take_front` appends to `out`; that buffer's growt
   next after 9b1, replaces them with one verified byte queue (de-amortized growth: on reaching half capacity a buffer
   of twice the size is allocated and each append also moves two old bytes, so every append is O(d) worst case with
   every copy counted; front removal copies only the message), so the strict bound covers them too. 9b1 closes
-  `cat-C15` for the out-of-order store and opens `cat-C15-inorder` (owner 9b2) for the rest; 9b2 closes it.
+  `cat-C15` for the out-of-order store. A sweep (docs/rca/2026-11-12-cost-sweep.md) found about 60 such sites across
+  quic, tls, h3 and server; owner decision 2026-11-12: phases 9b2 (quic/tls byte buffers), 9b3 (h3, the quadratic
+  cookie merge first) and 9b4 (the rest, and the sweep as a gate) run next, before Phase 6, each with a carryover row.
 - **D9 Bookkeeping.** `cat-C15` closes with the `work` ensures, the gate and the test as evidence; the `shortcut:`
   comment at `insert` goes; mutant patches T7-M3b2 and T7-M4 (frags) are regenerated (T7-M6 is `Reassembly`'s and
   stays); roadmap row 9b1 and 9b's text lose Task 1; TRUSTED.md's Vec row names the push-below-capacity guarantee

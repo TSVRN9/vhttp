@@ -268,9 +268,13 @@ moved frags.rs lines (the citations gate reports them).
   assertion in `crypto_ooo_cost_linear` (spec "The bound"). `cat-C15`: owner `9b1`,
   status closed, evidence the cost ensures (`crates/quic/src/frags.rs`), the gate and `crypto_ooo_cost_linear`, in
   the evidence format `scripts/carryovers.sh` accepts. Roadmap: a `9b1` row (status `in progress`; the controller
-  sets merged), a `9b2` row ("a verified de-amortized byte queue for CryptoStream's buf, read and tls HsReader", order
-  right after 9b1, `unplanned`), and row 9b's order cell loses "Task 1 Frags index". A new carryover
-  `cat-C15-inorder` (owner 9b2, open; spec D10's text). catalog.md's C15 row: the out-of-order store closed by 9b1,
+  sets merged); rows `9b2`, `9b3`, `9b4` at order 4, after 9b1 and before Phase 6 (owner decision 2026-11-12):
+  9b2 "a verified de-amortized byte queue for every quic/tls byte buffer on input paths (CryptoStream buf and read,
+  HsReader, Reassembly, send_stream, the TLS transcript)", 9b3 "h3 input costs (the quadratic cookie merge first, with
+  its RCA; reqs/unis remove+insert; request buffers)", 9b4 "the remaining sites of docs/rca/2026-11-12-cost-sweep.md
+  (server conns table, tls ext bitmap, ack/inflight/route tables, builders) and the sweep as a gate"; all `unplanned`.
+  Row 9b's order cell loses "Task 1 Frags index". New carryovers `cat-C15-9b2`, `cat-C15-9b3`, `cat-C15-9b4` (owners
+  9b2/9b3/9b4, open, source `docs/rca/2026-11-12-cost-sweep.md` with its section, text naming the sites). catalog.md's C15 row: the out-of-order store closed by 9b1,
   the in-order buffers open for 9b2.
 - [ ] **Step 5:** `scripts/quick.sh` → ok, `scripts/gate-demos.sh` → ok. Commit
   `9b1: cost-charge gate and demos, mutants regenerated and added, TRUSTED/carryovers/roadmap/catalog`.
