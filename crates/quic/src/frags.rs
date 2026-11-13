@@ -1200,6 +1200,27 @@ impl Frags {
         lemma_k(self.fs());
     }
 
+    /// Spec "The bound": at most 16384 bytes held in at most 4096 runs (CryptoStream's caps) give at most
+    /// `4096 + 128` chunks and height at most 25.
+    proof fn lemma_caps_height(&self)
+        requires
+            self.wf(),
+            self.held <= 16384,
+            self.count <= 4096,
+        ensures
+            seq(self.t).len() <= 4096 + 128,
+            ht(self.t) <= 25,
+    {
+        self.lemma_followers();
+        self.lemma_size();
+        lemma_height(self.t);
+        lemma2_to64();
+        let e = ht(self.t) / 2;
+        if e > 13 {
+            lemma_pow2_strictly_increases(13, e);
+        }
+    }
+
     /// The invariant, in terms of the accessors.
     pub proof fn lemma_wf(&self)
         requires
@@ -3701,6 +3722,7 @@ proof fn lemma_ins_cost(h: nat, d: nat, m: nat, cw: nat, cm: nat)
         1 + cw + cm <= c_ins1() * (h + 1) * (d / (K as nat) + 4) + c_ins2() * (d + 4 * K),
         1 + cw <= c_ins1() * (h + 1) * (d / (K as nat) + 4) + c_ins2() * (d + 4 * K),
         1 <= c_ins1() * (h + 1) * (d / (K as nat) + 4) + c_ins2() * (d + 4 * K),
+        1 + cw + cm <= 112 * (h + 1) + 8 * d + 1207,
 {
     assert((h + 1) * (d / (K as nat) + 4) >= (h + 1) * 4) by (nonlinear_arith);
     assert(c_ins1() * (h + 1) * (d / (K as nat) + 4) == 28 * ((h + 1) * (d / (K as nat) + 4))) by (nonlinear_arith)
@@ -3833,6 +3855,7 @@ fn merge(
         }
     }
     let (t2, Ghost(_p), Ghost(c2)) = rebuild(&mv, a, z, b2, data, lo, off, s0, me2, Ghost(h), Ghost(f));
+    // `mv` (M's drained chunks) drops at the end of this fn: an implicit O(|M|) free, bounded by drain's charge.
     proof {
         work = work + c1 + c2;
     }
@@ -4010,7 +4033,7 @@ impl Frags {
     }
 
     /// `insert`, and its cost (D3): the all-held check by the walk, then one split pair, the merge into fresh pieces, and
-    /// the joins.
+    /// the joins. The cost is bounded in the spec's form and additively, `112 (h + 1) + 8 d + 1207`.
     fn insert_w(&mut self, lo: u64, off: u64, data: &[u8]) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
@@ -4023,6 +4046,7 @@ impl Frags {
             (forall|k: nat| (if lo >= off { lo } else { off }) <= k < off + data@.len() ==> #[trigger]
                 old(self).view().contains_key(k)) ==> *final(self) == *old(self),
             r@ <= c_ins1() * (ht(old(self).t) + 1) * (data@.len() / (K as nat) + 4) + c_ins2() * (data@.len() + 4 * K),
+            r@ <= 112 * (ht(old(self).t) + 1) + 8 * data@.len() + 1207,
     {
         let ghost mut work: nat = 1;
         let ghost h = ht(self.t);
@@ -4080,6 +4104,7 @@ impl Frags {
         proof {
             assert(c <= c_ins1() * (ht(old(self).t) + 1) * (data@.len() / (K as nat) + 4) + c_ins2() * (data@.len()
                 + 4 * K));
+            assert(c <= 112 * (ht(old(self).t) + 1) + 8 * data@.len() + 1207);
         }
     }
 
