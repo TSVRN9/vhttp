@@ -257,11 +257,12 @@ moved frags.rs lines (the citations gate reports them).
   → fails naming the line; a recursive exec fn without a `Ghost<nat>` return → fails; the real tree → passes.
 - [ ] **Step 3: Mutants.** Regenerate T7-M3b2 (fn `Frags::locate` is gone: retarget "merging disabled" at
   `Frags::insert_w`, e.g. the small-`B`-head pop skipped, expected error a `wf`/view postcondition) and T7-M4
-  (`held += data.len()` in `insert_w`). Add: `9b1-M1` a charged extra walk in the range walk (fails cost ensures),
+  (`held += data.len()` in `insert_w`), and T7-M7 (its frags.rs hunk targets the old `insert`; retarget at
+  `insert_w`, keeping its other hunks). Add: `9b1-M1` a charged extra walk in the range walk (fails cost ensures),
   `9b1-M2` `join` that never rotates (fails balance/`wf`), `9b1-M3` a follower kept without the `K` check (fails
   `wf`), `9b1-M4` a piece cut past `CAP` (fails `wf`). Patches and rows in the registry's format (header of
   `tools/mutants.tsv`); `scripts/mutants.sh check` passes; `scripts/mutants.sh run 9b1-M1 9b1-M2 9b1-M3 9b1-M4
-  T7-M3b2 T7-M4` kills all six.
+  T7-M3b2 T7-M4 T7-M7` kills all seven.
 - [ ] **Step 4: Docs.** TRUSTED.md:7's Frags sentences → the chunk layout (chunks of at most 256 bytes, each its own
   `Vec` allocated at its exact length and never grown, nodes `Box`ed, `capacity` checked by
   `crypto_ooo_capacity_bounded`) and the Vec row: std's push-below-capacity guarantee, pinned by the 0-realloc
