@@ -61,7 +61,7 @@ send and recovery paths; parts of 9b/9c that do not touch them may go earlier. P
 | 12 | production readiness | unplanned | 11 | none; audit F10 |
 | t1 | toolchain upgrade procedure (design only) | unplanned | - | none; audit F12 |
 | q1 | scripts/quick.sh, a scoped inner-loop check (owner request 2026-11-10) | merged | - | none (owner request); aed556e |
-| q2 | mutants.sh run in parallel worktrees (owner request 2026-11-10) | in progress | - | none; branch phase-q2 |
+| q2 | mutants.sh run in parallel worktrees (owner request 2026-11-10) | merged | - | none (owner request); 908b2ac |
 
 "design spec" is `docs/superpowers/specs/2026-10-27-verified-http3-design.md`; "Phase 9 spec" is
 `docs/superpowers/specs/2026-11-05-phase-9-acceptance-and-closes-design.md`; "audit" is `docs/audit-2026-11-09.md`.
