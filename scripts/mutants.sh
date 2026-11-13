@@ -16,7 +16,9 @@ set -o pipefail
 #           verifies only the crate (plain `verify -- ARGS` passes ARGS to the dependencies too). `verus --version`
 #           must name the pinned version (tools/verus-pin.txt) and every Verus JSON must carry the pinned version, commit
 #           and toolchain (tools/mutants.py). A full run (no ids) writes tools/mutants-last-run.txt (or FILE), its `#`
-#           line naming the pinned Verus; a run of some ids only prints. Last step on a branch before merging.
+#           line naming the pinned Verus; a run of some ids only prints. Last step on a branch before merging. It refuses
+#           a MUTANTS_JOBS that is not a positive integer and an output dir whose .lock another run (or the orphaned
+#           workers of a killed one) holds.
 #   verify  what verify.sh runs: `check`, and at main's tip (every commit there, merge or not) the gate
 #           (tools/mutants.py gate): the committed run file names this commit's crates/ + root Cargo.toml, Cargo.lock,
 #           rust-toolchain.toml and the pinned Verus with every id passing; then a full `run --out` and `mutants.py same`
@@ -132,6 +134,8 @@ stop() {
         i=0
         while kill -0 -- "-$p" 2> /dev/null && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
         kill -KILL -- "-$p" 2> /dev/null || true
+        i=0
+        while kill -0 -- "-$p" 2> /dev/null && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
     done
     for w in $wts; do git -C "$root" worktree remove --force "$w" > /dev/null 2>&1 || rmdir "$w" 2> /dev/null || true; done
     git -C "$root" worktree prune || true
