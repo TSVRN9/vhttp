@@ -13,7 +13,7 @@ Not exhaustively verified line-by-line: ghost `Seq::push/remove/insert` in verus
 | Q2 | quic/src/reassembly.rs:688-691 (`pop`) | `buf.split_off(head)`, `have.split_off(head)` when head >= len-head | in-order delivery on STREAM frame | no | whole unread tail (<= half of buf, <= ~16 KiB) | same window; doc says amortized O(1) |
 | Q3 | quic/src/reassembly.rs:620 (`run_end`) | `out.push(buf[n])` per byte into fresh Vec | delivery | no | O(delivered) plus Vec growth reallocs | window |
 | Q4 | quic/src/crypto_stream.rs:491 (`read`) | `out.append(&mut self.buf)` | every datagram via quictls feed (quictls/src/server.rs:1084-1090) | YES (Initial/Handshake CRYPTO) | copies whole buf; `out` is fresh/empty each call so cost = bytes read | buf holds contiguous bytes since last read; drained every datagram (crypto_drained) |
-| Q5 | quic/src/frags.rs:1373 `take_front` via crypto_stream.rs:455 (`on_fill`) | appends the whole contiguous ooo run to `self.buf` | CRYPTO frame closing a gap | YES | up to all held out-of-order bytes (not "bytes given") | MAX_CRYPTO_BUFFER = 16384 (crypto_stream.rs:21), MAX_CRYPTO_RANGES = 4096. frags.rs being rewritten in 9b1; skipped otherwise |
+| Q5 | quic/src/frags.rs `take_front` (frags.rs:1373 at bd2708a; an AVL of chunks since 9b1) via crypto_stream.rs:455 (`on_fill`) | appends the whole contiguous ooo run to `self.buf` | CRYPTO frame closing a gap | YES | up to all held out-of-order bytes (not "bytes given") | MAX_CRYPTO_BUFFER = 16384 (crypto_stream.rs:21), MAX_CRYPTO_RANGES = 4096. frags.rs being rewritten in 9b1; skipped otherwise |
 | Q6 | quic/src/conn.rs:3392-3396 | `shortcut:` copy-and-drop of all three CRYPTO streams into `sink` on discard/close | key discard / close | YES | all unread CRYPTO bytes (<= 16 KiB + one datagram) | as Q4/Q5 |
 | Q7 | quic/src/send_stream.rs:1023 | `buf.split_off(nb-ab)` trimming acked prefix (ponytail at :984) | incoming ACK frame | no (1-RTT) | tail copy up to ~half the stream's unacked data: up to ~512 KiB from one ACK | Σ send buffers <= MAX_SEND_BUFFER = 1<<20 (streams.rs:72); ranges <= MAX_SEND_RANGES = 64 (send_stream.rs:187) |
 | Q8 | quic/src/send_stream.rs:519 | `buf.extend_from_slice(data)` past capacity | app response writes (not wire-driven, but reached from request) | no | realloc moves whole send buffer (<= 1 MiB) | MAX_SEND_BUFFER |
@@ -96,7 +96,7 @@ No exec drain/insert(0)/rotate/remove(0) in quictls.
 - quic/src/send_stream.rs:984 ponytail: split_off trim, up to 2x slack (Q7). :92, :184 O(ranges).
 - quic/src/conn.rs:3392 shortcut: crypto bytes copied out and dropped (Q6).
 - quic/src/crypto_stream.rs:20 shortcut: fixed 16 KiB ooo hold (bound for Q5).
-- quic/src/frags.rs:1147 shortcut: frame adding positions copies touched fragments and moves list; 0.2 s/1 s/1.8 s per connection (Initial, pre-auth). 9b1 owns it.
+- quic/src/frags.rs:1147 (at bd2708a) shortcut: frame adding positions copies touched fragments and moves list; 0.2 s/1 s/1.8 s per connection (Initial, pre-auth). Closed by 9b1: the comment is gone, `insert` is O(log n + d) per frame, proved (`cat-C15`).
 - quic/src/path.rs:930 ponytail: shifts at most MAX_RESPONSES-1 (Q17).
 - quic/src/ack_track.rs:438 ponytail: O(ranges) insert, <= 32 (Q15).
 - quic/src/sent.rs:301 ponytail: O(inflight x 65) per ACK (Q16).

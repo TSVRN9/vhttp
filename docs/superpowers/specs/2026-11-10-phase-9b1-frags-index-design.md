@@ -44,9 +44,13 @@ call:
 - `insert` and `after_insert`: cost at most `c1 · (h + 1) · (d / K + 4) + c2 · (d + 4K)` (the walk, two splits and
   at most `d / K + 4` joins; bytes: `d`, two tails under `K`, and `Lc`'s bytes, at most `CAP`, copied into a fresh
   piece in D3 step 5), which is at most `(c1 + c2) · (d + 4 · (h + 1) + 4K)` since `h + 1 <= K`. The constants are fixed numbers in the ensures.
+  `insert_w` also ensures the additive form `112 · (h + 1) + 8 · d + 1207` (from `merge_w`'s `108 · (h + 1) + 6 · d + 1200`
+  and the walk's `c_walk() · (2(h + 1) + |M| + 2)` with `|M| <= d + 1`).
 - `take_front`: at most `c1 · (h + 1) + c2 · (r + K)`.
-- `size + 1 >= 2^(h/2)` (AVL; no `log` in the proofs, vstd's is opaque) and `K · (n − runs) <= held`; under
-  `CryptoStream`'s caps that gives `n <= 4096 + 128` and `h <= 25`, derived where the caps apply. For any store,
+- `size + 1 >= 2^(h/2)` (AVL; no `log` in the proofs, vstd's is opaque) and `K · (n − runs) <= held`; the private
+  lemma `Frags::lemma_caps_height` proves `n <= 4096 + 128` and `h <= 25` for any wf `Frags` with `held <= 16384` and
+  `count <= 4096` (`CryptoStream`'s caps; no caller applies it, since `crypto_stream.rs` does not change and the bounds
+  above need only `h + 1 <= 126`). For any store,
   `held <= VARINT_MAX < 2^62` gives `h + 1 <= 126 <= K`, which the bounds above use.
 
 So a frame costs O(log n + d) in the store and `take_front` O(log n + r), worst case per call, with no amortization.
@@ -58,7 +62,8 @@ uncounted reallocation): every piece D3 step 5 makes is a fresh `Vec::with_capac
 exactly `len` bytes, and no chunk is grown afterwards, so every byte copy inside `Frags` is in the ghost cost. vstd
 models length, not capacity, so "a push below capacity does not reallocate" is std's documented guarantee, trusted
 (TRUSTED.md's Vec row), and pinned mechanically: `crypto_ooo_cost_linear` counts `realloc` calls and requires none
-on its out-of-order patterns. `take_front` appends to `out`; that buffer's growth is the caller's (D10).
+on its out-of-order patterns (a gate demo shows it failing when `fill`'s piece is made by `Vec::new()`). `take_front`
+appends to `out`; that buffer's growth is the caller's (D10).
 
 ## Decisions
 
@@ -104,8 +109,9 @@ on its out-of-order patterns. `take_front` appends to `out`; that buffer's growt
   in-order `Seq<(u64, V)>`, sorted by key (rotations, `split` and `join` preserve it by concatenation; the `Map` is
   derived where needed). Size is ghost only (no exec `len` field). Ops: `new`, `get_le(k)`, `split(k)` (keys below
   `k` / the rest), `join(a, (k, v), b)` (all keys of `a` below `k`, all of `b` above; requires a size bound such as
-  `size < 2^63`, which keeps heights in `u8`), `join2(a, b)`, `pop_min`, the in-order consume of D3 step 3, and the
-  range walk of D3a. Ensures on the view, on balance and height, and on cost:
+  `size < 2^63`, which keeps heights in `u8`), `join2(a, b)`, `pop_min` and the in-order consume of D3 step 3
+  (`drain`). The range walk of D3a is `frags::walk`, not an avl op (ledger ruling: Verus has no closures over `V` to
+  make it generic). Ensures on the view, on balance and height, and on cost:
   - `join`: `max(h(a), h(b)) <= h(out) <= max(h(a), h(b)) + 1` (the lower bound is what makes `split` telescope), cost
     at most `c · (|h(a) − h(b)| + 1)` (descending the taller spine; AVL heights drop 1 or 2 per step).
   - `split(T)`: `h(L) <= h(T)`, `h(R) <= h(T)`, cost at most `c · (h(L) + h(R) + 4(h(T) + 1))`, hence at most
@@ -119,11 +125,18 @@ on its out-of-order patterns. `take_front` appends to `out`; that buffer's growt
   becomes sorted-and-disjoint (adjacent allowed), the follower rule and the `CAP` bound are local conditions on
   neighbours, and `K · (n − runs) <= held` is an induction over the sequence. Lemmas that assume separated fragments
   (`located`, `lemma_merge*`) are reworked; `put`, `runs`, `starts`, `lemma_runs_*` (the public spec) stay.
-- **D6 Catch.** The proved cost ensures are the catch, but cost is charged by hand, so an uncharged loop would still
-  verify. Mechanical guards: (a) a gate (`scripts/cost-charge.sh`, run by verify.sh, with gate demos): every `while` in
-  avl.rs and frags.rs has an invariant line naming `work` (the ghost accumulator), and every fn there that loops or
-  recurses returns a `Ghost<nat>` named in its ensures (public wrappers excepted by name); demos: a loop without the
-  line, a recursive fn without it; (b) tests: keep `duplicate_ooo_frames_allocate_nothing`'s time pin, add a
+- **D6 Catch.** The proved cost ensures are the catch, but cost is charged by hand and the ensures are upper bounds, so
+  an uncharged or undercharged loop would still verify. Mechanical guards: (a) a gate (`scripts/cost-charge.sh`, run by
+  verify.sh and quick.sh, with gate demos), structural only: in avl.rs and frags.rs every `while` has an invariant
+  naming `work` (the ghost accumulator) and a body updating `work = work + E` with `E` not `0`; every exec fn that
+  loops or recurses returns a `Ghost<nat>` named in its ensures, and a recursive one's body updates `work` the same
+  way; every assignment to `work` is such an update; no callee cost is dropped (each `Ghost<nat>` a callee returns is
+  bound as `Ghost(x)` and `x` is charged to `work`, built into the fn's returned `Ghost`, or, in the public wrappers
+  `insert`, `after_insert` and `take_front` only, asserted; or the call is a block's tail and passes on); `loop`,
+  `for` and the attribute waiving `decreases` are refused. Charging the right amount stays by hand: a semantic check of
+  the charge is carryover `cat-C15-semantic-cost` (9b4). Demos: a while without the `work` invariant line, a recursive
+  fn returning no cost, fill's ensures not reading its cost, fill's charge deleted or made `+ 0`, take_run's in-loop
+  charge deleted, a dropped and a plainly bound callee cost, a `loop`, a `for`; (b) tests: keep `duplicate_ooo_frames_allocate_nothing`'s time pin, add a
   duplicate that crosses a head/follower boundary to it (D3 step 0), and add `crypto_ooo_cost_linear` (the measured
   patterns at 1024, 2048, 4096 runs and 4, 8, 16 KiB: allocations and wall time at most linear, a counting allocator
   for the allocation half). New mutants, each killed by a Verus error: a charged extra walk (visits both subtrees;
