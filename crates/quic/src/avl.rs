@@ -1314,18 +1314,18 @@ pub fn drain<V>(t: Tree<V>, out: &mut Vec<(u64, V)>) -> (r: Ghost<nat>)
             Ghost(work)
         },
         Some(n) => {
-            let Node { key, val, h: _, left, right } = *n;
+            let Node { key: x, val: v, h: _, left: l, right: r } = *n;
             let ghost o0 = out@;
-            let Ghost(cl) = drain(left, out);
+            let Ghost(cl) = drain(l, out);
             let ghost o1 = out@;
-            out.push((key, val));
+            out.push((x, v));
             proof {
-                lemma_seq_assoc(o1, seq(right), (key, val), seq(right));
+                lemma_seq_assoc(o1, seq(r), (x, v), seq(r));
             }
-            let Ghost(cr) = drain(right, out);
+            let Ghost(cr) = drain(r, out);
             proof {
-                lemma_seq_assoc(o0, seq(left), (key, val), seq(right));
-                assert(seq(t0) == seq(left) + seq![(key, val)] + seq(right));
+                lemma_seq_assoc(o0, seq(l), (x, v), seq(r));
+                assert(seq(t0) == seq(l) + seq![(x, v)] + seq(r));
                 work = work + cl + cr;
             }
             Ghost(work)
