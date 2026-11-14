@@ -390,6 +390,12 @@ proof fn lemma_seq_rot2<T>(a: Seq<T>, x: T, b: Seq<T>, y: T, c: Seq<T>, z: T, d:
     assert((a + seq![x] + b) + seq![y] + (c + seq![z] + d) =~= (a + seq![x] + (b + seq![y] + c)) + seq![z] + d);
 }
 
+/// Room for a node over `l` and `r` (its height at most 126): fewer than `2^63` entries in all, or both parts at most
+/// 125 high (`pop_min`, whose result is no taller than its input, needs no size bound).
+pub open spec fn fits<V>(l: Tree<V>, r: Tree<V>) -> bool {
+    seq(l).len() + seq(r).len() + 1 < pow2(63) || (ht(l) <= 125 && ht(r) <= 125)
+}
+
 /// A node over balanced, ordered parts: its height is one above the taller part.
 fn mk<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>) -> (t: Tree<V>)
     requires
@@ -399,14 +405,16 @@ fn mk<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>) -> (t: Tree<V>)
         keys_gt(r, k),
         ht(l) <= ht(r) + 1,
         ht(r) <= ht(l) + 1,
-        seq(l).len() + seq(r).len() + 1 < pow2(63),
+        fits(l, r),
     ensures
         wf(t),
         seq(t) == seq(l) + seq![(k, v)] + seq(r),
         ht(t) == 1 + if ht(l) >= ht(r) { ht(l) } else { ht(r) },
 {
     proof {
-        lemma_node_cap(l, r);
+        if seq(l).len() + seq(r).len() + 1 < pow2(63) {
+            lemma_node_cap(l, r);
+        }
     }
     let hl = height(&l);
     let hr = height(&r);
@@ -422,7 +430,7 @@ fn rot_left<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>) -> (res: (Tree<V>, Ghost<na
         keys_lt(l, k),
         keys_gt(r, k),
         ht(r) == ht(l) + 2,
-        seq(l).len() + seq(r).len() + 1 < pow2(63),
+        fits(l, r),
     ensures
         wf(res.0),
         seq(res.0) == seq(l) + seq![(k, v)] + seq(r),
@@ -448,7 +456,7 @@ fn rot_left1<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>) -> (res: (Tree<V>, Ghost<n
         keys_lt(l, k),
         keys_gt(r, k),
         ht(r) == ht(l) + 2,
-        seq(l).len() + seq(r).len() + 1 < pow2(63),
+        fits(l, r),
         r is Some ==> ht(r->0.left) <= ht(r->0.right),
     ensures
         wf(res.0),
@@ -481,7 +489,7 @@ fn rot_left2<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>) -> (res: (Tree<V>, Ghost<n
         keys_lt(l, k),
         keys_gt(r, k),
         ht(r) == ht(l) + 2,
-        seq(l).len() + seq(r).len() + 1 < pow2(63),
+        fits(l, r),
         r is Some,
         ht(r->0.right) < ht(r->0.left),
     ensures
@@ -519,7 +527,7 @@ proof fn lemma_rot_single<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>)
         keys_lt(l, k),
         keys_gt(r, k),
         ht(r) == ht(l) + 2,
-        seq(l).len() + seq(r).len() + 1 < pow2(63),
+        fits(l, r),
         r is Some ==> ht(r->0.left) <= ht(r->0.right),
     ensures
         r is Some,
@@ -529,8 +537,8 @@ proof fn lemma_rot_single<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>)
             &&& keys_gt(rl, k) && keys_lt(rl, rk) && keys_gt(rr, rk) && keys_lt(l, rk)
             &&& k < rk
             &&& ht(rl) <= ht(rr) && ht(rr) <= ht(rl) + 1 && ht(rr) == ht(l) + 1
-            &&& seq(l).len() + seq(rl).len() + 1 < pow2(63)
-            &&& seq(l).len() + seq(rl).len() + seq(rr).len() + 2 < pow2(63)
+            &&& fits(l, rl)
+            &&& seq(l).len() + seq(rl).len() + seq(rr).len() + 2 < pow2(63) || ht(r) <= 125
             &&& seq(r) == seq(rl) + seq![(rk, r->0.val)] + seq(rr)
         }),
 {
@@ -548,7 +556,7 @@ proof fn lemma_rot_double<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>)
         keys_lt(l, k),
         keys_gt(r, k),
         ht(r) == ht(l) + 2,
-        seq(l).len() + seq(r).len() + 1 < pow2(63),
+        fits(l, r),
         r is Some,
         ht(r->0.right) < ht(r->0.left),
     ensures
@@ -561,9 +569,9 @@ proof fn lemma_rot_double<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>)
             &&& k < lk < rk
             &&& ht(l) <= ht(rll) + 1 && ht(rll) <= ht(l) && ht(rlr) <= ht(rr) && ht(rr) <= ht(rlr) + 1
             &&& ht(rr) == ht(l)
-            &&& seq(l).len() + seq(rll).len() + 1 < pow2(63)
-            &&& seq(rlr).len() + seq(rr).len() + 1 < pow2(63)
-            &&& seq(l).len() + seq(rll).len() + seq(rlr).len() + seq(rr).len() + 3 < pow2(63)
+            &&& fits(l, rll)
+            &&& fits(rlr, rr)
+            &&& seq(l).len() + seq(rll).len() + seq(rlr).len() + seq(rr).len() + 3 < pow2(63) || ht(r) <= 125
             &&& seq(r) == (seq(rll) + seq![(lk, rl->0.val)] + seq(rlr)) + seq![(rk, r->0.val)] + seq(rr)
         }),
 {
@@ -586,7 +594,7 @@ fn rot_right<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>) -> (res: (Tree<V>, Ghost<n
         keys_lt(l, k),
         keys_gt(r, k),
         ht(l) == ht(r) + 2,
-        seq(l).len() + seq(r).len() + 1 < pow2(63),
+        fits(l, r),
     ensures
         wf(res.0),
         seq(res.0) == seq(l) + seq![(k, v)] + seq(r),
@@ -612,7 +620,7 @@ fn rot_right1<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>) -> (res: (Tree<V>, Ghost<
         keys_lt(l, k),
         keys_gt(r, k),
         ht(l) == ht(r) + 2,
-        seq(l).len() + seq(r).len() + 1 < pow2(63),
+        fits(l, r),
         l is Some ==> ht(l->0.right) <= ht(l->0.left),
     ensures
         wf(res.0),
@@ -645,7 +653,7 @@ fn rot_right2<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>) -> (res: (Tree<V>, Ghost<
         keys_lt(l, k),
         keys_gt(r, k),
         ht(l) == ht(r) + 2,
-        seq(l).len() + seq(r).len() + 1 < pow2(63),
+        fits(l, r),
         l is Some,
         ht(l->0.left) < ht(l->0.right),
     ensures
@@ -683,7 +691,7 @@ proof fn lemma_rot_single_mirror<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>)
         keys_lt(l, k),
         keys_gt(r, k),
         ht(l) == ht(r) + 2,
-        seq(l).len() + seq(r).len() + 1 < pow2(63),
+        fits(l, r),
         l is Some ==> ht(l->0.right) <= ht(l->0.left),
     ensures
         l is Some,
@@ -693,8 +701,8 @@ proof fn lemma_rot_single_mirror<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>)
             &&& keys_lt(ll, lk) && keys_gt(lr, lk) && keys_lt(lr, k) && keys_gt(r, lk)
             &&& lk < k
             &&& ht(lr) <= ht(ll) && ht(ll) <= ht(lr) + 1 && ht(ll) == ht(r) + 1
-            &&& seq(lr).len() + seq(r).len() + 1 < pow2(63)
-            &&& seq(ll).len() + seq(lr).len() + seq(r).len() + 2 < pow2(63)
+            &&& fits(lr, r)
+            &&& seq(ll).len() + seq(lr).len() + seq(r).len() + 2 < pow2(63) || ht(l) <= 125
             &&& seq(l) == seq(ll) + seq![(lk, l->0.val)] + seq(lr)
         }),
 {
@@ -712,7 +720,7 @@ proof fn lemma_rot_double_mirror<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>)
         keys_lt(l, k),
         keys_gt(r, k),
         ht(l) == ht(r) + 2,
-        seq(l).len() + seq(r).len() + 1 < pow2(63),
+        fits(l, r),
         l is Some,
         ht(l->0.left) < ht(l->0.right),
     ensures
@@ -725,9 +733,9 @@ proof fn lemma_rot_double_mirror<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>)
             &&& lk < rk < k
             &&& ht(ll) <= ht(lrl) + 1 && ht(lrl) <= ht(ll) && ht(r) <= ht(lrr) + 1 && ht(lrr) <= ht(r)
             &&& ht(ll) == ht(r)
-            &&& seq(ll).len() + seq(lrl).len() + 1 < pow2(63)
-            &&& seq(lrr).len() + seq(r).len() + 1 < pow2(63)
-            &&& seq(ll).len() + seq(lrl).len() + seq(lrr).len() + seq(r).len() + 3 < pow2(63)
+            &&& fits(ll, lrl)
+            &&& fits(lrr, r)
+            &&& seq(ll).len() + seq(lrl).len() + seq(lrr).len() + seq(r).len() + 3 < pow2(63) || ht(l) <= 125
             &&& seq(l) == seq(ll) + seq![(lk, l->0.val)] + (seq(lrl) + seq![(rk, lr->0.val)] + seq(lrr))
         }),
 {
@@ -752,7 +760,7 @@ fn bal<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>) -> (res: (Tree<V>, Ghost<nat>))
         keys_gt(r, k),
         ht(l) <= ht(r) + 2,
         ht(r) <= ht(l) + 2,
-        seq(l).len() + seq(r).len() + 1 < pow2(63),
+        fits(l, r),
     ensures
         wf(res.0),
         seq(res.0) == seq(l) + seq![(k, v)] + seq(r),
@@ -1231,7 +1239,6 @@ pub fn pop_min<V>(t: Tree<V>) -> (r: (Tree<V>, u64, V, Ghost<nat>))
     requires
         wf(t),
         t is Some,
-        seq(t).len() < pow2(63),
     ensures
         wf(r.0),
         seq![(r.1, r.2)] + seq(r.0) == seq(t),
@@ -1270,6 +1277,63 @@ pub fn pop_min<V>(t: Tree<V>) -> (r: (Tree<V>, u64, V, Ghost<nat>))
         }
         (c, m, mv, Ghost(work))
     }
+}
+
+/// Frees the first `budget / (c_pop() * (ht(t) + 1) + 1)` entries (at least one: a stored height is at most 126), each
+/// a `pop_min` plus one unit for its value, so the cost stays within `budget` (D7(d)).
+pub fn pop_some<V>(t: &mut Tree<V>, budget: u64) -> (r: Ghost<nat>)
+    requires
+        wf(*old(t)),
+        c_pop() * 127 + 1 <= budget,
+    ensures
+        wf(*final(t)),
+        seq(*old(t)).len() > 0 ==> seq(*final(t)).len() < seq(*old(t)).len(),
+        seq(*final(t)).len() <= seq(*old(t)).len(),
+        r@ <= budget,
+{
+    let ghost n0 = seq(*t).len();
+    let ghost mut work: nat = 0;
+    let h = height(t) as u64;
+    proof {
+        if let Some(b) = t {
+            assert(b.h <= 126);
+        }
+        assert(c_pop() == 6);
+    }
+    let u = 6 * (h + 1) + 1;
+    let n = budget / u;
+    proof {
+        vstd::arithmetic::div_mod::lemma_div_is_ordered(u as int, budget as int, u as int);
+        vstd::arithmetic::div_mod::lemma_div_basics(u as int);
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod(budget as int, u as int);
+        vstd::arithmetic::mul::lemma_mul_is_commutative(n as int, u as int);
+    }
+    let mut i: u64 = 0;
+    while i < n && t.is_some()
+        invariant
+            wf(*t),
+            ht(*t) <= h,
+            u == c_pop() * (h + 1) + 1,
+            n * u <= budget,
+            1 <= n,
+            i <= n,
+            seq(*t).len() + i == n0,
+            work <= i * u,
+        decreases n - i,
+    {
+        let t0 = t.take();
+        let (t2, _k, _v, Ghost(cp)) = pop_min(t0);
+        *t = t2;
+        proof {
+            vstd::arithmetic::mul::lemma_mul_is_distributive_add_other_way(u as int, i as int, 1);
+            work = work + cp + 1;
+        }
+        i = i + 1;
+    }
+    proof {
+        vstd::arithmetic::mul::lemma_mul_inequality(i as int, n as int, u as int);
+    }
+    Ghost(work)
 }
 
 /// `b`'s first entry `(m, mv)` sits between `a`'s keys and the rest of `b`'s.

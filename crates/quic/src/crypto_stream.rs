@@ -454,9 +454,44 @@ impl CryptoStream {
         let ghost a = *self;
         self.ooo.insert(self.contig, offset, data);
         let ghost mid = self.ooo;
-        let r = self.ooo.take_front(self.contig, &mut self.buf);
+        let e = self.ooo.run_end(self.contig);
+        let fe = offset + data.len() as u64;
+        // Two takes so each buffer's length fits a usize: the frame's part (at most `data.len()`), then the rest (held
+        // before the frame, so at most MAX_CRYPTO_BUFFER).
+        let m1 = if e < fe {
+            e - self.contig
+        } else {
+            fe - self.contig
+        };
+        proof {
+            lemma_fill_first(a, mid, offset, data@);
+        }
+        let mut o1 = byteq::capvec::CapVec::new(m1 as usize);
+        let r1 = self.ooo.take_front(self.contig, m1, &mut o1);
+        let ghost mid2 = self.ooo;
+        proof {
+            lemma_fill_second(a, mid, mid2, offset, data@, e as nat, r1 as nat);
+        }
+        let mut o2 = byteq::capvec::CapVec::new((e - r1) as usize);
+        let r = self.ooo.take_front(r1, e - r1, &mut o2);
+        let ghost (s1, s2) = (o1@, o2@);
+        proof {
+            assert(r == e) by {
+                if r < e {
+                    assert(mid2.view().contains_key(r as nat));
+                }
+            }
+            assert(s1 =~= Seq::new((r1 - a.contig) as nat, |i: int| mid.view()[(a.contig + i) as nat]));
+            assert(s2 =~= Seq::new((e - r1) as nat, |i: int| mid2.view()[(r1 + i) as nat]));
+        }
+        let mut v1 = o1.into_vec();
+        self.buf.append(&mut v1);
+        let mut v2 = o2.into_vec();
+        self.buf.append(&mut v2);
         self.contig = r;
         proof {
+            lemma_fill_join(a.contig as nat, mid, mid2, self.ooo, e as nat, r1 as nat, s1, s2);
+            assert(self.buf@ =~= a.buf@ + Seq::new((r - a.contig) as nat, |i: int| mid.view()[(a.contig + i) as nat]));
             lemma_fill_post(a, mid, *self, offset, data@);
         }
         self.ins = Ghost(self.ins@.push((offset as nat, data@)));
@@ -650,6 +685,87 @@ proof fn lemma_ooo_post(a: CryptoStream, b: CryptoStream, off: u64, d: Seq<u8>)
     assert forall|p: nat| #[trigger] b.ooo.view().contains_key(p) implies b.ooo.view()[p] == m2[p] by {
         assert(put(a.ooo.view(), a.contig as nat, off as nat, d).contains_key(p));
     }
+}
+
+/// `on_fill`'s first take: the store after the insert holds positions at or past `contig` only.
+proof fn lemma_fill_first(a: CryptoStream, mid: Frags, off: u64, d: Seq<u8>)
+    requires
+        a.wf(),
+        off <= a.contig < off + d.len(),
+        mid.view() == put(a.ooo.view(), a.contig as nat, off as nat, d),
+    ensures
+        forall|k: nat| #[trigger] mid.view().contains_key(k) ==> k >= a.contig,
+{
+    a.lemma_core();
+    assert forall|k: nat| #[trigger] mid.view().contains_key(k) implies k >= a.contig by {
+        if a.ooo.view().contains_key(k) {
+            assert(k > a.contig);
+        }
+    }
+}
+
+/// `on_fill`'s second take: the first took the frame's part of the run `[contig, e)`, and what is left of it was held
+/// before the frame, so it fits MAX_CRYPTO_BUFFER.
+proof fn lemma_fill_second(a: CryptoStream, mid: Frags, mid2: Frags, off: u64, d: Seq<u8>, e: nat, r1: nat)
+    requires
+        a.wf(),
+        off <= a.contig < off + d.len(),
+        mid.view() == put(a.ooo.view(), a.contig as nat, off as nat, d),
+        a.contig <= e,
+        forall|k: nat| a.contig <= k < e ==> #[trigger] mid.view().contains_key(k),
+        r1 <= a.contig + (if e < off + d.len() { e - a.contig } else { off + d.len() - a.contig }),
+        r1 < a.contig + (if e < off + d.len() { e - a.contig } else { off + d.len() - a.contig }) ==> !mid.view().contains_key(r1),
+        a.contig <= r1,
+        forall|k: nat| #[trigger] mid2.view().contains_key(k) <==> mid.view().contains_key(k) && k >= r1,
+    ensures
+        r1 == (if e < off + d.len() { e } else { (off + d.len()) as nat }),
+        e - r1 <= MAX_CRYPTO_BUFFER,
+        forall|k: nat| #[trigger] mid2.view().contains_key(k) ==> k >= r1,
+        forall|k: nat| r1 <= k < e ==> #[trigger] mid2.view().contains_key(k),
+{
+    a.lemma_core();
+    a.ooo.lemma_wf();
+    let fe = (off + d.len()) as nat;
+    if r1 < (if e < fe { e } else { fe }) {
+        assert(mid.view().contains_key(r1));
+    }
+    if e > fe {
+        let rg = Set::range(fe, e);
+        assert forall|k: nat| #[trigger] rg.contains(k) implies a.ooo.view().dom().contains(k) by {
+            assert(mid.view().contains_key(k));
+        }
+        assert(rg.subset_of(a.ooo.view().dom()));
+        vstd::set_lib::lemma_len_subset(rg, a.ooo.view().dom());
+    }
+}
+
+/// `on_fill`'s two takes as one: the store keeps `mid`'s positions at or past `e`, and the two buffers hold
+/// `[contig, e)` of `mid`.
+proof fn lemma_fill_join(c: nat, mid: Frags, mid2: Frags, fin: Frags, e: nat, r1: nat, s1: Seq<u8>, s2: Seq<u8>)
+    requires
+        c <= r1 <= e,
+        !mid.view().contains_key(e),
+        s1 == Seq::new((r1 - c) as nat, |i: int| mid.view()[(c + i) as nat]),
+        s2 == Seq::new((e - r1) as nat, |i: int| mid2.view()[(r1 + i) as nat]),
+        forall|k: nat| r1 <= k < e ==> #[trigger] mid2.view().contains_key(k),
+        forall|k: nat| #[trigger] mid2.view().contains_key(k) <==> mid.view().contains_key(k) && k >= r1,
+        forall|k: nat| #[trigger] mid2.view().contains_key(k) ==> mid2.view()[k] == mid.view()[k],
+        forall|k: nat| #[trigger] fin.view().contains_key(k) <==> mid2.view().contains_key(k) && k >= e,
+        forall|k: nat| #[trigger] fin.view().contains_key(k) ==> fin.view()[k] == mid2.view()[k],
+    ensures
+        s1 + s2 == Seq::new((e - c) as nat, |i: int| mid.view()[(c + i) as nat]),
+        forall|k: nat| #[trigger] fin.view().contains_key(k) <==> mid.view().contains_key(k) && k > e,
+        forall|k: nat| #[trigger] fin.view().contains_key(k) ==> fin.view()[k] == mid.view()[k],
+{
+    assert forall|i: int| 0 <= i < (s1 + s2).len() implies #[trigger] (s1 + s2)[i] == Seq::new(
+        (e - c) as nat,
+        |i: int| mid.view()[(c + i) as nat],
+    )[i] by {
+        if i >= s1.len() {
+            assert(mid2.view().contains_key((r1 + (i - s1.len())) as nat));
+        }
+    }
+    assert(s1 + s2 =~= Seq::new((e - c) as nat, |i: int| mid.view()[(c + i) as nat]));
 }
 
 /// After `insert` and `take_front` (`mid` between them), what stays out of order is what was,

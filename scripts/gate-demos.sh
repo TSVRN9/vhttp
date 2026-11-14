@@ -336,8 +336,8 @@ cfresh
 sed -i 's/^            work = work + 1;$/            work = work + 0;/' "$ccq/frags.rs"
 expect_fail "cost-charge: fill's charge made + 0" "crates/quic/src/frags.rs:$fw: while whose body does not charge work" cc
 cfresh
-once '^            work = work \+ cp \+ n as nat \+ c \+ 1;$' "$ccq/frags.rs"
-sed -i '/^            work = work + cp + n as nat + c + 1;$/d' "$ccq/frags.rs"
+once '^            work = work \+ cp \+ cw \+ c \+ 1;$' "$ccq/frags.rs"
+sed -i '/^            work = work + cp + cw + c + 1;$/d' "$ccq/frags.rs"
 expect_fail "cost-charge: take_run's in-loop charge deleted (review I1)" "take_run drops the cost cp binds from pop_min" cc
 cfresh
 once '^        work = work \+ c0 \+ c3;$' "$ccq/frags.rs"
@@ -366,18 +366,18 @@ cfresh
 printf 'pub fn outside_demo() -> u8 {\n    0\n}\n' > "$ccb/outside_demo.rs"
 expect_fail "cost-charge: a byteq file with a fn and no verus! block" "crates/byteq/src/outside_demo.rs: no verus! block" cc
 cfresh
-once '^    let mut v: Vec<u8> = Vec::with_capacity\(n as usize\);$' "$ccq/frags.rs"
-sed -i 's/^    let mut v: Vec<u8> = Vec::with_capacity(n as usize);$/&\n    loop { break; }/' "$ccq/frags.rs"
+once '^    let mut v: CapVec<u8> = CapVec::new\(n as usize\);$' "$ccq/frags.rs"
+sed -i 's/^    let mut v: CapVec<u8> = CapVec::new(n as usize);$/&\n    loop { break; }/' "$ccq/frags.rs"
 expect_fail "cost-charge: a loop" "\`loop\` in fill: only \`while\` loops are checked" cc
 cfresh
-sed -i 's/^    let mut v: Vec<u8> = Vec::with_capacity(n as usize);$/&\n    for _x in 0..1u8 {}/' "$ccq/frags.rs"
+sed -i 's/^    let mut v: CapVec<u8> = CapVec::new(n as usize);$/&\n    for _x in 0..1u8 {}/' "$ccq/frags.rs"
 expect_fail "cost-charge: a for" "\`for\` in fill: only \`while\` loops are checked" cc
 cfresh
 rm "$ccq/avl.rs"
 expect_fail "cost-charge: a missing file" "cannot read crates/quic/src/avl.rs" cc
 
-# The no-realloc claim (spec "The bound", TRUSTED.md's Vec row): fill's fresh piece made by Vec::new() instead of
-# Vec::with_capacity(n) must fail crypto_ooo_cost_linear on reallocs. A copy of the workspace in target/realloc-demo
+# The no-realloc claim (spec "The bound", TRUSTED.md's Vec row): fill's fresh piece made by CapVec::new(0) instead of
+# CapVec::new(n) must fail crypto_ooo_cost_linear on reallocs (under Verus it fails push's precondition). A copy of the workspace in target/realloc-demo
 # (stable path, mtimes kept and frags.rs touched, so only quic rebuilds), its own target dir; two debug builds and runs, about half a
 # minute after the first.
 rd=$root/target/realloc-demo
@@ -388,9 +388,9 @@ mkdir -p "$rd/ws"
 touch "$rd/ws/crates/quic/src/frags.rs"
 rdt() { env CARGO_TARGET_DIR="$rd/target" cargo test --offline --locked -q --manifest-path "$rd/ws/Cargo.toml" -p quic --test crypto_cost; }
 expect_pass "crypto_cost: an unchanged workspace copy" rdt
-once '^    let mut v: Vec<u8> = Vec::with_capacity\(n as usize\);$' "$rd/ws/crates/quic/src/frags.rs"
-sed -i 's/^    let mut v: Vec<u8> = Vec::with_capacity(n as usize);$/    let mut v: Vec<u8> = Vec::new();/' "$rd/ws/crates/quic/src/frags.rs"
-expect_fail "crypto_cost: fill's pieces grown from Vec::new()" "reallocs" rdt
+once '^    let mut v: CapVec<u8> = CapVec::new\(n as usize\);$' "$rd/ws/crates/quic/src/frags.rs"
+sed -i 's/^    let mut v: CapVec<u8> = CapVec::new(n as usize);$/    let mut v: CapVec<u8> = CapVec::new(0);/' "$rd/ws/crates/quic/src/frags.rs"
+expect_fail "crypto_cost: fill's pieces grown from CapVec::new(0)" "reallocs" rdt
 
 # rlimit gate (tools/rl.py --gate): a quic fn at 8,000,001; a FAIL row; empty and rowless logs; a missing log; two JSON objects.
 pin=$root/tools/verus-pin.txt

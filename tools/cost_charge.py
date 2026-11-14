@@ -12,7 +12,7 @@ strings blanked, fns found by tools/acceptance.py's parser):
     (the costs; `NAME(`, `path::NAME(` or `.NAME(` on any receiver, for NAME such a fn; a std method of another name,
     such as `out.append(..)`, is not one) is the tail of a block (its value passes on), or a `let` whose pattern binds each cost as `Ghost(x)`, and from there to the next
     binding of the same name `x` appears in a `work = work + E` update, in a `Ghost(..)` the fn builds (not a call
-    argument), or, in frags.rs's public wrappers Frags::insert, Frags::after_insert and Frags::take_front only (keyed
+    argument), or, in frags.rs's public wrappers Frags::insert, Frags::after_insert, Frags::take_front and Frags::run_end only (keyed
     by file and impl path: queue.rs's ByteQueue::take_front is no wrapper), in an `assert`; any other fn that calls one
     returns a cost itself;
   - no `loop`, `for .. in` or `exec_allows_no_decreases_clause` (loops and recursion this gate does not see).
@@ -29,7 +29,7 @@ import acceptance as acc  # noqa: E402
 FILES = ['crates/quic/src/avl.rs', 'crates/quic/src/frags.rs']
 DIRS = ['crates/byteq/src']
 INV = re.compile(r'\b(invariant_except_break|invariant|ensures|decreases)\b')
-WRAPPERS = {('crates/quic/src/frags.rs', 'Frags::' + n) for n in ('insert', 'after_insert', 'take_front')}
+WRAPPERS = {('crates/quic/src/frags.rs', 'Frags::' + n) for n in ('insert', 'after_insert', 'take_front', 'run_end')}
 UPDATE = re.compile(r'\bwork\s*=\s*work\s*\+\s*([^;]*?)\s*;')
 ASSIGN = re.compile(r'(?<![\w.])work\s*=(?!=)')
 
