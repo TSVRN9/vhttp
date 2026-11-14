@@ -4942,6 +4942,18 @@ impl Frags {
         ht(self.t)
     }
 
+    /// The tree's height bounds, for composing `run_end_w`'s cost: at most 126, and logarithmic in the chunks.
+    pub proof fn lemma_tree_ht(&self)
+        requires
+            self.wf(),
+        ensures
+            self.tree_ht() <= 126,
+            self.nodes() + 1 >= pow2(self.tree_ht() / 2),
+    {
+        lemma_ht_le(self.t);
+        lemma_height(self.t);
+    }
+
     /// With `[lo, hi)` held, at most `2 + (hi − lo)/K` chunks start there (the follower rule).
     pub proof fn lemma_chunks_in_held(&self, lo: nat, hi: nat)
         requires
@@ -5363,8 +5375,8 @@ impl Frags {
 } // verus!
 
 impl Frags {
-    /// Test support: the bytes allocated for the chunks: per node, the node itself and its chunk `Vec`'s capacity.
-    /// Verus models `Vec` length, not capacity (TRUSTED.md).
+    /// Test support: the bytes allocated for the chunks: per node, the node itself and its piece's capacity (the inner
+    /// `Vec`'s). Verus models `Vec` length, not capacity (TRUSTED.md).
     #[doc(hidden)]
     pub fn capacity(&self) -> usize {
         fn go(t: &Tree<CapVec<u8>>) -> usize {

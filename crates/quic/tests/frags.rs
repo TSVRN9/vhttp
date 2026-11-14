@@ -189,6 +189,25 @@ fn frags_take_front_bounded() {
 }
 
 #[test]
+fn frags_take_front_appends() {
+    // Into a buffer already holding bytes, with capacity to spare: the run follows them.
+    let mut f = Frags::new();
+    let d: Vec<u8> = (0..700u32).map(|k| (k % 251) as u8).collect();
+    put(&mut f, 0, 40, &d);
+    let mut out = CapVec::new(1000);
+    out.push_slice(&[9, 8, 7]);
+    assert_eq!(f.take_front(40, 500, &mut out), 540);
+    let mut want = vec![9, 8, 7];
+    want.extend_from_slice(&d[..500]);
+    assert_eq!(out.as_slice(), &want[..]);
+    assert_eq!(out.capacity(), 1000);
+    assert_eq!(f.take_front(540, 497, &mut out), 740);
+    want.extend_from_slice(&d[500..]);
+    assert_eq!(out.into_vec(), want);
+    assert_eq!((f.held(), f.count()), (0, 0));
+}
+
+#[test]
 fn frags_take_front_max_zero() {
     let mut f = Frags::new();
     put(&mut f, 0, 5, &[1; 600]);
@@ -240,8 +259,8 @@ fn frags_pop_some_frees() {
     assert_eq!(n, 64);
     let mut calls = 0;
     while n > 0 {
-        // The least budget pop_some accepts: c_pop() * 127 + 1.
-        let _ = pop_some(&mut t, 6 * 127 + 1);
+        // The least budget pop_some accepts: c_pop() * 127 + 2.
+        let _ = pop_some(&mut t, 6 * 127 + 2);
         let m = nodes(&t);
         assert!(m < n, "{m} >= {n}");
         n = m;

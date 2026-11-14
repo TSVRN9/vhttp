@@ -377,9 +377,9 @@ rm "$ccq/avl.rs"
 expect_fail "cost-charge: a missing file" "cannot read crates/quic/src/avl.rs" cc
 
 # The no-realloc claim (spec "The bound", TRUSTED.md's Vec row): fill's fresh piece made by CapVec::new(0) instead of
-# CapVec::new(n) must fail crypto_ooo_cost_linear on reallocs (under Verus it fails push's precondition). A copy of the workspace in target/realloc-demo
-# (stable path, mtimes kept and frags.rs touched, so only quic rebuilds), its own target dir; two debug builds and runs, about half a
-# minute after the first.
+# CapVec::new(n) must fail crypto_ooo_cost_linear on reallocs (under Verus it fails push's precondition). A copy of the
+# workspace in target/realloc-demo (stable path, mtimes kept and frags.rs touched, so only quic rebuilds), its own target
+# dir; two debug builds and runs, about half a minute after the first.
 rd=$root/target/realloc-demo
 rm -rf "$rd/ws"
 mkdir -p "$rd/ws"
