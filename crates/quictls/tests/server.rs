@@ -140,9 +140,16 @@ fn accept(d: &[u8]) -> QuicServer<'static> {
     QuicServer::accept(cfg(), d, 0, 0, &R(1), &qc::ltp(), &mut app).expect("accepted")
 }
 
+/// A datagram, then the shell's loop (D13): `pump_backlog` until no backlog is left, as before the next datagram.
 fn receive(s: &mut QuicServer, d: &[u8], n: u8) {
     let mut app = Vec::new();
     s.receive(d, 0, 10, &R(n), &mut app);
+    let mut k = 0u8;
+    while s.has_backlog() {
+        assert!(k < 32, "backlog left after 32 pumps");
+        s.pump_backlog(10, &R(n.wrapping_add(150).wrapping_add(k)), &mut app);
+        k += 1;
+    }
 }
 
 /// The close code of the server's next datagram, which must hold only CONNECTION_CLOSE.

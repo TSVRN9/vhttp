@@ -1035,7 +1035,7 @@ proof fn lemma_body_roundtrip(f: SpecFrame, rest: Seq<u8>)
 }
 
 /// Every varint `rfc_vint` reads inside `b` fits in 62 bits and ends after `p`, inside `b`.
-proof fn lemma_vints_ok(b: Seq<u8>)
+pub(crate) proof fn lemma_vints_ok(b: Seq<u8>)
     ensures
         forall|p: int|
             0 <= p <= b.len() && (#[trigger] rfc_vint(b, p)) is Some ==> p < rfc_vint(b, p).unwrap().1

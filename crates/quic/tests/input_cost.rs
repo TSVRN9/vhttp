@@ -5,6 +5,7 @@
 //! (the allocator is deterministic): no `realloc`, and requested bytes at most `COST_A·d + COST_B`, but for one queue
 //! buffer of a call given bytes (`per_call_ok`).
 use quic::crypto_stream::CryptoStream;
+use quic::CapVec;
 use quic::recv_stream::{RecvStream, StreamEvent};
 use quic::send_stream::{SendState, SendStream};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -263,8 +264,9 @@ fn bytes(m: usize) -> Vec<u8> {
     (0..m).map(|i| i as u8).collect()
 }
 
-/// `on_crypto` then `read` into a fresh `Vec`, as quictls's `feed` does per level: one input call. `new` is the bytes
-/// the frame adds to what was received; `held` counts the received bytes not yet handed over.
+/// `on_crypto` then `read(max = d)` into an exact buffer, as quictls's `feed` does per level with the datagram's size
+/// (D6): one input call. `new` is the bytes the frame adds to what was received; `held` counts the received bytes not
+/// yet handed over.
 fn crypto_call(
     r: &mut Run,
     tag: &'static str,
@@ -276,8 +278,8 @@ fn crypto_call(
 ) {
     r.call(tag, d.len(), || {
         assert_eq!(c.on_crypto(off as u64, d), Ok(()));
-        let mut out = Vec::new();
-        c.read(&mut out);
+        let mut out = CapVec::new((c.unread() as usize).min(d.len()));
+        c.read(d.len() as u64, &mut out);
         *held = *held + new - out.len();
         (Some(out.len()), *held)
     });
@@ -360,13 +362,12 @@ fn reverse_fill(m: usize, r: &mut Run) {
 }
 
 #[test]
-#[ignore = "9b2: fails today, a 1-byte frame closing a gap copies and hands over the whole run (Q4, Q5); un-ignored by Task 6"]
 fn crypto_one_byte_frames() {
     check("crypto_one_byte_frames", 16 << 10, one_byte_frames, false, false);
 }
 
 #[test]
-#[ignore = "9b2: fails today, the fill's take_front grows buf by realloc (Q5); un-ignored by Task 6"]
+#[ignore = "9b2 Task 6: lazy delivery passes; the fill call still requests 16·d bytes in one allocation: Frags::insert gathers the chunks the frame meets into a Vec of 32-byte entries (d/2 one-byte runs here), over 8·d + 4096. Needs a ruling (gather-buffer allowance or a gather-free merge)"]
 fn crypto_runs_then_fill() {
     check("crypto_runs_then_fill", 1024, runs_then_fill, true, false);
 }

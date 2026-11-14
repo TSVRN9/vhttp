@@ -21,6 +21,10 @@ use tls::config::{build_config, p256_signing_key, CertChain, ServerConfig};
 
 pub const MAX_POLLS: usize = 1024;
 
+/// D13: `pump_backlog` calls per connection per loop turn: 32 · `B_PUMP` = 128 KiB, enough for one datagram's
+/// CRYPTO backlog at every level; a connection with backlog left gets its next 32 on the next turn.
+pub const MAX_PUMPS: usize = 32;
+
 fn setopt(fd: i32, level: i32, name: i32, val: i32) -> io::Result<()> {
     let p = &val as *const i32 as *const libc::c_void;
     let r = unsafe { libc::setsockopt(fd, level, name, p, std::mem::size_of::<i32>() as libc::socklen_t) };
@@ -256,7 +260,9 @@ impl<'a> Server<'a> {
                     if new && c.q.conn().path_state(p as u64).is_none() {
                         c.addrs.truncate(p); // no slot for an unaccepted path
                     }
-                    self.service(i, now, send);
+                    if !self.service(i, now, send) {
+                        self.pump(i, now, send)?;
+                    }
                 }
             }
             Route::NewInitial => {
@@ -266,7 +272,10 @@ impl<'a> Server<'a> {
                     c.take_requests(&mut app);
                     self.conns.push(c);
                     self.next_id += 1;
-                    self.service(self.conns.len() - 1, now, send);
+                    let i = self.conns.len() - 1;
+                    if !self.service(i, now, send) {
+                        self.pump(i, now, send)?;
+                    }
                 }
             }
             Route::Drop => {}
@@ -286,11 +295,34 @@ impl<'a> Server<'a> {
                 c.q.on_timeout(now, &r, &mut app);
                 c.take_requests(&mut app);
             }
-            if !self.service(i, now, send) {
+            if !self.service(i, now, send) && !self.pump(i, now, send)? {
                 i += 1;
             }
         }
         Ok(())
+    }
+
+    /// Whether some connection has backlog (D13): then `run` reads the socket without blocking.
+    pub fn has_backlog(&self) -> bool {
+        self.conns.iter().any(|c| c.q.has_backlog())
+    }
+
+    /// D13: the backlog of connection `i`, up to `MAX_PUMPS` `pump_backlog` calls, each with fresh randomness and
+    /// followed by `service`. Returns whether the connection was removed.
+    fn pump(&mut self, i: usize, now: u64, send: &mut Outbox) -> io::Result<bool> {
+        let mut n = 0;
+        while n < MAX_PUMPS && self.conns[i].q.has_backlog() {
+            let r = rand(self.rng)?;
+            let mut app = Vec::new();
+            let c = &mut self.conns[i];
+            c.q.pump_backlog(now, &r, &mut app);
+            c.take_requests(&mut app);
+            if self.service(i, now, send) {
+                return Ok(true);
+            }
+            n += 1;
+        }
+        Ok(false)
     }
 
     fn index(&self, id: ConnId) -> Option<usize> {
@@ -350,7 +382,13 @@ pub fn run(sock: UdpSocket, cfg: &ServerConfig) -> io::Result<()> {
         let now = us();
         srv.on_wake(now, &mut send)?;
         send_all(&sock, &mut send);
-        sock.set_read_timeout(read_timeout(now, srv.deadline()))?;
+        // While a connection has backlog the socket is polled, so the next turn's `on_wake` pumps it (D13); a zero
+        // read timeout is an error, so not blocking is set instead.
+        let busy = srv.has_backlog();
+        sock.set_nonblocking(busy)?;
+        if !busy {
+            sock.set_read_timeout(read_timeout(now, srv.deadline()))?;
+        }
         match sock.recv_from(&mut buf) {
             Ok((n, from)) => {
                 srv.on_datagram(&buf[..n], from, us(), &mut send)?;

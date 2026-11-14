@@ -1,8 +1,7 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index 84680fd..b8d12cd 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -1601,7 +1601,6 @@ impl Connection {
+@@ -1880,7 +1880,6 @@
      fn on_crypto_frame(&mut self, k: PacketKind, offset: u64, data: &[u8], now: u64) -> (r: Result<(), u64>)
          requires
              old(self).wf(),

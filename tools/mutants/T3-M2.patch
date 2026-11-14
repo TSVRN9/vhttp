@@ -1,8 +1,7 @@
 diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
-index 84ffad2..7134be4 100644
 --- a/crates/quic/src/crypto_stream.rs
 +++ b/crates/quic/src/crypto_stream.rs
-@@ -377,11 +377,6 @@ impl CryptoStream {
+@@ -453,11 +453,6 @@
              }
              return Ok(());
          }
@@ -14,7 +13,7 @@ index 84ffad2..7134be4 100644
          let ghost a = *self;
          if end <= self.contig {
              // Every byte already received: nothing new is held.
-@@ -393,6 +388,11 @@ impl CryptoStream {
+@@ -469,6 +464,11 @@
              }
              return Ok(());
          }

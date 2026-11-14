@@ -1,8 +1,7 @@
 diff --git a/crates/quic/src/frags.rs b/crates/quic/src/frags.rs
-index 25191a4..2ea7a0e 100644
 --- a/crates/quic/src/frags.rs
 +++ b/crates/quic/src/frags.rs
-@@ -5206,7 +5206,7 @@ impl Frags {
+@@ -5232,7 +5232,7 @@
          let t = self.t.take();
          let (t2, hi, Ghost(c1)) = merge(t, self.hi, _lo, off, data, s, e, Ghost(f));
          self.t = t2;

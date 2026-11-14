@@ -136,3 +136,47 @@ fn two_requests_answered_in_order() {
         check_response(&r.1);
     }
 }
+
+/// D13 through the shell: an inflated ClientHello whose bytes `[1, N)` came first, then the 1-byte gap fill.
+/// `Server::on_datagram` pumps the backlog that datagram leaves, so its replies already hold the server's Initial
+/// and Handshake flight; the exchange then completes and the static response arrives, with no other datagram
+/// needed to move the handshake on.
+#[test]
+fn gap_filled_client_hello_completes_without_another_datagram() {
+    let cfg: &'static _ = Box::leak(Box::new(
+        load_config(include_bytes!("data/cert.pem"), include_bytes!("data/key.pem"), vec![]).unwrap(),
+    ));
+    let mut s = Server::new(cfg, rng);
+    let mut c = Client::with_alpn_pad(200);
+    let from: SocketAddr = "127.0.0.1:50001".parse().unwrap();
+    let mut got = Vec::new();
+    let (ch, ds) = e2e::big_ch(&mut c, 1);
+    exchange(&mut s, &mut c, from, 10, ds, &mut got);
+    assert!(!s.has_backlog());
+    let gap = c.ch_dgram(&ch, 0, 1);
+    let mut send = Vec::new();
+    s.on_datagram(&gap, from, 11, &mut send).unwrap();
+    assert!(!s.has_backlog());
+    let mut kinds = Vec::new();
+    for (r, to) in send {
+        assert_eq!(to, from);
+        kinds.extend(c.absorb(&r).into_iter().map(|(k, _)| k));
+    }
+    assert!(kinds.contains(&PacketKind::Initial) && kinds.contains(&PacketKind::Handshake), "{kinds:?}");
+    for round in 0..8u64 {
+        if !c.handshaking() && round > 1 {
+            break;
+        }
+        let ds = c.datagrams(None);
+        exchange(&mut s, &mut c, from, 12 + round, ds, &mut got);
+    }
+    assert!(!c.handshaking());
+    let ds = c.datagrams(Some(vec![stream(2, 0, &[0x00, 0x04, 0x00], false), stream(0, 0, &get(), true)]));
+    exchange(&mut s, &mut c, from, 30, ds, &mut got);
+    for r in 0..4 {
+        let ds = c.datagrams(Some(vec![Frame::Ping]));
+        exchange(&mut s, &mut c, from, 40 + r, ds, &mut got);
+    }
+    let r = got.iter().find(|(id, _)| *id == 0).expect("a response on stream 0");
+    check_response(&r.1);
+}

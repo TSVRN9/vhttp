@@ -1,8 +1,7 @@
 diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
-index 206d62d..4245cf4 100644
 --- a/crates/quic/src/crypto_stream.rs
 +++ b/crates/quic/src/crypto_stream.rs
-@@ -37,7 +37,7 @@ pub open spec fn crypto_contiguous(s: CryptoStream) -> nat {
+@@ -41,7 +41,7 @@
  /// out-of-order CRYPTO frames.
  pub open spec fn ooo_received(s: CryptoStream, off: u64, d: Seq<u8>) -> Set<nat> {
      let m = rfc_received(s.inserted_frames().push((off as nat, d)));

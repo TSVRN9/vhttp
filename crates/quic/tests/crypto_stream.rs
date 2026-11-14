@@ -1,10 +1,52 @@
 use quic::codes::CRYPTO_BUFFER_EXCEEDED;
 use quic::crypto_stream::*;
+use quic::CapVec;
 
+/// Reads every unread in-order byte, into an exact buffer.
 fn read(c: &mut CryptoStream) -> Vec<u8> {
-    let mut out = Vec::new();
-    c.read(&mut out);
-    out
+    let u = c.unread();
+    let mut out = CapVec::new(u as usize);
+    c.read(u, &mut out);
+    out.into_vec()
+}
+
+/// D6: in-order bytes stay in the store until read, and a read takes at most `max` of them.
+#[test]
+fn crypto_lazy_read_bounded() {
+    let mut c = CryptoStream::new();
+    let d: Vec<u8> = (0..16384u32).map(|i| i as u8).collect();
+    assert_eq!(c.on_crypto(0, &d), Ok(()));
+    assert_eq!(c.unread(), 16384);
+    let mut out = CapVec::new(100);
+    c.read(100, &mut out);
+    assert_eq!(out.into_vec(), d[..100].to_vec());
+    assert_eq!(c.unread(), 16284);
+    assert_eq!(c.start(), 100);
+    assert_eq!(read(&mut c), d[100..].to_vec());
+}
+
+/// `retire` moves the store to the teardown slot; `free_some` empties it a bounded piece at a time.
+#[test]
+fn crypto_retire_then_free() {
+    let mut c = CryptoStream::new();
+    assert_eq!(c.on_crypto(0, &[1; 5000]), Ok(()));
+    assert_eq!(c.on_crypto(6000, &[2; 5000]), Ok(()));
+    c.retire();
+    assert_eq!(c.unread(), 0);
+    assert_eq!(c.start(), 11000);
+    assert_eq!(c.end(), 11000);
+    assert_eq!(c.capacities().0, 0);
+    assert!(c.has_td());
+    let mut n = 0;
+    while c.has_td() {
+        let _ = c.free_some();
+        n += 1;
+    }
+    assert!(n >= 1);
+    assert_eq!(c.capacities(), (0, 0));
+    // Retiring again onto an empty store moves nothing.
+    c.retire();
+    assert!(!c.has_td());
 }
 
 #[test]
@@ -148,5 +190,5 @@ fn crypto_ooo_capacity_bounded() {
         assert_eq!(c.on_crypto(2 + 2 * k, &[1]), Ok(()));
     }
     let slot = std::mem::size_of::<(u64, Vec<u8>)>();
-    assert!(c.capacities().1 <= 2 * 4096 * slot + 4096, "{:?}", c.capacities());
+    assert!(c.capacities().0 <= 2 * 4096 * slot + 4096, "{:?}", c.capacities());
 }

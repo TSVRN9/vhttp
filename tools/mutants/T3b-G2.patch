@@ -1,12 +1,11 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index 84680fd..77fcb4b 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -3392,7 +3392,6 @@ impl Connection {
-         // shortcut: the bytes are copied out and dropped (`read`); a copy-free pop only if this shows up.
-         let mut sink: Vec<u8> = Vec::new();
-         self.crx_i.read(&mut sink);
--        self.crx_h.read(&mut sink);
-         self.crx_1.read(&mut sink);
+@@ -3678,7 +3678,6 @@
+         }
+         // Each store moves to its teardown slot, no byte copied or freed here (`free_teardown`).
+         self.crx_i.retire();
+-        self.crx_h.retire();
+         self.crx_1.retire();
          proof {
-             assert forall|k: PacketKind| #[trigger] crypto_drained(*self, k) by {
+             lemma_backlog3(old(self).crx_i, old(self).crx_h, old(self).crx_1);

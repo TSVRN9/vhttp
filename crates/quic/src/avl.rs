@@ -1290,9 +1290,12 @@ pub fn pop_some<V>(t: &mut Tree<V>, budget: u64) -> (r: Ghost<nat>)
         wf(*final(t)),
         seq(*old(t)).len() > 0 ==> seq(*final(t)).len() < seq(*old(t)).len(),
         seq(*final(t)).len() <= seq(*old(t)).len(),
+        // The smallest entries go: what stays is a suffix.
+        seq(*final(t)) == seq(*old(t)).skip(seq(*old(t)).len() - seq(*final(t)).len()),
         r@ <= budget,
 {
     let ghost n0 = seq(*t).len();
+    let ghost s0 = seq(*t);
     let ghost mut work: nat = 1;
     let h = height(t) as u64;
     proof {
@@ -1310,6 +1313,9 @@ pub fn pop_some<V>(t: &mut Tree<V>, budget: u64) -> (r: Ghost<nat>)
         vstd::arithmetic::mul::lemma_mul_is_commutative(n as int, u as int);
     }
     let mut i: u64 = 0;
+    proof {
+        assert(s0.skip(0) =~= s0);
+    }
     while i < n && t.is_some()
         invariant
             wf(*t),
@@ -1319,6 +1325,8 @@ pub fn pop_some<V>(t: &mut Tree<V>, budget: u64) -> (r: Ghost<nat>)
             1 <= n,
             i <= n,
             seq(*t).len() + i == n0,
+            seq(*t) == s0.skip(i as int),
+            s0.len() == n0,
             work <= 1 + i * u,
         decreases n - i,
     {
@@ -1326,6 +1334,9 @@ pub fn pop_some<V>(t: &mut Tree<V>, budget: u64) -> (r: Ghost<nat>)
         let (t2, _k, _v, Ghost(cp)) = pop_min(t0);
         *t = t2;
         proof {
+            assert(seq(t2) =~= s0.skip(i + 1)) by {
+                assert(seq(t2) =~= seq(t0).skip(1));
+            }
             vstd::arithmetic::mul::lemma_mul_is_distributive_add_other_way(u as int, i as int, 1);
             work = work + cp + 1;
         }

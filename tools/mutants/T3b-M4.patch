@@ -1,8 +1,7 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
-index 37201ae..3f8e0c1 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -1198,13 +1198,6 @@ impl<'a> QuicServer<'a> {
+@@ -1614,13 +1614,6 @@
                  self.conn_spec().out_log() == old(self).conn_spec().out_log(),
                  self.hs == old(self).hs,
                  forall|j: int| 0 <= j < ev.deep_view().len() ==> !spec_send_level(#[trigger] ev.deep_view()[j], Level::OneRtt),

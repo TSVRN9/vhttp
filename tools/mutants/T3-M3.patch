@@ -1,8 +1,7 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index 84680fd..21911ae 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -8571,7 +8571,6 @@ impl Connection {
+@@ -8936,7 +8936,6 @@
              forall|p: nat| #[trigger] self.crypto_received(k, p) ==> p < r,
      {
          proof {

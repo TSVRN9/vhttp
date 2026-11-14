@@ -19,6 +19,7 @@ pub mod avl;
 pub mod cid;
 pub mod codes;
 pub mod conn;
+pub mod crypto_count;
 pub mod crypto_stream;
 pub mod datagram;
 mod export_check;
@@ -45,3 +46,6 @@ pub mod stateless;
 pub mod stream_id;
 pub mod streams;
 pub mod tp;
+
+/// quictls builds its CRYPTO reads in exact buffers through this re-export (no byteq dependency of its own).
+pub use byteq::capvec::CapVec;

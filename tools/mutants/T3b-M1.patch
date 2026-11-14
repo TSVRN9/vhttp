@@ -1,12 +1,11 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index 84680fd..42bf549 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -3425,7 +3425,6 @@ impl Connection {
-             ).crypto_contiguous_spec(level) - old(self).crypto_base_spec(level),
-             old(self).crypto_end_spec(level) <= old(self).crypto_base_spec(level) ==> final(out)@ == old(out)@,
+@@ -3720,7 +3720,6 @@
+             ) ==> crypto_drained(*final(self), level),
+             old(self).crypto_end_spec(level) <= old(self).crypto_base_spec(level) ==> final(out)@.len() == 0,
              // The read hands over exactly the bytes its offset passes; no other level's moves.
 -            final(self).crypto_kept_but(*old(self), Some(level)),
              final(self).peer_tp_known_spec() == old(self).peer_tp_known_spec(),
-             !(old(self).phase_spec() is Open) ==> final(out)@ == old(out)@,
+             !(old(self).phase_spec() is Open) ==> final(out)@.len() == 0,
              final(self).phase_spec() == old(self).phase_spec(),

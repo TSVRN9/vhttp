@@ -110,9 +110,12 @@ fn client_tp() -> Vec<u8> {
     qc::hex("0f08c1c1c1c1c1c1c1c1 0e0104 090103 040480010000 070480004000 050480004000")
 }
 
-fn rustls_client() -> (ClientConnection, Arc<Log>) {
+/// A rustls client offering ALPN `h3` and then `pad` 40-byte dummy protocols (the server picks `h3`): `pad` 41-byte
+/// entries more in its ClientHello. A padded client offers P-256 only, so the server answers without a
+/// HelloRetryRequest and the inflated ClientHello is sent once.
+fn rustls_client(pad: usize) -> (ClientConnection, Arc<Log>) {
     let mut provider = default_provider();
-    provider.kx_groups = vec![kx_group::X25519, kx_group::SECP256R1];
+    provider.kx_groups = if pad == 0 { vec![kx_group::X25519, kx_group::SECP256R1] } else { vec![kx_group::SECP256R1] };
     let algs = provider.signature_verification_algorithms;
     let mut c = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
         .with_protocol_versions(&[&rustls::version::TLS13])
@@ -126,6 +129,9 @@ fn rustls_client() -> (ClientConnection, Arc<Log>) {
     let log = Arc::new(Log::default());
     c.key_log = log.clone();
     c.alpn_protocols = vec![b"h3".to_vec()];
+    for i in 0..pad {
+        c.alpn_protocols.push(format!("dummy-protocol-{i:025}").into_bytes());
+    }
     let name = "localhost".try_into().unwrap();
     (ClientConnection::new(Arc::new(c), Version::V1, name, client_tp()).unwrap(), log)
 }
@@ -200,6 +206,9 @@ fn dup(fs: &[Frame]) -> Vec<Frame> {
         .map(|f| match f {
             Frame::Ping => Frame::Ping,
             Frame::Crypto { offset, data } => Frame::Crypto { offset: *offset, data: data.clone() },
+            Frame::ConnectionClose { app, error_code, frame_type, reason } => {
+                Frame::ConnectionClose { app: *app, error_code: *error_code, frame_type: *frame_type, reason: reason.clone() }
+            },
             Frame::Stream { stream_id, offset, data, fin } => {
                 Frame::Stream { stream_id: *stream_id, offset: *offset, data: data.clone(), fin: *fin }
             },
@@ -218,7 +227,12 @@ impl Client {
     }
 
     pub fn new() -> Client {
-        let (tls, log) = rustls_client();
+        Client::with_alpn_pad(0)
+    }
+
+    /// A client whose ClientHello carries `pad` 40-byte dummy ALPN protocols after `h3`.
+    pub fn with_alpn_pad(pad: usize) -> Client {
+        let (tls, log) = rustls_client(pad);
         let odcid = qc::S1;
         let mut c = Client {
             tls,
@@ -328,6 +342,30 @@ impl Client {
         }
         out.extend(rest);
         out
+    }
+
+    /// The pending ClientHello, taken out of the pending output: the caller puts its bytes in packets itself.
+    pub fn take_ch(&mut self) -> Vec<u8> {
+        let out = std::mem::take(&mut self.out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, Level::Initial);
+        let ch = out[0].1.clone();
+        assert_eq!(self.tx_off[0], 0);
+        self.tx_off[0] = ch.len() as u64;
+        ch
+    }
+
+    /// One padded Initial datagram carrying `ch[a..b]` at offset `a`.
+    pub fn ch_dgram(&mut self, ch: &[u8], a: usize, b: usize) -> Vec<u8> {
+        self.dgram(vec![(Level::Initial, vec![Frame::Crypto { offset: a as u64, data: ch[a..b].to_vec() }])])
+    }
+
+    /// One padded Initial datagram carrying a CONNECTION_CLOSE (NO_ERROR).
+    pub fn close_dgram(&mut self) -> Vec<u8> {
+        self.dgram(vec![(
+            Level::Initial,
+            vec![Frame::ConnectionClose { app: false, error_code: 0, frame_type: 0, reason: vec![] }],
+        )])
     }
 
     /// Everything pending, as one datagram (none when nothing is pending), with `extra_one_rtt`
@@ -691,4 +729,105 @@ fn gapped_handshake_at_one_rtt_pv() {
     pull_server(&mut s, &mut c, &mut log);
     assert!(close_in(&log, PacketKind::Handshake, 0x0a), "{:?}", log);
     assert!(!done(&log));
+}
+
+/// The ClientHello's bytes per datagram in the gap-fill tests: a CRYPTO frame this big fits one padded Initial.
+const CH_PIECE: usize = 1100;
+
+/// A ClientHello of at least 8 KiB (`h3` and 200 dummy ALPN protocols), and its bytes `[from, len)` as padded
+/// Initials of `CH_PIECE` bytes each, in order.
+pub fn big_ch(c: &mut Client, from: usize) -> (Vec<u8>, Vec<Vec<u8>>) {
+    let ch = c.take_ch();
+    assert!(ch.len() >= 8192, "ClientHello {} bytes", ch.len());
+    let mut ds = Vec::new();
+    let mut a = from;
+    while a < ch.len() {
+        let b = (a + CH_PIECE).min(ch.len());
+        ds.push(c.ch_dgram(&ch, a, b));
+        a = b;
+    }
+    (ch, ds)
+}
+
+/// The gap-fill pattern (D13): the ClientHello's bytes `[1, N)` in padded Initials, accepted and received, then the
+/// datagram with `[0, 1)` alone. Returns the server after the first datagrams and that gap datagram, not yet sent.
+pub fn gap_fill(c: &mut Client) -> (QuicServer<'static>, Vec<u8>) {
+    let (ch, ds) = big_ch(c, 1);
+    let mut app = Vec::new();
+    let mut s = QuicServer::accept(cfg(), &ds[0], 0, 0, &R(1), &qc::ltp(), &mut app).expect("accepted");
+    for (j, d) in ds[1..].iter().enumerate() {
+        send(&mut s, d, 2 + j as u8);
+        // Every byte so far is out of order: nothing for TLS, nothing to pump.
+        assert!(!s.has_backlog());
+    }
+    let gap = c.ch_dgram(&ch, 0, 1);
+    (s, gap)
+}
+
+/// The inflated ClientHello is accepted when it arrives in order, one datagram's worth at a time: each datagram's
+/// bytes go to TLS in its own call, so no backlog is left.
+#[test]
+fn big_client_hello_accepted_unsplit() {
+    let mut c = Client::with_alpn_pad(200);
+    let (_, ds) = big_ch(&mut c, 0);
+    let mut app = Vec::new();
+    let mut s = QuicServer::accept(cfg(), &ds[0], 0, 0, &R(1), &qc::ltp(), &mut app).expect("accepted");
+    assert!(!s.has_backlog());
+    for (j, d) in ds[1..].iter().enumerate() {
+        send(&mut s, d, 2 + j as u8);
+        assert!(!s.has_backlog());
+    }
+    let mut log = Vec::new();
+    pull_server(&mut s, &mut c, &mut log);
+    log.extend(run(&mut s, &mut c, 6));
+    assert!(s.conn().handshake_complete());
+    assert_eq!(c.tls.alpn_protocol(), Some(&b"h3"[..]));
+}
+
+/// D13: the 1-byte gap fill makes the whole ClientHello contiguous, but its call hands TLS at most the datagram's
+/// size; `pump_backlog` hands over the rest in at most 4 calls, and the handshake completes with no other datagram.
+#[test]
+fn gap_filled_client_hello_needs_pump() {
+    let mut c = Client::with_alpn_pad(200);
+    let (mut s, gap) = gap_fill(&mut c);
+    send(&mut s, &gap, 40);
+    assert!(s.has_backlog());
+    let mut app = Vec::new();
+    let mut n = 0u8;
+    while s.has_backlog() {
+        assert!(n < 4, "still backlog after {n} pumps");
+        s.pump_backlog(NOW, &R(60 + n), &mut app);
+        n += 1;
+    }
+    let mut log = Vec::new();
+    pull_server(&mut s, &mut c, &mut log);
+    assert!(log.iter().any(|(_, p)| p.iter().any(|(k, _)| *k == PacketKind::Handshake)), "no Handshake flight");
+    log.extend(run(&mut s, &mut c, 6));
+    assert!(s.conn().handshake_complete());
+}
+
+/// Review Focus 3, end to end: the gap fill, then the client's Initial CONNECTION_CLOSE before any pump. TLS is fed
+/// nothing more (its fed counts stay); the unread ClientHello goes to the teardown slot, which keeps `has_backlog`
+/// until `pump_backlog` frees it, within the shell's 32 calls.
+#[test]
+fn closing_with_backlog_frees_slots() {
+    let mut c = Client::with_alpn_pad(200);
+    let (mut s, gap) = gap_fill(&mut c);
+    send(&mut s, &gap, 40);
+    assert!(s.has_backlog());
+    let fed = s.fed_counts();
+    let cc = c.close_dgram();
+    send(&mut s, &cc, 41);
+    assert_ne!(s.conn().phase(), Phase::Open);
+    assert_eq!(s.fed_counts(), fed);
+    assert!(s.has_backlog());
+    let mut app = Vec::new();
+    let mut n = 0u8;
+    while s.has_backlog() {
+        assert!(n < 32, "still backlog after {n} pumps");
+        s.pump_backlog(NOW, &R(60 + n), &mut app);
+        assert_eq!(s.fed_counts(), fed);
+        n += 1;
+    }
+    assert!(!s.conn().teardown_pending());
 }

@@ -4954,6 +4954,20 @@ impl Frags {
         lemma_height(self.t);
     }
 
+    /// Every chunk holds a byte: at most `held` nodes, none when nothing is held.
+    pub proof fn lemma_nodes_le_held(&self)
+        requires
+            self.wf(),
+        ensures
+            self.nodes() <= self.held(),
+            self.held() == 0 <==> self.nodes() == 0,
+    {
+        self.lemma_size();
+        if self.fs().len() == 0 {
+            assert(self.fs() =~= Seq::<(nat, Seq<u8>)>::empty());
+        }
+    }
+
     /// With `[lo, hi)` held, at most `2 + (hi − lo)/K` chunks start there (the follower rule).
     pub proof fn lemma_chunks_in_held(&self, lo: nat, hi: nat)
         requires
@@ -5104,14 +5118,26 @@ impl Frags {
         r
     }
 
-    /// The store's tree, for a teardown slot (`avl::pop_some` frees it).
+    /// The store's tree, for a teardown slot (`avl::pop_some` frees it). Each key is a chunk's start, a position held.
     pub fn into_tree(self) -> (r: Tree<CapVec<u8>>)
         requires
             self.wf(),
         ensures
             crate::avl::wf(r),
             seq(r).len() == self.nodes(),
+            forall|i: int| 0 <= i < seq(r).len() ==> #[trigger] self.view().contains_key(seq(r)[i].0 as nat),
     {
+        proof {
+            let f = self.fs();
+            assert(self.view().dom() =~= pos(f));
+            assert forall|i: int| 0 <= i < seq(self.t).len() implies #[trigger] self.view().contains_key(
+                seq(self.t)[i].0 as nat,
+            ) by {
+                assert(f[i] == (seq(self.t)[i].0 as nat, seq(self.t)[i].1@));
+                assert(inf(f, i, f[i].0));
+                assert(f[i].0 < VARINT_MAX);
+            }
+        }
         self.t
     }
 }

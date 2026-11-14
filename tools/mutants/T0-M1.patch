@@ -1,8 +1,7 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index 84680fd..37b3d0a 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -6780,8 +6780,6 @@ impl Connection {
+@@ -7145,8 +7145,6 @@
              c2.tx_timers(s0, now),
              *self == (Connection { idle: self.idle, ..c2 }),
              self.idle.last == c2.idle.last || self.idle.last == now,

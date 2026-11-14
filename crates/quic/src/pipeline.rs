@@ -10,6 +10,8 @@ use vstd::prelude::*;
 use crate::aead::*;
 use crate::cid::{eq_bytes, LOCAL_CID_LEN};
 use crate::conn::*;
+#[allow(unused_imports)]
+use crate::crypto_count::*;
 use crate::datagram::*;
 use crate::header::*;
 use crate::lifecycle::Phase;
@@ -139,6 +141,9 @@ pub fn accept_datagram(
         r matches Some(c) ==> !c.peer_tp_known_spec(),
         r matches Some(c) ==> (c.phase_spec() is Open && c.live(PacketKind::Initial) ==> c.crypto_base_spec(PacketKind::Initial) == 0),
         r matches Some(c) ==> (c.phase_spec() is Open && c.live(PacketKind::Handshake) ==> c.crypto_base_spec(PacketKind::Handshake) == 0),
+        // The CRYPTO positions held come from `d`'s packets: at most `d.len()`, and the datagram fits a UDP payload.
+        r matches Some(c) ==> d.len() <= MAX_UDP_PAYLOAD && c.crypto_backlog() <= d.len() && forall|k: PacketKind| #[trigger]
+            c.crypto_held(k) <= d.len(),
 {
     hide(rfc_open_datagram);
     let dcid = match initial_dcid(d) {
@@ -146,6 +151,9 @@ pub fn accept_datagram(
         None => return None,
     };
     let rx = open_first(d, keys);
+    proof {
+        lemma_open_datagram_crypto(d@, rx_keys(keys.deep_view(), false), seq![None, None, None]);
+    }
     let p = if rx.packets.len() > 0 {
         &rx.packets[0]
     } else {
@@ -165,9 +173,11 @@ pub fn accept_datagram(
         assert(c.odcid_spec() == dcid@);
     }
     let ghost c0 = c;
+    let ghost g = plains_crypto(plains_view(rx.packets@));
     c.on_datagram(path, d.len(), rx.packets, rx.error, now, rand);
     proof {
-        Connection::lemma_crypto_kept_elim(c, c0);
+        Connection::lemma_crypto_kept_g_elim(c, c0, g);
+        Connection::lemma_held_le_backlog(c0);
     }
     Some(c)
 }
@@ -196,15 +206,40 @@ pub fn receive(
         // §8.1: counted on a known path, whatever decrypted.
         old(c).has_path(path) && !(old(c).phase_spec() is Draining) && !(old(c).phase_spec() is Closed)
             ==> recv_counted(old(c).amp_trace(path), final(c).amp_trace(path), d.len() as nat),
-        final(c).crypto_kept(*old(c)),
+        // The CRYPTO positions held grow by at most `d.len()`: none past a UDP payload (no packet opens), none
+        // unless open.
+        final(c).crypto_kept_g(*old(c), d.len() as nat),
+        d.len() > MAX_UDP_PAYLOAD ==> final(c).crypto_kept(*old(c)),
+        !(old(c).phase_spec() is Open) ==> final(c).crypto_kept(*old(c)),
 {
     hide(rfc_open_datagram);
     let rx = open_for(c, d, keys);
+    let ghost g = plains_crypto(plains_view(rx.packets@));
+    proof {
+        lemma_open_datagram_crypto(
+            d@,
+            rx_keys(keys.deep_view(), c.live(PacketKind::OneRtt)),
+            seq![
+                c.recv(PacketKind::Initial).largest_spec(),
+                c.recv(PacketKind::Handshake).largest_spec(),
+                c.recv(PacketKind::OneRtt).largest_spec(),
+            ],
+        );
+    }
     c.on_datagram(path, d.len(), rx.packets, rx.error, now, rand);
+    let ghost c1 = *c;
+    proof {
+        Connection::lemma_crypto_kept_refl(c1);
+    }
     if let Some(tail) = rx.reset_tail {
-        let ghost c1 = *c;
         c.on_reset_candidate(&tail, now);
-        proof {
+    }
+    proof {
+        Connection::lemma_crypto_kept_g_zero(*c, c1);
+        Connection::lemma_crypto_kept_g_zero(c1, *old(c));
+        Connection::lemma_crypto_kept_g_trans(*old(c), c1, *c, g, 0);
+        Connection::lemma_crypto_kept_g_mono(*c, *old(c), g, d.len() as nat);
+        if !(old(c).phase_spec() is Open) || d.len() > MAX_UDP_PAYLOAD {
             Connection::lemma_crypto_kept_trans(*old(c), c1, *c);
         }
     }
@@ -264,11 +299,14 @@ pub fn refeed_one_rtt(
         final(c).out_log() == old(c).out_log(),
         !old(c).live(PacketKind::OneRtt) ==> *final(c) == *old(c),
         !(old(c).phase_spec() is Open) ==> *final(c) == *old(c),
-        final(c).crypto_kept(*old(c)),
+        // As `receive`: at most `d.len()` CRYPTO positions more, none past a UDP payload.
+        final(c).crypto_kept_g(*old(c), d.len() as nat),
+        d.len() > MAX_UDP_PAYLOAD ==> final(c).crypto_kept(*old(c)),
 {
     hide(rfc_open_datagram);
     proof {
         Connection::lemma_crypto_kept_refl(*c);
+        Connection::lemma_crypto_kept_g_refl(*c, d.len() as nat);
     }
     if !c.handshake_complete() {
         return;
@@ -284,9 +322,27 @@ pub fn refeed_one_rtt(
         Some(Header::UnsupportedVersion { dcid, .. }) => dcid,
         None => return,
     };
-    let rx = open_for(c, d, &[None, None, keys[2]]);
+    let k1 = [None, None, keys[2]];
+    let rx = open_for(c, d, &k1);
+    let ghost g = plains_crypto(plains_view(rx.packets@));
+    proof {
+        lemma_open_datagram_crypto(
+            d@,
+            rx_keys(k1.deep_view(), c.live(PacketKind::OneRtt)),
+            seq![
+                c.recv(PacketKind::Initial).largest_spec(),
+                c.recv(PacketKind::Handshake).largest_spec(),
+                c.recv(PacketKind::OneRtt).largest_spec(),
+            ],
+        );
+    }
     if all_to(&rx, first.as_slice()) {
+        let ghost c0 = *c;
         c.on_datagram(path, 0, rx.packets, rx.error, now, rand);
+        proof {
+            Connection::lemma_crypto_kept_g_mono(*c, c0, g, d.len() as nat);
+            Connection::lemma_crypto_kept_g_zero(*c, c0);
+        }
     }
 }
 

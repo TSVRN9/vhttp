@@ -27,7 +27,10 @@ use crate::ack::*;
 use crate::ack_track::*;
 use crate::cid::*;
 use crate::codes::*;
+use byteq::capvec::CapVec;
 use crate::crypto_stream::*;
+#[allow(unused_imports)]
+use crate::crypto_count::*;
 use crate::datagram::*;
 use crate::frame::*;
 use crate::handshake::*;
@@ -55,6 +58,9 @@ verus! {
 pub const RAND_LEN: usize = 129;
 
 pub const H3_ALPN: [u8; 2] = *b"h3";
+
+/// The work one `pump_backlog` spends per kind of backlog: CRYPTO bytes handed to TLS, teardown-slot frees.
+pub const B_PUMP: u64 = 4096;
 
 pub open spec fn space_idx(k: PacketKind) -> int {
     match k {
@@ -291,6 +297,26 @@ impl Connection {
         }
     }
 
+    /// The positions level `k` holds: unread in-order and out-of-order CRYPTO bytes.
+    pub closed spec fn crypto_held(&self, k: PacketKind) -> nat {
+        self.crx_spec(k).held_spec()
+    }
+
+    /// The nodes in level `k`'s teardown slot.
+    pub closed spec fn crypto_td(&self, k: PacketKind) -> nat {
+        self.crx_spec(k).td_nodes()
+    }
+
+    /// The positions held and the teardown slots' nodes, over the three levels: what `pump_backlog` works off.
+    pub closed spec fn crypto_backlog(&self) -> nat {
+        backlog3(self.crx_i, self.crx_h, self.crx_1)
+    }
+
+    /// The nodes in the three teardown slots.
+    pub closed spec fn crypto_td_total(&self) -> nat {
+        self.crx_i.td_nodes() + self.crx_h.td_nodes() + self.crx_1.td_nodes()
+    }
+
     /// The end of level `k`'s in-order CRYPTO data (`crypto_contiguous`).
     pub closed spec fn crypto_contiguous_spec(&self, k: PacketKind) -> nat {
         match k {
@@ -319,7 +345,13 @@ impl Connection {
     /// handshake's completion been undone. Nor have the peer's transport parameters appeared:
     /// only `on_peer_params` sets them (it ensures `crypto_kept_base`).
     pub closed spec fn crypto_kept(&self, o: Connection) -> bool {
-        &&& self.crypto_kept_base(o)
+        self.crypto_kept_g(o, 0)
+    }
+
+    /// `crypto_kept`, but the positions held may grow by `g` at each level and in all (a datagram's CRYPTO
+    /// frames, `g` their bytes).
+    pub closed spec fn crypto_kept_g(&self, o: Connection, g: nat) -> bool {
+        &&& self.crypto_kept_bg(o, None, g)
         &&& self.peer_tp is Some ==> o.peer_tp is Some
     }
 
@@ -333,6 +365,16 @@ impl Connection {
     /// not undone, the connection does not reopen, no space comes back, and while open the read
     /// offset of a live Initial or Handshake space other than `skip` stays where it was.
     pub closed spec fn crypto_kept_but(&self, o: Connection, skip: Option<PacketKind>) -> bool {
+        self.crypto_kept_bg(o, skip, 0)
+    }
+
+    /// `crypto_kept_but`, the positions held growing by at most `g` at each level, and the positions held plus
+    /// the teardown slots' nodes by at most `g` in all.
+    pub closed spec fn crypto_kept_bg(&self, o: Connection, skip: Option<PacketKind>, g: nat) -> bool {
+        &&& self.crx_i.held_spec() <= o.crx_i.held_spec() + g
+        &&& self.crx_h.held_spec() <= o.crx_h.held_spec() + g
+        &&& self.crx_1.held_spec() <= o.crx_1.held_spec() + g
+        &&& self.crypto_backlog() <= o.crypto_backlog() + g
         &&& self.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial)
         &&& self.crypto_end_spec(PacketKind::Initial) >= o.crypto_end_spec(PacketKind::Initial)
         &&& o.complete ==> self.complete
@@ -388,6 +430,112 @@ impl Connection {
     {
     }
 
+    /// `crypto_kept` is `crypto_kept_g` with no growth.
+    pub proof fn lemma_crypto_kept_g_zero(c: Connection, o: Connection)
+        ensures
+            c.crypto_kept_g(o, 0) == c.crypto_kept(o),
+    {
+    }
+
+    pub proof fn lemma_crypto_kept_g_refl(c: Connection, g: nat)
+        ensures
+            c.crypto_kept_g(c, g),
+    {
+    }
+
+    /// `crypto_kept_g` composes, the growths adding up.
+    pub proof fn lemma_crypto_kept_g_trans(a: Connection, b: Connection, c: Connection, g1: nat, g2: nat)
+        requires
+            b.crypto_kept_g(a, g1),
+            c.crypto_kept_g(b, g2),
+        ensures
+            c.crypto_kept_g(a, g1 + g2),
+    {
+    }
+
+    /// `crypto_kept_g` for a larger growth.
+    pub proof fn lemma_crypto_kept_g_mono(c: Connection, o: Connection, g1: nat, g2: nat)
+        requires
+            c.crypto_kept_g(o, g1),
+            g1 <= g2,
+        ensures
+            c.crypto_kept_g(o, g2),
+    {
+    }
+
+    /// `CryptoStream::wf`'s memory bound per level: the read offset is at most the contiguous end, and a level holds
+    /// at most `MAX_CRYPTO_BUFFER` positions past its unread in-order bytes, so a drained one at most that.
+    pub proof fn lemma_held_facts(c: Connection)
+        requires
+            c.wf(),
+        ensures
+            forall|k: PacketKind| #[trigger] c.crypto_base_spec(k) <= c.crypto_contiguous_spec(k),
+            forall|k: PacketKind|
+                #[trigger] c.crypto_held(k) <= c.crypto_contiguous_spec(k) - c.crypto_base_spec(k) + MAX_CRYPTO_BUFFER,
+            forall|k: PacketKind| crypto_drained(c, k) ==> #[trigger] c.crypto_held(k) <= MAX_CRYPTO_BUFFER,
+    {
+        reveal(crx_ok);
+        c.crx_i.lemma_wf();
+        c.crx_h.lemma_wf();
+        c.crx_1.lemma_wf();
+        assert forall|k: PacketKind| #[trigger] c.crypto_held(k) <= c.crypto_contiguous_spec(k) - c.crypto_base_spec(k)
+            + MAX_CRYPTO_BUFFER by {
+            match k {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
+        assert forall|k: PacketKind| #[trigger] c.crypto_base_spec(k) <= c.crypto_contiguous_spec(k) by {
+            match k {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
+    }
+
+    /// The positions held and the slots' nodes, level by level.
+    pub proof fn lemma_backlog_split(c: Connection)
+        ensures
+            c.crypto_backlog() == c.crypto_held(PacketKind::Initial) + c.crypto_held(PacketKind::Handshake)
+                + c.crypto_held(PacketKind::OneRtt) + c.crypto_td_total(),
+    {
+        lemma_backlog3(c.crx_i, c.crx_h, c.crx_1);
+    }
+
+    /// Each level holds at most what the levels hold with their slots.
+    pub proof fn lemma_held_le_backlog(c: Connection)
+        ensures
+            forall|k: PacketKind| #[trigger] c.crypto_held(k) <= c.crypto_backlog(),
+    {
+        lemma_backlog3(c.crx_i, c.crx_h, c.crx_1);
+    }
+
+    /// What `crypto_kept_g` says, in terms quictls can read: `crypto_kept_elim`'s frame, the positions held
+    /// growing by at most `g` at each level and, with the teardown slots, in all.
+    pub proof fn lemma_crypto_kept_g_elim(c: Connection, o: Connection, g: nat)
+        requires
+            c.crypto_kept_g(o, g),
+        ensures
+            forall|k: PacketKind| #[trigger] c.crypto_held(k) <= o.crypto_held(k) + g,
+            c.crypto_backlog() <= o.crypto_backlog() + g,
+            c.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial),
+            o.live(PacketKind::OneRtt) ==> c.live(PacketKind::OneRtt),
+            c.peer_tp_known_spec() ==> o.peer_tp_known_spec(),
+            forall|p: nat| #[trigger] o.crypto_received(PacketKind::Initial, p) ==> c.crypto_received(PacketKind::Initial, p),
+            c.crypto_end_spec(PacketKind::Initial) >= o.crypto_end_spec(PacketKind::Initial),
+            c.phase_spec() is Open ==> o.phase_spec() is Open,
+            c.live(PacketKind::Initial) ==> o.live(PacketKind::Initial),
+            c.live(PacketKind::Handshake) ==> o.live(PacketKind::Handshake),
+            c.phase_spec() is Open && c.live(PacketKind::Initial) ==> c.crypto_base_spec(PacketKind::Initial) == o.crypto_base_spec(
+                PacketKind::Initial,
+            ),
+            c.phase_spec() is Open && c.live(PacketKind::Handshake) ==> c.crypto_base_spec(PacketKind::Handshake)
+                == o.crypto_base_spec(PacketKind::Handshake),
+    {
+    }
+
     pub proof fn lemma_crypto_kept_to_base(c: Connection, o: Connection)
         requires
             c.crypto_kept(o),
@@ -400,6 +548,8 @@ impl Connection {
         requires
             c.crypto_kept_base(o),
         ensures
+            forall|k: PacketKind| #[trigger] c.crypto_held(k) <= o.crypto_held(k),
+            c.crypto_backlog() <= o.crypto_backlog(),
             c.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial),
             o.live(PacketKind::OneRtt) ==> c.live(PacketKind::OneRtt),
             forall|p: nat| #[trigger] o.crypto_received(PacketKind::Initial, p) ==> c.crypto_received(PacketKind::Initial, p),
@@ -420,6 +570,8 @@ impl Connection {
         requires
             c.crypto_kept_but(o, skip),
         ensures
+            forall|k: PacketKind| #[trigger] c.crypto_held(k) <= o.crypto_held(k),
+            c.crypto_backlog() <= o.crypto_backlog(),
             c.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial),
             c.crypto_end_spec(PacketKind::Initial) >= o.crypto_end_spec(PacketKind::Initial),
             o.live(PacketKind::OneRtt) ==> c.live(PacketKind::OneRtt),
@@ -440,6 +592,8 @@ impl Connection {
         requires
             c.crypto_kept(o),
         ensures
+            forall|k: PacketKind| #[trigger] c.crypto_held(k) <= o.crypto_held(k),
+            c.crypto_backlog() <= o.crypto_backlog(),
             c.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial),
             o.live(PacketKind::OneRtt) ==> c.live(PacketKind::OneRtt),
             c.peer_tp_known_spec() ==> o.peer_tp_known_spec(),
@@ -644,6 +798,7 @@ impl Connection {
             // No transport parameters yet: TLS delivers them later (`on_peer_params`).
             r matches Some(c) ==> !c.peer_tp_known_spec(),
             r matches Some(c) ==> c.crypto_base_spec(PacketKind::Initial) == 0 && c.crypto_base_spec(PacketKind::Handshake) == 0,
+            r matches Some(c) ==> c.crypto_backlog() == 0,
     {
         if datagram_len < MIN_INITIAL_DATAGRAM || !is_local_tp_ok(local_tp) {
             return None;
@@ -724,6 +879,7 @@ impl Connection {
                 reveal(crx_ok);
                 assert(c.cid_updates@.len() == 2);
             }
+            lemma_backlog3(c.crx_i, c.crx_h, c.crx_1);
             assert(c.wf_amp());
             assert(c.wf_dcids());
         }
@@ -737,12 +893,22 @@ impl Connection {
     /// What every frame helper leaves alone: `recv_*` carries `gate_packet`'s duplicate check to
     /// `RecvPns::on_packet`, and is P10's frame.
     closed spec fn frames_kept(&self, o: Connection) -> bool {
-        &&& self.rx_kept(o)
+        self.frames_kept_g(o, 0)
+    }
+
+    /// `frames_kept`, the CRYPTO positions held growing by at most `g` (`crypto_kept_g`).
+    closed spec fn frames_kept_g(&self, o: Connection, g: nat) -> bool {
+        &&& self.rx_kept_g(o, g)
         &&& self.paths.ids() == o.paths.ids()
     }
 
     /// `frames_kept` less `paths.ids()`: also what admitting a new path leaves alone.
     closed spec fn rx_kept(&self, o: Connection) -> bool {
+        self.rx_kept_g(o, 0)
+    }
+
+    /// `rx_kept`, the CRYPTO positions held growing by at most `g`.
+    closed spec fn rx_kept_g(&self, o: Connection, g: nat) -> bool {
         &&& self.out_log@ == o.out_log@
         &&& self.recv_i == o.recv_i
         &&& self.recv_h == o.recv_h
@@ -750,7 +916,27 @@ impl Connection {
         &&& self.live_i == o.live_i
         &&& self.live_h == o.live_h
         &&& self.complete == o.complete
-        &&& self.crypto_kept(o)
+        &&& self.crypto_kept_g(o, g)
+    }
+
+    /// `frames_kept_g` composes, the growths adding up.
+    proof fn lemma_frames_kept_g_trans(a: Connection, b: Connection, c: Connection, g1: nat, g2: nat)
+        requires
+            b.frames_kept_g(a, g1),
+            c.frames_kept_g(b, g2),
+        ensures
+            c.frames_kept_g(a, g1 + g2),
+    {
+    }
+
+    /// `frames_kept_g` for a larger growth.
+    proof fn lemma_frames_kept_g_mono(c: Connection, o: Connection, g1: nat, g2: nat)
+        requires
+            c.frames_kept_g(o, g1),
+            g1 <= g2,
+        ensures
+            c.frames_kept_g(o, g2),
+    {
     }
 
     /// What `gate_packet` accepts. Biconditional, so what is absent is proved absent: no size rule
@@ -813,7 +999,9 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
-            final(self).crypto_kept(*old(self)),
+            // The positions held grow by at most the CRYPTO bytes of the packets, and not at all unless open.
+            final(self).crypto_kept_g(*old(self), plains_crypto(crate::protect::plains_view(packets@))),
+            !(old(self).phase_spec() is Open) ==> final(self).crypto_kept(*old(self)),
             // §8.1: a datagram on a known path is counted, and nothing after undoes the count.
             old(self).has_path(path) && !(old(self).phase_spec() is Draining) && !(old(
                 self,
@@ -845,8 +1033,13 @@ impl Connection {
             self.count_recv(path, datagram_len as u64);
         }
         let ghost sc = *self;
+        let ghost g = plains_crypto(crate::protect::plains_view(packets@));
         self.on_counted(path, datagram_len, known, packets, error, rand);
         proof {
+            Connection::lemma_crypto_kept_g_trans(*old(self), sc, *self, 0, g);
+            if !(old(self).phase_spec() is Open) {
+                Connection::lemma_crypto_kept_trans(*old(self), sc, *self);
+            }
             reveal(recv_counted);
             if known {
                 let t0 = old(self).paths.amp_trace(path);
@@ -879,13 +1072,15 @@ impl Connection {
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
             final(self).amp_grew(*old(self)),
-            final(self).crypto_kept(*old(self)),
+            final(self).crypto_kept_g(*old(self), plains_crypto(crate::protect::plains_view(packets@))),
+            !(old(self).phase_spec() is Open) ==> final(self).crypto_kept(*old(self)),
             packets@.len() == 0 && old(self).phase_spec() is Open ==> (error matches Some((_, h)) && old(
                 self,
             ).gate_spec(path, datagram_len, &h) && old(self).paths.has(path) ==> final(self).phase_spec() is Closing),
             packets@.len() == 0 && old(self).phase_spec() is Open ==> (!(error matches Some((_, h))
                 && old(self).gate_spec(path, datagram_len, &h)) ==> *final(self) == *old(self)),
     {
+        let ghost g = plains_crypto(crate::protect::plains_view(packets@));
         let mut known = known;
         proof {
             self.lemma_grew_same(*self);
@@ -922,65 +1117,51 @@ impl Connection {
         //# them, as if they were received as the payload of different UDP
         //# datagrams.
         if packets.len() > 0 {
+            let ghost ps = packets@;
+            proof {
+                assert(crate::protect::plains_view(ps).take(0) =~= Seq::<SpecPlain>::empty());
+            }
             for p in it: packets
                 invariant
+                    it.seq() == ps,
+                    g == plains_crypto(crate::protect::plains_view(ps)),
                     self.wf(),
                     self.out_log() == old(self).out_log(),
                     known == self.paths.has(path),
                     self.phase_spec() is Open,
                     self.amp_grew(s1),
-                    self.crypto_kept(s1),
+                    self.crypto_kept_g(s1, plains_crypto(crate::protect::plains_view(ps).take(it.index() as int))),
                     s1 == *old(self),
                     forall|j: int| 0 <= j < it.seq().len() ==> plain_wf(#[trigger] it.seq()[j]@),
             {
+                let ghost i = it.index() as int;
+                let ghost b = *self;
+                let ghost pv = p@;
                 proof {
                     assert(it.seq()[it.index()] == p);
                     assert(plain_wf(it.seq()[it.index()]@));
+                    assert(crate::protect::plains_view(ps)[i] == p@);
+                    lemma_plains_crypto_take(crate::protect::plains_view(ps), i);
+                    lemma_plains_crypto_take(crate::protect::plains_view(ps), i + 1);
                 }
-                // §12.2: a packet with another DCID is ignored.
-                if eq_bytes(p.dcid.as_slice(), first.as_slice()) && self.gate_packet(path, datagram_len, &p) {
-                    if !known {
-                        let ghost b0 = *self;
-                        // §9: at `MAX_PATHS` the datagram is dropped uncounted.
-                        let ok = self.ensure_path(path);
-                        proof {
-                            self.lemma_grew_trans(b0, s1);
-                        }
-                        if !ok {
-                            return;
-                        }
-                        let ghost b1 = *self;
-                        // §8.1: the whole datagram, including packets the gate already dropped.
-                        self.count_recv(path, datagram_len as u64);
-                        proof {
-                            self.lemma_grew_trans(b1, s1);
-                        }
-                        known = true;
-                    }
-                    let ghost b2 = *self;
-                    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2
-                    //# An
-                    //# endpoint MUST generate a connection error if processing the contents
-                    //# of these packets prior to discovering an error, or fully revert any
-                    //# changes made during that processing.
-                    let r = self.on_packet(path, p, now, rand);
-                    proof {
-                        self.lemma_grew_trans(b2, s1);
-                    }
-                    if let Err(c) = r {
-                        let ghost b3 = *self;
-                        self.close_internal(c);
-                        proof {
-                            self.lemma_grew_same(b3);
-                            self.lemma_grew_trans(b3, s1);
-                        }
-                        return;
-                    }
-                    // CONNECTION_CLOSE, or a closed connection.
-                    if !matches!(self.lc.phase(), Phase::Open) {
-                        return;
-                    }
+                let r = self.on_counted_one(path, datagram_len, known, first.as_slice(), p, now, rand);
+                proof {
+                    self.lemma_grew_trans(b, s1);
+                    Connection::lemma_crypto_kept_g_trans(s1, b, *self, plains_crypto(crate::protect::plains_view(ps).take(i)), frames_crypto(pv.frames));
+                    Connection::lemma_crypto_kept_g_mono(*self, s1, plains_crypto(crate::protect::plains_view(ps).take(i + 1)), g);
                 }
+                match r {
+                    Some(kn) => known = kn,
+                    None => return ,
+                }
+            }
+            proof {
+                assert(crate::protect::plains_view(ps).take(ps.len() as int) =~= crate::protect::plains_view(ps));
+            }
+        }
+        proof {
+            if np == 0 {
+                Connection::lemma_crypto_kept_g_refl(*self, g);
             }
         }
         if let Some((code, h)) = error {
@@ -993,8 +1174,88 @@ impl Connection {
             self.close_on_error(path, datagram_len, first.as_slice(), known, code, &h);
             proof {
                 self.lemma_grew_trans(b4, s1);
+                Connection::lemma_crypto_kept_g_trans(s1, b4, *self, g, 0);
             }
         }
+    }
+
+    /// One packet of `on_counted`'s datagram (split from it for the rlimit): §12.2's DCID check and the gate, the
+    /// path admitted if new, then the packet. `None` when the datagram stops here: a full path table, a
+    /// connection error (closed), or a connection no longer open; else `Some` of whether `path` is known.
+    #[verifier::spinoff_prover]
+    fn on_counted_one(
+        &mut self,
+        path: PathId,
+        datagram_len: usize,
+        known: bool,
+        first: &[u8],
+        p: PlainPacket,
+        now: u64,
+        rand: &[u8; RAND_LEN],
+    ) -> (r: Option<bool>)
+        requires
+            old(self).wf(),
+            old(self).phase_spec() is Open,
+            known == old(self).paths.has(path),
+            plain_wf(p@),
+        ensures
+            final(self).wf(),
+            final(self).out_log() == old(self).out_log(),
+            final(self).amp_grew(*old(self)),
+            final(self).crypto_kept_g(*old(self), frames_crypto(p@.frames)),
+            r matches Some(kn) ==> final(self).phase_spec() is Open && kn == final(self).paths.has(path),
+    {
+        let ghost g = frames_crypto(p@.frames);
+        proof {
+            self.lemma_grew_same(*self);
+        }
+        // §12.2: a packet with another DCID is ignored.
+        if eq_bytes(p.dcid.as_slice(), first) && self.gate_packet(path, datagram_len, &p) {
+            let mut known = known;
+            if !known {
+                let ghost b0 = *self;
+                // §9: at `MAX_PATHS` the datagram is dropped uncounted.
+                let ok = self.ensure_path(path);
+                if !ok {
+                    return None;
+                }
+                let ghost b1 = *self;
+                // §8.1: the whole datagram, including packets the gate already dropped.
+                self.count_recv(path, datagram_len as u64);
+                proof {
+                    self.lemma_grew_trans(b1, b0);
+                    Connection::lemma_crypto_kept_trans(b0, b1, *self);
+                }
+                known = true;
+            }
+            let ghost b2 = *self;
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2
+            //# An
+            //# endpoint MUST generate a connection error if processing the contents
+            //# of these packets prior to discovering an error, or fully revert any
+            //# changes made during that processing.
+            let r = self.on_packet(path, p, now, rand);
+            proof {
+                self.lemma_grew_trans(b2, *old(self));
+                Connection::lemma_crypto_kept_g_trans(*old(self), b2, *self, 0, g);
+            }
+            if let Err(c) = r {
+                let ghost b3 = *self;
+                self.close_internal(c);
+                proof {
+                    self.lemma_grew_same(b3);
+                    self.lemma_grew_trans(b3, *old(self));
+                    Connection::lemma_crypto_kept_g_trans(*old(self), b3, *self, g, 0);
+                }
+                return None;
+            }
+            // CONNECTION_CLOSE, or a closed connection.
+            if !matches!(self.lc.phase(), Phase::Open) {
+                return None;
+            }
+            return Some(known);
+        }
+        Some(known)
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-14
@@ -1353,8 +1614,9 @@ impl Connection {
             r is Err ==> final(self).recv(p.kind).seen() == old(self).recv(p.kind).seen(),
             r is Ok && final(self).phase_spec() is Open ==> final(self).paths.path(path).peer_used
                 == Some(p.dcid@),
-            final(self).crypto_kept(*old(self)),
+            final(self).crypto_kept_g(*old(self), frames_crypto(p@.frames)),
     {
+        let ghost g = frames_crypto(p@.frames);
         let k = p.kind;
         let pn = p.pn;
         let dcid = p.dcid;
@@ -1362,6 +1624,7 @@ impl Connection {
         let eliciting = is_ack_eliciting(frames.as_slice());
         let non_probing = has_non_probing(frames.as_slice());
         let f = self.on_frames(k, path, dcid.as_slice(), frames, now, rand);
+        let ghost s1 = *self;
         if f.is_err() {
             return f;
         }
@@ -1385,6 +1648,9 @@ impl Connection {
                 self.after_one_rtt(path, non_probing, pn, now, rand);
             },
             PacketKind::Initial => {},
+        }
+        proof {
+            Connection::lemma_crypto_kept_g_trans(*old(self), s1, *self, g, 0);
         }
         Ok(())
     }
@@ -1412,15 +1678,18 @@ impl Connection {
         ensures
             final(self).amp_grew(*old(self)),
             final(self).wf(),
-            final(self).frames_kept(*old(self)),
+            final(self).frames_kept_g(*old(self), frames_crypto(frames_view(frames@))),
             r matches Err(c) ==> c <= VARINT_MAX,
     {
         let ghost fs = frames@;
+        proof {
+            assert(frames_view(fs).take(0) =~= Seq::<SpecFrame>::empty());
+        }
         for f in it: frames
             invariant
                 self.amp_grew(*old(self)),
                 self.wf(),
-                self.frames_kept(*old(self)),
+                self.frames_kept_g(*old(self), frames_crypto(frames_view(fs).take(it.index() as int))),
                 self.phase_spec() is Open,
                 self.paths.has(path),
                 it.seq() == fs,
@@ -1429,18 +1698,28 @@ impl Connection {
                 k is OneRtt ==> self.complete,
                 self.live(k),
         {
+            let ghost i = it.index() as int;
+            let ghost s0 = *self;
             proof {
-                let i = it.index();
                 assert(fs[i] == f);
                 assert(frames_view(fs)[i] == f@);
+                lemma_frames_crypto_take(frames_view(fs), i);
+                lemma_frames_crypto_take(frames_view(fs), i + 1);
             }
             let r = self.on_frame(k, path, dcid, &f, now, rand);
+            proof {
+                Connection::lemma_frames_kept_g_trans(*old(self), s0, *self, frames_crypto(frames_view(fs).take(i)), frame_crypto(f@));
+                Connection::lemma_frames_kept_g_mono(*self, *old(self), frames_crypto(frames_view(fs).take(i + 1)), frames_crypto(frames_view(fs)));
+            }
             if r.is_err() {
                 return r;
             }
             if !matches!(self.lc.phase(), Phase::Open) {
                 return Ok(());
             }
+        }
+        proof {
+            assert(frames_view(fs).take(fs.len() as int) =~= frames_view(fs));
         }
         Ok(())
     }
@@ -1469,7 +1748,7 @@ impl Connection {
         ensures
             final(self).amp_grew(*old(self)),
             final(self).wf(),
-            final(self).frames_kept(*old(self)),
+            final(self).frames_kept_g(*old(self), frame_crypto(f@)),
             r matches Err(c) ==> c <= VARINT_MAX,
     {
         // The stream family reaches only 1-RTT, so `wf`'s `complete` clause gives `streams`.
@@ -1606,7 +1885,7 @@ impl Connection {
         ensures
             final(self).paths == old(self).paths,
             final(self).wf(),
-            final(self).frames_kept(*old(self)),
+            final(self).frames_kept_g(*old(self), data@.len()),
             r matches Err(c) ==> c <= VARINT_MAX,
             r matches Err(c) ==> c == CRYPTO_BUFFER_EXCEEDED && crypto_allowed_err(
                 old(self).crx_spec(k),
@@ -1635,6 +1914,10 @@ impl Connection {
             PacketKind::Handshake => self.crx_h.on_crypto(offset, data),
             PacketKind::OneRtt => self.crx_1.on_crypto(offset, data),
         };
+        proof {
+            lemma_backlog3(old(self).crx_i, old(self).crx_h, old(self).crx_1);
+            lemma_backlog3(self.crx_i, self.crx_h, self.crx_1);
+        }
         if let Err(c) = r {
             let none: Vec<u8> = Vec::new();
             proof {
@@ -3229,8 +3512,9 @@ impl Connection {
                 }
                 self.live_i = false;
                 self.sent_i.drain_inflight(&mut lost);
-                // Restarted empty at its end, which the glue still checks (RFC 9001 §4.1.3).
-                self.crx_i.restart();
+                // Retired at its end, which the glue still checks (RFC 9001 §4.1.3); the store goes to
+                // the teardown slot, freed by `free_teardown`.
+                self.crx_i.retire();
                 self.ctx_i = SendStream::new(VARINT_MAX);
                 self.recv_i = RecvPns::new(k);
                 self.cid_updates.push(CidUpdate::Remove(slice_to_vec(self.ids.odcid())));
@@ -3241,7 +3525,7 @@ impl Connection {
                 }
                 self.live_h = false;
                 self.sent_h.drain_inflight(&mut lost);
-                self.crx_h = CryptoStream::new();
+                self.crx_h.retire();
                 self.ctx_h = SendStream::new(VARINT_MAX);
                 self.recv_h = RecvPns::new(k);
             },
@@ -3250,6 +3534,8 @@ impl Connection {
         self.recovery.on_space_discarded(k);
         proof {
             assert(cids_only(self.cid_updates@));
+            lemma_backlog3(old(self).crx_i, old(self).crx_h, old(self).crx_1);
+            lemma_backlog3(self.crx_i, self.crx_h, self.crx_1);
         }
     }
 
@@ -3380,6 +3666,7 @@ impl Connection {
             forall|k: PacketKind, p: nat| #[trigger] final(self).crypto_received(k, p) == old(self).crypto_received(k, p),
             final(self).crypto_kept(*old(self)),
             crypto_all_drained(*final(self)),
+            forall|k: PacketKind| #[trigger] final(self).crypto_held(k) == 0,
     {
         hide(crate::reassembly::rfc_received);
         hide(crate::reassembly::rfc_contiguous);
@@ -3389,12 +3676,13 @@ impl Connection {
             self.crx_h.lemma_wf();
             self.crx_1.lemma_wf();
         }
-        // shortcut: the bytes are copied out and dropped (`read`); a copy-free pop only if this shows up.
-        let mut sink: Vec<u8> = Vec::new();
-        self.crx_i.read(&mut sink);
-        self.crx_h.read(&mut sink);
-        self.crx_1.read(&mut sink);
+        // Each store moves to its teardown slot, no byte copied or freed here (`free_teardown`).
+        self.crx_i.retire();
+        self.crx_h.retire();
+        self.crx_1.retire();
         proof {
+            lemma_backlog3(old(self).crx_i, old(self).crx_h, old(self).crx_1);
+            lemma_backlog3(self.crx_i, self.crx_h, self.crx_1);
             assert forall|k: PacketKind| #[trigger] crypto_drained(*self, k) by {
                 match k {
                     PacketKind::Initial => {},
@@ -3405,32 +3693,40 @@ impl Connection {
         }
     }
 
-    /// Appends the newly contiguous CRYPTO bytes of `level` to `out`.
+    /// Moves `min(max, unread)` of `level`'s in-order CRYPTO bytes into the empty `out`, an exact buffer for them
+    /// (`crypto_read_len`); nothing once the connection is no longer open.
     #[verifier::spinoff_prover]
-    pub fn crypto_read(&mut self, level: PacketKind, out: &mut Vec<u8>)
+    pub fn crypto_read(&mut self, level: PacketKind, max: u64, out: &mut CapVec<u8>)
         requires
             old(self).wf(),
+            old(out).wf(),
+            old(out)@.len() == 0,
+            old(out).cap() >= crypto_read_len(*old(self), level, max),
         ensures
             final(self).wf(),
+            final(out).wf(),
+            final(out).cap() == old(out).cap(),
             final(self).out_log() == old(self).out_log(),
-            final(out)@.len() <= old(out)@.len() + old(self).crypto_end_spec(level) - old(
-                self,
-            ).crypto_base_spec(level),
-            // A read drains the in-order data: nothing received in order stays unread.
-            old(self).phase_spec() is Open ==> final(self).crypto_base_spec(level) == old(
-                self,
-            ).crypto_contiguous_spec(level),
-            old(self).phase_spec() is Open ==> final(out)@.len() == old(out)@.len() + old(
-                self,
-            ).crypto_contiguous_spec(level) - old(self).crypto_base_spec(level),
-            old(self).crypto_end_spec(level) <= old(self).crypto_base_spec(level) ==> final(out)@ == old(out)@,
+            final(out)@.len() <= old(self).crypto_end_spec(level) - old(self).crypto_base_spec(level),
+            old(self).phase_spec() is Open ==> final(out)@.len() == crypto_read_len(*old(self), level, max),
+            old(self).phase_spec() is Open ==> final(self).crypto_base_spec(level) == old(self).crypto_base_spec(level)
+                + final(out)@.len(),
+            // A read of at least the unread bytes drains the level.
+            old(self).phase_spec() is Open && max >= old(self).crypto_contiguous_spec(level) - old(self).crypto_base_spec(
+                level,
+            ) ==> final(self).crypto_base_spec(level) == old(self).crypto_contiguous_spec(level),
+            old(self).phase_spec() is Open && max >= old(self).crypto_contiguous_spec(level) - old(self).crypto_base_spec(
+                level,
+            ) ==> crypto_drained(*final(self), level),
+            old(self).crypto_end_spec(level) <= old(self).crypto_base_spec(level) ==> final(out)@.len() == 0,
             // The read hands over exactly the bytes its offset passes; no other level's moves.
             final(self).crypto_kept_but(*old(self), Some(level)),
             final(self).peer_tp_known_spec() == old(self).peer_tp_known_spec(),
-            !(old(self).phase_spec() is Open) ==> final(out)@ == old(out)@,
+            !(old(self).phase_spec() is Open) ==> final(out)@.len() == 0,
             final(self).phase_spec() == old(self).phase_spec(),
-            old(self).phase_spec() is Open ==> crypto_drained(*final(self), level),
             drained_kept(*final(self), *old(self)),
+            final(self).crypto_held(level) + final(out)@.len() == old(self).crypto_held(level),
+            final(self).crypto_backlog() + final(out)@.len() == old(self).crypto_backlog(),
     {
         // The bound needs only `lemma_wf`; unfolded, these make a missing fact an rlimit failure.
         hide(crate::reassembly::rfc_received);
@@ -3446,21 +3742,90 @@ impl Connection {
                 proof {
                     self.crx_i.lemma_wf();
                 }
-                self.crx_i.read(out)
+                self.crx_i.read(max, out)
             },
             PacketKind::Handshake => {
                 proof {
                     self.crx_h.lemma_wf();
                 }
-                self.crx_h.read(out)
+                self.crx_h.read(max, out)
             },
             PacketKind::OneRtt => {
                 proof {
                     self.crx_1.lemma_wf();
                 }
-                self.crx_1.read(out)
+                self.crx_1.read(max, out)
             },
         }
+        proof {
+            lemma_backlog3(old(self).crx_i, old(self).crx_h, old(self).crx_1);
+            lemma_backlog3(self.crx_i, self.crx_h, self.crx_1);
+        }
+    }
+
+    /// The unread in-order CRYPTO bytes of `level`.
+    pub fn crypto_unread(&self, level: PacketKind) -> (r: u64)
+        requires
+            self.wf(),
+        ensures
+            r == self.crypto_contiguous_spec(level) - self.crypto_base_spec(level),
+    {
+        proof {
+            reveal(crx_ok);
+        }
+        match level {
+            PacketKind::Initial => self.crx_i.unread(),
+            PacketKind::Handshake => self.crx_h.unread(),
+            PacketKind::OneRtt => self.crx_1.unread(),
+        }
+    }
+
+    /// Some teardown slot holds a retired store.
+    pub fn teardown_pending(&self) -> (r: bool)
+        ensures
+            r == (self.crypto_td_total() > 0),
+    {
+        self.crx_i.has_td() || self.crx_h.has_td() || self.crx_1.has_td()
+    }
+
+    /// Frees part of the first non-empty teardown slot: at least one node while any remain, at most `B_PUMP` units
+    /// of work. Nothing else changes.
+    #[verifier::spinoff_prover]
+    pub fn free_teardown(&mut self) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            r@ <= B_PUMP,
+            old(self).crypto_td_total() > 0 ==> final(self).crypto_backlog() < old(self).crypto_backlog(),
+            final(self).crypto_kept(*old(self)),
+            drained_kept(*final(self), *old(self)),
+            final(self).out_log() == old(self).out_log(),
+            final(self).phase_spec() == old(self).phase_spec(),
+            final(self).close_spec() == old(self).close_spec(),
+            forall|k: PacketKind| #[trigger] final(self).crypto_end_spec(k) == old(self).crypto_end_spec(k),
+            forall|k: PacketKind| #[trigger] final(self).crypto_held(k) == old(self).crypto_held(k),
+            forall|k: PacketKind| #[trigger] final(self).crypto_contiguous_spec(k) == old(self).crypto_contiguous_spec(k),
+            forall|k: PacketKind| #[trigger] final(self).crypto_base_spec(k) == old(self).crypto_base_spec(k),
+            forall|k: PacketKind, p: nat| #[trigger] final(self).crypto_received(k, p) == old(self).crypto_received(k, p),
+            forall|k: PacketKind| #[trigger] final(self).live(k) == old(self).live(k),
+            final(self).peer_tp_known_spec() == old(self).peer_tp_known_spec(),
+    {
+        proof {
+            reveal(crx_ok);
+        }
+        let r = if self.crx_i.has_td() {
+            self.crx_i.free_some()
+        } else if self.crx_h.has_td() {
+            self.crx_h.free_some()
+        } else {
+            self.crx_1.free_some()
+        };
+        proof {
+            lemma_backlog3(old(self).crx_i, old(self).crx_h, old(self).crx_1);
+            lemma_backlog3(self.crx_i, self.crx_h, self.crx_1);
+        }
+        r
     }
 
     /// Queues CRYPTO data for `level`; ignored once its space is discarded.
@@ -8750,6 +9115,22 @@ pub open spec fn crypto_all_drained(c: Connection) -> bool {
 /// Level `k` holds no unread in-order CRYPTO byte: it has been read to its contiguous end.
 pub open spec fn crypto_drained(c: Connection, k: PacketKind) -> bool {
     c.crypto_base_spec(k) == c.crypto_contiguous_spec(k)
+}
+
+/// How many bytes `crypto_read(k, max)` takes on an open connection: `max`, or every unread in-order byte if fewer.
+pub open spec fn crypto_read_len(c: Connection, k: PacketKind, max: u64) -> nat {
+    if max as int <= c.crypto_contiguous_spec(k) - c.crypto_base_spec(k) {
+        max as nat
+    } else {
+        (c.crypto_contiguous_spec(k) - c.crypto_base_spec(k)) as nat
+    }
+}
+
+/// The CRYPTO memory bound across calls: at every level, the positions held (unread in-order and out-of-order
+/// bytes) are at most `MAX_CRYPTO_BUFFER`, and the read offset is at most the contiguous end.
+pub open spec fn crypto_held_ok(c: Connection) -> bool {
+    forall|k: PacketKind|
+        #[trigger] c.crypto_held(k) <= MAX_CRYPTO_BUFFER && c.crypto_base_spec(k) <= c.crypto_contiguous_spec(k)
 }
 
 /// Every level drained in `o` is drained in `c`.
