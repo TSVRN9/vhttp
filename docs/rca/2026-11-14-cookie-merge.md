@@ -82,6 +82,9 @@ a293f81).
      `shortcut:` comment under `crates/*/src` whose text states a cost (`O(`, `quadratic`, `rescan`, `linear scan`,
      `linear lookup`, `copies`, `amortized`) unless it names a carryover id that `docs/carryovers.tsv` holds open. A
      closed id fails, so the comment goes when its row closes. Demo: a cost comment with its id removed.
+  6. The residual (pre-flight F26). Each charge is written by hand, and the cost ensures are upper bounds, so an
+     undercharged loop still verifies. The structural gate does not see that, and it remains
+     `cat-C15-semantic-cost`'s (owner 9b4), whose close must cover 9b3's h3 fns or leave a row open for them.
 - **Evidence** (to complete): the measurement below; Task 1's failing test; the gate demos and the mutant at 9b3's
   last task.
 
