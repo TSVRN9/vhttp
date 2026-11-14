@@ -15,8 +15,12 @@ a293f81).
   5. `out.set(k, ..)` (:1418) frees the previous value.
 
   After k extra lines the value holds `L_k = v + k·(v + 2)` bytes, for lines of `v` bytes each. With every realloc
-  moving, line k copies `2·L_{k-1} + v + 8` bytes, so n lines copy about `n²·(v + 2)` bytes. The rescans add `n²/2`
-  name comparisons of 6 bytes.
+  moving, line k copies `2·L_{k-1} + v + 8` bytes, so n lines copy about `n²·(v + 2)` bytes. The rescans are a second
+  quadratic term. `find_first` (:871) scans all of `out`, with no early exit. `out` holds the regular fields so far,
+  with cookies already merged into one line. So each cookie line compares names against every non-cookie field before
+  it, and a frame of `r` other fields then `c` cookie lines costs `c·(r + 1)` comparisons. That is at most `(n/2)²`,
+  about 739,000 for `n` = 1,719 empty-valued lines. A cookie-only frame rescans almost nothing, because `out` stays
+  one line long.
 
   What bounds it is the decoded budget. Each line charges `6 + v + 32` against `MAX_FIELD_SECTION_SIZE` = 65536
   (limits.rs:24, enforced by `decode_field_section_bounded`), so `n ≤ 65536/(38 + v)`. Maximizing
@@ -35,9 +39,10 @@ a293f81).
   1. Cost was in no contract (C15). `build_headers` ensures only `fields_view(out@) == request_headers(..)`. Verus checks
      the result, so a quadratic implementation of a linear spec verifies.
   2. The comment named the cheap part and had no tracker. It reads: "each cookie line rescans `out` for the first
-     cookie, O(n^2) in field count; fields are capped by MAX_FIELD_SECTION_SIZE (2048 lines at most)". That covers the
-     rescans (6-byte name comparisons) but not the value copies, which are larger by a factor of `v + 2` and about
-     150x larger at the worst case measured below. So its "2048 lines" read as harmless. No `ponytail:` or `shortcut:`
+     cookie, O(n^2) in field count; fields are capped by MAX_FIELD_SECTION_SIZE (2048 lines at most)". Its O(n²)
+     is a valid bound on the rescans, but the comment says nothing about the value copies, which are the larger term in
+     bytes (29.6 MB at the worst case below). Both terms are about equal in time (below). So its "2048 lines" read as
+     a harmless count of comparisons. No `ponytail:` or `shortcut:`
      comment has a carryover row or a gate, so nothing sent a review back to check the claim.
   3. No cost check reached it. The 8b MIR cost analysis has the decoder `none`
      (`decode_field_section_bounded Unsupported`, tools/ct-driver/expected-cost.txt:24). `validate_request` and
@@ -109,8 +114,18 @@ Method: one HEADERS frame on a fresh `h3::request::RequestStream`, fed whole to 
 
 Worst case per HEADERS frame (v = 34, n = 907, the budget's maximum with the four pseudo lines):
 - **29.6 MB copied** by the merge from a 32.7 KB frame, which is 44.5 MB requested from the allocator in 915 reallocs;
-- **0.80 ms**, against 0.27 MB requested and 0.12 ms for the same frame with non-cookie lines;
+- **0.80 ms**, against 0.27 MB requested and 0.12 ms for the same frame with non-cookie lines. The rescan-heavy shape
+  (half other fields, then empty cookies) takes about as long, 0.7-0.9 ms, with 2.5 MB requested;
 - 1,363 requested bytes per frame byte, where 9b2's per-call test budget (`8·d + 4096`) allows 265,416 for this `d`.
+
+The rescan term, measured the same way, with empty values, fastest of 3 (times vary about ±30% between runs):
+
+| frame | lines | requested bytes | time |
+|---|---|---|---|
+| 860 `accept` lines (static 29) only | 860 | 207,073 | 0.068 ms |
+| 859 cookie lines only | 859 | 2,315,071 | 0.12-0.14 ms |
+| 860 `accept` then 859 cookie lines (739,000 name comparisons) | 1,719 | 2,521,615 | 0.69-0.93 ms |
+| 500 `accept` then 640 cookie lines, v = 34 | 1,140 | 22,361,521 | 0.73 ms |
 
 Each doubling of n multiplies requested bytes by 3.96-4.0, against 1x per line for `date`. The time is modest,
 because glibc's `realloc` often grows in place and `memcpy` is fast, but the work is quadratic in the frame. One
