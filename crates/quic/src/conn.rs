@@ -3696,7 +3696,7 @@ impl Connection {
     /// Moves `min(max, unread)` of `level`'s in-order CRYPTO bytes into the empty `out`, an exact buffer for them
     /// (`crypto_read_len`); nothing once the connection is no longer open.
     #[verifier::spinoff_prover]
-    pub fn crypto_read(&mut self, level: PacketKind, max: u64, out: &mut CapVec<u8>)
+    pub fn crypto_read(&mut self, level: PacketKind, max: u64, out: &mut CapVec<u8>) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
             old(out).wf(),
@@ -3727,6 +3727,8 @@ impl Connection {
             drained_kept(*final(self), *old(self)),
             final(self).crypto_held(level) + final(out)@.len() == old(self).crypto_held(level),
             final(self).crypto_backlog() + final(out)@.len() == old(self).crypto_backlog(),
+            // The cost: linear in the bytes it may take (`CryptoStream::read`).
+            r@ <= 18 * crypto_read_len(*old(self), level, max) + 5608,
     {
         // The bound needs only `lemma_wf`; unfolded, these make a missing fact an rlimit failure.
         hide(crate::reassembly::rfc_received);
@@ -3735,9 +3737,9 @@ impl Connection {
             reveal(crx_ok);
         }
         if !matches!(self.lc.phase(), Phase::Open) {
-            return;
+            return Ghost(0);
         }
-        match level {
+        let r = match level {
             PacketKind::Initial => {
                 proof {
                     self.crx_i.lemma_wf();
@@ -3756,11 +3758,12 @@ impl Connection {
                 }
                 self.crx_1.read(max, out)
             },
-        }
+        };
         proof {
             lemma_backlog3(old(self).crx_i, old(self).crx_h, old(self).crx_1);
             lemma_backlog3(self.crx_i, self.crx_h, self.crx_1);
         }
+        r
     }
 
     /// The unread in-order CRYPTO bytes of `level`.

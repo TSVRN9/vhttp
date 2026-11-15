@@ -36,10 +36,10 @@ diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
 +            final(self).crypto_backlog() + crypto_read_len(*old(self), level, max) == old(self).crypto_backlog() || !(old(
 +                self,
 +            ).phase_spec() is Open),
+             // The cost: linear in the bytes it may take (`CryptoStream::read`).
+             r@ <= 18 * crypto_read_len(*old(self), level, max) + 5608,
      {
-         // The bound needs only `lemma_wf`; unfolded, these make a missing fact an rlimit failure.
-         hide(crate::reassembly::rfc_received);
-@@ -3761,6 +3772,12 @@
+@@ -3763,6 +3774,12 @@
              lemma_backlog3(old(self).crx_i, old(self).crx_h, old(self).crx_1);
              lemma_backlog3(self.crx_i, self.crx_h, self.crx_1);
          }
@@ -49,6 +49,6 @@ diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
 +            let _ = t.push_slice(vstd::slice::slice_subrange(out.as_slice(), 0, n));
 +            *out = t;
 +        }
+         r
      }
  
-     /// The unread in-order CRYPTO bytes of `level`.

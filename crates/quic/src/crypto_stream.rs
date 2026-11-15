@@ -567,8 +567,9 @@ impl CryptoStream {
         }
     }
 
-    /// Moves `min(max, unread)` in-order bytes into the empty `out`, an exact buffer for them.
-    pub fn read(&mut self, max: u64, out: &mut CapVec<u8>)
+    /// Moves `min(max, unread)` in-order bytes into the empty `out`, an exact buffer for them; returns its cost
+    /// (`Frags::take_front_c`), linear in the bytes it may take.
+    pub fn read(&mut self, max: u64, out: &mut CapVec<u8>) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
             old(out).wf(),
@@ -589,6 +590,7 @@ impl CryptoStream {
             forall|p: nat| #[trigger] final(self).received(p) == old(self).received(p),
             final(self).held_spec() + crypto_take(*old(self), max) == old(self).held_spec(),
             final(self).td_nodes() == old(self).td_nodes(),
+            r@ <= 18 * crypto_take(*old(self), max) + 5608,
     {
         proof {
             self.lemma_core();
@@ -600,7 +602,7 @@ impl CryptoStream {
             u
         };
         let ghost a = *self;
-        let r = self.st.take_front(self.base, k, out);
+        let (r, Ghost(c)) = self.st.take_front_c(self.base, k, out);
         proof {
             if r < a.base + k {
                 assert(a.st.view().contains_key(r as nat));
@@ -630,6 +632,7 @@ impl CryptoStream {
             assert(self.hist == a.hist && self.ins == a.ins && self.hi == a.hi);
             assert(forall|p: nat| #[trigger] self.received(p) == a.received(p));
         }
+        Ghost(c)
     }
 
     /// The unread in-order bytes.

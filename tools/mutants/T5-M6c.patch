@@ -1,7 +1,7 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -1944,7 +1944,7 @@
+@@ -2003,7 +2003,7 @@
              forall|p: nat| #[trigger] final(self).init_rx@.crypto_received(PacketKind::Initial, p) ==> p < final(self).init_end,
              final(self).init_end > 0 ==> final(self).init_rx@.crypto_received(PacketKind::Initial, (final(self).init_end - 1) as nat),
      {

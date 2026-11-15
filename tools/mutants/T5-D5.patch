@@ -1,7 +1,7 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -3950,8 +3950,7 @@
+@@ -3953,8 +3953,7 @@
              return;
          }
          // ALPN first: §8.1's close is owed whatever else is wrong.

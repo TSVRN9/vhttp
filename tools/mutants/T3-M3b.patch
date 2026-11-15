@@ -1,7 +1,7 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -8937,17 +8937,6 @@
+@@ -8940,17 +8940,6 @@
      {
          proof {
              reveal(crx_ok);

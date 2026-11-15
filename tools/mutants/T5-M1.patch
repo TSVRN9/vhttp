@@ -1,7 +1,7 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -1408,7 +1408,7 @@
+@@ -1465,7 +1465,7 @@
          }
          let e = self.h3.conn().crypto_end(PacketKind::Initial);
          let ghost c0 = self.h3.conn_spec();

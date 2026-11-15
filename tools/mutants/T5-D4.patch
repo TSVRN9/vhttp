@@ -1,7 +1,7 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -1862,7 +1862,6 @@
+@@ -1921,7 +1921,6 @@
          }
          match parse_transport_params(b.as_slice(), true) {
              Err(_) => {

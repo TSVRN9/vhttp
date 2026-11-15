@@ -67,8 +67,28 @@ const QUEUE_MIN_CAP: usize = 64;
 /// (D4's memory bound); the rest of the call stays within the budget. The allocator sees no copy into that buffer: the
 /// work bound on it rests on D15's proved cost (`push_slice` at most `7d + 4`), not on this test. `exempt_cap` bounds
 /// how many calls a run may excuse so.
-fn bytes_ok(x: &Call, queue: bool) -> bool {
-    x.k[4] <= COST_A * x.d + COST_B || exempt(x, queue)
+fn bytes_ok(x: &Call, a: Alloc) -> bool {
+    x.k[4] <= COST_A * x.d + COST_B || exempt(x, a == Alloc::Queue) || gather_ok(x, a)
+}
+
+/// Which allocation a call of the test's structure may make beyond the budget: a `ByteQueue`'s buffer (`exempt`), or
+/// `Frags::insert`'s gather list (`gather_ok`).
+#[derive(Clone, Copy, PartialEq)]
+enum Alloc {
+    None,
+    Queue,
+    Gather,
+}
+
+/// One entry of `Frags::insert`'s gather list: a chunk's start and its piece.
+const GATHER_ENTRY: usize = std::mem::size_of::<(u64, CapVec<u8>)>();
+
+/// `Frags::insert`'s gather list (9b2 Task 6, coordinator ruling): one exact `CapVec` with room for the chunks the frame
+/// meets, at most `d` (`split_frame`'s proved `fm.len() <= e - s`), plus `B`'s first chunk, so one allocation of at most
+/// `GATHER_ENTRY·(d + 1)` bytes, freed before the call returns; the rest of the call stays within the budget.
+fn gather_ok(x: &Call, a: Alloc) -> bool {
+    let budget = COST_A * x.d + COST_B;
+    a == Alloc::Gather && x.k[4] - x.k[5] <= budget && x.k[5] <= GATHER_ENTRY * (x.d + 1)
 }
 
 /// The call passes only by its queue-buffer allowance.
@@ -84,7 +104,8 @@ fn exempt_cap(peak: usize) -> usize {
 }
 
 /// Each call: no realloc, and `bytes_ok`; at most `exempt_cap` excused calls. Returns the failures, worst call first.
-fn per_call_ok(name: &str, m: usize, c: &[Call], queue: bool) -> Vec<String> {
+fn per_call_ok(name: &str, m: usize, c: &[Call], a: Alloc) -> Vec<String> {
+    let queue = a == Alloc::Queue;
     let mut f = Vec::new();
     let re: Vec<_> = c.iter().enumerate().filter(|(_, x)| x.k[2] != 0).collect();
     if let Some((i, x)) = re.iter().max_by_key(|(_, x)| x.k[2]) {
@@ -103,7 +124,7 @@ fn per_call_ok(name: &str, m: usize, c: &[Call], queue: bool) -> Vec<String> {
             exempt_cap(peak)
         ));
     }
-    let over: Vec<_> = c.iter().enumerate().filter(|(_, x)| !bytes_ok(x, queue)).collect();
+    let over: Vec<_> = c.iter().enumerate().filter(|(_, x)| !bytes_ok(x, a)).collect();
     if let Some((i, x)) = over
         .iter()
         .max_by_key(|(_, x)| x.k[4] - (COST_A * x.d + COST_B).min(x.k[4]))
@@ -165,7 +186,7 @@ impl Run {
 /// Runs `pat` at n, 2n, 4n (three times each; times are the fastest run's) and checks the bounds; `queue`: the structure
 /// is a `ByteQueue` after 9b2 (`bytes_ok`). With `fill`, the
 /// last call is the gap fill and must take at most 8x the slowest other call + 1 ms.
-fn check(name: &str, n: usize, pat: fn(usize, &mut Run), fill: bool, queue: bool) {
+fn check(name: &str, n: usize, pat: fn(usize, &mut Run), fill: bool, a: Alloc) {
     let mut fails = Vec::new();
     let mut rows = Vec::new();
     for m in [n, 2 * n, 4 * n] {
@@ -194,7 +215,7 @@ fn check(name: &str, n: usize, pat: fn(usize, &mut Run), fill: bool, queue: bool
             .filter_map(|x| x.out.map(|o| (o, x.d)))
             .max_by_key(|&(o, d)| o as i64 - d as i64);
         let over = c.iter().filter(|x| x.out.is_some_and(|o| o > x.d)).count();
-        fails.extend(per_call_ok(name, m, c, queue));
+        fails.extend(per_call_ok(name, m, c, a));
         if over != 0 {
             fails.push(format!(
                 "{name} n={m}: {over} calls hand over more than their input (worst {worst:?} (out, d))"
@@ -363,23 +384,22 @@ fn reverse_fill(m: usize, r: &mut Run) {
 
 #[test]
 fn crypto_one_byte_frames() {
-    check("crypto_one_byte_frames", 16 << 10, one_byte_frames, false, false);
+    check("crypto_one_byte_frames", 16 << 10, one_byte_frames, false, Alloc::Gather);
 }
 
 #[test]
-#[ignore = "9b2 Task 6: lazy delivery passes; the fill call still requests 16·d bytes in one allocation: Frags::insert gathers the chunks the frame meets into a Vec of 32-byte entries (d/2 one-byte runs here), over 8·d + 4096. Needs a ruling (gather-buffer allowance or a gather-free merge)"]
 fn crypto_runs_then_fill() {
-    check("crypto_runs_then_fill", 1024, runs_then_fill, true, false);
+    check("crypto_runs_then_fill", 1024, runs_then_fill, true, Alloc::Gather);
 }
 
 #[test]
 #[ignore = "9b2: fails today, one ACK's split_off copies up to half the stream (Q7); un-ignored by Task 8"]
 fn send_ack_1k() {
-    check("send_ack_1k", 256 << 10, write_send_ack, false, true);
+    check("send_ack_1k", 256 << 10, write_send_ack, false, Alloc::Queue);
 }
 
 #[test]
 #[ignore = "9b2: fails today, zero-fill reallocs and eager whole-run delivery (Q1, Q3); un-ignored by Task 10"]
 fn stream_reverse_fill() {
-    check("stream_reverse_fill", 16 << 10, reverse_fill, false, false);
+    check("stream_reverse_fill", 16 << 10, reverse_fill, false, Alloc::None);
 }

@@ -1,8 +1,7 @@
 diff --git a/crates/quic/src/frags.rs b/crates/quic/src/frags.rs
-index fb00fe6..152eec8 100644
 --- a/crates/quic/src/frags.rs
 +++ b/crates/quic/src/frags.rs
-@@ -2869,7 +2869,7 @@ fn gather(m: Tree<CapVec<u8>>, b: Tree<CapVec<u8>>, _s: u64, e: u64, _s0: u64, l
+@@ -2876,7 +2876,7 @@
          work = work + c3;
      }
      if let Some(wl) = fl {
@@ -10,4 +9,4 @@ index fb00fe6..152eec8 100644
 +        if false && (wl as u64) < K {
              let (b2, wk, wv, Ghost(c4)) = pop_min(b);
              let ghost w = (wk as nat, wv@);
-             mv.push((wk, wv));
+             cv.push((wk, wv));

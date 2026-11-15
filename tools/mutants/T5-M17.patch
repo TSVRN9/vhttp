@@ -1,7 +1,7 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -1412,7 +1412,7 @@
+@@ -1469,7 +1469,7 @@
              proof {
                  assert(c0.crypto_received(PacketKind::Initial, (e - 1) as nat));
              }

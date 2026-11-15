@@ -1,7 +1,7 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -726,7 +726,6 @@
+@@ -729,7 +729,6 @@
                  lemma_held_ok_kept(self.h3.conn_spec(), c0);
              }
          }

@@ -1,11 +1,12 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -839,7 +839,6 @@
+@@ -851,7 +851,7 @@
              }
          }
          let ghost c2 = self.h3.conn_spec();
--        let _ = self.feed(Level::OneRtt, now, r, true, max);
+-        let (_, Ghost(w)) = self.feed(Level::OneRtt, now, r, true, max);
++        let ghost w: nat = 0;
          proof {
              let c = self.h3.conn_spec();
              self.h3.lemma_conn_wf();

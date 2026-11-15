@@ -1414,6 +1414,50 @@ pub fn join2<V>(a: Tree<V>, b: Tree<V>) -> (r: (Tree<V>, Ghost<nat>))
     (c, Ghost(work))
 }
 
+/// `drain` into an exact buffer: `out` has room for every entry, so no push reallocates (D2).
+pub fn drain_cap<V>(t: Tree<V>, out: &mut byteq::capvec::CapVec<(u64, V)>) -> (r: Ghost<nat>)
+    requires
+        old(out).wf(),
+        old(out)@.len() + seq(t).len() <= old(out).cap(),
+    ensures
+        final(out).wf(),
+        final(out).cap() == old(out).cap(),
+        final(out)@ == old(out)@ + seq(t),
+        r@ <= c_drain() * (2 * seq(t).len() + 1),
+    decreases t,
+{
+    let ghost t0 = t;
+    let ghost mut work: nat = 1;
+    match t {
+        None => {
+            proof {
+                assert(out@ + seq(t0) =~= out@);
+            }
+            Ghost(work)
+        },
+        Some(n) => {
+            let Node { key: x, val: v, h: _, left: l, right: r } = *n;
+            let ghost o0 = out@;
+            proof {
+                assert(seq(t0) == seq(l) + seq![(x, v)] + seq(r));
+            }
+            let Ghost(cl) = drain_cap(l, out);
+            let ghost o1 = out@;
+            out.push((x, v));
+            proof {
+                // Only the `a.push(x) + b` clause is used; the second `seq(r)` fills the unused `c`.
+                lemma_seq_assoc(o1, seq(r), (x, v), seq(r));
+            }
+            let Ghost(cr) = drain_cap(r, out);
+            proof {
+                lemma_seq_assoc(o0, seq(l), (x, v), seq(r));
+                work = work + cl + cr;
+            }
+            Ghost(work)
+        },
+    }
+}
+
 /// Appends `t`'s entries, in order, to `out`, consuming `t`.
 pub fn drain<V>(t: Tree<V>, out: &mut Vec<(u64, V)>) -> (r: Ghost<nat>)
     ensures

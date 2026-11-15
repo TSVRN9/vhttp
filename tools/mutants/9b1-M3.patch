@@ -1,13 +1,12 @@
 diff --git a/crates/quic/src/frags.rs b/crates/quic/src/frags.rs
-index fb00fe6..8592238 100644
 --- a/crates/quic/src/frags.rs
 +++ b/crates/quic/src/frags.rs
-@@ -2841,7 +2841,7 @@ fn gather(m: Tree<CapVec<u8>>, b: Tree<CapVec<u8>>, _s: u64, e: u64, _s0: u64, l
-         }
-         let zk = mv[zi].0;
-         let ze = zk + mv[zi].1.len() as u64;
--        if ze > e && mv[zi].1.len() as u64 >= K && !(lc && zi == 0) {
+@@ -2846,7 +2846,7 @@
+         let zk = cv.index(zi).0;
+         let zl = cv.index(zi).1.len();
+         let ze = zk + zl as u64;
+-        if ze > e && zl as u64 >= K && !(lc && zi == 0) {
 +        if ze > e && !(lc && zi == 0) {
+             // Ends the exact list: `Vec::pop` never reallocates (TRUSTED.md, CapVec (c)).
+             let mut mv = cv.into_vec();
              z = mv.pop();
-             me = zk;
-             proof {

@@ -2806,6 +2806,8 @@ fn gather(m: Tree<CapVec<u8>>, b: Tree<CapVec<u8>>, _s: u64, e: u64, _s0: u64, l
         seq(m).len() + seq(b).len() < pow2(63),
         keys_ge(b, e),
         mfacts(mp(seq(m)), mp(seq(b)), _s0 as nat, _s as nat, e as nat, lc),
+        // `split_frame`'s bound on the chunks the frame meets: the list below is exact for them.
+        seq(m).len() <= e - _s,
     ensures
         gat(mp(r.0.0@), zs(r.0.1) + mp(seq(r.1)), mp(seq(m)), mp(seq(b)), _s0 as nat, r.2 as nat, _s as nat, e as nat, lc),
         crate::avl::wf(r.1),
@@ -2824,24 +2826,29 @@ fn gather(m: Tree<CapVec<u8>>, b: Tree<CapVec<u8>>, _s: u64, e: u64, _s0: u64, l
         assert(c_drain() == 1 && c_pop() == 6);
     }
     let (n, Ghost(c1)) = size(&m);
-    let mut mv: Vec<(u64, CapVec<u8>)> = Vec::with_capacity(n + 1);
-    let Ghost(c2) = drain(m, &mut mv);
+    // One exact list for the chunks the frame meets (at most `e - s`, `split_frame`) and `B`'s first: no push
+    // reallocates, and it is freed when `insert` returns.
+    let mut cv: CapVec<(u64, CapVec<u8>)> = CapVec::new(n + 1);
+    let Ghost(c2) = drain_cap(m, &mut cv);
     proof {
         work = work + c1 + c2;
-        assert(mv@ =~= seq(m));
+        assert(cv@ =~= seq(m));
     }
     let mut me = e;
     let mut z: Option<(u64, CapVec<u8>)> = None;
-    if mv.len() > 0 {
-        let zi = mv.len() - 1;
+    if cv.len() > 0 {
+        let zi = cv.len() - 1;
         proof {
-            assert(fm[zi as int] == (mv@[zi as int].0 as nat, mv@[zi as int].1@));
+            assert(fm[zi as int] == (cv@[zi as int].0 as nat, cv@[zi as int].1@));
             assert(fm.last() == fm[zi as int]);
             assert(end(fm[zi as int]) <= VARINT_MAX);
         }
-        let zk = mv[zi].0;
-        let ze = zk + mv[zi].1.len() as u64;
-        if ze > e && mv[zi].1.len() as u64 >= K && !(lc && zi == 0) {
+        let zk = cv.index(zi).0;
+        let zl = cv.index(zi).1.len();
+        let ze = zk + zl as u64;
+        if ze > e && zl as u64 >= K && !(lc && zi == 0) {
+            // Ends the exact list: `Vec::pop` never reallocates (TRUSTED.md, CapVec (c)).
+            let mut mv = cv.into_vec();
             z = mv.pop();
             me = zk;
             proof {
@@ -2858,7 +2865,7 @@ fn gather(m: Tree<CapVec<u8>>, b: Tree<CapVec<u8>>, _s: u64, e: u64, _s0: u64, l
         }
     }
     proof {
-        assert(mp(mv@) == fm);
+        assert(mp(cv@) == fm);
         lemma_gather_m(fm, fb, _s0 as nat, _s as nat, e as nat, lc, me as nat);
         assert forall|j: int| 0 <= j < seq(b).len() implies #[trigger] seq(b)[j].0 >= me by {
             assert(fb[j].0 == seq(b)[j].0);
@@ -2872,7 +2879,8 @@ fn gather(m: Tree<CapVec<u8>>, b: Tree<CapVec<u8>>, _s: u64, e: u64, _s0: u64, l
         if (wl as u64) < K {
             let (b2, wk, wv, Ghost(c4)) = pop_min(b);
             let ghost w = (wk as nat, wv@);
-            mv.push((wk, wv));
+            cv.push((wk, wv));
+            let mv = cv.into_vec();
             proof {
                 work = work + c4;
                 lemma_mp_cat(seq![(wk, wv)], seq(b2));
@@ -2894,7 +2902,7 @@ fn gather(m: Tree<CapVec<u8>>, b: Tree<CapVec<u8>>, _s: u64, e: u64, _s0: u64, l
         lemma_gather_nopop(fm, fb, _s0 as nat, _s as nat, e as nat, lc, me as nat);
         assert(zs(z) + fb =~= fb);
     }
-    ((mv, z), b, me, Ghost(work))
+    ((cv.into_vec(), z), b, me, Ghost(work))
 }
 
 /// Chunks all starting in `[a, b]` all count in `nm`.
@@ -5363,6 +5371,47 @@ impl Frags {
         }
         proof {
             Frags::lemma_tf_frags(a, *self, mp(seq(t2)), st as nat, r as nat);
+        }
+        (r, Ghost(c))
+    }
+
+    /// `take_front` with its cost, in the bytes it may take: `take_front_w`'s bound at the tree's height cap (126).
+    pub fn take_front_c(&mut self, st: u64, max: u64, out: &mut CapVec<u8>) -> (r: (u64, Ghost<nat>))
+        requires
+            old(self).wf(),
+            st <= VARINT_MAX,
+            forall|k: nat| #[trigger] old(self).view().contains_key(k) ==> k >= st,
+            old(out).wf(),
+            old(out)@.len() + max <= old(out).cap(),
+        ensures
+            final(self).wf(),
+            st <= r.0 <= st + max,
+            forall|k: nat| st <= k < r.0 ==> #[trigger] old(self).view().contains_key(k),
+            r.0 < st + max ==> !old(self).view().contains_key(r.0 as nat),
+            final(out).wf(),
+            final(out).cap() == old(out).cap(),
+            final(out)@ == old(out)@ + Seq::new((r.0 - st) as nat, |i: int| old(self).view()[(st + i) as nat]),
+            forall|k: nat| #[trigger]
+                final(self).view().contains_key(k) <==> old(self).view().contains_key(k) && k >= r.0,
+            forall|k: nat| #[trigger]
+                final(self).view().contains_key(k) ==> final(self).view()[k] == old(self).view()[k],
+            r.1@ <= 18 * max + 5608,
+    {
+        proof {
+            lemma_ht_le(self.t);
+        }
+        let ghost h = ht(self.t);
+        let (r, Ghost(c)) = self.take_front_w(st, max, out);
+        proof {
+            let q = max / K;
+            assert(c_tf1() == 8 && c_tf2() == 10 && K == 128 && CAP == 256);
+            vstd::arithmetic::div_mod::lemma_fundamental_div_mod(max as int, 128);
+            assert(q * 128 <= max);
+            assert(8 * (h + 1) * (q + 3) <= 1016 * (q + 3)) by (nonlinear_arith)
+                requires
+                    h + 1 <= 127,
+            ;
+            assert(c <= 8 * (h + 1) * (q + 3) + 10 * (max + 256));
         }
         (r, Ghost(c))
     }

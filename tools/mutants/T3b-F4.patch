@@ -1,7 +1,7 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -3963,7 +3963,6 @@
+@@ -3966,7 +3966,6 @@
          let ghost s0 = *self;
          self.discard(PacketKind::Initial);
          let ghost s1 = *self;
