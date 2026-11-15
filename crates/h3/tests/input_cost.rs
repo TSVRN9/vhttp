@@ -357,6 +357,7 @@ fn cookie_rescans_linear() {
         if r.reallocs() != 0 {
             fails.push(format!("cookie_rescans_linear n={m}: {} reallocs", r.reallocs()));
         }
+        fails.extend(completing_ok("cookie_rescans_linear", m, &r, fr.len()));
         rows.push((m, r.bytes()));
     }
     fails.extend(doubling_ok("cookie_rescans_linear", &rows));
@@ -437,7 +438,7 @@ fn data_frames_events() {
 
 // ------------------------------------------------------------------ uni streams
 
-/// Feeds `b` to a fresh `UniStream`, cut at `cuts` (call ends); `done(i)` is the frame or instruction bytes call `i`
+/// Feeds `b` to a fresh `UniStream`, cut every `step` bytes (call ends); `done(i)` is the frame or instruction bytes call `i`
 /// completes. Returns the run and the events.
 fn feed_uni(b: &[u8], step: usize, tag: &'static str, done: impl Fn(usize, usize) -> usize) -> (Run, Vec<UniEvent>) {
     let (mut s, mut seen, mut r, mut all) = (UniStream::new(), fresh_seen(), Run::default(), Vec::new());
@@ -541,6 +542,6 @@ fn stream_table_flat() {
         assert!(matches!(&out[..], [Output::RequestBody { stream_id, data }] if *stream_id == 4 * i && data == b"x"));
     }
     report("stream_table_flat", n as usize, &r);
-    let fails = per_call_ok("stream_table_flat", n as usize, &r.0, true);
+    let fails = per_call_ok("stream_table_flat", n as usize, &r.0, false);
     assert!(fails.is_empty(), "{fails:#?}");
 }
