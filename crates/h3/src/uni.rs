@@ -1059,6 +1059,13 @@ impl UniStream {
         self.done
     }
 
+    pub fn buffered_len(&self) -> (r: usize)
+        ensures
+            r == self.buffered(),
+    {
+        self.buf.len()
+    }
+
     pub fn kind(&self) -> (k: UniKind)
         requires
             self.wf(),
