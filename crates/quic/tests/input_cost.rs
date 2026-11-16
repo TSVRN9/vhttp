@@ -333,14 +333,19 @@ fn runs_then_fill(m: usize, r: &mut Run) {
 fn write_send_ack(m: usize, r: &mut Run) {
     let s = bytes(m);
     let mut st = SendStream::new(m as u64);
-    r.call("write", m, || {
-        assert_eq!(st.write(&s, true), Ok(()));
-        (None, st.buffered())
-    });
+    // 1 KiB writes, as an application writes: one write of all m bytes would time the byte copy's cache misses
+    // (D4's copy is O(d), byte by byte) in the slowest-call ratio, not an ACK.
+    for (i, w) in s.chunks(1024).enumerate() {
+        r.call("write", w.len(), || {
+            assert_eq!(st.write(w, (i + 1) * 1024 >= m), Ok(()));
+            (None, st.buffered())
+        });
+    }
     let mut more = true;
     while more {
         r.call("poll", 0, || {
-            more = st.poll_data(1200, u64::MAX).is_some();
+            // Each 1 KiB ACK below is exactly one sent piece.
+            more = st.poll_data(1024, u64::MAX).is_some();
             (None, st.buffered())
         });
     }
@@ -393,9 +398,31 @@ fn crypto_runs_then_fill() {
 }
 
 #[test]
-#[ignore = "9b2: fails today, one ACK's split_off copies up to half the stream (Q7); un-ignored by Task 8"]
 fn send_ack_1k() {
     check("send_ack_1k", 256 << 10, write_send_ack, false, Alloc::Queue);
+}
+
+/// 64 KiB written and sent in 1 KiB pieces, each acknowledged in order: no `realloc`, and no ACK requests more than
+/// 64 bytes, so none copies a stream byte (in-order ACKs leave the range lists empty; 64 bytes is the one 4-entry
+/// `Vec` of `(u64, u64)` that `range_insert` builds, Task 8's lists only: Task 8a restates it for the AVL).
+#[test]
+fn ack_copies_no_stream_bytes() {
+    const W: usize = 1 << 16;
+    let mut s = SendStream::new(W as u64);
+    assert_eq!(s.write(&bytes(W), true), Ok(()));
+    while s.poll_data(1024, u64::MAX).is_some() {}
+    let mut bad = Vec::new();
+    for i in 0..W / 1024 {
+        let a = K.with(|k| k.get());
+        s.on_data_acked((i * 1024) as u64, 1024, i == W / 1024 - 1);
+        let b = K.with(|k| k.get());
+        let (re, req) = (b[2] - a[2], b[4] - a[4]);
+        if re != 0 || req > 64 {
+            bad.push((i, re, req));
+        }
+    }
+    assert!(bad.is_empty(), "ACKs that realloc or request more than 64 bytes (ack, reallocs, bytes): {bad:?}");
+    assert_eq!(s.state_exec(), SendState::DataRecvd);
 }
 
 #[test]

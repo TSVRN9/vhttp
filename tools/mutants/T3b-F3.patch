@@ -1,7 +1,7 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -3629,10 +3629,6 @@
+@@ -3630,10 +3630,6 @@
                  }
                  self.live_h = false;
                  self.sent_h.drain_inflight(&mut lost);

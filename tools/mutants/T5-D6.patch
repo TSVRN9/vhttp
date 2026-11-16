@@ -1,7 +1,7 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -4158,7 +4158,6 @@
+@@ -4165,7 +4165,6 @@
          // `streams.is_none()` is unreachable (`on_peer_params` sets both); `wf`'s `complete` clause
          // needs it, and it costs less than one more conjunct.
          if self.peer_tp.is_none() || self.streams.is_none() {

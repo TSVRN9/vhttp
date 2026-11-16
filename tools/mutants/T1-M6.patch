@@ -1,7 +1,7 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -3674,7 +3674,6 @@
+@@ -3675,7 +3675,6 @@
      {
          let now = self.now;
          let none: Vec<u8> = Vec::new();

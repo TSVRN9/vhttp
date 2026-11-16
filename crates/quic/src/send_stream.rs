@@ -3,6 +3,7 @@
 //! and abandoned with RESET_STREAM (§3.3, §3.5).
 use vstd::prelude::*;
 use vstd::slice::{slice_subrange, slice_to_vec};
+use byteq::queue::ByteQueue;
 use crate::flow::*;
 use wire::varint::*;
 
@@ -203,7 +204,7 @@ fn clamp_end(off: u64, len: u64, end: u64) -> (r: u64)
 pub struct SendStream {
     state: SendState,
     /// The bytes `[acked_base, written)`.
-    buf: Vec<u8>,
+    buf: ByteQueue,
     acked_base: u64,
     written: u64,
     sent_end: u64,
@@ -276,14 +277,10 @@ impl SendStream {
         self.reset
     }
 
-    /// The end of the contiguously acknowledged prefix. The buffer is trimmed to it lazily, so
-    /// `acked_base` (the buffer's start) may lag behind.
+    /// The end of the acknowledged prefix: each ACK drops it from the buffer at once, so it is the
+    /// buffer's start (that no acked range starts there is Task 8a's `wf` clause, on merged sets).
     pub closed spec fn acked_point_spec(&self) -> u64 {
-        if self.acked@.len() > 0 && self.acked@[0].0 == self.acked_base {
-            self.acked@[0].1
-        } else {
-            self.acked_base
-        }
+        self.acked_base
     }
 
     pub closed spec fn buffered_spec(&self) -> nat {
@@ -330,6 +327,7 @@ impl SendStream {
 
     /// `wf` except the clauses `on_data_acked` restores only at its end.
     closed spec fn core(&self) -> bool {
+        &&& self.buf.wf()
         &&& self.credit.wf()
         &&& self.credit.used_spec() == self.sent_end
         &&& self.sent_end <= self.credit.max_spec()
@@ -359,9 +357,8 @@ impl SendStream {
     pub closed spec fn wf(&self) -> bool {
         &&& self.core()
         &&& self.state is DataSent ==> !(self.acked_base == self.written && self.fin_acked)
-        // Memory: the buffer is at most twice the bytes past the acknowledged prefix.
-        &&& self.buf@.len() <= 2 * (self.written - self.acked_point_spec())
-        &&& self.acked_point_spec() == self.written ==> self.acked_base == self.written
+        // Memory: the buffer holds exactly the bytes past the acknowledged prefix (none once reset).
+        &&& !is_reset(self.state) ==> self.buf@.len() == self.written - self.acked_base
     }
 
     /// The invariant, in terms of the accessors.
@@ -433,7 +430,7 @@ impl SendStream {
     {
         let r = SendStream {
             state: SendState::Ready,
-            buf: Vec::new(),
+            buf: ByteQueue::new(),
             acked_base: 0,
             written: 0,
             sent_end: 0,
@@ -491,6 +488,7 @@ impl SendStream {
     pub fn write(&mut self, data: &[u8], fin: bool) -> (r: Result<(), ()>)
         requires
             old(self).wf(),
+            old(self).buffered_spec() + data@.len() <= byteq::queue::MAX_QUEUE,
         ensures
             final(self).wf(),
             send_step_ok(old(self).state(), final(self).state()),
@@ -516,7 +514,8 @@ impl SendStream {
             return Err(());
         }
         let ghost aw = self.all_written@;
-        self.buf.extend_from_slice(data);
+        let Ghost(w) = self.buf.push_slice(data);
+        assert(w <= 7 * data@.len() + 4);
         self.written = self.written + data.len() as u64;
         self.all_written = Ghost(aw + data@);
         self.fin_written = fin;
@@ -790,7 +789,7 @@ impl SendStream {
         self.state = SendState::ResetSent;
         self.reset = Some((code, self.sent_end));
         self.reset_pending = true;
-        self.buf = Vec::new();
+        self.buf = ByteQueue::new();
         self.lost = Vec::new();
         self.acked = Vec::new();
         self.fin_lost = false;
@@ -936,6 +935,46 @@ impl SendStream {
         }
     }
 
+    /// Drops the acknowledged prefix, if the first acked range starts at the buffer's start, from
+    /// the queue at once: no byte copied (split from `on_data_acked` for the rlimit).
+    fn drop_prefix(&mut self)
+        requires
+            old(self).core(),
+        ensures
+            final(self).core(),
+            *final(self) == (SendStream {
+                buf: final(self).buf,
+                acked: final(self).acked,
+                lost: final(self).lost,
+                acked_base: final(self).acked_base,
+                ..*old(self)
+            }),
+            final(self).acked_base >= old(self).acked_base,
+            final(self).buf@.len() <= old(self).buf@.len(),
+    {
+        let ab = self.acked_base;
+        let se = self.sent_end;
+        if self.acked.len() > 0 && self.acked[0].0 == ab {
+            let ghost aw = self.all_written@;
+            let nb = self.acked[0].1;
+            proof {
+                self.buf.lemma_wf();
+            }
+            let Ghost(w) = self.buf.drop_front((nb - ab) as usize);
+            assert(w <= 2);
+            range_remove(&mut self.acked, 0, nb, Ghost(ab), Ghost(se));
+            range_remove(&mut self.lost, 0, nb, Ghost(ab), Ghost(se));
+            self.acked_base = nb;
+            proof {
+                if !is_reset(self.state) {
+                    assert(self.buf@ =~= aw.subrange(nb as int, self.written as int));
+                }
+                assert(in_bounds(self.acked@, nb, se));
+                assert(in_bounds(self.lost@, nb, se));
+            }
+        }
+    }
+
     /// The bytes `[off, off + len)`, and the FIN if `fin`, were acknowledged.
     pub fn on_data_acked(&mut self, off: u64, len: u64, fin: bool)
         requires
@@ -981,57 +1020,7 @@ impl SendStream {
                 self.fin_lost = false;
             }
         }
-        // ponytail: the buffer is trimmed only once the acknowledged prefix is at least the
-        // tail that `split_off` copies, so each copied byte is paid for by a freed one (O(written)
-        // copying in total) at the cost of up to 2x the unacked bytes held; a head index as in
-        // Reassembly if that slack matters.
-        let ghost pre = *self;
-        loop
-            invariant
-                self.core(),
-                self.state == pre.state,
-                self.state is Send || self.state is DataSent,
-                self.all_written == pre.all_written,
-                self.written == pre.written,
-                self.sent_end == pre.sent_end,
-                se == self.sent_end,
-                aw == self.all_written@,
-                self.credit == pre.credit,
-                self.fin_written == pre.fin_written,
-                self.fin_acked == pre.fin_acked,
-                self.reset == pre.reset,
-                self.reset_pending == pre.reset_pending,
-                self.acked_base >= pre.acked_base,
-            ensures
-                self.acked@.len() == 0 || self.acked@[0].0 != self.acked_base || self.acked@[0].1
-                    - self.acked_base < self.written - self.acked@[0].1,
-            decreases self.written - self.acked_base,
-        {
-            if self.acked.len() == 0 || self.acked[0].0 != self.acked_base {
-                break;
-            }
-            let ab = self.acked_base;
-            let nb = self.acked[0].1;
-            if nb - ab < self.written - nb {
-                break;
-            }
-            if nb == self.written {
-                // A fresh vec, not `clear()`: acknowledged space keeps no allocation
-                // (TRUSTED.md: proven bounds are lengths, not capacities).
-                self.buf = Vec::new();
-            } else {
-                let t = self.buf.split_off((nb - ab) as usize);
-                self.buf = t;
-            }
-            range_remove(&mut self.acked, 0, nb, Ghost(ab), Ghost(se));
-            range_remove(&mut self.lost, 0, nb, Ghost(ab), Ghost(se));
-            self.acked_base = nb;
-            proof {
-                assert(self.buf@ =~= aw.subrange(nb as int, self.written as int));
-                assert(in_bounds(self.acked@, nb, se));
-                assert(in_bounds(self.lost@, nb, se));
-            }
-        }
+        self.drop_prefix();
         if let SendState::DataSent = self.state {
             if self.acked_base == self.written && self.fin_acked {
                 self.state = SendState::DataRecvd;
@@ -1083,11 +1072,11 @@ impl SendStream {
 } // verus!
 
 impl SendStream {
-    /// Test support: the send buffer's allocated capacity. Verus models `Vec` length, not
-    /// capacity, so capacity release is checked by test only (TRUSTED.md).
+    /// Test support: the send queue's allocated capacity, both buffers while it migrates.
     #[doc(hidden)]
     pub fn buf_capacity(&self) -> usize {
-        self.buf.capacity()
+        let (a, b) = self.buf.caps();
+        a + b
     }
 
     /// Test support: the acked and lost range lists' lengths.

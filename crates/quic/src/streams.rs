@@ -484,6 +484,28 @@ proof fn lemma_sum_prefix_le(s: Seq<Entry>, i: int)
     }
 }
 
+proof fn lemma_sum_buf_nonneg(s: Seq<Entry>)
+    ensures
+        sum(s, 9) >= 0,
+    decreases s.len(),
+{
+    if s.len() > 0 {
+        lemma_sum_buf_nonneg(s.drop_last());
+    }
+}
+
+/// One sending part's buffered bytes are at most the whole's (`tx_buffered`).
+proof fn lemma_sum_buf_le(s: Seq<Entry>, i: int)
+    requires
+        0 <= i < s.len(),
+    ensures
+        0 <= val(s[i], 9) <= sum(s, 9),
+{
+    lemma_sum_prefix_le(s, i + 1);
+    lemma_sum_take(s, i, 9);
+    lemma_sum_buf_nonneg(s.take(i));
+}
+
 proof fn lemma_sum_kind_nonneg(s: Seq<Entry>, q: int)
     requires
         4 <= q < 8,
@@ -2050,6 +2072,27 @@ proof fn lemma_ids_frame(s0: Streams, s1: Streams)
     assert forall|y: u64| #[trigger] created(s1.ids, y) == created(s0.ids, y) by {}
 }
 
+/// `poll_max_data` committed MAX_DATA (`s1` to `s2`, only `conn_recv` changed, its limit not lowered): the polling
+/// state is still kept (split from `poll_max_data` for the rlimit).
+proof fn lemma_max_data_kept(s0: Streams, s1: Streams, s2: Streams, n: int, out: Seq<Frame>)
+    requires
+        kept(s0, s1),
+        sends_same(s0, s1),
+        out_tx(s1, n, out),
+        s2.conn_recv.wf(),
+        s1.conn_recv.limit_spec() <= s2.conn_recv.limit_spec(),
+        s2.conn_recv.consumed_spec() == s1.conn_recv.consumed_spec(),
+        s2.conn_recv.window_spec() == s1.conn_recv.window_spec(),
+        s2.conn_recv.cap_spec() == s1.conn_recv.cap_spec(),
+        s2 == (Streams { conn_recv: s2.conn_recv, ..s1 }),
+    ensures
+        kept(s0, s2),
+        sends_same(s0, s2),
+        out_tx(s2, n, out),
+{
+    assert(forall|j: u64| #[trigger] s2.rx_spec(j) == s1.rx_spec(j));
+}
+
 /// `poll_max_streams` committed this direction's MAX_STREAMS (`s1` to `s2`, only `ids`
 /// changed): the polling state is still kept (split from `poll_max_streams` for the rlimit).
 #[verifier::spinoff_prover]
@@ -3443,6 +3486,10 @@ impl Streams {
         if !ok {
             return Err(());
         }
+        proof {
+            lemma_sum_buf_le(s0.entries@, i as int);
+            assert(MAX_SEND_BUFFER <= byteq::queue::MAX_QUEUE) by (compute_only);
+        }
         let mut e = Entry { id: 0, recv: None, send: None };
         self.entries.set_and_swap(i, &mut e);
         if let Some(mut p) = e.send.take() {
@@ -3497,6 +3544,10 @@ impl Streams {
             return Err(());
         }
         let mut p = SendStream::new(self.tx_uni);
+        proof {
+            lemma_sum_buf_nonneg(s0.entries@);
+            assert(MAX_SEND_BUFFER <= byteq::queue::MAX_QUEUE) by (compute_only);
+        }
         let _ = p.write(data, fin);
         let e = Entry { id, recv: None, send: Some(p) };
         self.entries.push(e);
@@ -3966,7 +4017,7 @@ impl Streams {
                 let ghost s1 = *self;
                 self.conn_recv.commit();
                 proof {
-                    assert(forall|j: u64| #[trigger] self.rx_spec(j) == s1.rx_spec(j));
+                    lemma_max_data_kept(s0, s1, *self, pre.len() as int, out@);
                 }
             }
         }

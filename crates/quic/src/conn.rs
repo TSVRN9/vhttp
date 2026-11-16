@@ -28,6 +28,7 @@ use crate::ack_track::*;
 use crate::cid::*;
 use crate::codes::*;
 use byteq::capvec::CapVec;
+use byteq::queue::MAX_QUEUE;
 use crate::crypto_stream::*;
 #[allow(unused_imports)]
 use crate::crypto_count::*;
@@ -4039,11 +4040,17 @@ impl Connection {
         if !matches!(self.lc.phase(), Phase::Open) {
             return;
         }
+        // The queue holds at most `MAX_QUEUE` bytes (`SendStream::write`'s requires); nothing proves a bound on the
+        // bytes TLS writes per level yet, so a write past it is dropped, as one past `VARINT_MAX` is
+        // (carryover cat-C15-crypto-write).
+        if data.len() > MAX_QUEUE {
+            return;
+        }
         match level {
-            PacketKind::Initial => if self.live_i {
+            PacketKind::Initial => if self.live_i && self.ctx_i.buffered() <= MAX_QUEUE - data.len() {
                 let _ = self.ctx_i.write(data, false);
             },
-            PacketKind::Handshake => if self.live_h {
+            PacketKind::Handshake => if self.live_h && self.ctx_h.buffered() <= MAX_QUEUE - data.len() {
                 let _ = self.ctx_h.write(data, false);
             },
             PacketKind::OneRtt => {},
