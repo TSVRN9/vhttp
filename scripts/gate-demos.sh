@@ -310,8 +310,9 @@ expect_fail "escape-gate: assume_specification" "unaccounted escape" esc
 # crypto_stream.rs nor the per-fn files conn.rs and quictls's server.rs: crypto_stream.rs's retire dropping join2's cost,
 # refeed's OneRtt feed cost stubbed to 0 behind `let _ =` (the call kept), the T3b-F1 mutant patch itself (the call
 # deleted, its cost a literal ghost 0), receive's returned cost
-# stubbed to `Ghost(0)`, crypto_drop dropping a retire's cost, the allowed validate_hs_path drop gone stale; the real
-# tree passes.
+# stubbed to `Ghost(0)`, crypto_drop dropping a retire's cost, the allowed validate_hs_path drop gone stale; fix round
+# 2, each passed by b937472's tool: retire returning a literal `Ghost(1)`, `work = 0;` in receive's proof block, a second
+# `let ghost mut work` in receive, a stale LITERAL_OK entry (bal's arm no longer literal); the real tree passes.
 expect_pass "cost-charge: the real tree" "$root/scripts/cost-charge.sh" "$root"
 ccq=$tmp/cost/crates/quic/src
 ccb=$tmp/cost/crates/byteq/src
@@ -409,6 +410,21 @@ cfresh
 once '^        self\.discard\(PacketKind::Initial\);$' "$ccq/conn.rs"
 sed -i 's/^        self\.discard(PacketKind::Initial);$/        let Ghost(_c) = self.discard(PacketKind::Initial);/' "$ccq/conn.rs"
 expect_fail "cost-charge: a stale allowed drop (I6)" "allowed drop of discard in Connection::validate_hs_path matches no statement call" cc
+cfresh
+once '^        Ghost\(work\)$' "$ccq/crypto_stream.rs"
+sed -i 's/^        Ghost(work)$/        Ghost(1)/' "$ccq/crypto_stream.rs"
+expect_fail "cost-charge: retire returns a literal Ghost(1) (crypto_stream.rs, fix round 2)" "CryptoStream::retire builds the literal cost Ghost(1)" cc
+cfresh
+once '^            assert\(refed ==> !keep\);$' "$cct/server.rs"
+sed -i 's/^            assert(refed ==> !keep);$/&\n            work = 0;/' "$cct/server.rs"
+expect_fail "cost-charge: receive zeroes work in a proof block (per-fn file, fix round 2)" "QuicServer::receive assigns work other than as" cc
+cfresh
+sed -i 's/^            assert(refed ==> !keep);$/&\n        }\n        let ghost mut work: nat = 0;\n        proof {/' "$cct/server.rs"
+expect_fail "cost-charge: receive rebinds work after its charges (fix round 2)" "QuicServer::receive binds work again" cc
+cfresh
+once '^        \(mk\(l, k, v, r\), Ghost\(1\)\)$' "$ccq/avl.rs"
+sed -i 's/^        (mk(l, k, v, r), Ghost(1))$/        (mk(l, k, v, r), Ghost(1nat + 0))/' "$ccq/avl.rs"
+expect_fail "cost-charge: a stale literal-return exemption (fix round 2)" "literal-return exemption for bal matches no literal cost" cc
 
 # The no-realloc claim (spec "The bound", TRUSTED.md's Vec row): fill's fresh piece made by CapVec::new(0) instead of
 # CapVec::new(n) must fail crypto_ooo_cost_linear on reallocs (under Verus it fails push's precondition). A copy of the

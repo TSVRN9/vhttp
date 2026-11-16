@@ -1,7 +1,7 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -1876,6 +1876,7 @@
+@@ -1880,6 +1880,7 @@
                          assert(dv[i as int] == ev@[i as int].deep_view());
                          assert(dv[i as int] is PeerParams);
                      }

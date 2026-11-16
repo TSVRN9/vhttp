@@ -10,7 +10,7 @@ diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
          Err(_) => allowed_tp_err(b) && c.client_scid_spec().len() <= MAX_CID_LEN,  // rfc-quantity: c.client_scid_spec(): the Source Connection ID field of the client's first Initial (RFC 9000 §7.3), tied by Connection::accept's ensures client_scid_spec() == first.scid@ (T5-M8' kills a re-anchor); its length bound <= 20 is §17.2's receiver rule via HandshakeIds::wf (Connection::client_scid_len)
          Ok(t) => t.initial_source_connection_id != Some(c.client_scid_spec()),  // rfc-quantity: c.client_scid_spec(): the Source Connection ID field of the client's first Initial (RFC 9000 §7.3), as on the Err arm
      }
-@@ -2102,7 +2102,7 @@
+@@ -2106,7 +2106,7 @@
          proof {
              lemma_tp_err_allowed(b@);
          }

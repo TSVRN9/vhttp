@@ -19,11 +19,15 @@ hold no fn), inside `verus!` (comments and strings blanked, fns found by tools/a
 In the per-fn files ROOT/crates/quic/src/conn.rs and ROOT/crates/quictls/src/server.rs (9b2 fix round 1, I6), their
 exec fns returning a Ghost<nat> are callees too, and every fn there is held to the callee-cost rule above (no public
 wrappers), except the statement drops DROPS lists by (file, fn, callee), each an exclusion with an owner (an entry no
-statement matches fails); their whiles and loops are not this gate's. In every file a fn returning a cost binds no
-ghost but `work` to a literal (`let ghost [mut] X: nat = N;`, a deleted callee's cost stubbed, the T3b-F1 shape); in the
-per-fn files it also builds no literal `Ghost(N)` after its first callee cost call or charge of work (a stubbed return).
+statement matches fails); their whiles and loops are not this gate's. In every file: every assignment to `work` is
+`work = work + E;`; a fn binds `work` once (`let ghost [mut] work` twice restarts the count); a fn returning a cost
+binds no ghost but `work` to a literal (`let ghost [mut] X: nat = N;`, a deleted callee's cost stubbed, the T3b-F1
+shape) and builds no literal `Ghost(N)` after its first callee cost call or charge of work (a stubbed return), but for
+LITERAL_OK's keyed fns (avl::bal, frags::walk, frags::walk_run: match arms returning literals after a recursive arm's
+text; an entry that no longer fires fails).
 Fails naming file:line; fails closed on a missing file (avl.rs, frags.rs, crypto_stream.rs, conn.rs, server.rs, or no byteq src/*.rs), no verus! block, or no looping or recursive fn or bound cost.
-Limit: a structural check, not a proof that the amount charged is right (the cost ensures are upper bounds, so an
+Limit: a stubbed literal cost arm in avl::bal, frags::walk or frags::walk_run is not seen (LITERAL_OK; owned by
+carryover cat-C15-semantic-cost, 9b4). Limit: a structural check, not a proof that the amount charged is right (the cost ensures are upper bounds, so an
 undercharge still verifies; carryover cat-C15-semantic-cost); a cost used on one path and dropped on another, a Ghost(x) built and then discarded, and a charge written work += E or work + 0 + 0 are not seen (the same carryover); a call is matched by name, so a
 std method named like one of these cost fns would be flagged (fails closed); recursion is recognised by a fn-level `decreases`,
 which Verus requires of every recursive exec fn here (the attribute that waives it is refused)."""
@@ -37,6 +41,13 @@ DIRS = ['crates/byteq/src']
 # Per-fn files: only their cost-carrying fns (an exec fn returning a Ghost<nat>) and the callers of one are checked, by
 # the callee-cost rules; their whiles and other fns are not this gate's (9b2 fix round 1, I6).
 PERFN = ['crates/quic/src/conn.rs', 'crates/quictls/src/server.rs']
+# Cost fns whose match arms return a literal cost after a recursive arm's text (the literal-return rule's only
+# exemption, by (file, fn); an entry that no longer fires fails): their literal arms are cat-C15-semantic-cost's.
+LITERAL_OK = {
+    ('crates/quic/src/avl.rs', 'bal'),
+    ('crates/quic/src/frags.rs', 'walk'),
+    ('crates/quic/src/frags.rs', 'walk_run'),
+}
 # Statement drops the gate allows, each an exclusion its fn's comment names and an owner holds: (file, fn, callee).
 # An entry no drop matches fails, so the list cannot go stale.
 DROPS = {
@@ -139,7 +150,7 @@ def bodies(root):
 def check(root):
     errs, nfn, nwhile, nbound = [], 0, 0, 0
     files = bodies(root)
-    seen = set()
+    seen, lits_seen = set(), set()
     costs = {}
     for rel, s, fl in files:
         for path, name, ret, clauses, k, end, e2 in fl:
@@ -155,16 +166,23 @@ def check(root):
             errs.append('%s: exec_allows_no_decreases_clause (recursion without a decreases)' % line(s.index('exec_allows_no_decreases_clause')))
         for path, name, ret, clauses, k, end, e2 in fl:
             body = s[end:e2]
+            for w in ASSIGN.finditer(body):
+                if not UPDATE.match(body, w.start()):
+                    errs.append('%s: %s assigns work other than as `work = work + E;`' % (line(end + w.start()), path))
+            decl = list(re.finditer(r'\blet\s+ghost\s+(?:mut\s+)?work\b', body))
+            for d2 in decl[1:]:
+                errs.append('%s: %s binds work again (a second `let ghost work` restarts the count)' % (line(end + d2.start()), path))
+            lit = zeroed(s, line, path, ret, end, e2, call, True)
+            if (rel, path) in LITERAL_OK:
+                if any('builds the literal cost' in x for x in lit): lits_seen.add((rel, path))
+                lit = [x for x in lit if 'builds the literal cost' not in x]
+            errs += lit
             if rel in PERFN:
                 errs += dropped(s, line, path, name, ret, end, e2, costs, call, False, {d[2] for d in DROPS if d[:2] == (rel, path)}, seen)
-                errs += zeroed(s, line, path, ret, end, e2, call, True)
                 nbound += len(binds_in(s, end, e2, call))
                 continue
             for bad in re.finditer(r'\bloop\b|\bfor\s+[^{;]*?\bin\b', body):
                 errs.append('%s: `%s` in %s: only `while` loops are checked' % (line(end + bad.start()), bad.group(0).split()[0], path))
-            for w in ASSIGN.finditer(body):
-                if not UPDATE.match(body, w.start()):
-                    errs.append('%s: %s assigns work other than as `work = work + E;`' % (line(end + w.start()), path))
             whiles = [w.start() + end for w in re.finditer(r'\bwhile\b', body)]
             rec = re.search(r'\bdecreases\b', clauses) is not None
             for w in whiles:
@@ -191,7 +209,6 @@ def check(root):
             if rec and not charges(body):
                 errs.append('%s: %s recurses but its body does not charge work (`work = work + E`, E not 0)' % (line(k), path))
             errs += dropped(s, line, path, name, ret, end, e2, costs, call, (rel, path) in WRAPPERS, set(), seen)
-            errs += zeroed(s, line, path, ret, end, e2, call, False)
             nbound += len(binds_in(s, end, e2, call))
             if not (rec or whiles): continue
             nfn += 1
@@ -204,6 +221,8 @@ def check(root):
             for r in reads:
                 if len(ens) < 2 or not re.search(r'(?<![\w.])' + re.escape(r), ens[1]):
                     errs.append('%s: %s %s but its ensures do not read its cost %s' % (line(k), path, why, r))
+    for d in sorted(LITERAL_OK - lits_seen):
+        errs.append('%s: literal-return exemption for %s matches no literal cost' % d)
     for d in sorted(DROPS):
         if d[1:] not in seen:
             errs.append('%s: allowed drop of %s in %s matches no statement call' % (d[0], d[2], d[1]))
@@ -217,9 +236,8 @@ def check(root):
 def zeroed(s, line, path, ret, a, b, call, returns):
     """Errors for a stubbed cost in a cost fn (body s[a:b]): a ghost binding of a literal, `let ghost [mut] X: nat = N;`
     with X not `work` (a deleted callee's cost replaced by a constant, the T3b-F1 shape), or a literal `Ghost(N)` built
-    after its first callee cost call or charge of work (a stubbed return; with `returns`, in the per-fn files only,
-    whose literal costs are early exits before any callee: avl.rs's and frags.rs's match arms return literals after a
-    recursive arm's text)."""
+    after its first callee cost call or charge of work (a stubbed return; with `returns`; LITERAL_OK exempts the match
+    arms of avl::bal, frags::walk and frags::walk_run, which return literals after a recursive arm's text)."""
     if cost_idx(ret) is None: return []
     errs = []
     for g in re.finditer(r'\blet\s+ghost\s+(?:mut\s+)?(\w+)\s*(?::\s*nat\s*)?=\s*\d+(?:nat)?\s*;', s[a:b]):

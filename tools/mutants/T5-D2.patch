@@ -1,7 +1,7 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -2021,7 +2021,6 @@
+@@ -2025,7 +2025,6 @@
          // `Complete` gives 1-RTT keys, above Initial too: TLS leaves Initial there if the batch has
          // no `Secrets { Handshake }`.
          if (to_hs || done) && self.unconsumed(Level::Initial, PacketKind::Initial) {

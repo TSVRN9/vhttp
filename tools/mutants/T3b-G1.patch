@@ -1,7 +1,7 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -1020,7 +1020,7 @@
+@@ -1021,7 +1021,7 @@
                  }
              }
          }

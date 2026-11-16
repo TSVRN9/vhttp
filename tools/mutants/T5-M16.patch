@@ -1,7 +1,7 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -1771,11 +1771,11 @@
+@@ -1775,11 +1775,11 @@
          let ghost cfg = self.hs.cfg_view();
          let ghost tp = self.hs.tp_view();
          proof {

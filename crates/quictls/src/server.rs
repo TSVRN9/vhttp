@@ -830,7 +830,8 @@ impl<'a> QuicServer<'a> {
             // The CRYPTO reads handing TLS its bytes (two levels, then the refed 1-RTT one, each linear in `d`), the
             // stash copy (`d + 1`, only when there was no refeed), and the retires of completion and of a close.
             // Excluded: the pipeline half (`pipeline::receive`, `refeed_one_rtt`; Task 10), TLS's own step (D14,
-            // 9b5), `h3.pump` (9b4).
+            // 9b5), `h3.pump` (9b4), and the free of the stash this one replaces (O(1), a `CapVec<u8>`; frees are
+            // outside the ghost cost, cat-C15-semantic-cost, 9b4).
             cost@ <= 3 * (18 * d.len() + 5608) + 5 * c_retire(),
     {
         hide(spec_on_crypto);
@@ -1075,7 +1076,8 @@ impl<'a> QuicServer<'a> {
             old(self).has_backlog_spec() ==> final(self).backlog_measure() < old(self).backlog_measure(),
             // Its budgets: `B_PUMP` of teardown, `B_PUMP` CRYPTO bytes read and the completing call's retires, the
             // refed datagram's 1-RTT read, a close's retires. Excluded: the refeed's pipeline half (`refeed_one_rtt`,
-            // Task 10), TLS's own step (D14, 9b5), `h3.pump` (9b4).
+            // Task 10), TLS's own step (D14, 9b5), `h3.pump` (9b4), and the drop of the refed stash (O(1), a
+            // `CapVec<u8>`; frees are outside the ghost cost, cat-C15-semantic-cost, 9b4).
             res.0@ <= B_PUMP + (18 * B_PUMP + 5608 + 2 * c_retire()) + (18 * MAX_UDP_PAYLOAD + 5608) + 3 * c_retire(),
     {
         let ghost mut work: nat = 0;
@@ -1680,7 +1682,9 @@ impl<'a> QuicServer<'a> {
             final(self).conn_spec().phase_spec() is Open && old(self).conn_spec().crypto_held(level_kind(l))
                 <= MAX_CRYPTO_BUFFER + max ==> final(self).conn_spec().crypto_held(level_kind(l)) <= MAX_CRYPTO_BUFFER,
             // The read's cost, linear in `max` (`Connection::crypto_read`), and the retires of the call that completes
-            // (`feed_tls`). Excluded: TLS's own step (D14, 9b5).
+            // (`feed_tls`). Excluded: TLS's own step (D14, 9b5), and the buffer's allocation (`CapVec::new(n)`, one
+            // allocator call, no byte written) and free (O(1), a `CapVec<u8>`): allocator calls are outside the ghost
+            // cost (cat-C15-semantic-cost, 9b4).
             res.1@ <= 18 * max + 5608 + c_done(final(self).conn_spec(), old(self).conn_spec()),
     {
         let lk = kind(l);

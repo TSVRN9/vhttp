@@ -97,7 +97,8 @@ impl<T> CapVec<T> {
         self.v.as_slice()
     }
 
-    /// The guarantee ends here: the `Vec` is only read or moved afterwards.
+    /// The guarantee ends here: the `Vec` is only read, moved, or shrunk by `pop` afterwards (a `Vec` never reallocates
+    /// to shrink; `frags::gather` pops after its exact list).
     pub fn into_vec(self) -> (r: Vec<T>)
         ensures
             r@ == self@,

@@ -1,7 +1,7 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -1951,11 +1951,7 @@
+@@ -1955,11 +1955,7 @@
      /// reassembly buffer out of order.
      spec fn unread(&self, l: Level, k: PacketKind) -> nat {
          let c = self.h3.conn_spec();
@@ -14,7 +14,7 @@ diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
      }
  
      #[verifier::spinoff_prover]
-@@ -1977,7 +1973,7 @@
+@@ -1981,7 +1977,7 @@
                  assert(self.h3.conn_spec().crypto_received(k, (e - 1) as nat));
              }
          }

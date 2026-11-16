@@ -1,7 +1,7 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -2029,7 +2029,6 @@
+@@ -2033,7 +2033,6 @@
              return false;
          }
          if done && self.unconsumed(Level::Handshake, PacketKind::Handshake) {
