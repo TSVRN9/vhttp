@@ -130,7 +130,7 @@ echo "ct-check: cost fixtures $n/$n"
 # header index moves with any edit to the function, so NotCounted payloads are stripped here (the
 # fixtures keep theirs); the gate is about verdicts and the atoms of each bound. Any difference
 # fails. Re-recording expected-cost.txt cannot hide a lost bound: every `# predicted: bounded`
-# target must still be bounded, and the root count is the pre-registered 36.
+# target must still be bounded, and the root count is the pre-registered 36 plus 9b3's sort_ids_w (37).
 for c in wire h3 quic; do
     front $t cost "$CT_OUT/parsers/mir-$c.json" "$CT_OUT/parsers/cost-$c.txt" "$cm" "$pm" "$ct/cost-targets.txt"
 done
@@ -146,7 +146,7 @@ if grep_hits -v '^[[:space:]]*(#|$|cost-root[[:space:]])' "$ct/cost-targets.txt"
     fail "cost-targets.txt holds a line that is not a cost-root line (the selftest and the cost run must share one cpol)"
 fi
 nt=$(grep -c -E '^[[:space:]]*cost-root[[:space:]]' "$ct/cost-targets.txt")
-[ "$nt" -eq 36 ] || fail "cost targets: $nt roots, the pre-registered denominator is 36"
+[ "$nt" -eq 37 ] || fail "cost targets: $nt roots, the pre-registered denominator is 37 (36 + 9b3's sort_ids_w)"
 for p in $(sed -nE 's/^[[:space:]]*cost-root[[:space:]]+([^ ]+)[[:space:]]+# predicted: bounded.*/\1/p' "$ct/cost-targets.txt"); do
     grep -q "^bounded $p deg=" "$got" || fail "lost a bound the targets file predicts: $p"
 done

@@ -64,8 +64,8 @@ h3::frame::parse_exact_varint 04 => Some(0x4u64)
 # GOAWAY payload [04 00] has a trailing byte => H3_FRAME_ERROR (frame_layout_errors, same file)
 h3::frame::parse_exact_varint 0400 => None
 # SETTINGS [(6, 0x400)] ok; setting 6 twice => H3_SETTINGS_ERROR (settings_rules, same file)
-h3::frame::settings_ok [(0x6u64,0x400u64)] => true
-h3::frame::settings_ok [(0x6u64,0x1u64),(0x6u64,0x2u64)] => false
+h3::frame::settings_ok [(0x6u64,0x400u64)] [0x6u64] => (true,())
+h3::frame::settings_ok [(0x6u64,0x1u64),(0x6u64,0x2u64)] [0x6u64,0x6u64] => (false,())
 # RFC 7541 C.1.2: 1337 with a 5-bit prefix (rfc7541_c1 in crates/h3/tests/qpack_int.rs)
 h3::qpack::int::parse_prefix_int 0x5u8 1f9a0a => #1(0x539u64,0x3usize)
 # RFC 7541 C.4.1: www.example.com (rfc7541_c4_strings in crates/h3/tests/huffman.rs)

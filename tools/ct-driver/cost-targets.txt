@@ -1,12 +1,14 @@
 # Phase 8b step-bound roots: the 36 pre-registered parser targets (spec: Pre-registered coverage, I3),
 # read with manifest.txt by scripts/ct-check.sh's cost run. Each line's prediction is Task 2's final X'
-# (19/36); `orig` is the original 27/38 table's row. Verdicts: expected-cost.txt.
+# (19/36); `orig` is the original 27/38 table's row. Verdicts: expected-cost.txt. Phase 9b3 adds a 37th, sort_ids_w,
+# whose bound Verus proves as a ghost cost (its row's comment).
 cost-root wire::varint::exec_len  # predicted: bounded; orig: Some
 cost-root wire::varint::exec_min_len  # predicted: bounded; orig: Some
 cost-root wire::varint::parse_varint  # predicted: bounded; orig: Some
 cost-root h3::frame::parse_frame_header  # predicted: bounded; orig: Some
 cost-root h3::frame::parse_exact_varint  # predicted: bounded; orig: Some
 cost-root h3::frame::settings_ok  # predicted: bounded; orig: Some
+cost-root h3::frame::sort_ids_w  # predicted: none (generic CapVec<u64>: ambiguous key byteq::capvec::CapVec::new); bound proved by Verus as a ghost cost: sort_ids_w ensures r.1@ <= c_sort() * (p * (clog2(p) + 1) + 1) (9b3 D7); MIR cross-check: 9b4 cat-C15-mir-cost; orig: -
 cost-root h3::frame::parse_settings  # predicted: none (non-unit step (off += n1 + n2); original None); orig: None
 cost-root h3::frame::parse_frame_payload  # predicted: none (calls parse_settings); orig: None
 cost-root h3::qpack::int::parse_prefix_int  # predicted: bounded; orig: Some

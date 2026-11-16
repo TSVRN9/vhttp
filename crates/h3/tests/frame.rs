@@ -38,6 +38,38 @@ fn settings_rules() {
     assert!(parse_frame_payload(FRAME_SETTINGS, &[0x21, 0x07]).is_ok());
 }
 
+/// 512 SETTINGS pairs with distinct, non-reserved identifiers (0, 1, 6..=515), value 0: 1,476 bytes.
+fn settings_512() -> (Vec<(u64, u64)>, Vec<u8>) {
+    let s: Vec<(u64, u64)> = (0..=515u64).filter(|id| !(2..=5).contains(id)).map(|id| (id, 0)).collect();
+    let mut p = Vec::new();
+    for &(id, v) in &s {
+        put_varint(id, &mut p);
+        put_varint(v, &mut p);
+    }
+    (s, p)
+}
+
+#[test]
+fn settings_duplicates_far_apart() {
+    let (s, p) = settings_512();
+    assert_eq!((s.len(), p.len()), (512, 1476));
+    assert_eq!(parse_frame_payload(FRAME_SETTINGS, &p), Ok(Frame::Settings(s)));
+    // the last pair's identifier (515, two bytes) becomes the first's (0, one byte)
+    let mut q = p[..p.len() - 3].to_vec();
+    q.extend_from_slice(&[0x00, 0x00]);
+    assert_eq!(parse_frame_payload(FRAME_SETTINGS, &q), Err(H3_SETTINGS_ERROR));
+}
+
+#[test]
+fn settings_reserved_with_duplicate() {
+    assert_eq!(
+        parse_frame_payload(FRAME_SETTINGS, &[0x02, 0x00, 0x06, 0x01, 0x06, 0x02]),
+        Err(H3_SETTINGS_ERROR)
+    );
+    // a pair cut short is H3_FRAME_ERROR even after a duplicate
+    assert_eq!(parse_frame_payload(FRAME_SETTINGS, &[0x06, 0x01, 0x06, 0x02, 0x06]), Err(H3_FRAME_ERROR));
+}
+
 #[test]
 fn frame_types() {
     assert_eq!(parse_frame_payload(0x02, &[]), Ok(Frame::H2Reserved(2)));
