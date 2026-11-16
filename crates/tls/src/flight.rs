@@ -74,9 +74,11 @@ pub struct SpecFlight {
 /// `t0` is the transcript up to and including the ClientHello being answered: `CH`, or
 /// `message_hash(CH1) || HRR || CH2`. `rand` is `TLS_RAND_LEN` bytes: [0..32] the ServerHello
 /// random, [32..64] the ECDHE scalar, [64..96] the PSS salt. The order is the requirement.
-/// Opaque (C11): its crypto specs, unfolded wherever a `spec_step` term appears, cost `spec_drain`'s termination check
-/// up to 25x (0.45M to over 12M when byteq's items reordered the crate's SMT declarations); revealed only by the lemmas
-/// in this file that need its body.
+/// Opaque (C11 PROOF-BUDGET FRAGILITY): its crypto specs, unfolded wherever a `spec_step` term appears, cost
+/// `spec_drain`'s termination check up to 25x (0.45M to over 12M when byteq's items reordered the crate's SMT
+/// declarations). Revealed only where its body is needed: theorem_flight_order and the `lemma_flight_*` case lemmas here,
+/// `lemma_flight_shape` in server.rs. A fn that needs it calls `reveal(spec_flight)` after its `hide`s; never `hide` it
+/// (Verus emits ill-typed AIR for a hidden opaque fn).
 #[verifier::opaque]
 pub open spec fn spec_flight(
     cfg: Seq<SpecCertChain>,
@@ -358,8 +360,8 @@ proof fn lemma_cv_len(scheme: u16, sig: Seq<u8>)
 }
 
 // =============================================================================
-// spec_flight's cases (build_flight's proof, split out of its body: C11, docs/rca/2026-11-16-smt-order-fragility.md
-// on phase-9b3; build_flight hides spec_flight and calls these)
+// spec_flight's cases (build_flight's proof, split out of its body for C11 PROOF-BUDGET FRAGILITY; build_flight sees
+// spec_flight only through these, it being opaque)
 // =============================================================================
 
 /// The key-exchange errors.
@@ -590,7 +592,7 @@ fn flight_events(tp: &Vec<u8>, sh: Vec<u8>, hs: &HsSecrets, data: Vec<u8>, c_ap:
     //# Protocol messages MUST be sent in the order defined in Section 4.4.1
     //# and shown in the diagrams in Section 2.
     // by construction: SH, then EE, Certificate, CertificateVerify, Finished, in spec_flight's order (theorem_flight_order)
-    let mut evs: Vec<TlsEvent> = Vec::new();
+    let mut evs: CapVec<TlsEvent> = CapVec::new(5);
     evs.push(TlsEvent::PeerParams(tp.clone()));
     evs.push(TlsEvent::Send { level: Level::Initial, data: sh });
     evs.push(TlsEvent::Secrets { level: Level::Handshake, client: hs.client, server: hs.server });
@@ -601,6 +603,7 @@ fn flight_events(tp: &Vec<u8>, sh: Vec<u8>, hs: &HsSecrets, data: Vec<u8>, c_ap:
     // The 1-RTT secrets are the last event, after the Finished; 3d sends no 1-RTT packet before
     // on_handshake_complete.
     evs.push(TlsEvent::Secrets { level: Level::OneRtt, client: c_ap, server: s_ap });
+    let evs = evs.into_vec();
     assert(evs.deep_view() =~= seq![
         SpecTlsEvent::PeerParams(tp@),
         SpecTlsEvent::Send { level: Level::Initial, data: sh@ },

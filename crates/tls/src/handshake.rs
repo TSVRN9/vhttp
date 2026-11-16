@@ -147,6 +147,7 @@ impl HsReader {
             final(self).wf(),
             final(self)@ == old(self)@ + data@,
     {
+        // push_slice's cost (<= 7d + 4) is not surfaced here: TLS-side O(d) per call is 9b5's (cat-C15-stream-parse).
         let _ = self.q.push_slice(data);
     }
 
@@ -196,6 +197,7 @@ impl HsReader {
         if have - 4 < len {
             return Ok(None);
         }
+        // take_front's cost (<= n + 3) is not surfaced here: 9b5's (cat-C15-stream-parse).
         let (m, _) = self.q.take_front(4 + len);
         Ok(Some(m.into_vec()))
     }
