@@ -307,9 +307,6 @@ proof fn lemma_drain_decreases(
     acc: Seq<SpecTlsEvent>,
 ) {
     hide(spec_step);
-    hide(spec_failed);
-    hide(zeros32);
-    hide(rfc_next_message);
     if let Some((l, ty)) = spec_expected(s.phase) {
         let buf = spec_reader(s, level);
         if let Ok(Some(n)) = rfc_next_message(buf, ty) {
