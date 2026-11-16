@@ -441,21 +441,53 @@ pin=$root/tools/verus-pin.txt
 expect_fail "rlimit-gate: no --pin" "no --pin FILE given" python3 -I "$root/tools/rl.py" --gate quic "$tmp/rl.json"
 
 # Seed gate (tools/rlseeds.py, run by scripts/rlimit-seeds.sh; RCA docs/rca/2026-11-16-smt-order-fragility.md): a fn
-# that verifies under seed 0 and fails or exceeds its cap or ceiling under another seed is caught.
-printf 'quic quic::conn::edge 8000000\n' > "$tmp/rs-ceil.txt"
-rs() { python3 -I "$root/tools/rlseeds.py" quic --pin "$pin" --ceilings "$tmp/rs-ceil.txt" "$tmp/rs-0.json" "$tmp/rs-1.json"; }
-cp "$tmp/rlimit/quic.json" "$tmp/rs-0.json"; cp "$tmp/rlimit/quic.json" "$tmp/rs-1.json"
+# that verifies under seed 0 and fails or exceeds its cap or ceiling under another seed is caught. The fixture is the
+# rlimit gate's log renamed to h3 (the ceilings file may not hold quic lines); seed 1's copy differs in one rlimit.
+sed 's/quic::/h3::/g; s/"module": "quic"/"module": "h3"/' "$tmp/rlimit/quic.json" > "$tmp/rs-base.json"
+rs1() { sed 's/"rlimit": 120000, "success": true/"rlimit": 120001, "success": true/' "$tmp/rs-base.json" > "$tmp/rs-1.json"; }
+printf 'h3 h3::conn::edge 8000000\n' > "$tmp/rs-ceil.txt"
+rs() { python3 -I "$root/tools/rlseeds.py" h3 --pin "$pin" --ceilings "$tmp/rs-ceil.txt" "$tmp/rs-0.json" "$tmp/rs-1.json"; }
+cp "$tmp/rs-base.json" "$tmp/rs-0.json"; rs1
 expect_pass "rlimit-seeds" rs
-sed -i 's/"rlimit": 120000, "success": true/"rlimit": 12000000, "success": false/' "$tmp/rs-1.json"
-expect_fail "rlimit-seeds: passes seed 0, FAIL row under seed 1" "seed 1: FAIL row quic::conn::small" rs
-cp "$tmp/rlimit/quic.json" "$tmp/rs-1.json"; sed -i 's/"rlimit": 7630000/"rlimit": 8000001/' "$tmp/rs-1.json"
-expect_fail "rlimit-seeds: over the cap under seed 1 only" "quic::conn::poll_max_data at 8000001 (seed 1) is above its cap" rs
-cp "$tmp/rlimit/quic.json" "$tmp/rs-1.json"; printf 'quic quic::conn::edge 7999999\n' > "$tmp/rs-ceil.txt"
-expect_fail "rlimit-seeds: over its ceiling line" "quic::conn::edge at 8000000 (seed 0) is above its ceiling 7999999" rs
-printf 'quic quic::conn::edge 8000000\n' > "$tmp/rs-ceil.txt"; sed -i 's/"errors": 0/"errors": 1/' "$tmp/rs-1.json"
+cp "$tmp/rs-base.json" "$tmp/rs-1.json"
+expect_fail "rlimit-seeds: identical runs (the seed had no effect)" "the seed option had no effect" rs
+rs1; sed -i 's/"rlimit": 120001, "success": true/"rlimit": 12000000, "success": false/' "$tmp/rs-1.json"
+expect_fail "rlimit-seeds: passes seed 0, FAIL row under seed 1" "seed 1: FAIL row h3::conn::small" rs
+rs1; sed -i 's/"rlimit": 7630000/"rlimit": 8000001/' "$tmp/rs-1.json"
+expect_fail "rlimit-seeds: over the cap under seed 1 only" "h3::conn::poll_max_data at 8000001 (seed 1) is above its cap" rs
+rs1; printf 'h3 h3::conn::edge 7999999\n' > "$tmp/rs-ceil.txt"
+expect_fail "rlimit-seeds: over its ceiling line" "h3::conn::edge at 8000000 (seed 0) is above its ceiling 7999999" rs
+printf 'h3 h3::conn::edge\n' > "$tmp/rs-ceil.txt"
+expect_fail "rlimit-seeds: a malformed ceilings line" "malformed line" rs
+printf 'h3 h3::conn::edge 8000000\n' > "$tmp/rs-ceil.txt"; sed -i 's/"errors": 0/"errors": 1/' "$tmp/rs-1.json"
 expect_fail "rlimit-seeds: a seed's run not clean" "seed 1: run not clean" rs
+rs1; sed -i 's/"verified": [0-9]*/"verified": 0/' "$tmp/rs-1.json"
+expect_fail "rlimit-seeds: a seed that verified nothing" "seed 1: run not clean" rs
 : > "$tmp/rs-1.json"
 expect_fail "rlimit-seeds: an empty seed log" "seed 1: 0 verification-results objects" rs
+# rlimit-seeds.sh itself, in a copy of the tree with a stub `cargo` (VERUS_HOME leads PATH): each seed's run prints the
+# fixture (seed 1's perturbed); a non-zero exit under one seed fails the gate after every seed is read.
+rsd=$tmp/rsd
+mkdir -p "$rsd/scripts" "$rsd/tools" "$rsd/crates/h3/src" "$rsd/bin"
+cp "$root/scripts/rlimit-seeds.sh" "$rsd/scripts/"; cp "$root/tools/rlseeds.py" "$root/tools/verus-pin.txt" "$rsd/tools/"
+: > "$rsd/tools/rlimit-ceilings.txt"
+cp "$tmp/rs-base.json" "$rsd/fixture.json"
+cat > "$rsd/bin/cargo" <<'STUB'
+#!/bin/sh
+case $1 in
+    metadata) printf '{"target_directory": "%s/target"}\n' "$RSD" ;;
+    clean) ;;
+    verus)
+        s=0
+        for a in "$@"; do case $a in smt.random_seed=*) s=${a#*=} ;; esac; done
+        sed "s/\"rlimit\": 120000,/\"rlimit\": 12000$s,/" "$RSD/fixture.json"
+        if [ "$s" = "${RSD_FAIL:-none}" ]; then exit 1; fi ;;
+esac
+STUB
+chmod +x "$rsd/bin/cargo"
+rsh() { env RSD="$rsd" RSD_FAIL="${1:-none}" VERUS_HOME="$rsd/bin" RS_OUT="$rsd/out" "$rsd/scripts/rlimit-seeds.sh" h3 3; }
+expect_pass "rlimit-seeds.sh (stub cargo)" rsh
+expect_fail "rlimit-seeds.sh: verus exits non-zero under seed 2 only" "verus exited non-zero under seed(s) 2" rsh 2
 
 # clean-tree.sh (F5): an untracked file, a modified tracked file and a non-repo dir fail; a clean repo passes.
 ct() { "$root/scripts/clean-tree.sh" "$tmp/ctree"; }

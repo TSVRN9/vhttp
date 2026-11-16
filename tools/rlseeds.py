@@ -2,8 +2,9 @@
 # docs/rca/2026-11-16-smt-order-fragility.md). Each LOG is one `cargo verus focus -- --rlimit 4 --output-json
 # --time-expanded --smt-option smt.random_seed=<i>` run of crate NAME. Fails if a LOG is unreadable or has no results
 # object, a run is not clean, a run's verus version/commit/toolchain differs from the pin or is not a whole-crate run,
-# any fn has a FAIL row under any seed, or a fn of NAME exceeds, under any seed, its line in the ceilings FILE (if it has
-# one) or N (default 8,000,000). Prints each fn of NAME above 3,000,000 with its max over seeds and the seed of the max,
+# any fn has a FAIL row under any seed, every log has the same {fn: rlimit} map (with two or more logs: the seed option
+# had no effect), the ceilings FILE has a malformed line for NAME, or a fn of NAME exceeds, under any seed, its line in
+# the ceilings FILE (if it has one) or N (default 8,000,000). Prints each fn of NAME above 3,000,000 with its max over seeds and the seed of the max,
 # then `rlimit-seeds: NAME <k> seeds ok (max <fn> <n>)`.
 import json, sys
 
@@ -45,12 +46,16 @@ lim = {}
 try:
     for l in open(ceil).read().splitlines():
         w = l.split()
-        if len(w) == 3 and w[0] == name and w[2].isdigit():
-            lim[w[1]] = int(w[2])
+        if not w or w[0] != name:
+            continue
+        if len(w) != 3 or not w[2].isdigit() or not w[1].startswith(name + '::'):
+            fail('%s: malformed line %r' % (ceil, l))
+        lim[w[1]] = int(w[2])
 except OSError as e:
     fail('cannot read the ceilings file %s: %s' % (ceil, e))
 
 mx = {}  # fn -> (max rlimit, seed of the max)
+maps = []  # per seed: {fn: rlimit}, to check the seed changed the runs
 errs = []
 for s, lg in enumerate(a):
     try:
@@ -75,6 +80,8 @@ for s, lg in enumerate(a):
     if not objs:
         fail('seed %d: 0 verification-results objects in %s' % (s, lg))
     own = 0
+    seen = {}
+    maps.append(seen)
     for o in objs:
         try:
             v = o['verification-results']
@@ -88,12 +95,14 @@ for s, lg in enumerate(a):
                 fail('seed %d: verus.toolchain is %r, the pin says %s-*' % (s, vz['toolchain'], pn['toolchain']))
             if v['is-verifying-entire-crate'] is not True:
                 fail('seed %d: is-verifying-entire-crate is not true (a partial run)' % s)
-            clean = v['success'] and not v['errors'] and not v['encountered-error'] and not v['encountered-vir-error']
+            clean = (v['success'] and not v['errors'] and not v['encountered-error'] and not v['encountered-vir-error']
+                     and v['verified'])
         except (KeyError, TypeError):
             fail('seed %d: unreadable results object in %s' % (s, lg))
         if not clean:
             errs.append('seed %d: run not clean: %s' % (s, v))
         for r, fn, ok in rows:
+            seen[fn] = r
             if not ok:
                 errs.append('seed %d: FAIL row %s at %d' % (s, fn, r))
             if fn.startswith(name + '::'):
@@ -102,6 +111,8 @@ for s, lg in enumerate(a):
                     mx[fn] = (r, s)
     if not own:
         fail('seed %d: no rows for fns of %s in %s' % (s, name, lg))
+if len(maps) >= 2 and all(m == maps[0] for m in maps[1:]):
+    errs.append('all %d seeds gave identical per-fn rlimits: the seed option had no effect' % len(maps))
 for fn, (r, s) in sorted(mx.items()):
     l = lim.get(fn, cap)
     if r > l:

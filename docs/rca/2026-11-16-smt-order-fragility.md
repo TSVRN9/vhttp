@@ -8,8 +8,10 @@ crate.
   rewrote `build_headers` and removed h3's last `Vec::extend_from_slice` call. vstd's `extend_from_slice` spec was the
   only reachable item that put `View::view` before `Seq::new` and `array_view` in the crate's declaration order. Without
   it, every h3 module's SMT prelude lists the same declarations and axioms in a different order. The content is
-  identical; only the order changes (a `--log smt` diff of `qpack::field_section`'s prelude showed nothing but moved
-  lines). Measured at seed 0 (`target/quick/h3.json` crate runs):
+  identical; only the order changes. To reproduce: run `cargo verus focus -- --rlimit 4 --verify-only-module
+  qpack::field_section --log smt --log-dir DIR` in crates/h3 at 12ec841 (before) and at 05adcf1 with
+  `smt_order_anchor` deleted (after), then diff `DIR/qpack__field_section.smt2`: only moved lines differ. The table is
+  `scripts/quick.sh h3` (one crate run, seed 0) at 12ec841 and at 05adcf1 without the anchor:
 
   | fn | before | after the reorder |
   |---|---:|---:|
@@ -43,9 +45,10 @@ crate.
 - **Catch**: `scripts/rlimit-seeds.sh CRATE [N]` (default 5) verifies the crate whole at `--rlimit 4` under
   `smt.random_seed` 0..N-1 and fails (`tools/rlseeds.py`) if any fn fails under any seed, or a fn exceeds its
   `tools/rlimit-ceilings.txt` line or 8,000,000 under any seed. It prints each fn's maximum over the seeds.
-  `scripts/verify.sh` runs it for h3 after the rlimit gate. A seed sweep moves the solver path the way an unrelated edit
-  does, so a proof that survives 5 seeds survives the reorders above. That is the mechanical form of "robust, not
-  lucky".
+  `scripts/verify.sh` runs it for h3 after the rlimit gate. It also fails when Verus exits non-zero under any seed, and
+  when every seed gives identical per-fn numbers (the seed option had no effect, so the sweep would be one run repeated).
+  A seed sweep perturbs the solver path as an unrelated edit does. h3 passes 5 seeds under both declaration orders seen
+  (anchor in and out). Passing a sample raises the bar; it does not prove robustness.
   - Fixing the instance (this commit): every flagged fn was restructured with no ensures, requires or exec change.
     Proof blocks moved into `proof fn lemma_*` with narrow requires (`lemma_line_out`, `lemma_name_out`,
     `lemma_literal_out`, `lemma_exact_out`, `lemma_section_step`, `lemma_section_out`, `lemma_prefix_zero`,
@@ -54,17 +57,25 @@ crate.
     `rfc_decode_field_section`, `spec_prefix_int_bytes`, `rfc_req`, `rfc_headers`, `ctrl_preamble`, `goaway_frames`,
     `spec_frame_bytes`, `spec_varint`, `rfc_control`, ...). The profile of `send_response` showed why: 72% of its
     quantifier instantiations were vstd's `array_index` and `Seq::new` index axioms, reached through the control
-    stream's serialization specs, which it never needs to unfold.
+    stream's serialization specs, which it never needs to unfold. To reproduce: at 4bf5976 with `smt_order_anchor`
+    deleted, run `cargo verus focus -- --rlimit 4 --verify-only-module conn --verify-function H3Conn::send_response
+    --profile --smt-option smt.random_seed=0` in crates/h3 (the top two quantifiers are vstd array.rs:57 and
+    seq.rs:1403).
   - `smt_order_anchor` is deleted. h3 passes 5 seeds with the reorder in force, and also with the anchor added back
     (both orders checked).
   - h3's ceiling lines are all deleted: every fn is now below 8,000,000 under every seed.
   - Residual (owner 9b4): the gate runs on h3 only. Every other crate is still measured on one path; 9b4 extends
     `rlimit-seeds.sh` to every crate (and carries tls `build_flight` and the crypto/ctcore ceilings into it).
-    Seeds are a sample, not a proof of robustness: 5 seeds bound the cost of the gate (about 2 minutes for h3).
+    Seeds are a sample, not a proof of robustness: 5 seeds bound the cost of the gate (about 2 minutes for h3). The
+    thinnest h3 margin is the untouched `qpack::huffman::lemma_unique_bits`, which spreads from 3.77M to 6.43M across
+    seeds 0-4 (1.7x); the next restructuring of h3's proofs should start there.
 - **Evidence**:
   - Gate demos (`scripts/gate-demos.sh`): "rlimit-seeds: passes seed 0, FAIL row under seed 1", "rlimit-seeds: over
-    the cap under seed 1 only", "rlimit-seeds: over its ceiling line", "rlimit-seeds: a seed's run not clean",
-    "rlimit-seeds: an empty seed log", each after "rlimit-seeds: unchanged fixture passes".
+    the cap under seed 1 only", "rlimit-seeds: over its ceiling line", "rlimit-seeds: a malformed ceilings line",
+    "rlimit-seeds: a seed's run not clean", "rlimit-seeds: a seed that verified nothing", "rlimit-seeds: an empty seed
+    log", "rlimit-seeds: identical runs (the seed had no effect)", each after "rlimit-seeds: unchanged fixture passes";
+    and "rlimit-seeds.sh: verus exits non-zero under seed 2 only" (the script with a stub `cargo`), after
+    "rlimit-seeds.sh (stub cargo)".
   - The h3 sweep: before this commit (05adcf1/4bf5976 sources, anchor in place) `scripts/rlimit-seeds.sh h3 5` failed
     on the 10 fns above; after it, `rlimit-seeds: h3 5 seeds ok`, with the per-fn maxima in the table below.
 
