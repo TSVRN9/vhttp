@@ -27,7 +27,8 @@ LITERAL_OK's keyed fns (avl::bal, frags::walk, frags::walk_run: match arms retur
 text; an entry that no longer fires fails).
 Fails naming file:line; fails closed on a missing file (avl.rs, frags.rs, crypto_stream.rs, conn.rs, server.rs, or no byteq src/*.rs), no verus! block, or no looping or recursive fn or bound cost.
 Limit: a stubbed literal cost arm in avl::bal, frags::walk or frags::walk_run is not seen (LITERAL_OK; owned by
-carryover cat-C15-semantic-cost, 9b4). Limit: a structural check, not a proof that the amount charged is right (the cost ensures are upper bounds, so an
+carryover cat-C15-semantic-cost, 9b4). Limit: a stub helper cost fn (a fn returning a literal Ghost(N) before any call,
+bound and charged by its caller) is not seen (cat-C15-semantic-cost). Limit: a structural check, not a proof that the amount charged is right (the cost ensures are upper bounds, so an
 undercharge still verifies; carryover cat-C15-semantic-cost); a cost used on one path and dropped on another, a Ghost(x) built and then discarded, and a charge written work += E or work + 0 + 0 are not seen (the same carryover); a call is matched by name, so a
 std method named like one of these cost fns would be flagged (fails closed); recursion is recognised by a fn-level `decreases`,
 which Verus requires of every recursive exec fn here (the attribute that waives it is refused)."""

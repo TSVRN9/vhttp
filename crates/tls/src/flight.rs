@@ -219,14 +219,28 @@ proof fn lemma_sh_random(random: Seq<u8>, sid: Seq<u8>, pk: Seq<u8>)
     ensures
         spec_server_hello_bytes(random, sid, SECP256R1, pk).subrange(6, 38) == random,
 {
+    hide(spec_hello_body_bytes);
     let sh = spec_server_hello_bytes(random, sid, SECP256R1, pk);
     let exts = spec_sh_key_share_bytes(SECP256R1, pk) + spec_sh_versions_bytes();
     let body = spec_hello_body_bytes(random, sid, exts);
-    assert(spec_be_bytes(LEGACY_VERSION as nat, 2).len() == 2);
+    lemma_body_random(random, sid, exts);
     assert(spec_be_bytes(body.len(), 3).len() == 3);
-    assert(body.subrange(2, 34) =~= random);
     assert(sh =~= seq![HT_SERVER_HELLO] + (spec_be_bytes(body.len(), 3) + body));
     assert(sh.subrange(6, 38) =~= body.subrange(2, 34));
+}
+
+/// The random sits at [2..34] of the hello body, after legacy_version.
+proof fn lemma_body_random(random: Seq<u8>, sid: Seq<u8>, exts: Seq<u8>)
+    requires
+        random.len() == 32,
+    ensures
+        spec_hello_body_bytes(random, sid, exts).len() >= 34,
+        spec_hello_body_bytes(random, sid, exts).subrange(2, 34) == random,
+{
+    hide(spec_vec_bytes);
+    let body = spec_hello_body_bytes(random, sid, exts);
+    assert(spec_be_bytes(LEGACY_VERSION as nat, 2).len() == 2);
+    assert(body.subrange(2, 34) =~= random);
 }
 
 // =============================================================================
@@ -338,6 +352,171 @@ proof fn lemma_cv_len(scheme: u16, sig: Seq<u8>)
 }
 
 // =============================================================================
+// spec_flight's cases (build_flight's proof, split out of its body: C11, docs/rca/2026-11-16-smt-order-fragility.md
+// on phase-9b3; build_flight hides spec_flight and calls these)
+// =============================================================================
+
+/// The key-exchange errors.
+proof fn lemma_flight_kx_err(
+    cfg: Seq<SpecCertChain>,
+    tp: Seq<u8>,
+    t0: Seq<u8>,
+    ch: SpecClientHello,
+    chain: nat,
+    scheme: u16,
+    share: nat,
+    rand: Seq<u8>,
+)
+    ensures
+        ({
+            let d = rand.subrange(32, 64);
+            let peer = ch.key_shares.unwrap()[share as int].key_exchange;
+            let f = spec_flight(cfg, tp, t0, ch, chain, scheme, share, rand);
+            &&& spec_p256_public_key(d) is None ==> f == Err::<SpecFlight, u64>(ALERT_INTERNAL_ERROR)
+            &&& spec_p256_public_key(d) is Some && spec_p256_ecdh(d, peer) is None ==> f == Err::<
+                SpecFlight,
+                u64,
+            >(ALERT_ILLEGAL_PARAMETER)
+            &&& spec_p256_public_key(d) is Some && spec_p256_ecdh(d, peer) == Some(zeros32()) ==> f == Err::<
+                SpecFlight,
+                u64,
+            >(ALERT_ILLEGAL_PARAMETER)
+        }),
+{
+    hide(spec_sha256);
+    hide(spec_hkdf_expand_label);
+    hide(spec_hmac_sha256);
+    hide(spec_finished_key);
+    hide(spec_handshake_secret);
+    hide(spec_master_secret);
+    hide(spec_p256_public_key);
+    hide(spec_p256_ecdh);
+    hide(spec_encrypted_extensions_bytes);
+    hide(spec_certificate_bytes);
+    hide(spec_certificate_verify_bytes);
+    hide(spec_finished_bytes);
+    hide(spec_cv_signature);
+    hide(spec_server_hello_bytes);
+}
+
+/// The CertificateVerify signature fails.
+proof fn lemma_flight_sig_err(
+    cfg: Seq<SpecCertChain>,
+    tp: Seq<u8>,
+    t0: Seq<u8>,
+    ch: SpecClientHello,
+    chain: nat,
+    scheme: u16,
+    share: nat,
+    rand: Seq<u8>,
+    pk: Seq<u8>,
+    z: Seq<u8>,
+    t2: Seq<u8>,
+)
+    requires
+        spec_p256_public_key(rand.subrange(32, 64)) == Some(pk),
+        spec_p256_ecdh(rand.subrange(32, 64), ch.key_shares.unwrap()[share as int].key_exchange) == Some(z),
+        z != zeros32(),
+        t2 == t0 + spec_server_hello_bytes(rand.subrange(0, 32), ch.legacy_session_id, SECP256R1, pk)
+            + spec_encrypted_extensions_bytes(tp) + spec_certificate_bytes(cfg[chain as int].der),
+        spec_cv_signature(cfg[chain as int].key, spec_sha256(t2), rand.subrange(64, 96)) is None,
+    ensures
+        spec_flight(cfg, tp, t0, ch, chain, scheme, share, rand) == Err::<SpecFlight, u64>(ALERT_INTERNAL_ERROR),
+{
+    hide(spec_sha256);
+    hide(spec_hkdf_expand_label);
+    hide(spec_hmac_sha256);
+    hide(spec_finished_key);
+    hide(spec_handshake_secret);
+    hide(spec_master_secret);
+    hide(spec_p256_public_key);
+    hide(spec_p256_ecdh);
+    hide(spec_encrypted_extensions_bytes);
+    hide(spec_certificate_bytes);
+    hide(spec_certificate_verify_bytes);
+    hide(spec_finished_bytes);
+    hide(spec_cv_signature);
+    hide(spec_server_hello_bytes);
+}
+
+/// The flight, from the values build_flight computes (each stated as its callee's ensures states it).
+proof fn lemma_flight_ok(
+    cfg: Seq<SpecCertChain>,
+    tp: Seq<u8>,
+    t0: Seq<u8>,
+    ch: SpecClientHello,
+    chain: nat,
+    scheme: u16,
+    share: nat,
+    rand: Seq<u8>,
+    pk: Seq<u8>,
+    z: Seq<u8>,
+    sig: Seq<u8>,
+    hs: SpecHsSecrets,
+    sfin: Seq<u8>,
+    master: Seq<u8>,
+    c_ap: Seq<u8>,
+    s_ap: Seq<u8>,
+    cfin: Seq<u8>,
+)
+    requires
+        spec_p256_public_key(rand.subrange(32, 64)) == Some(pk),
+        spec_p256_ecdh(rand.subrange(32, 64), ch.key_shares.unwrap()[share as int].key_exchange) == Some(z),
+        z != zeros32(),
+        ({
+            let sh = spec_server_hello_bytes(rand.subrange(0, 32), ch.legacy_session_id, SECP256R1, pk);
+            let t1 = t0 + sh;
+            let t2 = t1 + spec_encrypted_extensions_bytes(tp) + spec_certificate_bytes(cfg[chain as int].der);
+            let t3 = t2 + spec_certificate_verify_bytes(scheme, sig);
+            let t4 = t3 + spec_finished_bytes(sfin);
+            &&& hs.hs == spec_handshake_secret(z)
+            &&& hs.client == spec_hkdf_expand_label(hs.hs, LABEL_C_HS@, spec_sha256(t1), 32)
+            &&& hs.server == spec_hkdf_expand_label(hs.hs, LABEL_S_HS@, spec_sha256(t1), 32)
+            &&& spec_cv_signature(cfg[chain as int].key, spec_sha256(t2), rand.subrange(64, 96)) == Some(sig)
+            &&& sfin == spec_hmac_sha256(spec_finished_key(hs.server), spec_sha256(t3))
+            &&& master == spec_master_secret(hs.hs)
+            &&& c_ap == spec_hkdf_expand_label(master, LABEL_C_AP@, spec_sha256(t4), 32)
+            &&& s_ap == spec_hkdf_expand_label(master, LABEL_S_AP@, spec_sha256(t4), 32)
+            &&& cfin == spec_hmac_sha256(spec_finished_key(hs.client), spec_sha256(t4))
+        }),
+    ensures
+        spec_flight(cfg, tp, t0, ch, chain, scheme, share, rand) == Ok::<SpecFlight, u64>(
+            SpecFlight {
+                events: seq![
+                    SpecTlsEvent::PeerParams(ch.transport_params),
+                    SpecTlsEvent::Send {
+                        level: Level::Initial,
+                        data: spec_server_hello_bytes(rand.subrange(0, 32), ch.legacy_session_id, SECP256R1, pk),
+                    },
+                    SpecTlsEvent::Secrets { level: Level::Handshake, client: hs.client, server: hs.server },
+                    SpecTlsEvent::Send {
+                        level: Level::Handshake,
+                        data: spec_encrypted_extensions_bytes(tp) + spec_certificate_bytes(cfg[chain as int].der)
+                            + spec_certificate_verify_bytes(scheme, sig) + spec_finished_bytes(sfin),
+                    },
+                    SpecTlsEvent::Secrets { level: Level::OneRtt, client: c_ap, server: s_ap },
+                ],
+                client_vd: cfin,
+            },
+        ),
+{
+    hide(spec_sha256);
+    hide(spec_hkdf_expand_label);
+    hide(spec_hmac_sha256);
+    hide(spec_finished_key);
+    hide(spec_handshake_secret);
+    hide(spec_master_secret);
+    hide(spec_p256_public_key);
+    hide(spec_p256_ecdh);
+    hide(spec_encrypted_extensions_bytes);
+    hide(spec_certificate_bytes);
+    hide(spec_certificate_verify_bytes);
+    hide(spec_finished_bytes);
+    hide(spec_cv_signature);
+    hide(spec_server_hello_bytes);
+}
+
+// =============================================================================
 // Exec
 // =============================================================================
 
@@ -433,6 +612,10 @@ pub fn build_flight(
             rand@,
         ) is Ok),
 {
+    hide(spec_flight);
+    hide(spec_server_hello_bytes);
+    hide(rfc_client_hello);
+    hide(zeros32);
     hide(spec_sha256);
     hide(spec_hkdf_expand_label);
     hide(spec_hmac_sha256);
@@ -446,6 +629,7 @@ pub fn build_flight(
     hide(spec_certificate_verify_bytes);
     hide(spec_finished_bytes);
     hide(spec_cv_signature);
+    let ghost t0v = t0@;
     let ghost b = choose|b: Seq<u8>| rfc_client_hello(b) == Ok::<SpecClientHello, u64>(ch@);
     proof {
         lemma_client_hello_ok(b);
@@ -499,6 +683,9 @@ pub fn build_flight(
     let random = take32(rand, 0);
     let d = take32(rand, 32);
     let salt = take32(rand, 64);
+    proof {
+        lemma_flight_kx_err(cfg@, local_tp@, t0v, ch@, chain as nat, scheme, share as nat, rand@);
+    }
 
     let pk = match p256_public_key(d.as_slice()) {
         Some(pk) => pk,
@@ -587,7 +774,12 @@ pub fn build_flight(
     //# via a certificate.
     let sig = match sign_cv(&c.key, &th2, &salt) {
         Ok(s) => s,
-        Err(e) => return Err(e),
+        Err(e) => {
+            proof {
+                lemma_flight_sig_err(cfg@, local_tp@, t0v, ch@, chain as nat, scheme, share as nat, rand@, pk@, z@, t2);
+            }
+            return Err(e);
+        },
     };
     proof {
         lemma_sig_len(c.key@, th2@, salt@, sig@);
@@ -623,6 +815,27 @@ pub fn build_flight(
     let master = master_secret(&hs.hs);
     let (c_ap, s_ap) = app_secrets(&master, &th4);
     let cfin = verify_data(&hs.client, &th4);
+    proof {
+        lemma_flight_ok(
+            cfg@,
+            local_tp@,
+            t0v,
+            ch@,
+            chain as nat,
+            scheme,
+            share as nat,
+            rand@,
+            pk@,
+            z@,
+            sig@,
+            hs@,
+            sfin@,
+            master@,
+            c_ap@,
+            s_ap@,
+            cfin@,
+        );
+    }
 
     //= https://www.rfc-editor.org/rfc/rfc8446#section-4
     //# Protocol messages MUST be sent in the order defined in Section 4.4.1

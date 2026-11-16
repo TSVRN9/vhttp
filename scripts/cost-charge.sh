@@ -13,6 +13,6 @@ set -o pipefail
 # but work to a literal (a stubbed callee cost) and builds no literal Ghost(N) after its first callee cost or charge (a
 # stubbed return), but for avl::bal, frags::walk and frags::walk_run (LITERAL_OK, cat-C15-semantic-cost's).
 # Structural only: the amount charged is not checked, and per-path use, built-then-discarded Ghosts and `+=` are not
-# seen (cat-C15-semantic-cost). ROOT (default: the repo) holds crates/; scripts/gate-demos.sh feeds it temp copies. Prints `cost-charge: N ...` on success.
+# seen, nor a stub helper cost fn (a literal Ghost(N) returned before any call, bound and charged by its caller) (cat-C15-semantic-cost). ROOT (default: the repo) holds crates/; scripts/gate-demos.sh feeds it temp copies. Prints `cost-charge: N ...` on success.
 root=${1:-$(cd "$(dirname "$0")/.." && pwd)}
 python3 -I "$(cd "$(dirname "$0")/../tools" && pwd)/cost_charge.py" "$root"
