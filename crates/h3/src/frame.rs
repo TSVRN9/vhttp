@@ -258,7 +258,8 @@ pub open spec fn sorted_u64(s: Seq<u64>) -> bool {
     forall|a: int, b: int| #![trigger s[a], s[b]] 0 <= a < b < s.len() ==> s[a] <= s[b]
 }
 
-/// Within every block of width `w`, nondecreasing.
+/// Within every block of width `w`, nondecreasing. Opaque: revealed only in the merge lemmas.
+#[verifier::opaque]
 spec fn sorted_runs(s: Seq<u64>, w: int) -> bool {
     forall|a: int, b: int|
         #![trigger s[a], s[b]]
@@ -335,6 +336,7 @@ proof fn lemma_push_runs(out: Seq<u64>, e: u64, w2: int, lo: int, k: int)
     ensures
         sorted_runs(out.push(e), w2),
 {
+    reveal(sorted_runs);
     let s = out.push(e);
     let p = out.len() as int;
     lemma_block(p, w2, k);
@@ -358,6 +360,7 @@ proof fn lemma_runs_one(s: Seq<u64>)
     ensures
         sorted_runs(s, 1),
 {
+    reveal(sorted_runs);
     assert forall|a: int, b: int|
         #![trigger s[a], s[b]]
         0 <= a < b < s.len() && a / 1 == b / 1 implies s[a] <= s[b] by {
@@ -376,6 +379,7 @@ proof fn lemma_runs_all(s: Seq<u64>, w: int, w2: int)
         sorted_u64(s),
         sorted_runs(s, w2),
 {
+    reveal(sorted_runs);
     assert forall|a: int, b: int| #![trigger s[a], s[b]] 0 <= a < b < s.len() implies s[a] <= s[b] by {
         lemma_block(a, w, 0);
         lemma_block(b, w, 0);
@@ -397,16 +401,6 @@ proof fn lemma_clog2(k: nat, p: nat)
     } else {
         vstd::arithmetic::power2::lemma_pow2_unfold(k);
         lemma_clog2((k - 1) as nat, ((p + 1) / 2) as nat);
-    }
-}
-
-proof fn lemma_clog2_le(p: nat)
-    ensures
-        clog2(p) <= p,
-    decreases p,
-{
-    if p > 1 {
-        lemma_clog2_le(((p + 1) / 2) as nat);
     }
 }
 
@@ -518,137 +512,220 @@ proof fn lemma_settings_dup(v: Seq<(u64, u64)>, srt: Seq<u64>)
     }
 }
 
-/// `sort_ids_w`'s bound from its accounting: a copy pass and `passes <= clog2(n)` merge passes of 2n + 2.
+/// `sort_ids_w`'s bound from its accounting: the copy, the fill of the second buffer, its free, and
+/// `passes <= clog2(n)` merge passes of 2n.
 proof fn lemma_sort_cost(n: nat, passes: nat, work: nat)
     requires
         passes <= clog2(n),
-        work <= (n + 1) + passes * (2 * n + 2),
+        work <= 2 * n + 3 + passes * (2 * n),
     ensures
         work <= c_sort() * (n * (clog2(n) + 1) + 1),
 {
     let c = clog2(n);
-    lemma_clog2_le(n);
-    vstd::arithmetic::mul::lemma_mul_inequality(passes as int, c as int, (2 * n + 2) as int);
-    assert((n + 1) + c * (2 * n + 2) <= 3 * (n * (c + 1) + 1)) by (nonlinear_arith)
-        requires
-            c <= n,
-    {}
+    vstd::arithmetic::mul::lemma_mul_inequality(passes as int, c as int, (2 * n) as int);
+    assert(2 * n + 3 + c * (2 * n) <= 3 * (n * (c + 1) + 1)) by (nonlinear_arith);
 }
 
-/// Merges the runs `src[lo..mid)` and `src[mid..hi)` (block k of width 2w) onto `out`.
+/// One step of `merge_runs`: the smaller head `e` (the left run's when `left`) keeps the merged prefix in runs of 2w
+/// and at most both remaining heads.
+proof fn lemma_merge_order(
+    o0: Seq<u64>,
+    e: u64,
+    src: Seq<u64>,
+    w: int,
+    kk: int,
+    lo: int,
+    i: int,
+    mid: int,
+    j: int,
+    hi: int,
+    left: bool,
+)
+    requires
+        1 <= w,
+        kk >= 0,
+        lo == kk * (2 * w),
+        lo == (2 * kk) * w,
+        lo <= i <= mid <= j <= hi <= src.len(),
+        mid <= lo + w,
+        hi <= lo + 2 * w,
+        mid < hi ==> mid == lo + w,
+        sorted_runs(src, w),
+        sorted_runs(o0, 2 * w),
+        o0.len() == i + j - mid,
+        o0.len() > lo ==> (i < mid ==> o0.last() <= src[i]) && (j < hi ==> o0.last() <= src[j]),
+        i < mid || j < hi,
+        left == (i < mid && (j >= hi || src[i] <= src[j])),
+        e == (if left {
+            src[i]
+        } else {
+            src[j]
+        }),
+    ensures
+        sorted_runs(o0.push(e), 2 * w),
+        left ==> (i + 1 < mid ==> e <= src[i + 1]) && (j < hi ==> e <= src[j]),
+        !left ==> (i < mid ==> e <= src[i]) && (j + 1 < hi ==> e <= src[j + 1]),
+{
+    reveal(sorted_runs);
+    lemma_push_runs(o0, e, 2 * w, lo, kk);
+    if left {
+        if i + 1 < mid {
+            lemma_block(i, w, 2 * kk);
+            lemma_block(i + 1, w, 2 * kk);
+        }
+    } else {
+        if j + 1 < hi {
+            lemma_block(j, w, 2 * kk + 1);
+            lemma_block(j + 1, w, 2 * kk + 1);
+            assert((2 * kk + 1) * w == (2 * kk) * w + w) by (nonlinear_arith);
+        }
+    }
+}
+
+/// One step of `merge_runs`: writing `e` (from the left run when `left`, else the right) at `o0.len()` extends the
+/// merged prefix and its multiset.
+proof fn lemma_merge_step(
+    before: Seq<u64>,
+    o0: Seq<u64>,
+    e: u64,
+    src: Seq<u64>,
+    i: int,
+    mid: int,
+    j: int,
+    left: bool,
+)
+    requires
+        o0.len() < before.len(),
+        before.subrange(0, o0.len() as int) == o0,
+        0 <= i <= mid <= j <= src.len(),
+        left ==> i < mid && e == src[i],
+        !left ==> j < src.len() && e == src[j],
+        o0.to_multiset() == src.subrange(0, i).to_multiset().add(src.subrange(mid, j).to_multiset()),
+    ensures
+        before.update(o0.len() as int, e).subrange(0, o0.len() as int + 1) == o0.push(e),
+        left ==> o0.push(e).to_multiset() == src.subrange(0, i + 1).to_multiset().add(
+            src.subrange(mid, j).to_multiset(),
+        ),
+        !left ==> o0.push(e).to_multiset() == src.subrange(0, i).to_multiset().add(
+            src.subrange(mid, j + 1).to_multiset(),
+        ),
+{
+    broadcast use vstd::seq_lib::group_to_multiset_ensures;
+
+    assert(before.update(o0.len() as int, e).subrange(0, o0.len() as int + 1) =~= o0.push(e));
+    if left {
+        assert(src.subrange(0, i + 1) =~= src.subrange(0, i).push(e));
+        assert(o0.push(e).to_multiset() =~= src.subrange(0, i + 1).to_multiset().add(
+            src.subrange(mid, j).to_multiset(),
+        ));
+    } else {
+        assert(src.subrange(mid, j + 1) =~= src.subrange(mid, j).push(e));
+        assert(o0.push(e).to_multiset() =~= src.subrange(0, i).to_multiset().add(
+            src.subrange(mid, j + 1).to_multiset(),
+        ));
+    }
+}
+
+/// Merges the runs `src[lo..mid)` and `src[mid..hi)` (block k of width 2w) into `out[lo..hi)`, in place.
 fn merge_runs(
     src: &[u64],
     lo: usize,
     mid: usize,
     hi: usize,
     out: &mut CapVec<u64>,
-    _w: usize,
+    _w: Ghost<int>,
     _k: Ghost<int>,
 ) -> (r: Ghost<nat>)
     requires
-        1 <= _w,
+        1 <= _w@,
         _k@ >= 0,
-        lo == _k@ * (2 * _w),
+        lo == _k@ * (2 * _w@),
         lo <= mid <= hi <= src.len(),
-        mid <= lo + _w,
-        hi <= lo + 2 * _w,
-        mid < hi ==> mid == lo + _w,
-        sorted_runs(src@, _w as int),
+        mid <= lo + _w@,
+        hi <= lo + 2 * _w@,
+        mid < hi ==> mid == lo + _w@,
+        sorted_runs(src@, _w@),
         old(out).wf(),
-        hi <= old(out).cap(),
-        old(out)@.len() == lo,
-        old(out)@.to_multiset() == src@.subrange(0, lo as int).to_multiset(),
-        sorted_runs(old(out)@, 2 * _w),
+        hi <= old(out)@.len(),
+        old(out)@.subrange(0, lo as int).to_multiset() == src@.subrange(0, lo as int).to_multiset(),
+        sorted_runs(old(out)@.subrange(0, lo as int), 2 * _w@),
     ensures
         final(out).wf(),
-        final(out).cap() == old(out).cap(),
-        final(out)@.to_multiset() == src@.subrange(0, hi as int).to_multiset(),
-        sorted_runs(final(out)@, 2 * _w),
+        final(out)@.len() == old(out)@.len(),
+        final(out)@.subrange(0, hi as int).to_multiset() == src@.subrange(0, hi as int).to_multiset(),
+        sorted_runs(final(out)@.subrange(0, hi as int), 2 * _w@),
         r@ <= 2 * (hi - lo),
 {
-    let ghost w2 = 2 * _w as int;
+    let ghost w = _w@;
+    let ghost w2 = 2 * w;
     let ghost kk = _k@;
+    let ghost mut o = out@.subrange(0, lo as int);
     let ghost mut work: nat = 0;
     let mut i = lo;
     let mut j = mid;
     proof {
-        assert(kk * w2 == (2 * kk) * _w) by (nonlinear_arith)
+        assert(kk * w2 == (2 * kk) * w) by (nonlinear_arith)
             requires
-                w2 == 2 * _w,
+                w2 == 2 * w,
         {}
         assert(src@.subrange(mid as int, mid as int) =~= Seq::<u64>::empty());
         assert(Seq::<u64>::empty().to_multiset() =~= vstd::multiset::Multiset::<u64>::empty()) by {
             broadcast use vstd::multiset::group_multiset_axioms, vstd::seq_lib::group_to_multiset_ensures;
 
         }
-        assert(out@.to_multiset().add(vstd::multiset::Multiset::empty()) =~= out@.to_multiset());
+        assert(o.to_multiset().add(vstd::multiset::Multiset::empty()) =~= o.to_multiset());
     }
     while i < mid || j < hi
         invariant
-            1 <= _w,
-            w2 == 2 * _w,
-            sorted_runs(src@, _w as int),
+            1 <= w,
+            w2 == 2 * w,
+            sorted_runs(src@, w),
             kk >= 0,
             lo == kk * w2,
-            lo == (2 * kk) * _w,
+            lo == (2 * kk) * w,
             lo <= i <= mid <= j <= hi <= src.len(),
-            mid <= lo + _w,
-            hi <= lo + 2 * _w,
-            mid < hi ==> mid == lo + _w,
+            mid <= lo + w,
+            hi <= lo + 2 * w,
+            mid < hi ==> mid == lo + w,
             out.wf(),
-            out.cap() == old(out).cap(),
-            hi <= out.cap(),
-            out@.len() == i + j - mid,
-            out@.to_multiset() == src@.subrange(0, i as int).to_multiset().add(
+            out@.len() == old(out)@.len(),
+            hi <= out@.len(),
+            o.len() == i + j - mid,
+            out@.subrange(0, o.len() as int) == o,
+            o.to_multiset() == src@.subrange(0, i as int).to_multiset().add(
                 src@.subrange(mid as int, j as int).to_multiset(),
             ),
-            sorted_runs(out@, w2),
-            out@.len() > lo ==> (i < mid ==> out@.last() <= src@[i as int]) && (j < hi
-                ==> out@.last() <= src@[j as int]),
-            work == 2 * (out@.len() - lo),
+            sorted_runs(o, w2),
+            o.len() > lo ==> (i < mid ==> o.last() <= src@[i as int]) && (j < hi ==> o.last()
+                <= src@[j as int]),
+            work == 2 * (o.len() - lo),
         decreases (mid - i) + (hi - j),
     {
-        let ghost o = out@;
+        let ghost o0 = o;
+        let k = i + (j - mid);
         if i < mid && (j >= hi || src[i] <= src[j]) {
             let e = src[i];
             proof {
-                lemma_push_runs(o, e, w2, lo as int, kk);
-                assert(src@.subrange(0, i + 1) =~= src@.subrange(0, i as int).push(e));
-                if i + 1 < mid {
-                    lemma_block(i as int, _w as int, 2 * kk);
-                    lemma_block(i + 1, _w as int, 2 * kk);
-                }
+                lemma_merge_order(o0, e, src@, w, kk, lo as int, i as int, mid as int, j as int, hi as int, true);
             }
-            out.push(e);
+            let ghost before = out@;
+            out.set(k, e);
             i += 1;
             proof {
-                broadcast use vstd::seq_lib::group_to_multiset_ensures;
-
-                assert(out@.to_multiset() =~= src@.subrange(0, i as int).to_multiset().add(
-                    src@.subrange(mid as int, j as int).to_multiset(),
-                ));
+                lemma_merge_step(before, o0, e, src@, (i - 1) as int, mid as int, j as int, true);
+                o = o0.push(e);
             }
         } else {
             let e = src[j];
             proof {
-                lemma_push_runs(o, e, w2, lo as int, kk);
-                assert(src@.subrange(mid as int, j + 1) =~= src@.subrange(mid as int, j as int).push(
-                    e,
-                ));
-                if j + 1 < hi {
-                    lemma_block(j as int, _w as int, 2 * kk + 1);
-                    lemma_block(j + 1, _w as int, 2 * kk + 1);
-                    assert((2 * kk + 1) * _w == (2 * kk) * _w + _w) by (nonlinear_arith);
-                }
+                lemma_merge_order(o0, e, src@, w, kk, lo as int, i as int, mid as int, j as int, hi as int, false);
             }
-            out.push(e);
+            let ghost before = out@;
+            out.set(k, e);
             j += 1;
             proof {
-                broadcast use vstd::seq_lib::group_to_multiset_ensures;
-
-                assert(out@.to_multiset() =~= src@.subrange(0, i as int).to_multiset().add(
-                    src@.subrange(mid as int, j as int).to_multiset(),
-                ));
+                lemma_merge_step(before, o0, e, src@, i as int, mid as int, (j - 1) as int, false);
+                o = o0.push(e);
             }
         }
         // one compare and one copy
@@ -667,25 +744,27 @@ fn merge_runs(
     Ghost(work)
 }
 
-/// One pass: merges the runs of width w of `src` into runs of width 2w, into a fresh buffer.
-fn merge_pass(src: &[u64], w: usize) -> (r: (CapVec<u64>, Ghost<nat>))
+/// One pass: merges the runs of width w of `src` into runs of width 2w, written over `dst` (no allocation).
+fn merge_pass(src: &[u64], w: usize, dst: &mut CapVec<u64>) -> (r: Ghost<nat>)
     requires
         1 <= w,
         sorted_runs(src@, w as int),
+        old(dst).wf(),
+        old(dst)@.len() == src.len(),
     ensures
-        r.0.wf(),
-        r.0@.len() == src.len(),
-        r.0@.to_multiset() == src@.to_multiset(),
-        sorted_runs(r.0@, 2 * w),
-        r.1@ <= 2 * src.len() + 1,
+        final(dst).wf(),
+        final(dst)@.len() == src.len(),
+        final(dst)@.to_multiset() == src@.to_multiset(),
+        sorted_runs(final(dst)@, 2 * w),
+        r@ <= 2 * src.len(),
 {
     let n = src.len();
-    let mut out: CapVec<u64> = CapVec::new(n);
-    let ghost mut work: nat = 1;
+    let ghost mut work: nat = 0;
     let mut lo: usize = 0;
     let ghost mut k: int = 0;
     proof {
-        assert(src@.subrange(0, 0) =~= Seq::<u64>::empty());
+        reveal(sorted_runs);
+        assert(dst@.subrange(0, 0) =~= src@.subrange(0, 0));
     }
     while lo < n
         invariant
@@ -695,12 +774,11 @@ fn merge_pass(src: &[u64], w: usize) -> (r: (CapVec<u64>, Ghost<nat>))
             lo <= n,
             k >= 0,
             lo < n ==> lo == k * (2 * w),
-            out.wf(),
-            out.cap() == n,
-            out@.len() == lo,
-            out@.to_multiset() == src@.subrange(0, lo as int).to_multiset(),
-            sorted_runs(out@, 2 * w),
-            work <= 1 + 2 * lo,
+            dst.wf(),
+            dst@.len() == n,
+            dst@.subrange(0, lo as int).to_multiset() == src@.subrange(0, lo as int).to_multiset(),
+            sorted_runs(dst@.subrange(0, lo as int), 2 * w),
+            work <= 2 * lo,
         decreases n - lo,
     {
         let mid = if w < n - lo {
@@ -713,13 +791,8 @@ fn merge_pass(src: &[u64], w: usize) -> (r: (CapVec<u64>, Ghost<nat>))
         } else {
             n
         };
-        let Ghost(c) = merge_runs(src, lo, mid, hi, &mut out, w, Ghost(k));
+        let Ghost(c) = merge_runs(src, lo, mid, hi, dst, Ghost(w as int), Ghost(k));
         proof {
-            assert(out@.len() == hi) by {
-                broadcast use vstd::seq_lib::group_to_multiset_ensures;
-
-                assert(out@.to_multiset().len() == src@.subrange(0, hi as int).to_multiset().len());
-            }
             if hi < n {
                 assert((k + 1) * (2 * w) == k * (2 * w) + 2 * w) by (nonlinear_arith);
             }
@@ -730,12 +803,13 @@ fn merge_pass(src: &[u64], w: usize) -> (r: (CapVec<u64>, Ghost<nat>))
     }
     proof {
         assert(src@.subrange(0, n as int) =~= src@);
+        assert(dst@.subrange(0, n as int) =~= dst@);
     }
-    (out, Ghost(work))
+    Ghost(work)
 }
 
-/// Copies the identifiers of `v` and sorts them by bottom-up merging: widths 1, 2, 4, .. below p, one fresh
-/// buffer per pass (the previous one freed).
+/// Copies the identifiers of `v` and sorts them by bottom-up merging: widths 1, 2, 4, .. below p, ping-ponging
+/// between two buffers (the copy and one more, filled once), so the sort allocates two buffers in all.
 fn sort_ids_w(v: &[(u64, u64)]) -> (r: (CapVec<u64>, Ghost<nat>))
     ensures
         r.0.wf(),
@@ -768,6 +842,28 @@ fn sort_ids_w(v: &[(u64, u64)]) -> (r: (CapVec<u64>, Ghost<nat>))
             work = work + 1;
         }
     }
+    // the second buffer, filled once so each pass can write it in place
+    let mut b: CapVec<u64> = CapVec::new(n);
+    let mut f: usize = 0;
+    proof {
+        work = work + 1;
+    }
+    while f < n
+        invariant
+            n == v@.len(),
+            f <= n,
+            b.wf(),
+            b.cap() == n,
+            b@.len() == f,
+            work == 2 + n + f,
+        decreases n - f,
+    {
+        b.push(0);
+        f += 1;
+        proof {
+            work = work + 1;
+        }
+    }
     proof {
         assert(ids.take(n as int) =~= ids);
         lemma_runs_one(a@);
@@ -784,24 +880,27 @@ fn sort_ids_w(v: &[(u64, u64)]) -> (r: (CapVec<u64>, Ghost<nat>))
             passes == 0 || vstd::arithmetic::power2::pow2((passes - 1) as nat) < n,
             a.wf(),
             a@.len() == n,
+            b.wf(),
+            b@.len() == n,
             a@.to_multiset() == ids.to_multiset(),
             sorted_runs(a@, w as int),
-            work <= (n + 1) + passes * (2 * n + 2),
+            work <= 2 * n + 2 + passes * (2 * n),
         decreases n - w,
     {
         proof {
             lemma_clog2(passes, n as nat);
         }
-        let (b, Ghost(c)) = merge_pass(a.as_slice(), w);
-        // the previous buffer is freed here
+        let Ghost(c) = merge_pass(a.as_slice(), w, &mut b);
+        let t = a;
         a = b;
+        b = t;
         proof {
-            assert(work + c + 1 <= (n + 1) + (passes + 1) * (2 * n + 2)) by (nonlinear_arith)
+            assert(work + c <= 2 * n + 2 + (passes + 1) * (2 * n)) by (nonlinear_arith)
                 requires
-                    work <= (n + 1) + passes * (2 * n + 2),
-                    c <= 2 * n + 1,
+                    work <= 2 * n + 2 + passes * (2 * n),
+                    c <= 2 * n,
             {}
-            work = work + c + 1;
+            work = work + c;
             passes = passes + 1;
         }
         if w <= (n - 1) / 2 {
@@ -816,7 +915,9 @@ fn sort_ids_w(v: &[(u64, u64)]) -> (r: (CapVec<u64>, Ghost<nat>))
             w = n;
         }
     }
+    // `b` is freed here
     proof {
+        work = work + 1;
         lemma_runs_all(a@, w as int, 1);
         if passes > 0 {
             lemma_clog2((passes - 1) as nat, n as nat);

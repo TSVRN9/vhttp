@@ -66,6 +66,14 @@ fn settings_reserved_with_duplicate() {
         parse_frame_payload(FRAME_SETTINGS, &[0x02, 0x00, 0x06, 0x01, 0x06, 0x02]),
         Err(H3_SETTINGS_ERROR)
     );
+    // a duplicate in the middle, not adjacent: ids 9, 6, 7, 9, 8
+    assert_eq!(
+        parse_frame_payload(FRAME_SETTINGS, &[0x09, 0x00, 0x06, 0x00, 0x07, 0x00, 0x09, 0x01, 0x08, 0x00]),
+        Err(H3_SETTINGS_ERROR)
+    );
+    for id in 3u8..=5 {
+        assert_eq!(parse_frame_payload(FRAME_SETTINGS, &[0x06, 0x00, id, 0x00]), Err(H3_SETTINGS_ERROR));
+    }
     // a pair cut short is H3_FRAME_ERROR even after a duplicate
     assert_eq!(parse_frame_payload(FRAME_SETTINGS, &[0x06, 0x01, 0x06, 0x02, 0x06]), Err(H3_FRAME_ERROR));
 }
