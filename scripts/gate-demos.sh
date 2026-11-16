@@ -4,7 +4,7 @@ set -o pipefail
 # gate-demos.sh: each cheap gate gets a canned bad input (a temp copy of a fixture in
 # tools/gate-demos/ with one change applied) and must exit non-zero with its message; every fixture
 # first passes unchanged, so a demo cannot fail for the wrong reason. Covers lint-scripts,
-# check-quotes, the citation gate, the RFC-quantity gate (its git demos in throwaway repos), acceptance (many bad changes, including real-git runs), escape-gate (three), the cost-charge gate, crypto_cost's realloc count (a debug build of a workspace copy), the rlimit gate and the mutant registry (scripts/mutants.sh; its run demos call Verus
+# check-quotes, the citation gate, the RFC-quantity gate (its git demos in throwaway repos), acceptance (many bad changes, including real-git runs), escape-gate (three), the cost-charge gate, crypto_cost's realloc count (a debug build of a workspace copy), the rlimit gate, the seed gate (tools/rlseeds.py) and the mutant registry (scripts/mutants.sh; its run demos call Verus
 # on the fixture crate), the declassify and deps gates, ct-check's report reader (ct-report.sh), ct-binary (against its real build), the test gate, the carryover gate and the requirements status gate (throwaway repos). Takes a few seconds, plus about a minute the first time vstd builds in target/mutants-demo (and a debug build in
 # target/realloc-demo).
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -439,6 +439,23 @@ printf 'version 0.2026.10.04.426d8b0\n' > "$tmp/short-pin"; pin=$tmp/short-pin
 expect_fail "rlimit-gate: pin file without commit and toolchain" "lacks a version, commit or toolchain" rl
 pin=$root/tools/verus-pin.txt
 expect_fail "rlimit-gate: no --pin" "no --pin FILE given" python3 -I "$root/tools/rl.py" --gate quic "$tmp/rl.json"
+
+# Seed gate (tools/rlseeds.py, run by scripts/rlimit-seeds.sh; RCA docs/rca/2026-11-16-smt-order-fragility.md): a fn
+# that verifies under seed 0 and fails or exceeds its cap or ceiling under another seed is caught.
+printf 'quic quic::conn::edge 8000000\n' > "$tmp/rs-ceil.txt"
+rs() { python3 -I "$root/tools/rlseeds.py" quic --pin "$pin" --ceilings "$tmp/rs-ceil.txt" "$tmp/rs-0.json" "$tmp/rs-1.json"; }
+cp "$tmp/rlimit/quic.json" "$tmp/rs-0.json"; cp "$tmp/rlimit/quic.json" "$tmp/rs-1.json"
+expect_pass "rlimit-seeds" rs
+sed -i 's/"rlimit": 120000, "success": true/"rlimit": 12000000, "success": false/' "$tmp/rs-1.json"
+expect_fail "rlimit-seeds: passes seed 0, FAIL row under seed 1" "seed 1: FAIL row quic::conn::small" rs
+cp "$tmp/rlimit/quic.json" "$tmp/rs-1.json"; sed -i 's/"rlimit": 7630000/"rlimit": 8000001/' "$tmp/rs-1.json"
+expect_fail "rlimit-seeds: over the cap under seed 1 only" "quic::conn::poll_max_data at 8000001 (seed 1) is above its cap" rs
+cp "$tmp/rlimit/quic.json" "$tmp/rs-1.json"; printf 'quic quic::conn::edge 7999999\n' > "$tmp/rs-ceil.txt"
+expect_fail "rlimit-seeds: over its ceiling line" "quic::conn::edge at 8000000 (seed 0) is above its ceiling 7999999" rs
+printf 'quic quic::conn::edge 8000000\n' > "$tmp/rs-ceil.txt"; sed -i 's/"errors": 0/"errors": 1/' "$tmp/rs-1.json"
+expect_fail "rlimit-seeds: a seed's run not clean" "seed 1: run not clean" rs
+: > "$tmp/rs-1.json"
+expect_fail "rlimit-seeds: an empty seed log" "seed 1: 0 verification-results objects" rs
 
 # clean-tree.sh (F5): an untracked file, a modified tracked file and a non-repo dir fail; a clean repo passes.
 ct() { "$root/scripts/clean-tree.sh" "$tmp/ctree"; }

@@ -1397,6 +1397,11 @@ impl UniStream {
         ensures
             consumed(*old(self), *final(self), seg@, old(events)@, final(events)@, fin, r),
     {
+        hide(rfc_control);
+        hide(rfc_tail);
+        hide(rfc_frame_payload);
+        hide(rfc_frame_header);
+        hide(rfc_varint_decode);
         let mut j: usize = 0;
         proof {
             lemma_grew_refl(*self, events@);

@@ -800,6 +800,41 @@ fn fits_peer_x(fields: &[FieldLine], peer: Option<u64>) -> (r: bool)
     true
 }
 
+/// `write_response`'s bytes: a HEADERS frame of `enc` then the body frames carry `r`.
+proof fn lemma_write_wire(enc: Seq<u8>, data: Seq<u8>, r: SpecResponse)
+    requires
+        enc.len() <= VARINT_MAX,
+        rfc_decode_field_section(enc) == Ok::<Fields, u64>(resp_fields(r)),
+        data == spec_frame_bytes(FRAME_HEADERS, enc) + body_frames(r.body),
+    ensures
+        response_wire(data, r),
+{
+    hide(rfc_decode_field_section);
+    hide(body_frames);
+    let b = body_frames(r.body);
+    lemma_frame_bytes_roundtrip(FRAME_HEADERS, enc, b);
+    let h = spec_frame_header_bytes(FRAME_HEADERS, enc.len() as u64).len();
+    assert(data.skip((h + enc.len()) as int) =~= b);
+}
+
+/// `write_response`'s one output.
+proof fn lemma_one_write(o0: Seq<Output>, out: Seq<Output>, w: Output, id: u64, r: SpecResponse)
+    requires
+        out == o0.push(w),
+        match w@ {
+            SpecOutput::StreamWrite { stream_id, data, fin } => stream_id == id && fin && response_wire(data, r),
+            _ => false,
+        },
+    ensures
+        extends(o0, out),
+        one_response(added(o0, out), id, r),
+{
+    hide(response_wire);
+    lemma_added_refl(o0);
+    lemma_added_push(o0, o0, w);
+    assert(added(o0, out) =~= seq![w@]);
+}
+
 /// Writes `r` on `id` with FIN, `:status` first. `false` (nothing written): the field section
 /// exceeds the peer's limit, or a frame would be too long to encode.
 #[verifier::spinoff_prover]
@@ -819,6 +854,12 @@ fn write_response(id: u64, r: &Response, peer: Option<u64>, out: &mut Vec<Output
             fields_size(resp_fields(r@)),
         ),
 {
+    hide(response_wire);
+    hide(one_response);
+    hide(rfc_decode_field_section);
+    hide(rfc_frame_header);
+    hide(spec_frame_bytes);
+    hide(spec_varint);
     let mut fields: Vec<FieldLine> = Vec::new();
     fields.push(status_line(r.status));
     proof {
@@ -863,21 +904,15 @@ fn write_response(id: u64, r: &Response, peer: Option<u64>, out: &mut Vec<Output
         put_frame(FRAME_DATA, &r.body, &mut data);
     }
     proof {
-        let b = body_frames(r.body@);
         assert(enc@.skip(0) =~= enc@);
-        assert(data@ =~= spec_frame_bytes(FRAME_HEADERS, enc@) + b);
-        lemma_frame_bytes_roundtrip(FRAME_HEADERS, enc@, b);
-        let h = spec_frame_header_bytes(FRAME_HEADERS, enc@.len() as u64).len();
-        assert(data@.skip((h + enc@.len()) as int) =~= b);
+        assert(data@ =~= spec_frame_bytes(FRAME_HEADERS, enc@) + body_frames(r.body@));
+        lemma_write_wire(enc@, data@, r@);
     }
     let ghost o0 = out@;
     let w = Output::StreamWrite { stream_id: id, data, fin: true };
     out.push(w);
     proof {
-        lemma_added_refl(o0);
-        lemma_added_push(o0, o0, w);
-        assert(added(o0, out@) =~= seq![w@]);
-        assert(added(o0, out@).take(1) =~= added(o0, out@));
+        lemma_one_write(o0, out@, w, id, r@);
     }
     true
 }
@@ -3603,6 +3638,14 @@ impl H3Conn {
         hide(valid_response);
         hide(fits_peer);
         hide(resp_fields);
+        hide(ctrl_preamble);
+        hide(goaway_frames);
+        hide(spec_frame_bytes);
+        hide(spec_frame_header_bytes);
+        hide(spec_varint);
+        hide(spec_pairs_bytes);
+        hide(rfc_frame_header);
+        hide(response_wire);
         let ghost c0 = *self;
         let ghost o0 = out@;
         proof {

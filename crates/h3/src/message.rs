@@ -2067,12 +2067,4 @@ pub fn check_response(r: &Response, head: bool) -> (ok: bool)
     true
 }
 
-/// Never called. It keeps a `Vec::extend_from_slice` reference in h3: without one, Verus orders vstd's `View::view`,
-/// `Seq::new` and `array_view` declarations differently in every module, and `H3Conn::send_response`,
-/// `encode_field_section` and `decode_lines` blow their rlimits (9b3 Task 4 report).
-#[allow(dead_code)]
-fn smt_order_anchor(v: &mut Vec<u8>, a: &[u8]) {
-    v.extend_from_slice(a);
-}
-
 } // verus!

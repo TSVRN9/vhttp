@@ -356,6 +356,9 @@ proof fn lemma_field_line_append(b: Seq<u8>, t: Seq<u8>)
     ensures
         rfc_field_line(b + t) == rfc_field_line(b),
 {
+    hide(rfc_string);
+    hide(rfc_prefix_int);
+    hide(spec_static_entry);
     let b0 = b[0];
     assert((b + t)[0] == b0);
     if b0 & 0x80u8 != 0 {
@@ -466,6 +469,7 @@ proof fn lemma_lines_bounded_refines(b: Seq<u8>, left: u64)
             == QPACK_DECOMPRESSION_FAILED && rfc_field_lines(b) is None,
     decreases b.len(),
 {
+    hide(rfc_field_line);
     if b.len() > 0 {
         lemma_field_line_consumed(b);
         if let Some((f, c)) = rfc_field_line(b) {
@@ -485,6 +489,9 @@ pub proof fn lemma_bounded_refines(b: Seq<u8>, budget: u64)
         rfc_decode_field_section_bounded(b, budget) matches Err(BoundedError::Qpack(c))
             ==> rfc_decode_field_section(b) == Err::<Seq<(Seq<u8>, Seq<u8>)>, u64>(c),
 {
+    hide(rfc_field_lines_bounded);
+    hide(rfc_field_lines);
+    hide(rfc_field_line);
     lemma_prefix_int_consumed(8, b);
     if let PrefixIntSpec::Value { consumed: c, .. } = rfc_prefix_int(8, b) {
         let rest = b.skip(c as int);
@@ -697,6 +704,131 @@ pub fn decode_field_section(b: &[u8]) -> (r: Result<Vec<FieldLine>, u64>)
     }
 }
 
+type Lines = Seq<(Seq<u8>, Seq<u8>)>;
+
+/// `decode_lines`' invariant at `pos`, with `acc` decoded so far.
+pub open spec fn lines_inv(lines: Seq<u8>, pos: int, acc: Lines) -> bool {
+    rfc_field_lines(lines) == match rfc_field_lines(lines.skip(pos)) {
+        Some(r) => Some(acc + r),
+        None => None,
+    }
+}
+
+/// `decode_lines_bounded`'s invariant at `pos` with `left` of the budget.
+pub open spec fn lines_bounded_inv(lines: Seq<u8>, budget: u64, pos: int, left: u64, acc: Lines) -> bool {
+    rfc_field_lines_bounded(lines, budget) == match rfc_field_lines_bounded(lines.skip(pos), left) {
+        Ok(r) => Ok(acc + r),
+        Err(e) => Err(e),
+    }
+}
+
+proof fn lemma_lines_start(lines: Seq<u8>, budget: u64)
+    ensures
+        lines_inv(lines, 0, Seq::empty()),
+        lines_bounded_inv(lines, budget, 0, budget, Seq::empty()),
+{
+    hide(rfc_field_line);
+    assert(lines.skip(0) =~= lines);
+    if let Some(r) = rfc_field_lines(lines) {
+        assert(Seq::<(Seq<u8>, Seq<u8>)>::empty() + r =~= r);
+    }
+    if let Ok(r) = rfc_field_lines_bounded(lines, budget) {
+        assert(Seq::<(Seq<u8>, Seq<u8>)>::empty() + r =~= r);
+    }
+}
+
+/// One line decoded at `pos` moves `decode_lines`' invariant to `pos + k`.
+proof fn lemma_lines_step(lines: Seq<u8>, pos: int, k: nat, acc: Lines, f: (Seq<u8>, Seq<u8>))
+    requires
+        0 <= pos < lines.len(),
+        rfc_field_line(lines.skip(pos)) == Some((f, k)),
+        lines_inv(lines, pos, acc),
+    ensures
+        1 <= k,
+        pos + k <= lines.len(),
+        lines_inv(lines, pos + k, acc.push(f)),
+{
+    hide(rfc_field_line);
+    lemma_field_line_consumed(lines.skip(pos));
+    assert(lines.skip(pos).skip(k as int) =~= lines.skip(pos + k));
+    if let Some(r) = rfc_field_lines(lines.skip(pos + k)) {
+        assert(acc + (seq![f] + r) =~= acc.push(f) + r);
+    }
+}
+
+/// A line that does not decode at `pos` fails the whole section.
+proof fn lemma_lines_none(lines: Seq<u8>, pos: int, acc: Lines)
+    requires
+        0 <= pos < lines.len(),
+        rfc_field_line(lines.skip(pos)) is None,
+        lines_inv(lines, pos, acc),
+    ensures
+        rfc_field_lines(lines) is None,
+{
+    hide(rfc_field_line);
+}
+
+/// At the end, the invariant is the result.
+proof fn lemma_lines_end(lines: Seq<u8>, budget: u64, pos: int, left: u64, acc: Lines)
+    requires
+        pos == lines.len(),
+    ensures
+        lines_inv(lines, pos, acc) ==> rfc_field_lines(lines) == Some(acc),
+        lines_bounded_inv(lines, budget, pos, left, acc) ==> rfc_field_lines_bounded(lines, budget) == Ok::<
+            _,
+            BoundedError,
+        >(acc),
+{
+    hide(rfc_field_line);
+    assert(lines.skip(pos) =~= Seq::<u8>::empty());
+    assert(acc + Seq::empty() =~= acc);
+}
+
+/// One line decoded within `left` at `pos` moves `decode_lines_bounded`' invariant to `pos + k`.
+proof fn lemma_lines_bounded_step(
+    lines: Seq<u8>,
+    budget: u64,
+    pos: int,
+    left: u64,
+    k: nat,
+    acc: Lines,
+    f: (Seq<u8>, Seq<u8>),
+)
+    requires
+        0 <= pos < lines.len(),
+        rfc_field_line(lines.skip(pos)) == Some((f, k)),
+        field_line_size(f) <= left,
+        lines_bounded_inv(lines, budget, pos, left, acc),
+    ensures
+        1 <= k,
+        pos + k <= lines.len(),
+        lines_bounded_inv(lines, budget, pos + k, (left - field_line_size(f)) as u64, acc.push(f)),
+{
+    hide(rfc_field_line);
+    let left2 = (left - field_line_size(f)) as u64;
+    lemma_field_line_consumed(lines.skip(pos));
+    assert(lines.skip(pos).skip(k as int) =~= lines.skip(pos + k));
+    if let Ok(r) = rfc_field_lines_bounded(lines.skip(pos + k), left2) {
+        assert(acc + (seq![f] + r) =~= acc.push(f) + r);
+    }
+}
+
+/// A line that fails at `pos` (QPACK error or over `left`) fails the whole section with that error.
+proof fn lemma_lines_bounded_err(lines: Seq<u8>, budget: u64, pos: int, left: u64, acc: Lines, e: BoundedError)
+    requires
+        0 <= pos < lines.len(),
+        lines_bounded_inv(lines, budget, pos, left, acc),
+        match e {
+            BoundedError::Qpack(c) => c == QPACK_DECOMPRESSION_FAILED && rfc_field_line(lines.skip(pos)) is None,
+            BoundedError::OverBudget => rfc_field_line(lines.skip(pos)) matches Some((f, _)) && field_line_size(f)
+                > left,
+        },
+    ensures
+        rfc_field_lines_bounded(lines, budget) == Err::<Lines, BoundedError>(e),
+{
+    hide(rfc_field_line);
+}
+
 /// Decodes field line representations up to the end of `lines`.
 fn decode_lines(lines: &[u8]) -> (r: Option<Vec<FieldLine>>)
     ensures
@@ -705,22 +837,19 @@ fn decode_lines(lines: &[u8]) -> (r: Option<Vec<FieldLine>>)
             None => rfc_field_lines(lines@) is None,
         },
 {
+    hide(rfc_field_lines);
+    hide(rfc_field_line);
+    hide(lines_inv);
     proof {
-        assert(lines@.skip(0) =~= lines@);
+        lemma_lines_start(lines@, 0);
         assert(fields_view(Seq::<FieldLine>::empty()) =~= Seq::empty());
-        if let Some(r) = rfc_field_lines(lines@) {
-            assert(Seq::<(Seq<u8>, Seq<u8>)>::empty() + r =~= r);
-        }
     }
     let mut out: Vec<FieldLine> = Vec::new();
     let mut pos: usize = 0;
     while pos < lines.len()
         invariant
             pos <= lines@.len(),
-            rfc_field_lines(lines@) == match rfc_field_lines(lines@.skip(pos as int)) {
-                Some(r) => Some(fields_view(out@) + r),
-                None => None,
-            },
+            lines_inv(lines@, pos as int, fields_view(out@)),
         decreases lines@.len() - pos,
     {
         let tail = slice_subrange(lines, pos, lines.len());
@@ -730,29 +859,22 @@ fn decode_lines(lines: &[u8]) -> (r: Option<Vec<FieldLine>>)
         match decode_field_line(tail) {
             Some((f, k)) => {
                 proof {
-                    lemma_field_line_consumed(tail@);
-                    assert(tail@.skip(k as int) =~= lines@.skip(pos + k));
+                    lemma_lines_step(lines@, pos as int, k as nat, fields_view(out@), f@);
                     assert(fields_view(out@.push(f)) =~= fields_view(out@).push(f@));
-                    if let Some(r) = rfc_field_lines(lines@.skip(pos + k)) {
-                        assert(fields_view(out@) + (seq![f@] + r) =~= fields_view(out@).push(f@)
-                            + r);
-                    }
                 }
                 out.push(f);
                 pos += k;
             },
             None => {
                 proof {
-                    assert(rfc_field_lines(lines@.skip(pos as int)) is None);
-                    assert(rfc_field_lines(lines@) is None);
+                    lemma_lines_none(lines@, pos as int, fields_view(out@));
                 }
                 return None;
             },
         }
     }
     proof {
-        assert(lines@.skip(pos as int) =~= Seq::<u8>::empty());
-        assert(fields_view(out@) + Seq::empty() =~= fields_view(out@));
+        lemma_lines_end(lines@, 0, pos as int, 0, fields_view(out@));
     }
     Some(out)
 }
@@ -869,12 +991,12 @@ fn decode_lines_bounded(lines: &[u8], budget: u64) -> (r: Result<Vec<FieldLine>,
             >(e),
         },
 {
+    hide(rfc_field_lines_bounded);
+    hide(rfc_field_line);
+    hide(lines_bounded_inv);
     proof {
-        assert(lines@.skip(0) =~= lines@);
+        lemma_lines_start(lines@, budget);
         assert(fields_view(Seq::<FieldLine>::empty()) =~= Seq::empty());
-        if let Ok(r) = rfc_field_lines_bounded(lines@, budget) {
-            assert(Seq::<(Seq<u8>, Seq<u8>)>::empty() + r =~= r);
-        }
     }
     let mut out: Vec<FieldLine> = Vec::new();
     let mut pos: usize = 0;
@@ -882,13 +1004,7 @@ fn decode_lines_bounded(lines: &[u8], budget: u64) -> (r: Result<Vec<FieldLine>,
     while pos < lines.len()
         invariant
             pos <= lines@.len(),
-            rfc_field_lines_bounded(lines@, budget) == match rfc_field_lines_bounded(
-                lines@.skip(pos as int),
-                left,
-            ) {
-                Ok(r) => Ok(fields_view(out@) + r),
-                Err(e) => Err(e),
-            },
+            lines_bounded_inv(lines@, budget, pos as int, left, fields_view(out@)),
         decreases lines@.len() - pos,
     {
         let tail = slice_subrange(lines, pos, lines.len());
@@ -897,28 +1013,24 @@ fn decode_lines_bounded(lines: &[u8], budget: u64) -> (r: Result<Vec<FieldLine>,
         }
         match decode_field_line_bounded(tail, left) {
             Ok((f, k)) => {
-                let ghost left2 = (left - field_line_size(f@)) as u64;
                 proof {
-                    lemma_field_line_consumed(tail@);
-                    assert(tail@.skip(k as int) =~= lines@.skip(pos + k));
+                    lemma_lines_bounded_step(lines@, budget, pos as int, left, k as nat, fields_view(out@), f@);
                     assert(fields_view(out@.push(f)) =~= fields_view(out@).push(f@));
-                    if let Ok(r) = rfc_field_lines_bounded(lines@.skip(pos + k), left2) {
-                        assert(fields_view(out@) + (seq![f@] + r) =~= fields_view(out@).push(f@)
-                            + r);
-                    }
                 }
                 left = left - f.name.len() as u64 - f.value.len() as u64 - 32;
                 out.push(f);
                 pos += k;
             },
             Err(e) => {
+                proof {
+                    lemma_lines_bounded_err(lines@, budget, pos as int, left, fields_view(out@), e);
+                }
                 return Err(e);
             },
         }
     }
     proof {
-        assert(lines@.skip(pos as int) =~= Seq::<u8>::empty());
-        assert(fields_view(out@) + Seq::empty() =~= fields_view(out@));
+        lemma_lines_end(lines@, budget, pos as int, left, fields_view(out@));
     }
     Ok(out)
 }
@@ -1139,6 +1251,102 @@ proof fn lemma_literal_line_len(name: Seq<u8>, value: Seq<u8>)
     }
 }
 
+/// The encoders' postcondition from one line's bytes `e` appended to `o` (proof moved out of the exec fns, so their
+/// contexts stay small and robust to solver seeds; RCA docs/rca/2026-11-16-smt-order-fragility.md).
+proof fn lemma_line_out(o: Seq<u8>, out: Seq<u8>, e: Seq<u8>, f: (Seq<u8>, Seq<u8>))
+    requires
+        out == o + e,
+        e.len() > 0,
+        rfc_field_line(e) == Some((f, e.len())),
+    ensures
+        out.len() > o.len(),
+        out.subrange(0, o.len() as int) == o,
+        rfc_field_line(out.skip(o.len() as int)) == Some((f, (out.len() - o.len()) as nat)),
+{
+    hide(rfc_field_line);
+    assert(out.skip(o.len() as int) =~= e);
+    assert(out.subrange(0, o.len() as int) =~= o);
+}
+
+/// `encode_exact_line`'s bytes.
+proof fn lemma_exact_out(o: Seq<u8>, out: Seq<u8>, i: u64, f: (Seq<u8>, Seq<u8>))
+    requires
+        i < STATIC_TABLE_LEN,
+        spec_static_entry(i as nat) == Some(f),
+        out == o.add(spec_prefix_int_bytes(6, 0xc0, i)),
+    ensures
+        out.len() > o.len(),
+        f.0.len() < 128 && f.1.len() < 128 ==> out.len() <= o.len() + 260,
+        out.subrange(0, o.len() as int) == o,
+        rfc_field_line(out.skip(o.len() as int)) == Some((f, (out.len() - o.len()) as nat)),
+{
+    hide(rfc_field_line);
+    lemma_prefix_small(6, 0xc0, i);
+    lemma_exact_line(i, f);
+    lemma_line_out(o, out, spec_prefix_int_bytes(6, 0xc0, i), f);
+}
+
+/// `encode_name_line`'s bytes.
+proof fn lemma_name_out(o: Seq<u8>, out: Seq<u8>, i: u64, name: Seq<u8>, value: Seq<u8>)
+    requires
+        i < STATIC_TABLE_LEN,
+        spec_name_is(i as nat, name),
+        value.len() <= PREFIX_INT_MAX,
+        out == o.add(spec_prefix_int_bytes(4, 0x50, i)) + spec_prefix_int_bytes(7, 0x00, value.len() as u64)
+            + value,
+    ensures
+        out.len() > o.len(),
+        name.len() < 128 && value.len() < 128 ==> out.len() <= o.len() + 260,
+        out.subrange(0, o.len() as int) == o,
+        rfc_field_line(out.skip(o.len() as int)) == Some(((name, value), (out.len() - o.len()) as nat)),
+{
+    hide(rfc_field_line);
+    lemma_name_line_len(i, value);
+    let e = spec_prefix_int_bytes(4, 0x50, i) + (spec_prefix_int_bytes(7, 0x00, value.len() as u64) + value);
+    assert(out =~= o + e);
+    lemma_name_line(i, name, value);
+    lemma_line_out(o, out, e, (name, value));
+}
+
+/// `encode_literal_line`'s bytes.
+proof fn lemma_literal_out(o: Seq<u8>, out: Seq<u8>, name: Seq<u8>, value: Seq<u8>)
+    requires
+        name.len() <= PREFIX_INT_MAX,
+        value.len() <= PREFIX_INT_MAX,
+        out == o + spec_prefix_int_bytes(3, 0x20, name.len() as u64) + name + spec_prefix_int_bytes(
+            7,
+            0x00,
+            value.len() as u64,
+        ) + value,
+    ensures
+        out.len() > o.len(),
+        name.len() < 128 && value.len() < 128 ==> out.len() <= o.len() + 260,
+        out.subrange(0, o.len() as int) == o,
+        rfc_field_line(out.skip(o.len() as int)) == Some(((name, value), (out.len() - o.len()) as nat)),
+{
+    hide(rfc_field_line);
+    lemma_literal_line_len(name, value);
+    let e = (spec_prefix_int_bytes(3, 0x20, name.len() as u64) + name) + (spec_prefix_int_bytes(
+        7,
+        0x00,
+        value.len() as u64,
+    ) + value);
+    assert(out =~= o + e);
+    lemma_literal_line(name, value);
+    lemma_line_out(o, out, e, (name, value));
+}
+
+/// The flag bytes the encoders pass to `serialize_prefix_int` fit their prefixes.
+proof fn lemma_enc_flags()
+    ensures
+        0xc0u8 as nat % pow2(6) == 0,
+        0x50u8 as nat % pow2(4) == 0,
+        0x20u8 as nat % pow2(3) == 0,
+        0x00u8 as nat % pow2(7) == 0,
+{
+    lemma2_to64();
+}
+
 // `f` appears only in the spec, which a plain `cargo build` erases.
 #[allow(unused_variables)]
 fn encode_exact_line(f: &FieldLine, i: u64, out: &mut Vec<u8>)
@@ -1153,18 +1361,15 @@ fn encode_exact_line(f: &FieldLine, i: u64, out: &mut Vec<u8>)
             (f@, (final(out)@.len() - old(out)@.len()) as nat),
         ),
 {
+    hide(rfc_field_line);
+    hide(spec_prefix_int_bytes);
     let ghost o = out@;
     proof {
-        lemma2_to64();
+        lemma_enc_flags();
     }
     serialize_prefix_int(6, 0xc0, i, out);
     proof {
-        lemma_prefix_small(6, 0xc0, i);
-        let e = spec_prefix_int_bytes(6, 0xc0, i);
-        assert(out@.skip(o.len() as int) =~= e);
-        lemma_exact_line(i, f@);
-        assert(rfc_field_line(out@.skip(o.len() as int)) == Some((f@, e.len())));
-        assert(out@.subrange(0, o.len() as int) =~= o);
+        lemma_exact_out(o, out@, i, f@);
     }
 }
 
@@ -1181,23 +1386,16 @@ fn encode_name_line(f: &FieldLine, i: u64, out: &mut Vec<u8>)
             (f@, (final(out)@.len() - old(out)@.len()) as nat),
         ),
 {
+    hide(rfc_field_line);
+    hide(spec_prefix_int_bytes);
     let ghost o = out@;
     proof {
-        lemma2_to64();
+        lemma_enc_flags();
     }
     serialize_prefix_int(4, 0x50, i, out);
     encode_string(7, 0x00, f.value.as_slice(), out);
     proof {
-        lemma_name_line_len(i, f.value@);
-        let e = spec_prefix_int_bytes(4, 0x50, i) + (spec_prefix_int_bytes(
-            7,
-            0x00,
-            f.value@.len() as u64,
-        ) + f.value@);
-        assert(out@.skip(o.len() as int) =~= e);
-        lemma_name_line(i, f.name@, f.value@);
-        assert(rfc_field_line(out@.skip(o.len() as int)) == Some((f@, e.len())));
-        assert(out@.subrange(0, o.len() as int) =~= o);
+        lemma_name_out(o, out@, i, f.name@, f.value@);
     }
 }
 
@@ -1213,20 +1411,16 @@ fn encode_literal_line(f: &FieldLine, out: &mut Vec<u8>)
             (f@, (final(out)@.len() - old(out)@.len()) as nat),
         ),
 {
+    hide(rfc_field_line);
+    hide(spec_prefix_int_bytes);
     let ghost o = out@;
     proof {
-        lemma2_to64();
+        lemma_enc_flags();
     }
     encode_string(3, 0x20, f.name.as_slice(), out);
     encode_string(7, 0x00, f.value.as_slice(), out);
     proof {
-        lemma_literal_line_len(f.name@, f.value@);
-        let e = (spec_prefix_int_bytes(3, 0x20, f.name@.len() as u64) + f.name@) + (
-        spec_prefix_int_bytes(7, 0x00, f.value@.len() as u64) + f.value@);
-        assert(out@.skip(o.len() as int) =~= e);
-        lemma_literal_line(f.name@, f.value@);
-        assert(rfc_field_line(out@.skip(o.len() as int)) == Some((f@, e.len())));
-        assert(out@.subrange(0, o.len() as int) =~= o);
+        lemma_literal_out(o, out@, f.name@, f.value@);
     }
 }
 
@@ -1247,6 +1441,74 @@ fn encode_field_line(f: &FieldLine, out: &mut Vec<u8>)
         StaticMatch::Name(i) => encode_name_line(f, i, out),
         StaticMatch::None => encode_literal_line(f, out),
     }
+}
+
+/// One step of `encode_field_section`: the line appended after `base + enc` extends the decoded lines by `f`.
+proof fn lemma_section_step(
+    base: Seq<u8>,
+    enc: Seq<u8>,
+    out: Seq<u8>,
+    lines: Seq<(Seq<u8>, Seq<u8>)>,
+    f: (Seq<u8>, Seq<u8>),
+)
+    requires
+        out.len() > (base + enc).len(),
+        out.subrange(0, (base + enc).len() as int) == base + enc,
+        rfc_field_line(out.skip((base + enc).len() as int)) == Some((f, (out.len() - (base + enc).len()) as nat)),
+        rfc_field_lines(enc) == Some(lines),
+    ensures
+        out == base + (enc + out.skip((base + enc).len() as int)),
+        rfc_field_lines(enc + out.skip((base + enc).len() as int)) == Some(lines.push(f)),
+{
+    hide(rfc_field_line);
+    hide(rfc_field_lines);
+    let e = out.skip((base + enc).len() as int);
+    lemma_one_line(e, f);
+    lemma_field_lines_append(enc, e);
+    let n = (base + enc).len() as int;
+    assert(out =~= out.subrange(0, n) + out.skip(n));
+    assert((base + enc) + e =~= base + (enc + e));
+    assert(lines + seq![f] =~= lines.push(f));
+}
+
+/// `encode_field_section`'s end: the two-byte prefix then the lines decode to `lines`.
+proof fn lemma_section_out(o: Seq<u8>, enc: Seq<u8>, out: Seq<u8>, lines: Seq<(Seq<u8>, Seq<u8>)>)
+    requires
+        out == o + seq![0u8, 0u8] + enc,
+        rfc_field_lines(enc) == Some(lines),
+    ensures
+        out.subrange(0, o.len() as int) == o,
+        rfc_decode_field_section(out.skip(o.len() as int)) == Ok::<_, u64>(lines),
+{
+    hide(rfc_field_lines);
+    hide(rfc_prefix_int);
+    let b = seq![0u8, 0u8] + enc;
+    assert(out.skip(o.len() as int) =~= b);
+    assert(out.subrange(0, o.len() as int) =~= o);
+    assert(b[0] == 0u8 && b.skip(1)[0] == 0u8);
+    assert(b.skip(1).skip(1) =~= enc);
+    lemma_prefix_zero(8, b);
+    lemma_prefix_zero(7, b.skip(1));
+    assert(0u8 & 0x80u8 == 0) by (bit_vector);
+}
+
+/// A zero first byte is the prefix integer 0 in one byte.
+proof fn lemma_prefix_zero(n: u8, b: Seq<u8>)
+    requires
+        1 <= n <= 8,
+        b.len() > 0,
+        b[0] == 0u8,
+    ensures
+        rfc_prefix_int(n, b) == (PrefixIntSpec::Value { value: 0, consumed: 1 }),
+{
+    lemma2_to64();
+}
+
+/// The empty encoding decodes to no lines.
+proof fn lemma_lines_empty()
+    ensures
+        rfc_field_lines(Seq::<u8>::empty()) == Some(Seq::<(Seq<u8>, Seq<u8>)>::empty()),
+{
 }
 
 //= https://www.rfc-editor.org/rfc/rfc9204#section-2.1
@@ -1271,12 +1533,16 @@ pub fn encode_field_section(fields: &[FieldLine], out: &mut Vec<u8>)
                 && fields@[i].value@.len() < 128) ==> final(out)@.len() <= old(out)@.len() + 2
             + 260 * fields@.len(),
 {
+    hide(rfc_field_line);
+    hide(rfc_field_lines);
+    hide(rfc_decode_field_section);
     out.push(0);
     out.push(0);
     let ghost mut enc: Seq<u8> = Seq::empty();
     proof {
         assert(out@ =~= old(out)@ + seq![0u8, 0u8] + enc);
         assert(fields_view(fields@.take(0)) =~= Seq::empty());
+        lemma_lines_empty();
     }
     let mut i: usize = 0;
     while i < fields.len()
@@ -1295,30 +1561,17 @@ pub fn encode_field_section(fields: &[FieldLine], out: &mut Vec<u8>)
         let ghost before = out@;
         encode_field_line(&fields[i], out);
         proof {
-            let e = out@.skip(before.len() as int);
+            let base = old(out)@ + seq![0u8, 0u8];
             let f = fields@[i as int];
-            lemma_one_line(e, f@);
-            lemma_field_lines_append(enc, e);
-            assert(out@ =~= before + e);
-            enc = enc + e;
-            assert(fields_view(fields@.take(i + 1)) =~= fields_view(fields@.take(i as int)) + seq![
-                f@,
-            ]);
+            lemma_section_step(base, enc, out@, fields_view(fields@.take(i as int)), f@);
+            enc = enc + out@.skip(before.len() as int);
+            assert(fields_view(fields@.take(i + 1)) =~= fields_view(fields@.take(i as int)).push(f@));
         }
         i += 1;
     }
     proof {
-        let b = seq![0u8, 0u8] + enc;
-        assert(out@.skip(old(out)@.len() as int) =~= b);
-        assert(out@.subrange(0, old(out)@.len() as int) =~= old(out)@);
         assert(fields@.take(fields@.len() as int) =~= fields@);
-        assert(b[0] == 0u8 && b.skip(1)[0] == 0u8);
-        assert(b.skip(1).skip(1) =~= enc);
-        lemma2_to64();
-        assert(rfc_prefix_int(8, b) == PrefixIntSpec::Value { value: 0, consumed: 1 });
-        assert(b.skip(1).len() > 0 && pow2(7) == 128 && (b.skip(1)[0] as nat) % 128 == 0);
-        assert(rfc_prefix_int(7, b.skip(1)) == PrefixIntSpec::Value { value: 0, consumed: 1 });
-        assert(0u8 & 0x80u8 == 0) by (bit_vector);
+        lemma_section_out(old(out)@, enc, out@, fields_view(fields@));
     }
 }
 

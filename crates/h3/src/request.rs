@@ -573,6 +573,8 @@ proof fn lemma_frame_at(
             Ok((ev, ph2)) => rfc_req(b.skip(h + len) + t, ph2, acc.push(ev), f),
         },
 {
+    hide(rfc_headers);
+    hide(rfc_end);
     lemma_frame_header_prefix(b, t);
     lemma_frame_header_bounds(b);
     let p = (b + t).skip(h as int);
@@ -1486,6 +1488,10 @@ impl RequestStream {
                 err_of(r),
             ),
     {
+        hide(rfc_req);
+        hide(rfc_skip);
+        hide(rfc_data);
+        hide(rfc_headers);
         let ghost all0 = self.all@;
         let ghost ev0 = events@;
         let mut j: usize = 0;

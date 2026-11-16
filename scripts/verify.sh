@@ -17,6 +17,9 @@ VERUS_HOME="${VERUS_HOME:-$HOME/.local/opt/verus/$verus_ver/verus-x86-linux}"
 PATH="$VERUS_HOME:$PATH"
 # Every crate verified at --rlimit 4 (replaces the default per-crate run); quic/quictls fns must stay under 8,000,000.
 "$root/scripts/rlimit-gate.sh" "$root" || exit 1
+# Seed gate (C11, RCA docs/rca/2026-11-16-smt-order-fragility.md): h3 verified whole under Z3 seeds 0..4, every fn passing
+# each seed under its cap or ceiling, so no proof rests on one solver path (9b4 extends it to every crate).
+"$root/scripts/rlimit-seeds.sh" h3 5 || exit 1
 (cd "$root" && duvet report)
 # Constant-time check; its crypto report is read by the declassify gate, so pin where it goes.
 export CT_TARGET_DIR="${CT_TARGET_DIR:-$root/target/ct}"

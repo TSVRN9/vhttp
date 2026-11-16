@@ -211,7 +211,7 @@ Existing-gate abbreviations: V = `scripts/verify.sh` (verus verify of all crates
 **C11 PROOF-BUDGET FRAGILITY** (rlimit cap, Z3 perturbation across modules, import-triggered blow-up, cache replay).
  EXISTING NOW: controller's manual fresh rlimit-4 run with fingerprint deletion (checks.sh/rl.py outside the repo); V runs default rlimit and does not detect a replay; crate split quictls.
  PROPOSED: V (or a nightly job) runs `cargo verus verify -- --rlimit 4 --output-json --time-expensive` with `touch`-invalidated fingerprints, fails if verified count == 0 ("Finished"), and fails if any query exceeds 8M (2/3 of cap); commit `docs/rlimit-top.txt` and diff top-8 each run (M; 40 min cost, so merge-time).
- STATUS: partial (9r2 T1: the rlimit gate and the shrinking ceilings, see the summary table; restructuring for headroom and the upgrade path: t1, carryover cat-C11)
+ STATUS: partial (9r2 T1: the rlimit gate and the shrinking ceilings, see the summary table; restructuring for headroom and the upgrade path: t1, carryover cat-C11; Z3 path perturbation: the seed gate scripts/rlimit-seeds.sh, h3 only, 9b3 Task 4b, docs/rca/2026-11-16-smt-order-fragility.md; every crate: 9b4)
 
 **C12 TRUSTED SEMANTICS / TRANSLATOR UNFAITHFUL, UNEXERCISED OR VACUOUS**.
  EXISTING NOW: 8d exec evaluator (`pass_ok`: each ok/bounded root reaches Done on a real input; CC "done roots 11/11, bounded 19/19"), semconf 31723, `sem_sanity` facts, two clean-room audits, `ct-zarr.py`, dumps tests in CC.
