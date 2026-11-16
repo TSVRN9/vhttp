@@ -1750,7 +1750,7 @@ impl<'a> QuicServer<'a> {
             old(self).wf(),
             level_rank(l) >= level_rank(old(self).level),
             was ==> l is OneRtt,
-            b@.len() > 0,
+            0 < b@.len() <= MAX_FEED,
             old(self).conn_spec().phase_spec() is Open,
         ensures
             final(self).wf(),

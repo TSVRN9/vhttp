@@ -3,6 +3,7 @@
 //! Handshake level, with the handshake and 1-RTT traffic secrets as events.
 //!
 //! There is no 0-RTT level: 0-RTT is never accepted (RFC 9114 §7.2.4.2).
+use byteq::capvec::CapVec;
 use crate::client_hello::*;
 use crate::codes::*;
 use crate::config::*;
@@ -73,6 +74,10 @@ pub struct SpecFlight {
 /// `t0` is the transcript up to and including the ClientHello being answered: `CH`, or
 /// `message_hash(CH1) || HRR || CH2`. `rand` is `TLS_RAND_LEN` bytes: [0..32] the ServerHello
 /// random, [32..64] the ECDHE scalar, [64..96] the PSS salt. The order is the requirement.
+/// Opaque (C11): its crypto specs, unfolded wherever a `spec_step` term appears, cost `spec_drain`'s termination check
+/// up to 25x (0.45M to over 12M when byteq's items reordered the crate's SMT declarations); revealed only by the lemmas
+/// in this file that need its body.
+#[verifier::opaque]
 pub open spec fn spec_flight(
     cfg: Seq<SpecCertChain>,
     tp: Seq<u8>,
@@ -206,6 +211,7 @@ pub proof fn theorem_flight_order(
     hide(spec_finished_bytes);
     hide(spec_cv_signature);
     hide(spec_server_hello_bytes);
+    reveal(spec_flight);
     let d = rand.subrange(32, 64);
     let pk = spec_p256_public_key(d).unwrap();
     let random = rand.subrange(0, 32);
@@ -397,6 +403,7 @@ proof fn lemma_flight_kx_err(
     hide(spec_finished_bytes);
     hide(spec_cv_signature);
     hide(spec_server_hello_bytes);
+    reveal(spec_flight);
 }
 
 /// The CertificateVerify signature fails.
@@ -437,6 +444,7 @@ proof fn lemma_flight_sig_err(
     hide(spec_finished_bytes);
     hide(spec_cv_signature);
     hide(spec_server_hello_bytes);
+    reveal(spec_flight);
 }
 
 /// The flight, from the values build_flight computes (each stated as its callee's ensures states it).
@@ -514,6 +522,7 @@ proof fn lemma_flight_ok(
     hide(spec_finished_bytes);
     hide(spec_cv_signature);
     hide(spec_server_hello_bytes);
+    reveal(spec_flight);
 }
 
 // =============================================================================
@@ -564,12 +573,42 @@ fn is_zero(z: &[u8; 32]) -> (r: bool)
     true
 }
 
-fn append(t: &mut Vec<u8>, m: &[u8])
+/// The flight's five events, in spec_flight's order (split from build_flight: C11).
+fn flight_events(tp: &Vec<u8>, sh: Vec<u8>, hs: &HsSecrets, data: Vec<u8>, c_ap: [u8; 32], s_ap: [u8; 32]) -> (evs: Vec<
+    TlsEvent,
+>)
     ensures
-        final(t)@ == old(t)@ + m@,
+        evs.deep_view() == seq![
+            SpecTlsEvent::PeerParams(tp@),
+            SpecTlsEvent::Send { level: Level::Initial, data: sh@ },
+            SpecTlsEvent::Secrets { level: Level::Handshake, client: hs.client@, server: hs.server@ },
+            SpecTlsEvent::Send { level: Level::Handshake, data: data@ },
+            SpecTlsEvent::Secrets { level: Level::OneRtt, client: c_ap@, server: s_ap@ },
+        ],
 {
-    t.extend_from_slice(m);
-    assert(final(t)@ =~= old(t)@ + m@);
+    //= https://www.rfc-editor.org/rfc/rfc8446#section-4
+    //# Protocol messages MUST be sent in the order defined in Section 4.4.1
+    //# and shown in the diagrams in Section 2.
+    // by construction: SH, then EE, Certificate, CertificateVerify, Finished, in spec_flight's order (theorem_flight_order)
+    let mut evs: Vec<TlsEvent> = Vec::new();
+    evs.push(TlsEvent::PeerParams(tp.clone()));
+    evs.push(TlsEvent::Send { level: Level::Initial, data: sh });
+    evs.push(TlsEvent::Secrets { level: Level::Handshake, client: hs.client, server: hs.server });
+    evs.push(TlsEvent::Send { level: Level::Handshake, data });
+    //= https://www.rfc-editor.org/rfc/rfc8446#section-2
+    //# Application Data MUST NOT be sent prior to sending the Finished
+    //# message
+    // The 1-RTT secrets are the last event, after the Finished; 3d sends no 1-RTT packet before
+    // on_handshake_complete.
+    evs.push(TlsEvent::Secrets { level: Level::OneRtt, client: c_ap, server: s_ap });
+    assert(evs.deep_view() =~= seq![
+        SpecTlsEvent::PeerParams(tp@),
+        SpecTlsEvent::Send { level: Level::Initial, data: sh@ },
+        SpecTlsEvent::Secrets { level: Level::Handshake, client: hs.client@, server: hs.server@ },
+        SpecTlsEvent::Send { level: Level::Handshake, data: data@ },
+        SpecTlsEvent::Secrets { level: Level::OneRtt, client: c_ap@, server: s_ap@ },
+    ]);
+    evs
 }
 
 /// `(chain, scheme, share)` is a `Choice::Proceed` from `negotiate` (the facts of
@@ -612,7 +651,6 @@ pub fn build_flight(
             rand@,
         ) is Ok),
 {
-    hide(spec_flight);
     hide(spec_server_hello_bytes);
     hide(rfc_client_hello);
     hide(zeros32);
@@ -710,24 +748,19 @@ pub fn build_flight(
         return Err(ALERT_ILLEGAL_PARAMETER);
     }
 
+    // D9: ServerHello, EncryptedExtensions and Certificate first (none depends on a transcript hash), then one exact
+    // transcript buffer, `lemma_cv_len`'s bound as the CertificateVerify's slack (freed when the call returns).
     // ServerHello. legacy_session_id_echo is ch.legacy_session_id (empty, 4a).
     //= https://www.rfc-editor.org/rfc/rfc8446#section-2
     //# the server's share MUST
     //# be in the same group as one of the client's shares.
     // `share` indexes a secp256r1 KeyShareEntry (the requires), and ours is secp256r1.
-    let mut t = t0;
     let mut sh: Vec<u8> = Vec::new();
     assert(!spec_reserved_group(SECP256R1)) by (compute);
     serialize_server_hello(&random, ch.legacy_session_id.as_slice(), SECP256R1, pk.as_slice(), &mut sh);
-    append(&mut t, sh.as_slice());
     proof {
         lemma_sh_len(random@, ch@.legacy_session_id, pk@);
     }
-    let ghost t1 = t@;
-    let th1 = sha256(t.as_slice());
-    let hs = handshake_secrets(&z, &th1);
-
-    let mut data: Vec<u8> = Vec::new();
     //= https://www.rfc-editor.org/rfc/rfc8446#section-4.3.1
     //# In all handshakes, the server MUST send the EncryptedExtensions
     //# message immediately after the ServerHello message.
@@ -739,8 +772,6 @@ pub fn build_flight(
     //# the handshake with an "illegal_parameter" alert.
     let mut ee: Vec<u8> = Vec::new();
     serialize_encrypted_extensions(local_tp, &mut ee);
-    append(&mut t, ee.as_slice());
-    append(&mut data, ee.as_slice());
     proof {
         lemma_ee_len(local_tp@);
     }
@@ -761,11 +792,17 @@ pub fn build_flight(
     // trusted config: der[0] is the end-entity certificate (TRUSTED.md, config row); serialize_certificate keeps the order
     let mut cert: Vec<u8> = Vec::new();
     serialize_certificate(&c.der, &mut cert);
-    append(&mut t, cert.as_slice());
-    append(&mut data, cert.as_slice());
     proof {
         lemma_cert_len(c.der.deep_view());
     }
+    let mut t: CapVec<u8> = CapVec::new(t0.len() + sh.len() + ee.len() + cert.len() + 0x1_0008 + 36);
+    let _ = t.push_slice(t0.as_slice());
+    let _ = t.push_slice(sh.as_slice());
+    let ghost t1 = t@;
+    let th1 = sha256(t.as_slice());
+    let hs = handshake_secrets(&z, &th1);
+    let _ = t.push_slice(ee.as_slice());
+    let _ = t.push_slice(cert.as_slice());
     let ghost t2 = t@;
     let th2 = sha256(t.as_slice());
 
@@ -793,24 +830,28 @@ pub fn build_flight(
     //# When sent, this message MUST appear immediately after
     //# the Certificate message and immediately prior to the Finished
     //# message.
-    // by construction: CV is appended to `data` right after the Certificate and right before the Finished
+    // by construction: CV goes into `data` right after the Certificate and right before the Finished
     let mut cv: Vec<u8> = Vec::new();
     serialize_certificate_verify(scheme, sig.as_slice(), &mut cv);
-    append(&mut t, cv.as_slice());
-    append(&mut data, cv.as_slice());
     proof {
         lemma_cv_len(scheme, sig@);
     }
+    let _ = t.push_slice(cv.as_slice());
     let ghost t3 = t@;
     let th3 = sha256(t.as_slice());
     let sfin = verify_data(&hs.server, &th3);
     let mut fin: Vec<u8> = Vec::new();
     serialize_finished(&sfin, &mut fin);
-    append(&mut t, fin.as_slice());
-    append(&mut data, fin.as_slice());
     proof {
         lemma_fin_len(sfin@);
     }
+    let _ = t.push_slice(fin.as_slice());
+    let mut dc: CapVec<u8> = CapVec::new(ee.len() + cert.len() + cv.len() + fin.len());
+    let _ = dc.push_slice(ee.as_slice());
+    let _ = dc.push_slice(cert.as_slice());
+    let _ = dc.push_slice(cv.as_slice());
+    let _ = dc.push_slice(fin.as_slice());
+    let data = dc.into_vec();
     let th4 = sha256(t.as_slice());
     let master = master_secret(&hs.hs);
     let (c_ap, s_ap) = app_secrets(&master, &th4);
@@ -837,21 +878,7 @@ pub fn build_flight(
         );
     }
 
-    //= https://www.rfc-editor.org/rfc/rfc8446#section-4
-    //# Protocol messages MUST be sent in the order defined in Section 4.4.1
-    //# and shown in the diagrams in Section 2.
-    // by construction: SH, then EE, Certificate, CertificateVerify, Finished, in spec_flight's order (theorem_flight_order)
-    let mut evs: Vec<TlsEvent> = Vec::new();
-    evs.push(TlsEvent::PeerParams(ch.transport_params.clone()));
-    evs.push(TlsEvent::Send { level: Level::Initial, data: sh });
-    evs.push(TlsEvent::Secrets { level: Level::Handshake, client: hs.client, server: hs.server });
-    evs.push(TlsEvent::Send { level: Level::Handshake, data });
-    //= https://www.rfc-editor.org/rfc/rfc8446#section-2
-    //# Application Data MUST NOT be sent prior to sending the Finished
-    //# message
-    // The 1-RTT secrets are the last event, after the Finished; 3d sends no 1-RTT packet before
-    // on_handshake_complete.
-    evs.push(TlsEvent::Secrets { level: Level::OneRtt, client: c_ap, server: s_ap });
+    let evs = flight_events(&ch.transport_params, sh, &hs, data, c_ap, s_ap);
     Ok((evs, cfin))
 }
 

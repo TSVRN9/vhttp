@@ -127,7 +127,6 @@ fn one_byte_push(m: usize) -> Vec<Rec> {
 }
 
 #[test]
-#[ignore = "9b2: fails today, a 1-byte push reallocs the whole reader (T1); un-ignored by Task 7"]
 fn reader_one_byte_push() {
     let mut fails = Vec::new();
     let mut rows = Vec::new();
@@ -205,4 +204,38 @@ fn reader_one_byte_push() {
         fails.push(format!("slowest call {:?} -> {:?} (> 4x + 1 ms)", rows[0].2, rows[2].2));
     }
     assert!(fails.is_empty(), "{fails:#?}");
+}
+
+/// One ClientHello-typed message of `m` bytes, header included, its body bytes starting at `seed`.
+fn msg(m: usize, seed: u8) -> Vec<u8> {
+    let body = m - 4;
+    let mut s = vec![1u8, (body >> 16) as u8, (body >> 8) as u8, body as u8];
+    s.extend((0..body).map(|i| (i as u8).wrapping_add(seed)));
+    s
+}
+
+/// D8 (T2): three complete 1000-byte messages and 4 bytes of a fourth in one push; each `next_message` makes exactly one
+/// allocation, of its message's `4 + len` bytes (the tail is never copied), and the bytes left are the fourth's.
+#[test]
+fn reader_never_copies_tail() {
+    let ms: Vec<Vec<u8>> = (0..4).map(|k| msg(1000, k as u8)).collect();
+    let mut first = [&ms[0][..], &ms[1][..], &ms[2][..]].concat();
+    first.extend_from_slice(&ms[3][..4]);
+    let mut h = HsReader::new();
+    h.push(&first);
+    for m in &ms[..3] {
+        let mut got = None;
+        let mut r = Vec::new();
+        call(&mut r, 0, || {
+            got = Some(h.next_message(1));
+            0
+        });
+        let k = r[0].0;
+        assert_eq!((k[0], k[1], k[2], k[4]), (1, 0, 0, 1000), "allocs, zeroed, reallocs, bytes: {k:?}");
+        assert_eq!(got, Some(Ok(Some(m.clone()))));
+    }
+    assert_eq!(h.next_message(1), Ok(None));
+    h.push(&ms[3][4..]);
+    assert_eq!(h.next_message(1), Ok(Some(ms[3].clone())));
+    assert!(h.is_empty());
 }

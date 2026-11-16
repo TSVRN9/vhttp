@@ -31,10 +31,16 @@ use crypto::hmac::*;
 use crypto::p256::*;
 #[allow(unused_imports)]
 use crypto::sha256::*;
+#[allow(unused_imports)] // proof-only under plain cargo
+use byteq::queue::MAX_QUEUE;
+use byteq::capvec::CapVec;
 use vstd::prelude::*;
 use vstd::slice::slice_subrange;
 
 verus! {
+
+/// The most CRYPTO bytes one `on_crypto` call is given (D8): quictls hands over at most its `MAX_FEED`, the same 2^16.
+pub const MAX_TLS_FEED: usize = 0x1_0000;
 
 //= https://www.rfc-editor.org/rfc/rfc8446#appendix-E.5
 //# In addition, to avoid accidental misuse, TLS implementations MUST NOT
@@ -301,6 +307,9 @@ proof fn lemma_drain_decreases(
     acc: Seq<SpecTlsEvent>,
 ) {
     hide(spec_step);
+    hide(spec_failed);
+    hide(zeros32);
+    hide(rfc_next_message);
     if let Some((l, ty)) = spec_expected(s.phase) {
         let buf = spec_reader(s, level);
         if let Ok(Some(n)) = rfc_next_message(buf, ty) {
@@ -439,6 +448,7 @@ proof fn lemma_flight_shape(
     hide(spec_finished_bytes);
     hide(spec_cv_signature);
     hide(spec_server_hello_bytes);
+    reveal(spec_flight);
 }
 
 /// The phase moves only forward, a step to `WaitFinished` comes from a ClientHello phase,
@@ -462,7 +472,6 @@ proof fn lemma_step_facts(
             &&& !(s2.phase is Failed)
         },
 {
-    hide(spec_flight);
     hide(rfc_client_hello);
     hide(rfc_negotiate);
     hide(spec_message_hash);
@@ -487,7 +496,6 @@ proof fn lemma_step_events(
             ||| s.phase is WaitFinished && s2.phase is Complete && evs == seq![SpecTlsEvent::Complete]
         },
 {
-    hide(spec_flight);
     hide(rfc_client_hello);
     hide(rfc_negotiate);
     hide(spec_message_hash);
@@ -648,7 +656,6 @@ pub proof fn theorem_complete_iff_finished(
         spec_step(cfg, tp, s, m, rand)->Ok_0.1.contains(SpecTlsEvent::Complete) <==> (s.phase is WaitFinished
             && m == spec_finished_bytes(s.client_vd)),
 {
-    hide(spec_flight);
     hide(rfc_client_hello);
     hide(rfc_negotiate);
     hide(spec_message_hash);
@@ -690,7 +697,6 @@ pub proof fn theorem_server_no_second_hrr(
                 } && data.subrange(6, 38) == HRR_RANDOM@)
         }),
 {
-    hide(spec_flight);
     hide(rfc_client_hello);
     hide(rfc_negotiate);
     hide(spec_message_hash);
@@ -1156,7 +1162,14 @@ impl<'a> ServerHandshake<'a> {
         self.local_tp@
     }
 
+    /// Both readers' queues are well formed.
+    pub closed spec fn readers_wf(&self) -> bool {
+        &&& self.initial.wf()
+        &&& self.handshake.wf()
+    }
+
     pub open spec fn wf(&self) -> bool {
+        &&& self.readers_wf()
         &&& self.cfg_view().len() >= 1
         &&& forall|i: int| 0 <= i < self.cfg_view().len() ==> chain_wf(#[trigger] self.cfg_view()[i])
         &&& self.tp_view().len() <= 1024
@@ -1191,6 +1204,8 @@ impl<'a> ServerHandshake<'a> {
 
     /// Bytes left at `level` that no expected message will consume (RFC 9001 §4.1.3, 4c).
     pub fn pending(&self, level: Level) -> (r: bool)
+        requires
+            self.wf(),
         ensures
             r == !(spec_reader(self@, level).len() == 0),
     {
@@ -1221,6 +1236,8 @@ impl<'a> ServerHandshake<'a> {
             final(self)@ == spec_failed(old(self)@, e),
             final(self).cfg == old(self).cfg,
             final(self).local_tp == old(self).local_tp,
+            final(self).initial == old(self).initial,
+            final(self).handshake == old(self).handshake,
     {
         self.phase = SpecPhase::Failed;
         self.err = e;
@@ -1243,8 +1260,8 @@ impl<'a> ServerHandshake<'a> {
         ensures
             final(self).cfg == old(self).cfg,
             final(self).local_tp == old(self).local_tp,
-            final(self)@.initial == old(self)@.initial,
-            final(self)@.handshake == old(self)@.handshake,
+            final(self).initial == old(self).initial,
+            final(self).handshake == old(self).handshake,
             match spec_step(old(self).cfg@, old(self).local_tp@, old(self)@, m@, rand@) {
                 Err(e) => r == Err::<(), u64>(e),
                 Ok((s2, evs)) => (r is Ok && final(self)@ == s2 && final(acc).deep_view() == old(
@@ -1254,7 +1271,6 @@ impl<'a> ServerHandshake<'a> {
             },
             r is Ok ==> final(self).wf_core(),
     {
-        hide(spec_flight);
         hide(rfc_client_hello);
         hide(rfc_negotiate);
         hide(spec_message_hash);
@@ -1327,10 +1343,13 @@ impl<'a> ServerHandshake<'a> {
                             SECP256R1,
                             &mut hrr,
                         );
-                        let mut t = message_hash(m.as_slice());
-                        t.extend_from_slice(hrr.as_slice());
+                        // D9: one exact buffer, message_hash(CH1) then the HRR.
+                        let mh = message_hash(m.as_slice());
+                        let mut t: CapVec<u8> = CapVec::new(36 + hrr.len());
+                        let _ = t.push_slice(mh.as_slice());
+                        let _ = t.push_slice(hrr.as_slice());
                         assert(t@ =~= spec_message_hash(m@) + hrr@);
-                        self.transcript = t;
+                        self.transcript = t.into_vec();
                         self.ch1 = Some(ch);
                         self.phase = SpecPhase::HrrSent;
                         push_event(acc, TlsEvent::Send { level: Level::Initial, data: hrr });
@@ -1354,9 +1373,13 @@ impl<'a> ServerHandshake<'a> {
                         proof {
                             theorem_proceed_facts(ch@, self.cfg@, after_hrr);
                         }
-                        let mut t0: Vec<u8> = Vec::new();
-                        core::mem::swap(&mut t0, &mut self.transcript);
-                        t0.extend_from_slice(m.as_slice());
+                        // D9: the transcript and this ClientHello into one exact buffer.
+                        let mut tr: Vec<u8> = Vec::new();
+                        core::mem::swap(&mut tr, &mut self.transcript);
+                        let mut tc: CapVec<u8> = CapVec::new(tr.len() + m.len());
+                        let _ = tc.push_slice(tr.as_slice());
+                        let _ = tc.push_slice(m.as_slice());
+                        let t0 = tc.into_vec();
                         let ghost t = t0@;
                         proof {
                             if !after_hrr {
@@ -1395,12 +1418,48 @@ impl<'a> ServerHandshake<'a> {
     }
 
     spec fn wf_core(&self) -> bool {
+        &&& self.initial.wf()
+        &&& self.handshake.wf()
         &&& self.cfg.wf()
         &&& self.local_tp@.len() <= 1024
         &&& self@.transcript.len() <= 0x2_0000
         &&& self@.phase is HrrSent ==> self@.transcript.len() <= 0x1000
         &&& !(self@.phase is HrrSent) ==> self@.transcript.len() == 0
         &&& (self@.phase is HrrSent <==> self@.ch1 is Some)
+    }
+
+    /// Buffers `data` at `level`'s reader (split from `on_crypto`: C11). Its room: `data` is empty, or `level` is
+    /// the expected one, whose reader holds less than `4 + MAX_HS_BODY` (`spec_readers_ok`).
+    fn buffer(&mut self, level: Level, data: &[u8])
+        requires
+            old(self).wf(),
+            data@.len() <= MAX_TLS_FEED,
+            data@.len() > 0 ==> (spec_expected(old(self)@.phase) matches Some((l, _)) && l == level),
+        ensures
+            final(self)@ == spec_with_reader(old(self)@, level, spec_reader(old(self)@, level) + data@),
+            final(self).initial.wf(),
+            final(self).handshake.wf(),
+            final(self).cfg == old(self).cfg,
+            final(self).local_tp == old(self).local_tp,
+    {
+        proof {
+            self.initial.lemma_wf();
+            self.handshake.lemma_wf();
+            if data@.len() > 0 {
+                assert(spec_reader(old(self)@, level).len() < 4 + MAX_HS_BODY);
+            }
+            assert(MAX_HS_BODY + 4 + MAX_TLS_FEED <= MAX_QUEUE) by (compute);
+        }
+        match level {
+            Level::Initial => self.initial.push(data),
+            Level::Handshake => self.handshake.push(data),
+            Level::OneRtt => {},
+        }
+        assert(self@ == spec_with_reader(old(self)@, level, spec_reader(old(self)@, level) + data@)) by {
+            if level is OneRtt {
+                assert(self@.initial == old(self)@.initial);
+            }
+        }
     }
 
     /// Feeds CRYPTO data received at `level`. Events are appended to `ev` only when the call
@@ -1414,6 +1473,7 @@ impl<'a> ServerHandshake<'a> {
     ) -> (r: Result<(), u64>)
         requires
             old(self).wf(),
+            data@.len() <= MAX_TLS_FEED,
         ensures
             final(self).wf(),
             final(self).cfg_view() == old(self).cfg_view(),
@@ -1452,16 +1512,7 @@ impl<'a> ServerHandshake<'a> {
             self.fail(ALERT_UNEXPECTED_MESSAGE);
             return Err(ALERT_UNEXPECTED_MESSAGE);
         }
-        match level {
-            Level::Initial => self.initial.push(data),
-            Level::Handshake => self.handshake.push(data),
-            Level::OneRtt => {},
-        }
-        assert(self@ == spec_with_reader(s_in, level, spec_reader(s_in, level) + data@)) by {
-            if level is OneRtt {
-                assert(self@.initial == s_in.initial);
-            }
-        }
+        self.buffer(level, data);
         let ghost target = spec_drain(cfg, tp, self@, level, rand@, seq![]);
         let mut acc: Vec<TlsEvent> = Vec::new();
         assert(acc.deep_view() =~= Seq::<SpecTlsEvent>::empty());

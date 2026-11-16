@@ -161,7 +161,7 @@ fn hrr_then_ch2() {
     let (r, ev) = feed(&mut hs, Level::Initial, &ch2);
     assert_eq!(r, Ok(()));
     check_flight(&ev);
-    let t0 = [&message_hash(&hrr_ch())[..], &hex(HRR), &ch2].concat();
+    let t0 = [message_hash(&hrr_ch()).as_slice(), &hex(HRR), &ch2].concat();
     let z = p256_ecdh(&R[32..64], P256_SHARE).unwrap();
     let want = handshake_secrets(&z, &sha256(&[&t0[..], &send(&ev[1])].concat()));
     assert_eq!(

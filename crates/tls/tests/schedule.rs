@@ -49,8 +49,8 @@ fn rfc8448_s5_hrr() {
     let z = p256_ecdh(&d, &ks[6..6 + n]).unwrap();
     assert_eq!(z, s32("c142ce13ca11b5c2233652e63ad3d97844f1621fbfb9de69d547dc8fedeabeb4"));
     let mh = message_hash(R5_CH1);
-    assert_eq!(mh, hex("fe000020de7420cc7426d2f6b221edcc9c4bdc9bb0ab048b3ddd2411da7e3a01baea6c7e"));
-    let th = h(&[&mh, R5_HRR, R5_CH2, R5_SH]);
+    assert_eq!(mh.as_slice(), hex("fe000020de7420cc7426d2f6b221edcc9c4bdc9bb0ab048b3ddd2411da7e3a01baea6c7e"));
+    let th = h(&[mh.as_slice(), R5_HRR, R5_CH2, R5_SH]);
     assert_eq!(th, s32("8aa8e828ec2f8a884fec95a3139de01c15a3daa7ff5bfc3f4bfcc21b438d7bf8"));
     let s = handshake_secrets(&z, &th);
     assert_eq!(s.hs, s32("ce022e5e6e81e50736d773f2d3adfce8220d049bf510f0dbfac927ef4243b148"));
@@ -60,9 +60,9 @@ fn rfc8448_s5_hrr() {
     assert_eq!(master, s32("1131545d0baf79ddce9b87f06945781a57dd18ef378dcd2060f8f9a569027ed8"));
     assert_eq!(finished_key(&s.server), s32("e7f8bb3ea4b6c30c4710b3d09c3313658117e70b097e850368e2510ca5631f74"));
     assert_eq!(finished_key(&s.client), s32("81be4131fbb9b6f4471450846f74fd1e68c5224ba7c2a8677f5c53ad226fdc13"));
-    let th_cv = h(&[&mh, R5_HRR, R5_CH2, R5_SH, R5_EE, R5_CERT, R5_CV]);
+    let th_cv = h(&[mh.as_slice(), R5_HRR, R5_CH2, R5_SH, R5_EE, R5_CERT, R5_CV]);
     assert_eq!(&verify_data(&s.server, &th_cv)[..], &R5_SFIN[4..]);
-    let th_sf = h(&[&mh, R5_HRR, R5_CH2, R5_SH, R5_EE, R5_CERT, R5_CV, R5_SFIN]);
+    let th_sf = h(&[mh.as_slice(), R5_HRR, R5_CH2, R5_SH, R5_EE, R5_CERT, R5_CV, R5_SFIN]);
     assert_eq!(th_sf, s32("50f63cbf36b0dd049e7a0ba27d6455745ea2aaac54bb167f9950b2b7ce9509da"));
     let (c_ap, s_ap) = app_secrets(&master, &th_sf);
     assert_eq!(c_ap, s32("75ecf4b972525aa0dcd057c9944d4cd5d82671d8843141d7dc2a4ff15a21dc51"));
