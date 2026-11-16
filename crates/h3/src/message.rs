@@ -772,13 +772,13 @@ pub open spec fn request_headers(s: Fields) -> Fields
 }
 
 /// Σ |name| + |value| over the lines.
-pub open spec fn fields_size(s: Fields) -> nat
+pub open spec fn fields_bytes(s: Fields) -> nat
     decreases s.len(),
 {
     if s.len() == 0 {
         0
     } else {
-        fields_size(s.drop_last()) + s.last().0.len() + s.last().1.len()
+        fields_bytes(s.drop_last()) + s.last().0.len() + s.last().1.len()
     }
 }
 
@@ -1469,21 +1469,21 @@ proof fn lemma_find_name_update(s: Fields, k: int, x: (Seq<u8>, Seq<u8>), name: 
     }
 }
 
-/// `fields_size` of a line followed by `rest`.
-proof fn lemma_fields_size_prepend(x: (Seq<u8>, Seq<u8>), rest: Fields)
+/// `fields_bytes` of a line followed by `rest`.
+proof fn lemma_fields_bytes_prepend(x: (Seq<u8>, Seq<u8>), rest: Fields)
     ensures
-        fields_size(seq![x] + rest) == x.0.len() + x.1.len() + fields_size(rest),
+        fields_bytes(seq![x] + rest) == x.0.len() + x.1.len() + fields_bytes(rest),
     decreases rest.len(),
 {
     if rest.len() > 0 {
         assert((seq![x] + rest).drop_last() =~= seq![x] + rest.drop_last());
         assert((seq![x] + rest).last() == rest.last());
-        lemma_fields_size_prepend(x, rest.drop_last());
+        lemma_fields_bytes_prepend(x, rest.drop_last());
     } else {
         let e = Seq::<(Seq<u8>, Seq<u8>)>::empty();
         assert((seq![x] + rest).drop_last() =~= e);
         assert((seq![x] + rest).last() == x);
-        assert(fields_size(e) == 0);
+        assert(fields_bytes(e) == 0);
         assert(rest =~= e);
     }
 }
@@ -1491,11 +1491,11 @@ proof fn lemma_fields_size_prepend(x: (Seq<u8>, Seq<u8>), rest: Fields)
 /// The lines the bounded decoder accepts fit its budget (RFC 9114 §4.2.2's size, Σ(|name| + |value| + 32)).
 proof fn lemma_lines_size(b: Seq<u8>, left: u64)
     ensures
-        rfc_field_lines_bounded(b, left) matches Ok(f) ==> fields_size(f) + 32 * f.len() <= left,
+        rfc_field_lines_bounded(b, left) matches Ok(f) ==> fields_bytes(f) + 32 * f.len() <= left,
     decreases b.len(),
 {
     if b.len() == 0 {
-        assert(fields_size(Seq::<(Seq<u8>, Seq<u8>)>::empty()) == 0);
+        assert(fields_bytes(Seq::<(Seq<u8>, Seq<u8>)>::empty()) == 0);
     } else {
         lemma_field_line_consumed(b);
         if let Some((f, c)) = rfc_field_line(b) {
@@ -1503,7 +1503,7 @@ proof fn lemma_lines_size(b: Seq<u8>, left: u64)
                 let l2 = (left - field_line_size(f)) as u64;
                 lemma_lines_size(b.skip(c as int), l2);
                 if let Ok(rest) = rfc_field_lines_bounded(b.skip(c as int), l2) {
-                    lemma_fields_size_prepend(f, rest);
+                    lemma_fields_bytes_prepend(f, rest);
                 }
             }
         }
@@ -1513,7 +1513,7 @@ proof fn lemma_lines_size(b: Seq<u8>, left: u64)
 /// A field section the bounded decoder accepts meets `validate_request`'s size precondition.
 pub proof fn lemma_section_size(b: Seq<u8>, budget: u64)
     ensures
-        rfc_decode_field_section_bounded(b, budget) matches Ok(f) ==> fields_size(f) + 32 * f.len() <= budget,
+        rfc_decode_field_section_bounded(b, budget) matches Ok(f) ==> fields_bytes(f) + 32 * f.len() <= budget,
 {
     if let Some(c) = rfc_section_start(b) {
         lemma_lines_size(b.skip(c as int), budget);
@@ -1562,7 +1562,7 @@ proof fn lemma_take_le(s: Fields, i: int)
     requires
         0 <= i <= s.len(),
     ensures
-        fields_size(s.take(i)) <= fields_size(s),
+        fields_bytes(s.take(i)) <= fields_bytes(s),
         ctotal(s.take(i)) <= ctotal(s),
     decreases s.len(),
 {
@@ -1577,7 +1577,7 @@ proof fn lemma_take_le(s: Fields, i: int)
 /// `ctotal` is at most the field bytes plus 2 per line.
 proof fn lemma_ctotal_le(s: Fields)
     ensures
-        ctotal(s) <= fields_size(s) + 2 * s.len(),
+        ctotal(s) <= fields_bytes(s) + 2 * s.len(),
     decreases s.len(),
 {
     if s.len() > 0 {
@@ -1673,7 +1673,7 @@ proof fn lemma_join_step(s: Fields, i: int)
     ensures
         ({
             let (p, q, x) = (s.take(i), s.take(i + 1), s[i]);
-            &&& fields_size(q) == fields_size(p) + x.0.len() + x.1.len()
+            &&& fields_bytes(q) == fields_bytes(p) + x.0.len() + x.1.len()
             &&& ctotal(q) == ctotal(p) + if x.0 == lit_cookie() {
                 x.1.len() + 2
             } else {
@@ -1705,13 +1705,18 @@ spec fn c_bh() -> nat {
     20
 }
 
+/// The per-line cost constant of `cookie_scan`.
+spec fn c_scan() -> nat {
+    8
+}
+
 /// Pass 1 of `build_headers`: the merged cookie value's length, one name compare per line.
 fn cookie_scan(fields: &[FieldLine]) -> (r: (usize, Ghost<nat>))
     requires
-        fields_size(fields_view(fields@)) + 2 * fields@.len() <= usize::MAX,
+        fields_bytes(fields_view(fields@)) + 2 * fields@.len() <= usize::MAX,
     ensures
         r.0 == cookie_total(fields_view(fields@)),
-        r.1@ <= 8 * fields@.len() + 1,
+        r.1@ <= c_scan() * fields@.len() + 1,
 {
     let ghost fv = fields_view(fields@);
     let ghost mut work: nat = 1;
@@ -1728,7 +1733,7 @@ fn cookie_scan(fields: &[FieldLine]) -> (r: (usize, Ghost<nat>))
             ck@ == lit_cookie(),
             ctotal(fv) <= usize::MAX,
             t == ctotal(fv.take(i as int)),
-            work <= 8 * i + 1,
+            work <= c_scan() * i + 1,
         decreases fields.len() - i,
     {
         proof {
@@ -1759,10 +1764,10 @@ fn cookie_scan(fields: &[FieldLine]) -> (r: (usize, Ghost<nat>))
 /// line takes the first cookie's slot at the end.
 fn build_headers(fields: &[FieldLine]) -> (r: (Vec<FieldLine>, Ghost<nat>))
     requires
-        fields_size(fields_view(fields@)) + 2 * fields@.len() <= usize::MAX,
+        fields_bytes(fields_view(fields@)) + 2 * fields@.len() <= usize::MAX,
     ensures
         fields_view(r.0@) == request_headers(fields_view(fields@)),
-        r.1@ <= c_bh() * (fields_size(fields_view(fields@)) + fields@.len() + 1),
+        r.1@ <= c_bh() * (fields_bytes(fields_view(fields@)) + fields@.len() + 1),
 {
     let ghost fv = fields_view(fields@);
     let (tot, Ghost(w1)) = cookie_scan(fields);
@@ -1794,7 +1799,7 @@ fn build_headers(fields: &[FieldLine]) -> (r: (Vec<FieldLine>, Ghost<nat>))
             ) && cjoin(fv.take(i as int)) == Some(merged@),
             first matches Some(k) ==> forall|j: int|
                 0 <= j < out@.len() && j != k ==> (#[trigger] out@[j])@ == skel(fv.take(i as int))[j],
-            work <= w1 + 2 + 12 * i + fields_size(fv.take(i as int)),
+            work <= w1 + 2 + 12 * i + fields_bytes(fv.take(i as int)),
         decreases fields.len() - i,
     {
         let f = &fields[i];
@@ -1879,7 +1884,7 @@ fn build_headers(fields: &[FieldLine]) -> (r: (Vec<FieldLine>, Ghost<nat>))
 /// cookie lines merged.
 pub fn validate_request(fields: &[FieldLine]) -> (r: Result<RequestHead, u64>)
     requires
-        fields_size(fields_view(fields@)) + 32 * fields@.len() <= MAX_FIELD_SECTION_SIZE,
+        fields_bytes(fields_view(fields@)) + 32 * fields@.len() <= MAX_FIELD_SECTION_SIZE,
     ensures
         match r {
             Ok(h) => rfc_validate_request(fields_view(fields@)) == Ok::<SpecRequestHead, u64>(h@),
