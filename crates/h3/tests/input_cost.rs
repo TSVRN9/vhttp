@@ -316,8 +316,9 @@ fn completing_ok(name: &str, m: usize, r: &Run, fr: usize) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "9b3: fails today, build_headers copies the accumulated cookie value per line (quadratic, reallocs); \
-            un-ignored by Task 4"]
+#[ignore = "9b3: build_headers is linear since Task 4; still fails on decode_lines_bounded's Vec growth (6-8 reallocs, \
+            Task 6) and, bytewise, top_up's append (11-13 reallocs, Task 7); D6's decode capacity (2,048 FieldLines, \
+            98,304 bytes) would exceed the completing call's 8·f + 4096 at n = 226 (controller ruling)"]
 fn cookie_lines_linear() {
     let (v, mut fails, mut whole, mut bytewise) = (34, Vec::new(), Vec::new(), Vec::new());
     for m in [226, 452, 904] {
@@ -341,8 +342,9 @@ fn cookie_lines_linear() {
 }
 
 #[test]
-#[ignore = "9b3: fails today, build_headers rescans and copies per cookie line (quadratic bytes, reallocs); the rescan's \
-            time is mutant 9b3-M8's to catch; un-ignored by Task 4"]
+#[ignore = "9b3: build_headers is linear since Task 4 (the rescan's time is mutant 9b3-M8's to catch); still fails on \
+            decode_lines_bounded's Vec growth (reallocs, Task 6) and on the completing call's 8·f + 4096 budget, below the \
+            48-byte FieldLine each 2-3-byte line decodes to (controller ruling)"]
 fn cookie_rescans_linear() {
     let (mut fails, mut rows) = (Vec::new(), Vec::new());
     for m in [215, 430, 860] {

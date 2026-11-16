@@ -4,6 +4,10 @@
 //! (§5.1 field-name = token, §5.5 field-content) is cited in plain comments: RFC 9110 is not in the
 //! Duvet config.
 use crate::codes::H3_MESSAGE_ERROR;
+// Read only by `validate_request`'s requires, erased by a plain `cargo build`.
+#[allow(unused_imports)]
+use crate::limits::MAX_FIELD_SECTION_SIZE;
+use byteq::capvec::CapVec;
 // `fields_view` is ghost, erased by a plain `cargo build`.
 #[allow(unused_imports)]
 use crate::qpack::field_section::*;
@@ -333,12 +337,24 @@ fn x_semi() -> (r: [u8; 2])
 // Byte helpers
 // =============================================================================
 
-pub fn eq_bytes(a: &[u8], b: &[u8]) -> (r: bool)
+/// The cost constant of `eq_bytes_w`.
+pub open spec fn c_eq() -> nat {
+    1
+}
+
+/// `eq_bytes` with its cost: one unit for the length check, one per byte compared.
+pub fn eq_bytes_w(a: &[u8], b: &[u8]) -> (r: (bool, Ghost<nat>))
     ensures
-        r == (a@ == b@),
+        r.0 == (a@ == b@),
+        r.1@ <= c_eq() * ((if a@.len() <= b@.len() {
+            a@.len()
+        } else {
+            b@.len()
+        }) + 1),
 {
+    let ghost mut work: nat = 1;
     if a.len() != b.len() {
-        return false;
+        return (false, Ghost(work));
     }
     let mut i = 0;
     while i < a.len()
@@ -346,15 +362,26 @@ pub fn eq_bytes(a: &[u8], b: &[u8]) -> (r: bool)
             i <= a.len(),
             a@.len() == b@.len(),
             forall|k: int| 0 <= k < i ==> a@[k] == b@[k],
+            work == i + 1,
         decreases a.len() - i,
     {
         if a[i] != b[i] {
-            return false;
+            return (false, Ghost(work));
         }
         i += 1;
+        proof {
+            work = work + 1;
+        }
     }
     assert(a@ =~= b@);
-    true
+    (true, Ghost(work))
+}
+
+pub fn eq_bytes(a: &[u8], b: &[u8]) -> (r: bool)
+    ensures
+        r == (a@ == b@),
+{
+    eq_bytes_w(a, b).0
 }
 
 // =============================================================================
@@ -741,6 +768,87 @@ pub open spec fn request_headers(s: Fields) -> Fields
         } else {
             merge_step(t, s.last())
         }
+    }
+}
+
+/// Σ |name| + |value| over the lines.
+pub open spec fn fields_size(s: Fields) -> nat
+    decreases s.len(),
+{
+    if s.len() == 0 {
+        0
+    } else {
+        fields_size(s.drop_last()) + s.last().0.len() + s.last().1.len()
+    }
+}
+
+/// Σ (|value| + 2) over the cookie lines: `cookie_total` plus the 2 of a delimiter the last line does not need.
+pub open spec fn ctotal(s: Fields) -> nat
+    decreases s.len(),
+{
+    if s.len() == 0 {
+        0
+    } else {
+        ctotal(s.drop_last()) + if s.last().0 == lit_cookie() {
+            s.last().1.len() + 2
+        } else {
+            0
+        }
+    }
+}
+
+/// The merged cookie value's length: Σ cookie value lengths + 2·(count − 1), 0 with no cookie line.
+pub open spec fn cookie_total(s: Fields) -> nat {
+    if ctotal(s) >= 2 {
+        (ctotal(s) - 2) as nat
+    } else {
+        0
+    }
+}
+
+/// `build_headers`' `out` before the merge: the non-pseudo fields in order, cookie lines after the first dropped.
+spec fn skel(s: Fields) -> Fields
+    decreases s.len(),
+{
+    if s.len() == 0 {
+        Seq::empty()
+    } else {
+        let t = skel(s.drop_last());
+        let x = s.last();
+        if is_pseudo(x.0) || (x.0 == lit_cookie() && find_name(t, lit_cookie()) is Some) {
+            t
+        } else {
+            t.push(x)
+        }
+    }
+}
+
+/// The "; "-join of every cookie value, `None` with no cookie line.
+spec fn cjoin(s: Fields) -> Option<Seq<u8>>
+    decreases s.len(),
+{
+    if s.len() == 0 {
+        None
+    } else {
+        let j = cjoin(s.drop_last());
+        let x = s.last();
+        if x.0 == lit_cookie() {
+            match j {
+                None => Some(x.1),
+                Some(v) => Some(v + lit_semi() + x.1),
+            }
+        } else {
+            j
+        }
+    }
+}
+
+/// `skel` with the first cookie's value replaced by the join: `request_headers` in closed form
+/// (`lemma_headers_join`).
+spec fn joined(s: Fields) -> Fields {
+    match (cjoin(s), find_name(skel(s), lit_cookie())) {
+        (Some(v), Some(k)) => skel(s).update(k, (lit_cookie(), v)),
+        _ => skel(s),
     }
 }
 
@@ -1361,80 +1469,407 @@ proof fn lemma_find_name_update(s: Fields, k: int, x: (Seq<u8>, Seq<u8>), name: 
     }
 }
 
-fn copy_line(f: &FieldLine) -> (r: FieldLine)
+/// `fields_size` of a line followed by `rest`.
+proof fn lemma_fields_size_prepend(x: (Seq<u8>, Seq<u8>), rest: Fields)
     ensures
-        r@ == f@,
+        fields_size(seq![x] + rest) == x.0.len() + x.1.len() + fields_size(rest),
+    decreases rest.len(),
 {
-    FieldLine { name: slice_to_vec(&f.name), value: slice_to_vec(&f.value) }
+    if rest.len() > 0 {
+        assert((seq![x] + rest).drop_last() =~= seq![x] + rest.drop_last());
+        assert((seq![x] + rest).last() == rest.last());
+        lemma_fields_size_prepend(x, rest.drop_last());
+    } else {
+        let e = Seq::<(Seq<u8>, Seq<u8>)>::empty();
+        assert((seq![x] + rest).drop_last() =~= e);
+        assert((seq![x] + rest).last() == x);
+        assert(fields_size(e) == 0);
+        assert(rest =~= e);
+    }
 }
 
-/// Regular fields in order, with cookie lines merged.
-// ponytail: each cookie line rescans `out` for the first cookie, O(n^2) in field count; fields are
-// capped by MAX_FIELD_SECTION_SIZE (2048 lines at most). Track its index if that ever matters.
-fn build_headers(fields: &[FieldLine]) -> (out: Vec<FieldLine>)
+/// The lines the bounded decoder accepts fit its budget (RFC 9114 §4.2.2's size, Σ(|name| + |value| + 32)).
+proof fn lemma_lines_size(b: Seq<u8>, left: u64)
     ensures
-        fields_view(out@) == request_headers(fields_view(fields@)),
+        rfc_field_lines_bounded(b, left) matches Ok(f) ==> fields_size(f) + 32 * f.len() <= left,
+    decreases b.len(),
+{
+    if b.len() == 0 {
+        assert(fields_size(Seq::<(Seq<u8>, Seq<u8>)>::empty()) == 0);
+    } else {
+        lemma_field_line_consumed(b);
+        if let Some((f, c)) = rfc_field_line(b) {
+            if field_line_size(f) <= left {
+                let l2 = (left - field_line_size(f)) as u64;
+                lemma_lines_size(b.skip(c as int), l2);
+                if let Ok(rest) = rfc_field_lines_bounded(b.skip(c as int), l2) {
+                    lemma_fields_size_prepend(f, rest);
+                }
+            }
+        }
+    }
+}
+
+/// A field section the bounded decoder accepts meets `validate_request`'s size precondition.
+pub proof fn lemma_section_size(b: Seq<u8>, budget: u64)
+    ensures
+        rfc_decode_field_section_bounded(b, budget) matches Ok(f) ==> fields_size(f) + 32 * f.len() <= budget,
+{
+    if let Some(c) = rfc_section_start(b) {
+        lemma_lines_size(b.skip(c as int), budget);
+    }
+}
+
+/// One field line copied into exact buffers: two allocations, one unit per byte.
+fn copy_line(f: &FieldLine) -> (r: (FieldLine, Ghost<nat>))
+    ensures
+        r.0@ == f@,
+        r.1@ == f.name@.len() + f.value@.len() + 2,
+{
+    let mut n = CapVec::new(f.name.len());
+    let Ghost(cn) = n.push_slice(f.name.as_slice());
+    let mut v = CapVec::new(f.value.len());
+    let Ghost(cv) = v.push_slice(f.value.as_slice());
+    assert(n@ =~= f.name@);
+    assert(v@ =~= f.value@);
+    (FieldLine { name: n.into_vec(), value: v.into_vec() }, Ghost(cn + cv + 2))
+}
+
+proof fn lemma_cookie_not_pseudo()
+    ensures
+        !is_pseudo(lit_cookie()),
+{
+    assert(lit_cookie()[0] == 99u8);
+}
+
+/// The first `name` in `s.push(x)`.
+proof fn lemma_find_name_push(s: Fields, x: (Seq<u8>, Seq<u8>), name: Seq<u8>)
+    ensures
+        find_name(s.push(x), name) == match find_name(s, name) {
+            Some(k) => Some(k),
+            None => if x.0 == name {
+                Some(s.len() as int)
+            } else {
+                None
+            },
+        },
+{
+    assert(s.push(x).drop_last() =~= s);
+}
+
+/// A prefix is no larger.
+proof fn lemma_take_le(s: Fields, i: int)
+    requires
+        0 <= i <= s.len(),
+    ensures
+        fields_size(s.take(i)) <= fields_size(s),
+        ctotal(s.take(i)) <= ctotal(s),
+    decreases s.len(),
+{
+    if i < s.len() {
+        assert(s.take(i) =~= s.drop_last().take(i));
+        lemma_take_le(s.drop_last(), i);
+    } else {
+        assert(s.take(i) =~= s);
+    }
+}
+
+/// `ctotal` is at most the field bytes plus 2 per line.
+proof fn lemma_ctotal_le(s: Fields)
+    ensures
+        ctotal(s) <= fields_size(s) + 2 * s.len(),
+    decreases s.len(),
+{
+    if s.len() > 0 {
+        lemma_ctotal_le(s.drop_last());
+    }
+}
+
+/// `skel` has a cookie exactly when there is a cookie line; the join's length is `ctotal - 2`.
+proof fn lemma_skel_cookie(s: Fields)
+    ensures
+        (find_name(skel(s), lit_cookie()) is Some) == (cjoin(s) is Some),
+        cjoin(s) is Some ==> cjoin(s)->0.len() + 2 == ctotal(s),
+        cjoin(s) is None ==> ctotal(s) == 0,
+    decreases s.len(),
+{
+    if s.len() > 0 {
+        let t = s.drop_last();
+        let x = s.last();
+        lemma_skel_cookie(t);
+        lemma_cookie_not_pseudo();
+        if !is_pseudo(x.0) && !(x.0 == lit_cookie() && find_name(skel(t), lit_cookie()) is Some) {
+            lemma_find_name_push(skel(t), x, lit_cookie());
+        }
+    }
+}
+
+/// D5: `request_headers` in closed form, its cookie (if any) where `skel`'s first cookie is.
+proof fn lemma_headers_join(s: Fields)
+    ensures
+        request_headers(s) == joined(s),
+        find_name(request_headers(s), lit_cookie()) == find_name(skel(s), lit_cookie()),
+    decreases s.len(),
+{
+    if s.len() > 0 {
+        let t = s.drop_last();
+        let x = s.last();
+        lemma_headers_join(t);
+        lemma_skel_cookie(t);
+        lemma_skel_cookie(s);
+        lemma_cookie_not_pseudo();
+        let st = skel(t);
+        lemma_find_name(st, lit_cookie());
+        if is_pseudo(x.0) {
+        } else if x.0 != lit_cookie() {
+            // skel(s) = st.push(x): the first cookie keeps its index, and an update commutes with the push.
+            assert(skel(s) == st.push(x));
+            assert(skel(s).drop_last() =~= st);
+            match (cjoin(t), find_name(st, lit_cookie())) {
+                (Some(v), Some(k)) => {
+                    let u = st.update(k, (lit_cookie(), v));
+                    lemma_find_name_update(st, k, (lit_cookie(), v), lit_cookie());
+                    assert(u.push(x).drop_last() =~= u);
+                    assert(u.push(x) =~= st.push(x).update(k, (lit_cookie(), v)));
+                },
+                _ => {
+                    assert(st.push(x).drop_last() =~= st);
+                },
+            }
+        } else {
+            match (cjoin(t), find_name(st, lit_cookie())) {
+                (Some(v), Some(k)) => {
+                    // A later cookie: merge_step updates the first one in place.
+                    let u = st.update(k, (lit_cookie(), v));
+                    lemma_find_name_update(st, k, (lit_cookie(), v), lit_cookie());
+                    assert(skel(s) == st);
+                    assert(u.update(k, (lit_cookie(), u[k].1 + lit_semi() + x.1)) =~= st.update(
+                        k,
+                        (lit_cookie(), v + lit_semi() + x.1),
+                    ));
+                },
+                _ => {
+                    // The first cookie: pushed, and the join is its own value.
+                    assert(skel(s) == st.push(x));
+                    assert(skel(s).drop_last() =~= st);
+                    assert(find_name(skel(s), lit_cookie()) == Some(st.len() as int));
+                    assert(skel(s).update(st.len() as int, (lit_cookie(), x.1)) =~= skel(s));
+                },
+            }
+        }
+        // The join's update keeps the cookie's name, so its position.
+        lemma_find_name(skel(s), lit_cookie());
+        match (cjoin(s), find_name(skel(s), lit_cookie())) {
+            (Some(v), Some(k)) => lemma_find_name_update(skel(s), k, (lit_cookie(), v), lit_cookie()),
+            _ => {},
+        }
+    }
+}
+
+/// One step of `build_headers`' passes over `s.take(i + 1)`: field `i` against the closed form over `s.take(i)`.
+proof fn lemma_join_step(s: Fields, i: int)
+    requires
+        0 <= i < s.len(),
+    ensures
+        ({
+            let (p, q, x) = (s.take(i), s.take(i + 1), s[i]);
+            &&& fields_size(q) == fields_size(p) + x.0.len() + x.1.len()
+            &&& ctotal(q) == ctotal(p) + if x.0 == lit_cookie() {
+                x.1.len() + 2
+            } else {
+                0nat
+            }
+            &&& (find_name(skel(p), lit_cookie()) is Some) == (cjoin(p) is Some)
+            &&& cjoin(p) is Some ==> cjoin(p)->0.len() + 2 == ctotal(p)
+            &&& cjoin(p) is None ==> ctotal(p) == 0
+            &&& is_pseudo(x.0) ==> skel(q) == skel(p) && cjoin(q) == cjoin(p)
+            &&& !is_pseudo(x.0) && x.0 != lit_cookie() ==> skel(q) == skel(p).push(x) && cjoin(q) == cjoin(p)
+                && find_name(skel(q), lit_cookie()) == find_name(skel(p), lit_cookie())
+            &&& x.0 == lit_cookie() && cjoin(p) is None ==> skel(q) == skel(p).push(x) && cjoin(q) == Some(x.1)
+                && find_name(skel(q), lit_cookie()) == Some(skel(p).len() as int)
+            &&& x.0 == lit_cookie() && cjoin(p) is Some ==> skel(q) == skel(p) && cjoin(q) == Some(
+                cjoin(p)->0 + lit_semi() + x.1,
+            )
+        }),
+{
+    let (p, q, x) = (s.take(i), s.take(i + 1), s[i]);
+    assert(q.drop_last() =~= p);
+    assert(q.last() == x);
+    lemma_skel_cookie(p);
+    lemma_cookie_not_pseudo();
+    lemma_find_name_push(skel(p), x, lit_cookie());
+}
+
+/// The cost constant of `build_headers`.
+spec fn c_bh() -> nat {
+    20
+}
+
+/// Pass 1 of `build_headers`: the merged cookie value's length, one name compare per line.
+fn cookie_scan(fields: &[FieldLine]) -> (r: (usize, Ghost<nat>))
+    requires
+        fields_size(fields_view(fields@)) + 2 * fields@.len() <= usize::MAX,
+    ensures
+        r.0 == cookie_total(fields_view(fields@)),
+        r.1@ <= 8 * fields@.len() + 1,
 {
     let ghost fv = fields_view(fields@);
-    let mut out: Vec<FieldLine> = Vec::new();
+    let ghost mut work: nat = 1;
+    proof {
+        lemma_ctotal_le(fv);
+    }
+    let ck = x_cookie();
+    let mut t: usize = 0;
     let mut i = 0;
     while i < fields.len()
         invariant
             i <= fields.len(),
             fv == fields_view(fields@),
-            fields_view(out@) == request_headers(fv.take(i as int)),
+            ck@ == lit_cookie(),
+            ctotal(fv) <= usize::MAX,
+            t == ctotal(fv.take(i as int)),
+            work <= 8 * i + 1,
+        decreases fields.len() - i,
+    {
+        proof {
+            lemma_join_step(fv, i as int);
+            lemma_take_le(fv, i as int + 1);
+            assert(fv[i as int] == fields@[i as int]@);
+        }
+        let (c, Ghost(ce)) = eq_bytes_w(fields[i].name.as_slice(), &ck);
+        if c {
+            t = t + fields[i].value.len() + 2;
+        }
+        i += 1;
+        proof {
+            work = work + 1 + ce;
+        }
+    }
+    assert(fv.take(fields.len() as int) =~= fv);
+    let r = if t >= 2 {
+        t - 2
+    } else {
+        0
+    };
+    (r, Ghost(work))
+}
+
+/// Regular fields in order, with cookie lines merged. Pass 1 sizes the merged value; pass 2 copies each other field
+/// into exact buffers and pushes every cookie value, "; "-joined, into one merged buffer of exactly that size, whose
+/// line takes the first cookie's slot at the end.
+fn build_headers(fields: &[FieldLine]) -> (r: (Vec<FieldLine>, Ghost<nat>))
+    requires
+        fields_size(fields_view(fields@)) + 2 * fields@.len() <= usize::MAX,
+    ensures
+        fields_view(r.0@) == request_headers(fields_view(fields@)),
+        r.1@ <= c_bh() * (fields_size(fields_view(fields@)) + fields@.len() + 1),
+{
+    let ghost fv = fields_view(fields@);
+    let (tot, Ghost(w1)) = cookie_scan(fields);
+    let mut out: CapVec<FieldLine> = CapVec::new(fields.len());
+    let mut merged: CapVec<u8> = CapVec::new(tot);
+    let ghost mut work: nat = w1 + 2;
+    let ck = x_cookie();
+    let semi = x_semi();
+    let mut first: Option<usize> = None;
+    let mut i = 0;
+    while i < fields.len()
+        invariant
+            i <= fields.len(),
+            fv == fields_view(fields@),
+            ck@ == lit_cookie(),
+            semi@ == lit_semi(),
+            tot == cookie_total(fv),
+            out.wf(),
+            out.cap() == fields.len(),
+            merged.wf(),
+            merged.cap() == tot,
+            out@.len() <= i,
+            out@.len() == skel(fv.take(i as int)).len(),
+            first is None ==> cjoin(fv.take(i as int)) is None && merged@ == Seq::<u8>::empty(),
+            first is None ==> forall|j: int|
+                0 <= j < out@.len() ==> (#[trigger] out@[j])@ == skel(fv.take(i as int))[j],
+            first matches Some(k) ==> k < out@.len() && find_name(skel(fv.take(i as int)), lit_cookie()) == Some(
+                k as int,
+            ) && cjoin(fv.take(i as int)) == Some(merged@),
+            first matches Some(k) ==> forall|j: int|
+                0 <= j < out@.len() && j != k ==> (#[trigger] out@[j])@ == skel(fv.take(i as int))[j],
+            work <= w1 + 2 + 12 * i + fields_size(fv.take(i as int)),
         decreases fields.len() - i,
     {
         let f = &fields[i];
+        let ghost p = fv.take(i as int);
+        let ghost q = fv.take(i as int + 1);
         proof {
-            let t = fv.take(i as int + 1);
-            assert(t.drop_last() =~= fv.take(i as int));
-            assert(t.last() == fields@[i as int]@);
+            lemma_join_step(fv, i as int);
+            lemma_take_le(fv, i as int + 1);
+            assert(fv[i as int] == f@);
         }
+        let (c, Ghost(ce)) = eq_bytes_w(f.name.as_slice(), &ck);
         if is_pseudo_x(&f.name) {
-        } else if eq_bytes(&f.name, &x_cookie()) {
-            let ck = find_first(out.as_slice(), &x_cookie());
-            match ck {
-                Some(k) => {
-                    let mut nv = slice_to_vec(&out[k].value);
-                    let semi = x_semi();
-                    nv.extend_from_slice(&semi);
-                    nv.extend_from_slice(&f.value);
-                    let nm = slice_to_vec(&out[k].name);
-                    let ghost old_out = out@;
-                    let ghost old = fields_view(out@);
+            proof {
+                work = work + 1 + ce;
+            }
+        } else if !c {
+            let (l, Ghost(cl)) = copy_line(f);
+            out.push(l);
+            proof {
+                work = work + 1 + ce + cl;
+            }
+        } else {
+            let ghost mut cs: nat = 0;
+            let ghost mut fst = false;
+            match first {
+                None => {
+                    out.push(FieldLine { name: Vec::new(), value: Vec::new() });
+                    first = Some(out.len() - 1);
                     proof {
-                        lemma_find_name(old, lit_cookie());
-                        assert(old[k as int] == old_out[k as int]@);
-                        assert(nm@ == lit_cookie());
-                        assert(nv@ == old[k as int].1 + lit_semi() + f.value@);
-                    }
-                    out.set(k, FieldLine { name: nm, value: nv });
-                    proof {
-                        assert(out@ == old_out.update(k as int, FieldLine { name: nm, value: nv }));
-                        assert(fields_view(out@) =~= old.update(
-                            k as int,
-                            (lit_cookie(), old[k as int].1 + lit_semi() + f.value@),
-                        ));
+                        fst = true;
                     }
                 },
-                None => {
-                    out.push(copy_line(f));
+                Some(_) => {
+                    let Ghost(c2) = merged.push_slice(&semi);
                     proof {
-                        assert(fields_view(out@) =~= fields_view(out@.drop_last()).push(f@));
+                        cs = c2;
                     }
                 },
             }
-        } else {
-            out.push(copy_line(f));
+            let Ghost(cv) = merged.push_slice(f.value.as_slice());
             proof {
-                assert(fields_view(out@) =~= fields_view(out@.drop_last()).push(f@));
+                work = work + 1 + ce + cs + cv;
+                if fst {
+                    assert(merged@ =~= f.value@);
+                }
             }
         }
         i += 1;
     }
-    assert(fv.take(fields.len() as int) =~= fv);
-    out
+    proof {
+        assert(fv.take(fields.len() as int) =~= fv);
+        lemma_skel_cookie(fv);
+        lemma_headers_join(fv);
+    }
+    match first {
+        Some(k) => {
+            // Exactly full: pass 1's T is the join's length.
+            assert(merged@.len() == tot);
+            let mut nm = CapVec::new(6);
+            let Ghost(cn) = nm.push_slice(&ck);
+            assert(nm@ =~= lit_cookie());
+            let ghost old_out = out@;
+            out.set(k, FieldLine { name: nm.into_vec(), value: merged.into_vec() });
+            proof {
+                work = work + 1 + cn;
+                assert(fields_view(out@) =~= skel(fv).update(k as int, (lit_cookie(), cjoin(fv)->0)));
+            }
+        },
+        None => {
+            proof {
+                assert(fields_view(out@) =~= skel(fv));
+            }
+        },
+    }
+    (out.into_vec(), Ghost(work))
 }
 
 //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3
@@ -1443,6 +1878,8 @@ fn build_headers(fields: &[FieldLine]) -> (out: Vec<FieldLine>)
 /// Validate a decoded request header section. `Request.headers` holds the regular fields with
 /// cookie lines merged.
 pub fn validate_request(fields: &[FieldLine]) -> (r: Result<RequestHead, u64>)
+    requires
+        fields_size(fields_view(fields@)) + 32 * fields@.len() <= MAX_FIELD_SECTION_SIZE,
     ensures
         match r {
             Ok(h) => rfc_validate_request(fields_view(fields@)) == Ok::<SpecRequestHead, u64>(h@),
@@ -1483,6 +1920,8 @@ pub fn validate_request(fields: &[FieldLine]) -> (r: Result<RequestHead, u64>)
             let scheme = fields[s].value.as_slice();
             if fields[m].value.len() > 0 && scheme.len() > 0 && fields[p].value.len() > 0
                 && authority_ok_x(scheme, av, hv) {
+                // Task 6 charges `wb` once `validate_request` returns its cost.
+                let (headers, Ghost(wb)) = build_headers(fields);
                 Ok(
                     RequestHead::Request(
                         Request {
@@ -1490,7 +1929,7 @@ pub fn validate_request(fields: &[FieldLine]) -> (r: Result<RequestHead, u64>)
                             scheme: slice_to_vec(scheme),
                             authority: request_authority_x(av, hv),
                             path: slice_to_vec(&fields[p].value),
-                            headers: build_headers(fields),
+                            headers,
                         },
                     ),
                 )
@@ -1621,6 +2060,14 @@ pub fn check_response(r: &Response, head: bool) -> (ok: bool)
         }
     }
     true
+}
+
+/// Never called. It keeps a `Vec::extend_from_slice` reference in h3: without one, Verus orders vstd's `View::view`,
+/// `Seq::new` and `array_view` declarations differently in every module, and `H3Conn::send_response`,
+/// `encode_field_section` and `decode_lines` blow their rlimits (9b3 Task 4 report).
+#[allow(dead_code)]
+fn smt_order_anchor(v: &mut Vec<u8>, a: &[u8]) {
+    v.extend_from_slice(a);
 }
 
 } // verus!

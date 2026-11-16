@@ -79,7 +79,7 @@ st=$ct/selftest.txt
 encode=$(sed -nE 's/^[[:space:]]*translate-crate[[:space:]]+([^[:space:]#]+).*/\1/p' "$pm" | paste -sd, -)
 dump fixtures ct_fixtures "" --manifest-path "$fx/Cargo.toml"
 dump crypto crypto ""
-dump parsers wire,h3,quic "$encode"
+dump parsers wire,byteq,h3,quic "$encode"
 export RUSTFLAGS='--cfg ct_negative'
 dump negative crypto ""
 unset RUSTFLAGS

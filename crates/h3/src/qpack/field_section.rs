@@ -316,7 +316,7 @@ proof fn lemma_string_consumed(n: u8, b: Seq<u8>)
     lemma_prefix_int_consumed(n, b);
 }
 
-proof fn lemma_field_line_consumed(b: Seq<u8>)
+pub(crate) proof fn lemma_field_line_consumed(b: Seq<u8>)
     requires
         b.len() > 0,
     ensures

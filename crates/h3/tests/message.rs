@@ -107,6 +107,64 @@ fn cookie_merge() {
     }
 }
 
+fn headers_of(f: &[FieldLine]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    match validate_request(f) {
+        Ok(RequestHead::Request(r)) => pairs(&r.headers),
+        _ => panic!("expected Request"),
+    }
+}
+
+/// RFC 9114 §4.2.1's merge, written plainly: each cookie value after the first joins the first with "; ".
+fn model_merge(f: &[FieldLine]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut out: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    for l in f.iter().filter(|l| !l.name.starts_with(b":")) {
+        match out.iter_mut().find(|(n, _)| n == b"cookie") {
+            Some((_, v)) if l.name == b"cookie" => {
+                v.extend_from_slice(b"; ");
+                v.extend_from_slice(&l.value);
+            }
+            _ => out.push((l.name.clone(), l.value.clone())),
+        }
+    }
+    out
+}
+
+#[test]
+fn cookie_first_after_other_fields() {
+    let f = with(vec![fl("accept", "x"), fl("date", "d"), fl("cookie", "a=1"), fl("te", "trailers"), fl("cookie", "b=2")]);
+    let want = vec![
+        (b"accept".to_vec(), b"x".to_vec()),
+        (b"date".to_vec(), b"d".to_vec()),
+        (b"cookie".to_vec(), b"a=1; b=2".to_vec()),
+        (b"te".to_vec(), b"trailers".to_vec()),
+    ];
+    assert_eq!(headers_of(&f), want);
+}
+
+#[test]
+fn cookie_single_line() {
+    let f = with(vec![fl("accept", "x"), fl("cookie", "a=1")]);
+    assert_eq!(headers_of(&f), pairs(&[fl("accept", "x"), fl("cookie", "a=1")]));
+}
+
+#[test]
+fn cookie_empty_values() {
+    let f = with(vec![fl("cookie", ""), fl("accept", "x"), fl("cookie", ""), fl("cookie", "c")]);
+    assert_eq!(headers_of(&f), pairs(&[fl("cookie", "; ; c"), fl("accept", "x")]));
+    assert_eq!(headers_of(&with(vec![fl("cookie", "")])), pairs(&[fl("cookie", "")]));
+}
+
+#[test]
+fn cookie_alternating_matches_model() {
+    let extra: Vec<FieldLine> = (0..100)
+        .map(|i| if i % 2 == 0 { fl("cookie", &format!("k{i}={}", "v".repeat(i % 7))) } else { fl("x-n", &i.to_string()) })
+        .collect();
+    let f = with(extra);
+    let got = headers_of(&f);
+    assert_eq!(got, model_merge(&f));
+    assert_eq!(got.len(), 51);
+}
+
 #[test]
 fn response_check() {
     let r = |s: u16, n: &str, v: &str| Response { status: s, headers: vec![fl(n, v)], body: vec![] };

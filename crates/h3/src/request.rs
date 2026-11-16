@@ -542,6 +542,7 @@ proof fn lemma_add_body_assoc(a: Seq<SpecReqEvent>, x: Seq<u8>, y: Seq<u8>)
 }
 
 /// One request-stream frame whose header is complete, followed by anything.
+#[verifier::spinoff_prover]
 proof fn lemma_frame_at(
     b: Seq<u8>,
     ph: Phase,
@@ -859,6 +860,9 @@ fn headers_frame(p: &[u8], ph: &mut Phase, events: &mut Vec<ReqEvent>) -> (r: Re
         Err(BoundedError::Qpack(c)) => return Err(ReqError::Connection(c)),
         Err(BoundedError::OverBudget) => return Err(ReqError::Stream(H3_EXCESSIVE_LOAD)),
     };
+    proof {
+        lemma_section_size(p@, MAX_FIELD_SECTION_SIZE);
+    }
     match *ph {
         Phase::AwaitHeaders => match validate_request(fields.as_slice()) {
             Ok(h) => {

@@ -4,6 +4,8 @@
 # ct-check.sh compiles wire with -Zalways-encode-mir (CT_ENCODE_MIR) so its bodies are dumped, and
 # vest_lib's come from rustc's cross-crate encoding.
 translate-crate wire
+# byteq: h3 calls CapVec from 9b3 on; built with -Zalways-encode-mir and dumped (ct-check.sh) so its bodies resolve.
+translate-crate byteq
 translate-crate vest_lib
 # vest_lib's Ghost fallback returns a ghost value: a call that returns () and does nothing.
 ghost vest_lib::prelude::Ghost::assume_new_fallback
