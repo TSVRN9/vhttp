@@ -1,11 +1,11 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -8939,7 +8939,6 @@
+@@ -9142,7 +9142,6 @@
              forall|p: nat| #[trigger] self.crypto_received(k, p) ==> p < r,
      {
          proof {
--            reveal(crx_ok);
+-            reveal(crate::crx::crx_ok);
              match k {
                  PacketKind::Initial => {
                      self.crx_i.lemma_wf();

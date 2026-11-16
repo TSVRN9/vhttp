@@ -1,7 +1,7 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -301,7 +301,7 @@
+@@ -345,7 +345,7 @@
      } else if code <= 0x3fff_ffff_ffff_ffff {
          shut(c, code, now);
      } else {

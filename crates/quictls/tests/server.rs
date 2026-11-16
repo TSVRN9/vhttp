@@ -137,7 +137,7 @@ fn is_server_hello(d: &[u8]) -> bool {
 
 fn accept(d: &[u8]) -> QuicServer<'static> {
     let mut app = Vec::new();
-    QuicServer::accept(cfg(), d, 0, 0, &R(1), &qc::ltp(), &mut app).expect("accepted")
+    QuicServer::accept(cfg(), d, 0, 0, &R(1), &qc::ltp(), &mut app).0.expect("accepted")
 }
 
 /// A datagram, then the shell's loop (D13): `pump_backlog` until no backlog is left, as before the next datagram.
@@ -165,7 +165,7 @@ fn close_code(s: &mut QuicServer) -> u64 {
 #[test]
 fn a2_closes_0x178() {
     let mut app = Vec::new();
-    let mut s = QuicServer::accept(cfg(), &qc::A2, 0, 0, &R(1), &qc::ltp(), &mut app).expect("accepted");
+    let mut s = QuicServer::accept(cfg(), &qc::A2, 0, 0, &R(1), &qc::ltp(), &mut app).0.expect("accepted");
     let mut out = Vec::new();
     assert_eq!(s.transmit(0, &mut out), Some(0));
     let ps = open_pkts(&out);

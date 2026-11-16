@@ -21,6 +21,7 @@ pub mod codes;
 pub mod conn;
 pub mod crypto_count;
 pub mod crypto_stream;
+mod crx;
 pub mod datagram;
 mod export_check;
 pub mod flow;

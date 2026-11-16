@@ -1,10 +1,10 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -8940,17 +8940,6 @@
+@@ -9143,17 +9143,6 @@
      {
          proof {
-             reveal(crx_ok);
+             reveal(crate::crx::crx_ok);
 -            match k {
 -                PacketKind::Initial => {
 -                    self.crx_i.lemma_wf();

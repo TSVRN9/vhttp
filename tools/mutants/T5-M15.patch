@@ -1,7 +1,7 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -3705,12 +3705,19 @@
+@@ -3820,12 +3820,19 @@
          ensures
              final(self).wf(),
              final(out).wf(),
@@ -24,7 +24,7 @@ diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
              // A read of at least the unread bytes drains the level.
              old(self).phase_spec() is Open && max >= old(self).crypto_contiguous_spec(level) - old(self).crypto_base_spec(
                  level,
-@@ -3725,8 +3732,12 @@
+@@ -3840,8 +3847,12 @@
              !(old(self).phase_spec() is Open) ==> final(out)@.len() == 0,
              final(self).phase_spec() == old(self).phase_spec(),
              drained_kept(*final(self), *old(self)),
@@ -39,16 +39,19 @@ diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
              // The cost: linear in the bytes it may take (`CryptoStream::read`).
              r@ <= 18 * crypto_read_len(*old(self), level, max) + 5608,
      {
-@@ -3763,6 +3774,12 @@
-             lemma_backlog3(old(self).crx_i, old(self).crx_h, old(self).crx_1);
-             lemma_backlog3(self.crx_i, self.crx_h, self.crx_1);
+@@ -3851,7 +3862,14 @@
+         if !matches!(self.lc.phase(), Phase::Open) {
+             return Ghost(0);
          }
+-        self.read_open(level, max, out)
++        let r = self.read_open(level, max, out);
 +        if out.len() > 0 {
 +            let n = out.len() - 1;
 +            let mut t: CapVec<u8> = CapVec::new(n);
 +            let _ = t.push_slice(vstd::slice::slice_subrange(out.as_slice(), 0, n));
 +            *out = t;
 +        }
-         r
++        r
      }
  
+     /// `crypto_read` on an open connection (split from it for the rlimit).

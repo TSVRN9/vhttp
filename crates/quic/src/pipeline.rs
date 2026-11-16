@@ -142,8 +142,8 @@ pub fn accept_datagram(
         r matches Some(c) ==> (c.phase_spec() is Open && c.live(PacketKind::Initial) ==> c.crypto_base_spec(PacketKind::Initial) == 0),
         r matches Some(c) ==> (c.phase_spec() is Open && c.live(PacketKind::Handshake) ==> c.crypto_base_spec(PacketKind::Handshake) == 0),
         // The CRYPTO positions held come from `d`'s packets: at most `d.len()`, and the datagram fits a UDP payload.
-        r matches Some(c) ==> d.len() <= MAX_UDP_PAYLOAD && c.crypto_backlog() <= d.len() && forall|k: PacketKind| #[trigger]
-            c.crypto_held(k) <= d.len(),
+        r matches Some(c) ==> d.len() <= MAX_UDP_PAYLOAD && c.crypto_backlog() <= d.len() && (forall|k: PacketKind| #[trigger]
+            c.crypto_held(k) <= d.len()) && (forall|k: PacketKind| #[trigger] c.crypto_load(k) <= d.len()),
 {
     hide(rfc_open_datagram);
     let dcid = match initial_dcid(d) {
@@ -178,6 +178,7 @@ pub fn accept_datagram(
     proof {
         Connection::lemma_crypto_kept_g_elim(c, c0, g);
         Connection::lemma_held_le_backlog(c0);
+        Connection::lemma_held_le_backlog(c);
     }
     Some(c)
 }

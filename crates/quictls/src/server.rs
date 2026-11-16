@@ -21,7 +21,7 @@ use quic::datagram::*;
 use quic::h3_server::*;
 use quic::lifecycle::Phase;
 use quic::payload::PacketKind;
-use quic::pipeline::{accept_datagram, initial_dcid, refeed_one_rtt};
+use quic::pipeline::{accept_datagram, initial_dcid, receive as receive_datagram, refeed_one_rtt};
 #[allow(unused_imports)]
 use quic::protect::*;
 use quic::route::CidUpdate;
@@ -61,6 +61,50 @@ pub const MAX_FEED: usize = 0x1_0000;
 /// Every level holds at most `x` positions more than `crypto_held_ok` allows: what a datagram of `x` bytes may add.
 spec fn held_ok_plus(c: Connection, x: nat) -> bool {
     forall|k: PacketKind| #[trigger] c.crypto_held(k) <= MAX_CRYPTO_BUFFER + x
+}
+
+/// Every level's positions held plus slot nodes within D6's slot bound (`crypto_held_ok`'s last clause).
+spec fn loads_ok(c: Connection) -> bool {
+    forall|k: PacketKind| #[trigger] c.crypto_load(k) <= MAX_CRYPTO_BUFFER + MAX_UDP_PAYLOAD
+}
+
+/// One `CryptoStream::retire`'s cost: a join onto the slot (`avl::join2`, heights at most 126).
+pub open spec fn c_retire() -> nat {
+    quic::avl::c_join2() * 127 + 1
+}
+
+/// The two retires of the call that completes the handshake (Initial's and Handshake's discard), else none.
+spec fn c_done(c: Connection, o: Connection) -> nat {
+    if !o.live(PacketKind::OneRtt) && c.live(PacketKind::OneRtt) {
+        2 * c_retire()
+    } else {
+        0
+    }
+}
+
+/// D6's step: from `o` within `crypto_held_ok`, at most `g <= MAX_UDP_PAYLOAD` more positions at each level still
+/// taking frames (whose slot is empty), none elsewhere: every level within the slot bound.
+proof fn lemma_loads_step(c: Connection, o: Connection, g: nat)
+    requires
+        o.wf(),
+        crypto_held_ok(o),
+        g <= MAX_UDP_PAYLOAD,
+        forall|k: PacketKind| #[trigger] c.crypto_load(k) <= o.crypto_load(k) + (if crypto_open_level(o, k) {
+            g
+        } else {
+            0
+        }),
+    ensures
+        loads_ok(c),
+{
+    Connection::lemma_held_facts(o);
+    assert forall|k: PacketKind| #[trigger] c.crypto_load(k) <= MAX_CRYPTO_BUFFER + MAX_UDP_PAYLOAD by {
+        assert(o.crypto_held(k) <= MAX_CRYPTO_BUFFER);
+        assert(o.crypto_load(k) <= MAX_CRYPTO_BUFFER + MAX_UDP_PAYLOAD);
+        if crypto_open_level(o, k) {
+            assert(o.crypto_td(k) == 0);
+        }
+    }
 }
 
 pub open spec fn level_rank(l: Level) -> nat {
@@ -410,6 +454,7 @@ spec fn fed_kept(c: Connection, o: Connection) -> bool {
     &&& c.phase_spec() is Open ==> o.phase_spec() is Open && drained_kept(c, o)
     &&& o.live(PacketKind::OneRtt) ==> c.live(PacketKind::OneRtt)
     &&& forall|k: PacketKind| #[trigger] c.crypto_held(k) <= o.crypto_held(k)
+    &&& forall|k: PacketKind| #[trigger] c.crypto_load(k) <= o.crypto_load(k)
     &&& c.crypto_backlog() <= o.crypto_backlog()
 }
 
@@ -642,32 +687,55 @@ impl<'a> QuicServer<'a> {
         r: &Rand,
         local_tp: &TransportParams,
         app: &mut Vec<AppEvent>,
-    ) -> (s: Option<QuicServer<'a>>)
+    ) -> (res: (Option<QuicServer<'a>>, Ghost<nat>))
         requires
             cfg.wf(),
         ensures
-            s matches Some(q) ==> q.wf() && q.one_rtt_forgotten(),
+            res.0 matches Some(q) ==> q.wf() && q.one_rtt_forgotten(),
             app_grew(old(app)@, final(app)@),
-            s matches Some(q) ==> crypto_held_ok(q.conn_spec()),
+            res.0 matches Some(q) ==> crypto_held_ok(q.conn_spec()),
+            // TLS's first step on the datagram's CRYPTO bytes (`accept_run`). Excluded: the pipeline half
+            // (`accept_datagram`, Task 10), TLS's own step (D14, 9b5), `h3.pump` (9b4).
+            res.1@ <= 2 * (18 * d.len() + 5608) + 5 * c_retire(),
     {
         let dcid = match initial_dcid(d) {
             Some(x) => x,
-            None => return None,
+            None => return (None, Ghost(0)),
         };
         if dcid.len() > MAX_CID_LEN {
-            return None;
+            return (None, Ghost(0));
         }
         let keys = [Some(initial_keys(dcid.as_slice())), None, None];
         // `accept_datagram` checks that the accepting packet's DCID is `dcid`: the connection's
         // odcid is the DCID these keys come from (Task 2).
         let c = match accept_datagram(d, path, now, &r.conn, local_tp, &keys) {
             Some(c) => c,
-            None => return None,
+            None => return (None, Ghost(0)),
         };
+        let ghost cs = c;
+        let mut s = QuicServer::assemble(cfg, c, keys);
+        // `accept_datagram` admits only a datagram within a UDP payload, so within `MAX_FEED`.
+        let Ghost(cost) = s.accept_run(now, r, d.len(), app);
+        (Some(s), Ghost(cost))
+    }
+
+    /// The server around the accepted connection `c`, TLS at its start (split from `accept` for the rlimit).
+    #[verifier::spinoff_prover]
+    fn assemble(cfg: &'a ServerConfig, c: Connection, keys: [Option<KeyPair>; 3]) -> (s: QuicServer<'a>)
+        requires
+            cfg.wf(),
+            c.wf(),
+            !c.peer_tp_known_spec(),
+            c.phase_spec() is Open && c.live(PacketKind::Initial) ==> c.crypto_base_spec(PacketKind::Initial) == 0,
+            c.phase_spec() is Open && c.live(PacketKind::Handshake) ==> c.crypto_base_spec(PacketKind::Handshake) == 0,
+        ensures
+            s.core_ok(),
+            s.conn_spec() == c,
+    {
         let mut tp: Vec<u8> = Vec::new();
         serialize_server_params(c.local_params(), &mut tp);
         let ghost cs = c;
-        let mut s = QuicServer {
+        QuicServer {
             h3: H3Server::new(c),
             hs: ServerHandshake::new(cfg, tp),
             keys,
@@ -678,10 +746,7 @@ impl<'a> QuicServer<'a> {
             init_rx: Ghost(cs),
             stash: None,
             log: Ghost(Seq::empty()),
-        };
-        // `accept_datagram` admits only a datagram within a UDP payload, so within `MAX_FEED`.
-        let _ = s.accept_run(now, r, d.len(), app);
-        Some(s)
+        }
     }
 
     /// `accept` once the server is built: TLS's first step on at most `max` bytes per level, which is all the
@@ -692,33 +757,41 @@ impl<'a> QuicServer<'a> {
             old(self).core_ok(),
             max <= MAX_FEED,
             held_ok_plus(old(self).conn_spec(), max as nat),
+            loads_ok(old(self).conn_spec()),
         ensures
             final(self).wf(),
             final(self).one_rtt_forgotten(),
             app_grew(old(app)@, final(app)@),
             crypto_held_ok(final(self).conn_spec()),
-            // The CRYPTO reads (`tls_step`).
-            cost@ <= 2 * (18 * max + 5608),
+            // The CRYPTO reads and the completing call's retires (`tls_step`), then a close's retires.
+            cost@ <= 2 * (18 * max + 5608) + 5 * c_retire(),
     {
         self.sync_keys();
-        let c = self.tls_step(now, r, max);
-        self.accept_settle(app);
-        c
+        let Ghost(c1) = self.tls_step(now, r, max);
+        let Ghost(c2) = self.accept_settle(app);
+        let ghost mut work: nat = 0;
+        proof {
+            work = work + c1 + c2;
+        }
+        Ghost(work)
     }
 
     /// `accept` after TLS's first step: HTTP/3, then a closed connection's unread CRYPTO bytes
     /// dropped and the key slots synced (split from `accept` so that a missing step fails a named
     /// ensures here, not the rlimit there).
     #[verifier::spinoff_prover]
-    fn accept_settle(&mut self, app: &mut Vec<AppEvent>)
+    fn accept_settle(&mut self, app: &mut Vec<AppEvent>) -> (cost: Ghost<nat>)
         requires
             old(self).wf(),
             old(self).conn_spec().phase_spec() is Open ==> crypto_held_ok(old(self).conn_spec()),
+            loads_ok(old(self).conn_spec()),
         ensures
             final(self).wf(),
             final(self).one_rtt_forgotten(),
             app_grew(old(app)@, final(app)@),
             crypto_held_ok(final(self).conn_spec()),
+            // A close's retires (`drop_if_closed`). Excluded: `h3.pump` (9b4).
+            cost@ <= 3 * c_retire(),
     {
         let ghost c0 = self.h3.conn_spec();
         self.h3.pump(app);
@@ -728,10 +801,16 @@ impl<'a> QuicServer<'a> {
             if self.h3.conn_spec().phase_spec() is Open {
                 lemma_held_ok_kept(self.h3.conn_spec(), c0);
             }
+            assert(loads_ok(self.h3.conn_spec())) by {
+                assert forall|k: PacketKind| #[trigger] self.h3.conn_spec().crypto_load(k) <= MAX_CRYPTO_BUFFER + MAX_UDP_PAYLOAD by {
+                    assert(c0.crypto_load(k) <= MAX_CRYPTO_BUFFER + MAX_UDP_PAYLOAD);
+                }
+            }
         }
-        self.drop_if_closed();
+        let Ghost(c) = self.drop_if_closed();
         self.forget_failed();
         self.sync_keys();
+        Ghost(c)
     }
 
     /// A datagram for this connection: the pipeline, TLS, the coalesced 1-RTT packet once TLS
@@ -745,16 +824,20 @@ impl<'a> QuicServer<'a> {
             final(self).one_rtt_forgotten(),
             app_grew(old(app)@, final(app)@),
             // The memory bound after the datagram (D6): TLS was handed at least what it added at each level it
-            // reads, or the level is drained, or the connection closed and dropped its CRYPTO bytes.
+            // reads, or the level is drained, or the connection closed and dropped its CRYPTO bytes; a slot holds
+            // one retired store.
             crypto_held_ok(final(self).conn_spec()),
-            // The CRYPTO reads handing TLS its bytes: three levels at most (two, then the refed 1-RTT one), each
-            // linear in the datagram's size (`feed`).
-            cost@ <= 3 * (18 * d.len() + 5608),
+            // The CRYPTO reads handing TLS its bytes (two levels, then the refed 1-RTT one, each linear in `d`), the
+            // stash copy (`d + 1`, only when there was no refeed), and the retires of completion and of a close.
+            // Excluded: the pipeline half (`pipeline::receive`, `refeed_one_rtt`; Task 10), TLS's own step (D14,
+            // 9b5), `h3.pump` (9b4).
+            cost@ <= 3 * (18 * d.len() + 5608) + 5 * c_retire(),
     {
         hide(spec_on_crypto);
+        let ghost mut work: nat = 0;
         let was = self.h3.conn().handshake_complete();
         let ghost c0 = self.h3.conn_spec();
-        quic::pipeline::receive(self.h3.conn_mut(), d, path, now, &r.conn, &self.keys);
+        receive_datagram(self.h3.conn_mut(), d, path, now, &r.conn, &self.keys);
         // The datagram's own bytes, at most: a datagram past `MAX_FEED` opens no packet (`pipeline::receive`).
         let max = if d.len() <= MAX_FEED {
             d.len()
@@ -766,6 +849,9 @@ impl<'a> QuicServer<'a> {
             Connection::lemma_crypto_kept_g_elim(c, c0, d.len() as nat);
             if d.len() > MAX_UDP_PAYLOAD {
                 Connection::lemma_crypto_kept_elim(c, c0);
+                lemma_loads_step(c, c0, 0);
+            } else {
+                lemma_loads_step(c, c0, d.len() as nat);
             }
             assert(held_ok_plus(c, max as nat)) by {
                 assert forall|k: PacketKind| #[trigger] c.crypto_held(k) <= MAX_CRYPTO_BUFFER + max by {
@@ -775,11 +861,15 @@ impl<'a> QuicServer<'a> {
         }
         self.sync_keys();
         let Ghost(c1) = self.tls_step(now, r, max);
-        let ghost mut work = c1;
+        proof {
+            work = work + c1;
+        }
+        let ghost mut refed = false;
         if !was && self.h3.conn().handshake_complete() {
             let Ghost(c2) = self.refeed(d, path, now, r, max);
             proof {
                 work = work + c2;
+                refed = true;
             }
         }
         // D13's stash: CRYPTO backlog left while the handshake is incomplete keeps this datagram, whose 1-RTT
@@ -787,12 +877,20 @@ impl<'a> QuicServer<'a> {
         let keep = !self.h3.conn().handshake_complete() && d.len() <= MAX_UDP_PAYLOAD && self.crypto_pending();
         if keep {
             let mut v: CapVec<u8> = CapVec::new(d.len());
-            let _ = v.push_slice(d);
+            let Ghost(cs) = v.push_slice(d);
+            proof {
+                // The copy, and the buffer.
+                work = work + cs + 1;
+            }
             self.stash = Some((v, path));
         } else {
             self.stash = None;
         }
-        self.settle(app);
+        let Ghost(c3) = self.settle(app);
+        proof {
+            work = work + c3;
+            assert(refed ==> !keep);
+        }
         Ghost(work)
     }
 
@@ -806,18 +904,22 @@ impl<'a> QuicServer<'a> {
             max <= MAX_FEED,
             d.len() <= max || d.len() > MAX_UDP_PAYLOAD,
             old(self).conn_spec().phase_spec() is Open ==> crypto_held_ok(old(self).conn_spec()),
+            loads_ok(old(self).conn_spec()),
         ensures
             final(self).wf(),
             final(self).one_rtt_forgotten() == old(self).one_rtt_forgotten(),
             final(self).conn_spec().live(PacketKind::OneRtt),
             final(self).conn_spec().phase_spec() is Open ==> old(self).conn_spec().phase_spec() is Open,
             final(self).conn_spec().phase_spec() is Open ==> crypto_held_ok(final(self).conn_spec()),
+            loads_ok(final(self).conn_spec()),
             final(self).conn_spec().crypto_backlog() <= old(self).conn_spec().crypto_backlog() + (if d.len()
                 <= MAX_UDP_PAYLOAD {
                 d.len() as nat
             } else {
                 0nat
             }),
+            // The 1-RTT read (`feed`; the handshake completed before, so no retire). Excluded: the pipeline half
+            // (`refeed_one_rtt`, Task 10), TLS's own step (D14, 9b5).
             cost@ <= 18 * max + 5608,
     {
         hide(spec_on_crypto);
@@ -830,6 +932,13 @@ impl<'a> QuicServer<'a> {
             Connection::lemma_crypto_kept_g_elim(c, c1, d.len() as nat);
             if d.len() > MAX_UDP_PAYLOAD {
                 Connection::lemma_crypto_kept_elim(c, c1);
+            }
+            if c1.phase_spec() is Open {
+                if d.len() > MAX_UDP_PAYLOAD {
+                    lemma_loads_step(c, c1, 0);
+                } else {
+                    lemma_loads_step(c, c1, d.len() as nat);
+                }
             }
         }
         self.sync_keys();
@@ -857,7 +966,13 @@ impl<'a> QuicServer<'a> {
             self.h3.lemma_conn_wf();
             Connection::lemma_dead_drained(c);
             Connection::lemma_held_facts(c);
+            lemma_held_ok_of(c);
             assert(c.live(PacketKind::OneRtt));
+            assert(loads_ok(c)) by {
+                assert forall|k: PacketKind| #[trigger] c.crypto_load(k) <= MAX_CRYPTO_BUFFER + MAX_UDP_PAYLOAD by {
+                    assert(c2.crypto_load(k) <= MAX_CRYPTO_BUFFER + MAX_UDP_PAYLOAD);
+                }
+            }
             if c.phase_spec() is Open {
                 Connection::lemma_dead_drained(c1);
                 assert forall|k: PacketKind| #[trigger] c.crypto_held(k) <= MAX_CRYPTO_BUFFER by {
@@ -875,10 +990,11 @@ impl<'a> QuicServer<'a> {
     /// `receive`'s and `pump_backlog`'s tail: SETTINGS goes out once 1-RTT is live, a closed connection's CRYPTO
     /// bytes are dropped, the keys synced.
     #[verifier::spinoff_prover]
-    fn settle(&mut self, app: &mut Vec<AppEvent>)
+    fn settle(&mut self, app: &mut Vec<AppEvent>) -> (cost: Ghost<nat>)
         requires
             old(self).core_ok(),
             old(self).conn_spec().phase_spec() is Open ==> crypto_held_ok(old(self).conn_spec()),
+            loads_ok(old(self).conn_spec()),
         ensures
             final(self).wf(),
             final(self).one_rtt_forgotten(),
@@ -887,6 +1003,8 @@ impl<'a> QuicServer<'a> {
             final(self).conn_spec().crypto_backlog() <= old(self).conn_spec().crypto_backlog(),
             final(self).conn_spec().phase_spec() is Open ==> old(self).conn_spec().phase_spec() is Open,
             final(self).stash == old(self).stash,
+            // A close's retires (`drop_if_closed`). Excluded: `h3.pump` (9b4).
+            cost@ <= 3 * c_retire(),
     {
         let ghost c2 = self.h3.conn_spec();
         self.h3.pump(app);
@@ -896,10 +1014,16 @@ impl<'a> QuicServer<'a> {
             if self.h3.conn_spec().phase_spec() is Open {
                 lemma_held_ok_kept(self.h3.conn_spec(), c2);
             }
+            assert(loads_ok(self.h3.conn_spec())) by {
+                assert forall|k: PacketKind| #[trigger] self.h3.conn_spec().crypto_load(k) <= MAX_CRYPTO_BUFFER + MAX_UDP_PAYLOAD by {
+                    assert(c2.crypto_load(k) <= MAX_CRYPTO_BUFFER + MAX_UDP_PAYLOAD);
+                }
+            }
         }
-        self.drop_if_closed();
+        let Ghost(c) = self.drop_if_closed();
         self.forget_failed();
         self.sync_keys();
+        Ghost(c)
     }
 
     /// Whether some level TLS reads holds unread CRYPTO bytes of an open connection (`crypto_pending_spec`).
@@ -924,12 +1048,13 @@ impl<'a> QuicServer<'a> {
         self.crypto_pending() || self.h3.conn().teardown_pending()
     }
 
-    /// D13: one bounded step of backlog. At most `B_PUMP` CRYPTO bytes to TLS through `feed`'s own path (the
-    /// ClientHello or the client Finished can complete here), then, open or not, at most `B_PUMP` of teardown freed
-    /// (key discard fills slots on an open connection too); then `receive`'s tail: the stashed datagram refed if the
-    /// handshake completed here, HTTP/3, a closed connection's CRYPTO bytes dropped, the keys synced. Cost: the two
-    /// budgets, plus D14's items in the call that completes a TLS message, plus the one refeed.
-    pub fn pump_backlog(&mut self, now: u64, r: &Rand, app: &mut Vec<AppEvent>) -> (cost: Ghost<nat>)
+    /// D13: one bounded step of backlog. Open or not, at most `B_PUMP` of teardown freed (key discard fills slots on
+    /// an open connection too); then, if open, at most `B_PUMP` CRYPTO bytes to TLS through `feed`'s own path (the
+    /// ClientHello or the client Finished can complete here); then `receive`'s tail: the stashed datagram refed if
+    /// the handshake completed here, HTTP/3, a closed connection's CRYPTO bytes dropped, the keys synced. Returns its
+    /// work and its progress `(delivered, freed)`: the CRYPTO backlog's drop across the CRYPTO step (the positions
+    /// read for TLS), and the teardown nodes freed.
+    pub fn pump_backlog(&mut self, now: u64, r: &Rand, app: &mut Vec<AppEvent>) -> (res: (Ghost<nat>, Ghost<(nat, nat)>))
         requires
             old(self).wf(),
             crypto_held_ok(old(self).conn_spec()),
@@ -938,47 +1063,61 @@ impl<'a> QuicServer<'a> {
             final(self).one_rtt_forgotten(),
             app_grew(old(app)@, final(app)@),
             crypto_held_ok(final(self).conn_spec()),
-            // Progress (D13): CRYPTO bytes handed to TLS, a teardown node freed, or the connection left open; the
-            // measure falls, so the shell's loop ends.
+            // Progress (D13, as built): it frees a teardown node, takes at least one and at least `min(B_PUMP,
+            // pending_unread)` CRYPTO positions off the backlog (the unread bytes at the one level it feeds: the lowest
+            // at or above TLS's with any), or the connection leaves Open; the measure falls, so the shell's loop ends.
+            old(self).has_backlog_spec() ==> res.1@.1 >= 1 || (res.1@.0 >= 1 && res.1@.0 >= (if old(self).pending_unread()
+                < B_PUMP {
+                old(self).pending_unread()
+            } else {
+                B_PUMP as nat
+            })) || (old(self).conn_spec().phase_spec() is Open && !(final(self).conn_spec().phase_spec() is Open)),
             old(self).has_backlog_spec() ==> final(self).backlog_measure() < old(self).backlog_measure(),
-            // Its budgets: `B_PUMP` CRYPTO bytes read, `B_PUMP` of teardown, and the refed datagram's 1-RTT read.
-            cost@ <= (18 * B_PUMP + 5608) + B_PUMP + (18 * MAX_UDP_PAYLOAD + 5608),
+            // Its budgets: `B_PUMP` of teardown, `B_PUMP` CRYPTO bytes read and the completing call's retires, the
+            // refed datagram's 1-RTT read, a close's retires. Excluded: the refeed's pipeline half (`refeed_one_rtt`,
+            // Task 10), TLS's own step (D14, 9b5), `h3.pump` (9b4).
+            res.0@ <= B_PUMP + (18 * B_PUMP + 5608 + 2 * c_retire()) + (18 * MAX_UDP_PAYLOAD + 5608) + 3 * c_retire(),
     {
         let ghost mut work: nat = 0;
         let was = self.h3.conn().handshake_complete();
         let ghost c0 = self.h3.conn_spec();
-        let ghost m0 = self.backlog_measure();
-        let ghost pending = self.crypto_pending_spec();
+        let ghost pu = self.pending_unread();
         proof {
             Connection::lemma_backlog_split(c0);
         }
-        let st = self.stash.take();
-        if matches!(self.h3.conn().phase(), Phase::Open) {
-            let Ghost(c) = self.pump_crypto(now, r, was);
-            proof {
-                work = c;
-            }
-        }
-        let ghost c1 = self.h3.conn_spec();
         let Ghost(cf) = self.h3.conn_mut().free_teardown();
         proof {
             work = work + cf;
         }
-        let ghost c2 = self.h3.conn_spec();
+        let ghost c1 = self.h3.conn_spec();
+        let ghost freed: nat = (c0.crypto_td_total() - c1.crypto_td_total()) as nat;
         proof {
             self.h3.lemma_conn_wf();
-            Connection::lemma_crypto_kept_elim(c2, c1);
+            Connection::lemma_crypto_kept_elim(c1, c0);
             Connection::lemma_backlog_split(c1);
-            Connection::lemma_backlog_split(c2);
-            if c2.phase_spec() is Open {
-                lemma_held_ok_kept(c2, c1);
-            }
-            // Teardown left at the start: freed here, or gone already, the held positions not grown.
-            if c0.crypto_td_total() > 0 {
-                assert(c2.crypto_backlog() < c0.crypto_backlog());
-            }
+            lemma_held_ok_kept(c1, c0);
+            assert(self.pending_unread() == pu);
         }
         self.sync_keys();
+        let st = self.stash.take();
+        let ghost cb = self.h3.conn_spec();
+        if matches!(self.h3.conn().phase(), Phase::Open) {
+            let Ghost(c) = self.pump_crypto(now, r, was);
+            proof {
+                work = work + c;
+            }
+        }
+        let ghost c2 = self.h3.conn_spec();
+        let ghost delivered: nat = (cb.crypto_backlog() - c2.crypto_backlog()) as nat;
+        proof {
+            self.h3.lemma_conn_wf();
+            lemma_held_ok_of(c2);
+            assert(loads_ok(c2)) by {
+                assert forall|k: PacketKind| #[trigger] c2.crypto_load(k) <= MAX_CRYPTO_BUFFER + MAX_UDP_PAYLOAD by {
+                    assert(c1.crypto_load(k) <= MAX_CRYPTO_BUFFER + MAX_UDP_PAYLOAD);
+                }
+            }
+        }
         let mut keep = st;
         let ghost mut refed = false;
         if !was && self.h3.conn().handshake_complete() {
@@ -993,21 +1132,38 @@ impl<'a> QuicServer<'a> {
         }
         let ghost c3 = self.h3.conn_spec();
         self.stash = keep;
-        self.settle(app);
+        let Ghost(cs) = self.settle(app);
         proof {
-            let cf = self.h3.conn_spec();
-            assert(cf.phase_spec() is Open ==> c0.phase_spec() is Open);
+            work = work + cs;
+            let cfin = self.h3.conn_spec();
+            assert(cfin.phase_spec() is Open ==> c0.phase_spec() is Open);
             if refed {
                 assert(c3.crypto_backlog() <= c2.crypto_backlog() + MAX_UDP_PAYLOAD);
             } else {
                 assert(c3.crypto_backlog() <= c2.crypto_backlog());
             }
         }
-        Ghost(work)
+        (Ghost(work), Ghost((delivered, freed)))
+    }
+
+    /// The unread CRYPTO bytes at the level `pump_crypto` feeds: the lowest at or above TLS's with any.
+    pub closed spec fn pending_unread(&self) -> nat {
+        let c = self.h3.conn_spec();
+        let ui = c.crypto_contiguous_spec(PacketKind::Initial) - c.crypto_base_spec(PacketKind::Initial);
+        let uh = c.crypto_contiguous_spec(PacketKind::Handshake) - c.crypto_base_spec(PacketKind::Handshake);
+        let u1 = c.crypto_contiguous_spec(PacketKind::OneRtt) - c.crypto_base_spec(PacketKind::OneRtt);
+        if level_rank(self.level) == 0 && ui > 0 {
+            ui as nat
+        } else if level_rank(self.level) <= 1 && uh > 0 {
+            uh as nat
+        } else {
+            if u1 > 0 { u1 as nat } else { 0 }
+        }
     }
 
     /// `pump_backlog`'s CRYPTO step on an open connection: step 1 (`superseded`), then at most `B_PUMP` bytes of
-    /// the lowest level at or above TLS's that has unread bytes, through `feed` (`key_changes`, `apply`).
+    /// the lowest level at or above TLS's that has unread bytes, through `feed` (`key_changes`, `apply`). Returns its
+    /// cost and the bytes handed to TLS.
     #[verifier::spinoff_prover]
     fn pump_crypto(&mut self, now: u64, r: &Rand, was: bool) -> (cost: Ghost<nat>)
         requires
@@ -1023,11 +1179,17 @@ impl<'a> QuicServer<'a> {
             fed_kept(final(self).conn_spec(), old(self).conn_spec()),
             final(self).conn_spec().phase_spec() is Open ==> crypto_held_ok(final(self).conn_spec()),
             final(self).stash == old(self).stash,
-            // Progress: unread bytes at a level TLS reads went to TLS, or the connection closed.
+            // The bytes handed to TLS leave the backlog: while unread bytes wait at a level TLS reads, at least
+            // `min(B_PUMP, them)`, unless the connection closed.
             old(self).crypto_pending_spec() && final(self).conn_spec().phase_spec() is Open
-                ==> final(self).conn_spec().crypto_backlog() < old(self).conn_spec().crypto_backlog(),
-            // One level's read, within `B_PUMP` bytes (`feed`).
-            cost@ <= 18 * B_PUMP + 5608,
+                ==> final(self).conn_spec().crypto_backlog() + (if old(self).pending_unread() < B_PUMP {
+                old(self).pending_unread()
+            } else {
+                B_PUMP as nat
+            }) <= old(self).conn_spec().crypto_backlog(),
+            // One level's read within `B_PUMP` bytes, and the completing call's retires (`feed`). Excluded: TLS's own
+            // step (D14, 9b5).
+            cost@ <= 18 * B_PUMP + 5608 + 2 * c_retire(),
     {
         let ghost mut work: nat = 0;
         let ghost c0 = self.h3.conn_spec();
@@ -1052,26 +1214,20 @@ impl<'a> QuicServer<'a> {
             if u1 > 0 {
                 let (_, Ghost(w)) = self.feed(Level::OneRtt, now, r, was, max);
                 proof {
-                    work = w;
-                }
-                proof {
+                    work = work + w;
                     fed = true;
                 }
             }
         } else if rank(self.level) == 0 && ui > 0 {
             let (_, Ghost(w)) = self.feed(Level::Initial, now, r, was, max);
-                proof {
-                    work = w;
-                }
             proof {
+                work = work + w;
                 fed = true;
             }
         } else if rank(self.level) <= 1 && uh > 0 {
             let (_, Ghost(w)) = self.feed(Level::Handshake, now, r, was, max);
-                proof {
-                    work = w;
-                }
             proof {
+                work = work + w;
                 fed = true;
             }
         }
@@ -1101,11 +1257,13 @@ impl<'a> QuicServer<'a> {
 
     /// A connection that is no longer open has its unread CRYPTO bytes dropped: TLS reads no more.
     #[verifier::spinoff_prover]
-    fn drop_if_closed(&mut self)
+    fn drop_if_closed(&mut self) -> (cost: Ghost<nat>)
         requires
             old(self).core_ok(),
             old(self).conn_spec().phase_spec() is Open ==> crypto_held_ok(old(self).conn_spec()),
+            loads_ok(old(self).conn_spec()),
         ensures
+            cost@ <= 3 * c_retire(),
             final(self).core_ok(),
             crypto_held_ok(final(self).conn_spec()),
             final(self).conn_spec().crypto_backlog() <= old(self).conn_spec().crypto_backlog(),
@@ -1115,15 +1273,22 @@ impl<'a> QuicServer<'a> {
             final(self).conn_spec().live(PacketKind::OneRtt) == old(self).conn_spec().live(PacketKind::OneRtt),
     {
         if matches!(self.h3.conn().phase(), Phase::Open) {
-            return;
+            return Ghost(0);
         }
         let ghost c0 = self.h3.conn_spec();
-        self.h3.conn_mut().crypto_drop();
+        let Ghost(c) = self.h3.conn_mut().crypto_drop();
         proof {
             Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
             self.h3.lemma_conn_wf();
             Connection::lemma_held_facts(self.h3.conn_spec());
+            lemma_held_ok_of(self.h3.conn_spec());
+            assert(loads_ok(self.h3.conn_spec())) by {
+                assert forall|k: PacketKind| #[trigger] self.h3.conn_spec().crypto_load(k) <= MAX_CRYPTO_BUFFER + MAX_UDP_PAYLOAD by {
+                    assert(c0.crypto_load(k) <= MAX_CRYPTO_BUFFER + MAX_UDP_PAYLOAD);
+                }
+            }
         }
+        Ghost(c)
     }
 
     /// Clears `out`, then protects the next datagram into it and returns its path. A `Some` with
@@ -1324,9 +1489,12 @@ impl<'a> QuicServer<'a> {
             old(self).wf(),
             max <= MAX_FEED,
             held_ok_plus(old(self).conn_spec(), max as nat),
+            loads_ok(old(self).conn_spec()),
         ensures
             final(self).wf(),
             final(self).conn_spec().out_log() == old(self).conn_spec().out_log(),
+            fed_kept(final(self).conn_spec(), old(self).conn_spec()),
+            loads_ok(final(self).conn_spec()),
             // No 1-RTT key survives a handshake that failed before completion (RFC 8446 §6).
             final(self).hs@.phase is Failed && !(old(self).hs@.phase is Failed) && !old(self).conn_spec().live(PacketKind::OneRtt) ==> final(self).keys_spec()[2] is None,
             // After completion the 1-RTT keys stay, so a CONNECTION_CLOSE for a TLS failure goes
@@ -1338,8 +1506,9 @@ impl<'a> QuicServer<'a> {
             // D6's induction: what the datagram added is read, or the level is drained (levels not live are
             // drained by `Connection::wf`), so every level is back within `MAX_CRYPTO_BUFFER`.
             final(self).conn_spec().phase_spec() is Open ==> crypto_held_ok(final(self).conn_spec()),
-            // The CRYPTO reads: at most two levels, each linear in `max` (`feed`).
-            cost@ <= 2 * (18 * max + 5608),
+            // The CRYPTO reads, at most two levels each linear in `max`, and the retires of the call that completes
+            // (`feed`). Excluded: TLS's own step (D14, 9b5).
+            cost@ <= 2 * (18 * max + 5608) + c_done(final(self).conn_spec(), old(self).conn_spec()),
     {
         let ghost mut work: nat = 0;
         let ghost c0 = self.h3.conn_spec();
@@ -1510,8 +1679,9 @@ impl<'a> QuicServer<'a> {
             // D6's induction step: a level holding at most `max` more than `crypto_held_ok` allows is back within it.
             final(self).conn_spec().phase_spec() is Open && old(self).conn_spec().crypto_held(level_kind(l))
                 <= MAX_CRYPTO_BUFFER + max ==> final(self).conn_spec().crypto_held(level_kind(l)) <= MAX_CRYPTO_BUFFER,
-            // The read's cost, linear in `max` (`Connection::crypto_read`); TLS's step is D14's.
-            res.1@ <= 18 * max + 5608,
+            // The read's cost, linear in `max` (`Connection::crypto_read`), and the retires of the call that completes
+            // (`feed_tls`). Excluded: TLS's own step (D14, 9b5).
+            res.1@ <= 18 * max + 5608 + c_done(final(self).conn_spec(), old(self).conn_spec()),
     {
         let lk = kind(l);
         let u = self.h3.conn().crypto_unread(lk);
@@ -1559,17 +1729,19 @@ impl<'a> QuicServer<'a> {
             return (true, Ghost(w));
         }
         let ghost c1 = self.h3.conn_spec();
-        let cont = self.feed_tls(l, &b, now, r, was);
+        let (cont, Ghost(wt)) = self.feed_tls(l, &b, now, r, was);
+        let ghost mut work: nat = 0;
         proof {
             assert(fed_kept(self.h3.conn_spec(), c1));
+            work = work + w + wt;
         }
-        (cont, Ghost(w))
+        (cont, Ghost(work))
     }
 
     /// `feed`'s TLS half: the bytes `feed` read go to TLS, logged, then its events (split from `feed` for the
     /// rlimit). False when the connection is to stop here.
     #[verifier::spinoff_prover]
-    fn feed_tls(&mut self, l: Level, b: &CapVec<u8>, now: u64, r: &Rand, was: bool) -> (cont: bool)
+    fn feed_tls(&mut self, l: Level, b: &CapVec<u8>, now: u64, r: &Rand, was: bool) -> (res: (bool, Ghost<nat>))
         requires
             old(self).wf(),
             level_rank(l) >= level_rank(old(self).level),
@@ -1579,12 +1751,14 @@ impl<'a> QuicServer<'a> {
         ensures
             final(self).wf(),
             final(self).conn_spec().out_log() == old(self).conn_spec().out_log(),
-            cont && !(old(self).hs@.phase is Failed) ==> !(final(self).hs@.phase is Failed),
+            res.0 && !(old(self).hs@.phase is Failed) ==> !(final(self).hs@.phase is Failed),
             final(self).hs@.phase is Failed && !(old(self).hs@.phase is Failed) && !was
                 ==> final(self).keys@[2] is None,
             was ==> final(self).keys@[2] == old(self).keys@[2],
-            !cont ==> !(final(self).conn_spec().phase_spec() is Open),
+            !res.0 ==> !(final(self).conn_spec().phase_spec() is Open),
             fed_kept(final(self).conn_spec(), old(self).conn_spec()),
+            // The retires of the call that completes (`apply`).
+            res.1@ <= c_done(final(self).conn_spec(), old(self).conn_spec()),
     {
         hide(spec_on_crypto);
         proof {
@@ -1624,20 +1798,21 @@ impl<'a> QuicServer<'a> {
                     Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c1);
                 }
                 self.sync_keys();
-                false
+                (false, Ghost(0))
             },
             Ok(()) => {
                 proof {
                     assert(self.hs@ == step.0);
                 }
-                self.apply(ev, now, r)
+                let (ok, Ghost(c)) = self.apply(ev, now, r);
+                (ok, Ghost(c))
             },
         }
     }
 
     /// TLS's events, in order. False when the connection is to stop here.
     #[verifier::spinoff_prover]
-    fn apply(&mut self, ev: Vec<TlsEvent>, now: u64, r: &Rand) -> (ok: bool)
+    fn apply(&mut self, ev: Vec<TlsEvent>, now: u64, r: &Rand) -> (res: (bool, Ghost<nat>))
         requires
             old(self).wf(),
             forall|i: int| 0 <= i < ev.deep_view().len() ==> !spec_send_level(#[trigger] ev.deep_view()[i], Level::OneRtt),
@@ -1654,12 +1829,15 @@ impl<'a> QuicServer<'a> {
             final(self).wf(),
             final(self).conn_spec().out_log() == old(self).conn_spec().out_log(),
             final(self).hs == old(self).hs,
-            !ok ==> !(final(self).conn_spec().phase_spec() is Open),
+            !res.0 ==> !(final(self).conn_spec().phase_spec() is Open),
             fed_kept(final(self).conn_spec(), old(self).conn_spec()),
+            // The retires of the call that completes (`on_complete`).
+            res.1@ <= c_done(final(self).conn_spec(), old(self).conn_spec()),
     {
+        let ghost mut work: nat = 0;
         if !self.key_changes(&ev, now) {
             self.sync_keys();
-            return false;
+            return (false, Ghost(work));
         }
         proof {
             // The Initial offset is what TLS was handed (live), or the end (discarded).
@@ -1681,6 +1859,7 @@ impl<'a> QuicServer<'a> {
                     PacketKind::Initial,
                 ) <= self.fed_i,
                 fed_kept(self.conn_spec(), old(self).conn_spec()),
+                work <= c_done(self.conn_spec(), old(self).conn_spec()),
                 i <= ev.deep_view().len(),
                 forall|j: int| i <= j < ev.deep_view().len() && #[trigger] ev.deep_view()[j] is PeerParams
                     ==> !self.conn_spec().peer_tp_known_spec() && self.hs@.phase is WaitFinished,
@@ -1731,17 +1910,21 @@ impl<'a> QuicServer<'a> {
                         assert(ev.deep_view()[i as int] == ev@[i as int].deep_view());
                         assert(ev.deep_view()[i as int] is Complete);
                     }
-                    self.on_complete(now, r)
+                    let (ok, Ghost(c)) = self.on_complete(now, r);
+                    proof {
+                        work = work + c;
+                    }
+                    ok
                 },
             };
             if !ok {
                 self.sync_keys();
-                return false;
+                return (false, Ghost(work));
             }
             i += 1;
         }
         self.sync_keys();
-        true
+        (true, Ghost(work))
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9001#section-4.1.3
@@ -2044,7 +2227,7 @@ impl<'a> QuicServer<'a> {
     /// `Complete`: the handshake's end (`h3`, the only ALPN TLS negotiates). No more is applied to
     /// a connection it closed.
     #[verifier::spinoff_prover]
-    fn on_complete(&mut self, now: u64, r: &Rand) -> (ok: bool)
+    fn on_complete(&mut self, now: u64, r: &Rand) -> (res: (bool, Ghost<nat>))
         requires
             old(self).wf(),
             old(self).level is Initial ==> old(self).conn_spec().crypto_end_spec(PacketKind::Initial)
@@ -2056,11 +2239,13 @@ impl<'a> QuicServer<'a> {
             final(self).wf(),
             final(self).conn_spec().out_log() == old(self).conn_spec().out_log(),
             final(self).hs == old(self).hs,
-            ok ==> final(self).level is OneRtt,
-            !ok ==> final(self).level == old(self).level,
-            !ok ==> !(final(self).conn_spec().phase_spec() is Open),
+            res.0 ==> final(self).level is OneRtt,
+            !res.0 ==> final(self).level == old(self).level,
+            !res.0 ==> !(final(self).conn_spec().phase_spec() is Open),
             fed_kept(final(self).conn_spec(), old(self).conn_spec()),
             final(self).conn_spec().peer_tp_known_spec() ==> old(self).conn_spec().peer_tp_known_spec(),
+            // Initial's and Handshake's retires, in the call that completes.
+            res.1@ <= c_done(final(self).conn_spec(), old(self).conn_spec()),
     {
         let alpn: &[u8] = &H3_ALPN;
         // `on_handshake_complete` sets HANDSHAKE_DONE owed in the call that completes, so the next
@@ -2069,13 +2254,13 @@ impl<'a> QuicServer<'a> {
         //# The server MUST send a
         //# HANDSHAKE_DONE frame as soon as the handshake is complete.
         let ghost c0 = self.h3.conn_spec();
-        self.h3.conn_mut().on_handshake_complete(alpn, now, &r.complete);
+        let Ghost(c) = self.h3.conn_mut().on_handshake_complete(alpn, now, &r.complete);
         proof {
             Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
         }
         if !matches!(self.h3.conn().phase(), Phase::Open) {
             self.sync_keys();
-            return false;
+            return (false, Ghost(c));
         }
         if matches!(self.level, Level::Initial) {
             // TLS leaves Initial here (no `Secrets { Handshake }` before it): as `on_secrets` does.
@@ -2084,7 +2269,7 @@ impl<'a> QuicServer<'a> {
         // Only a completed connection: `core_ok` ties OneRtt to completion.
         self.level = Level::OneRtt;
         self.sync_keys();
-        true
+        (true, Ghost(c))
     }
 }
 
@@ -2129,14 +2314,29 @@ proof fn lemma_held_ok_kept(c: Connection, o: Connection)
         crypto_held_ok(o),
         c.wf(),
         forall|k: PacketKind| #[trigger] c.crypto_held(k) <= o.crypto_held(k),
+        forall|k: PacketKind| #[trigger] c.crypto_load(k) <= o.crypto_load(k),
     ensures
         crypto_held_ok(c),
 {
-    Connection::lemma_held_facts(c);
-    assert forall|k: PacketKind| #[trigger] c.crypto_held(k) <= MAX_CRYPTO_BUFFER && c.crypto_base_spec(k)
-        <= c.crypto_contiguous_spec(k) by {
+    lemma_held_ok_of(c);
+    assert forall|k: PacketKind| #[trigger] c.crypto_held(k) <= MAX_CRYPTO_BUFFER by {
         assert(o.crypto_held(k) <= MAX_CRYPTO_BUFFER);
     }
+    assert forall|k: PacketKind| #[trigger] c.crypto_load(k) <= MAX_CRYPTO_BUFFER + MAX_UDP_PAYLOAD by {
+        assert(o.crypto_held(k) <= MAX_CRYPTO_BUFFER);
+        assert(o.crypto_load(k) <= MAX_CRYPTO_BUFFER + MAX_UDP_PAYLOAD);
+    }
+}
+
+/// `crypto_held_ok` from its parts: held positions within `MAX_CRYPTO_BUFFER` and `loads_ok`.
+proof fn lemma_held_ok_of(c: Connection)
+    requires
+        c.wf(),
+    ensures
+        (forall|k: PacketKind| #[trigger] c.crypto_held(k) <= MAX_CRYPTO_BUFFER) && loads_ok(c) ==> crypto_held_ok(c),
+        crypto_held_ok(c) ==> loads_ok(c),
+{
+    Connection::lemma_held_facts(c);
 }
 
 /// TLS's answer to non-empty 1-RTT CRYPTO data does not depend on its randomness: no phase

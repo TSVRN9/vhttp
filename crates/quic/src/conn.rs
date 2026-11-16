@@ -53,6 +53,8 @@ use wire::varint::*;
 
 verus! {
 
+broadcast use crate::crx::lemma_crx_ok_closed;
+
 /// The randomness each call that needs it takes: `rand[0..96]` is four 24-byte CID slices (CID
 /// and reset token), `rand[96..128]` four 8-byte PATH_CHALLENGE slices, `rand[128]` the spin bit.
 pub const RAND_LEN: usize = 129;
@@ -307,6 +309,11 @@ impl Connection {
         self.crx_spec(k).td_nodes()
     }
 
+    /// Level `k`'s positions held plus its slot's nodes.
+    pub closed spec fn crypto_load(&self, k: PacketKind) -> nat {
+        self.crx_spec(k).load()
+    }
+
     /// The positions held and the teardown slots' nodes, over the three levels: what `pump_backlog` works off.
     pub closed spec fn crypto_backlog(&self) -> nat {
         backlog3(self.crx_i, self.crx_h, self.crx_1)
@@ -375,6 +382,14 @@ impl Connection {
         &&& self.crx_h.held_spec() <= o.crx_h.held_spec() + g
         &&& self.crx_1.held_spec() <= o.crx_1.held_spec() + g
         &&& self.crypto_backlog() <= o.crypto_backlog() + g
+        // Per level, positions held plus slot nodes grow by at most `g`, and only where frames still arrive
+        // (`crypto_open_level`).
+        &&& self.crx_i.load() <= o.crx_i.load() + g
+        &&& self.crx_h.load() <= o.crx_h.load() + g
+        &&& self.crx_1.load() <= o.crx_1.load() + g
+        &&& g > 0 && !(o.lc.phase_spec() is Open && o.live_i) ==> self.crx_i.load() <= o.crx_i.load()
+        &&& g > 0 && !(o.lc.phase_spec() is Open && o.live_h) ==> self.crx_h.load() <= o.crx_h.load()
+        &&& g > 0 && !(o.lc.phase_spec() is Open) ==> self.crx_1.load() <= o.crx_1.load()
         &&& self.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial)
         &&& self.crypto_end_spec(PacketKind::Initial) >= o.crypto_end_spec(PacketKind::Initial)
         &&& o.complete ==> self.complete
@@ -412,7 +427,7 @@ impl Connection {
             // A discarded Initial space buffers nothing: its read offset is its end.
             !c.live(PacketKind::Initial) ==> c.crypto_base_spec(PacketKind::Initial) == c.crypto_end_spec(PacketKind::Initial),
     {
-        reveal(crx_ok);
+        reveal(crate::crx::crx_ok);
     }
 
     pub proof fn lemma_crypto_kept_refl(c: Connection)
@@ -473,8 +488,36 @@ impl Connection {
             forall|k: PacketKind|
                 #[trigger] c.crypto_held(k) <= c.crypto_contiguous_spec(k) - c.crypto_base_spec(k) + MAX_CRYPTO_BUFFER,
             forall|k: PacketKind| crypto_drained(c, k) ==> #[trigger] c.crypto_held(k) <= MAX_CRYPTO_BUFFER,
+            // D6's slot rule: a level still taking frames has an empty slot; a non-empty slot, an empty store.
+            forall|k: PacketKind| #[trigger] crypto_open_level(c, k) ==> c.crypto_td(k) == 0,
+            forall|k: PacketKind| #[trigger] c.crypto_td(k) > 0 ==> c.crypto_held(k) == 0,
+            forall|k: PacketKind| #[trigger] c.crypto_load(k) == c.crypto_held(k) + c.crypto_td(k),
     {
-        reveal(crx_ok);
+        reveal(crate::crx::crx_ok);
+        c.crx_i.lemma_load();
+        c.crx_h.lemma_load();
+        c.crx_1.lemma_load();
+        assert forall|k: PacketKind| #[trigger] crypto_open_level(c, k) implies c.crypto_td(k) == 0 by {
+            match k {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
+        assert forall|k: PacketKind| #[trigger] c.crypto_td(k) > 0 implies c.crypto_held(k) == 0 by {
+            match k {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
+        assert forall|k: PacketKind| #[trigger] c.crypto_load(k) == c.crypto_held(k) + c.crypto_td(k) by {
+            match k {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
         c.crx_i.lemma_wf();
         c.crx_h.lemma_wf();
         c.crx_1.lemma_wf();
@@ -508,8 +551,19 @@ impl Connection {
     pub proof fn lemma_held_le_backlog(c: Connection)
         ensures
             forall|k: PacketKind| #[trigger] c.crypto_held(k) <= c.crypto_backlog(),
+            forall|k: PacketKind| #[trigger] c.crypto_load(k) <= c.crypto_backlog(),
     {
         lemma_backlog3(c.crx_i, c.crx_h, c.crx_1);
+        c.crx_i.lemma_load();
+        c.crx_h.lemma_load();
+        c.crx_1.lemma_load();
+        assert forall|k: PacketKind| #[trigger] c.crypto_load(k) <= c.crypto_backlog() by {
+            match k {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
     }
 
     /// What `crypto_kept_g` says, in terms quictls can read: `crypto_kept_elim`'s frame, the positions held
@@ -518,6 +572,11 @@ impl Connection {
         requires
             c.crypto_kept_g(o, g),
         ensures
+            forall|k: PacketKind| #[trigger] c.crypto_load(k) <= o.crypto_load(k) + (if crypto_open_level(o, k) {
+                g
+            } else {
+                0
+            }),
             forall|k: PacketKind| #[trigger] c.crypto_held(k) <= o.crypto_held(k) + g,
             c.crypto_backlog() <= o.crypto_backlog() + g,
             c.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial),
@@ -534,6 +593,17 @@ impl Connection {
             c.phase_spec() is Open && c.live(PacketKind::Handshake) ==> c.crypto_base_spec(PacketKind::Handshake)
                 == o.crypto_base_spec(PacketKind::Handshake),
     {
+        assert forall|k: PacketKind| #[trigger] c.crypto_load(k) <= o.crypto_load(k) + (if crypto_open_level(o, k) {
+            g
+        } else {
+            0
+        }) by {
+            match k {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
     }
 
     pub proof fn lemma_crypto_kept_to_base(c: Connection, o: Connection)
@@ -548,6 +618,7 @@ impl Connection {
         requires
             c.crypto_kept_base(o),
         ensures
+            forall|k: PacketKind| #[trigger] c.crypto_load(k) <= o.crypto_load(k),
             forall|k: PacketKind| #[trigger] c.crypto_held(k) <= o.crypto_held(k),
             c.crypto_backlog() <= o.crypto_backlog(),
             c.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial),
@@ -563,6 +634,13 @@ impl Connection {
             c.phase_spec() is Open && c.live(PacketKind::Handshake) ==> c.crypto_base_spec(PacketKind::Handshake)
                 == o.crypto_base_spec(PacketKind::Handshake),
     {
+        assert forall|k: PacketKind| #[trigger] c.crypto_load(k) <= o.crypto_load(k) by {
+            match k {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
     }
 
     /// What `crypto_kept_but` says, in terms quictls can read.
@@ -570,6 +648,7 @@ impl Connection {
         requires
             c.crypto_kept_but(o, skip),
         ensures
+            forall|k: PacketKind| #[trigger] c.crypto_load(k) <= o.crypto_load(k),
             forall|k: PacketKind| #[trigger] c.crypto_held(k) <= o.crypto_held(k),
             c.crypto_backlog() <= o.crypto_backlog(),
             c.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial),
@@ -586,12 +665,20 @@ impl Connection {
                 PacketKind::Handshake,
             ) == o.crypto_base_spec(PacketKind::Handshake),
     {
+        assert forall|k: PacketKind| #[trigger] c.crypto_load(k) <= o.crypto_load(k) by {
+            match k {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
     }
 
     pub proof fn lemma_crypto_kept_elim(c: Connection, o: Connection)
         requires
             c.crypto_kept(o),
         ensures
+            forall|k: PacketKind| #[trigger] c.crypto_load(k) <= o.crypto_load(k),
             forall|k: PacketKind| #[trigger] c.crypto_held(k) <= o.crypto_held(k),
             c.crypto_backlog() <= o.crypto_backlog(),
             c.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial),
@@ -609,6 +696,13 @@ impl Connection {
             c.phase_spec() is Open && c.live(PacketKind::Handshake) ==> c.crypto_base_spec(PacketKind::Handshake)
                 == o.crypto_base_spec(PacketKind::Handshake),
     {
+        assert forall|k: PacketKind| #[trigger] c.crypto_load(k) <= o.crypto_load(k) by {
+            match k {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
     }
 
     /// The client's original Destination Connection ID.
@@ -667,7 +761,7 @@ impl Connection {
         &&& self.sent_i.wf()
         &&& self.sent_h.wf()
         &&& self.sent_1.wf()
-        &&& crx_ok(self.crx_i, self.crx_h, self.crx_1, self.live_i, self.live_h, self.complete)
+        &&& crate::crx::crx_ok(self.crx_i, self.crx_h, self.crx_1, self.live_i, self.live_h, self.complete, self.lc.phase_spec() is Open)
         &&& self.ctx_i.wf()
         &&& self.ctx_h.wf()
         &&& self.local_cids.wf()
@@ -876,7 +970,7 @@ impl Connection {
                 assert(ids_seq[0] == path);
             }
             assert(c.wf_parts()) by {
-                reveal(crx_ok);
+                reveal(crate::crx::crx_ok);
                 assert(c.cid_updates@.len() == 2);
             }
             lemma_backlog3(c.crx_i, c.crx_h, c.crx_1);
@@ -1418,6 +1512,7 @@ impl Connection {
         proof {
             self.lemma_path_event(s0, s0.hs_path, AmpEv::Validated);
         }
+        // Excluded cost: the pipeline half (`on_datagram`'s frame path, Task 10) does not compose its costs.
         self.discard(PacketKind::Initial);
     }
 
@@ -1880,6 +1975,7 @@ impl Connection {
     fn on_crypto_frame(&mut self, k: PacketKind, offset: u64, data: &[u8], now: u64) -> (r: Result<(), u64>)
         requires
             old(self).wf(),
+            old(self).phase_spec() is Open,
             old(self).live(k),
             offset + data@.len() <= VARINT_MAX,
         ensures
@@ -1906,7 +2002,7 @@ impl Connection {
             r is Err ==> !(final(self).phase_spec() is Open),
     {
         proof {
-            reveal(crx_ok);
+            reveal(crate::crx::crx_ok);
         }
         let pto = self.pto();
         let r = match k {
@@ -3476,7 +3572,7 @@ impl Connection {
     /// Drops an Initial or Handshake space, once (RFC 9001 §4.9). `sent(k)` is drained, not
     /// replaced: a fresh `SentPackets` would reset `next_pn` and break `wf_pn`.
     #[verifier::spinoff_prover]
-    fn discard(&mut self, k: PacketKind)
+    fn discard(&mut self, k: PacketKind) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
             !(k is OneRtt),
@@ -3500,32 +3596,43 @@ impl Connection {
             final(self).crypto_kept(*old(self)),
             drained_kept(*final(self), *old(self)),
             crypto_drained(*final(self), k),
+            // The store's retire (`CryptoStream::retire`). Excluded: the space's in-flight drain and recovery reset
+            // (`drain_inflight`, `on_space_discarded`), the old send and receive state's drop, the CID update's push
+            // (Q27): the cost sweep's other sites (docs/rca/2026-11-12-cost-sweep.md, 9b4).
+            r@ <= crate::avl::c_join2() * 127 + 1,
     {
         proof {
-            reveal(crx_ok);
+            reveal(crate::crx::crx_ok);
         }
+        let ghost mut work: nat = 0;
         let mut lost: Vec<SentPacket> = Vec::new();
         match k {
             PacketKind::Initial => {
                 if !self.live_i {
-                    return;
+                    return Ghost(work);
                 }
                 self.live_i = false;
                 self.sent_i.drain_inflight(&mut lost);
                 // Retired at its end, which the glue still checks (RFC 9001 §4.1.3); the store goes to
                 // the teardown slot, freed by `free_teardown`.
-                self.crx_i.retire();
+                let Ghost(c) = self.crx_i.retire();
+                proof {
+                    work = work + c;
+                }
                 self.ctx_i = SendStream::new(VARINT_MAX);
                 self.recv_i = RecvPns::new(k);
                 self.cid_updates.push(CidUpdate::Remove(slice_to_vec(self.ids.odcid())));
             },
             PacketKind::Handshake => {
                 if !self.live_h {
-                    return;
+                    return Ghost(work);
                 }
                 self.live_h = false;
                 self.sent_h.drain_inflight(&mut lost);
-                self.crx_h.retire();
+                let Ghost(c) = self.crx_h.retire();
+                proof {
+                    work = work + c;
+                }
                 self.ctx_h = SendStream::new(VARINT_MAX);
                 self.recv_h = RecvPns::new(k);
             },
@@ -3537,6 +3644,7 @@ impl Connection {
             lemma_backlog3(old(self).crx_i, old(self).crx_h, old(self).crx_1);
             lemma_backlog3(self.crx_i, self.crx_h, self.crx_1);
         }
+        Ghost(work)
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-11.1
@@ -3652,7 +3760,7 @@ impl Connection {
     /// TLS is fed nothing more after a close (RFC 8446 §6.2). The ends and the received history
     /// stay, for RFC 9001 §4.1.3.
     #[verifier::spinoff_prover]
-    pub fn crypto_drop(&mut self)
+    pub fn crypto_drop(&mut self) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
             !(old(self).phase_spec() is Open),
@@ -3667,19 +3775,25 @@ impl Connection {
             final(self).crypto_kept(*old(self)),
             crypto_all_drained(*final(self)),
             forall|k: PacketKind| #[trigger] final(self).crypto_held(k) == 0,
+            // Three retires.
+            r@ <= 3 * (crate::avl::c_join2() * 127 + 1),
     {
         hide(crate::reassembly::rfc_received);
         hide(crate::reassembly::rfc_contiguous);
         proof {
-            reveal(crx_ok);
+            reveal(crate::crx::crx_ok);
             self.crx_i.lemma_wf();
             self.crx_h.lemma_wf();
             self.crx_1.lemma_wf();
         }
         // Each store moves to its teardown slot, no byte copied or freed here (`free_teardown`).
-        self.crx_i.retire();
-        self.crx_h.retire();
-        self.crx_1.retire();
+        let Ghost(c1) = self.crx_i.retire();
+        let Ghost(c2) = self.crx_h.retire();
+        let Ghost(c3) = self.crx_1.retire();
+        let ghost mut work: nat = 0;
+        proof {
+            work = work + c1 + c2 + c3;
+        }
         proof {
             lemma_backlog3(old(self).crx_i, old(self).crx_h, old(self).crx_1);
             lemma_backlog3(self.crx_i, self.crx_h, self.crx_1);
@@ -3691,6 +3805,7 @@ impl Connection {
                 }
             }
         }
+        Ghost(work)
     }
 
     /// Moves `min(max, unread)` of `level`'s in-order CRYPTO bytes into the empty `out`, an exact buffer for them
@@ -3733,37 +3848,111 @@ impl Connection {
         // The bound needs only `lemma_wf`; unfolded, these make a missing fact an rlimit failure.
         hide(crate::reassembly::rfc_received);
         hide(crate::reassembly::rfc_contiguous);
-        proof {
-            reveal(crx_ok);
-        }
         if !matches!(self.lc.phase(), Phase::Open) {
             return Ghost(0);
         }
-        let r = match level {
-            PacketKind::Initial => {
-                proof {
-                    self.crx_i.lemma_wf();
-                }
-                self.crx_i.read(max, out)
-            },
-            PacketKind::Handshake => {
-                proof {
-                    self.crx_h.lemma_wf();
-                }
-                self.crx_h.read(max, out)
-            },
-            PacketKind::OneRtt => {
-                proof {
-                    self.crx_1.lemma_wf();
-                }
-                self.crx_1.read(max, out)
-            },
+        self.read_open(level, max, out)
+    }
+
+    /// `crypto_read` on an open connection (split from it for the rlimit).
+    #[verifier::spinoff_prover]
+    fn read_open(&mut self, level: PacketKind, max: u64, out: &mut CapVec<u8>) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            old(self).phase_spec() is Open,
+            old(out).wf(),
+            old(out)@.len() == 0,
+            old(out).cap() >= crypto_read_len(*old(self), level, max),
+        ensures
+            final(self).wf(),
+            final(out).wf(),
+            final(out).cap() == old(out).cap(),
+            final(self).out_log() == old(self).out_log(),
+            final(out)@.len() == crypto_read_len(*old(self), level, max),
+            final(out)@.len() <= old(self).crypto_end_spec(level) - old(self).crypto_base_spec(level),
+            final(self).crypto_base_spec(level) == old(self).crypto_base_spec(level) + final(out)@.len(),
+            max >= old(self).crypto_contiguous_spec(level) - old(self).crypto_base_spec(level)
+                ==> final(self).crypto_base_spec(level) == old(self).crypto_contiguous_spec(level),
+            max >= old(self).crypto_contiguous_spec(level) - old(self).crypto_base_spec(level)
+                ==> crypto_drained(*final(self), level),
+            final(self).crypto_kept_but(*old(self), Some(level)),
+            final(self).peer_tp_known_spec() == old(self).peer_tp_known_spec(),
+            final(self).phase_spec() == old(self).phase_spec(),
+            drained_kept(*final(self), *old(self)),
+            final(self).crypto_held(level) + final(out)@.len() == old(self).crypto_held(level),
+            final(self).crypto_backlog() + final(out)@.len() == old(self).crypto_backlog(),
+            r@ <= 18 * crypto_read_len(*old(self), level, max) + 5608,
+    {
+        proof {
+            Connection::lemma_read_pre(*self, level, max);
+        }
+        let Ghost(c) = match level {
+            PacketKind::Initial => self.crx_i.read(max, out),
+            PacketKind::Handshake => self.crx_h.read(max, out),
+            PacketKind::OneRtt => self.crx_1.read(max, out),
         };
         proof {
-            lemma_backlog3(old(self).crx_i, old(self).crx_h, old(self).crx_1);
-            lemma_backlog3(self.crx_i, self.crx_h, self.crx_1);
+            Connection::lemma_read_done(*old(self), *self, level, max, out@.len());
         }
-        r
+        Ghost(c)
+    }
+
+    /// What `CryptoStream::read` on level `level` needs, from `crx_ok`.
+    proof fn lemma_read_pre(a: Connection, level: PacketKind, max: u64)
+        requires
+            a.wf(),
+        ensures
+            a.crx_spec(level).wf(),
+            crypto_take(a.crx_spec(level), max) == crypto_read_len(a, level, max),
+            match level {
+                PacketKind::Initial => a.crx_i.wf(),
+                PacketKind::Handshake => a.crx_h.wf(),
+                PacketKind::OneRtt => a.crx_1.wf(),
+            },
+    {
+        reveal(crate::crx::crx_ok);
+    }
+
+    /// `crypto_read`'s connection-level facts from `CryptoStream::read`'s on level `level` (split from it for the
+    /// rlimit): `b` is `a` with that stream read `n` bytes further.
+    #[verifier::spinoff_prover]
+    proof fn lemma_read_done(a: Connection, b: Connection, level: PacketKind, max: u64, n: nat)
+        requires
+            a.wf(),
+            a.phase_spec() is Open,
+            b == (match level {
+                PacketKind::Initial => Connection { crx_i: b.crx_i, ..a },
+                PacketKind::Handshake => Connection { crx_h: b.crx_h, ..a },
+                PacketKind::OneRtt => Connection { crx_1: b.crx_1, ..a },
+            }),
+            b.crx_spec(level).wf(),
+            n == crypto_take(a.crx_spec(level), max),
+            b.crx_spec(level).base_spec() == a.crx_spec(level).base_spec() + n,
+            b.crx_spec(level).end_spec() == a.crx_spec(level).end_spec(),
+            b.crx_spec(level).inserted_frames() == a.crx_spec(level).inserted_frames(),
+            b.crx_spec(level).history() == a.crx_spec(level).history(),
+            forall|p: nat| #[trigger] b.crx_spec(level).received(p) == a.crx_spec(level).received(p),
+            b.crx_spec(level).held_spec() + n == a.crx_spec(level).held_spec(),
+            b.crx_spec(level).td_nodes() == a.crx_spec(level).td_nodes(),
+            b.crx_spec(level).load() + n == a.crx_spec(level).load(),
+        ensures
+            b.wf(),
+            n == crypto_read_len(a, level, max),
+            n <= a.crypto_end_spec(level) - a.crypto_base_spec(level),
+            b.crypto_base_spec(level) == a.crypto_base_spec(level) + n,
+            max >= a.crypto_contiguous_spec(level) - a.crypto_base_spec(level) ==> b.crypto_base_spec(level)
+                == a.crypto_contiguous_spec(level) && crypto_drained(b, level),
+            b.crypto_kept_but(a, Some(level)),
+            drained_kept(b, a),
+            b.crypto_held(level) + n == a.crypto_held(level),
+            b.crypto_backlog() + n == a.crypto_backlog(),
+    {
+        hide(crate::reassembly::rfc_received);
+        hide(crate::reassembly::rfc_contiguous);
+        reveal(crate::crx::crx_ok);
+        a.crx_spec(level).lemma_wf();
+        lemma_backlog3(a.crx_i, a.crx_h, a.crx_1);
+        lemma_backlog3(b.crx_i, b.crx_h, b.crx_1);
     }
 
     /// The unread in-order CRYPTO bytes of `level`.
@@ -3774,7 +3963,7 @@ impl Connection {
             r == self.crypto_contiguous_spec(level) - self.crypto_base_spec(level),
     {
         proof {
-            reveal(crx_ok);
+            reveal(crate::crx::crx_ok);
         }
         match level {
             PacketKind::Initial => self.crx_i.unread(),
@@ -3801,6 +3990,8 @@ impl Connection {
             final(self).wf(),
             r@ <= B_PUMP,
             old(self).crypto_td_total() > 0 ==> final(self).crypto_backlog() < old(self).crypto_backlog(),
+            old(self).crypto_td_total() > 0 ==> final(self).crypto_td_total() < old(self).crypto_td_total(),
+            final(self).crypto_td_total() <= old(self).crypto_td_total(),
             final(self).crypto_kept(*old(self)),
             drained_kept(*final(self), *old(self)),
             final(self).out_log() == old(self).out_log(),
@@ -3815,9 +4006,9 @@ impl Connection {
             final(self).peer_tp_known_spec() == old(self).peer_tp_known_spec(),
     {
         proof {
-            reveal(crx_ok);
+            reveal(crate::crx::crx_ok);
         }
-        let r = if self.crx_i.has_td() {
+        let Ghost(c) = if self.crx_i.has_td() {
             self.crx_i.free_some()
         } else if self.crx_h.has_td() {
             self.crx_h.free_some()
@@ -3828,7 +4019,7 @@ impl Connection {
             lemma_backlog3(old(self).crx_i, old(self).crx_h, old(self).crx_1);
             lemma_backlog3(self.crx_i, self.crx_h, self.crx_1);
         }
-        r
+        Ghost(c)
     }
 
     /// Queues CRYPTO data for `level`; ignored once its space is discarded.
@@ -3924,7 +4115,7 @@ impl Connection {
     //# protocol is not negotiated.
     /// TLS finished, with this ALPN. After this no long-header packet is built.
     #[verifier::spinoff_prover]
-    pub fn on_handshake_complete(&mut self, alpn: &[u8], now: u64, rand: &[u8; RAND_LEN])
+    pub fn on_handshake_complete(&mut self, alpn: &[u8], now: u64, rand: &[u8; RAND_LEN]) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
         ensures
@@ -3941,6 +4132,13 @@ impl Connection {
             final(self).phase_spec() is Open ==> final(self).live(PacketKind::OneRtt),
             final(self).live(PacketKind::OneRtt) ==> crypto_drained(*final(self), PacketKind::Initial)
                 && crypto_drained(*final(self), PacketKind::Handshake),
+            // Initial's and Handshake's retires, only in the call that completes. Excluded: `discard`'s own (above),
+            // `issue_cids` and a close (`close_internal`): the cost sweep's other sites (9b4).
+            r@ <= (if !old(self).live(PacketKind::OneRtt) && final(self).live(PacketKind::OneRtt) {
+                2 * (crate::avl::c_join2() * 127 + 1)
+            } else {
+                0
+            }),
     {
         if now > self.now {
             self.now = now;
@@ -3948,41 +4146,46 @@ impl Connection {
         self.chal_used = 0;
         if !matches!(self.lc.phase(), Phase::Open) || self.complete {
             proof {
-                reveal(crx_ok);
+                reveal(crate::crx::crx_ok);
             }
-            return;
+            return Ghost(0);
         }
         // ALPN first: §8.1's close is owed whatever else is wrong.
         if let Err(c) = check_alpn(alpn) {
             self.close_internal(c);
-            return;
+            return Ghost(0);
         }
         // `streams.is_none()` is unreachable (`on_peer_params` sets both); `wf`'s `complete` clause
         // needs it, and it costs less than one more conjunct.
         if self.peer_tp.is_none() || self.streams.is_none() {
             self.close_internal(INTERNAL_ERROR);
-            return;
+            return Ghost(0);
         }
         let ghost s0 = *self;
-        self.discard(PacketKind::Initial);
+        let Ghost(c1) = self.discard(PacketKind::Initial);
         let ghost s1 = *self;
-        self.discard(PacketKind::Handshake);
+        let Ghost(c2) = self.discard(PacketKind::Handshake);
+        let ghost mut work: nat = 0;
+        proof {
+            work = work + c1 + c2;
+        }
         let ghost s2 = *self;
         proof {
-            reveal(crx_ok);
+            reveal(crate::crx::crx_ok);
         }
         self.complete = true;
         self.hs_done = HsDone::Pending;
         self.spin = rand[128] & 1 == 1;
         self.issue_cids(rand);
         proof {
-            reveal(crx_ok);
+            reveal(crate::crx::crx_ok);
             assert forall|k: PacketKind| #[trigger] crypto_drained(*old(self), k) implies crypto_drained(*self, k) by {
                 assert(crypto_drained(s0, k));
                 assert(crypto_drained(s1, k));
                 assert(crypto_drained(s2, k));
             }
         }
+        Ghost(work)
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9001#section-4.8
@@ -8939,7 +9142,7 @@ impl Connection {
             forall|p: nat| #[trigger] self.crypto_received(k, p) ==> p < r,
     {
         proof {
-            reveal(crx_ok);
+            reveal(crate::crx::crx_ok);
             match k {
                 PacketKind::Initial => {
                     self.crx_i.lemma_wf();
@@ -9098,18 +9301,6 @@ impl Connection {
 // Helpers
 // =============================================================================
 
-/// The three CRYPTO streams' `wf`, and a stream whose space is not live is drained. Opaque, so a
-/// fn that changes neither a CRYPTO stream nor `live_i`, `live_h`, `complete` carries it by field
-/// congruence; the fns that do (`on_crypto_frame`, `crypto_read`, `crypto_drop`, `discard`,
-/// `on_handshake_complete`, `crypto_end`'s proof, the constructor) reveal it.
-#[verifier::opaque]
-spec fn crx_ok(i: CryptoStream, h: CryptoStream, o: CryptoStream, live_i: bool, live_h: bool, complete: bool) -> bool {
-    &&& i.wf() && h.wf() && o.wf()
-    &&& !live_i ==> i.drained() && i.buf_len_spec() == 0
-    &&& !live_h ==> h.drained()
-    &&& !complete ==> o.drained()
-}
-
 /// No level holds an unread in-order CRYPTO byte.
 pub open spec fn crypto_all_drained(c: Connection) -> bool {
     forall|k: PacketKind| #[trigger] crypto_drained(c, k)
@@ -9134,6 +9325,14 @@ pub open spec fn crypto_read_len(c: Connection, k: PacketKind, max: u64) -> nat 
 pub open spec fn crypto_held_ok(c: Connection) -> bool {
     forall|k: PacketKind|
         #[trigger] c.crypto_held(k) <= MAX_CRYPTO_BUFFER && c.crypto_base_spec(k) <= c.crypto_contiguous_spec(k)
+            // Each level's positions held plus its teardown slot's nodes: one store retired from at most a
+            // datagram past `MAX_CRYPTO_BUFFER` (D6's slot bound).
+            && c.crypto_load(k) <= MAX_CRYPTO_BUFFER + crate::aead::MAX_UDP_PAYLOAD
+}
+
+/// Level `k` still takes CRYPTO frames: the connection is open and (for Initial, Handshake) the level live.
+pub open spec fn crypto_open_level(c: Connection, k: PacketKind) -> bool {
+    c.phase_spec() is Open && (k is OneRtt || c.live(k))
 }
 
 /// Every level drained in `o` is drained in `c`.

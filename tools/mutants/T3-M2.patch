@@ -1,7 +1,7 @@
 diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
 --- a/crates/quic/src/crypto_stream.rs
 +++ b/crates/quic/src/crypto_stream.rs
-@@ -453,11 +453,6 @@
+@@ -481,11 +481,6 @@
              }
              return Ok(());
          }
@@ -13,7 +13,7 @@ diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
          let ghost a = *self;
          if end <= self.contig {
              // Every byte already received: nothing new is held.
-@@ -469,6 +464,11 @@
+@@ -497,6 +492,11 @@
              }
              return Ok(());
          }

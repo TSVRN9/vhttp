@@ -1,7 +1,7 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -2079,7 +2079,6 @@
+@@ -2264,7 +2264,6 @@
          }
          if matches!(self.level, Level::Initial) {
              // TLS leaves Initial here (no `Secrets { Handshake }` before it): as `on_secrets` does.

@@ -1,10 +1,10 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -1880,7 +1880,6 @@
-     fn on_crypto_frame(&mut self, k: PacketKind, offset: u64, data: &[u8], now: u64) -> (r: Result<(), u64>)
+@@ -1976,7 +1976,6 @@
          requires
              old(self).wf(),
+             old(self).phase_spec() is Open,
 -            old(self).live(k),
              offset + data@.len() <= VARINT_MAX,
          ensures

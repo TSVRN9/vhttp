@@ -1458,41 +1458,4 @@ pub fn drain_cap<V>(t: Tree<V>, out: &mut byteq::capvec::CapVec<(u64, V)>) -> (r
     }
 }
 
-/// Appends `t`'s entries, in order, to `out`, consuming `t`.
-pub fn drain<V>(t: Tree<V>, out: &mut Vec<(u64, V)>) -> (r: Ghost<nat>)
-    ensures
-        final(out)@ == old(out)@ + seq(t),
-        r@ <= c_drain() * (2 * seq(t).len() + 1),
-    decreases t,
-{
-    let ghost t0 = t;
-    let ghost mut work: nat = 1;
-    match t {
-        None => {
-            proof {
-                assert(out@ + seq(t0) =~= out@);
-            }
-            Ghost(work)
-        },
-        Some(n) => {
-            let Node { key: x, val: v, h: _, left: l, right: r } = *n;
-            let ghost o0 = out@;
-            let Ghost(cl) = drain(l, out);
-            let ghost o1 = out@;
-            out.push((x, v));
-            proof {
-                // Only the `a.push(x) + b` clause is used; the second `seq(r)` fills the unused `c`.
-                lemma_seq_assoc(o1, seq(r), (x, v), seq(r));
-            }
-            let Ghost(cr) = drain(r, out);
-            proof {
-                lemma_seq_assoc(o0, seq(l), (x, v), seq(r));
-                assert(seq(t0) == seq(l) + seq![(x, v)] + seq(r));
-                work = work + cl + cr;
-            }
-            Ghost(work)
-        },
-    }
-}
-
 } // verus!

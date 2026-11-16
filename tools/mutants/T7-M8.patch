@@ -24,7 +24,7 @@ diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
      /// Every insertion since the last `retire`, which records the bytes below its base (read,
      /// but not data received anew) as zeros.
      ins: Ghost<Seq<(nat, Seq<u8>)>>,
-@@ -322,6 +329,7 @@
+@@ -333,6 +340,7 @@
              hi: 0,
              st: Frags::new(),
              td: None,
@@ -32,7 +32,7 @@ diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
              ins: Ghost(Seq::empty()),
              hist: Ghost(Seq::empty()),
          };
-@@ -511,13 +519,16 @@
+@@ -539,13 +547,16 @@
          } else {
              0
          };

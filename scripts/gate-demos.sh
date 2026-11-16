@@ -306,11 +306,21 @@ expect_fail "escape-gate: assume_specification" "unaccounted escape" esc
 # (9b2 ruling 1), queue.rs's take_front naming push_slice's cost only in an assert (frags.rs's wrapper exemption is
 # keyed by file), a fn named insert in another impl of frags.rs asserting insert_w's cost (keyed by impl path), a new
 # byteq file with an uncharged while (byteq's src/ is listed, not named), a byteq file with a fn and no verus! block, a
-# `loop` and a `for`, a missing file; the real tree passes.
+# `loop` and a `for`, a missing file; 9b2 fix round 1 (I6), each passed by the tool before it, which read neither
+# crypto_stream.rs nor the per-fn files conn.rs and quictls's server.rs: crypto_stream.rs's retire dropping join2's cost,
+# refeed's OneRtt feed cost stubbed to 0 behind `let _ =` (the call kept), the T3b-F1 mutant patch itself (the call
+# deleted, its cost a literal ghost 0), receive's returned cost
+# stubbed to `Ghost(0)`, crypto_drop dropping a retire's cost, the allowed validate_hs_path drop gone stale; the real
+# tree passes.
 expect_pass "cost-charge: the real tree" "$root/scripts/cost-charge.sh" "$root"
 ccq=$tmp/cost/crates/quic/src
 ccb=$tmp/cost/crates/byteq/src
-cfresh() { rm -rf "${tmp:?}/cost"; mkdir -p "$ccq" "$ccb"; cp "$root/crates/quic/src/avl.rs" "$root/crates/quic/src/frags.rs" "$ccq/"; cp "$root"/crates/byteq/src/*.rs "$ccb/"; }
+cct=$tmp/cost/crates/quictls/src
+cfresh() {
+  rm -rf "${tmp:?}/cost"; mkdir -p "$ccq" "$ccb" "$cct"
+  cp "$root/crates/quic/src/avl.rs" "$root/crates/quic/src/frags.rs" "$root/crates/quic/src/crypto_stream.rs" "$root/crates/quic/src/conn.rs" "$ccq/"
+  cp "$root"/crates/byteq/src/*.rs "$ccb/"; cp "$root/crates/quictls/src/server.rs" "$cct/"
+}
 cc() { "$root/scripts/cost-charge.sh" "$tmp/cost"; }
 cfresh
 expect_pass "cost-charge: an unchanged copy" cc
@@ -375,6 +385,30 @@ expect_fail "cost-charge: a for" "\`for\` in fill: only \`while\` loops are chec
 cfresh
 rm "$ccq/avl.rs"
 expect_fail "cost-charge: a missing file" "cannot read crates/quic/src/avl.rs" cc
+cfresh
+once '^                work = work \+ cj;$' "$ccq/crypto_stream.rs"
+sed -i 's/^                work = work + cj;$/                assert(cj >= 0);/' "$ccq/crypto_stream.rs"
+expect_fail "cost-charge: retire drops join2's cost (crypto_stream.rs, I6)" "CryptoStream::retire drops the cost cj binds from join2" cc
+cfresh
+once '^        let \(_, Ghost\(w\)\) = self\.feed\(Level::OneRtt, now, r, true, max\);$' "$cct/server.rs"
+sed -i 's/^        let (_, Ghost(w)) = self\.feed(Level::OneRtt, now, r, true, max);$/        let _ = self.feed(Level::OneRtt, now, r, true, max);\n        let ghost w: nat = 0;/' "$cct/server.rs"
+expect_fail "cost-charge: refeed's feed cost dropped behind let _ (I6)" "QuicServer::refeed does not bind the cost feed returns as Ghost(x)" cc
+cfresh
+patch -p1 -s -d "$tmp/cost" < "$root/tools/mutants/T3b-F1.patch" || die "cost-charge demo: T3b-F1.patch does not apply to the copy"
+expect_fail "cost-charge: the T3b-F1 mutant itself (refeed's feed deleted, its cost a literal 0; I6)" "QuicServer::refeed binds the ghost w to a literal" cc
+cfresh
+once '^            assert\(refed ==> !keep\);$' "$cct/server.rs"
+rl=$(($(grep -n '^            assert(refed ==> !keep);$' "$cct/server.rs" | cut -d: -f1) + 2))
+sed -i "${rl}s/^        Ghost(work)$/        Ghost(0)/" "$cct/server.rs"
+expect_fail "cost-charge: receive's cost returned as Ghost(0) (I6)" "crates/quictls/src/server.rs:$rl: QuicServer::receive builds the literal cost Ghost(0)" cc
+cfresh
+once '^            work = work \+ c1 \+ c2 \+ c3;$' "$ccq/conn.rs"
+sed -i 's/^            work = work + c1 + c2 + c3;$/            work = work + c1 + c2;/' "$ccq/conn.rs"
+expect_fail "cost-charge: crypto_drop drops a retire's cost (conn.rs per-fn, I6)" "Connection::crypto_drop drops the cost c3 binds from retire" cc
+cfresh
+once '^        self\.discard\(PacketKind::Initial\);$' "$ccq/conn.rs"
+sed -i 's/^        self\.discard(PacketKind::Initial);$/        let Ghost(_c) = self.discard(PacketKind::Initial);/' "$ccq/conn.rs"
+expect_fail "cost-charge: a stale allowed drop (I6)" "allowed drop of discard in Connection::validate_hs_path matches no statement call" cc
 
 # The no-realloc claim (spec "The bound", TRUSTED.md's Vec row): fill's fresh piece made by CapVec::new(0) instead of
 # CapVec::new(n) must fail crypto_ooo_cost_linear on reallocs (under Verus it fails push's precondition). A copy of the

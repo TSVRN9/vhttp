@@ -1,7 +1,7 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -231,7 +231,7 @@
+@@ -275,7 +275,7 @@
          final(c).crypto_kept(*old(c)),
  {
      let none: Vec<u8> = Vec::new();

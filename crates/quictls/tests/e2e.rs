@@ -467,7 +467,7 @@ fn accept(c: &mut Client) -> (QuicServer<'static>, Vec<(bool, Pkts)>) {
     assert_eq!(ds.len(), 1);
     assert_eq!(ds[0].len(), 1200);
     let mut app = Vec::new();
-    let mut s = QuicServer::accept(cfg(), &ds[0], 0, 0, &R(1), &qc::ltp(), &mut app).expect("accepted");
+    let mut s = QuicServer::accept(cfg(), &ds[0], 0, 0, &R(1), &qc::ltp(), &mut app).0.expect("accepted");
     let mut log = Vec::new();
     pull_server(&mut s, c, &mut log);
     (s, log)
@@ -648,7 +648,7 @@ fn zero_rtt_dropped() {
     let mut d = c.datagrams(None).remove(0);
     d.extend(zero_rtt(&qc::S1));
     let mut app = Vec::new();
-    let mut s = QuicServer::accept(cfg(), &d, 0, 0, &R(1), &qc::ltp(), &mut app).expect("accepted");
+    let mut s = QuicServer::accept(cfg(), &d, 0, 0, &R(1), &qc::ltp(), &mut app).0.expect("accepted");
     let mut log = Vec::new();
     pull_server(&mut s, &mut c, &mut log);
     log.extend(run(&mut s, &mut c, 6));
@@ -754,7 +754,7 @@ pub fn big_ch(c: &mut Client, from: usize) -> (Vec<u8>, Vec<Vec<u8>>) {
 pub fn gap_fill(c: &mut Client) -> (QuicServer<'static>, Vec<u8>) {
     let (ch, ds) = big_ch(c, 1);
     let mut app = Vec::new();
-    let mut s = QuicServer::accept(cfg(), &ds[0], 0, 0, &R(1), &qc::ltp(), &mut app).expect("accepted");
+    let mut s = QuicServer::accept(cfg(), &ds[0], 0, 0, &R(1), &qc::ltp(), &mut app).0.expect("accepted");
     for (j, d) in ds[1..].iter().enumerate() {
         send(&mut s, d, 2 + j as u8);
         // Every byte so far is out of order: nothing for TLS, nothing to pump.
@@ -771,7 +771,7 @@ fn big_client_hello_accepted_unsplit() {
     let mut c = Client::with_alpn_pad(200);
     let (_, ds) = big_ch(&mut c, 0);
     let mut app = Vec::new();
-    let mut s = QuicServer::accept(cfg(), &ds[0], 0, 0, &R(1), &qc::ltp(), &mut app).expect("accepted");
+    let mut s = QuicServer::accept(cfg(), &ds[0], 0, 0, &R(1), &qc::ltp(), &mut app).0.expect("accepted");
     assert!(!s.has_backlog());
     for (j, d) in ds[1..].iter().enumerate() {
         send(&mut s, d, 2 + j as u8);

@@ -10,7 +10,7 @@ diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
  }
  
  /// The out-of-order positions depend on the frame's length, not its bytes.
-@@ -511,7 +511,7 @@
+@@ -539,7 +539,7 @@
          } else {
              0
          };

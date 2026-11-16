@@ -79,7 +79,7 @@ fn loader_fails_closed() {
 fn local_params_accepted() {
     let r = Rand { conn: [1; 129], refeed: [2; 129], complete: [3; 129], tls: [4; 96] };
     let mut app = Vec::new();
-    assert!(QuicServer::accept(cfg(), &A2, 0, 0, &r, &local_params(), &mut app).is_some());
+    assert!(QuicServer::accept(cfg(), &A2, 0, 0, &r, &local_params(), &mut app).0.is_some());
 }
 
 #[test]

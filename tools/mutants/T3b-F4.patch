@@ -1,11 +1,12 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -3966,7 +3966,6 @@
+@@ -4164,7 +4164,7 @@
          let ghost s0 = *self;
-         self.discard(PacketKind::Initial);
+         let Ghost(c1) = self.discard(PacketKind::Initial);
          let ghost s1 = *self;
--        self.discard(PacketKind::Handshake);
-         let ghost s2 = *self;
+-        let Ghost(c2) = self.discard(PacketKind::Handshake);
++        let ghost c2: nat = 0;
+         let ghost mut work: nat = 0;
          proof {
-             reveal(crx_ok);
+             work = work + c1 + c2;

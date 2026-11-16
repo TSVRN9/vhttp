@@ -1,7 +1,7 @@
 diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
 --- a/crates/quic/src/crypto_stream.rs
 +++ b/crates/quic/src/crypto_stream.rs
-@@ -425,9 +425,8 @@
+@@ -452,9 +452,8 @@
              r is Err <==> crypto_allowed_err(*old(self), offset, data@.len(), CRYPTO_BUFFER_EXCEEDED),
              r is Err ==> r == Err::<(), u64>(CRYPTO_BUFFER_EXCEEDED),
              r matches Err(c) ==> crypto_allowed_err(*old(self), offset, data@.len(), c),
@@ -13,7 +13,7 @@ diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
                  &&& final(self).inserted_frames() == old(self).inserted_frames().push((offset as nat, data@))
                  &&& final(self).base_spec() == old(self).base_spec()
              },
-@@ -453,11 +452,6 @@
+@@ -481,11 +480,6 @@
              }
              return Ok(());
          }

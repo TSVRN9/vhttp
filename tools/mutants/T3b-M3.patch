@@ -1,7 +1,7 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -1476,6 +1476,21 @@
+@@ -1645,6 +1645,21 @@
              self.sync_keys();
              return false;
          }

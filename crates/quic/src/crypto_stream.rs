@@ -219,6 +219,17 @@ impl CryptoStream {
         crate::avl::seq(self.td).len()
     }
 
+    /// The positions held and the slot's nodes: what a retire moves from one to the other, never growing it.
+    pub closed spec fn load(&self) -> nat {
+        self.held_spec() + self.td_nodes()
+    }
+
+    pub proof fn lemma_load(&self)
+        ensures
+            self.load() == self.held_spec() + self.td_nodes(),
+    {
+    }
+
     /// Byte `p` arrived in a CRYPTO frame. `inserted_frames()` also holds `retire`'s record of the bytes
     /// below its base, which were read but are not data received anew.
     pub closed spec fn received(&self, p: nat) -> bool {
@@ -340,7 +351,7 @@ impl CryptoStream {
     /// discard leaves, for the end check of RFC 9001 §4.1.3, and what a closed connection leaves
     /// (TLS reads no more). The store moves to the teardown slot, no byte copied; onto a full slot
     /// (never met: a level retires once while open, D6) it joins in O(log n), the slot's keys being below the store's.
-    pub fn retire(&mut self)
+    pub fn retire(&mut self) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
         ensures
@@ -352,7 +363,11 @@ impl CryptoStream {
             crypto_contiguous(*final(self)) == old(self).end_spec(),
             final(self).held_spec() == 0,
             final(self).td_nodes() <= old(self).td_nodes() + old(self).held_spec(),
+            final(self).load() <= old(self).load(),
+            // One join onto the slot (heights at most 126), else O(1).
+            r@ <= crate::avl::c_join2() * 127 + 1,
     {
+        let ghost mut work: nat = 1;
         proof {
             self.lemma_core();
             self.st.lemma_nodes_le_held();
@@ -380,7 +395,18 @@ impl CryptoStream {
                 }
                 vstd::arithmetic::power2::lemma2_to64_rest();
             }
-            let (j, _c) = crate::avl::join2(slot, t);
+            proof {
+                if slot is Some {
+                    assert(slot->0.h <= 126);
+                }
+                if t is Some {
+                    assert(t->0.h <= 126);
+                }
+            }
+            let (j, Ghost(cj)) = crate::avl::join2(slot, t);
+            proof {
+                work = work + cj;
+            }
             self.td = j;
         }
         self.base = end;
@@ -413,6 +439,7 @@ impl CryptoStream {
                 assert(a.received((a.end_spec() - 1) as nat));
             }
         }
+        Ghost(work)
     }
 
     /// A CRYPTO frame's `offset` and `data`.
@@ -437,6 +464,7 @@ impl CryptoStream {
             // At most one position held per byte of the frame.
             final(self).held_spec() <= old(self).held_spec() + data@.len(),
             final(self).td_nodes() == old(self).td_nodes(),
+            final(self).load() <= old(self).load() + data@.len(),
     {
         let end = offset + data.len() as u64;
         if end <= self.base {
@@ -590,6 +618,7 @@ impl CryptoStream {
             forall|p: nat| #[trigger] final(self).received(p) == old(self).received(p),
             final(self).held_spec() + crypto_take(*old(self), max) == old(self).held_spec(),
             final(self).td_nodes() == old(self).td_nodes(),
+            final(self).load() + crypto_take(*old(self), max) == old(self).load(),
             r@ <= 18 * crypto_take(*old(self), max) + 5608,
     {
         proof {
@@ -669,6 +698,8 @@ impl CryptoStream {
             final(self).held_spec() == old(self).held_spec(),
             crypto_contiguous(*final(self)) == crypto_contiguous(*old(self)),
             forall|p: nat| #[trigger] final(self).received(p) == old(self).received(p),
+            old(self).td_nodes() > 0 ==> final(self).load() < old(self).load(),
+            final(self).load() <= old(self).load(),
     {
         proof {
             assert(crate::avl::c_pop() * 127 + 2 <= B_PUMP);
@@ -723,6 +754,7 @@ pub closed spec fn backlog3(i: CryptoStream, h: CryptoStream, o: CryptoStream) -
 pub proof fn lemma_backlog3(i: CryptoStream, h: CryptoStream, o: CryptoStream)
     ensures
         backlog3(i, h, o) == i.held_spec() + i.td_nodes() + h.held_spec() + h.td_nodes() + o.held_spec() + o.td_nodes(),
+        backlog3(i, h, o) == i.load() + h.load() + o.load(),
 {
 }
 

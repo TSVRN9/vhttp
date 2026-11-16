@@ -1,13 +1,13 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -3953,8 +3953,7 @@
-             return;
+@@ -4151,8 +4151,7 @@
+             return Ghost(0);
          }
          // ALPN first: §8.1's close is owed whatever else is wrong.
 -        if let Err(c) = check_alpn(alpn) {
 -            self.close_internal(c);
 +        if let Err(_c) = check_alpn(alpn) {
-             return;
+             return Ghost(0);
          }
          // `streams.is_none()` is unreachable (`on_peer_params` sets both); `wf`'s `complete` clause

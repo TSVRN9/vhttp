@@ -267,7 +267,7 @@ impl<'a> Server<'a> {
             }
             Route::NewInitial => {
                 let r = rand(self.rng)?;
-                if let Some(q) = QuicServer::accept(self.cfg, d, 0, now, &r, &local_params(), &mut app) {
+                if let (Some(q), _) = QuicServer::accept(self.cfg, d, 0, now, &r, &local_params(), &mut app) {
                     let mut c = Conn { id: self.next_id, q, addrs: vec![from], owed: Vec::new() };
                     c.take_requests(&mut app);
                     self.conns.push(c);

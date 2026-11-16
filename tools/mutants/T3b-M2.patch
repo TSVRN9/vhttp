@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
 --- a/crates/quic/src/crypto_stream.rs
 +++ b/crates/quic/src/crypto_stream.rs
-@@ -383,7 +383,7 @@
-             let (j, _c) = crate::avl::join2(slot, t);
+@@ -409,7 +409,7 @@
+             }
              self.td = j;
          }
 -        self.base = end;

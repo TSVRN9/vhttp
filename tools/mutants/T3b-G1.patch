@@ -1,11 +1,12 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -897,7 +897,6 @@
-                 lemma_held_ok_kept(self.h3.conn_spec(), c2);
+@@ -1020,7 +1020,7 @@
+                 }
              }
          }
--        self.drop_if_closed();
+-        let Ghost(c) = self.drop_if_closed();
++        let ghost c: nat = 0;
          self.forget_failed();
          self.sync_keys();
-     }
+         Ghost(c)
