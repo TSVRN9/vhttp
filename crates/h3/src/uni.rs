@@ -582,6 +582,90 @@ proof fn lemma_determined(b: Seq<u8>, n: nat, ty: u64, seen0: SeenUni)
     }
 }
 
+/// No stream type yet: nothing happens (split out of `determine` for the rlimit).
+proof fn lemma_undetermined(b: Seq<u8>, seen0: SeenUni)
+    requires
+        rfc_varint_decode(b) is None,
+    ensures
+        forall|f: bool| #[trigger]
+            rfc_uni_stream(b, f, seen0) == (Seq::<SpecUniEvent>::empty(), None::<u64>),
+{
+}
+
+/// An ignored stream type with `rest` after `b`: the stream is discarded (split out of
+/// `determine` for the rlimit).
+proof fn lemma_determined_ignored(b: Seq<u8>, n: nat, ty: u64, seen0: SeenUni, rest: Seq<u8>)
+    requires
+        forall|t: Seq<u8>| #[trigger] rfc_varint_decode(b + t) == Some((n, ty)),
+        ty != STREAM_PUSH,
+        !rfc_duplicate(seen0, ty),
+        rfc_kind_of(ty) is Ignored,
+    ensures
+        split_ok(b + rest, seen0, Seq::empty(), UniKind::Ignored, ctrl_init(), 0, Seq::empty()),
+        forall|f: bool| #[trigger]
+            rfc_uni_stream(b + rest, f, seen0) == (Seq::<SpecUniEvent>::empty(), None::<u64>),
+{
+    assert forall|t: Seq<u8>, f: bool| #[trigger]
+        rfc_uni_stream((b + rest) + t, f, seen0) == prepend(
+            Seq::empty(),
+            tail_of(UniKind::Ignored, ctrl_init(), 0, Seq::<u8>::empty() + t, f),
+        ) by {
+        assert(b + (rest + t) =~= (b + rest) + t);
+        assert(rfc_varint_decode(b + (rest + t)) == Some((n, ty)));
+        assert(Seq::<SpecUniEvent>::empty() + Seq::<SpecUniEvent>::empty() =~= Seq::<
+            SpecUniEvent,
+        >::empty());
+    }
+    assert forall|f: bool| #[trigger]
+        rfc_uni_stream(b + rest, f, seen0) == (Seq::<SpecUniEvent>::empty(), None::<u64>) by {
+        assert(b + (rest + Seq::empty()) =~= b + rest);
+        assert(rfc_varint_decode(b + (rest + Seq::empty())) == Some((n, ty)));
+        assert(Seq::<SpecUniEvent>::empty() + Seq::<SpecUniEvent>::empty() =~= Seq::<
+            SpecUniEvent,
+        >::empty());
+    }
+}
+
+/// Data on an ignored stream changes nothing (split out of `on_data` for the rlimit).
+proof fn lemma_ignored_data(
+    all0: Seq<u8>,
+    seen0: SeenUni,
+    em0: Seq<SpecUniEvent>,
+    st: CtrlState,
+    skip: u64,
+    buf: Seq<u8>,
+    data: Seq<u8>,
+    fin: bool,
+)
+    requires
+        rfc_varint_decode(all0) is Some,
+        split_ok(all0, seen0, em0, UniKind::Ignored, st, skip, buf),
+    ensures
+        rfc_varint_decode(all0 + data) == rfc_varint_decode(all0),
+        split_ok(all0 + data, seen0, em0, UniKind::Ignored, st, skip, buf),
+        rfc_uni_stream(all0 + data, fin, seen0) == (em0, None::<u64>),
+{
+    lemma_decode_prefix(all0, data);
+    lemma_split_append(all0, seen0, em0, UniKind::Ignored, st, skip, buf, data);
+    assert forall|t: Seq<u8>, f: bool| #[trigger]
+        rfc_uni_stream((all0 + data) + t, f, seen0) == prepend(
+            em0,
+            tail_of(UniKind::Ignored, st, skip, buf + t, f),
+        ) by {
+        assert(rfc_uni_stream((all0 + data) + t, f, seen0) == prepend(
+            em0,
+            tail_of(UniKind::Ignored, st, skip, (buf + data) + t, f),
+        ));
+    }
+    assert((all0 + data) + Seq::<u8>::empty() =~= all0 + data);
+    assert(buf + Seq::<u8>::empty() =~= buf);
+    assert(rfc_uni_stream((all0 + data) + Seq::empty(), fin, seen0) == prepend(
+        em0,
+        tail_of(UniKind::Ignored, st, skip, buf + Seq::empty(), fin),
+    ));
+    assert(em0 + Seq::<SpecUniEvent>::empty() =~= em0);
+}
+
 proof fn lemma_skipping_zero(st: CtrlState, b: Seq<u8>, f: bool)
     ensures
         skipping(0, st, b, f) == rfc_control(b, st, f),
@@ -1114,6 +1198,8 @@ impl UniStream {
             !(kind_of_bytes(old(self).all()) is Undetermined) ==> final(self).seen_before()
                 == old(self).seen_before() && *final(seen) == *old(seen),
     {
+        hide(rfc_uni_stream);
+        hide(tail_of);
         let ghost all0 = self.all@;
         let ghost em0 = self.emitted@;
         self.done = true;
@@ -1122,25 +1208,9 @@ impl UniStream {
             assert((all0 + data@) + Seq::<u8>::empty() =~= all0 + data@);
         }
         if let UniKind::Ignored = self.kind {
-            let ghost buf0 = self.buf@;
             self.all = Ghost(all0 + data@);
             proof {
-                lemma_decode_prefix(all0, data@);
-                lemma_split_append(all0, self.seen0@, em0, self.kind, self.ctrl, self.skip, buf0, data@);
-                assert forall|t: Seq<u8>, f: bool| #[trigger]
-                    rfc_uni_stream(self.all@ + t, f, self.seen0@) == prepend(
-                        em0,
-                        tail_of(self.kind, self.ctrl, self.skip, self.buf@ + t, f),
-                    ) by {
-                    assert(rfc_uni_stream(self.all@ + t, f, self.seen0@) == prepend(
-                        em0,
-                        tail_of(self.kind, self.ctrl, self.skip, buf0 + data@ + t, f),
-                    ));
-                }
-                assert(rfc_uni_stream(self.all@ + Seq::empty(), fin, self.seen0@) == prepend(
-                    em0,
-                    tail_of(self.kind, self.ctrl, self.skip, self.buf@ + Seq::empty(), fin),
-                ));
+                lemma_ignored_data(all0, self.seen0@, em0, self.ctrl, self.skip, self.buf@, data@, fin);
             }
             self.done = fin;
             return Ok(());
@@ -1225,6 +1295,7 @@ impl UniStream {
                 },
             },
     {
+        hide(rfc_varint_decode);
         let ghost all0 = self.all@;
         let ghost em0 = self.emitted@;
         self.seen0 = Ghost(*seen);
@@ -1249,6 +1320,7 @@ impl UniStream {
                 proof {
                     lemma_decode_none_short(b);
                     assert(data@.take(i as int) =~= data@);
+                    lemma_undetermined(b, self.seen0@);
                 }
                 self.all = Ghost(all0 + data@);
                 return Ok(None);
@@ -1278,25 +1350,7 @@ impl UniStream {
             self.buf = Vec::new();
             self.all = Ghost(all0 + data@);
             proof {
-                assert forall|t: Seq<u8>, f: bool| #[trigger]
-                    rfc_uni_stream(self.all@ + t, f, self.seen0@) == prepend(
-                        em0,
-                        tail_of(UniKind::Ignored, self.ctrl, self.skip, self.buf@ + t, f),
-                    ) by {
-                    assert(b + (data@.skip(i as int) + t) =~= self.all@ + t);
-                    assert(rfc_varint_decode(b + (data@.skip(i as int) + t)) == Some(
-                        (n as nat, ty),
-                    ));
-                }
-                assert(self.all@ + Seq::<u8>::empty() =~= self.all@);
-                assert(rfc_uni_stream(self.all@ + Seq::empty(), false, self.seen0@) == prepend(
-                    em0,
-                    tail_of(UniKind::Ignored, self.ctrl, self.skip, self.buf@ + Seq::empty(), false),
-                ));
-                assert(rfc_uni_stream(self.all@ + Seq::empty(), true, self.seen0@) == prepend(
-                    em0,
-                    tail_of(UniKind::Ignored, self.ctrl, self.skip, self.buf@ + Seq::empty(), true),
-                ));
+                lemma_determined_ignored(b, n as nat, ty, self.seen0@, data@.skip(i as int));
             }
             return Ok(None);
         }

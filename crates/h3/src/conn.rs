@@ -3151,6 +3151,7 @@ impl H3Conn {
             uni_fed(*old(self), *final(self), id, data@, fin, added(old(out)@, final(out)@)),
             final(self).highest == old(self).highest,
     {
+        hide(uni::rfc_uni_stream);
         let ghost c0 = *self;
         let ghost o0 = out@;
         let found = find_uni(&self.unis, id);
