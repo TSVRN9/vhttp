@@ -995,7 +995,7 @@ proof fn lemma_validate_lines(f: Seq<(Seq<u8>, Seq<u8>)>)
 }
 
 /// A frame header is read whole from `r`'s first `m` bytes once they cover it (N5).
-proof fn lemma_header_cover(r: Seq<u8>, m: int)
+pub proof fn lemma_header_cover(r: Seq<u8>, m: int)
     requires
         rfc_frame_header(r) matches Some((h, _, _)) && h <= m <= r.len(),
     ensures
@@ -1017,7 +1017,7 @@ proof fn lemma_header_cover(r: Seq<u8>, m: int)
 }
 
 /// The header of `r` equals that of its first `min(16, len)` bytes: a header is at most 16 bytes (N5).
-proof fn lemma_header_take(r: Seq<u8>, m: int)
+pub proof fn lemma_header_take(r: Seq<u8>, m: int)
     requires
         0 <= m <= r.len(),
         m >= 16 || m == r.len(),

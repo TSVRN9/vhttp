@@ -5,7 +5,7 @@
 use vest_lib::core::spec::*;
 use vstd::prelude::*;
 use byteq::capvec::CapVec;
-use vstd::slice::{slice_subrange, slice_to_vec};
+use vstd::slice::slice_subrange;
 pub use wire::varint::*;
 
 use crate::codes::*;
@@ -1182,51 +1182,83 @@ pub fn put_frame(ty: u64, body: &Vec<u8>, out: &mut Vec<u8>)
 // Payload parsing
 // =============================================================================
 
+/// `parse_frame_payload`'s cost constant for every type but SETTINGS, over the payload length: a varint parse over the
+/// payload (its MIR bound is linear in the payload, expected-cost.txt), then a copy into an exact `CapVec` and its
+/// allocation (PUSH_PROMISE).
+pub open spec fn c_pfp() -> nat {
+    10
+}
+
+/// A SETTINGS payload within `MAX_SETTINGS_FRAME` sorts in linear time: `clog2(d) <= clog2(1024) == 10`.
+pub proof fn lemma_settings_cost(d: nat)
+    requires
+        d <= crate::limits::MAX_SETTINGS_FRAME,
+    ensures
+        c_pset() * (d * (clog2(d) + 1) + 1) <= 275 * d + 25,
+{
+    lemma_clog2_mono(d, 1024);
+    reveal_with_fuel(clog2, 12);
+    assert(clog2(1024) == 10);
+    assert(d * (clog2(d) + 1) <= d * 11) by (nonlinear_arith)
+        requires
+            clog2(d) <= 10,
+    ;
+}
+
 /// Consumes `payload` exactly: a frame whose fields do not fill it, or overrun it, is
 /// `H3_FRAME_ERROR`; a duplicate or HTTP/2-reserved SETTINGS identifier is
-/// `H3_SETTINGS_ERROR`.
-pub fn parse_frame_payload(ty: u64, payload: &[u8]) -> (r: Result<Frame, u64>)
+/// `H3_SETTINGS_ERROR`. Its cost is `parse_settings`' for SETTINGS, else linear in the payload.
+pub fn parse_frame_payload(ty: u64, payload: &[u8]) -> (r: (Result<Frame, u64>, Ghost<nat>))
     ensures
-        match r {
+        match r.0 {
             Ok(f) => rfc_frame_payload(ty, payload@) == Ok::<SpecFrame, u64>(f@),
             Err(e) => rfc_frame_payload(ty, payload@) == Err::<SpecFrame, u64>(e),
         },
+        ty == FRAME_SETTINGS ==> r.1@ <= c_pset() * (payload@.len() * (clog2(payload@.len() as nat) + 1) + 1),
+        ty != FRAME_SETTINGS ==> r.1@ <= c_pfp() * (payload@.len() + 1),
 {
+    // A varint parse over the payload: linear in it on its MIR bound (expected-cost.txt).
+    let ghost cv: nat = payload@.len() + 9;
     if ty == FRAME_DATA {
-        Ok(Frame::Data)
+        (Ok(Frame::Data), Ghost(0))
     } else if ty == FRAME_HEADERS {
-        Ok(Frame::Headers(slice_to_vec(payload)))
+        let mut v: CapVec<u8> = CapVec::new(payload.len());
+        let Ghost(wp) = v.push_slice(payload);
+        (Ok(Frame::Headers(v.into_vec())), Ghost(wp + 1))
     } else if ty == FRAME_CANCEL_PUSH {
         match parse_exact_varint(payload) {
-            Some(v) => Ok(Frame::CancelPush(v)),
-            None => Err(H3_FRAME_ERROR),
+            Some(v) => (Ok(Frame::CancelPush(v)), Ghost(cv)),
+            None => (Err(H3_FRAME_ERROR), Ghost(cv)),
         }
     } else if ty == FRAME_SETTINGS {
-        // Task 8 makes this fn charge the cost
-        let (r, _) = parse_settings(payload);
-        r
+        parse_settings(payload)
     } else if ty == FRAME_PUSH_PROMISE {
         match parse_varint(payload) {
             Some((n, id)) => {
-                let fs = slice_to_vec(slice_subrange(payload, n, payload.len()));
-                Ok(Frame::PushPromise { push_id: id, field_section: fs })
+                let rest = slice_subrange(payload, n, payload.len());
+                let mut fs: CapVec<u8> = CapVec::new(rest.len());
+                let Ghost(wp) = fs.push_slice(rest);
+                proof {
+                    assert(fs@ =~= payload@.skip(n as int));
+                }
+                (Ok(Frame::PushPromise { push_id: id, field_section: fs.into_vec() }), Ghost(cv + wp + 1))
             },
-            None => Err(H3_FRAME_ERROR),
+            None => (Err(H3_FRAME_ERROR), Ghost(cv)),
         }
     } else if ty == FRAME_GOAWAY {
         match parse_exact_varint(payload) {
-            Some(v) => Ok(Frame::Goaway(v)),
-            None => Err(H3_FRAME_ERROR),
+            Some(v) => (Ok(Frame::Goaway(v)), Ghost(cv)),
+            None => (Err(H3_FRAME_ERROR), Ghost(cv)),
         }
     } else if ty == FRAME_MAX_PUSH_ID {
         match parse_exact_varint(payload) {
-            Some(v) => Ok(Frame::MaxPushId(v)),
-            None => Err(H3_FRAME_ERROR),
+            Some(v) => (Ok(Frame::MaxPushId(v)), Ghost(cv)),
+            None => (Err(H3_FRAME_ERROR), Ghost(cv)),
         }
     } else if is_h2_reserved_frame(ty) {
-        Ok(Frame::H2Reserved(ty))
+        (Ok(Frame::H2Reserved(ty)), Ghost(0))
     } else {
-        Ok(Frame::Unknown(ty))
+        (Ok(Frame::Unknown(ty)), Ghost(0))
     }
 }
 

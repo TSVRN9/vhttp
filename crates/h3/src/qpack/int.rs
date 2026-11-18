@@ -378,6 +378,37 @@ pub proof fn lemma_prefix_int_append(n: u8, b: Seq<u8>, t: Seq<u8>)
     lemma_cont_facts(b.skip(1), 0, b[0] as nat % pow2(n as nat), t);
 }
 
+/// Continuation bytes that decode or overflow decode the same whatever follows them.
+proof fn lemma_cont_settled(b: Seq<u8>, k: nat, acc: nat, t: Seq<u8>)
+    requires
+        !(rfc_prefix_cont(b, k, acc) is Incomplete),
+    ensures
+        rfc_prefix_cont(b + t, k, acc) == rfc_prefix_cont(b, k, acc),
+    decreases b.len(),
+{
+    assert((b + t)[0] == b[0]);
+    assert((b + t).skip(1) =~= b.skip(1) + t);
+    let nv = acc + (b[0] & 127u8) as nat * pow2(7 * k);
+    if k < PREFIX_INT_MAX_CONT && nv <= PREFIX_INT_MAX && b[0] & 128u8 != 0 {
+        lemma_cont_settled(b.skip(1), k + 1, nv, t);
+    }
+}
+
+/// Prefix stability of a decided integer: bytes after a complete or too-large integer don't change it.
+pub proof fn lemma_prefix_int_settled(n: u8, b: Seq<u8>, t: Seq<u8>)
+    requires
+        !(rfc_prefix_int(n, b) is Incomplete),
+    ensures
+        rfc_prefix_int(n, b + t) == rfc_prefix_int(n, b),
+{
+    assert((b + t)[0] == b[0]);
+    assert((b + t).skip(1) =~= b.skip(1) + t);
+    let i = b[0] as nat % pow2(n as nat);
+    if i >= pow2(n as nat) - 1 {
+        lemma_cont_settled(b.skip(1), 0, i, t);
+    }
+}
+
 // =============================================================================
 // Executable codec
 // =============================================================================

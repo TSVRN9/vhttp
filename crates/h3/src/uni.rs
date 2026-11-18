@@ -8,12 +8,14 @@
 //! front of `buf` preserves it (prefix stability), so the spec of exactly the bytes received
 //! (`t` empty) is what each call reports.
 use vstd::prelude::*;
-use vstd::slice::{slice_subrange, slice_to_vec};
+use vstd::slice::slice_subrange;
+use byteq::capvec::CapVec;
+use byteq::queue::ByteQueue;
 // Used only in ghost code, which a plain `cargo build` erases.
 #[allow(unused_imports)]
 use wire::varint::*;
 #[allow(unused_imports)]
-use crate::qpack::int::PREFIX_INT_MAX_CONT;
+use crate::qpack::int::*;
 
 use crate::codes::*;
 use crate::frame::*;
@@ -388,6 +390,91 @@ pub open spec fn is_buffered_control_frame(ty: u64) -> bool {
     ty == FRAME_SETTINGS || ty == FRAME_GOAWAY || ty == FRAME_MAX_PUSH_ID
 }
 
+/// 1 until the peer's SETTINGS arrives: an empty SETTINGS frame is the one event-bearing control frame shorter than 3
+/// bytes, and only the stream's first frame can be one.
+spec fn tok(st: CtrlState) -> nat {
+    if st.settings {
+        0
+    } else {
+        1
+    }
+}
+
+/// The control buffer between steps: an incomplete frame header, or an incomplete frame that passed its header
+/// checks.
+spec fn one_frame(b: Seq<u8>) -> bool {
+    match rfc_frame_header(b) {
+        None => true,
+        Some((h, _, len)) => b.len() < h + len && h + len <= UNI_BUF_CAP,
+    }
+}
+
+/// After a top-up: at most one frame, so a frame `settle` completes ends the buffer.
+spec fn at_most_one(b: Seq<u8>) -> bool {
+    match rfc_frame_header(b) {
+        None => true,
+        Some((h, _, len)) => b.len() <= h + len,
+    }
+}
+
+/// The events a control stream may still return from `rem` more bytes of a call: one for the frame `buf` holds
+/// (completed by at least one of them), then one per 3 bytes, an empty SETTINGS counting as 3.
+spec fn ev_room(held: bool, st: CtrlState, rem: nat) -> nat {
+    if held && rem > 0 {
+        1 + rem / 3
+    } else {
+        (rem + tok(st)) / 3
+    }
+}
+
+/// `control_frame`'s cost constant: per byte of the frame it completes, its payload parse (a SETTINGS payload within
+/// MAX_SETTINGS_FRAME sorts at 275 per byte plus 25, `lemma_settings_cost`; any other at most `c_pfp()` per byte plus
+/// 10), the 16-byte header parse (17) and the event push or the free of a dropped frame; the constant of a call that
+/// completes none.
+#[verifier::inline]
+spec fn c_cf() -> nat {
+    280
+}
+
+/// `control_frames`' cost constant: a `control_frame` and its loop iteration, per byte.
+#[verifier::inline]
+spec fn c_cfs() -> nat {
+    281
+}
+
+/// `settle`'s constant beside the held bytes: a `control_frame` that completes nothing, `drop_front` (2) and 1.
+#[verifier::inline]
+spec fn c_set() -> nat {
+    283
+}
+
+/// `step`'s cost per byte of the segment it consumes, with the held bytes' potential: `parse_direct` (`control_frames`
+/// twice over, the tail's push and its `c_uni_frame()` per byte), the most of its three branches.
+#[verifier::inline]
+spec fn c_stp() -> nat {
+    854
+}
+
+/// `consume`'s cost per byte of its segment: `step` and its loop iteration.
+#[verifier::inline]
+spec fn c_csm() -> nat {
+    855
+}
+
+/// `on_data`'s cost per byte given (and per byte of the 16 the constant terms take): `consume`, `determine` (at most
+/// 80) and 1.
+#[verifier::inline]
+pub open spec fn c_uni() -> nat {
+    856
+}
+
+/// `on_data`'s cost per byte held before the call (the `F` term): the frame a call completes from its held bytes is
+/// parsed once.
+#[verifier::inline]
+pub open spec fn c_uni_frame() -> nat {
+    280
+}
+
 /// The control stream after `skip` more payload bytes of an unknown frame are discarded.
 pub open spec fn skipping(skip: u64, st: CtrlState, b: Seq<u8>, fin: bool) -> (
     Seq<SpecUniEvent>,
@@ -544,18 +631,30 @@ proof fn lemma_skip_discard(skip: u64, st: CtrlState, b: Seq<u8>, d: nat, t: Seq
     }
 }
 
-/// `v[n..]` (split out of `determine` for the rlimit).
-fn skip_vec(v: &Vec<u8>, n: usize) -> (r: Vec<u8>)
+/// A type varint that decodes from `b` is all in `b.take(n)`, and is longer than any prefix `b.take(bl)` that did not
+/// decode (split out of `determine` for the rlimit).
+proof fn lemma_decode_take(b: Seq<u8>, n: nat, ty: u64, bl: nat)
     requires
-        n <= v@.len(),
+        rfc_varint_decode(b) == Some((n, ty)),
+        bl <= b.len(),
+        rfc_varint_decode(b.take(bl as int)) is None,
     ensures
-        r@ == v@.skip(n as int),
+        bl < n <= b.len(),
+        forall|t: Seq<u8>| #[trigger] rfc_varint_decode(b.take(n as int) + t) == Some((n, ty)),
 {
-    let r = slice_to_vec(slice_subrange(v.as_slice(), n, v.len()));
-    proof {
-        assert(r@ =~= v@.skip(n as int));
+    lemma_decode_len_bounds(b);
+    let q = b.take(n as int);
+    assert(q[0] == b[0]);
+    assert(q.subrange(1, n as int) =~= b.subrange(1, n as int));
+    assert(rfc_varint_decode(q) == rfc_varint_decode(b));
+    if n <= bl {
+        let p = b.take(bl as int);
+        assert(q + p.skip(n as int) =~= p);
+        lemma_decode_prefix(q, p.skip(n as int));
     }
-    r
+    assert forall|t: Seq<u8>| #[trigger] rfc_varint_decode(b.take(n as int) + t) == Some((n, ty)) by {
+        lemma_decode_prefix(q, t);
+    }
 }
 
 /// A stream whose type varint decodes from `b`, with `b[n..]` still to feed (split out of
@@ -582,6 +681,114 @@ proof fn lemma_determined(b: Seq<u8>, n: nat, ty: u64, seen0: SeenUni)
     }
 }
 
+/// The sequences `determine` relates, with `b` the type bytes held after its push (split out for the rlimit: the
+/// extensional equalities stay here).
+proof fn lemma_determine_seqs(all0: Seq<u8>, data: Seq<u8>, i: nat)
+    requires
+        i <= data.len(),
+    ensures
+        (all0 + data.take(i as int)) + data.skip(i as int) == all0 + data,
+        (all0 + data.take(i as int)).take(all0.len() as int) == all0,
+        i == data.len() ==> all0 + data.take(i as int) == all0 + data,
+{
+    let b = all0 + data.take(i as int);
+    assert(b + data.skip(i as int) =~= all0 + data);
+    assert(b.take(all0.len() as int) =~= all0);
+    if i == data.len() {
+        assert(data.take(i as int) =~= data);
+    }
+}
+
+proof fn lemma_empty_events(e: Seq<SpecUniEvent>)
+    requires
+        e.len() == 0,
+    ensures
+        e == Seq::<SpecUniEvent>::empty(),
+{
+    assert(e =~= Seq::<SpecUniEvent>::empty());
+}
+
+proof fn lemma_empty_bytes(e: Seq<u8>)
+    requires
+        e.len() == 0,
+    ensures
+        e == Seq::<u8>::empty(),
+{
+    assert(e =~= Seq::<u8>::empty());
+}
+
+/// The type varint's `n` bytes: what `all0` held and the first `n - all0.len()` of `data`.
+proof fn lemma_determine_take(all0: Seq<u8>, data: Seq<u8>, i: nat, n: nat)
+    requires
+        i <= data.len(),
+        all0.len() <= n <= all0.len() + i,
+    ensures
+        (all0 + data.take(i as int)).take(n as int) == all0 + data.take(n - all0.len()),
+{
+    assert((all0 + data.take(i as int)).take(n as int) =~= all0 + data.take(n - all0.len()));
+}
+
+/// A push stream or a second critical stream of one type (split out of `determine` for the rlimit).
+proof fn lemma_creation_err(b: Seq<u8>, n: nat, ty: u64, seen0: SeenUni)
+    requires
+        rfc_varint_decode(b) == Some((n, ty)),
+        ty == STREAM_PUSH || rfc_duplicate(seen0, ty),
+    ensures
+        forall|f: bool| #[trigger]
+            rfc_uni_stream(b, f, seen0) == (Seq::<SpecUniEvent>::empty(), Some(H3_STREAM_CREATION_ERROR)),
+{
+}
+
+/// `wf_live` of a stream whose type has not arrived (for callers that hide `wf_live`).
+proof fn lemma_undetermined_def(s: UniStream)
+    requires
+        s.kind is Undetermined,
+    ensures
+        wf_live(s) == (s.buf.wf() && s.all@ == s.buf@ && s.buf@.len() < 8 && s.emitted@.len() == 0 && s.ctrl
+            == ctrl_init() && s.skip == 0),
+{
+}
+
+/// `wf_live` of a stream of an unknown type (for callers that hide `wf_live`).
+proof fn lemma_ignored_def(s: UniStream)
+    requires
+        s.kind is Ignored,
+    ensures
+        wf_live(s) == (s.buf.wf() && s.buf@.len() == 0 && split_ok(
+            s.all@,
+            s.seen0@,
+            s.emitted@,
+            s.kind,
+            s.ctrl,
+            s.skip,
+            s.buf@,
+        )),
+{
+}
+
+/// A critical stream whose type varint is all of `q`: live with nothing held (split out of `determine` for the
+/// rlimit).
+proof fn lemma_determined_live(s: UniStream, q: Seq<u8>, n: nat, ty: u64)
+    requires
+        s.all@ == q,
+        n == q.len(),
+        forall|t: Seq<u8>| #[trigger] rfc_varint_decode(q + t) == Some((n, ty)),
+        ty != STREAM_PUSH,
+        !rfc_duplicate(s.seen0@, ty),
+        s.kind == rfc_kind_of(ty),
+        s.kind is Control || s.kind is QpackEncoder || s.kind is QpackDecoder,
+        s.buf.wf(),
+        s.buf@.len() == 0,
+        s.ctrl == ctrl_init(),
+        s.skip == 0,
+        s.emitted@ == Seq::<SpecUniEvent>::empty(),
+    ensures
+        live_s(s),
+{
+    lemma_determined(q, n, ty, s.seen0@);
+    assert(q.skip(n as int) =~= s.buf@);
+}
+
 /// No stream type yet: nothing happens (split out of `determine` for the rlimit).
 proof fn lemma_undetermined(b: Seq<u8>, seen0: SeenUni)
     requires
@@ -596,7 +803,7 @@ proof fn lemma_undetermined(b: Seq<u8>, seen0: SeenUni)
 /// `determine` for the rlimit).
 proof fn lemma_determined_ignored(b: Seq<u8>, n: nat, ty: u64, seen0: SeenUni, rest: Seq<u8>)
     requires
-        forall|t: Seq<u8>| #[trigger] rfc_varint_decode(b + t) == Some((n, ty)),
+        rfc_varint_decode(b) == Some((n, ty)),
         ty != STREAM_PUSH,
         !rfc_duplicate(seen0, ty),
         rfc_kind_of(ty) is Ignored,
@@ -611,7 +818,7 @@ proof fn lemma_determined_ignored(b: Seq<u8>, n: nat, ty: u64, seen0: SeenUni, r
             tail_of(UniKind::Ignored, ctrl_init(), 0, Seq::<u8>::empty() + t, f),
         ) by {
         assert(b + (rest + t) =~= (b + rest) + t);
-        assert(rfc_varint_decode(b + (rest + t)) == Some((n, ty)));
+        lemma_decode_prefix(b, rest + t);
         assert(Seq::<SpecUniEvent>::empty() + Seq::<SpecUniEvent>::empty() =~= Seq::<
             SpecUniEvent,
         >::empty());
@@ -619,7 +826,7 @@ proof fn lemma_determined_ignored(b: Seq<u8>, n: nat, ty: u64, seen0: SeenUni, r
     assert forall|f: bool| #[trigger]
         rfc_uni_stream(b + rest, f, seen0) == (Seq::<SpecUniEvent>::empty(), None::<u64>) by {
         assert(b + (rest + Seq::empty()) =~= b + rest);
-        assert(rfc_varint_decode(b + (rest + Seq::empty())) == Some((n, ty)));
+        lemma_decode_prefix(b, rest + Seq::empty());
         assert(Seq::<SpecUniEvent>::empty() + Seq::<SpecUniEvent>::empty() =~= Seq::<
             SpecUniEvent,
         >::empty());
@@ -771,15 +978,26 @@ fn control_header_error(st: &CtrlState, ty: u64, len: u64) -> (r: Option<u64>)
 /// Consumes the frame at the front of `b`, dispatching on its type before parsing any payload.
 /// `Ok((0, 0))`: `b` is an incomplete header, or an incomplete buffered frame that passed its
 /// header checks. `Ok((b.len(), s))` with `s > 0`: an unknown frame whose last `s` payload bytes
-/// have not arrived. Otherwise `Ok((k, 0))`: one complete frame of `k` bytes.
-fn control_frame(b: &[u8], st: &mut CtrlState, events: &mut Vec<UniEvent>) -> (r: Result<
-    (usize, u64),
-    u64,
->)
+/// have not arrived. Otherwise `Ok((k, 0))`: one complete frame of `k` bytes. The header is parsed from `b`'s first 16
+/// bytes at most (N5). It returns at most one event, from a frame of at least 3 bytes or the stream's first (an empty
+/// SETTINGS has 2).
+fn control_frame(b: &[u8], st: &mut CtrlState, events: &mut CapVec<UniEvent>) -> (r: (
+    Result<(usize, u64), u64>,
+    Ghost<nat>,
+))
+    requires
+        old(events).wf(),
+        b@.len() + tok(*old(st)) >= 3 ==> old(events)@.len() < old(events).cap(),
     ensures
+        final(events).wf(),
+        final(events).cap() == old(events).cap(),
         final(events)@.len() >= old(events)@.len(),
+        final(events)@.len() <= old(events)@.len() + 1,
         final(events)@.take(old(events)@.len() as int) == old(events)@,
-        match r {
+        final(events)@.len() > old(events)@.len() ==> (r.0 matches Ok((k, s)) && s == 0 && 3 <= k + tok(*old(st))
+            && tok(*final(st)) == 0),
+        tok(*final(st)) <= tok(*old(st)),
+        match r.0 {
             Ok((k, s)) => {
                 &&& k <= b@.len()
                 &&& k == 0 ==> {
@@ -787,6 +1005,7 @@ fn control_frame(b: &[u8], st: &mut CtrlState, events: &mut Vec<UniEvent>) -> (r
                     &&& final(events)@ == old(events)@
                     &&& *final(st) == *old(st)
                     &&& b@.len() < UNI_BUF_CAP
+                    &&& one_frame(b@)
                     &&& forall|f: bool| #[trigger]
                         rfc_control(b@, *old(st), f) == (Seq::<SpecUniEvent>::empty(), fin_err(f))
                 }
@@ -797,6 +1016,7 @@ fn control_frame(b: &[u8], st: &mut CtrlState, events: &mut Vec<UniEvent>) -> (r
                     b@.skip(k as int),
                     *final(st),
                 )
+                &&& k > 0 && s == 0 ==> (rfc_frame_header(b@) matches Some((h, _, len)) && k == h + len)
                 &&& s > 0 ==> {
                     &&& k == b@.len()
                     &&& final(events)@ == old(events)@
@@ -804,31 +1024,50 @@ fn control_frame(b: &[u8], st: &mut CtrlState, events: &mut Vec<UniEvent>) -> (r
                     &&& forall|t: Seq<u8>, f: bool| #[trigger]
                         rfc_control(b@ + t, *old(st), f) == skipping(s, *old(st), t, f)
                 }
+                &&& if k > 0 && s == 0 {
+                    r.1@ <= c_cf() * k
+                } else {
+                    r.1@ <= c_cf()
+                }
             },
             Err(e) => {
                 &&& final(events)@ == old(events)@
                 &&& forall|t: Seq<u8>, f: bool| #[trigger]
                     rfc_control(b@ + t, *old(st), f) == (Seq::<SpecUniEvent>::empty(), Some(e))
+                &&& r.1@ <= c_cf() * (b@.len() + 1)
             },
         },
 {
+    hide(rfc_control);
+    hide(rfc_frame_payload);
+    hide(rfc_varint_decode);
+    hide(skipping);
     let ghost st1 = *st;
     let ghost ev0 = events@;
     proof {
         assert(events@.take(ev0.len() as int) =~= ev0);
     }
-    let (ty, len, hdr_len) = match parse_frame_header(b) {
+    let m = if b.len() < 16 {
+        b.len()
+    } else {
+        16
+    };
+    let hp = slice_subrange(b, 0, m);
+    proof {
+        assert(hp@ =~= b@.take(m as int));
+        crate::request::lemma_header_take(b@, m as int);
+        lemma_frame_header_bounds(b@);
+    }
+    // The header parse reads at most 16 bytes: a constant charge on the MIR bound (expected-cost.txt:2).
+    let (ty, len, hdr_len) = match parse_frame_header(hp) {
         FrameHeader::Incomplete => {
             proof {
-                lemma_frame_header_bounds(b@);
+                lemma_control_incomplete(b@, st1);
             }
-            return Ok((0, 0));
+            return (Ok((0, 0)), Ghost(17));
         },
         FrameHeader::Complete { ty, len, hdr_len } => (ty, len, hdr_len),
     };
-    proof {
-        lemma_frame_header_bounds(b@);
-    }
     if let Some(e) = control_header_error(st, ty, len) {
         proof {
             assert forall|t: Seq<u8>, f: bool| #[trigger]
@@ -836,13 +1075,16 @@ fn control_frame(b: &[u8], st: &mut CtrlState, events: &mut Vec<UniEvent>) -> (r
                 lemma_control_frame(b@, st1, hdr_len as nat, ty, len, t, f);
             }
         }
-        return Err(e);
+        return (Err(e), Ghost(18));
     }
     let avail = b.len() - hdr_len;
     if len > avail as u64 {
         if ty == FRAME_SETTINGS || ty == FRAME_GOAWAY || ty == FRAME_MAX_PUSH_ID {
             // The header check capped `len` at MAX_SETTINGS_FRAME.
-            return Ok((0, 0));
+            proof {
+                lemma_control_incomplete(b@, st1);
+            }
+            return (Ok((0, 0)), Ghost(18));
         }
         // Unknown frame: drop the payload present and skip the rest as it arrives.
         proof {
@@ -854,7 +1096,7 @@ fn control_frame(b: &[u8], st: &mut CtrlState, events: &mut Vec<UniEvent>) -> (r
                 assert(Seq::<u8>::empty() + t =~= t);
             }
         }
-        return Ok((b.len(), len - avail as u64));
+        return (Ok((b.len(), len - avail as u64)), Ghost(18));
     }
     let len = len as usize;
     let k = hdr_len + len;
@@ -862,7 +1104,11 @@ fn control_frame(b: &[u8], st: &mut CtrlState, events: &mut Vec<UniEvent>) -> (r
     proof {
         assert(payload@ =~= b@.subrange(hdr_len as int, k as int));
     }
-    let frame = match parse_frame_payload(ty, payload) {
+    let (pr, Ghost(wp)) = parse_frame_payload(ty, payload);
+    proof {
+        lemma_payload_cost(ty, len as nat, wp);
+    }
+    let frame = match pr {
         Ok(f) => f,
         Err(e) => {
             proof {
@@ -871,10 +1117,13 @@ fn control_frame(b: &[u8], st: &mut CtrlState, events: &mut Vec<UniEvent>) -> (r
                     lemma_control_frame(b@, st1, hdr_len as nat, ty, len as u64, t, f);
                 }
             }
-            return Err(e);
+            return (Err(e), Ghost(wp + 18));
         },
     };
     let ghost fv = frame@;
+    proof {
+        lemma_event_frame_len(ty, payload@, fv);
+    }
     let id_err = match frame {
         Frame::Settings(v) => {
             st.settings = true;
@@ -895,6 +1144,7 @@ fn control_frame(b: &[u8], st: &mut CtrlState, events: &mut Vec<UniEvent>) -> (r
             events.push(UniEvent::PeerMaxPushId(id));
             false
         },
+        // A dropped HEADERS or PUSH_PROMISE frame frees its buffer: one unit of the 20 charged below.
         _ => false,
     };
     if id_err {
@@ -904,7 +1154,7 @@ fn control_frame(b: &[u8], st: &mut CtrlState, events: &mut Vec<UniEvent>) -> (r
                 lemma_control_frame(b@, st1, hdr_len as nat, ty, len as u64, t, f);
             }
         }
-        return Err(H3_ID_ERROR);
+        return (Err(H3_ID_ERROR), Ghost(wp + 20));
     }
     proof {
         let (evs, st2) = rfc_control_frame(st1, fv)->Ok_0;
@@ -926,23 +1176,71 @@ fn control_frame(b: &[u8], st: &mut CtrlState, events: &mut Vec<UniEvent>) -> (r
             lemma_control_frame(b@, st1, hdr_len as nat, ty, len as u64, t, f);
         }
     }
-    Ok((k, 0))
+    (Ok((k, 0)), Ghost(wp + 20))
+}
+
+/// A control buffer that completes no frame: an incomplete header, or a frame that passed its header checks and whose
+/// payload has not all arrived (split out of `control_frame` for the rlimit).
+proof fn lemma_control_incomplete(b: Seq<u8>, st: CtrlState)
+    requires
+        rfc_frame_header(b) matches Some((h, ty, len)) ==> rfc_control_header_error(st, ty, len) is None && b.len()
+            < h + len,
+    ensures
+        forall|f: bool| #[trigger] rfc_control(b, st, f) == (Seq::<SpecUniEvent>::empty(), fin_err(f)),
+{
+}
+
+/// The frame types that return an event, and a GOAWAY or MAX_PUSH_ID payload is a varint, so at least one byte (split
+/// out of `control_frame` for the rlimit).
+proof fn lemma_event_frame_len(ty: u64, p: Seq<u8>, fv: SpecFrame)
+    requires
+        rfc_frame_payload(ty, p) == Ok::<SpecFrame, u64>(fv),
+    ensures
+        fv is Goaway || fv is MaxPushId ==> p.len() >= 1,
+        fv is Settings ==> ty == FRAME_SETTINGS,
+        fv is Goaway ==> ty == FRAME_GOAWAY,
+        fv is MaxPushId ==> ty == FRAME_MAX_PUSH_ID,
+{
+    lemma_decode_len_bounds(p);
+}
+
+/// `parse_frame_payload`'s cost on a frame that passed the control stream's header checks: SETTINGS within
+/// MAX_SETTINGS_FRAME is linear (split out of `control_frame` for the rlimit).
+proof fn lemma_payload_cost(ty: u64, len: nat, wp: nat)
+    requires
+        ty == FRAME_SETTINGS ==> len <= MAX_SETTINGS_FRAME,
+        ty == FRAME_SETTINGS ==> wp <= c_pset() * (len * (clog2(len) + 1) + 1),
+        ty != FRAME_SETTINGS ==> wp <= c_pfp() * (len + 1),
+    ensures
+        wp + 20 <= c_cf() * (len + 2),
+{
+    if ty == FRAME_SETTINGS {
+        lemma_settings_cost(len);
+    }
 }
 
 /// Consumes the complete frames at the front of `buf`. `Ok((n, s))`: `s` bytes of an unknown
-/// payload are still to be skipped (then `n == buf.len()`), and `buf[n..]` completes nothing.
-fn control_frames(buf: &[u8], st: &mut CtrlState, events: &mut Vec<UniEvent>) -> (r: Result<
-    (usize, u64),
-    u64,
->)
+/// payload are still to be skipped (then `n == buf.len()`), and `buf[n..]` completes nothing. It returns at most one
+/// event per 3 bytes of `buf`, the stream's first frame's counting as 3 (`tok`).
+fn control_frames(buf: &[u8], st: &mut CtrlState, events: &mut CapVec<UniEvent>) -> (r: (
+    Result<(usize, u64), u64>,
+    Ghost<nat>,
+))
+    requires
+        old(events).wf(),
+        old(events)@.len() + (buf@.len() + tok(*old(st))) / 3 <= old(events).cap(),
     ensures
+        final(events).wf(),
+        final(events).cap() == old(events).cap(),
         final(events)@.len() >= old(events)@.len(),
         final(events)@.take(old(events)@.len() as int) == old(events)@,
-        match r {
+        r.1@ <= c_cfs() * (buf@.len() + 1),
+        match r.0 {
             Ok((n, s)) => {
                 &&& n <= buf@.len()
                 &&& s > 0 ==> n == buf@.len()
                 &&& buf@.len() - n < UNI_BUF_CAP
+                &&& one_frame(buf@.skip(n as int))
                 &&& forall|t: Seq<u8>, f: bool| #[trigger]
                     rfc_control(buf@ + t, *old(st), f) == prepend(
                         views(final(events)@.skip(old(events)@.len() as int)),
@@ -957,8 +1255,13 @@ fn control_frames(buf: &[u8], st: &mut CtrlState, events: &mut Vec<UniEvent>) ->
                 ),
         },
 {
+    hide(rfc_control);
+    hide(rfc_frame_header);
+    hide(rfc_frame_payload);
+    hide(rfc_varint_decode);
     let ghost st0 = *st;
     let ghost ev0 = events@;
+    let ghost mut work: nat = 0;
     let mut pos: usize = 0;
     proof {
         assert(buf@.skip(0) =~= buf@);
@@ -974,13 +1277,17 @@ fn control_frames(buf: &[u8], st: &mut CtrlState, events: &mut Vec<UniEvent>) ->
         }
         assert(events@.take(ev0.len() as int) =~= ev0);
     }
-    loop
+    while pos < buf.len()
         invariant
             ev0 == old(events)@,
             st0 == *old(st),
             pos <= buf@.len(),
+            events.wf(),
+            events.cap() == old(events).cap(),
             events@.len() >= ev0.len(),
             events@.take(ev0.len() as int) == ev0,
+            events@.len() + (buf@.len() - pos + tok(*st)) / 3 <= events.cap(),
+            work <= c_cfs() * pos,
             ctrl_split(buf@, st0, views(events@.skip(ev0.len() as int)), buf@.skip(pos as int), *st),
         decreases buf@.len() - pos,
     {
@@ -989,7 +1296,7 @@ fn control_frames(buf: &[u8], st: &mut CtrlState, events: &mut Vec<UniEvent>) ->
         let ghost done = views(events@.skip(ev0.len() as int));
         let ghost st1 = *st;
         let ghost ev1 = events@;
-        let r = control_frame(rest, st, events);
+        let (r, Ghost(w)) = control_frame(rest, st, events);
         proof {
             lemma_views_split(ev1, events@, ev0.len() as int);
             let mine = views(events@.skip(ev1.len() as int));
@@ -1006,7 +1313,7 @@ fn control_frames(buf: &[u8], st: &mut CtrlState, events: &mut Vec<UniEvent>) ->
                         assert(rfc_control(rest@ + t, st1, f) == (Seq::<SpecUniEvent>::empty(), Some(e)));
                     }
                 }
-                return Err(e);
+                return (Err(e), Ghost(work + w + 1));
             },
             Ok((k, s)) => {
                 if k == 0 {
@@ -1029,7 +1336,7 @@ fn control_frames(buf: &[u8], st: &mut CtrlState, events: &mut Vec<UniEvent>) ->
                             lemma_skipping_zero(*st, rest@, f);
                         }
                     }
-                    return Ok((pos, 0));
+                    return (Ok((pos, 0)), Ghost(work + w + 1));
                 }
                 if s > 0 {
                     proof {
@@ -1037,6 +1344,8 @@ fn control_frames(buf: &[u8], st: &mut CtrlState, events: &mut Vec<UniEvent>) ->
                         assert(views(Seq::<UniEvent>::empty()) =~= Seq::<SpecUniEvent>::empty());
                         assert(done + Seq::<SpecUniEvent>::empty() =~= done);
                         assert(buf@.skip(buf@.len() as int) =~= Seq::<u8>::empty());
+                        lemma_frame_header_bounds(Seq::<u8>::empty());
+                        lemma_settled_empty(*st, s);
                         assert forall|t: Seq<u8>, f: bool| #[trigger]
                             rfc_control(buf@ + t, st0, f) == prepend(
                                 done,
@@ -1048,7 +1357,7 @@ fn control_frames(buf: &[u8], st: &mut CtrlState, events: &mut Vec<UniEvent>) ->
                             assert(done + x.0 =~= done + x.0);
                         }
                     }
-                    return Ok((buf.len(), s));
+                    return (Ok((buf.len(), s)), Ghost(work + w + 1));
                 }
                 proof {
                     let mine = views(events@.skip(ev1.len() as int));
@@ -1060,11 +1369,25 @@ fn control_frames(buf: &[u8], st: &mut CtrlState, events: &mut Vec<UniEvent>) ->
                         let x = rfc_control(next + t, *st, f);
                         assert(done + (mine + x.0) =~= (done + mine) + x.0);
                     }
+                    work = work + w + 1;
                 }
                 pos = pos + k;
             },
         }
     }
+    proof {
+        assert(buf@.skip(pos as int) =~= Seq::<u8>::empty());
+        lemma_frame_header_bounds(Seq::<u8>::empty());
+        lemma_settled_empty(*st, 0);
+        assert forall|t: Seq<u8>, f: bool| #[trigger]
+            rfc_control(buf@ + t, st0, f) == prepend(
+                views(events@.skip(ev0.len() as int)),
+                skipping(0, *st, buf@.skip(pos as int) + t, f),
+            ) by {
+            lemma_skipping_zero(*st, buf@.skip(pos as int) + t, f);
+        }
+    }
+    (Ok((pos, 0)), Ghost(work + 1))
 }
 
 /// One peer-initiated unidirectional stream.
@@ -1072,7 +1395,7 @@ pub struct UniStream {
     kind: UniKind,
     /// Received bytes not yet consumed: part of the type varint, or one incomplete frame header,
     /// SETTINGS/GOAWAY/MAX_PUSH_ID frame or QPACK instruction. Under UNI_BUF_CAP (proven).
-    buf: Vec<u8>,
+    buf: ByteQueue,
     ctrl: CtrlState,
     /// Payload bytes of an unknown control frame still to discard as they arrive.
     skip: u64,
@@ -1109,6 +1432,7 @@ impl UniStream {
     }
 
     pub closed spec fn wf(&self) -> bool {
+        &&& self.buf.wf()
         &&& self.kind == kind_of_bytes(self.all@)
         &&& !self.done ==> wf_live(*self)
     }
@@ -1122,7 +1446,7 @@ impl UniStream {
     {
         let r = UniStream {
             kind: UniKind::Undetermined,
-            buf: Vec::new(),
+            buf: ByteQueue::new(),
             ctrl: CtrlState { settings: false, max_push_id: None, goaway: None },
             skip: 0,
             done: false,
@@ -1144,6 +1468,8 @@ impl UniStream {
     }
 
     pub fn buffered_len(&self) -> (r: usize)
+        requires
+            self.wf(),
         ensures
             r == self.buffered(),
     {
@@ -1167,22 +1493,27 @@ impl UniStream {
 
     /// Feeds the next `data` (`fin`: the stream ends after it). `Err(code)` is a connection
     /// error. Afterwards the cumulative events and error are exactly `rfc_uni_stream` of every
-    /// byte received, so they don't depend on how the bytes were chunked.
+    /// byte received, so they don't depend on how the bytes were chunked. A call returns at most `data.len() / 3 + 1`
+    /// events and costs at most `c_uni()` per byte given (and 16 more) plus `c_uni_frame()` per byte held before it.
     pub fn on_data(
         &mut self,
         data: &[u8],
         fin: bool,
         seen: &mut SeenUni,
-        events: &mut Vec<UniEvent>,
-    ) -> (r: Result<(), u64>)
+        events: &mut CapVec<UniEvent>,
+    ) -> (r: (Result<(), u64>, Ghost<nat>))
         requires
             old(self).wf(),
             !old(self).done(),
+            old(events).wf(),
+            old(events)@.len() + data@.len() / 3 + 1 <= old(events).cap(),
         ensures
             final(self).wf(),
             final(self).all() == old(self).all() + data@,
-            final(self).done() == (r is Err || fin),
+            final(self).done() == (r.0 is Err || fin),
             !final(self).done() ==> final(self).buffered() < UNI_BUF_CAP,
+            final(events).wf(),
+            final(events).cap() == old(events).cap(),
             final(events)@.len() >= old(events)@.len(),
             final(events)@.take(old(events)@.len() as int) == old(events)@,
             final(self).emitted() == old(self).emitted() + views(
@@ -1190,49 +1521,66 @@ impl UniStream {
             ),
             rfc_uni_stream(final(self).all(), fin, final(self).seen_before()) == (
                 final(self).emitted(),
-                err_of(r),
+                err_of(r.0),
             ),
             kind_of_bytes(old(self).all()) is Undetermined ==> final(self).seen_before() == *old(
                 seen,
             ) && *final(seen) == seen_after(*old(seen), final(self).all()),
             !(kind_of_bytes(old(self).all()) is Undetermined) ==> final(self).seen_before()
                 == old(self).seen_before() && *final(seen) == *old(seen),
+            r.1@ <= c_uni() * (data@.len() + 16) + c_uni_frame() * old(self).buffered(),
     {
         hide(rfc_uni_stream);
         hide(tail_of);
+        hide(ready);
+        hide(live_s);
+        hide(split_ok);
+        hide(one_frame);
+        hide(rfc_varint_decode);
         let ghost all0 = self.all@;
         let ghost em0 = self.emitted@;
+        let ghost s0 = *self;
         self.done = true;
         proof {
+            lemma_set_done(s0, true);
             lemma_grew_refl(*self, events@);
             assert((all0 + data@) + Seq::<u8>::empty() =~= all0 + data@);
         }
         if let UniKind::Ignored = self.kind {
             self.all = Ghost(all0 + data@);
+            self.done = fin;
             proof {
+                reveal(split_ok);
                 lemma_ignored_data(all0, self.seen0@, em0, self.ctrl, self.skip, self.buf@, data@, fin);
             }
-            self.done = fin;
-            return Ok(());
+            return (Ok(()), Ghost(1));
         }
         let ghost was_undetermined = self.kind is Undetermined;
         let mut i: usize = 0;
+        let ghost mut wd: nat = 0;
         if let UniKind::Undetermined = self.kind {
-            match self.determine(data, seen) {
+            let (dr, Ghost(w)) = self.determine(data, seen);
+            match dr {
                 Err(e) => {
                     proof {
                         lemma_grew_refl(*self, events@);
                     }
-                    return Err(e);
+                    return (Err(e), Ghost(w + 1));
                 },
                 Ok(None) => {
+                    let ghost s1 = *self;
+                    self.done = fin;
                     proof {
+                        lemma_set_done(s1, fin);
                         lemma_grew_refl(*self, events@);
                     }
-                    self.done = fin;
-                    return Ok(());
+                    return (Ok(()), Ghost(w + 1));
                 },
                 Ok(Some(k)) => {
+                    proof {
+                        wd = w;
+                        lemma_live_empty(*self);
+                    }
                     i = k;
                 },
             }
@@ -1247,30 +1595,38 @@ impl UniStream {
                 lemma_decode_prefix(all0, data@);
             }
         }
-        let r = self.consume(rest, fin, events);
+        let (r, Ghost(wc)) = self.consume(rest, fin, events);
         match r {
             Ok(()) => {
+                let ghost s1 = *self;
                 self.done = false;
-                Ok(())
+                proof {
+                    lemma_set_done(s1, false);
+                }
+                (Ok(()), Ghost(wd + wc + 1))
             },
-            Err(e) => Err(e),
+            Err(e) => (Err(e), Ghost(wd + wc + 1)),
         }
     }
 
     /// Reads the stream type from at most the 8 bytes a varint can take. `Ok(Some(i))`: a
-    /// critical stream, with `data[i..]` still to feed; `Ok(None)`: all of `data` is consumed.
+    /// critical stream, with `data[i..]` still to feed and nothing held (bytes after the varint stay in `data`);
+    /// `Ok(None)`: all of `data` is consumed.
     #[verifier::spinoff_prover]
-    fn determine(&mut self, data: &[u8], seen: &mut SeenUni) -> (r: Result<Option<usize>, u64>)
+    fn determine(&mut self, data: &[u8], seen: &mut SeenUni) -> (r: (Result<Option<usize>, u64>, Ghost<nat>))
         requires
             old(self).kind is Undetermined,
+            old(self).kind == kind_of_bytes(old(self).all@),
             wf_live(*old(self)),
         ensures
+            final(self).buf.wf(),
             final(self).seen0@ == *old(seen),
             *final(seen) == seen_after(*old(seen), old(self).all@ + data@),
             final(self).done == old(self).done,
             final(self).emitted@ == old(self).emitted@,
             final(self).kind == kind_of_bytes(old(self).all@ + data@),
-            match r {
+            r.1@ <= 80,
+            match r.0 {
                 Err(e) => {
                     &&& final(self).all@ == old(self).all@ + data@
                     &&& forall|f: bool| #[trigger]
@@ -1281,6 +1637,7 @@ impl UniStream {
                 },
                 Ok(None) => {
                     &&& final(self).all@ == old(self).all@ + data@
+                    &&& final(self).kind is Undetermined || final(self).kind is Ignored
                     &&& wf_live(*final(self))
                     &&& forall|f: bool| #[trigger]
                         rfc_uni_stream(final(self).all@, f, final(self).seen0@) == (
@@ -1291,47 +1648,54 @@ impl UniStream {
                 Ok(Some(i)) => {
                     &&& i <= data@.len()
                     &&& final(self).all@ == old(self).all@ + data@.take(i as int)
+                    &&& final(self).kind is Control || final(self).kind is QpackEncoder || final(self).kind is QpackDecoder
                     &&& live_s(*final(self))
+                    &&& final(self).buf@.len() == 0
                 },
             },
     {
         hide(rfc_varint_decode);
+        hide(live_s);
+        hide(wf_live);
+        hide(rfc_uni_stream);
         let ghost all0 = self.all@;
-        let ghost em0 = self.emitted@;
+        proof {
+            lemma_undetermined_def(*self);
+            lemma_empty_events(self.emitted@);
+        }
         self.seen0 = Ghost(*seen);
-        let room = 8 - self.buf.len();
+        let bl = self.buf.len();
+        let room = 8 - bl;
         let i = if data.len() < room {
             data.len()
         } else {
             room
         };
-        let mut d = slice_to_vec(slice_subrange(data, 0, i));
-        self.buf.append(&mut d);
+        let head = slice_subrange(data, 0, i);
+        let Ghost(wp) = self.buf.push_slice(head);
         self.all = Ghost(all0 + data@.take(i as int));
         let ghost b = self.buf@;
         proof {
-            assert(b =~= self.all@);
-            assert(em0 =~= Seq::<SpecUniEvent>::empty());
-            assert(data@.take(i as int) + data@.skip(i as int) =~= data@);
-            assert(b + data@.skip(i as int) =~= all0 + data@);
+            lemma_determine_seqs(all0, data@, i as nat);
         }
+        // A varint parse over at most 8 bytes: a constant charge on its MIR bound (expected-cost.txt).
         let (n, ty) = match parse_varint(self.buf.as_slice()) {
             None => {
                 proof {
                     lemma_decode_none_short(b);
-                    assert(data@.take(i as int) =~= data@);
                     lemma_undetermined(b, self.seen0@);
                 }
                 self.all = Ghost(all0 + data@);
-                return Ok(None);
+                proof {
+                    lemma_undetermined_def(*self);
+                }
+                return (Ok(None), Ghost(wp + 17));
             },
             Some(x) => x,
         };
         proof {
-            assert forall|t: Seq<u8>| #[trigger] rfc_varint_decode(b + t) == Some((n as nat, ty)) by {
-                lemma_decode_prefix(b, t);
-            }
-            assert(rfc_varint_decode(b + data@.skip(i as int)) == Some((n as nat, ty)));
+            lemma_decode_take(b, n as nat, ty, bl as nat);
+            lemma_decode_prefix(b, data@.skip(i as int));
         }
         self.kind = kind_of(ty);
         if ty == STREAM_PUSH || (ty == STREAM_CONTROL && seen.control) || (ty
@@ -1340,36 +1704,49 @@ impl UniStream {
             self.all = Ghost(all0 + data@);
             proof {
                 assert(seen_mark(self.seen0@, ty) == self.seen0@);
+                lemma_creation_err(all0 + data@, n as nat, ty, self.seen0@);
             }
-            return Err(H3_STREAM_CREATION_ERROR);
+            return (Err(H3_STREAM_CREATION_ERROR), Ghost(wp + 17));
         }
         seen.control = seen.control || ty == STREAM_CONTROL;
         seen.encoder = seen.encoder || ty == STREAM_QPACK_ENCODER;
         seen.decoder = seen.decoder || ty == STREAM_QPACK_DECODER;
+        let Ghost(wd) = self.buf.drop_front(self.buf.len());
+        proof {
+            lemma_empty_bytes(self.buf@);
+        }
         if let UniKind::Ignored = self.kind {
-            self.buf = Vec::new();
             self.all = Ghost(all0 + data@);
             proof {
                 lemma_determined_ignored(b, n as nat, ty, self.seen0@, data@.skip(i as int));
+                lemma_ignored_def(*self);
             }
-            return Ok(None);
+            return (Ok(None), Ghost(wp + wd + 17));
         }
-        self.buf = skip_vec(&self.buf, n);
+        let k = n - bl;
+        self.all = Ghost(all0 + data@.take(k as int));
         proof {
-            lemma_determined(b, n as nat, ty, self.seen0@);
+            lemma_determine_take(all0, data@, i as nat, n as nat);
+            lemma_determined_live(*self, b.take(n as int), n as nat, ty);
         }
-        Ok(Some(i))
+        (Ok(Some(k)), Ghost(wp + wd + 17))
     }
 
     /// Feeds `seg` to a critical stream; then a FIN is H3_CLOSED_CRITICAL_STREAM.
-    fn consume(&mut self, seg: &[u8], fin: bool, events: &mut Vec<UniEvent>) -> (r: Result<
-        (),
-        u64,
-    >)
+    fn consume(&mut self, seg: &[u8], fin: bool, events: &mut CapVec<UniEvent>) -> (r: (
+        Result<(), u64>,
+        Ghost<nat>,
+    ))
         requires
-            live_s(*old(self)),
+            wf_live(*old(self)),
+            old(self).kind is Control || old(self).kind is QpackEncoder || old(self).kind is QpackDecoder,
+            old(events).wf(),
+            old(events)@.len() + seg@.len() / 3 + 1 <= old(events).cap(),
         ensures
-            consumed(*old(self), *final(self), seg@, old(events)@, final(events)@, fin, r),
+            consumed(*old(self), *final(self), seg@, old(events)@, final(events)@, fin, r.0),
+            final(events).wf(),
+            final(events).cap() == old(events).cap(),
+            r.1@ <= c_uni_frame() * old(self).buf@.len() + c_csm() * (seg@.len() + 1),
     {
         if let UniKind::Control = self.kind {
             self.consume_control(seg, fin, events)
@@ -1387,15 +1764,20 @@ impl UniStream {
 
     /// Unknown payloads are discarded straight from `seg`; `buf` only ever receives enough of
     /// `seg` to complete a pending frame, never more than UNI_BUF_CAP bytes in total.
-    fn consume_control(&mut self, seg: &[u8], fin: bool, events: &mut Vec<UniEvent>) -> (r: Result<
-        (),
-        u64,
-    >)
+    fn consume_control(&mut self, seg: &[u8], fin: bool, events: &mut CapVec<UniEvent>) -> (r: (
+        Result<(), u64>,
+        Ghost<nat>,
+    ))
         requires
-            live_s(*old(self)),
+            wf_live(*old(self)),
             old(self).kind is Control,
+            old(events).wf(),
+            old(events)@.len() + seg@.len() / 3 + 1 <= old(events).cap(),
         ensures
-            consumed(*old(self), *final(self), seg@, old(events)@, final(events)@, fin, r),
+            consumed(*old(self), *final(self), seg@, old(events)@, final(events)@, fin, r.0),
+            final(events).wf(),
+            final(events).cap() == old(events).cap(),
+            r.1@ <= c_uni_frame() * old(self).buf@.len() + c_csm() * (seg@.len() + 1),
     {
         hide(rfc_control);
         hide(rfc_tail);
@@ -1403,9 +1785,12 @@ impl UniStream {
         hide(rfc_frame_header);
         hide(rfc_varint_decode);
         let mut j: usize = 0;
+        let ghost b0 = self.buf@.len();
+        let ghost mut work: nat = 0;
         proof {
             lemma_grew_refl(*self, events@);
             assert(self.all@ + seg@.take(0) =~= self.all@);
+            lemma_room_start(self.buf@.len() > 0, self.ctrl, seg@.len());
         }
         while j < seg.len()
             invariant
@@ -1414,42 +1799,32 @@ impl UniStream {
                 same_id(*old(self), *self),
                 grew(*old(self), *self, old(events)@, events@),
                 self.all@ == old(self).all@ + seg@.take(j as int),
-                live_s(*self),
+                wf_live(*self),
+                events.wf(),
+                events.cap() == old(events).cap(),
+                events@.len() + ev_room(self.buf@.len() > 0, self.ctrl, (seg@.len() - j) as nat) <= events.cap(),
+                b0 == old(self).buf@.len(),
+                work + c_uni_frame() * self.buf@.len() <= c_uni_frame() * b0 + c_csm() * j,
             decreases seg@.len() - j,
         {
             let ghost s1 = *self;
             let ghost e1 = events@;
             let ghost all1 = self.all@;
-            let settled_ok = self.settle(events);
+            let (r, Ghost(w)) = self.step(seg, j, events);
             proof {
                 lemma_grew_trans(*old(self), s1, *self, old(events)@, e1, events@);
-            }
-            let ghost s2 = *self;
-            let ghost e2 = events@;
-            let r = match settled_ok {
-                Ok(()) => self.step(seg, j, events),
-                Err(e) => {
-                    proof {
-                        lemma_grew_refl(*self, events@);
-                    }
-                    Err(e)
-                },
-            };
-            proof {
-                lemma_grew_trans(*old(self), s2, *self, old(events)@, e2, events@);
                 assert(all1 + seg@.skip(j as int) =~= old(self).all@ + seg@);
             }
             match r {
                 Err(e) => {
-                    self.all = Ghost(old(self).all@ + seg@);
                     proof {
                         assert(self.all@ + Seq::<u8>::empty() =~= self.all@);
-                        assert(rfc_uni_stream(all1 + seg@.skip(j as int), fin, self.seen0@) == (
+                        assert(rfc_uni_stream(self.all@ + Seq::empty(), fin, self.seen0@) == (
                             self.emitted@,
                             Some(e),
                         ));
                     }
-                    return Err(e);
+                    return (Err(e), Ghost(work + w + 1));
                 },
                 Ok(j2) => {
                     proof {
@@ -1458,32 +1833,14 @@ impl UniStream {
                         ));
                         assert(old(self).all@ + seg@.take(j as int) + seg@.subrange(j as int, j2 as int)
                             =~= old(self).all@ + seg@.take(j2 as int));
+                        work = work + w + 1;
                     }
                     j = j2;
                 },
             }
         }
-        let ghost s1 = *self;
-        let ghost e1 = events@;
         proof {
             assert(seg@.take(seg@.len() as int) =~= seg@);
-        }
-        match self.settle(events) {
-            Err(e) => {
-                proof {
-                    lemma_grew_trans(*old(self), s1, *self, old(events)@, e1, events@);
-                    assert(self.all@ + Seq::<u8>::empty() =~= self.all@);
-                    assert(rfc_uni_stream(self.all@ + Seq::empty(), fin, self.seen0@) == (
-                        self.emitted@,
-                        Some(e),
-                    ));
-                }
-                return Err(e);
-            },
-            Ok(()) => {},
-        }
-        proof {
-            lemma_grew_trans(*old(self), s1, *self, old(events)@, e1, events@);
             assert(self.buf@ + Seq::<u8>::empty() =~= self.buf@);
             assert(self.all@ + Seq::<u8>::empty() =~= self.all@);
             assert(rfc_uni_stream(self.all@ + Seq::empty(), fin, self.seen0@) == prepend(
@@ -1493,122 +1850,177 @@ impl UniStream {
             assert(self.emitted@ + Seq::<SpecUniEvent>::empty() =~= self.emitted@);
         }
         if fin {
-            return Err(H3_CLOSED_CRITICAL_STREAM);
+            return (Err(H3_CLOSED_CRITICAL_STREAM), Ghost(work + 1));
         }
-        Ok(())
+        (Ok(()), Ghost(work + 1))
     }
 
-    /// One step of progress through `seg[j..]` once `buf` is settled.
-    fn step(&mut self, seg: &[u8], j: usize, events: &mut Vec<UniEvent>) -> (r: Result<
-        usize,
-        u64,
-    >)
+    /// One step of progress through `seg[j..]`: discard a skipped payload, parse frames straight from `seg` when
+    /// nothing is held, or top up the held frame and settle it.
+    fn step(&mut self, seg: &[u8], j: usize, events: &mut CapVec<UniEvent>) -> (r: (
+        Result<usize, u64>,
+        Ghost<nat>,
+    ))
         requires
-            ready(*old(self)),
+            wf_live(*old(self)),
             old(self).kind is Control,
             j < seg@.len(),
+            old(events).wf(),
+            old(events)@.len() + ev_room(old(self).buf@.len() > 0, old(self).ctrl, (seg@.len() - j) as nat)
+                <= old(events).cap(),
         ensures
             same_id(*old(self), *final(self)),
             grew(*old(self), *final(self), old(events)@, final(events)@),
-            match r {
+            final(self).buf.wf(),
+            final(events).wf(),
+            final(events).cap() == old(events).cap(),
+            match r.0 {
                 Ok(j2) => {
                     &&& j < j2 <= seg@.len()
                     &&& final(self).all@ == old(self).all@ + seg@.subrange(j as int, j2 as int)
-                    &&& live_s(*final(self))
+                    &&& wf_live(*final(self))
+                    &&& final(events)@.len() + ev_room(
+                        final(self).buf@.len() > 0,
+                        final(self).ctrl,
+                        (seg@.len() - j2) as nat,
+                    ) <= final(events).cap()
+                    &&& r.1@ + c_uni_frame() * final(self).buf@.len() <= c_uni_frame() * old(self).buf@.len()
+                        + c_stp() * (j2 - j)
                 },
                 Err(e) => {
                     &&& final(self).all@ == old(self).all@ + seg@.skip(j as int)
                     &&& dead_with(*final(self), e)
+                    &&& r.1@ <= c_uni_frame() * old(self).buf@.len() + c_stp() * (seg@.len() - j)
                 },
             },
     {
         if self.skip > 0 {
-            let j2 = self.discard(seg, j);
+            let (j2, Ghost(w)) = self.discard(seg, j);
             proof {
                 lemma_grew_refl(*self, events@);
+                lemma_live_empty(*self);
             }
-            Ok(j2)
+            (Ok(j2), Ghost(w))
         } else if self.buf.len() == 0 {
-            let r = self.parse_direct(seg, j, events);
+            let (r, Ghost(w)) = self.parse_direct(seg, j, events);
             proof {
                 assert(seg@.skip(j as int) =~= seg@.subrange(j as int, seg@.len() as int));
             }
+            proof {
+                events.lemma_wf();
+            }
             match r {
-                Ok(()) => Ok(seg.len()),
-                Err(e) => Err(e),
+                Ok(()) => (Ok(seg.len()), Ghost(w)),
+                Err(e) => (Err(e), Ghost(w)),
             }
         } else {
-            let j2 = self.top_up(seg, j);
+            let ghost st0 = self.ctrl;
+            let ghost l0 = events@.len();
+            let ghost rem = (seg@.len() - j) as nat;
+            let (j2, Ghost(wt)) = self.top_up(seg, j);
+            let ghost all2 = self.all@;
+            let ghost bl2 = self.buf@.len();
+            let (r, Ghost(ws)) = self.settle(events);
             proof {
-                lemma_grew_refl(*self, events@);
+                lemma_room_settle(
+                    l0,
+                    events@.len(),
+                    events.cap(),
+                    st0,
+                    self.ctrl,
+                    rem,
+                    (j2 - j) as nat,
+                    self.buf@.len() > 0,
+                );
             }
-            Ok(j2)
+            match r {
+                Ok(()) => (Ok(j2), Ghost(wt + ws)),
+                Err(e) => {
+                    let ghost t = seg@.skip(j2 as int);
+                    self.all = Ghost(all2 + t);
+                    proof {
+                        assert(old(self).all@ + seg@.subrange(j as int, j2 as int) + t =~= old(self).all@
+                            + seg@.skip(j as int));
+                        assert forall|u: Seq<u8>, f: bool| #[trigger]
+                            rfc_uni_stream(self.all@ + u, f, self.seen0@) == (self.emitted@, Some(e)) by {
+                            assert(all2 + (t + u) =~= self.all@ + u);
+                            assert(rfc_uni_stream(all2 + (t + u), f, self.seen0@) == (self.emitted@, Some(e)));
+                        }
+                    }
+                    (Err(e), Ghost(wt + ws))
+                },
+            }
         }
     }
 
-    /// Consumes the frames `buf` completes (a no-op while skipping or when `buf` is empty).
-    fn settle(&mut self, events: &mut Vec<UniEvent>) -> (r: Result<(), u64>)
+    /// Consumes the frame the held bytes complete, if any: they hold at most one frame (`at_most_one`).
+    fn settle(&mut self, events: &mut CapVec<UniEvent>) -> (r: (Result<(), u64>, Ghost<nat>))
         requires
             live_s(*old(self)),
             old(self).kind is Control,
+            old(self).skip == 0,
+            at_most_one(old(self).buf@),
+            old(events).wf(),
+            old(events)@.len() < old(events).cap(),
         ensures
             same_id(*old(self), *final(self)),
             grew(*old(self), *final(self), old(events)@, final(events)@),
             final(self).all@ == old(self).all@,
-            match r {
-                Ok(()) => ready(*final(self)),
-                Err(e) => dead_with(*final(self), e),
+            final(self).buf.wf(),
+            final(events).wf(),
+            final(events).cap() == old(events).cap(),
+            final(events)@.len() <= old(events)@.len() + 1,
+            final(events)@.len() > old(events)@.len() ==> final(self).buf@.len() == 0 && tok(final(self).ctrl)
+                == 0,
+            tok(final(self).ctrl) <= tok(old(self).ctrl),
+            match r.0 {
+                Ok(()) => {
+                    &&& wf_live(*final(self))
+                    &&& r.1@ + c_uni_frame() * final(self).buf@.len() <= c_uni_frame() * old(self).buf@.len()
+                        + c_set()
+                },
+                Err(e) => {
+                    &&& dead_with(*final(self), e)
+                    &&& r.1@ <= c_uni_frame() * old(self).buf@.len() + c_set()
+                },
             },
     {
-        proof {
-            lemma_grew_refl(*self, events@);
-        }
-        if self.skip > 0 || self.buf.len() == 0 {
-            proof {
-                lemma_settled_empty(self.ctrl, self.skip);
-                assert(self.buf@ =~= Seq::<u8>::empty());
-            }
-            return Ok(());
-        }
         let ghost ev0 = events@;
         let ghost b = self.buf@;
         let ghost st1 = self.ctrl;
         let ghost e1 = self.emitted@;
-        let res = control_frames(self.buf.as_slice(), &mut self.ctrl, events);
-        self.emitted = Ghost(e1 + views(events@.skip(ev0.len() as int)));
+        let (res, Ghost(wc)) = control_frame(self.buf.as_slice(), &mut self.ctrl, events);
+        let ghost mine = views(events@.skip(ev0.len() as int));
+        self.emitted = Ghost(e1 + mine);
         match res {
             Err(e) => {
                 proof {
-                    lemma_settle_err(self.all@, self.seen0@, e1, st1, b, views(events@.skip(ev0.len() as int)), e);
+                    assert(events@.skip(ev0.len() as int) =~= Seq::<UniEvent>::empty());
+                    assert(views(Seq::<UniEvent>::empty()) =~= Seq::<SpecUniEvent>::empty());
+                    lemma_settle_err(self.all@, self.seen0@, e1, st1, b, mine, e);
                 }
-                Err(e)
+                (Err(e), Ghost(wc + 1))
             },
-            Ok((n, s)) => {
-                if n > 0 {
-                    self.buf = slice_to_vec(slice_subrange(self.buf.as_slice(), n, self.buf.len()));
+            Ok((k, s)) => {
+                proof {
+                    if k == 0 || s > 0 {
+                        assert(events@.skip(ev0.len() as int) =~= Seq::<UniEvent>::empty());
+                        assert(views(Seq::<UniEvent>::empty()) =~= Seq::<SpecUniEvent>::empty());
+                    }
+                    lemma_settle_one(self.all@, self.seen0@, e1, st1, b, mine, self.ctrl, k as nat, s);
                 }
+                let Ghost(wd) = self.buf.drop_front(k);
                 self.skip = s;
                 proof {
-                    assert(b.skip(n as int) =~= self.buf@);
-                    lemma_settle(
-                        self.all@,
-                        self.seen0@,
-                        e1,
-                        st1,
-                        b,
-                        views(events@.skip(ev0.len() as int)),
-                        self.ctrl,
-                        s,
-                        n as nat,
-                    );
+                    assert(self.buf@ == b.skip(k as int));
                 }
-                Ok(())
+                (Ok(()), Ghost(wc + wd + 1))
             },
         }
     }
 
     /// Discards the next bytes of `seg` that belong to a skipped unknown payload.
-    fn discard(&mut self, seg: &[u8], j: usize) -> (r: usize)
+    fn discard(&mut self, seg: &[u8], j: usize) -> (r: (usize, Ghost<nat>))
         requires
             live_s(*old(self)),
             old(self).kind is Control,
@@ -1617,9 +2029,12 @@ impl UniStream {
         ensures
             same_id(*old(self), *final(self)),
             final(self).emitted@ == old(self).emitted@,
-            j < r <= seg@.len(),
-            final(self).all@ == old(self).all@ + seg@.subrange(j as int, r as int),
+            final(self).buf == old(self).buf,
+            final(self).ctrl == old(self).ctrl,
+            j < r.0 <= seg@.len(),
+            final(self).all@ == old(self).all@ + seg@.subrange(j as int, r.0 as int),
             live_s(*final(self)),
+            r.1@ <= 1,
     {
         let avail = seg.len() - j;
         let d: usize = if self.skip < avail as u64 {
@@ -1650,41 +2065,57 @@ impl UniStream {
                 lemma_skip_discard(skip1, self.ctrl, p, d as nat, t, f);
             }
         }
-        j + d
+        (j + d, Ghost(1))
     }
 
-    /// With nothing pending, parses frames straight from `seg[j..]` and keeps only its tail.
-    fn parse_direct(&mut self, seg: &[u8], j: usize, events: &mut Vec<UniEvent>) -> (r: Result<
-        (),
-        u64,
-    >)
+    /// With nothing held, parses frames straight from `seg[j..]` and keeps only its incomplete tail.
+    fn parse_direct(&mut self, seg: &[u8], j: usize, events: &mut CapVec<UniEvent>) -> (r: (
+        Result<(), u64>,
+        Ghost<nat>,
+    ))
         requires
             live_s(*old(self)),
             old(self).kind is Control,
             old(self).skip == 0,
             old(self).buf@.len() == 0,
-            j <= seg@.len(),
+            j < seg@.len(),
+            old(events).wf(),
+            old(events)@.len() + ((seg@.len() - j) as nat + tok(old(self).ctrl)) / 3 <= old(events).cap(),
         ensures
             same_id(*old(self), *final(self)),
             grew(*old(self), *final(self), old(events)@, final(events)@),
             final(self).all@ == old(self).all@ + seg@.skip(j as int),
-            match r {
-                Ok(()) => live_s(*final(self)),
-                Err(e) => dead_with(*final(self), e),
+            final(self).buf.wf(),
+            final(events).wf(),
+            final(events).cap() == old(events).cap(),
+            match r.0 {
+                Ok(()) => {
+                    &&& wf_live(*final(self))
+                    &&& r.1@ + c_uni_frame() * final(self).buf@.len() <= c_stp() * (seg@.len() - j)
+                },
+                Err(e) => {
+                    &&& dead_with(*final(self), e)
+                    &&& r.1@ <= c_stp() * (seg@.len() - j)
+                },
             },
     {
+        hide(rfc_uni_stream);
+        hide(rfc_control);
+        hide(rfc_frame_header);
         let s = slice_subrange(seg, j, seg.len());
         let ghost ev0 = events@;
         let ghost all1 = self.all@;
         let ghost buf1 = self.buf@;
         let ghost st1 = self.ctrl;
         let ghost e1 = self.emitted@;
-        let res = control_frames(s, &mut self.ctrl, events);
+        proof {
+            assert(s@ =~= seg@.skip(j as int));
+        }
+        let (res, Ghost(wc)) = control_frames(s, &mut self.ctrl, events);
         self.emitted = Ghost(e1 + views(events@.skip(ev0.len() as int)));
         self.all = Ghost(self.all@ + s@);
         let ghost mine = views(events@.skip(ev0.len() as int));
         proof {
-            assert(s@ =~= seg@.skip(j as int));
             assert forall|t: Seq<u8>, f: bool|
                 #![trigger rfc_uni_stream(self.all@ + t, f, self.seen0@)]
                 rfc_uni_stream(self.all@ + t, f, self.seen0@) == prepend(
@@ -1701,12 +2132,14 @@ impl UniStream {
             }
         }
         match res {
-            Err(e) => Err(e),
+            Err(e) => (Err(e), Ghost(wc + 1)),
             Ok((n, sk)) => {
-                self.buf = slice_to_vec(slice_subrange(s, n, s.len()));
+                let tail = slice_subrange(s, n, s.len());
+                let Ghost(wp) = self.buf.push_slice(tail);
                 self.skip = sk;
                 proof {
-                    assert(s@.subrange(n as int, s@.len() as int) =~= s@.skip(n as int));
+                    assert(tail@ =~= s@.skip(n as int));
+                    assert(self.buf@ =~= s@.skip(n as int));
                     assert forall|t: Seq<u8>, f: bool| #[trigger]
                         rfc_uni_stream(self.all@ + t, f, self.seen0@) == prepend(
                             self.emitted@,
@@ -1716,50 +2149,76 @@ impl UniStream {
                         assert(e1 + (mine + x.0) =~= self.emitted@ + x.0);
                     }
                 }
-                Ok(())
+                (Ok(()), Ghost(wc + wp + 1))
             },
         }
     }
 
-    /// Moves just enough of `seg[j..]` into `buf` to complete a pending frame (at most
-    /// UNI_BUF_CAP - buf.len() bytes).
-    fn top_up(&mut self, seg: &[u8], j: usize) -> (r: usize)
+    /// Moves just enough of `seg[j..]` into `buf` to complete its frame: one byte while the header is incomplete, then
+    /// the rest of the frame. The header is parsed from `buf`'s first 16 bytes at most (N5).
+    fn top_up(&mut self, seg: &[u8], j: usize) -> (r: (usize, Ghost<nat>))
         requires
             live_s(*old(self)),
+            old(self).kind is Control,
             old(self).skip == 0,
-            old(self).buf@.len() < UNI_BUF_CAP,
+            old(self).buf@.len() > 0,
+            one_frame(old(self).buf@),
             j < seg@.len(),
         ensures
             same_id(*old(self), *final(self)),
             final(self).emitted@ == old(self).emitted@,
-            j < r <= seg@.len(),
-            final(self).all@ == old(self).all@ + seg@.subrange(j as int, r as int),
+            final(self).ctrl == old(self).ctrl,
+            final(self).skip == old(self).skip,
+            j < r.0 <= seg@.len(),
+            final(self).all@ == old(self).all@ + seg@.subrange(j as int, r.0 as int),
+            final(self).buf@ == old(self).buf@ + seg@.subrange(j as int, r.0 as int),
             live_s(*final(self)),
+            at_most_one(final(self).buf@),
+            r.1@ <= 7 * (r.0 - j) + 21,
     {
-        let room = UNI_BUF_CAP - self.buf.len();
+        let bl = self.buf.len();
+        let q = self.buf.as_slice();
+        let m = if bl < 16 {
+            bl
+        } else {
+            16
+        };
+        let hp = slice_subrange(q, 0, m);
+        proof {
+            assert(hp@ =~= q@.take(m as int));
+            crate::request::lemma_header_take(q@, m as int);
+            lemma_frame_header_bounds(q@);
+        }
+        // The header parse reads at most 16 bytes: a constant charge on the MIR bound (expected-cost.txt:2).
+        let need: usize = match parse_frame_header(hp) {
+            FrameHeader::Incomplete => 1,
+            FrameHeader::Complete { len, hdr_len, .. } => hdr_len + len as usize - bl,
+        };
         let avail = seg.len() - j;
-        let k = if avail < room {
+        let k = if avail < need {
             avail
         } else {
-            room
+            need
         };
         let piece = slice_subrange(seg, j, j + k);
         let ghost all1 = self.all@;
         let ghost buf1 = self.buf@;
-        let mut v = slice_to_vec(piece);
-        self.buf.append(&mut v);
+        proof {
+            lemma_top_up_shape(buf1, piece@);
+        }
+        let Ghost(wp) = self.buf.push_slice(piece);
         self.all = Ghost(self.all@ + piece@);
         proof {
             lemma_split_append(all1, self.seen0@, self.emitted@, self.kind, self.ctrl, self.skip, buf1, piece@);
-            assert(self.buf@ =~= buf1 + piece@);
         }
-        j + k
+        (j + k, Ghost(wp + 17))
     }
 
-    /// QPACK streams emit no events, so only `buf` and the result change.
-    fn consume_qpack(&mut self, seg: &[u8], fin: bool) -> (r: Result<(), u64>)
+    /// QPACK streams emit no events, so only `buf` and the result change. While an instruction is held, one byte at a
+    /// time completes it (at most 11 held); then the rest is scanned in place and only its incomplete tail is kept.
+    fn consume_qpack(&mut self, seg: &[u8], fin: bool) -> (r: (Result<(), u64>, Ghost<nat>))
         requires
-            live_s(*old(self)),
+            wf_live(*old(self)),
             old(self).kind is QpackEncoder || old(self).kind is QpackDecoder,
         ensures
             final(self).all@ == old(self).all@ + seg@,
@@ -1769,84 +2228,123 @@ impl UniStream {
             final(self).emitted@ == old(self).emitted@,
             final(self).ctrl == old(self).ctrl,
             final(self).skip == old(self).skip,
+            final(self).buf.wf(),
             rfc_uni_stream(final(self).all@, fin, final(self).seen0@) == (
                 final(self).emitted@,
-                err_of(r),
+                err_of(r.0),
             ),
-            r is Ok ==> !fin && ready(*final(self)),
+            r.0 is Ok ==> !fin && wf_live(*final(self)),
+            r.1@ <= c_csm() * (seg@.len() + 1),
     {
-        let ghost em0 = self.emitted@;
         let ghost all0 = self.all@;
-        let ghost buf0 = self.buf@;
-        let mut v = slice_to_vec(seg);
-        self.buf.append(&mut v);
-        self.all = Ghost(self.all@ + seg@);
-        let ghost b = self.buf@;
+        let ghost mut work: nat = 0;
+        let mut j: usize = 0;
         proof {
-            lemma_split_append(all0, self.seen0@, em0, self.kind, self.ctrl, self.skip, buf0, seg@);
-            assert(self.all@ + Seq::<u8>::empty() =~= self.all@);
-            assert(b + Seq::<u8>::empty() =~= b);
-            assert(rfc_uni_stream(self.all@ + Seq::empty(), fin, self.seen0@) == prepend(
-                em0,
-                tail_of(self.kind, self.ctrl, self.skip, b + Seq::empty(), fin),
-            ));
-            assert(em0 + Seq::<SpecUniEvent>::empty() =~= em0);
+            assert(all0 + seg@.take(0) =~= all0);
         }
-        // Task 8 charges the scan's cost once `consume_qpack` returns its cost.
-        let (scanned, Ghost(_cs)) = if let UniKind::QpackEncoder = self.kind {
-            process_encoder_stream(self.buf.as_slice())
+        while j < seg.len() && self.buf.len() > 0
+            invariant
+                j <= seg@.len(),
+                all0 == old(self).all@,
+                self.kind == old(self).kind,
+                self.seen0@ == old(self).seen0@,
+                self.done == old(self).done,
+                self.emitted@ == old(self).emitted@,
+                self.ctrl == old(self).ctrl,
+                self.skip == old(self).skip,
+                self.kind is QpackEncoder || self.kind is QpackDecoder,
+                self.all@ == all0 + seg@.take(j as int),
+                wf_live(*self),
+                // per byte held: a 1-byte push (11), a scan of at most 12 bytes (13 * 13), `drop_front` (2) and 1
+                work <= 183 * j,
+            decreases seg@.len() - j,
+        {
+            let piece = slice_subrange(seg, j, j + 1);
+            let ghost all1 = self.all@;
+            let ghost b0 = self.buf@;
+            let Ghost(wp) = self.buf.push_slice(piece);
+            self.all = Ghost(all1 + piece@);
+            let ghost b = self.buf@;
+            proof {
+                lemma_split_append(all1, self.seen0@, self.emitted@, self.kind, self.ctrl, self.skip, b0, piece@);
+                assert(piece@ =~= seg@.subrange(j as int, j + 1));
+                assert(all0 + seg@.take(j as int) + seg@.subrange(j as int, j + 1) =~= all0 + seg@.take(j + 1));
+            }
+            let (scanned, Ghost(cs)) = if let UniKind::QpackEncoder = self.kind {
+                process_encoder_stream(self.buf.as_slice())
+            } else {
+                process_decoder_stream(self.buf.as_slice())
+            };
+            match scanned {
+                Ok(n) => {
+                    proof {
+                        lemma_qpack_keep(self.all@, self.seen0@, self.emitted@, self.kind, self.ctrl, b, n as nat);
+                    }
+                    let Ghost(wd) = self.buf.drop_front(n);
+                    proof {
+                        work = work + wp + cs + wd + 1;
+                    }
+                    j = j + 1;
+                },
+                Err(e) => {
+                    let ghost t = seg@.skip(j + 1);
+                    self.all = Ghost(all0 + seg@);
+                    proof {
+                        assert(all1 + piece@ + t =~= all0 + seg@);
+                        lemma_qpack_dead(all1 + piece@, self.seen0@, self.emitted@, self.kind, self.ctrl, b, e, t);
+                    }
+                    return (Err(e), Ghost(work + wp + cs + 1));
+                },
+            }
+        }
+        if j < seg.len() {
+            // Nothing held: scan the rest in place and keep only its incomplete tail.
+            let s = slice_subrange(seg, j, seg.len());
+            let ghost all1 = self.all@;
+            proof {
+                assert(s@ =~= seg@.skip(j as int));
+                assert(all1 + s@ =~= all0 + seg@);
+                lemma_split_append(all1, self.seen0@, self.emitted@, self.kind, self.ctrl, self.skip, self.buf@, s@);
+                assert(self.buf@ + s@ =~= s@);
+            }
+            self.all = Ghost(all0 + seg@);
+            let (scanned, Ghost(cs)) = if let UniKind::QpackEncoder = self.kind {
+                process_encoder_stream(s)
+            } else {
+                process_decoder_stream(s)
+            };
+            match scanned {
+                Ok(n) => {
+                    proof {
+                        lemma_qpack_keep(self.all@, self.seen0@, self.emitted@, self.kind, self.ctrl, s@, n as nat);
+                    }
+                    let tail = slice_subrange(s, n, s.len());
+                    let Ghost(wp) = self.buf.push_slice(tail);
+                    proof {
+                        assert(self.buf@ =~= s@.skip(n as int));
+                        work = work + cs + wp + 1;
+                    }
+                },
+                Err(e) => {
+                    proof {
+                        assert(self.all@ + Seq::<u8>::empty() =~= self.all@);
+                        lemma_qpack_dead(self.all@, self.seen0@, self.emitted@, self.kind, self.ctrl, s@, e, Seq::empty());
+                    }
+                    return (Err(e), Ghost(work + cs + 1));
+                },
+            }
         } else {
-            process_decoder_stream(self.buf.as_slice())
-        };
-        let n = match scanned {
-            Ok(n) => n,
-            Err(e) => return Err(e),
-        };
-        proof {
-            lemma_qpack_split(self.kind, self.ctrl, b, n as nat);
-        }
-        if n > 0 {
-            self.buf = slice_to_vec(slice_subrange(self.buf.as_slice(), n, self.buf.len()));
+            proof {
+                assert(seg@.take(j as int) =~= seg@);
+            }
         }
         proof {
-            assert(b.skip(n as int) =~= self.buf@);
-            assert forall|t: Seq<u8>, f: bool| #[trigger]
-                rfc_uni_stream(self.all@ + t, f, self.seen0@) == prepend(
-                    em0,
-                    tail_of(self.kind, self.ctrl, self.skip, self.buf@ + t, f),
-                ) by {
-                assert(rfc_uni_stream(self.all@ + t, f, self.seen0@) == prepend(
-                    em0,
-                    tail_of(self.kind, self.ctrl, self.skip, b + t, f),
-                ));
-                assert(rfc_tail(self.kind, self.ctrl, b + t, f) == rfc_tail(
-                    self.kind,
-                    self.ctrl,
-                    self.buf@ + t,
-                    f,
-                ));
-            }
-            assert(rfc_tail(self.kind, self.ctrl, b, fin) == rfc_tail(
-                self.kind,
-                self.ctrl,
-                self.buf@,
-                fin,
-            ));
-            assert forall|f: bool| #[trigger]
-                tail_of(self.kind, self.ctrl, self.skip, self.buf@, f) == (
-                    Seq::<SpecUniEvent>::empty(),
-                    fin_err(f),
-                ) by {
-                assert(rfc_tail(self.kind, self.ctrl, b.skip(n as int), f) == (
-                    Seq::<SpecUniEvent>::empty(),
-                    fin_err(f),
-                ));
-            }
+            lemma_qpack_end(*self, fin);
         }
         if fin {
-            return Err(H3_CLOSED_CRITICAL_STREAM);
+            return (Err(H3_CLOSED_CRITICAL_STREAM), Ghost(work + 1));
         }
-        Ok(())
+        (Ok(()), Ghost(work + 1))
     }
 }
 
@@ -1898,16 +2396,19 @@ spec fn consumed(
     &&& s1.seen0@ == s0.seen0@
     &&& s1.kind == s0.kind
     &&& s1.done == s0.done
+    &&& s1.buf.wf()
     &&& e1.len() >= e0.len()
     &&& e1.take(e0.len() as int) == e0
     &&& s1.emitted@ == s0.emitted@ + views(e1.skip(e0.len() as int))
     &&& rfc_uni_stream(s1.all@, fin, s1.seen0@) == (s1.emitted@, err_of(r))
-    &&& r is Ok ==> !fin && ready(s1)
+    &&& r is Ok ==> !fin && wf_live(s1) && s1.buf@.len() < UNI_BUF_CAP
 }
 
-/// The part of `wf` that holds while the stream takes data.
+/// The part of `wf` that holds while the stream takes data: a control stream holds at most one incomplete frame, a
+/// QPACK stream at most one incomplete instruction.
 spec fn wf_live(s: UniStream) -> bool {
-    match s.kind {
+    &&& s.buf.wf()
+    &&& match s.kind {
         UniKind::Undetermined => {
             &&& s.all@ == s.buf@
             &&& s.buf@.len() < 8
@@ -1919,12 +2420,14 @@ spec fn wf_live(s: UniStream) -> bool {
             &&& s.buf@.len() == 0
             &&& split_ok(s.all@, s.seen0@, s.emitted@, s.kind, s.ctrl, s.skip, s.buf@)
         },
-        _ => ready(s),
+        UniKind::Control => ready(s) && one_frame(s.buf@),
+        _ => ready(s) && s.buf@.len() <= 1 + PREFIX_INT_MAX_CONT,
     }
 }
 
 spec fn live_s(s: UniStream) -> bool {
-    live(s.all@, s.seen0@, s.emitted@, s.kind, s.ctrl, s.skip, s.buf@)
+    &&& s.buf.wf()
+    &&& live(s.all@, s.seen0@, s.emitted@, s.kind, s.ctrl, s.skip, s.buf@)
 }
 
 /// Live, under the cap, and nothing left in `buf` to consume.
@@ -1987,6 +2490,8 @@ proof fn lemma_settle(
     ensures
         split_ok(all, seen0, e1 + mine, UniKind::Control, st2, s, b.skip(n as int)),
 {
+    hide(rfc_uni_stream);
+    hide(rfc_control);
     assert forall|t: Seq<u8>, f: bool| #[trigger]
         rfc_uni_stream(all + t, f, seen0) == prepend(
             e1 + mine,
@@ -2059,4 +2564,282 @@ proof fn lemma_grew_trans(
         =~= s0.emitted@ + views(e2.skip(e0.len() as int)));
 }
 
+/// `wf_live` and the buffer bound do not read `done` (for callers that hide `ready`).
+proof fn lemma_set_done(s: UniStream, d: bool)
+    ensures
+        wf_live(s) == wf_live(UniStream { done: d, ..s }),
+{
+}
+
+/// A held frame or instruction gone: a live critical stream with nothing held is ready (split out for the rlimit).
+proof fn lemma_live_empty(s: UniStream)
+    requires
+        live_s(s),
+        s.buf@.len() == 0,
+        s.kind is Control || s.kind is QpackEncoder || s.kind is QpackDecoder,
+    ensures
+        wf_live(s),
+{
+    lemma_frame_header_bounds(s.buf@);
+    assert(s.buf@ =~= Seq::<u8>::empty());
+    if s.kind is Control {
+        lemma_settled_empty(s.ctrl, s.skip);
+    } else {
+        assert(rfc_encoder_stream(Seq::<u8>::empty()) == Ok::<nat, u64>(0));
+        assert(rfc_decoder_stream(Seq::<u8>::empty()) == Ok::<nat, u64>(0));
+    }
+}
+
+/// A call's event capacity covers the control stream's room at its start.
+proof fn lemma_room_start(held: bool, st: CtrlState, rem: nat)
+    ensures
+        ev_room(held, st, rem) <= rem / 3 + 1,
+{
+}
+
+/// A top-up of `k` bytes and the settle after it keep the room: the held frame's event uses its one, and a frame
+/// completed leaves `tok` spent.
+proof fn lemma_room_settle(
+    l0: nat,
+    l1: nat,
+    cap: nat,
+    st0: CtrlState,
+    st1: CtrlState,
+    rem: nat,
+    k: nat,
+    held1: bool,
+)
+    requires
+        l0 + ev_room(true, st0, rem) <= cap,
+        1 <= k <= rem,
+        l1 <= l0 + 1,
+        l1 > l0 ==> !held1 && tok(st1) == 0,
+        tok(st1) <= tok(st0),
+    ensures
+        l1 + ev_room(held1, st1, (rem - k) as nat) <= cap,
+{
+}
+
+/// One `control_frame` over the held bytes, which hold at most one frame: what it consumed is all of them or none,
+/// and `split_ok` moves past it (split out of `settle` for the rlimit).
+proof fn lemma_settle_one(
+    all: Seq<u8>,
+    seen0: SeenUni,
+    e1: Seq<SpecUniEvent>,
+    st1: CtrlState,
+    b: Seq<u8>,
+    mine: Seq<SpecUniEvent>,
+    st2: CtrlState,
+    k: nat,
+    s: u64,
+)
+    requires
+        split_ok(all, seen0, e1, UniKind::Control, st1, 0, b),
+        at_most_one(b),
+        k <= b.len(),
+        k == 0 ==> {
+            &&& s == 0
+            &&& mine == Seq::<SpecUniEvent>::empty()
+            &&& st2 == st1
+            &&& one_frame(b)
+            &&& b.len() < UNI_BUF_CAP
+            &&& forall|f: bool| #[trigger] rfc_control(b, st1, f) == (Seq::<SpecUniEvent>::empty(), fin_err(f))
+        },
+        k > 0 && s == 0 ==> ctrl_split(b, st1, mine, b.skip(k as int), st2),
+        k > 0 && s == 0 ==> (rfc_frame_header(b) matches Some((h, _, len)) && k == h + len),
+        s > 0 ==> {
+            &&& k == b.len()
+            &&& mine == Seq::<SpecUniEvent>::empty()
+            &&& st2 == st1
+            &&& forall|t: Seq<u8>, f: bool| #[trigger] rfc_control(b + t, st1, f) == skipping(s, st1, t, f)
+        },
+    ensures
+        k > 0 ==> k == b.len(),
+        split_ok(all, seen0, e1 + mine, UniKind::Control, st2, s, b.skip(k as int)),
+        settled(UniKind::Control, st2, s, b.skip(k as int)),
+        one_frame(b.skip(k as int)),
+        b.skip(k as int).len() < UNI_BUF_CAP,
+        s > 0 ==> b.skip(k as int).len() == 0,
+{
+    assert forall|t: Seq<u8>, f: bool| #[trigger]
+        rfc_control(b + t, st1, f) == prepend(mine, skipping(s, st2, b.skip(k as int) + t, f)) by {
+        if k == 0 {
+            assert(b.skip(0) =~= b);
+            lemma_skipping_zero(st1, b + t, f);
+            let x = rfc_control(b + t, st1, f);
+            assert(Seq::<SpecUniEvent>::empty() + x.0 =~= x.0);
+        } else if s == 0 {
+            lemma_skipping_zero(st2, b.skip(k as int) + t, f);
+        } else {
+            assert(b.skip(k as int) + t =~= t);
+            let x = skipping(s, st1, t, f);
+            assert(Seq::<SpecUniEvent>::empty() + x.0 =~= x.0);
+        }
+    }
+    lemma_settle(all, seen0, e1, st1, b, mine, st2, s, k);
+    if k == 0 {
+        assert(b.skip(0) =~= b);
+        assert forall|f: bool| #[trigger]
+            tail_of(UniKind::Control, st2, s, b.skip(k as int), f) == (Seq::<SpecUniEvent>::empty(), fin_err(f)) by {
+            lemma_skipping_zero(st2, b, f);
+        }
+    } else {
+        assert(b.skip(k as int) =~= Seq::<u8>::empty());
+        lemma_settled_empty(st2, s);
+        lemma_frame_header_bounds(Seq::<u8>::empty());
+    }
+}
+
+/// A top-up keeps at most one frame held: one byte onto an incomplete header ends any header it completes, and the
+/// rest of a frame ends it (split out of `top_up` for the rlimit).
+proof fn lemma_top_up_shape(b: Seq<u8>, p: Seq<u8>)
+    requires
+        one_frame(b),
+        b.len() > 0,
+        p.len() >= 1,
+        rfc_frame_header(b) is None ==> p.len() == 1,
+        rfc_frame_header(b) matches Some((h, _, len)) ==> b.len() + p.len() <= h + len,
+    ensures
+        at_most_one(b + p),
+        (b + p).len() <= UNI_BUF_CAP,
+{
+    lemma_frame_header_bounds(b);
+    let c = b + p;
+    if rfc_frame_header(b) is Some {
+        lemma_frame_header_prefix(b, p);
+    } else {
+        lemma_frame_header_bounds(c);
+        if let Some((h, _, _)) = rfc_frame_header(c) {
+            if h <= b.len() {
+                crate::request::lemma_header_cover(c, b.len() as int);
+                assert(c.take(b.len() as int) =~= b);
+            }
+        }
+    }
+}
+
+/// A QPACK scan of the held bytes `b` that consumed `n`: `split_ok` moves past the complete instructions, and at most
+/// one incomplete one (11 bytes) stays held.
+proof fn lemma_qpack_keep(
+    all: Seq<u8>,
+    seen0: SeenUni,
+    em: Seq<SpecUniEvent>,
+    k: UniKind,
+    st: CtrlState,
+    b: Seq<u8>,
+    n: nat,
+)
+    requires
+        split_ok(all, seen0, em, k, st, 0, b),
+        k is QpackEncoder || k is QpackDecoder,
+        k is QpackEncoder ==> rfc_encoder_stream(b) == Ok::<nat, u64>(n),
+        k is QpackDecoder ==> rfc_decoder_stream(b) == Ok::<nat, u64>(n),
+    ensures
+        n <= b.len(),
+        b.len() - n <= 1 + PREFIX_INT_MAX_CONT,
+        split_ok(all, seen0, em, k, st, 0, b.skip(n as int)),
+        settled(k, st, 0, b.skip(n as int)),
+{
+    lemma_qpack_split(k, st, b, n);
+    assert forall|t: Seq<u8>, f: bool| #[trigger]
+        rfc_uni_stream(all + t, f, seen0) == prepend(em, tail_of(k, st, 0, b.skip(n as int) + t, f)) by {
+        assert(rfc_uni_stream(all + t, f, seen0) == prepend(em, tail_of(k, st, 0, b + t, f)));
+    }
+}
+
+/// A QPACK scan of the held bytes `b` that failed: the stream fails with that error whatever follows (split out of
+/// `consume_qpack` for the rlimit).
+proof fn lemma_qpack_dead(
+    all: Seq<u8>,
+    seen0: SeenUni,
+    em: Seq<SpecUniEvent>,
+    k: UniKind,
+    st: CtrlState,
+    b: Seq<u8>,
+    e: u64,
+    t: Seq<u8>,
+)
+    requires
+        split_ok(all, seen0, em, k, st, 0, b),
+        k is QpackEncoder || k is QpackDecoder,
+        k is QpackEncoder ==> rfc_encoder_stream(b) == Err::<nat, u64>(e),
+        k is QpackDecoder ==> rfc_decoder_stream(b) == Err::<nat, u64>(e),
+    ensures
+        forall|f: bool| #[trigger] rfc_uni_stream(all + t, f, seen0) == (em, Some(e)),
+{
+    if k is QpackEncoder {
+        lemma_encoder_stream_err(b, t);
+    } else {
+        lemma_decoder_stream_err(b, t);
+    }
+    assert forall|f: bool| #[trigger] rfc_uni_stream(all + t, f, seen0) == (em, Some(e)) by {
+        assert(rfc_uni_stream(all + t, f, seen0) == prepend(em, tail_of(k, st, 0, b + t, f)));
+        assert(em + Seq::<SpecUniEvent>::empty() =~= em);
+    }
+}
+
+/// A ready stream's bytes so far: its events, and the error a FIN gives.
+proof fn lemma_qpack_end(s: UniStream, fin: bool)
+    requires
+        ready(s),
+    ensures
+        rfc_uni_stream(s.all@, fin, s.seen0@) == (s.emitted@, fin_err(fin)),
+{
+    assert(s.all@ + Seq::<u8>::empty() =~= s.all@);
+    assert(s.buf@ + Seq::<u8>::empty() =~= s.buf@);
+    assert(rfc_uni_stream(s.all@ + Seq::empty(), fin, s.seen0@) == prepend(
+        s.emitted@,
+        tail_of(s.kind, s.ctrl, s.skip, s.buf@ + Seq::empty(), fin),
+    ));
+    assert(s.emitted@ + Seq::<SpecUniEvent>::empty() =~= s.emitted@);
+}
+
+/// An encoder-stream error is decided by the bytes so far: what follows does not change it.
+proof fn lemma_encoder_stream_err(b: Seq<u8>, t: Seq<u8>)
+    requires
+        rfc_encoder_stream(b) is Err,
+    ensures
+        rfc_encoder_stream(b + t) == rfc_encoder_stream(b),
+    decreases b.len(),
+{
+    assert((b + t)[0] == b[0]);
+    if b[0] & 0xE0u8 == 0x20u8 {
+        lemma_prefix_int_settled(5, b, t);
+        if let PrefixIntSpec::Value { value, consumed: c } = rfc_prefix_int(5, b) {
+            if value == 0 {
+                lemma_prefix_int_consumed(5, b);
+                assert((b + t).skip(c as int) =~= b.skip(c as int) + t);
+                lemma_encoder_stream_err(b.skip(c as int), t);
+            }
+        }
+    }
+}
+
+/// A decoder-stream error is decided by the bytes so far: what follows does not change it.
+proof fn lemma_decoder_stream_err(b: Seq<u8>, t: Seq<u8>)
+    requires
+        rfc_decoder_stream(b) is Err,
+    ensures
+        rfc_decoder_stream(b + t) == rfc_decoder_stream(b),
+    decreases b.len(),
+{
+    assert((b + t)[0] == b[0]);
+    if b[0] & 0xC0u8 == 0x40u8 {
+        lemma_prefix_int_settled(6, b, t);
+        if let PrefixIntSpec::Value { value: _, consumed: c } = rfc_prefix_int(6, b) {
+            lemma_prefix_int_consumed(6, b);
+            assert((b + t).skip(c as int) =~= b.skip(c as int) + t);
+            lemma_decoder_stream_err(b.skip(c as int), t);
+        }
+    }
+}
+
 } // verus!
+
+impl UniStream {
+    /// Test support: the held-byte queue's buffer capacities (`ByteQueue::caps`).
+    #[doc(hidden)]
+    pub fn buf_caps(&self) -> (usize, usize) {
+        self.buf.caps()
+    }
+}

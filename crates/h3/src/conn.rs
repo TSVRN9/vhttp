@@ -2430,6 +2430,20 @@ pub open spec fn pairs_fs(p: Seq<(u64, u64)>, cur: Option<u64>) -> Option<u64>
     }
 }
 
+/// The SETTINGS pairs in the uni-stream events `e` (`apply_settings` visits each once).
+pub open spec fn ev_pairs(e: Seq<SpecUniEvent>) -> nat
+    decreases e.len(),
+{
+    if e.len() == 0 {
+        0
+    } else {
+        match e.last() {
+            SpecUniEvent::PeerSettings(p) => ev_pairs(e.drop_last()) + p.len(),
+            _ => ev_pairs(e.drop_last()),
+        }
+    }
+}
+
 /// The peer's MAX_FIELD_SECTION_SIZE after its uni-stream events `e`, starting from `cur`.
 pub open spec fn events_fs(e: Seq<SpecUniEvent>, cur: Option<u64>) -> Option<u64>
     decreases e.len(),
@@ -3326,8 +3340,10 @@ impl H3Conn {
             },
         };
         let ghost e_old = e;
-        let mut evs: Vec<UniEvent> = Vec::new();
-        let r = e.stream.on_data(data, fin, &mut self.seen, &mut evs);
+        let mut evs: CapVec<UniEvent> = CapVec::new(data.len() / 3 + 1);
+        // Task 11 charges `on_data`'s and `apply_settings`' costs, and the frees of `evs` (with its SETTINGS vectors) and
+        // of a stream dropped here (on an error or a FIN), once `uni_data` returns its cost.
+        let (r, Ghost(_cu)) = e.stream.on_data(data, fin, &mut self.seen, &mut evs);
         self.uhist = Ghost(self.uhist@.insert(id, uni_hist_of(e)));
         proof {
             assert(evs@.skip(0) =~= evs@);
@@ -3341,7 +3357,7 @@ impl H3Conn {
                 self.close(c, out);
             },
             Ok(()) => {
-                self.apply_settings(&evs);
+                let Ghost(_ca) = self.apply_settings(&evs);
                 if !fin {
                     match found {
                         Some(i) => {
@@ -3391,12 +3407,14 @@ impl H3Conn {
     //# extensible protocol elements.
     /// Records the peer's SETTINGS_MAX_FIELD_SECTION_SIZE (the last one); every other identifier
     /// is ignored (the QPACK settings don't matter with a dynamic table of capacity 0).
-    fn apply_settings(&mut self, evs: &Vec<UniEvent>)
+    fn apply_settings(&mut self, evs: &CapVec<UniEvent>) -> (r: Ghost<nat>)
         ensures
             final(self).peer_max == events_fs(uni::views(evs@), old(self).peer_max),
             *final(self) == (H3Conn { peer_max: final(self).peer_max, ..*old(self) }),
+            r@ <= 1 + evs@.len() + ev_pairs(uni::views(evs@)),
     {
         let ghost ev = uni::views(evs@);
+        let ghost mut work: nat = 1;
         let mut k: usize = 0;
         proof {
             assert(ev.take(0) =~= Seq::<SpecUniEvent>::empty());
@@ -3407,14 +3425,16 @@ impl H3Conn {
                 ev == uni::views(evs@),
                 *self == (H3Conn { peer_max: self.peer_max, ..*old(self) }),
                 self.peer_max == events_fs(ev.take(k as int), old(self).peer_max),
+                work <= 1 + k + ev_pairs(ev.take(k as int)),
             decreases evs@.len() - k,
         {
             let ghost before = self.peer_max;
+            let ghost w0 = work;
             proof {
                 assert(ev.take(k + 1).drop_last() =~= ev.take(k as int));
                 assert(ev.take(k + 1).last() == evs@[k as int]@);
             }
-            if let UniEvent::PeerSettings(v) = &evs[k] {
+            if let UniEvent::PeerSettings(v) = evs.index(k) {
                 let mut j: usize = 0;
                 proof {
                     assert(v@.take(0) =~= Seq::<(u64, u64)>::empty());
@@ -3424,6 +3444,7 @@ impl H3Conn {
                         j <= v@.len(),
                         *self == (H3Conn { peer_max: self.peer_max, ..*old(self) }),
                         self.peer_max == pairs_fs(v@.take(j as int), before),
+                        work == w0 + j,
                     decreases v@.len() - j,
                 {
                     let (s, x) = v[j];
@@ -3435,16 +3456,23 @@ impl H3Conn {
                         self.peer_max = Some(x);
                     }
                     j += 1;
+                    proof {
+                        work = work + 1;
+                    }
                 }
                 proof {
                     assert(v@.take(v@.len() as int) =~= v@);
                 }
             }
             k += 1;
+            proof {
+                work = work + 1;
+            }
         }
         proof {
             assert(ev.take(evs@.len() as int) =~= ev);
         }
+        Ghost(work)
     }
 
     /// Closes our sending part of request entry `i`; the entry is dropped if the request has

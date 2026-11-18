@@ -1,3 +1,4 @@
+use byteq::capvec::CapVec;
 use h3::codes::*;
 use h3::uni::*;
 
@@ -7,9 +8,14 @@ fn fresh() -> SeenUni {
 
 fn run_with(bytes: &[u8], fin: bool, seen: &mut SeenUni) -> (Result<(), u64>, Vec<UniEvent>) {
     let mut s = UniStream::new();
-    let mut ev = Vec::new();
-    let r = s.on_data(bytes, fin, seen, &mut ev);
-    (r, ev)
+    let mut ev = CapVec::new(bytes.len() / 3 + 1);
+    let r = s.on_data(bytes, fin, seen, &mut ev).0;
+    (r, ev.into_vec())
+}
+
+/// Room for every event of a multi-call test (each call needs `d / 3 + 1` free).
+fn evs() -> CapVec<UniEvent> {
+    CapVec::new(4096)
 }
 
 fn run(bytes: &[u8], fin: bool) -> (Result<(), u64>, Vec<UniEvent>) {
@@ -63,11 +69,11 @@ fn control_rejects_from_header_alone() {
 fn stream_types() {
     assert_eq!(run(&[0x01], false).0, Err(H3_STREAM_CREATION_ERROR));
     let mut s = UniStream::new();
-    let mut ev = Vec::new();
+    let mut ev = evs();
     let mut seen = fresh();
-    assert_eq!(s.on_data(&[0x21, 0xff, 0xff], false, &mut seen, &mut ev), Ok(()));
-    assert_eq!(s.on_data(&[0x00, 0x07, 0x09], true, &mut seen, &mut ev), Ok(()));
-    assert!(ev.is_empty() && !seen.control);
+    assert_eq!(s.on_data(&[0x21, 0xff, 0xff], false, &mut seen, &mut ev).0, Ok(()));
+    assert_eq!(s.on_data(&[0x00, 0x07, 0x09], true, &mut seen, &mut ev).0, Ok(()));
+    assert!(ev.len() == 0 && !seen.control);
     let mut seen = fresh();
     assert_eq!(run_with(&[0x02, 0x20], false, &mut seen).0, Ok(()));
     assert!(seen.encoder);
@@ -75,9 +81,9 @@ fn stream_types() {
     assert_eq!(run(&[0x02, 0x3f, 0xbd, 0x01], false).0, Err(QPACK_ENCODER_STREAM_ERROR));
     let mut s = UniStream::new();
     let mut seen = fresh();
-    assert_eq!(s.on_data(&[0x03], false, &mut seen, &mut ev), Ok(()));
+    assert_eq!(s.on_data(&[0x03], false, &mut seen, &mut ev).0, Ok(()));
     assert!(seen.decoder);
-    assert_eq!(s.on_data(&[], true, &mut seen, &mut ev), Err(H3_CLOSED_CRITICAL_STREAM));
+    assert_eq!(s.on_data(&[], true, &mut seen, &mut ev).0, Err(H3_CLOSED_CRITICAL_STREAM));
     // A stream closed before its type arrives is not an error.
     assert_eq!(run(&[], true).0, Ok(()));
     assert_eq!(run(&[0x40], true).0, Ok(()));
@@ -94,18 +100,18 @@ fn chunking() {
     let want = vec![UniEvent::PeerSettings(vec![(6, 1), (0x21, 0)]), UniEvent::PeerGoaway(8)];
     assert_eq!(run(&stream, false), (Ok(()), want));
     let mut s = UniStream::new();
-    let mut ev = Vec::new();
+    let mut ev = evs();
     let mut seen = fresh();
     for b in stream.iter() {
-        assert_eq!(s.on_data(&[*b], false, &mut seen, &mut ev), Ok(()));
+        assert_eq!(s.on_data(&[*b], false, &mut seen, &mut ev).0, Ok(()));
     }
-    assert_eq!(ev, run(&stream, false).1);
+    assert_eq!(ev.as_slice(), &run(&stream, false).1[..]);
     // Encoder stream split mid-instruction (0x3f 0xe1 0x1f is capacity 4000 > 0).
     let mut s = UniStream::new();
     let mut seen = fresh();
-    assert_eq!(s.on_data(&[0x02, 0x20, 0x3f], false, &mut seen, &mut ev), Ok(()));
-    assert_eq!(s.on_data(&[0xe1], false, &mut seen, &mut ev), Ok(()));
-    assert_eq!(s.on_data(&[0x1f], false, &mut seen, &mut ev), Err(QPACK_ENCODER_STREAM_ERROR));
+    assert_eq!(s.on_data(&[0x02, 0x20, 0x3f], false, &mut seen, &mut ev).0, Ok(()));
+    assert_eq!(s.on_data(&[0xe1], false, &mut seen, &mut ev).0, Ok(()));
+    assert_eq!(s.on_data(&[0x1f], false, &mut seen, &mut ev).0, Err(QPACK_ENCODER_STREAM_ERROR));
 }
 
 #[test]
@@ -118,13 +124,41 @@ fn large_unknown_frame_skipped() {
     assert_eq!(run(&stream, false), (Ok(()), want()));
     for size in [1000, 1, 7] {
         let mut s = UniStream::new();
-        let mut ev = Vec::new();
+        let mut ev = evs();
         let mut seen = fresh();
         for c in stream.chunks(size) {
-            assert_eq!(s.on_data(c, false, &mut seen, &mut ev), Ok(()));
+            assert_eq!(s.on_data(c, false, &mut seen, &mut ev).0, Ok(()));
         }
-        assert_eq!(ev, want());
+        assert_eq!(ev.as_slice(), &want()[..]);
     }
     // A FIN while skipping is still a closed critical stream.
     assert_eq!(run(&stream[..100], true).0, Err(H3_CLOSED_CRITICAL_STREAM));
+}
+
+#[test]
+fn qpack_instruction_split_frees() {
+    // A decoder-stream Stream Cancellation (0x7F, then continuation bytes) cut across calls: the queue holds the
+    // incomplete instruction only, and frees both buffers once it completes.
+    let mut s = UniStream::new();
+    let mut seen = fresh();
+    let mut ev = evs();
+    assert_eq!(s.on_data(&[0x03, 0x7F], false, &mut seen, &mut ev).0, Ok(()));
+    assert_eq!(s.buffered_len(), 1);
+    assert_eq!(s.on_data(&[0x80], false, &mut seen, &mut ev).0, Ok(()));
+    assert_eq!(s.buffered_len(), 2);
+    assert_eq!(s.on_data(&[0x01, 0x7F], false, &mut seen, &mut ev).0, Ok(()));
+    assert_eq!(s.buffered_len(), 1);
+    assert_eq!(s.on_data(&[0x05], false, &mut seen, &mut ev).0, Ok(()));
+    assert_eq!(s.buffered_len(), 0);
+    assert_eq!(s.buf_caps(), (0, 0));
+    // The longest incomplete instruction: 0x7F and 10 continuation bytes, one per call, 11 held; an 11th is too large.
+    let mut s = UniStream::new();
+    let mut seen = fresh();
+    assert_eq!(s.on_data(&[0x03, 0x7F], false, &mut seen, &mut ev).0, Ok(()));
+    for i in 0..10 {
+        assert_eq!(s.on_data(&[0x80], false, &mut seen, &mut ev).0, Ok(()));
+        assert_eq!(s.buffered_len(), i + 2);
+    }
+    assert_eq!(s.on_data(&[0x00], false, &mut seen, &mut ev).0, Err(QPACK_DECODER_STREAM_ERROR));
+    assert!(ev.len() == 0);
 }

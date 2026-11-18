@@ -459,7 +459,10 @@ fn feed_uni(b: &[u8], step: usize, tag: &'static str, done: impl Fn(usize, usize
     for (i, ch) in b.chunks(step).enumerate() {
         let mut ev = Vec::new();
         r.call(tag, ch.len(), done(i * step, ch.len()), || {
-            assert_eq!(s.on_data(ch, false, &mut seen, &mut ev), Ok(()));
+            // `H3Conn::uni_data`'s per-call event capacity, allocated in the call.
+            let mut e = CapVec::new(ch.len() / 3 + 1);
+            assert_eq!(s.on_data(ch, false, &mut seen, &mut e).0, Ok(()));
+            ev = e.into_vec();
             s.buffered_len()
         });
         all.extend(ev);
@@ -468,7 +471,6 @@ fn feed_uni(b: &[u8], step: usize, tag: &'static str, done: impl Fn(usize, usize
 }
 
 #[test]
-#[ignore = "9b3: fails today, the uni buffer grows by append (reallocs); un-ignored by Task 8"]
 fn control_bytewise() {
     // 60 one-byte ids (0, 1, 6-63) and 301 two-byte ones: 361 pairs, a 1,023-byte payload.
     let ids = settings_ids(361);
@@ -488,7 +490,6 @@ fn control_bytewise() {
 }
 
 #[test]
-#[ignore = "9b3: fails today, the uni buffer is rebuilt exact then grown by append (reallocs); un-ignored by Task 8"]
 fn qpack_bytewise() {
     // The decoder stream (type 0x03), then 2,000 Stream Cancellations (01 + a 6-bit prefix integer) of ids 63 + 8i:
     // 0x7F then one or two continuation bytes, so 3-byte calls cut instructions.

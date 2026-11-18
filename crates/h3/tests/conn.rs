@@ -109,7 +109,7 @@ fn start_sends_settings() {
     let fr = frames(&data[1..]);
     assert_eq!(fr.len(), 1);
     assert_eq!(
-        parse_frame_payload(fr[0].0, &fr[0].1),
+        parse_frame_payload(fr[0].0, &fr[0].1).0,
         Ok(Frame::Settings(vec![(6, 65536), (0x21, 0)]))
     );
     // A second start writes nothing (a second SETTINGS is H3_FRAME_UNEXPECTED at the peer).
@@ -342,7 +342,7 @@ fn goaway_above_highest_request() {
     let mut out = Vec::new();
     c.shutdown(&mut out);
     let (fr, _) = write_on(&out, 3);
-    assert_eq!(parse_frame_payload(fr[0].0, &fr[0].1), Ok(Frame::Goaway(12)));
+    assert_eq!(parse_frame_payload(fr[0].0, &fr[0].1).0, Ok(Frame::Goaway(12)));
 }
 
 #[test]
@@ -394,7 +394,7 @@ fn goaway() {
     let (fr, fin) = write_on(&out, 3);
     assert!(!fin);
     assert_eq!(fr.len(), 1);
-    assert_eq!(parse_frame_payload(fr[0].0, &fr[0].1), Ok(Frame::Goaway(4)));
+    assert_eq!(parse_frame_payload(fr[0].0, &fr[0].1).0, Ok(Frame::Goaway(4)));
     let mut out = Vec::new();
     c.on_stream_data(4, &get("/"), true, &mut out);
     assert!(out.iter().any(|o| is_reset(o, 4, H3_REQUEST_REJECTED)));
@@ -406,7 +406,7 @@ fn goaway() {
     let mut out = Vec::new();
     c.shutdown(&mut out);
     let (fr, _) = write_on(&out, 3);
-    assert_eq!(parse_frame_payload(fr[0].0, &fr[0].1), Ok(Frame::Goaway(4)));
+    assert_eq!(parse_frame_payload(fr[0].0, &fr[0].1).0, Ok(Frame::Goaway(4)));
 }
 
 #[test]
@@ -424,8 +424,8 @@ fn goaway_before_start_and_without_requests() {
     assert_eq!(w[0], 0x00);
     let fr = frames(&w[1..]);
     assert_eq!(fr.len(), 2);
-    assert!(matches!(parse_frame_payload(fr[0].0, &fr[0].1), Ok(Frame::Settings(_))));
-    assert_eq!(parse_frame_payload(fr[1].0, &fr[1].1), Ok(Frame::Goaway(0)));
+    assert!(matches!(parse_frame_payload(fr[0].0, &fr[0].1).0, Ok(Frame::Settings(_))));
+    assert_eq!(parse_frame_payload(fr[1].0, &fr[1].1).0, Ok(Frame::Goaway(0)));
 }
 
 #[test]
