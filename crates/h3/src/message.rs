@@ -13,7 +13,6 @@ use byteq::capvec::CapVec;
 use crate::qpack::field_section::*;
 use crate::qpack::int::PREFIX_INT_MAX;
 use vstd::prelude::*;
-use vstd::slice::slice_to_vec;
 
 verus! {
 
@@ -338,6 +337,7 @@ fn x_semi() -> (r: [u8; 2])
 // =============================================================================
 
 /// The cost constant of `eq_bytes_w`.
+#[verifier::inline]
 pub open spec fn c_eq() -> nat {
     1
 }
@@ -441,51 +441,79 @@ pub open spec fn valid_field_value(v: Seq<u8>) -> bool {
         0 <= i < v.len() ==> vchar_spec(#[trigger] v[i]) || v[i] == 32 || v[i] == 9)
 }
 
-pub fn field_name_ok(n: &[u8]) -> (r: bool)
+/// `field_name_ok` with its cost: one unit per byte checked, and one.
+pub fn field_name_ok_w(n: &[u8]) -> (r: (bool, Ghost<nat>))
     ensures
-        r == valid_field_name(n@),
+        r.0 == valid_field_name(n@),
+        r.1@ <= n@.len() + 1,
 {
     if n.len() == 0 {
-        return false;
+        return (false, Ghost(1));
     }
+    let ghost mut work: nat = 1;
     let mut i = 0;
     while i < n.len()
         invariant
             i <= n.len(),
+            work == i + 1,
             forall|k: int| 0 <= k < i ==> tchar_lc_spec(#[trigger] n@[k]),
         decreases n.len() - i,
     {
         if !tchar_lc(n[i]) {
-            return false;
+            return (false, Ghost(work));
         }
         i += 1;
+        proof {
+            work = work + 1;
+        }
     }
-    true
+    (true, Ghost(work))
+}
+
+pub fn field_name_ok(n: &[u8]) -> (r: bool)
+    ensures
+        r == valid_field_name(n@),
+{
+    field_name_ok_w(n).0
+}
+
+/// `field_value_ok` with its cost: one unit per byte checked, and one.
+pub fn field_value_ok_w(v: &[u8]) -> (r: (bool, Ghost<nat>))
+    ensures
+        r.0 == valid_field_value(v@),
+        r.1@ <= v@.len() + 1,
+{
+    if v.len() == 0 {
+        return (true, Ghost(1));
+    }
+    if !vchar(v[0]) || !vchar(v[v.len() - 1]) {
+        return (false, Ghost(1));
+    }
+    let ghost mut work: nat = 1;
+    let mut i = 0;
+    while i < v.len()
+        invariant
+            i <= v.len(),
+            work == i + 1,
+            forall|k: int| 0 <= k < i ==> vchar_spec(#[trigger] v@[k]) || v@[k] == 32 || v@[k] == 9,
+        decreases v.len() - i,
+    {
+        if !(vchar(v[i]) || v[i] == 32 || v[i] == 9) {
+            return (false, Ghost(work));
+        }
+        i += 1;
+        proof {
+            work = work + 1;
+        }
+    }
+    (true, Ghost(work))
 }
 
 pub fn field_value_ok(v: &[u8]) -> (r: bool)
     ensures
         r == valid_field_value(v@),
 {
-    if v.len() == 0 {
-        return true;
-    }
-    if !vchar(v[0]) || !vchar(v[v.len() - 1]) {
-        return false;
-    }
-    let mut i = 0;
-    while i < v.len()
-        invariant
-            i <= v.len(),
-            forall|k: int| 0 <= k < i ==> vchar_spec(#[trigger] v@[k]) || v@[k] == 32 || v@[k] == 9,
-        decreases v.len() - i,
-    {
-        if !(vchar(v[i]) || v[i] == 32 || v[i] == 9) {
-            return false;
-        }
-        i += 1;
-    }
-    true
+    field_value_ok_w(v).0
 }
 
 // =============================================================================
@@ -976,24 +1004,36 @@ pub open spec fn valid_response(r: SpecResponse, head: bool) -> bool {
 // Exec twins
 // =============================================================================
 
-fn find_first(fields: &[FieldLine], lit: &[u8]) -> (r: Option<usize>)
+/// The per-line cost constant of `find_first` and `count_x` (a compare with a literal of at most 17 bytes).
+#[verifier::inline]
+spec fn c_find() -> nat {
+    19
+}
+
+fn find_first(fields: &[FieldLine], lit: &[u8]) -> (r: (Option<usize>, Ghost<nat>))
+    requires
+        lit@.len() <= 17,
     ensures
-        match r {
+        match r.0 {
             Some(k) => k < fields.len() && find_name(fields_view(fields@), lit@) == Some(k as int),
             None => find_name(fields_view(fields@), lit@) == None::<int>,
         },
+        r.1@ <= c_find() * fields@.len() + 1,
 {
     let mut i = 0;
     let mut r: Option<usize> = None;
+    let ghost mut work: nat = 1;
     while i < fields.len()
         invariant
             i <= fields.len(),
+            lit@.len() <= 17,
             match r {
                 Some(k) => k < i && find_name(fields_view(fields@).take(i as int), lit@) == Some(
                     k as int,
                 ),
                 None => find_name(fields_view(fields@).take(i as int), lit@) == None::<int>,
             },
+            work <= c_find() * i + 1,
         decreases fields.len() - i,
     {
         proof {
@@ -1001,26 +1041,41 @@ fn find_first(fields: &[FieldLine], lit: &[u8]) -> (r: Option<usize>)
             assert(t.drop_last() =~= fields_view(fields@).take(i as int));
             assert(t.last() == fields@[i as int]@);
         }
-        if r.is_none() && eq_bytes(&fields[i].name, lit) {
-            r = Some(i);
+        if r.is_none() {
+            let (e, Ghost(ce)) = eq_bytes_w(&fields[i].name, lit);
+            if e {
+                r = Some(i);
+            }
+            proof {
+                work = work + ce;
+            }
         }
         i += 1;
+        proof {
+            work = work + 1;
+        }
     }
     assert(fields_view(fields@).take(fields.len() as int) =~= fields_view(fields@));
-    r
+    (r, Ghost(work))
 }
 
-fn count_x(fields: &[FieldLine], lit: &[u8]) -> (c: usize)
+fn count_x(fields: &[FieldLine], lit: &[u8]) -> (r: (usize, Ghost<nat>))
+    requires
+        lit@.len() <= 17,
     ensures
-        c == count_name(fields_view(fields@), lit@),
+        r.0 == count_name(fields_view(fields@), lit@),
+        r.1@ <= c_find() * fields@.len() + 1,
 {
     let mut i = 0;
     let mut c: usize = 0;
+    let ghost mut work: nat = 1;
     while i < fields.len()
         invariant
             i <= fields.len(),
+            lit@.len() <= 17,
             c <= i,
             c == count_name(fields_view(fields@).take(i as int), lit@),
+            work <= c_find() * i + 1,
         decreases fields.len() - i,
     {
         proof {
@@ -1028,13 +1083,17 @@ fn count_x(fields: &[FieldLine], lit: &[u8]) -> (c: usize)
             assert(t.drop_last() =~= fields_view(fields@).take(i as int));
             assert(t.last() == fields@[i as int]@);
         }
-        if eq_bytes(&fields[i].name, lit) {
+        let (e, Ghost(ce)) = eq_bytes_w(&fields[i].name, lit);
+        if e {
             c += 1;
         }
         i += 1;
+        proof {
+            work = work + ce + 1;
+        }
     }
     assert(fields_view(fields@).take(fields.len() as int) =~= fields_view(fields@));
-    c
+    (c, Ghost(work))
 }
 
 fn is_pseudo_x(n: &[u8]) -> (r: bool)
@@ -1044,29 +1103,83 @@ fn is_pseudo_x(n: &[u8]) -> (r: bool)
     n.len() > 0 && n[0] == 58
 }
 
-fn is_request_pseudo_x(n: &[u8]) -> (r: bool)
+/// The four compares and their literals (29 bytes written).
+fn is_request_pseudo_x(n: &[u8]) -> (r: (bool, Ghost<nat>))
     ensures
-        r == request_pseudo(n@),
+        r.0 == request_pseudo(n@),
+        r.1@ <= 62,
 {
-    eq_bytes(n, &x_method()) || eq_bytes(n, &x_scheme()) || eq_bytes(n, &x_authority())
-        || eq_bytes(n, &x_path())
+    let (a, Ghost(w1)) = eq_bytes_w(n, &x_method());
+    let (b, Ghost(w2)) = eq_bytes_w(n, &x_scheme());
+    let (c, Ghost(w3)) = eq_bytes_w(n, &x_authority());
+    let (d, Ghost(w4)) = eq_bytes_w(n, &x_path());
+    (a || b || c || d, Ghost(w1 + w2 + w3 + w4 + 29))
+}
+
+/// The cost constant of `is_conn_specific_x_w`: five compares and their literals (60 bytes written).
+#[verifier::inline]
+spec fn c_conn() -> nat {
+    125
+}
+
+fn is_conn_specific_x_w(n: &[u8]) -> (r: (bool, Ghost<nat>))
+    ensures
+        r.0 == conn_specific(n@),
+        r.1@ <= c_conn(),
+{
+    let (a, Ghost(w1)) = eq_bytes_w(n, &x_connection());
+    let (b, Ghost(w2)) = eq_bytes_w(n, &x_keep_alive());
+    let (c, Ghost(w3)) = eq_bytes_w(n, &x_proxy_connection());
+    let (d, Ghost(w4)) = eq_bytes_w(n, &x_transfer_encoding());
+    let (e, Ghost(w5)) = eq_bytes_w(n, &x_upgrade());
+    (a || b || c || d || e, Ghost(w1 + w2 + w3 + w4 + w5 + 60))
 }
 
 fn is_conn_specific_x(n: &[u8]) -> (r: bool)
     ensures
         r == conn_specific(n@),
 {
-    eq_bytes(n, &x_connection()) || eq_bytes(n, &x_keep_alive()) || eq_bytes(
-        n,
-        &x_proxy_connection(),
-    ) || eq_bytes(n, &x_transfer_encoding()) || eq_bytes(n, &x_upgrade())
+    is_conn_specific_x_w(n).0
 }
 
-fn syntax_ok_x(fields: &[FieldLine]) -> (r: bool)
+/// One more line of `s.take(i)`.
+proof fn lemma_fb_take(s: Fields, i: int)
+    requires
+        0 <= i < s.len(),
     ensures
-        r == fields_syntax_ok(fields_view(fields@)),
+        fields_bytes(s.take(i + 1)) == fields_bytes(s.take(i)) + s[i].0.len() + s[i].1.len(),
+        fields_bytes(s.take(i + 1)) <= fields_bytes(s),
+{
+    assert(s.take(i + 1).drop_last() =~= s.take(i));
+    lemma_take_le(s, i + 1);
+}
+
+/// A line's bytes are within the whole.
+proof fn lemma_fb_elem(s: Fields, k: int)
+    requires
+        0 <= k < s.len(),
+    ensures
+        s[k].0.len() + s[k].1.len() <= fields_bytes(s),
+    decreases s.len(),
+{
+    if k < s.len() - 1 {
+        lemma_fb_elem(s.drop_last(), k);
+    }
+}
+
+/// The per-line cost constant of `syntax_ok_x`: the pseudo-header compares (62) and the step, plus the bytes checked.
+#[verifier::inline]
+spec fn c_syn() -> nat {
+    65
+}
+
+fn syntax_ok_x(fields: &[FieldLine]) -> (r: (bool, Ghost<nat>))
+    ensures
+        r.0 == fields_syntax_ok(fields_view(fields@)),
+        r.1@ <= c_syn() * (fields_bytes(fields_view(fields@)) + fields@.len() + 1),
 {
     let ghost fv = fields_view(fields@);
+    let ghost mut work: nat = 1;
     let mut i = 0;
     while i < fields.len()
         invariant
@@ -1075,23 +1188,37 @@ fn syntax_ok_x(fields: &[FieldLine]) -> (r: bool)
             forall|k: int|
                 0 <= k < i ==> (request_pseudo((#[trigger] fv[k]).0) || valid_field_name(fv[k].0))
                     && valid_field_value(fv[k].1),
+            work <= c_syn() * (fields_bytes(fv.take(i as int)) + i) + 1,
         decreases fields.len() - i,
     {
         let f = &fields[i];
         proof {
             assert(fv[i as int] == fields@[i as int]@);
+            lemma_fb_take(fv, i as int);
         }
-        if !((is_request_pseudo_x(&f.name) || field_name_ok(&f.name)) && field_value_ok(&f.value)) {
-            return false;
+        let (p, Ghost(w1)) = is_request_pseudo_x(&f.name);
+        let (nm, Ghost(w2)) = if p {
+            (p, Ghost(0))
+        } else {
+            field_name_ok_w(&f.name)
+        };
+        let (vl, Ghost(w3)) = field_value_ok_w(&f.value);
+        proof {
+            work = work + w1 + w2 + w3 + 1;
+        }
+        if !((p || nm) && vl) {
+            return (false, Ghost(work));
         }
         i += 1;
     }
-    true
+    assert(fv.take(fields.len() as int) =~= fv);
+    (true, Ghost(work))
 }
 
-fn pseudo_first_x(fields: &[FieldLine]) -> (r: bool)
+fn pseudo_first_x(fields: &[FieldLine]) -> (r: (bool, Ghost<nat>))
     ensures
-        r == pseudo_first(fields_view(fields@)),
+        r.0 == pseudo_first(fields_view(fields@)),
+        r.1@ <= fields@.len() + 1,
 {
     let ghost fv = fields_view(fields@);
     let mut seen = false;
@@ -1120,31 +1247,49 @@ fn pseudo_first_x(fields: &[FieldLine]) -> (r: bool)
                     }
                 }
             }
-            return false;
+            return (false, Ghost((i + 1) as nat));
         }
         if !p {
             seen = true;
         }
         i += 1;
     }
-    true
+    (true, Ghost((i + 1) as nat))
 }
 
-fn pseudo_once_x(fields: &[FieldLine]) -> (r: bool)
+/// The cost constant of `pseudo_once_x`: five counts and their literals (33 bytes written).
+#[verifier::inline]
+spec fn c_once() -> nat {
+    95
+}
+
+fn pseudo_once_x(fields: &[FieldLine]) -> (r: (bool, Ghost<nat>))
     ensures
-        r == pseudo_once(fields_view(fields@)),
+        r.0 == pseudo_once(fields_view(fields@)),
+        r.1@ <= c_once() * (fields@.len() + 1),
 {
-    count_x(fields, &x_method()) <= 1 && count_x(fields, &x_scheme()) <= 1 && count_x(
-        fields,
-        &x_authority(),
-    ) <= 1 && count_x(fields, &x_path()) <= 1 && count_x(fields, &x_host()) <= 1
+    let (a, Ghost(w1)) = count_x(fields, &x_method());
+    let (b, Ghost(w2)) = count_x(fields, &x_scheme());
+    let (c, Ghost(w3)) = count_x(fields, &x_authority());
+    let (d, Ghost(w4)) = count_x(fields, &x_path());
+    let (e, Ghost(w5)) = count_x(fields, &x_host());
+    (a <= 1 && b <= 1 && c <= 1 && d <= 1 && e <= 1, Ghost(w1 + w2 + w3 + w4 + w5 + 33))
 }
 
-fn no_conn_x(fields: &[FieldLine]) -> (r: bool)
+/// The per-line cost constant of `no_conn_x`: `is_conn_specific_x_w` (125), the `te` and `trailers` compares and
+/// literals (22), and the step.
+#[verifier::inline]
+spec fn c_noconn() -> nat {
+    148
+}
+
+fn no_conn_x(fields: &[FieldLine]) -> (r: (bool, Ghost<nat>))
     ensures
-        r == no_conn_fields(fields_view(fields@)),
+        r.0 == no_conn_fields(fields_view(fields@)),
+        r.1@ <= c_noconn() * fields@.len() + 1,
 {
     let ghost fv = fields_view(fields@);
+    let ghost mut work: nat = 1;
     let mut i = 0;
     while i < fields.len()
         invariant
@@ -1153,21 +1298,25 @@ fn no_conn_x(fields: &[FieldLine]) -> (r: bool)
             forall|k: int|
                 0 <= k < i ==> !conn_specific((#[trigger] fv[k]).0) && (fv[k].0 == lit_te()
                     ==> fv[k].1 == lit_trailers()),
+            work <= c_noconn() * i + 1,
         decreases fields.len() - i,
     {
         let f = &fields[i];
         proof {
             assert(fv[i as int] == fields@[i as int]@);
         }
-        if is_conn_specific_x(&f.name) || (eq_bytes(&f.name, &x_te()) && !eq_bytes(
-            &f.value,
-            &x_trailers(),
-        )) {
-            return false;
+        let (cs, Ghost(w1)) = is_conn_specific_x_w(&f.name);
+        let (te, Ghost(w2)) = eq_bytes_w(&f.name, &x_te());
+        let (tr, Ghost(w3)) = eq_bytes_w(&f.value, &x_trailers());
+        proof {
+            work = work + w1 + w2 + w3 + 11;
+        }
+        if cs || (te && !tr) {
+            return (false, Ghost(work));
         }
         i += 1;
     }
-    true
+    (true, Ghost(work))
 }
 
 proof fn lemma_digits_nonneg(s: Seq<u8>)
@@ -1195,12 +1344,13 @@ proof fn lemma_digits_mono(s: Seq<u8>, i: int, j: int)
 }
 
 /// The value of a `Content-Length` field value; `None` when it is not 1*DIGIT or overflows `u64`.
-fn parse_cl(v: &[u8]) -> (r: Option<u64>)
+fn parse_cl_w(v: &[u8]) -> (r: (Option<u64>, Ghost<nat>))
     ensures
-        match r {
+        match r.0 {
             Some(x) => cl_valid(v@) && x as int == digits_val(v@),
             None => !cl_valid(v@),
         },
+        r.1@ <= v@.len() + 1,
 {
     let mut acc: u64 = 0;
     let mut i = 0;
@@ -1213,7 +1363,7 @@ fn parse_cl(v: &[u8]) -> (r: Option<u64>)
     {
         let b = v[i];
         if b < 48 || b > 57 {
-            return None;
+            return (None, Ghost((i + 1) as nat));
         }
         let d = (b - 48) as u64;
         proof {
@@ -1225,35 +1375,55 @@ fn parse_cl(v: &[u8]) -> (r: Option<u64>)
                 lemma_digits_mono(v@, i as int + 1, v@.len() as int);
                 assert(v@.take(v@.len() as int) =~= v@);
             }
-            return None;
+            return (None, Ghost((i + 1) as nat));
         }
         acc = acc * 10 + d;
         i += 1;
     }
     assert(v@.take(v.len() as int) =~= v@);
     if v.len() == 0 {
-        None
+        (None, Ghost(1))
     } else {
-        Some(acc)
+        (Some(acc), Ghost((i + 1) as nat))
     }
 }
 
-fn cl_ok_x(fields: &[FieldLine]) -> (r: bool)
+/// The value of a `Content-Length` field value; `None` when it is not 1*DIGIT or overflows `u64`.
+fn parse_cl(v: &[u8]) -> (r: Option<u64>)
     ensures
-        r == cl_ok(fields_view(fields@)),
+        match r {
+            Some(x) => cl_valid(v@) && x as int == digits_val(v@),
+            None => !cl_valid(v@),
+        },
+{
+    parse_cl_w(v).0
+}
+
+/// The cost constant of `cl_ok_x`: `find_first` (19 per line), then per line the step, the `content-length` literal
+/// and compare (29) and, on a match, the parse and the value compare (one unit per value byte each).
+#[verifier::inline]
+spec fn c_clok() -> nat {
+    51
+}
+
+fn cl_ok_x(fields: &[FieldLine]) -> (r: (bool, Ghost<nat>))
+    ensures
+        r.0 == cl_ok(fields_view(fields@)),
+        r.1@ <= c_clok() * (fields_bytes(fields_view(fields@)) + fields@.len() + 1),
 {
     let ghost fv = fields_view(fields@);
-    let first = find_first(fields, &x_content_length());
+    let (first, Ghost(w0)) = find_first(fields, &x_content_length());
     proof {
         lemma_find_name(fv, lit_content_length());
     }
     let k = match first {
-        None => return true,
+        None => return (true, Ghost(w0 + 14)),
         Some(k) => k,
     };
     proof {
         assert(fv[k as int] == fields@[k as int]@);
     }
+    let ghost mut work: nat = w0 + 14;
     let mut i = 0;
     while i < fields.len()
         invariant
@@ -1265,32 +1435,72 @@ fn cl_ok_x(fields: &[FieldLine]) -> (r: bool)
             forall|j: int|
                 0 <= j < i && (#[trigger] fv[j]).0 == lit_content_length() ==> cl_valid(fv[j].1)
                     && fv[j].1 == fv[k as int].1,
+            work <= c_find() * fields.len() + 15 + 32 * i + 2 * fields_bytes(fv.take(i as int)),
         decreases fields.len() - i,
     {
         let f = &fields[i];
         proof {
             assert(fv[i as int] == fields@[i as int]@);
+            lemma_fb_take(fv, i as int);
         }
-        if eq_bytes(&f.name, &x_content_length()) {
-            let ok = match parse_cl(&f.value) {
-                Some(_) => eq_bytes(&f.value, &fields[k].value),
+        let (e, Ghost(we)) = eq_bytes_w(&f.name, &x_content_length());
+        proof {
+            work = work + we + 15;
+        }
+        if e {
+            let (pc, Ghost(wp)) = parse_cl_w(&f.value);
+            let ok = match pc {
+                Some(_) => {
+                    let (q, Ghost(wq)) = eq_bytes_w(&f.value, &fields[k].value);
+                    proof {
+                        work = work + wq;
+                    }
+                    q
+                },
                 None => false,
             };
+            proof {
+                work = work + wp;
+            }
             if !ok {
-                return false;
+                return (false, Ghost(work));
             }
         }
         i += 1;
     }
-    true
+    assert(fv.take(fields.len() as int) =~= fv);
+    (true, Ghost(work))
 }
 
-fn common_ok_x(fields: &[FieldLine]) -> (r: bool)
+/// The cost constant of `common_ok_x`: its five checks' constants summed.
+#[verifier::inline]
+spec fn c_common() -> nat {
+    360
+}
+
+fn common_ok_x(fields: &[FieldLine]) -> (r: (bool, Ghost<nat>))
     ensures
-        r == common_ok(fields_view(fields@)),
+        r.0 == common_ok(fields_view(fields@)),
+        r.1@ <= c_common() * (fields_bytes(fields_view(fields@)) + fields@.len() + 1),
 {
-    syntax_ok_x(fields) && pseudo_first_x(fields) && pseudo_once_x(fields) && no_conn_x(fields)
-        && cl_ok_x(fields)
+    let (a, Ghost(w1)) = syntax_ok_x(fields);
+    if !a {
+        return (false, Ghost(w1));
+    }
+    let (b, Ghost(w2)) = pseudo_first_x(fields);
+    if !b {
+        return (false, Ghost(w1 + w2));
+    }
+    let (c, Ghost(w3)) = pseudo_once_x(fields);
+    if !c {
+        return (false, Ghost(w1 + w2 + w3));
+    }
+    let (d, Ghost(w4)) = no_conn_x(fields);
+    if !d {
+        return (false, Ghost(w1 + w2 + w3 + w4));
+    }
+    let (e, Ghost(w5)) = cl_ok_x(fields);
+    (e, Ghost(w1 + w2 + w3 + w4 + w5))
 }
 
 spec fn opt_view(o: Option<&[u8]>) -> Option<Seq<u8>> {
@@ -1318,12 +1528,14 @@ fn value_at(fields: &[FieldLine], i: Option<usize>) -> (r: Option<&[u8]>)
     }
 }
 
-fn eq_ci_x(s: &[u8], lit: &[u8]) -> (r: bool)
+fn eq_ci_x(s: &[u8], lit: &[u8]) -> (r: (bool, Ghost<nat>))
     ensures
-        r == eq_ci(s@, lit@),
+        r.0 == eq_ci(s@, lit@),
+        r.1@ <= s@.len() + 1,
+        r.1@ <= lit@.len() + 1,
 {
     if s.len() != lit.len() {
-        return false;
+        return (false, Ghost(1));
     }
     let mut i = 0;
     while i < s.len()
@@ -1344,11 +1556,11 @@ fn eq_ci_x(s: &[u8], lit: &[u8]) -> (r: bool)
             s[i]
         };
         if c != lit[i] {
-            return false;
+            return (false, Ghost((i + 1) as nat));
         }
         i += 1;
     }
-    true
+    (true, Ghost((i + 1) as nat))
 }
 
 /// A scheme we serve: "http" or "https", case-insensitively (RFC 3986 §3.1).
@@ -1360,12 +1572,13 @@ pub fn is_http_scheme(s: &[u8]) -> (r: bool)
     ensures
         r == http_scheme(s@),
 {
-    eq_ci_x(s, &x_http()) || eq_ci_x(s, &x_https())
+    eq_ci_x(s, &x_http()).0 || eq_ci_x(s, &x_https()).0
 }
 
-fn no_at_x(s: &[u8]) -> (r: bool)
+fn no_at_x(s: &[u8]) -> (r: (bool, Ghost<nat>))
     ensures
-        r == no_at(s@),
+        r.0 == no_at(s@),
+        r.1@ <= s@.len() + 1,
 {
     let mut i = 0;
     while i < s.len()
@@ -1375,11 +1588,11 @@ fn no_at_x(s: &[u8]) -> (r: bool)
         decreases s.len() - i,
     {
         if s[i] == 64 {
-            return false;
+            return (false, Ghost((i + 1) as nat));
         }
         i += 1;
     }
-    true
+    (true, Ghost((i + 1) as nat))
 }
 
 proof fn lemma_trailing_digits(s: Seq<u8>, i: int)
@@ -1404,9 +1617,10 @@ proof fn lemma_trailing_digits(s: Seq<u8>, i: int)
     }
 }
 
-fn authority_form_x(a: &[u8]) -> (r: bool)
+fn authority_form_x(a: &[u8]) -> (r: (bool, Ghost<nat>))
     ensures
-        r == authority_form(a@),
+        r.0 == authority_form(a@),
+        r.1@ <= 2 * a@.len() + 2,
 {
     let mut i = a.len();
     while i > 0 && 48 <= a[i - 1] && a[i - 1] <= 57
@@ -1420,33 +1634,73 @@ fn authority_form_x(a: &[u8]) -> (r: bool)
     proof {
         lemma_trailing_digits(a@, i as int);
     }
-    i < a.len() && i >= 2 && a[i - 1] == 58 && no_at_x(a)
+    // The scan took `a.len() - i` steps.
+    let ghost scan: nat = (a.len() - i) as nat;
+    if i < a.len() && i >= 2 && a[i - 1] == 58 {
+        let (na, Ghost(wn)) = no_at_x(a);
+        (na, Ghost(scan + 1 + wn))
+    } else {
+        (false, Ghost(scan + 1))
+    }
 }
 
-fn authority_ok_x(scheme: &[u8], a: Option<&[u8]>, h: Option<&[u8]>) -> (r: bool)
+/// A present value's length, 0 when absent.
+spec fn olen(o: Option<Seq<u8>>) -> nat {
+    match o {
+        Some(x) => x.len(),
+        None => 0,
+    }
+}
+
+fn authority_ok_x(scheme: &[u8], a: Option<&[u8]>, h: Option<&[u8]>) -> (r: (bool, Ghost<nat>))
     ensures
-        r == authority_ok(scheme@, opt_view(a), opt_view(h)),
+        r.0 == authority_ok(scheme@, opt_view(a), opt_view(h)),
+        r.1@ <= 2 * olen(opt_view(a)) + olen(opt_view(h)) + 24,
 {
-    if !(eq_ci_x(scheme, &x_http()) || eq_ci_x(scheme, &x_https())) {
-        return true;
+    let (e1, Ghost(w1)) = eq_ci_x(scheme, &x_http());
+    let (e2, Ghost(w2)) = eq_ci_x(scheme, &x_https());
+    let ghost w: nat = w1 + w2 + 9;
+    if !(e1 || e2) {
+        return (true, Ghost(w));
     }
     match (a, h) {
-        (None, None) => false,
-        (Some(x), None) => x.len() > 0 && no_at_x(x),
-        (None, Some(y)) => y.len() > 0 && no_at_x(y),
-        (Some(x), Some(y)) => x.len() > 0 && eq_bytes(x, y) && no_at_x(x),
+        (None, None) => (false, Ghost(w)),
+        (Some(x), None) => if x.len() > 0 {
+            let (na, Ghost(wn)) = no_at_x(x);
+            (na, Ghost(w + wn))
+        } else {
+            (false, Ghost(w))
+        },
+        (None, Some(y)) => if y.len() > 0 {
+            let (na, Ghost(wn)) = no_at_x(y);
+            (na, Ghost(w + wn))
+        } else {
+            (false, Ghost(w))
+        },
+        (Some(x), Some(y)) => if x.len() > 0 {
+            let (eq, Ghost(we)) = eq_bytes_w(x, y);
+            if eq {
+                let (na, Ghost(wn)) = no_at_x(x);
+                (na, Ghost(w + we + wn))
+            } else {
+                (false, Ghost(w + we))
+            }
+        } else {
+            (false, Ghost(w))
+        },
     }
 }
 
-fn request_authority_x(a: Option<&[u8]>, h: Option<&[u8]>) -> (r: Vec<u8>)
+fn request_authority_x(a: Option<&[u8]>, h: Option<&[u8]>) -> (r: (Vec<u8>, Ghost<nat>))
     ensures
-        r@ == request_authority(opt_view(a), opt_view(h)),
+        r.0@ == request_authority(opt_view(a), opt_view(h)),
+        r.1@ <= olen(opt_view(a)) + olen(opt_view(h)) + 1,
 {
     match a {
-        Some(x) => slice_to_vec(x),
+        Some(x) => copy_bytes(x),
         None => match h {
-            Some(y) => slice_to_vec(y),
-            None => Vec::new(),
+            Some(y) => copy_bytes(y),
+            None => (Vec::new(), Ghost(1)),
         },
     }
 }
@@ -1701,11 +1955,13 @@ proof fn lemma_join_step(s: Fields, i: int)
 }
 
 /// The cost constant of `build_headers`.
+#[verifier::inline]
 spec fn c_bh() -> nat {
     20
 }
 
 /// The per-line cost constant of `cookie_scan`.
+#[verifier::inline]
 spec fn c_scan() -> nat {
     8
 }
@@ -1877,80 +2133,216 @@ fn build_headers(fields: &[FieldLine]) -> (r: (Vec<FieldLine>, Ghost<nat>))
     (out.into_vec(), Ghost(work))
 }
 
+//= https://www.rfc-editor.org/rfc/rfc9114#section-4.4
+//# A CONNECT request that does not conform
+//# to these restrictions is malformed.
+/// The error `connect_x` may return, `validate_request`'s requirement restated: H3_MESSAGE_ERROR when the CONNECT
+/// request's `:authority` is absent or not authority-form (RFC 9114 §4.4, cited at `rfc_validate_request`: "A CONNECT
+/// request that does not conform to these restrictions is malformed").
+spec fn connect_allowed_err(a: Option<Seq<u8>>, c: u64) -> bool {
+    c == H3_MESSAGE_ERROR && !(a matches Some(x) && authority_form(x))
+}
+
+/// A CONNECT request's head: the `:authority` value in authority-form, copied.
+fn connect_x(av: Option<&[u8]>) -> (r: (Result<RequestHead, u64>, Ghost<nat>))
+    ensures
+        match r.0 {
+            Ok(h) => opt_view(av) matches Some(a) && authority_form(a) && h@ == SpecRequestHead::Connect {
+                authority: a,
+            },
+            Err(c) => c == H3_MESSAGE_ERROR && !(opt_view(av) matches Some(a) && authority_form(a)),
+        },
+        r.0 matches Err(c) ==> connect_allowed_err(opt_view(av), c),
+        r.1@ <= 3 * olen(opt_view(av)) + 3,
+{
+    match av {
+        Some(auth) => {
+            let (af, Ghost(wa)) = authority_form_x(auth);
+            if af {
+                let (a2, Ghost(wp)) = copy_bytes(auth);
+                (Ok(RequestHead::Connect { authority: a2 }), Ghost(wa + wp))
+            } else {
+                (Err(H3_MESSAGE_ERROR), Ghost(wa))
+            }
+        },
+        None => (Err(H3_MESSAGE_ERROR), Ghost(1)),
+    }
+}
+
+//= https://www.rfc-editor.org/rfc/rfc9114#section-4.3.1
+//# This pseudo-header field MUST NOT be empty for "http" or "https"
+//# URIs; "http" or "https" URIs that do not contain a path component
+//# MUST include a value of / (ASCII 0x2f).
+//= https://www.rfc-editor.org/rfc/rfc9114#section-4.3.1
+//# If the :scheme pseudo-header field identifies a scheme that has a
+//# mandatory authority component (including "http" and "https"), the
+//# request MUST contain either an :authority pseudo-header field or a
+//# Host header field.  If these fields are present, they MUST NOT be
+//# empty.  If both fields are present, they MUST contain the same value.
+/// The error `request_x` may return, `validate_request`'s requirements restated: H3_MESSAGE_ERROR when `:method`,
+/// `:scheme` or `:path` is empty or the authority is not acceptable (RFC 9114 §4.3.1, cited at `rfc_validate_request`
+/// and `authority_ok`).
+spec fn request_allowed_err(
+    meth: Seq<u8>,
+    scheme: Seq<u8>,
+    path: Seq<u8>,
+    a: Option<Seq<u8>>,
+    h: Option<Seq<u8>>,
+    c: u64,
+) -> bool {
+    c == H3_MESSAGE_ERROR && !(meth.len() > 0 && scheme.len() > 0 && path.len() > 0 && authority_ok(scheme, a, h))
+}
+
+/// A non-CONNECT request's head, given its method, scheme and path lines and the `:authority` and `host` values: the
+/// checks, then the copies and `build_headers`.
+fn request_x(fields: &[FieldLine], m: usize, sc: usize, pa: usize, av: Option<&[u8]>, hv: Option<&[u8]>) -> (r: (
+    Result<RequestHead, u64>,
+    Ghost<nat>,
+))
+    requires
+        m < fields.len(),
+        sc < fields.len(),
+        pa < fields.len(),
+        fields_bytes(fields_view(fields@)) + 32 * fields@.len() <= MAX_FIELD_SECTION_SIZE,
+        olen(opt_view(av)) <= fields_bytes(fields_view(fields@)),
+        olen(opt_view(hv)) <= fields_bytes(fields_view(fields@)),
+    ensures
+        ({
+            let (meth, scheme, path) = (fields@[m as int].value@, fields@[sc as int].value@, fields@[pa as int].value@);
+            let (a, h) = (opt_view(av), opt_view(hv));
+            let ok = meth.len() > 0 && scheme.len() > 0 && path.len() > 0 && authority_ok(scheme, a, h);
+            match r.0 {
+                Ok(hd) => ok && hd@ == SpecRequestHead::Request(
+                    SpecRequest {
+                        method: meth,
+                        scheme,
+                        authority: request_authority(a, h),
+                        path,
+                        headers: request_headers(fields_view(fields@)),
+                    },
+                ),
+                Err(c) => c == H3_MESSAGE_ERROR && !ok,
+            }
+        }),
+        r.0 matches Err(c) ==> request_allowed_err(
+            fields@[m as int].value@,
+            fields@[sc as int].value@,
+            fields@[pa as int].value@,
+            opt_view(av),
+            opt_view(hv),
+            c,
+        ),
+        r.1@ <= 36 * (fields_bytes(fields_view(fields@)) + fields@.len() + 1),
+{
+    let ghost fv = fields_view(fields@);
+    proof {
+        assert(fv[m as int] == fields@[m as int]@);
+        assert(fv[sc as int] == fields@[sc as int]@);
+        assert(fv[pa as int] == fields@[pa as int]@);
+        lemma_fb_elem(fv, m as int);
+        lemma_fb_elem(fv, sc as int);
+        lemma_fb_elem(fv, pa as int);
+    }
+    let scheme = fields[sc].value.as_slice();
+    if !(fields[m].value.len() > 0 && scheme.len() > 0 && fields[pa].value.len() > 0) {
+        return (Err(H3_MESSAGE_ERROR), Ghost(1));
+    }
+    let (aok, Ghost(wa)) = authority_ok_x(scheme, av, hv);
+    if !aok {
+        return (Err(H3_MESSAGE_ERROR), Ghost(wa));
+    }
+    let (headers, Ghost(wb)) = build_headers(fields);
+    let (method, Ghost(c1)) = copy_bytes(&fields[m].value);
+    let (sch, Ghost(c2)) = copy_bytes(scheme);
+    let (authority, Ghost(c3)) = request_authority_x(av, hv);
+    let (path, Ghost(c4)) = copy_bytes(&fields[pa].value);
+    (
+        Ok(RequestHead::Request(Request { method, scheme: sch, authority, path, headers })),
+        Ghost(wa + wb + c1 + c2 + c3 + c4),
+    )
+}
+
+/// The cost constant of `validate_request`: `common_ok_x` (360), five `find_first`s with their literals (95), and
+/// `request_x` (36), each per field byte, line and one; the CONNECT compare and `connect_x` fit in the rest.
+#[verifier::inline]
+pub open spec fn c_vr() -> nat {
+    500
+}
+
 //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3
 //# Endpoints MUST treat a request or response that contains
 //# undefined or invalid pseudo-header fields as malformed.
 /// Validate a decoded request header section. `Request.headers` holds the regular fields with
 /// cookie lines merged.
-pub fn validate_request(fields: &[FieldLine]) -> (r: Result<RequestHead, u64>)
+pub fn validate_request(fields: &[FieldLine]) -> (r: (Result<RequestHead, u64>, Ghost<nat>))
     requires
         fields_bytes(fields_view(fields@)) + 32 * fields@.len() <= MAX_FIELD_SECTION_SIZE,
     ensures
-        match r {
+        match r.0 {
             Ok(h) => rfc_validate_request(fields_view(fields@)) == Ok::<SpecRequestHead, u64>(h@),
             Err(c) => rfc_validate_request(fields_view(fields@)) == Err::<SpecRequestHead, u64>(c),
         },
+        r.1@ <= c_vr() * (fields_bytes(fields_view(fields@)) + fields@.len() + 1),
 {
     let ghost fv = fields_view(fields@);
-    if !common_ok_x(fields) {
-        return Err(H3_MESSAGE_ERROR);
+    let (ok, Ghost(w0)) = common_ok_x(fields);
+    if !ok {
+        return (Err(H3_MESSAGE_ERROR), Ghost(w0));
     }
-    let mi = find_first(fields, &x_method());
-    let si = find_first(fields, &x_scheme());
-    let ai = find_first(fields, &x_authority());
-    let pi = find_first(fields, &x_path());
-    let hi = find_first(fields, &x_host());
+    let (mi, Ghost(w1)) = find_first(fields, &x_method());
+    let (si, Ghost(w2)) = find_first(fields, &x_scheme());
+    let (ai, Ghost(w3)) = find_first(fields, &x_authority());
+    let (pi, Ghost(w4)) = find_first(fields, &x_path());
+    let (hi, Ghost(w5)) = find_first(fields, &x_host());
+    let ghost work: nat = w0 + w1 + w2 + w3 + w4 + w5 + 33;
     let m = match mi {
         Some(m) => m,
-        None => return Err(H3_MESSAGE_ERROR),
+        None => return (Err(H3_MESSAGE_ERROR), Ghost(work)),
     };
     let av = value_at(fields, ai);
     proof {
         assert(forall|k: int| 0 <= k < fields.len() ==> fv[k] == (#[trigger] fields@[k])@);
-    }
-    if eq_bytes(&fields[m].value, &x_connect()) {
-        if si.is_none() && pi.is_none() {
-            match av {
-                Some(auth) if authority_form_x(auth) => {
-                    return Ok(RequestHead::Connect { authority: slice_to_vec(auth) });
-                },
-                _ => return Err(H3_MESSAGE_ERROR),
-            }
+        if let Some(a) = ai {
+            lemma_fb_elem(fv, a as int);
         }
-        return Err(H3_MESSAGE_ERROR);
+    }
+    let (isc, Ghost(wc)) = eq_bytes_w(&fields[m].value, &x_connect());
+    if isc {
+        if si.is_none() && pi.is_none() {
+            let (r, Ghost(wn)) = connect_x(av);
+            return (r, Ghost(work + wc + 7 + wn));
+        }
+        return (Err(H3_MESSAGE_ERROR), Ghost(work + wc + 7));
     }
     match (si, pi) {
         (Some(s), Some(p)) => {
             let hv = value_at(fields, hi);
-            let scheme = fields[s].value.as_slice();
-            if fields[m].value.len() > 0 && scheme.len() > 0 && fields[p].value.len() > 0
-                && authority_ok_x(scheme, av, hv) {
-                // Task 6 charges `wb` once `validate_request` returns its cost.
-                let (headers, Ghost(wb)) = build_headers(fields);
-                Ok(
-                    RequestHead::Request(
-                        Request {
-                            method: slice_to_vec(&fields[m].value),
-                            scheme: slice_to_vec(scheme),
-                            authority: request_authority_x(av, hv),
-                            path: slice_to_vec(&fields[p].value),
-                            headers,
-                        },
-                    ),
-                )
-            } else {
-                Err(H3_MESSAGE_ERROR)
+            proof {
+                if let Some(h) = hi {
+                    lemma_fb_elem(fv, h as int);
+                }
             }
+            let (r, Ghost(wr)) = request_x(fields, m, s, p, av, hv);
+            (r, Ghost(work + wc + 7 + wr))
         },
-        _ => Err(H3_MESSAGE_ERROR),
+        _ => (Err(H3_MESSAGE_ERROR), Ghost(work + wc + 7)),
     }
 }
 
-pub fn validate_trailers(fields: &[FieldLine]) -> (r: bool)
+/// The per-line cost constant of `validate_trailers`: `is_conn_specific_x_w` (125), the `te` literal and compare (5)
+/// and the step, plus the name and value checks' bytes.
+#[verifier::inline]
+pub open spec fn c_tr() -> nat {
+    134
+}
+
+pub fn validate_trailers(fields: &[FieldLine]) -> (r: (bool, Ghost<nat>))
     ensures
-        r == rfc_validate_trailers(fields_view(fields@)),
+        r.0 == rfc_validate_trailers(fields_view(fields@)),
+        r.1@ <= c_tr() * (fields_bytes(fields_view(fields@)) + fields@.len() + 1),
 {
     let ghost fv = fields_view(fields@);
+    let ghost mut work: nat = 1;
     let mut i = 0;
     while i < fields.len()
         invariant
@@ -1959,38 +2351,51 @@ pub fn validate_trailers(fields: &[FieldLine]) -> (r: bool)
             forall|k: int|
                 0 <= k < i ==> !is_pseudo((#[trigger] fv[k]).0) && valid_field_name(fv[k].0)
                     && valid_field_value(fv[k].1) && !conn_specific(fv[k].0) && fv[k].0 != lit_te(),
+            work <= c_tr() * (fields_bytes(fv.take(i as int)) + i) + 1,
         decreases fields.len() - i,
     {
         let f = &fields[i];
         proof {
             assert(fv[i as int] == fields@[i as int]@);
+            lemma_fb_take(fv, i as int);
         }
-        if is_pseudo_x(&f.name) || !field_name_ok(&f.name) || !field_value_ok(&f.value)
-            || is_conn_specific_x(&f.name) || eq_bytes(&f.name, &x_te()) {
-            return false;
+        let (nm, Ghost(w1)) = field_name_ok_w(&f.name);
+        let (vl, Ghost(w2)) = field_value_ok_w(&f.value);
+        let (cs, Ghost(w3)) = is_conn_specific_x_w(&f.name);
+        let (te, Ghost(w4)) = eq_bytes_w(&f.name, &x_te());
+        proof {
+            work = work + w1 + w2 + w3 + w4 + 3;
+        }
+        if is_pseudo_x(&f.name) || !nm || !vl || cs || te {
+            return (false, Ghost(work));
         }
         i += 1;
     }
-    true
+    assert(fv.take(fields.len() as int) =~= fv);
+    (true, Ghost(work))
 }
 
 /// The first `content-length` value, when present and valid (`validate_request` rejects the
 /// others).
-pub fn content_length(fields: &[FieldLine]) -> (r: Option<u64>)
+pub fn content_length(fields: &[FieldLine]) -> (r: (Option<u64>, Ghost<nat>))
     ensures
-        r == rfc_content_length(fields_view(fields@)),
+        r.0 == rfc_content_length(fields_view(fields@)),
+        r.1@ <= 20 * (fields_bytes(fields_view(fields@)) + fields@.len() + 1),
 {
-    match find_first(fields, &x_content_length()) {
+    let (fi, Ghost(w1)) = find_first(fields, &x_content_length());
+    match fi {
         Some(k) => {
             proof {
                 assert(fields_view(fields@)[k as int] == fields@[k as int]@);
+                lemma_fb_elem(fields_view(fields@), k as int);
             }
-            match parse_cl(&fields[k].value) {
-                Some(x) => Some(x),
-                None => None,
+            let (pc, Ghost(w2)) = parse_cl_w(&fields[k].value);
+            match pc {
+                Some(x) => (Some(x), Ghost(w1 + w2 + 14)),
+                None => (None, Ghost(w1 + w2 + 14)),
             }
         },
-        None => None,
+        None => (None, Ghost(w1 + 14)),
     }
 }
 

@@ -1,0 +1,11 @@
+--- a/crates/h3/src/qpack/field_section.rs
++++ b/crates/h3/src/qpack/field_section.rs
+@@ -1115,7 +1115,7 @@
+ /// section's size limit (RFC 9114 §4.2.2, cited at `field_line_size`).
+ pub open spec fn line_allowed_err(b: Seq<u8>, left: u64, e: BoundedError) -> bool {
+     match e {
+-        BoundedError::Qpack(c) => c == QPACK_DECOMPRESSION_FAILED && rfc_field_line(b) is None,
++        BoundedError::Qpack(c) => c == QPACK_DECOMPRESSION_FAILED && rfc_field_line(b) is Some,
+         BoundedError::OverBudget => rfc_field_line(b) matches Some((f, _)) && field_line_size(f) > left,
+     }
+ }

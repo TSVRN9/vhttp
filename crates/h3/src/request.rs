@@ -843,6 +843,8 @@ fn headers_frame(p: &[u8], ph: &mut Phase, events: &mut Vec<ReqEvent>) -> (r: Re
     (),
     ReqError,
 >)
+    requires
+        p@.len() <= MAX_FIELD_SECTION_SIZE,
     ensures
         match r {
             Ok(()) => {
@@ -857,7 +859,9 @@ fn headers_frame(p: &[u8], ph: &mut Phase, events: &mut Vec<ReqEvent>) -> (r: Re
             },
         },
 {
-    let fields = match decode_field_section_bounded(p, MAX_FIELD_SECTION_SIZE) {
+    // Task 7 charges the decode and validation costs once `headers_frame` returns its cost.
+    let (dec, Ghost(_cd)) = decode_field_section_bounded(p, MAX_FIELD_SECTION_SIZE);
+    let fields = match dec {
         Ok(f) => f,
         Err(BoundedError::Qpack(c)) => return Err(ReqError::Connection(c)),
         Err(BoundedError::OverBudget) => return Err(ReqError::Stream(H3_EXCESSIVE_LOAD)),
@@ -866,17 +870,21 @@ fn headers_frame(p: &[u8], ph: &mut Phase, events: &mut Vec<ReqEvent>) -> (r: Re
         lemma_section_size(p@, MAX_FIELD_SECTION_SIZE);
     }
     match *ph {
-        Phase::AwaitHeaders => match validate_request(fields.as_slice()) {
-            Ok(h) => {
-                let cl = content_length(fields.as_slice());
-                events.push(ReqEvent::Head(h));
-                *ph = Phase::Body { cl_left: cl };
-                Ok(())
-            },
-            Err(_) => Err(ReqError::Stream(H3_MESSAGE_ERROR)),
+        Phase::AwaitHeaders => {
+            let (vr, Ghost(_cv)) = validate_request(fields.as_slice());
+            match vr {
+                Ok(h) => {
+                    let (cl, Ghost(_cl)) = content_length(fields.as_slice());
+                    events.push(ReqEvent::Head(h));
+                    *ph = Phase::Body { cl_left: cl };
+                    Ok(())
+                },
+                Err(_) => Err(ReqError::Stream(H3_MESSAGE_ERROR)),
+            }
         },
         Phase::Body { cl_left } => {
-            if validate_trailers(fields.as_slice()) {
+            let (vt, Ghost(_ct)) = validate_trailers(fields.as_slice());
+            if vt {
                 events.push(ReqEvent::Trailers(fields));
                 *ph = Phase::Trailers { cl_left };
                 Ok(())

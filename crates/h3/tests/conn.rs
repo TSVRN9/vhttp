@@ -71,7 +71,7 @@ fn write_on(out: &[Output], id: u64) -> (Vec<(u64, Vec<u8>)>, bool) {
 
 fn status_of(fr: &[(u64, Vec<u8>)]) -> Vec<u8> {
     assert_eq!(fr[0].0, 0x01);
-    let f = decode_field_section(&fr[0].1).unwrap();
+    let f = decode_field_section(&fr[0].1).0.unwrap();
     assert_eq!(f[0].name, b":status");
     f[0].value.clone()
 }
@@ -136,7 +136,7 @@ fn end_to_end_get() {
     let (fr, fin) = write_on(&out, 0);
     assert!(fin);
     assert_eq!(fr.len(), 2);
-    let f = decode_field_section(&fr[0].1).unwrap();
+    let f = decode_field_section(&fr[0].1).0.unwrap();
     assert_eq!(f.len(), 2);
     assert_eq!((f[0].name.as_slice(), f[0].value.as_slice()), (&b":status"[..], &b"200"[..]));
     assert_eq!((f[1].name.as_slice(), f[1].value.as_slice()), (&b"content-type"[..], &b"text/plain"[..]));

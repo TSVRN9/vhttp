@@ -1,0 +1,11 @@
+--- a/crates/h3/src/message.rs
++++ b/crates/h3/src/message.rs
+@@ -2140,7 +2140,7 @@
+ /// request's `:authority` is absent or not authority-form (RFC 9114 §4.4, cited at `rfc_validate_request`: "A CONNECT
+ /// request that does not conform to these restrictions is malformed").
+ spec fn connect_allowed_err(a: Option<Seq<u8>>, c: u64) -> bool {
+-    c == H3_MESSAGE_ERROR && !(a matches Some(x) && authority_form(x))
++    c == H3_MESSAGE_ERROR && (a matches Some(x) && authority_form(x))
+ }
+ 
+ /// A CONNECT request's head: the `:authority` value in authority-form, copied.

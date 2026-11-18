@@ -383,15 +383,16 @@ pub proof fn lemma_prefix_int_append(n: u8, b: Seq<u8>, t: Seq<u8>)
 // =============================================================================
 
 /// Decodes an N-bit prefix integer from the front of `buf`; the high `8 - n` bits of
-/// `buf[0]` belong to the caller.
-pub fn parse_prefix_int(n: u8, buf: &[u8]) -> (r: PrefixInt)
+/// `buf[0]` belong to the caller. Its cost is at most one unit per byte read, and at most 11 (the loop's `i <= 11`).
+pub fn parse_prefix_int_w(n: u8, buf: &[u8]) -> (r: (PrefixInt, Ghost<nat>))
     requires
         1 <= n <= 8,
     ensures
-        r@ == rfc_prefix_int(n, buf@),
+        r.0@ == rfc_prefix_int(n, buf@),
+        r.1@ <= 11,
 {
     if buf.len() == 0 {
-        return PrefixInt::Incomplete;
+        return (PrefixInt::Incomplete, Ghost(1));
     }
     let mask: u8 = 0xffu8 >> (8 - n);
     proof {
@@ -399,7 +400,7 @@ pub fn parse_prefix_int(n: u8, buf: &[u8]) -> (r: PrefixInt)
     }
     let pre: u8 = buf[0] & mask;
     if pre < mask {
-        return PrefixInt::Value { value: pre as u64, consumed: 1 };
+        return (PrefixInt::Value { value: pre as u64, consumed: 1 }, Ghost(1));
     }
     let mut acc: u64 = pre as u64;
     let mut p: u64 = 1;
@@ -422,10 +423,10 @@ pub fn parse_prefix_int(n: u8, buf: &[u8]) -> (r: PrefixInt)
             proof {
                 assert(buf@.skip(i as int).len() == 0);
             }
-            return PrefixInt::Incomplete;
+            return (PrefixInt::Incomplete, Ghost(i as nat));
         }
         if i > PREFIX_INT_MAX_CONT {
-            return PrefixInt::TooLarge;
+            return (PrefixInt::TooLarge, Ghost(i as nat));
         }
         let byte = buf[i];
         let d: u64 = (byte & 127) as u64;
@@ -450,7 +451,7 @@ pub fn parse_prefix_int(n: u8, buf: &[u8]) -> (r: PrefixInt)
                         p > 0,
                 ;
             }
-            return PrefixInt::TooLarge;
+            return (PrefixInt::TooLarge, Ghost(i as nat));
         }
         proof {
             let x = (PREFIX_INT_MAX - acc) as nat;
@@ -464,7 +465,7 @@ pub fn parse_prefix_int(n: u8, buf: &[u8]) -> (r: PrefixInt)
         }
         acc = acc + d * p;
         if byte & 128 == 0 {
-            return PrefixInt::Value { value: acc, consumed: i + 1 };
+            return (PrefixInt::Value { value: acc, consumed: i + 1 }, Ghost(i as nat));
         }
         if i < PREFIX_INT_MAX_CONT {
             proof {
@@ -489,6 +490,15 @@ pub fn parse_prefix_int(n: u8, buf: &[u8]) -> (r: PrefixInt)
         }
         i += 1;
     }
+}
+
+pub fn parse_prefix_int(n: u8, buf: &[u8]) -> (r: PrefixInt)
+    requires
+        1 <= n <= 8,
+    ensures
+        r@ == rfc_prefix_int(n, buf@),
+{
+    parse_prefix_int_w(n, buf).0
 }
 
 /// Appends the minimal N-bit prefix encoding of `v` under `flags`.

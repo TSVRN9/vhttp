@@ -1792,7 +1792,8 @@ impl UniStream {
             ));
             assert(em0 + Seq::<SpecUniEvent>::empty() =~= em0);
         }
-        let scanned = if let UniKind::QpackEncoder = self.kind {
+        // Task 8 charges the scan's cost once `consume_qpack` returns its cost.
+        let (scanned, Ghost(_cs)) = if let UniKind::QpackEncoder = self.kind {
             process_encoder_stream(self.buf.as_slice())
         } else {
             process_decoder_stream(self.buf.as_slice())

@@ -1,11 +1,13 @@
 //! 9b3 Task 1: the per-call cost of h3's network-input calls (spec D13, RCA docs/rca/2026-11-14-cookie-merge.md).
 //! A per-thread counting allocator measures each input call on its own (9b2's crates/quic/tests/input_cost.rs design).
 //! Per call: no `realloc`, and requested bytes at most `COST_A·d + COST_B`, but for one queue buffer of a call given
-//! bytes, and, for the call that completes a buffered frame of `f` bytes, `COST_A·f + COST_B` more (`per_call_ok`).
+//! bytes, and, for the call that completes a buffered frame of `f` bytes, `fa·f + COST_B` more (`per_call_ok`): `fa` is
+//! `H3_F` for a request stream's frame (QPACK decode expands it), `COST_A` elsewhere.
 //! Each test is ignored until the task that makes it pass.
 use h3::conn::{H3Conn, Output};
 use h3::frame::serialize_frame_header;
 use h3::message::RequestHead;
+use h3::qpack::field_section::FieldLine;
 use h3::request::{ReqEvent, RequestStream};
 use h3::uni::{SeenUni, UniEvent, UniStream};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -54,6 +56,17 @@ static ALLOC: Counting = Counting;
 /// 9b2's per-call budget: `COST_A` per byte given, `COST_B` for the constant terms.
 const COST_A: usize = 8;
 const COST_B: usize = 4096;
+/// The decoded bytes per encoded byte of a field line, proved (`lemma_line_expansion` in
+/// crates/h3/src/qpack/field_section.rs): a static entry is at most 76 bytes and its line at least 1 byte, a Huffman
+/// string decodes to at most 8/5 of its bytes (`lemma_decoded_len`), a raw one to its bytes.
+const EXPAND: usize = 76;
+/// h3's per-byte constant for the frame a call completes (controller ruling after Task 4: QPACK decode expands its
+/// input, so 9b2's `COST_A` is not it). An encoded byte can be a whole line, so `decode_lines_bounded`'s `out` takes
+/// at most one `FieldLine` slot per encoded byte (`CapVec::new(min(lines.len(), budget/32))`) and `build_headers`'
+/// one more; each line's `EXPAND` bytes per encoded byte are copied by the decoder and at most once more
+/// (`build_headers` for a regular field, `validate_request` for a pseudo-header), plus a 2-byte "; " per cookie line.
+/// Still O(f).
+const H3_F: usize = 2 * std::mem::size_of::<FieldLine>() + 2 * EXPAND + 2;
 /// byteq's `MIN_CAP` (9b2 D4); named apart so the RFC-quantity gate, which reads constants by name, never sees it.
 const QUEUE_MIN_CAP: usize = 64;
 
@@ -100,18 +113,19 @@ impl Run {
     }
 }
 
-fn budget(x: &Call) -> usize {
-    COST_A * x.d + COST_B + if x.f > 0 { COST_A * x.f + COST_B } else { 0 }
+/// `fa`: the per-byte constant of the frame a call completes, `H3_F` on a request stream, else `COST_A`.
+fn budget(x: &Call, fa: usize) -> usize {
+    COST_A * x.d + COST_B + if x.f > 0 { fa * x.f + COST_B } else { 0 }
 }
 
 /// 9b2's rule: in a test whose structure is a `ByteQueue` (`queue`), one allocation of a call given bytes may exceed the
 /// budget if it can be a queue buffer, at most `3·(bytes held after the call) + MIN_CAP`.
-fn bytes_ok(x: &Call, queue: bool) -> bool {
-    x.k[4] <= budget(x) || exempt(x, queue)
+fn bytes_ok(x: &Call, queue: bool, fa: usize) -> bool {
+    x.k[4] <= budget(x, fa) || exempt(x, queue, fa)
 }
 
-fn exempt(x: &Call, queue: bool) -> bool {
-    let b = budget(x);
+fn exempt(x: &Call, queue: bool, fa: usize) -> bool {
+    let b = budget(x, fa);
     queue && x.k[4] > b && x.d > 0 && x.k[4] - x.k[5] <= b && x.k[5] <= 3 * x.held + QUEUE_MIN_CAP
 }
 
@@ -121,7 +135,7 @@ fn exempt_cap(peak: usize) -> usize {
 }
 
 /// Each call: no realloc, and `bytes_ok`; at most `exempt_cap` excused calls. Returns the failures, worst call first.
-fn per_call_ok(name: &str, m: usize, c: &[Call], queue: bool) -> Vec<String> {
+fn per_call_ok(name: &str, m: usize, c: &[Call], queue: bool, fa: usize) -> Vec<String> {
     let mut f = Vec::new();
     let re: Vec<_> = c.iter().enumerate().filter(|(_, x)| x.k[2] != 0).collect();
     if let Some((i, x)) = re.iter().max_by_key(|(_, x)| (x.k[2], x.k[4])) {
@@ -136,15 +150,15 @@ fn per_call_ok(name: &str, m: usize, c: &[Call], queue: bool) -> Vec<String> {
         ));
     }
     let peak = c.iter().map(|x| x.held).max().unwrap_or(0);
-    let ex = c.iter().filter(|x| exempt(x, queue)).count();
+    let ex = c.iter().filter(|x| exempt(x, queue, fa)).count();
     if ex > exempt_cap(peak) {
         f.push(format!(
             "{name} n={m}: {ex} calls excused as queue buffers, more than {} (peak {peak} held)",
             exempt_cap(peak)
         ));
     }
-    let over: Vec<_> = c.iter().enumerate().filter(|(_, x)| !bytes_ok(x, queue)).collect();
-    if let Some((i, x)) = over.iter().max_by_key(|(_, x)| x.k[4] - budget(x).min(x.k[4])) {
+    let over: Vec<_> = c.iter().enumerate().filter(|(_, x)| !bytes_ok(x, queue, fa)).collect();
+    if let Some((i, x)) = over.iter().max_by_key(|(_, x)| x.k[4] - budget(x, fa).min(x.k[4])) {
         f.push(format!(
             "{name} n={m}: {} calls over the per-call budget (worst: call {i} ({}), {} bytes for d = {}, f = {}, budget {}, \
              largest single {}, {} held after)",
@@ -153,7 +167,7 @@ fn per_call_ok(name: &str, m: usize, c: &[Call], queue: bool) -> Vec<String> {
             x.k[4],
             x.d,
             x.f,
-            budget(x),
+            budget(x, fa),
             x.k[5],
             x.held
         ));
@@ -298,16 +312,16 @@ fn head_fields(ev: &[ReqEvent]) -> Vec<(Vec<u8>, usize)> {
     q.headers.iter().map(|f| (f.name.clone(), f.value.len())).collect()
 }
 
-/// The completing (last) call of `r`: at most `COST_A·frame + COST_B`.
+/// The completing (last) call of `r`: at most `H3_F·frame + COST_B`.
 fn completing_ok(name: &str, m: usize, r: &Run, fr: usize) -> Vec<String> {
     let x = r.0.last().unwrap();
     eprintln!(
         "  {name} n={m}: completing call requested {} (d = {}, realloc {}), frame {fr}",
         x.k[4], x.d, x.k[2]
     );
-    if x.k[4] > COST_A * fr + COST_B {
+    if x.k[4] > H3_F * fr + COST_B {
         vec![format!(
-            "{name} n={m}: the completing call requested {} > {COST_A}·{fr} + {COST_B}",
+            "{name} n={m}: the completing call requested {} > {H3_F}·{fr} + {COST_B}",
             x.k[4]
         )]
     } else {
@@ -316,8 +330,7 @@ fn completing_ok(name: &str, m: usize, r: &Run, fr: usize) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "9b3: fails on decode_lines_bounded's Vec growth (Task 6) and, bytewise, top_up's append (Task 7); \
-            un-ignored by Task 7"]
+#[ignore = "9b3: fails bytewise on top_up's append (Task 7); un-ignored by Task 7"]
 fn cookie_lines_linear() {
     let (v, mut fails, mut whole, mut bytewise) = (34, Vec::new(), Vec::new(), Vec::new());
     for m in [226, 452, 904] {
@@ -330,7 +343,7 @@ fn cookie_lines_linear() {
             let h = head_fields(&ev);
             assert_eq!(h, vec![(b"cookie".to_vec(), m * v + (m - 1) * 2)]);
             report(&format!("cookie_lines_linear {tag}"), m, &r);
-            fails.extend(per_call_ok(&format!("cookie_lines_linear {tag}"), m, &r.0, true));
+            fails.extend(per_call_ok(&format!("cookie_lines_linear {tag}"), m, &r.0, true, H3_F));
             fails.extend(completing_ok(&format!("cookie_lines_linear {tag}"), m, &r, fr.len()));
             rows.push((m, r.bytes()));
         }
@@ -340,9 +353,8 @@ fn cookie_lines_linear() {
     assert!(fails.is_empty(), "{fails:#?}");
 }
 
+/// The rescan's time is mutant 9b3-M8's to catch.
 #[test]
-#[ignore = "9b3: fails on decode_lines_bounded's Vec growth and on the completing-call budget, whose h3 constant \
-            Task 6 sets (the rescan's time is mutant 9b3-M8's to catch); un-ignored by Task 6"]
 fn cookie_rescans_linear() {
     let (mut fails, mut rows) = (Vec::new(), Vec::new());
     for m in [215, 430, 860] {
@@ -365,7 +377,6 @@ fn cookie_rescans_linear() {
 }
 
 #[test]
-#[ignore = "9b3: fails today, huffman_decode grows its output by push (reallocs); un-ignored by Task 6"]
 fn huffman_max_expansion() {
     // 6,400 'a' (HPACK code 00011, 5 bits): 32,000 bits, 4,000 bytes, no padding.
     let mut enc = Vec::new();
@@ -400,7 +411,7 @@ fn headers_bytewise() {
     assert_eq!(head_fields(&ev).len(), 413);
     report("headers_bytewise", 413, &r);
     let l = r.0.len() - 1;
-    let fails = per_call_ok("headers_bytewise", 413, &r.0[..l], true);
+    let fails = per_call_ok("headers_bytewise", 413, &r.0[..l], true, H3_F);
     assert!(fails.is_empty(), "{fails:#?}");
 }
 
@@ -424,7 +435,7 @@ fn data_frames_events() {
         .iter()
         .filter_map(|e| if let ReqEvent::Body(b) = e { Some(b.len()) } else { None })
         .collect();
-    let mut fails = per_call_ok("data_frames_events", n, &r.0, true);
+    let mut fails = per_call_ok("data_frames_events", n, &r.0, true, H3_F);
     if ev.len() > 4 || bodies != vec![n] {
         fails.push(format!(
             "data_frames_events: {} events, {} Body events ({} bytes in all), want at most 4 events and one Body of {n}",
@@ -469,7 +480,7 @@ fn control_bytewise() {
     let want: Vec<(u64, u64)> = ids.iter().map(|&i| (i, 0)).collect();
     assert_eq!(ev, vec![UniEvent::PeerSettings(want)]);
     report("control_bytewise", ids.len(), &r);
-    let fails = per_call_ok("control_bytewise", ids.len(), &r.0, true);
+    let fails = per_call_ok("control_bytewise", ids.len(), &r.0, true, COST_A);
     assert!(fails.is_empty(), "{fails:#?}");
 }
 
@@ -491,7 +502,7 @@ fn qpack_bytewise() {
     let (r, ev) = feed_uni(&b, 3, "3 bytes", |_, _| 0);
     assert!(ev.is_empty());
     report("qpack_bytewise", 2000, &r);
-    let mut fails = per_call_ok("qpack_bytewise", 2000, &r.0, true);
+    let mut fails = per_call_ok("qpack_bytewise", 2000, &r.0, true, COST_A);
     if let Some((i, x)) = r.0.iter().enumerate().find(|(_, x)| x.held > 11) {
         fails.push(format!(
             "qpack_bytewise: {} bytes held after call {i}, more than 11",
@@ -542,6 +553,6 @@ fn stream_table_flat() {
         assert!(matches!(&out[..], [Output::RequestBody { stream_id, data }] if *stream_id == 4 * i && data == b"x"));
     }
     report("stream_table_flat", n as usize, &r);
-    let fails = per_call_ok("stream_table_flat", n as usize, &r.0, false);
+    let fails = per_call_ok("stream_table_flat", n as usize, &r.0, false, COST_A);
     assert!(fails.is_empty(), "{fails:#?}");
 }

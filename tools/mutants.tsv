@@ -90,3 +90,6 @@ T7-M8	quic	crypto_stream	lemma_crypto_floor	crypto_alloc:duplicate_ooo_frames_al
 9b1-M2	quic	avl	join	-	precondition not satisfied.*ht\([lr]\) <= ht\([lr]\) \+ 1	9b1 T8 (D6) M2: join never rotates: mk in place of bal on both spines
 9b1-M3	quic	frags	gather	-	precondition not satisfied.*fm\.last\(\)\.1\.len\(\) >= K	9b1 T8 (D6) M3: a follower kept without the K check: gather keeps Rc whole past e whatever its length
 9b1-M4	quic	frags	lemma_plen	-	postcondition not satisfied.*0 < plen\(rem\) <= CAP	9b1 T8 (D6) M4: a piece cut past CAP: plen and fill_all's cut take CAP + 1 bytes as one piece
+9b3-A1	h3	qpack::field_section	indexed_line	-	postcondition not satisfied.*line_allowed_err	9b3 T6 (allowed predicate) A1: line_allowed_err's QPACK arm requires the line to decode (is Some for is None)
+9b3-A2	h3	message	connect_x	-	postcondition not satisfied.*connect_allowed_err	9b3 T6 (allowed predicate) A2: connect_allowed_err allows the error on a valid CONNECT authority (the negation dropped)
+9b3-A3	h3	message	request_x	-	postcondition not satisfied.*request_allowed_err	9b3 T6 (allowed predicate) A3: request_allowed_err allows the error on a valid request (the negation dropped)

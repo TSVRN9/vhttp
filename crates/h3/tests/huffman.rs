@@ -76,3 +76,16 @@ fn huffman_eos_after_symbol() {
     let bytes: Vec<u8> = (0..(n + pad) / 8).rev().map(|i| (bits >> (8 * i)) as u8).collect();
     assert_eq!(huffman_decode(&bytes), None);
 }
+
+#[test]
+fn huffman_eos_padding() {
+    // 'a' is 5 bits (00011): n of them are 5·n bits, padded with ones to whole bytes, so the bit length is not a
+    // multiple of 5 but for n = 8; each decodes to exactly the n symbols, at most 8·len/5.
+    for n in 1..=9 {
+        let s = vec![b'a'; n];
+        let e = encode(&s);
+        assert_eq!(e.len(), (5 * n).div_ceil(8));
+        assert!(5 * n <= 8 * e.len());
+        assert_eq!(huffman_decode(&e), Some(s), "{n} 'a'");
+    }
+}

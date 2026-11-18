@@ -23,7 +23,7 @@ fn with(extra: Vec<FieldLine>) -> Vec<FieldLine> {
 #[test]
 fn valid_get() {
     let f = with(vec![fl("accept", "*/*")]);
-    match validate_request(&f) {
+    match validate_request(&f).0 {
         Ok(RequestHead::Request(r)) => {
             assert_eq!(r.method, b"GET");
             assert_eq!(r.scheme, b"https");
@@ -36,7 +36,7 @@ fn valid_get() {
 }
 
 fn err(f: Vec<FieldLine>) {
-    assert!(matches!(validate_request(&f), Err(H3_MESSAGE_ERROR)));
+    assert!(matches!(validate_request(&f).0, Err(H3_MESSAGE_ERROR)));
 }
 
 #[test]
@@ -63,23 +63,23 @@ fn malformed_cases() {
 
 #[test]
 fn accepted_variants() {
-    assert!(validate_request(&with(vec![fl("te", "trailers"), fl("content-length", "3"), fl("content-length", "3")])).is_ok());
+    assert!(validate_request(&with(vec![fl("te", "trailers"), fl("content-length", "3"), fl("content-length", "3")])).0.is_ok());
     let f = vec![fl(":method", "GET"), fl(":scheme", "https"), fl(":path", "/"), fl("host", "h")];
-    match validate_request(&f) {
+    match validate_request(&f).0 {
         Ok(RequestHead::Request(r)) => assert_eq!(r.authority, b"h"),
         _ => panic!(),
     }
-    assert_eq!(content_length(&with(vec![fl("content-length", "0042")])), Some(42));
-    assert_eq!(content_length(&base()), None);
-    assert!(validate_trailers(&[fl("x-sum", "1")]));
-    assert!(!validate_trailers(&[fl(":path", "/")]));
-    assert!(!validate_trailers(&[fl("X", "1")]));
+    assert_eq!(content_length(&with(vec![fl("content-length", "0042")])).0, Some(42));
+    assert_eq!(content_length(&base()).0, None);
+    assert!(validate_trailers(&[fl("x-sum", "1")]).0);
+    assert!(!validate_trailers(&[fl(":path", "/")]).0);
+    assert!(!validate_trailers(&[fl("X", "1")]).0);
 }
 
 #[test]
 fn connect() {
     let f = vec![fl(":method", "CONNECT"), fl(":authority", "example.com:443")];
-    match validate_request(&f) {
+    match validate_request(&f).0 {
         Ok(RequestHead::Connect { authority }) => assert_eq!(authority, b"example.com:443"),
         _ => panic!("expected Connect"),
     }
@@ -89,7 +89,7 @@ fn connect() {
     // RFC 9114 §4.4, RFC 9110 §9.3.6: authority-form, host ":" port, no userinfo.
     for a in ["[::1]:443", "h:1", "example.com:443"] {
         let f = vec![fl(":method", "CONNECT"), fl(":authority", a)];
-        assert!(matches!(validate_request(&f), Ok(RequestHead::Connect { .. })), "{a}");
+        assert!(matches!(validate_request(&f).0, Ok(RequestHead::Connect { .. })), "{a}");
     }
     for a in ["u@h:443", "h", "h:", ":443", "h:4a", "h:44 ", ""] {
         err(vec![fl(":method", "CONNECT"), fl(":authority", a)]);
@@ -99,7 +99,7 @@ fn connect() {
 #[test]
 fn cookie_merge() {
     let f = with(vec![fl("cookie", "a=1"), fl("accept", "x"), fl("cookie", "b=2")]);
-    match validate_request(&f) {
+    match validate_request(&f).0 {
         Ok(RequestHead::Request(r)) => {
             assert_eq!(pairs(&r.headers), pairs(&[fl("cookie", "a=1; b=2"), fl("accept", "x")]))
         }
@@ -108,7 +108,7 @@ fn cookie_merge() {
 }
 
 fn headers_of(f: &[FieldLine]) -> Vec<(Vec<u8>, Vec<u8>)> {
-    match validate_request(f) {
+    match validate_request(f).0 {
         Ok(RequestHead::Request(r)) => pairs(&r.headers),
         _ => panic!("expected Request"),
     }
@@ -184,9 +184,9 @@ fn hardening() {
     err(vec![fl(":method", "GET"), fl(":scheme", "https"), fl(":path", "/"), fl("host", "user@h")]);
     err(vec![fl(":method", "GET"), fl(":scheme", "HTTPS"), fl(":path", "/")]);
     err(vec![fl(":method", "GET"), fl(":scheme", "HtTp"), fl(":path", "/")]);
-    assert!(!validate_trailers(&[fl("connection", "x")]));
-    assert!(!validate_trailers(&[fl("te", "trailers")]));
-    assert!(validate_trailers(&[fl("x-t", "1")]));
+    assert!(!validate_trailers(&[fl("connection", "x")]).0);
+    assert!(!validate_trailers(&[fl("te", "trailers")]).0);
+    assert!(validate_trailers(&[fl("x-t", "1")]).0);
     err(vec![fl(":method", ""), fl(":scheme", "https"), fl(":authority", "a"), fl(":path", "/")]);
     err(vec![fl(":method", "CONNECT"), fl(":scheme", "https"), fl(":authority", "a:1")]);
 }

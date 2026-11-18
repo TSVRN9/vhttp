@@ -72,7 +72,7 @@ fn exchange(s: &mut Server, c: &mut Client, from: SocketAddr, now: u64, ds: Vec<
 fn check_response(w: &[u8]) {
     let FrameHeader::Complete { ty: 1, len, hdr_len } = parse_frame_header(w) else { panic!("no HEADERS") };
     let end = hdr_len + len as usize;
-    let fields = decode_field_section(&w[hdr_len..end]).unwrap();
+    let fields = decode_field_section(&w[hdr_len..end]).0.unwrap();
     assert_eq!(fields.len(), 2);
     assert_eq!((&fields[0].name[..], &fields[0].value[..]), (&b":status"[..], &b"200"[..]));
     assert_eq!((&fields[1].name[..], &fields[1].value[..]), (&b"content-type"[..], &b"text/plain"[..]));
