@@ -657,18 +657,18 @@ proof fn lemma_writes_one(x: SpecOutput, id: u64)
     }
 }
 
-/// Moves `v` into reverse order in an exact buffer, so popping yields its elements first to last: one allocation,
-/// one unit per element moved.
+/// Moves `v` into reverse order in an exact buffer, so popping yields its elements first to last: one allocation, the
+/// free of `v`, one unit per element moved.
 fn rev<T>(v: Vec<T>) -> (r: (Vec<T>, Ghost<nat>))
     ensures
         r.0@.len() == v@.len(),
         forall|i: int| 0 <= i < v@.len() ==> r.0@[i] == v@[v@.len() - 1 - i],
-        r.1@ <= v@.len() + 1,
+        r.1@ <= v@.len() + 2,
 {
     let ghost v0 = v@;
     let mut v = v;
     let mut r: CapVec<T> = CapVec::new(v.len());
-    let ghost mut work: nat = 1;
+    let ghost mut work: nat = 2;
     while v.len() > 0
         invariant
             v@.len() + r@.len() == v0.len(),
@@ -676,7 +676,7 @@ fn rev<T>(v: Vec<T>) -> (r: (Vec<T>, Ghost<nat>))
             forall|i: int| 0 <= i < r@.len() ==> r@[i] == v0[v0.len() - 1 - i],
             r.wf(),
             r.cap() == v0.len(),
-            work == r@.len() + 1,
+            work == r@.len() + 2,
         decreases v@.len(),
     {
         let ghost n = v@.len();
@@ -1829,7 +1829,7 @@ fn deliver(
             forall|i: int| 0 <= i < k ==> !internal_head(#[trigger] ev[i]),
             e.head == (old(e).head || has_request(added(o0, out@))),
             e.is_head == (old(e).is_head || head_req(added(o0, out@))),
-            work <= n + 1 + 31 * k,
+            work <= n + 2 + 31 * k,
             ev.len() == n,
         decreases n - k,
     {
@@ -1860,7 +1860,7 @@ fn deliver(
                     lemma_head_req_concat(added(o0, o1), added(o1, out@));
                     assert(internal_head(ev[k as int]));
                 }
-                return (true, Ghost(work + 31));
+                return (true, Ghost(work + 32));
             },
             ReqEvent::Head(RequestHead::Request(req)) => {
                 // `is_http_scheme`: two `eq_ci_x` against 4- and 5-byte literals, at most 11 units, and the literals' 9
@@ -1875,7 +1875,7 @@ fn deliver(
                         lemma_head_req_concat(added(o0, o1), added(o1, out@));
                         assert(internal_head(ev[k as int]));
                     }
-                    return (true, Ghost(work + 31));
+                    return (true, Ghost(work + 32));
                 }
                 e.head = true;
                 let head_method: [u8; 4] = [72u8, 69u8, 65u8, 68u8];
@@ -1950,11 +1950,11 @@ fn deliver(
         assert(ev.skip(n as int) =~= Seq::<SpecReqEvent>::empty());
         assert(req_outs(id, ev.skip(n as int), fields_view(e.trailers@), err, cx, err_outs(id, err, cx)));
     }
-    (false, Ghost(work))
+    (false, Ghost(work + 1))
 }
 
 /// The cost constant of `deliver`, per event: at most 31 (an `http` scheme check, a HEAD method check, an output) and
-/// one for the reversal.
+/// one for the reversal; the reversal's allocation and the two frees fit the constant term.
 #[verifier::inline]
 spec fn c_dlv() -> nat {
     32
