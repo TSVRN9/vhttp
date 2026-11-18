@@ -176,6 +176,7 @@ pub proof fn lemma_encoder_stream_split(b: Seq<u8>, t: Seq<u8>)
         }),
     decreases b.len(),
 {
+    hide(rfc_prefix_int);
     assert(b.skip(0) =~= b);
     if b.len() > 0 && b[0] & 0xE0u8 == 0x20u8 {
         assert((b + t)[0] == b[0]);
@@ -301,6 +302,7 @@ pub proof fn lemma_decoder_stream_split(b: Seq<u8>, t: Seq<u8>)
         }),
     decreases b.len(),
 {
+    hide(rfc_prefix_int);
     assert(b.skip(0) =~= b);
     if b.len() > 0 && b[0] & 0xC0u8 == 0x40u8 {
         assert((b + t)[0] == b[0]);
@@ -318,6 +320,48 @@ pub proof fn lemma_decoder_stream_split(b: Seq<u8>, t: Seq<u8>)
         }
     } else if b.len() == 0 {
         assert(b + t =~= t);
+    }
+}
+
+/// An encoder-stream error is decided by the bytes so far: what follows does not change it.
+pub proof fn lemma_encoder_stream_err(b: Seq<u8>, t: Seq<u8>)
+    requires
+        rfc_encoder_stream(b) is Err,
+    ensures
+        rfc_encoder_stream(b + t) == rfc_encoder_stream(b),
+    decreases b.len(),
+{
+    hide(rfc_prefix_int);
+    assert((b + t)[0] == b[0]);
+    if b[0] & 0xE0u8 == 0x20u8 {
+        lemma_prefix_int_settled(5, b, t);
+        if let PrefixIntSpec::Value { value, consumed: c } = rfc_prefix_int(5, b) {
+            if value == 0 {
+                lemma_prefix_int_consumed(5, b);
+                assert((b + t).skip(c as int) =~= b.skip(c as int) + t);
+                lemma_encoder_stream_err(b.skip(c as int), t);
+            }
+        }
+    }
+}
+
+/// A decoder-stream error is decided by the bytes so far: what follows does not change it.
+pub proof fn lemma_decoder_stream_err(b: Seq<u8>, t: Seq<u8>)
+    requires
+        rfc_decoder_stream(b) is Err,
+    ensures
+        rfc_decoder_stream(b + t) == rfc_decoder_stream(b),
+    decreases b.len(),
+{
+    hide(rfc_prefix_int);
+    assert((b + t)[0] == b[0]);
+    if b[0] & 0xC0u8 == 0x40u8 {
+        lemma_prefix_int_settled(6, b, t);
+        if let PrefixIntSpec::Value { value: _, consumed: c } = rfc_prefix_int(6, b) {
+            lemma_prefix_int_consumed(6, b);
+            assert((b + t).skip(c as int) =~= b.skip(c as int) + t);
+            lemma_decoder_stream_err(b.skip(c as int), t);
+        }
     }
 }
 
