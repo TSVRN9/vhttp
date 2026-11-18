@@ -156,8 +156,9 @@ tail).
 - **Catch**: the bound and the partition in `SendStream::wf`, proved at every mutator; the cost ensures under
   `scripts/cost-charge.sh` (send_stream.rs and ranges.rs in its `FILES`, the six wrappers in `WRAPPERS`); mutants
   9b2-M16 (retransmit without the floor), 9b2-M17 (a short piece with no slot), 9b2-M18 (an ACK leaving its piece in
-  flight) and 9b2-M19 (slots closed `FLOOR` past `acked_base`), each killed by Verus; the selective-ACK tests
-  (`send_ranges_bounded_under_selective_acks`, `input_cost::send_selective_acks`: after every call the three sets within
+  flight) and 9b2-M19 (slots closed `FLOOR` past `acked_base`), each killed by Verus under `scripts/mutants.sh run`;
+  the selective-ACK tests (`send_ranges_bounded_under_selective_acks`, `input_cost::send_selective_acks`: after every
+  call the three sets within
   `buffered()/256 + 4`, each ACK or loss at most `8·(h + 1)` node allocations and one live node more, no realloc) and
   `partition_never_forgets`; `range_gate_pto_cycles` and `alternate_ack_range_growth` now check the proved bound. No
   mutant drops a tree without `free`: an implicit `Drop` is invisible to Verus and to the gate (D15); review checks it.
@@ -167,5 +168,7 @@ tail).
   output routing), stated for the caller to keep (owner: the caller, the server's pipeline; checked by its own proofs
   and the interop tests). streams.rs:26-28's "tested not proven" range claim is gone, replaced by the proved bound.
 - **Evidence**: tests `ranges::ranges_model`, `send_stream::partition_never_forgets`,
-  `send_stream::send_ranges_bounded_under_selective_acks`, `input_cost::send_selective_acks`; mutants 9b2-M16..M19
-  (`scripts/mutants.sh run 9b2-M16 9b2-M17 9b2-M18 9b2-M19`); spec D10, D15, D16.
+  `send_stream::send_ranges_bounded_under_selective_acks`, `send_stream::range_gate_closes`,
+  `input_cost::send_selective_acks`; mutants 9b2-M16..M19, `scripts/mutants.sh run 9b2-M16 9b2-M17 9b2-M18 9b2-M19` at
+  e0037c5: "mutants: run ok (4 mutants killed)" (M16 at `SendStream::retransmit`, resend_piece's item rule; M17 at
+  `push_piece`; M18 at `ack_piece`; M19 at `drop_prefix`); spec D10, D15, D16.
