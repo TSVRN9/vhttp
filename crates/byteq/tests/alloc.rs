@@ -292,3 +292,71 @@ fn drained_queue_holds_nothing() {
     r.op(Op::Take(10), &src);
     assert_eq!(r.q.caps(), (0, 0));
 }
+
+/// Replays `ops` (pushes of zeros, drops) on a fresh queue.
+fn replay(ops: &[Op]) -> ByteQueue {
+    let mut q = ByteQueue::new();
+    let src = [0u8; 300];
+    for op in ops {
+        match *op {
+            Op::Push(d) => {
+                let _ = q.push_slice(&src[..d]);
+            }
+            Op::Drop(n) | Op::Take(n) => {
+                let _ = q.drop_front(n);
+            }
+        }
+    }
+    q
+}
+
+/// `room(b)` against the allocator's own sizes (`caps`): every push of at most `room(b)` bytes leaves both buffers
+/// within `b`, and one of `room(b) + 1` bytes does not (the closed form's floor divisions and piece edges, D4's three
+/// cases and the migration's finishing step); `held` is `caps`' sum.
+#[test]
+fn room_is_the_prefix_that_fits() {
+    let (mut migrating, mut checked) = (0, 0);
+    for seed in 1..=6u64 {
+        let mut x = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        let mut ops = Vec::new();
+        let mut len = 0usize;
+        for k in 0..120 {
+            let v = xorshift(&mut x);
+            let op = if v % 3 == 0 && len > 0 {
+                Op::Drop((v >> 8) as usize % len + 1)
+            } else {
+                Op::Push((v >> 8) as usize % 301)
+            };
+            match op {
+                Op::Push(d) => len += d,
+                Op::Drop(n) | Op::Take(n) => len -= n,
+            }
+            ops.push(op);
+            if k % 6 != 5 {
+                continue;
+            }
+            let q = replay(&ops);
+            let (a, b0) = q.caps();
+            assert_eq!(q.held(), a + b0, "held is both buffers");
+            migrating += (b0 != 0) as usize;
+            for b in [a + b0, a + b0 + (xorshift(&mut x) as usize % 200), a + b0 + (xorshift(&mut x) as usize % 1500)] {
+                let r = q.room(b);
+                for d in 0..=r + 1 {
+                    let mut p = replay(&ops);
+                    let _ = p.push_slice(&vec![0u8; d]);
+                    let (c, e) = p.caps();
+                    assert_eq!(c + e <= b, d <= r, "seed {seed} op {k}: push {d} -> {c} + {e} against b {b}, room {r}, caps {:?}", (a, b0));
+                    checked += 1;
+                }
+            }
+        }
+    }
+    assert!(migrating > 10 && checked > 10_000, "states mid-migration {migrating}, pushes checked {checked}");
+}
+
+/// An empty queue's room is `b/3` from `MIN_CAP` on (`empty_room`).
+#[test]
+fn empty_room_is_a_third() {
+    let q = ByteQueue::new();
+    assert_eq!((q.room(63), q.room(64), q.room(1 << 20)), (0, 21, 349_525));
+}

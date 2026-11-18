@@ -33,8 +33,9 @@
 //! Enforced here since Phase 3d (former caller obligations):
 //! - **Our own uni streams:** at most `MAX_OWN_UNI` (3), in `StreamIds::wf`; `write` refuses a
 //!   fourth (`uni_openable`).
-//! - **Write backpressure:** Σ send buffers ≤ `MAX_SEND_BUFFER` (1 MiB) is in `wf`; `write`
-//!   fails, changing nothing, beyond `send_room()`.
+//! - **Write backpressure:** Σ send-queue capacity (each queue's buffers, as requested from the
+//!   allocator) ≤ `MAX_SEND_BUFFER` (1 MiB) is in `wf`; `write` fails, changing nothing, beyond
+//!   `send_room(id)`.
 //! - **Receive window pinned (3d D8):** every mutator keeps the connection window at
 //!   `initial_max_data`, and `lemma_wf` bounds receive memory by 2·window.
 use vstd::prelude::*;
@@ -354,17 +355,15 @@ pub open spec fn post_rest(
 // ---- Sums over the entries ----
 
 /// Per-entry quantities: 0 counted, 1 retired, 2 buffered, 3 physically buffered; 4 + k is 1
-/// for a stream of type k; on the sending part, 8 bytes sent (`sent_end`), 9 buffered, 10
-/// written but not acknowledged.
+/// for a stream of type k; on the sending part, 8 bytes sent (`sent_end`), 9 the send queue's
+/// held capacity (`held_spec`).
 spec fn val(e: Entry, q: int) -> int {
     if q >= 8 {
         match e.send {
             Some(p) => if q == 8 {
                 p.sent_end() as int
-            } else if q == 9 {
-                p.buffered_spec() as int
             } else {
-                p.all_written().len() - p.acked_point_spec()
+                p.held_spec() as int
             },
             None => 0,
         }
@@ -541,28 +540,6 @@ proof fn lemma_sum_bounds(s: Seq<Entry>)
         }
         lemma_sum_bounds(p);
         assert(terms_ok(s[s.len() - 1]));
-    }
-}
-
-/// The per-entry send-side bounds behind the connection-level ones.
-spec fn tx_terms_ok(e: Entry) -> bool {
-    0 <= val(e, 9) <= 2 * val(e, 10)
-}
-
-proof fn lemma_sum_tx(s: Seq<Entry>)
-    requires
-        forall|k: int| 0 <= k < s.len() ==> tx_terms_ok(#[trigger] s[k]),
-    ensures
-        0 <= sum(s, 9) <= 2 * sum(s, 10),
-    decreases s.len(),
-{
-    if s.len() > 0 {
-        let p = s.drop_last();
-        assert forall|k: int| 0 <= k < p.len() implies tx_terms_ok(#[trigger] p[k]) by {
-            assert(p[k] == s[k]);
-        }
-        lemma_sum_tx(p);
-        assert(tx_terms_ok(s[s.len() - 1]));
     }
 }
 
@@ -780,14 +757,9 @@ impl Streams {
         self.tx_gone@ + sum(self.entries@, 8)
     }
 
-    /// Σ `buffered_spec()` over the sending parts.
+    /// Σ `held_spec()` over the sending parts: the bytes their send queues requested from the allocator.
     pub closed spec fn tx_buffered(&self) -> int {
         sum(self.entries@, 9)
-    }
-
-    /// Σ bytes written but not yet acknowledged over the sending parts.
-    pub closed spec fn tx_unacked(&self) -> int {
-        sum(self.entries@, 10)
     }
 
     /// Streams with an entry.
@@ -918,10 +890,9 @@ impl Streams {
                 self.tx_part(id) is Some ==> self.tx_part(id)->0.wf() && self.tx_part(
                     id,
                 )->0.sent_end() <= self.tx_part(id)->0.max(),
-            // Memory: the send buffers hold at most twice the bytes not yet acknowledged, and
-            // at most `MAX_SEND_BUFFER` in all.
-            0 <= self.tx_buffered() <= 2 * self.tx_unacked(),
-            self.tx_buffered() <= MAX_SEND_BUFFER,
+            // Memory: the send queues' buffers hold at most `MAX_SEND_BUFFER` bytes in all
+            // (each part's `held_spec`, the bytes its queue requested from the allocator).
+            0 <= self.tx_buffered() <= MAX_SEND_BUFFER,
             // Memory: receive buffers within twice the pinned window (3d D8).
             self.rx_buffered_phys() <= 2 * self.conn_recv_spec().window_spec(),
             self.ids_spec().local_uni_spec().used_spec() <= MAX_OWN_UNI,
@@ -961,13 +932,7 @@ impl Streams {
                 }
             }
         }
-        assert forall|k: int| 0 <= k < s.len() implies tx_terms_ok(#[trigger] s[k]) by {
-            assert(entry_ok(s[k], self.rx_bidi, self.rx_uni));
-            if let Some(p) = s[k].send {
-                p.lemma_wf();
-            }
-        }
-        lemma_sum_tx(s);
+        lemma_sum_buf_nonneg(s);
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9114#section-6.2
@@ -1673,12 +1638,41 @@ impl Streams {
             assert(post_rest(s0, s1, f@, event_views(ev0), event_views(ev@), r));
         }
         if r.is_ok() {
-            self.gc(i);
-            proof {
-                lemma_post_gc(s0, s1, *self, f@, id, event_views(ev0), event_views(ev@), r);
-            }
+            self.gc_after(i, Ghost(s0), Ghost(f@), Ghost(event_views(ev0)), Ghost(event_views(ev@)), Ghost(r));
         }
         r
+    }
+
+    /// `deliver_at`'s `gc` of entry `i` once its frame applied (split for the rlimit).
+    fn gc_after(
+        &mut self,
+        i: usize,
+        Ghost(s0): Ghost<Streams>,
+        Ghost(f): Ghost<SpecFrame>,
+        Ghost(ev0): Ghost<Seq<SpecStreamEvent>>,
+        Ghost(ev1): Ghost<Seq<SpecStreamEvent>>,
+        Ghost(r): Ghost<Result<(), u64>>,
+    )
+        requires
+            old(self).wf(),
+            i < old(self).entries@.len(),
+            frame_stream_id(f) == Some(old(self).entries@[i as int].id),
+            post_rest(s0, *old(self), f, ev0, ev1, r),
+            forall|j: u64| #[trigger] old(self).is_removed(j) == s0.is_removed(j),
+            forall|b: bool| #[trigger] old(self).peer_closed(b) == s0.peer_closed(b),
+        ensures
+            final(self).wf(),
+            final(self).failed == old(self).failed,
+            final(self).tx_buffered() <= old(self).tx_buffered(),
+            final(self).rx_conn == old(self).rx_conn,
+            post_rest(s0, *final(self), f, ev0, ev1, r),
+    {
+        let ghost s1 = *self;
+        let ghost id = self.entries@[i as int].id;
+        self.gc(i);
+        proof {
+            lemma_post_gc(s0, s1, *self, f, id, ev0, ev1, r);
+        }
     }
 
     /// One frame of types 0x04, 0x05 or 0x08–0x17 from a 1-RTT packet. Its new events go to
@@ -2389,7 +2383,7 @@ proof fn lemma_open_one(s0: Streams, s1: Streams, x: u64, e: Entry)
             && r.trace() == Seq::<SpecRecvIn>::empty(),
         (x % 4 == 0) == (e.send is Some),
         e.send matches Some(p) ==> p.wf() && p.reset_spec() is None && p.sent_end() == 0
-            && p.buffered_spec() == 0,
+            && p.held_spec() == 0,
         s1.entries@ == s0.entries@.push(e),
         s1.rtr@ == s0.rtr@.insert(x, Seq::<SpecRecvIn>::empty()),
         s1.conn_recv == s0.conn_recv,
@@ -2985,7 +2979,7 @@ fn poll_stream(
         final(cs).max() == old(cs).max(),
         final(p).sent_end() - old(p).sent_end() == final(cs).used() - old(cs).used(),
         final(p).sent_end() >= old(p).sent_end(),
-        final(p).buffered_spec() <= old(p).buffered_spec(),
+        final(p).held_spec() <= old(p).held_spec(),
         out_ok(s0, pre, budget, final(out)@, *final(room)),
         final(out)@.len() >= old(out)@.len(),
         final(out)@.subrange(0, old(out)@.len() as int) == old(out)@,
@@ -3011,7 +3005,7 @@ fn poll_stream(
             cs.max() == c0.max(),
             p.sent_end() - p0.sent_end() == cs.used() - c0.used(),
             p.sent_end() >= p0.sent_end(),
-            p.buffered_spec() <= p0.buffered_spec(),
+            p.held_spec() <= p0.held_spec(),
             out@.len() >= o0.len(),
             out@.subrange(0, o0.len() as int) == o0,
             streamed(out@, o0.len() as int, id, p.sent_end()),
@@ -3366,12 +3360,22 @@ impl Streams {
         &&& id / 4 < MAX_OWN_UNI
     }
 
-    /// How many more bytes `write` accepts, over all streams.
-    pub fn send_room(&self) -> (r: u64)
+    /// How many more bytes `write` accepts on stream `id`: the most `d` such that a write of `d` bytes, and every
+    /// shorter one, keeps the send queues' held capacity within `MAX_SEND_BUFFER` (`id`'s part's `room_spec`, the
+    /// other parts' capacity set aside; for a stream with no sending part, an empty queue's).
+    pub closed spec fn send_room_spec(&self, id: u64) -> int {
+        let b = MAX_SEND_BUFFER - self.tx_buffered();
+        match self.tx_part(id) {
+            Some(p) => p.room_spec((b + p.held_spec()) as nat) as int,
+            None => byteq::queue::empty_room(b as nat) as int,
+        }
+    }
+
+    pub fn send_room(&self, id: u64) -> (r: u64)
         requires
             self.wf(),
         ensures
-            r as int == MAX_SEND_BUFFER - self.tx_buffered(),
+            r as int == self.send_room_spec(id),
     {
         let mut acc: u64 = 0;
         let mut i: usize = 0;
@@ -3393,7 +3397,7 @@ impl Streams {
                 lemma_sum_prefix_le(self.entries@, i as int + 1);
             }
             let b = match &self.entries[i].send {
-                Some(p) => p.buffered() as u64,
+                Some(p) => p.held() as u64,
                 None => 0,
             };
             acc = acc + b;
@@ -3402,7 +3406,27 @@ impl Streams {
         proof {
             assert(self.entries@.take(i as int) =~= self.entries@);
         }
-        MAX_SEND_BUFFER - acc
+        let free = MAX_SEND_BUFFER - acc;
+        if let Some(k) = self.find(id) {
+            if let Some(p) = &self.entries[k].send {
+                proof {
+                    lemma_part_at(*self, k as int);
+                    lemma_sum_buf_le(self.entries@, k as int);
+                    assert(entry_ok(self.entries@[k as int], self.rx_bidi, self.rx_uni));
+                    assert(MAX_SEND_BUFFER <= byteq::queue::MAX_QUEUE) by (compute_only);
+                    p.lemma_room((free + p.held_spec()) as nat, 0);
+                }
+                return p.room((free + p.held() as u64) as usize) as u64;
+            }
+            proof {
+                lemma_part_at(*self, k as int);
+            }
+        }
+        if free >= byteq::queue::MIN_CAP as u64 {
+            free / 3
+        } else {
+            0
+        }
     }
 
     /// Appends `data` to stream `id`, with the FIN if `fin`. Opens our next unidirectional
@@ -3417,9 +3441,8 @@ impl Streams {
             r is Ok <==> match old(self).tx_part(id) {
                 Some(p) => write_ok(p, data@.len()),
                 None => old(self).uni_openable(id) && data@.len() <= VARINT_MAX,
-            } && old(self).tx_buffered() + data@.len() <= MAX_SEND_BUFFER,
+            } && data@.len() <= old(self).send_room_spec(id),
             r is Err ==> *final(self) == *old(self),
-            r is Ok ==> final(self).tx_buffered() == old(self).tx_buffered() + data@.len(),
             final(self).conn_recv_spec().window_spec() == old(self).conn_recv_spec().window_spec(),
             r is Ok ==> match final(self).tx_part(id) {
                 Some(q) => q.all_written() == (match old(self).tx_part(id) {
@@ -3433,7 +3456,7 @@ impl Streams {
             forall|j: u64| #[trigger] final(self).is_removed(j) == old(self).is_removed(j),
     {
         // Before any swap, so a refusal changes nothing.
-        if data.len() as u64 > self.send_room() {
+        if data.len() as u64 > self.send_room(id) {
             return Err(());
         }
         match self.find(id) {
@@ -3446,14 +3469,13 @@ impl Streams {
         requires
             old(self).wf(),
             i < old(self).entries@.len(),
-            old(self).tx_buffered() + data@.len() <= MAX_SEND_BUFFER,
+            data@.len() <= old(self).send_room_spec(old(self).entries@[i as int].id),
         ensures
             ({
                 let id = old(self).entries@[i as int].id;
                 &&& final(self).wf()
                 &&& final(self).failed() == old(self).failed()
                 &&& final(self).rx_conn == old(self).rx_conn
-                &&& r is Ok ==> final(self).tx_buffered() == old(self).tx_buffered() + data@.len()
                 &&& r is Ok <==> match old(self).tx_part(id) {
                     Some(p) => write_ok(p, data@.len()),
                     None => old(self).uni_openable(id) && data@.len() <= VARINT_MAX,
@@ -3487,8 +3509,10 @@ impl Streams {
             return Err(());
         }
         proof {
+            let p0 = s0.entries@[i as int].send->0;
             lemma_sum_buf_le(s0.entries@, i as int);
             assert(MAX_SEND_BUFFER <= byteq::queue::MAX_QUEUE) by (compute_only);
+            p0.lemma_room((MAX_SEND_BUFFER - s0.tx_buffered() + p0.held_spec()) as nat, data@.len() as nat);
         }
         let mut e = Entry { id: 0, recv: None, send: None };
         self.entries.set_and_swap(i, &mut e);
@@ -3515,12 +3539,11 @@ impl Streams {
         requires
             old(self).wf(),
             !has_id(old(self).entries@, id),
-            old(self).tx_buffered() + data@.len() <= MAX_SEND_BUFFER,
+            data@.len() <= byteq::queue::empty_room((MAX_SEND_BUFFER - old(self).tx_buffered()) as nat),
         ensures
             final(self).wf(),
             final(self).failed() == old(self).failed(),
             final(self).rx_conn == old(self).rx_conn,
-            r is Ok ==> final(self).tx_buffered() == old(self).tx_buffered() + data@.len(),
             r is Ok <==> old(self).uni_openable(id) && data@.len() <= VARINT_MAX,
             r is Err ==> *final(self) == *old(self),
             r is Ok ==> match final(self).tx_part(id) {
@@ -3547,6 +3570,7 @@ impl Streams {
         proof {
             lemma_sum_buf_nonneg(s0.entries@);
             assert(MAX_SEND_BUFFER <= byteq::queue::MAX_QUEUE) by (compute_only);
+            p.lemma_room((MAX_SEND_BUFFER - s0.tx_buffered()) as nat, data@.len() as nat);
         }
         let _ = p.write(data, fin);
         let e = Entry { id, recv: None, send: Some(p) };
@@ -4386,8 +4410,8 @@ proof fn lemma_swap_same_rx(s0: Streams, s1: Streams, i: int, ne: Entry)
         ne.recv == s0.entries@[i].recv,
         ne.send is Some == s0.entries@[i].send is Some,
         ne.send matches Some(p) ==> p.wf() && p.sent_end() == s0.entries@[i].send->0.sent_end()
-            && p.reset_spec() == s0.entries@[i].send->0.reset_spec() && p.buffered_spec()
-            <= s0.entries@[i].send->0.buffered_spec(),
+            && p.reset_spec() == s0.entries@[i].send->0.reset_spec() && p.held_spec()
+            <= s0.entries@[i].send->0.held_spec(),
         s1.entries@ == s0.entries@.update(i, ne),
         s1 == (Streams { entries: s1.entries, ..s0 }),
     ensures
@@ -4498,6 +4522,12 @@ proof fn lemma_push_local(s0: Streams, s1: Streams, e: Entry)
 } // verus!
 
 impl Streams {
+    /// Test support: the send queues' allocated capacity (`SendStream::buf_capacity`), summed.
+    #[doc(hidden)]
+    pub fn send_capacity(&self) -> usize {
+        self.entries.iter().filter_map(|e| e.send.as_ref()).map(SendStream::buf_capacity).sum()
+    }
+
     /// Test support: stream `id`'s sending part's acked and lost range counts.
     #[doc(hidden)]
     pub fn send_range_counts(&self, id: u64) -> Option<(usize, usize)> {

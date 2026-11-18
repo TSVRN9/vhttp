@@ -1,7 +1,7 @@
 //! 9b2 Task 1: the per-call cost of quic's input-path byte buffers (spec "The cost today", D15). Each pattern runs at
-//! n, 2n and 4n under a per-thread counting allocator; every input call is measured on its own. The bounds: requested
-//! bytes at most 3x per doubling, total time at most 8x (+ 20 ms) from n to 4n, no `realloc`, a delivering call hands
-//! over at most its own input's bytes, and the slowest call at 4n at most 4x the slowest at n (+ 1 ms). Per call
+//! n, 2n and 4n under a per-thread counting allocator; every input call is measured on its own. The bounds count, never
+//! time: requested bytes at most 3x per doubling, per call kind the largest single call's requested bytes at most 3x
+//! per doubling (+ `COST_B`), no `realloc`, and a delivering call hands over at most its own input's bytes. Per call
 //! (the allocator is deterministic): no `realloc`, and requested bytes at most `COST_A·d + COST_B`, but for one queue
 //! buffer of a call given bytes (`per_call_ok`).
 use quic::crypto_stream::CryptoStream;
@@ -10,7 +10,6 @@ use quic::recv_stream::{RecvStream, StreamEvent};
 use quic::send_stream::{SendState, SendStream};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::time::{Duration, Instant};
 
 struct Counting;
 
@@ -144,13 +143,12 @@ fn per_call_ok(name: &str, m: usize, c: &[Call], a: Alloc) -> Vec<String> {
     f
 }
 
-/// One input call: its kind, allocator counts (`k[5]` its largest single request), wall time, the bytes it was given,
-/// the bytes it handed over (None: delivers nothing), the bytes held after it.
+/// One input call: its kind, allocator counts (`k[5]` its largest single request), the bytes it was given, the bytes
+/// it handed over (None: delivers nothing), the bytes held after it.
 #[derive(Clone, Copy)]
 struct Call {
     tag: &'static str,
     k: [usize; 6],
-    t: Duration,
     d: usize,
     out: Option<usize>,
     held: usize,
@@ -168,14 +166,11 @@ impl Run {
             k.set(v);
             v
         });
-        let t = Instant::now();
         let (out, held) = f();
-        let t = t.elapsed();
         let b = K.with(|k| k.get());
         self.0.push(Call {
             tag,
             k: [0, 1, 2, 3, 4, 5].map(|i| if i == 5 { b[5] } else { b[i] - a[i] }),
-            t,
             d,
             out,
             held,
@@ -183,33 +178,16 @@ impl Run {
     }
 }
 
-/// Runs `pat` at n, 2n, 4n (three times each; times are the fastest run's) and checks the bounds; `queue`: the structure
-/// is a `ByteQueue` after 9b2 (`bytes_ok`). With `fill`, the
-/// last call is the gap fill and must take at most 8x the slowest other call + 1 ms.
-fn check(name: &str, n: usize, pat: fn(usize, &mut Run), fill: bool, a: Alloc) {
+/// Runs `pat` at n, 2n, 4n and checks the bounds; `a`: the allocations the structure may make beyond the per-call
+/// budget (`bytes_ok`). Counts only (the allocator is deterministic): wall time is not a cost bound (Task 8 ruling).
+fn check(name: &str, n: usize, pat: fn(usize, &mut Run), a: Alloc) {
     let mut fails = Vec::new();
-    let mut rows = Vec::new();
+    let mut rows: Vec<(usize, Vec<(&'static str, usize)>)> = Vec::new();
     for m in [n, 2 * n, 4 * n] {
-        let runs: Vec<Run> = (0..3)
-            .map(|_| {
-                let mut r = Run::default();
-                pat(m, &mut r);
-                r
-            })
-            .collect();
-        let c = &runs[0].0;
+        let mut r = Run::default();
+        pat(m, &mut r);
+        let c = &r.0;
         let k = c.iter().fold([0; 5], |a, x| [0, 1, 2, 3, 4].map(|i| a[i] + x.k[i]));
-        let total = runs
-            .iter()
-            .map(|r| r.0.iter().map(|x| x.t).sum::<Duration>())
-            .min()
-            .unwrap();
-        let slow = runs
-            .iter()
-            .map(|r| r.0.iter().map(|x| x.t).max().unwrap())
-            .min()
-            .unwrap();
-        let big = c.iter().map(|x| x.k[4]).max().unwrap();
         let worst = c
             .iter()
             .filter_map(|x| x.out.map(|o| (o, x.d)))
@@ -221,24 +199,8 @@ fn check(name: &str, n: usize, pat: fn(usize, &mut Run), fill: bool, a: Alloc) {
                 "{name} n={m}: {over} calls hand over more than their input (worst {worst:?} (out, d))"
             ));
         }
-        let (tf, tmax) = if fill {
-            let tf = runs.iter().map(|r| r.0.last().unwrap().t).min().unwrap();
-            let l = c.len() - 1;
-            let tmax = runs
-                .iter()
-                .map(|r| r.0[..l].iter().map(|x| x.t).max().unwrap())
-                .min()
-                .unwrap();
-            if tf > 8 * tmax + Duration::from_millis(1) {
-                fails.push(format!("{name} n={m}: fill call {tf:?} > 8 x {tmax:?} + 1 ms"));
-            }
-            (Some(tf), Some(tmax))
-        } else {
-            (None, None)
-        };
         eprintln!(
-            "{name} n={m}: calls {} bytes {} alloc {} alloc_zeroed {} realloc {} dealloc {} time {total:?} \
-             slowest {slow:?} largest-call-bytes {big} worst-out {worst:?} fill {tf:?} other-max {tmax:?}",
+            "{name} n={m}: calls {} bytes {} alloc {} alloc_zeroed {} realloc {} dealloc {} worst-out {worst:?}",
             c.len(),
             k[4],
             k[0],
@@ -246,37 +208,29 @@ fn check(name: &str, n: usize, pat: fn(usize, &mut Run), fill: bool, a: Alloc) {
             k[2],
             k[3]
         );
-        let mut tags: Vec<&str> = Vec::new();
+        let mut tags: Vec<(&'static str, usize)> = Vec::new();
         for x in c {
-            if !tags.contains(&x.tag) {
-                tags.push(x.tag);
+            match tags.iter_mut().find(|t| t.0 == x.tag) {
+                Some(t) => t.1 = t.1.max(x.k[4]),
+                None => tags.push((x.tag, x.k[4])),
             }
         }
-        for tag in tags {
-            let of = |r: &Run| r.0.iter().filter(|x| x.tag == tag).map(|x| x.t).max().unwrap();
-            let b = c.iter().filter(|x| x.tag == tag).map(|x| x.k[4]).max().unwrap();
+        for &(tag, b) in &tags {
             let n = c.iter().filter(|x| x.tag == tag).count();
-            let t = runs.iter().map(of).min().unwrap();
-            eprintln!("  {name} n={m} {tag}: calls {n} largest-call-bytes {b} slowest {t:?}");
+            eprintln!("  {name} n={m} {tag}: calls {n} largest-call-bytes {b}");
         }
-        rows.push((k[4], total, slow));
+        rows.push((k[4], tags));
     }
     for i in 0..2 {
         if rows[i + 1].0 > 3 * rows[i].0 {
             fails.push(format!("{name}: bytes {} -> {} (> 3x)", rows[i].0, rows[i + 1].0));
         }
-    }
-    if rows[2].1 > 8 * rows[0].1 + Duration::from_millis(20) {
-        fails.push(format!(
-            "{name}: time {:?} -> {:?} (> 8x + 20 ms)",
-            rows[0].1, rows[2].1
-        ));
-    }
-    if rows[2].2 > 4 * rows[0].2 + Duration::from_millis(1) {
-        fails.push(format!(
-            "{name}: slowest call {:?} -> {:?} (> 4x + 1 ms)",
-            rows[0].2, rows[2].2
-        ));
+        for &(tag, b) in &rows[i + 1].1 {
+            let p = rows[i].1.iter().find(|t| t.0 == tag).map_or(0, |t| t.1);
+            if b > 3 * p + COST_B {
+                fails.push(format!("{name}: {tag} largest-call-bytes {p} -> {b} (> 3x + {COST_B})"));
+            }
+        }
     }
     assert!(fails.is_empty(), "{fails:#?}");
 }
@@ -333,14 +287,10 @@ fn runs_then_fill(m: usize, r: &mut Run) {
 fn write_send_ack(m: usize, r: &mut Run) {
     let s = bytes(m);
     let mut st = SendStream::new(m as u64);
-    // 1 KiB writes, as an application writes: one write of all m bytes would time the byte copy's cache misses
-    // (D4's copy is O(d), byte by byte) in the slowest-call ratio, not an ACK.
-    for (i, w) in s.chunks(1024).enumerate() {
-        r.call("write", w.len(), || {
-            assert_eq!(st.write(w, (i + 1) * 1024 >= m), Ok(()));
-            (None, st.buffered())
-        });
-    }
+    r.call("write", m, || {
+        assert_eq!(st.write(&s, true), Ok(()));
+        (None, st.buffered())
+    });
     let mut more = true;
     while more {
         r.call("poll", 0, || {
@@ -389,17 +339,17 @@ fn reverse_fill(m: usize, r: &mut Run) {
 
 #[test]
 fn crypto_one_byte_frames() {
-    check("crypto_one_byte_frames", 16 << 10, one_byte_frames, false, Alloc::Gather);
+    check("crypto_one_byte_frames", 16 << 10, one_byte_frames, Alloc::Gather);
 }
 
 #[test]
 fn crypto_runs_then_fill() {
-    check("crypto_runs_then_fill", 1024, runs_then_fill, true, Alloc::Gather);
+    check("crypto_runs_then_fill", 1024, runs_then_fill, Alloc::Gather);
 }
 
 #[test]
 fn send_ack_1k() {
-    check("send_ack_1k", 256 << 10, write_send_ack, false, Alloc::Queue);
+    check("send_ack_1k", 256 << 10, write_send_ack, Alloc::Queue);
 }
 
 /// 64 KiB written and sent in 1 KiB pieces, each acknowledged in order: no `realloc`, and no ACK requests more than
@@ -428,5 +378,5 @@ fn ack_copies_no_stream_bytes() {
 #[test]
 #[ignore = "9b2: fails today, zero-fill reallocs and eager whole-run delivery (Q1, Q3); un-ignored by Task 10"]
 fn stream_reverse_fill() {
-    check("stream_reverse_fill", 16 << 10, reverse_fill, false, Alloc::None);
+    check("stream_reverse_fill", 16 << 10, reverse_fill, Alloc::None);
 }

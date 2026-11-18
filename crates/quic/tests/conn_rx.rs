@@ -545,7 +545,10 @@ fn stream_write_partial() {
     p.initial_max_stream_data_bidi_local = 1 << 30;
     let mut c = established_with(p);
     c.on_datagram(0, 100, vec![one(0, vec![stream(0, b"GET", false)])], None, 30, &rnd(3));
-    assert_eq!(c.stream_write(0, &vec![7; (1 << 20) + 5], true), Ok(1 << 20));
+    // The send room counts queue capacity (MAX_SEND_BUFFER / 3 into an empty queue, then the rest of its buffer's
+    // first half), so a 1 MiB write is taken in two pieces before the buffer is full.
+    assert_eq!(c.stream_write(0, &vec![7; (1 << 20) + 5], true), Ok(349_525));
+    assert_eq!(c.stream_write(0, &vec![7; 1 << 20], true), Ok(174_762));
     assert_eq!(c.stream_write(0, &[7; 5], true), Ok(0));
 }
 

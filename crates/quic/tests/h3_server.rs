@@ -261,6 +261,9 @@ fn deferred() -> H3Server {
     let body = vec![0x5a; 3 << 20];
     let r = Response { status: 200, headers: vec![], body };
     assert_eq!(s.send_response(0, &r, &mut app), Ok(()));
+    // The send room counts queue capacity (9b2 Task 8): `send_response` writes `MAX_SEND_BUFFER/3` into the empty
+    // queue, and the flush appends the rest of its buffer's first half, after which no write fits.
+    s.pump(&mut app);
     assert!(!s.can_send());
     s
 }

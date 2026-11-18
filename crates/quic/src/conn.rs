@@ -4271,10 +4271,10 @@ impl Connection {
     // Application side
     // =========================================================================
 
-    /// How many more bytes `stream_write` accepts, over all streams.
-    pub closed spec fn send_room_spec(&self) -> int {
+    /// How many more bytes `stream_write` accepts on stream `id` (`Streams::send_room_spec`).
+    pub closed spec fn send_room_spec(&self, id: u64) -> int {
         match self.streams {
-            Some(s) => MAX_SEND_BUFFER - s.tx_buffered(),
+            Some(s) => s.send_room_spec(id),
             None => 0,
         }
     }
@@ -4294,7 +4294,7 @@ impl Connection {
         ensures
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
-            r matches Ok(n) ==> n <= data@.len() && (n < data@.len() ==> n == old(self).send_room_spec()),
+            r matches Ok(n) ==> n <= data@.len() && (n < data@.len() ==> n == old(self).send_room_spec(id)),
             r matches Ok(n) ==> (n > 0 || data@.len() == 0 && fin) ==> final(self).fin_written(id) == (fin && n
                 == data@.len()),
             final(self).events_spec() == old(self).events_spec(),
@@ -4303,7 +4303,7 @@ impl Connection {
         let ghost o = *self;
         let r = match &mut self.streams {
             Some(s) => {
-                let room = s.send_room();
+                let room = s.send_room(id);
                 let n = if data.len() as u64 > room {
                     room as usize
                 } else {

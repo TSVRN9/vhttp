@@ -19,6 +19,15 @@ pub const MAX_QUEUE: usize = 0x1000_0000;
 /// The smallest buffer a push allocates (D4).
 pub const MIN_CAP: usize = 64;
 
+/// `room_spec` of an empty queue: one buffer of `max(MIN_CAP, 3d)` (D4 case 4) fits `b` up to `d = b/3`.
+pub open spec fn empty_room(b: nat) -> nat {
+    if b >= MIN_CAP {
+        b / 3
+    } else {
+        0
+    }
+}
+
 /// A migration in progress: `b` (capacity `cb`) holds a copy of `a[bs..c)`.
 struct Mig {
     b: CapVec<u8>,
@@ -136,12 +145,317 @@ impl ByteQueue {
         }
     }
 
+    /// `max(MIN_CAP, 3·s)`: the capacity D4 allocates for `s` live bytes.
+    closed spec fn new_cap(s: nat) -> nat {
+        if 3 * s < MIN_CAP {
+            MIN_CAP as nat
+        } else {
+            3 * s
+        }
+    }
+
+    /// `requested()` after D4 cases 2, 3 and 4 for `d > 0` (`L_a = la`, length `len`, `C = ca`): 2 keeps `ca`; 3 adds
+    /// `b` of `new_cap(len + d)` and keeps `a` unless its `3d` copy swaps (`len + d <= 3d`); 4 rebuilds into one.
+    closed spec fn idle_req(la: nat, len: nat, ca: nat, d: nat) -> nat {
+        if la + d <= ca / 2 {
+            ca
+        } else if d <= ca / 2 && len + d > 3 * d {
+            ca + Self::new_cap(len + d)
+        } else {
+            Self::new_cap(len + d)
+        }
+    }
+
+    /// `requested()` after `push_slice` of `d` bytes, exactly (D4's path, as `push_cost`): unchanged for `d == 0` or a
+    /// migration step that does not finish the copy; else, after any swap, `idle_req` on the state it leaves.
+    pub closed spec fn req_after(&self, d: nat) -> nat {
+        let la = self.a@.len();
+        let m = self.mig->0;
+        if d == 0 {
+            self.requested()
+        } else if self.mig is None {
+            Self::idle_req(la, self@.len(), self.ca as nat, d)
+        } else if la - m.c <= 3 * d {
+            Self::idle_req((la - m.bs) as nat, self@.len(), m.cb as nat, d)
+        } else {
+            self.requested()
+        }
+    }
+
+    /// `idle_req`'s room: the largest `D >= d0 - 1` with `idle_req(la, len, ca, d) <= b` for every `d0 <= d <= D`.
+    /// Its pieces, in `d` order, each non-decreasing: `d <= e1` keeps `ca`; `e1 < d <= e2` adds `b` beside `a`
+    /// (`ca + new_cap(len + d)`, fits up to `t2`); past `e2` one buffer (`new_cap(len + d)`, fits up to `t3`).
+    #[verifier::opaque]
+    closed spec fn idle_room(la: int, len: int, ca: int, b: int, d0: int) -> int {
+        let e1 = ca / 2 - la;
+        let u2 = if len >= 1 {
+            if ca / 2 < (len - 1) / 2 {
+                ca / 2
+            } else {
+                (len - 1) / 2
+            }
+        } else {
+            e1
+        };
+        let e2 = if u2 > e1 {
+            u2
+        } else {
+            e1
+        };
+        let t2 = if ca + MIN_CAP <= b {
+            (b - ca) / 3 - len
+        } else {
+            -1
+        };
+        let t3 = if MIN_CAP <= b {
+            b / 3 - len
+        } else {
+            -1
+        };
+        let s2 = if e1 + 1 > d0 {
+            e1 + 1
+        } else {
+            d0
+        };
+        let s3 = if e2 + 1 > d0 {
+            e2 + 1
+        } else {
+            d0
+        };
+        if s2 <= e2 && t2 < e2 {
+            if t2 > s2 - 1 {
+                t2
+            } else {
+                s2 - 1
+            }
+        } else if t3 > s3 - 1 {
+            t3
+        } else {
+            s3 - 1
+        }
+    }
+
+    /// The first `d` a migration step finishes the copy at (`R = L_a − c <= 3d`), at least 1.
+    closed spec fn mig_d0(r: int) -> int {
+        if r == 0 {
+            1
+        } else {
+            (r + 2) / 3
+        }
+    }
+
+    /// The most bytes a push may take with `req_after` at most `b` for it and every shorter push (the pieces of
+    /// `req_after` are not monotone together: a step-3 push that swaps can request less than a shorter one that
+    /// does not, so the room is the largest prefix of `d`s that fit, never a `d` past one that does not).
+    pub closed spec fn room_spec(&self, b: nat) -> nat {
+        let la = self.a@.len() as int;
+        let m = self.mig->0;
+        if self.mig is None {
+            Self::idle_room(la, self@.len() as int, self.ca as int, b as int, 1) as nat
+        } else {
+            Self::idle_room(la - m.bs, self@.len() as int, m.cb as int, b as int, Self::mig_d0(la - m.c)) as nat
+        }
+    }
+
+    proof fn lemma_idle_room(la: int, len: int, ca: int, b: int, d0: int, d: int)
+        requires
+            0 <= len <= la,
+            0 <= ca <= b,
+            1 <= d0,
+            d0 <= d,
+        ensures
+            d <= Self::idle_room(la, len, ca, b, d0) ==> len + d <= Self::idle_req(la as nat, len as nat, ca as nat, d as nat) <= b,
+            d == Self::idle_room(la, len, ca, b, d0) + 1 ==> Self::idle_req(la as nat, len as nat, ca as nat, d as nat) > b,
+            d0 - 1 <= Self::idle_room(la, len, ca, b, d0) <= b + d0,
+            la == 0 && ca == 0 && d0 == 1 ==> Self::idle_room(la, len, ca, b, d0) == empty_room(b as nat),
+    {
+        reveal(ByteQueue::idle_room);
+    }
+
+    /// `req_after` within `b` for every `d` up to `room_spec(b)`, never past it at `room_spec(b) + 1`; the length plus
+    /// `d` never exceeds what is requested after the push.
+    pub proof fn lemma_room(&self, b: nat, d: nat)
+        requires
+            self.wf(),
+            self.requested() <= b,
+        ensures
+            d <= self.room_spec(b) ==> self@.len() + d <= self.req_after(d) <= b,
+            d == self.room_spec(b) + 1 ==> self.req_after(d) > b,
+            self.room_spec(b) <= 2 * b + 1,
+            self@.len() == 0 ==> self.room_spec(b) == empty_room(b),
+    {
+        if self.mig is None {
+            self.lemma_room_idle(b, d);
+        } else {
+            self.lemma_room_mig(b, d);
+        }
+    }
+
+    proof fn lemma_room_idle(&self, b: nat, d: nat)
+        requires
+            self.wf(),
+            self.mig is None,
+            self.requested() <= b,
+        ensures
+            d <= self.room_spec(b) ==> self@.len() + d <= self.req_after(d) <= b,
+            d == self.room_spec(b) + 1 ==> self.req_after(d) > b,
+            self.room_spec(b) <= 2 * b + 1,
+            self@.len() == 0 ==> self.room_spec(b) == empty_room(b),
+    {
+        let la = self.a@.len() as int;
+        let len = self@.len() as int;
+        if d > 0 {
+            Self::lemma_idle_room(la, len, self.ca as int, b as int, 1, d as int);
+        }
+        Self::lemma_idle_room(la, len, self.ca as int, b as int, 1, 1);
+    }
+
+    proof fn lemma_room_mig(&self, b: nat, d: nat)
+        requires
+            self.wf(),
+            self.mig is Some,
+            self.requested() <= b,
+        ensures
+            d <= self.room_spec(b) ==> self@.len() + d <= self.req_after(d) <= b,
+            d == self.room_spec(b) + 1 ==> self.req_after(d) > b,
+            self.room_spec(b) <= 2 * b + 1,
+            self@.len() > 0,
+    {
+        let la = self.a@.len() as int;
+        let len = self@.len() as int;
+        let m = self.mig->0;
+        let r = la - m.c;
+        let d0 = Self::mig_d0(r);
+        assert(1 <= d0 <= r + 1);
+        assert(d >= 1 ==> (d < d0 <==> r > 3 * d));
+        assert(r <= 3 * d0);
+        if d >= d0 {
+            Self::lemma_idle_room(la - m.bs, len, m.cb as int, b as int, d0, d as int);
+        }
+        Self::lemma_idle_room(la - m.bs, len, m.cb as int, b as int, d0, d0);
+    }
+
+    /// The bytes both buffers asked the allocator for (`requested`).
+    pub fn held(&self) -> (r: usize)
+        requires
+            self.wf(),
+        ensures
+            r == self.requested(),
+    {
+        proof {
+            self.lemma_wf();
+        }
+        match &self.mig {
+            None => self.ca,
+            Some(m) => self.ca + m.cb,
+        }
+    }
+
+    /// `idle_room`, in `i64` (every input at most `2^30`).
+    fn idle_room_exec(la: u64, len: u64, ca: u64, b: u64, d0: u64) -> (r: i64)
+        requires
+            len <= la <= 0x4000_0000,
+            ca <= b <= 0x4000_0000,
+            1 <= d0 <= 0x4000_0000,
+        ensures
+            r == Self::idle_room(la as int, len as int, ca as int, b as int, d0 as int),
+    {
+        proof {
+            reveal(ByteQueue::idle_room);
+        }
+        let ca2 = (ca / 2) as i64;
+        let e1 = ca2 - la as i64;
+        let u2 = if len >= 1 {
+            let l2 = ((len - 1) / 2) as i64;
+            if ca2 < l2 {
+                ca2
+            } else {
+                l2
+            }
+        } else {
+            e1
+        };
+        let e2 = if u2 > e1 {
+            u2
+        } else {
+            e1
+        };
+        let t2: i64 = if ca + MIN_CAP as u64 <= b {
+            ((b - ca) / 3) as i64 - len as i64
+        } else {
+            -1
+        };
+        let t3: i64 = if MIN_CAP as u64 <= b {
+            (b / 3) as i64 - len as i64
+        } else {
+            -1
+        };
+        let s2 = if e1 + 1 > d0 as i64 {
+            e1 + 1
+        } else {
+            d0 as i64
+        };
+        let s3 = if e2 + 1 > d0 as i64 {
+            e2 + 1
+        } else {
+            d0 as i64
+        };
+        if s2 <= e2 && t2 < e2 {
+            if t2 > s2 - 1 {
+                t2
+            } else {
+                s2 - 1
+            }
+        } else if t3 > s3 - 1 {
+            t3
+        } else {
+            s3 - 1
+        }
+    }
+
+    /// `room_spec(b)`: the most bytes a push may take with `requested()` within `b` after it and after every shorter one.
+    pub fn room(&self, b: usize) -> (r: usize)
+        requires
+            self.wf(),
+            self.requested() <= b <= MAX_QUEUE,
+        ensures
+            r == self.room_spec(b as nat),
+    {
+        proof {
+            self.lemma_wf();
+        }
+        let la = self.a.len();
+        let len = la - self.head;
+        let r = match &self.mig {
+            None => {
+                proof {
+                    Self::lemma_idle_room(la as int, len as int, self.ca as int, b as int, 1, 1);
+                }
+                Self::idle_room_exec(la as u64, len as u64, self.ca as u64, b as u64, 1)
+            },
+            Some(m) => {
+                let rr = la - m.c;
+                let d0: u64 = if rr == 0 {
+                    1
+                } else {
+                    ((rr + 2) / 3) as u64
+                };
+                proof {
+                    Self::lemma_idle_room((la - m.bs) as int, len as int, m.cb as int, b as int, d0 as int, d0 as int);
+                }
+                Self::idle_room_exec((la - m.bs) as u64, len as u64, m.cb as u64, b as u64, d0)
+            },
+        };
+        r as usize
+    }
+
     /// No allocation: `CapVec::new(0)`.
     pub fn new() -> (r: ByteQueue)
         ensures
             r.wf(),
             r@ == Seq::<u8>::empty(),
             r.peak() == 0,
+            r.requested() == 0,
     {
         let r = ByteQueue { a: CapVec::new(0), ca: 0, head: 0, mig: None, pk: Ghost(0) };
         assert(r@ =~= Seq::<u8>::empty());
@@ -185,6 +499,7 @@ impl ByteQueue {
             final(self).wf(),
             final(self)@ == old(self)@.skip(n as int),
             final(self)@.len() > 0 ==> final(self).peak() == old(self).peak(),
+            final(self).requested() <= old(self).requested(),
             r@ <= 2,
     {
         let ghost v0 = self@;
@@ -216,6 +531,7 @@ impl ByteQueue {
             r.0.cap() == n,
             r.1@ <= n + 3,
             final(self)@.len() > 0 ==> final(self).peak() == old(self).peak(),
+            final(self).requested() <= old(self).requested(),
             n == 0 ==> *final(self) == *old(self),
     {
         let ghost mut work: nat = 1;
@@ -385,6 +701,7 @@ impl ByteQueue {
             final(self).mig is None,
             final(self)@ == old(self)@ + s@,
             final(self).pk@ == vstd::math::max(old(self).pk@ as int, (old(self)@.len() + s@.len()) as int),
+            final(self).requested() == Self::new_cap(old(self)@.len() + s@.len()),
             r@ == old(self)@.len() + s@.len() + 2,
     {
         let ghost mut work: nat = 2;
@@ -426,17 +743,23 @@ impl ByteQueue {
             final(self).pk@ == vstd::math::max(old(self).pk@ as int, (old(self)@.len() + s@.len()) as int),
             r@ == Self::idle_cost(old(self).a@.len(), old(self)@.len(), old(self).ca as nat, s@.len()),
             r@ <= 4 * s@.len() + 2,
+            final(self).requested() == Self::idle_req(old(self).a@.len(), old(self)@.len(), old(self).ca as nat, s@.len()),
     {
         let d = s.len();
+        let ghost ca0 = self.ca as nat;
         let Ghost(w1) = self.q_append(s);
         let sz = self.a.len() - self.head;
         let Ghost(w2) = self.mig_start(sz);
+        let ghost cb = Self::new_cap(sz as nat);
+        assert(self.mig->0.cb == cb);
         assert(self.mig->0.b@ =~= self.a@.subrange(self.head as int, self.head as int));
         let Ghost(w3) = self.mig_step(3 * d);
         if self.copied() {
             let Ghost(w4) = self.mig_swap();
+            assert(self.requested() == cb);
             return Ghost(w1 + w2 + w3 + w4);
         }
+        assert(self.requested() == ca0 + cb);
         Ghost(w1 + w2 + w3)
     }
 
@@ -453,6 +776,7 @@ impl ByteQueue {
             final(self).pk@ == vstd::math::max(old(self).pk@ as int, (old(self)@.len() + s@.len()) as int),
             r@ == Self::idle_cost(old(self).a@.len(), old(self)@.len(), old(self).ca as nat, s@.len()),
             r@ <= 4 * s@.len() + 2,
+            final(self).requested() == Self::idle_req(old(self).a@.len(), old(self)@.len(), old(self).ca as nat, s@.len()),
     {
         if self.a.len() + s.len() <= self.ca / 2 {
             self.q_append(s)
@@ -483,6 +807,7 @@ impl ByteQueue {
             final(self).mig is None ==> r@ == old(self).a@.len() - old(self).mig->0.c + 1,
             final(self).mig is None ==> final(self).a@.len() == old(self).a@.len() - old(self).mig->0.bs
                 && final(self).ca == old(self).mig->0.cb,
+            final(self).mig is Some ==> final(self).requested() == old(self).requested(),
     {
         let Ghost(w1) = self.mig_step(3 * s.len());
         if self.copied() {
@@ -511,6 +836,7 @@ impl ByteQueue {
             r@ <= 7 * s@.len() + 4,
             final(self).peak() == vstd::math::max(old(self).peak() as int, (old(self)@.len() + s@.len()) as int),
             final(self).requested() <= 2 * vstd::math::max(MIN_CAP as int, (3 * final(self).peak()) as int),
+            final(self).requested() == old(self).req_after(s@.len()),
             s@.len() == 0 ==> *final(self) == *old(self) && r@ == 0,
     {
         if s.len() == 0 {
@@ -548,6 +874,7 @@ impl ByteQueue {
             final(self)@ == old(self)@.skip(n as int),
             r@ <= 2,
             final(self)@.len() > 0 ==> final(self).peak() == old(self).peak(),
+            final(self).requested() <= old(self).requested(),
             n == 0 ==> *final(self) == *old(self),
     {
         if n == 0 {
