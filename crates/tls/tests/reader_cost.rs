@@ -1,12 +1,12 @@
 //! 9b2 Task 1: the per-call cost of `HsReader` (spec "The cost today" T1, T2; D15). The pattern runs at n, 2n and 4n
-//! under a per-thread counting allocator; every call is measured on its own. The bounds: requested bytes at most 3x per
-//! doubling, total time at most 8x (+ 20 ms) from n to 4n, no `realloc`, and the slowest call at 4n at most 4x the
-//! slowest at n (+ 1 ms). Per call (the allocator is deterministic): no `realloc`, and requested bytes at most `COST_A·d + COST_B`,
+//! under a per-thread counting allocator; every call is measured on its own. The bounds count, never time (9b2 Task 8
+//! ruling): requested bytes at most 3x per doubling, per call kind (push, next_message) the largest single call's
+//! requested bytes at most 3x per doubling (+ `COST_B`), and no `realloc`. Per call (the allocator is deterministic):
+//! no `realloc`, and requested bytes at most `COST_A·d + COST_B`,
 //! `d` the bytes the call was given; `next_message` is given none and hands over a whole message, one copy of the
 //! completed unit that stays O(message) until 9b5 (D14), so it is held to `COST_A·message + COST_B`.
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::time::{Duration, Instant};
 use tls::handshake::HsReader;
 
 struct Counting;
@@ -56,8 +56,8 @@ const COST_B: usize = 4096;
 /// byteq's `MIN_CAP` (D4); named apart so the RFC-quantity gate, which reads constants by name, never sees it.
 const QUEUE_MIN_CAP: usize = 64;
 
-/// (allocator counts with `.0[5]` the largest single request, wall time, byte allowance `d`, bytes held after)
-type Rec = ([usize; 6], Duration, usize, usize);
+/// (allocator counts with `.0[5]` the largest single request, byte allowance `d`, bytes held after)
+type Rec = ([usize; 6], usize, usize);
 
 /// Requested capacity is memory, not work: an uninitialized `with_capacity` is one allocator call, and D4 bounds the copies
 /// into it at 3 per byte pushed. So one allocation of a push may exceed the budget if it can be a queue buffer: the call
@@ -66,13 +66,13 @@ type Rec = ([usize; 6], Duration, usize, usize);
 /// that buffer: the work bound on it rests on D15's proved cost (`push_slice` at most `7d + 4`), not on this test.
 /// `exempt_cap` bounds how many calls a run may excuse so.
 fn bytes_ok(x: &Rec, push: bool) -> bool {
-    x.0[4] <= COST_A * x.2 + COST_B || exempt(x, push)
+    x.0[4] <= COST_A * x.1 + COST_B || exempt(x, push)
 }
 
 /// The call passes only by its queue-buffer allowance.
 fn exempt(x: &Rec, push: bool) -> bool {
-    let budget = COST_A * x.2 + COST_B;
-    push && x.0[4] > budget && x.0[4] - x.0[5] <= budget && x.0[5] <= 3 * x.3 + QUEUE_MIN_CAP
+    let budget = COST_A * x.1 + COST_B;
+    push && x.0[4] > budget && x.0[4] - x.0[5] <= budget && x.0[5] <= 3 * x.2 + QUEUE_MIN_CAP
 }
 
 /// A queue allocates a new buffer when its length reaches half the old one's capacity (D4), at most twice per doubling
@@ -81,8 +81,8 @@ fn exempt_cap(peak: usize) -> usize {
     2 * (peak / QUEUE_MIN_CAP).max(1).ilog2() as usize + 4
 }
 
-/// One call's allocator counts, wall time, byte allowance `d` and the bytes `f` reports held after it; the record is
-/// pushed after the counters are read.
+/// One call's allocator counts, byte allowance `d` and the bytes `f` reports held after it; the record is pushed after
+/// the counters are read.
 fn call(r: &mut Vec<Rec>, d: usize, f: impl FnOnce() -> usize) {
     let a = K.with(|k| {
         let mut v = k.get();
@@ -90,16 +90,9 @@ fn call(r: &mut Vec<Rec>, d: usize, f: impl FnOnce() -> usize) {
         k.set(v);
         v
     });
-    let t = Instant::now();
     let held = f();
-    let t = t.elapsed();
     let b = K.with(|k| k.get());
-    r.push((
-        [0, 1, 2, 3, 4, 5].map(|i| if i == 5 { b[5] } else { b[i] - a[i] }),
-        t,
-        d,
-        held,
-    ));
+    r.push(([0, 1, 2, 3, 4, 5].map(|i| if i == 5 { b[5] } else { b[i] - a[i] }), d, held));
 }
 
 /// One ClientHello-typed message of `m` bytes, header included, pushed one byte per call; `next_message` once it is
@@ -131,15 +124,8 @@ fn reader_one_byte_push() {
     let mut fails = Vec::new();
     let mut rows = Vec::new();
     for m in [16 << 10, 32 << 10, 64 << 10] {
-        let runs: Vec<_> = (0..3).map(|_| one_byte_push(m)).collect();
-        let c = &runs[0];
+        let c = &one_byte_push(m);
         let k = c.iter().fold([0; 5], |a, x| [0, 1, 2, 3, 4].map(|i| a[i] + x.0[i]));
-        let total = runs
-            .iter()
-            .map(|r| r.iter().map(|x| x.1).sum::<Duration>())
-            .min()
-            .unwrap();
-        let slow = runs.iter().map(|r| r.iter().map(|x| x.1).max().unwrap()).min().unwrap();
         let big = c.iter().map(|x| x.0[4]).max().unwrap();
         let re: Vec<_> = c.iter().enumerate().filter(|(_, x)| x.0[2] != 0).collect();
         if let Some((i, x)) = re.iter().max_by_key(|(_, x)| x.0[2]) {
@@ -149,7 +135,7 @@ fn reader_one_byte_push() {
                 x.0[2]
             ));
         }
-        let peak = c.iter().map(|x| x.3).max().unwrap_or(0);
+        let peak = c.iter().map(|x| x.2).max().unwrap_or(0);
         let ex = c
             .iter()
             .enumerate()
@@ -168,21 +154,21 @@ fn reader_one_byte_push() {
             .collect();
         if let Some((i, x)) = over
             .iter()
-            .max_by_key(|(_, x)| x.0[4] - (COST_A * x.2 + COST_B).min(x.0[4]))
+            .max_by_key(|(_, x)| x.0[4] - (COST_A * x.1 + COST_B).min(x.0[4]))
         {
             fails.push(format!(
                 "n={m}: {} calls request more than {COST_A}·d + {COST_B} bytes beyond one queue buffer (worst: call {i}, \
                  {} bytes for d = {}, largest single {}, {} held after)",
                 over.len(),
                 x.0[4],
-                x.2,
+                x.1,
                 x.0[5],
-                x.3
+                x.2
             ));
         }
         eprintln!(
             "reader_one_byte_push n={m}: calls {} bytes {} alloc {} alloc_zeroed {} realloc {} dealloc {} \
-             time {total:?} slowest {slow:?} largest-call-bytes {big}",
+             largest-call-bytes {big}",
             c.len(),
             k[4],
             k[0],
@@ -190,18 +176,23 @@ fn reader_one_byte_push() {
             k[2],
             k[3]
         );
-        rows.push((k[4], total, slow));
+        // Per call kind: the pushes, then the one `next_message`.
+        let (push, next) = c.split_at(c.len() - 1);
+        let kinds = [push.iter().map(|x| x.0[4]).max().unwrap(), next[0].0[4]];
+        rows.push((k[4], kinds));
     }
     for i in 0..2 {
         if rows[i + 1].0 > 3 * rows[i].0 {
             fails.push(format!("bytes {} -> {} (> 3x)", rows[i].0, rows[i + 1].0));
         }
     }
-    if rows[2].1 > 8 * rows[0].1 + Duration::from_millis(20) {
-        fails.push(format!("time {:?} -> {:?} (> 8x + 20 ms)", rows[0].1, rows[2].1));
-    }
-    if rows[2].2 > 4 * rows[0].2 + Duration::from_millis(1) {
-        fails.push(format!("slowest call {:?} -> {:?} (> 4x + 1 ms)", rows[0].2, rows[2].2));
+    for i in 0..2 {
+        for (k, kind) in ["push", "next_message"].iter().enumerate() {
+            let (p, b) = (rows[i].1[k], rows[i + 1].1[k]);
+            if b > 3 * p + COST_B {
+                fails.push(format!("{kind} largest-call-bytes {p} -> {b} (> 3x + {COST_B})"));
+            }
+        }
     }
     assert!(fails.is_empty(), "{fails:#?}");
 }
