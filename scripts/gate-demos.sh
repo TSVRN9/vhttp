@@ -432,6 +432,14 @@ once '^                    let Ghost\(c4\) = free\(l3\);$' "$ccq/ranges.rs"
 fl=$(grep -n '^                    let Ghost(c4) = free(l3);$' "$ccq/ranges.rs" | cut -d: -f1)
 sed -i 's/^                    let Ghost(c4) = free(l3);$/                    free(l3);/; s/^                        work = work + c3 + c4;$/                        work = work + c3;/' "$ccq/ranges.rs"
 expect_fail "cost-charge: add's left-neighbour detach drops free's cost (ranges.rs, 9b2 Task 8a)" "crates/quic/src/ranges.rs:$fl: RangeSet::take_left drops the cost free returns" cc
+cfresh
+once '^        while c < n && self\.slots\[c\]\.1 <= b$' "$ccq/send_stream.rs"
+sl=$(grep -n '^        while c < n && self.slots\[c\].1 <= b$' "$ccq/send_stream.rs" | cut -d: -f1)
+# close_slots' first charge, the one inside that while (the first `work = work + 1;` after it)
+cl=$(awk -v w="$sl" 'NR > w && /^                work = work \+ 1;$/ { print NR; exit }' "$ccq/send_stream.rs")
+[ -n "$cl" ] || die "cost-charge demo: close_slots' charge not found in the copy"
+sed -i "${cl}d" "$ccq/send_stream.rs"
+expect_fail "cost-charge: close_slots' while without its charge (send_stream.rs, 9b2 Task 8a, D15)" "crates/quic/src/send_stream.rs:$sl: while whose body does not charge work" cc
 
 # The no-realloc claim (spec "The bound", TRUSTED.md's Vec row): fill's fresh piece made by CapVec::new(0) instead of
 # CapVec::new(n) must fail crypto_ooo_cost_linear on reallocs (under Verus it fails push's precondition). A copy of the

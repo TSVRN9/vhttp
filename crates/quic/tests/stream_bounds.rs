@@ -108,10 +108,10 @@ fn room_after_reset() {
 /// The credit-drip adversary with simulated PTOs: one byte of stream credit per round, every
 /// other packet that carried only new data acked, retransmissions never acked, and everything
 /// outstanding declared lost every 20 rounds. After every round the sending part's acked, lost
-/// and in-flight sets hold at most `buffered/256 + 4` entries (D10 (d), proved in
-/// `SendStream::wf`), and no new byte goes while the acked ranges alone fill the
-/// `MAX_SEND_RANGES` gate (a throttle on new data, not the bound). A 1-byte credit drip makes
-/// credit-cut short pieces, which the four slots cap, so the gate need not close here.
+/// and in-flight sets hold at most `sent/256 + 4` entries and at most `buffered/256 + 4`
+/// (D10 (d), proved in `SendStream::wf`). Here the `MAX_SEND_RANGES` gate cannot close: the drip
+/// sends about 400 bytes, so the sets hold at most 5 items against a gate of 64; its `closed`
+/// check stays as a guard, and `send_stream::range_gate_closes` closes the gate for real.
 #[test]
 fn range_gate_pto_cycles() {
     let mut p = peer();
@@ -163,6 +163,7 @@ fn range_gate_pto_cycles() {
         let (a, l, f) = s.send_range_counts(0).unwrap();
         let b = s.send_buffered(0).unwrap();
         assert!(a + l + f <= b / 256 + 4, "round {r}: {a} acked, {l} lost, {f} in flight, {b} buffered");
+        assert!(a + l + f <= hi as usize / 256 + 4, "round {r}: {a} acked, {l} lost, {f} in flight, {hi} sent");
     }
 }
 

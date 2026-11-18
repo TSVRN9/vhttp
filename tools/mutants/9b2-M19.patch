@@ -1,7 +1,7 @@
 diff --git a/crates/quic/src/send_stream.rs b/crates/quic/src/send_stream.rs
 --- a/crates/quic/src/send_stream.rs
 +++ b/crates/quic/src/send_stream.rs
-@@ -2182,7 +2182,7 @@
+@@ -2186,7 +2186,7 @@
              self.peak = 0;
          }
          self.acked_base = b;

@@ -1,7 +1,7 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -9167,7 +9167,6 @@
+@@ -9175,7 +9175,6 @@
              forall|p: nat| #[trigger] self.crypto_received(k, p) ==> p < r,
      {
          proof {

@@ -3612,6 +3612,10 @@ impl Connection {
                 proof {
                     work = work + c;
                 }
+                // Task 10b (spec D15): replacing ctx_i drops its three range trees here at O(nodes) (up to
+                // ⌊flight/256⌋ + 4), uncharged and unseen by the cost gate, as `SendStream::reset_w` frees its trees at
+                // O(nodes); reachable from network input (key discard here, a peer's STOP_SENDING there). Owner: Task
+                // 10b's `retire` moves the trees to the teardown slot in O(1).
                 self.ctx_i = SendStream::new(VARINT_MAX);
                 self.recv_i = RecvPns::new(k);
                 self.cid_updates.push(CidUpdate::Remove(slice_to_vec(self.ids.odcid())));
@@ -3626,6 +3630,10 @@ impl Connection {
                 proof {
                     work = work + c;
                 }
+                // Task 10b (spec D15): replacing ctx_h drops its three range trees here at O(nodes) (up to
+                // ⌊flight/256⌋ + 4), uncharged and unseen by the cost gate, as `SendStream::reset_w` frees its trees at
+                // O(nodes); reachable from network input (key discard here, a peer's STOP_SENDING there). Owner: Task
+                // 10b's `retire` moves the trees to the teardown slot in O(1).
                 self.ctx_h = SendStream::new(VARINT_MAX);
                 self.recv_h = RecvPns::new(k);
             },

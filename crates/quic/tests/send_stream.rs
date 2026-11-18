@@ -383,3 +383,30 @@ fn send_ranges_bounded_under_selective_acks() {
         }
     }
 }
+
+/// The `MAX_SEND_RANGES` gate really closing (a throttle on new data, D10 (d)): 64 KiB sent as 130 pieces of 256 bytes,
+/// the 65 odd ones acknowledged, so 65 acked ranges: no new byte goes while unsent bytes remain. Acknowledging pieces 0
+/// and 2 drops the prefix to 63 acked ranges, and new bytes go again.
+#[test]
+fn range_gate_closes() {
+    const W: usize = 64 << 10;
+    let mut s = SendStream::new(W as u64);
+    assert_eq!(s.write(&vec![9u8; W], true), Ok(()));
+    let mut p = Vec::new();
+    for _ in 0..130 {
+        let c = s.poll_data(256, u64::MAX).unwrap();
+        p.push((c.off, c.data.len() as u64));
+    }
+    assert!(p.iter().all(|&(_, n)| n == 256));
+    for &(o, n) in p.iter().skip(1).step_by(2) {
+        s.on_data_acked(o, n, false);
+    }
+    assert_eq!(s.range_counts().0, 65);
+    assert!(s.sent_end() < W as u64);
+    assert_eq!(s.poll_data(1200, u64::MAX), None);
+    s.on_data_acked(p[0].0, p[0].1, false);
+    s.on_data_acked(p[2].0, p[2].1, false);
+    assert_eq!(s.range_counts().0, 63);
+    let c = s.poll_data(1200, u64::MAX).unwrap();
+    assert_eq!(c.off, 130 * 256);
+}

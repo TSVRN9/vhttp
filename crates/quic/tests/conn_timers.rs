@@ -916,6 +916,9 @@ fn alternate_ack_range_growth() {
         let (a, l, fl) = c.send_range_counts(0).unwrap();
         let b = c.send_buffered(0).unwrap();
         assert!(a + l + fl <= b / 256 + 4, "round {r}: {a} acked, {l} lost, {fl} in flight, {b} buffered");
+        // The drip sends about 300 bytes: the sets hold at most 5 items, so the gate above cannot close here
+        // (`send_stream::range_gate_closes` closes it).
+        assert!(a + l + fl <= hi as usize / 256 + 4, "round {r}: {a} acked, {l} lost, {fl} in flight, {hi} sent");
         assert!(c.sent_inflight_len(PacketKind::OneRtt) <= 64);
         if r % 20 == 19 {
             // Fire timers until the PTO has declared everything lost.
@@ -934,6 +937,7 @@ fn alternate_ack_range_growth() {
             let (a, l, fl) = c.send_range_counts(0).unwrap();
             let b = c.send_buffered(0).unwrap();
             assert!(a + l + fl <= b / 256 + 4, "round {r}: {a} acked, {l} lost, {fl} in flight, {b} buffered");
+            assert!(a + l + fl <= hi as usize / 256 + 4, "round {r}: {a} acked, {l} lost, {fl} in flight, {hi} sent");
         }
         assert_eq!(c.phase(), Phase::Open);
     }

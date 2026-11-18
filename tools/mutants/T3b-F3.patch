@@ -1,7 +1,7 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -3622,10 +3622,6 @@
+@@ -3626,10 +3626,6 @@
                  }
                  self.live_h = false;
                  self.sent_h.drain_inflight(&mut lost);
@@ -9,6 +9,6 @@ diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
 -                proof {
 -                    work = work + c;
 -                }
-                 self.ctx_h = SendStream::new(VARINT_MAX);
-                 self.recv_h = RecvPns::new(k);
-             },
+                 // Task 10b (spec D15): replacing ctx_h drops its three range trees here at O(nodes) (up to
+                 // ⌊flight/256⌋ + 4), uncharged and unseen by the cost gate, as `SendStream::reset_w` frees its trees at
+                 // O(nodes); reachable from network input (key discard here, a peer's STOP_SENDING there). Owner: Task

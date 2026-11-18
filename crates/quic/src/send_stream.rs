@@ -779,7 +779,7 @@ pub struct SendStream {
     /// The pieces sent and neither acknowledged nor lost, each exactly as `poll_data` returned it.
     flight: PieceSet,
     /// The open slots: the short new pieces sent, `slots[..nslots]`, until `acked_base` reaches their end (D10 (c)).
-    slots: [(u64, u64); 4],
+    slots: [(u64, u64); MAX_FLUSH],
     nslots: usize,
     /// The flush point: new bytes below it go out as a short piece (D10 (c)).
     flush_to: u64,
@@ -1853,6 +1853,10 @@ impl SendStream {
 
     /// `reset`, with its cost: the three trees freed node by node, O(nodes) until Task 10b moves them to a teardown
     /// slot in O(1) (review M3, an interim inside the phase).
+    // Task 10b (spec D15): these trees are freed here at O(nodes), up to ⌊W/256⌋ + 4, and the CRYPTO contexts' trees
+    // conn.rs's `discard` drops by replacing `ctx_i`/`ctx_h` are dropped at O(nodes) uncharged; both are reachable from
+    // network input (a peer's STOP_SENDING reaches `on_stop_sending` → `reset`; key discard reaches `discard`). Owner:
+    // Task 10b (`reset` and `retire` move the trees to a teardown slot in O(1), drained by `pump_backlog`).
     fn reset_w(&mut self, code: u64) -> (r: (bool, Ghost<nat>))
         requires
             old(self).wf(),
@@ -2095,9 +2099,9 @@ impl SendStream {
             invariant
                 i + c <= n,
                 n <= MAX_FLUSH,
-                self.slots@.len() == 4,
+                self.slots@.len() == MAX_FLUSH,
                 forall|k: int| 0 <= k < i ==> #[trigger] self.slots@[k] == s0[k + c],
-                forall|k: int| i <= k < 4 ==> #[trigger] self.slots@[k] == s0[k],
+                forall|k: int| i <= k < MAX_FLUSH ==> #[trigger] self.slots@[k] == s0[k],
                 work <= 1 + c + i,
             decreases n - c - i,
         {
@@ -2539,7 +2543,7 @@ impl SendStream {
     /// Test support: the acked and lost sets' and the in-flight set's lengths.
     #[doc(hidden)]
     pub fn range_counts(&self) -> (usize, usize, usize) {
-        (self.acked.to_vec().len(), self.lost.to_vec().len(), self.flight.to_vec().len())
+        (self.acked.len() as usize, self.lost.len() as usize, self.flight.len() as usize)
     }
 
     /// Test support: the acked and lost ranges and the pieces in flight.

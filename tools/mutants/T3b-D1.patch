@@ -1,7 +1,7 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -3823,9 +3823,6 @@
+@@ -3831,9 +3831,6 @@
              old(self).phase_spec() is Open && max >= old(self).crypto_contiguous_spec(level) - old(self).crypto_base_spec(
                  level,
              ) ==> final(self).crypto_base_spec(level) == old(self).crypto_contiguous_spec(level),
