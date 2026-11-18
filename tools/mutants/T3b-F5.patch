@@ -1,7 +1,7 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -1977,7 +1977,6 @@
+@@ -1969,7 +1969,6 @@
          requires
              old(self).wf(),
              old(self).phase_spec() is Open,

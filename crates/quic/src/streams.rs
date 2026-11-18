@@ -23,9 +23,12 @@
 //!   gets H3_CLOSED_CRITICAL_STREAM).
 //! - `Output::ResetStream` goes to `reset`, `Output::StopSending` to `stop_sending`, and
 //!   `Output::StreamWrite` to `write`.
-//! - **ACK-range growth** is bounded by the `MAX_SEND_RANGES` new-data gate in
-//!   `SendStream::poll_data`, `Recovery::can_send`'s in-flight cap and `SentPackets::on_ack`'s
-//!   range cap; about 2·64 per send stream plus ~1000 per connection, tested not proven (3d D4).
+//! - **Send-range memory is proved:** a sending part's acked, lost and in-flight sets hold at most
+//!   `⌊W/256⌋ + 4` nodes, `W` its bytes buffered (`SendStream::wf` from piece edges, 9b2 D10 (d),
+//!   (f)), so at most `4096 + 4·103` nodes per connection under `MAX_SEND_BUFFER`. The
+//!   `MAX_SEND_RANGES` gate in `SendStream::poll_data` only throttles new data.
+//! - **Flush points:** `write` never flushes; under `FLOOR` (256) bytes unsent, new bytes wait for
+//!   `flush(id)` (`Connection::stream_write` flushes every write it takes whole).
 //! - **Loop on `poll_data`, not `next_off`.** `next_off()` returning `Some` does not mean
 //!   `poll_data` sends anything (stream or connection credit may be 0); a
 //!   `while next_off().is_some()` loop spins forever on a blocked stream.
@@ -3690,6 +3693,62 @@ impl Streams {
         }
     }
 
+    /// Stream `id`'s sending part, if any, is flushed (D10 (c)): its bytes written so far may go as a short piece.
+    pub fn flush(&mut self, id: u64)
+        requires
+            old(self).wf(),
+            !old(self).failed(),
+        ensures
+            final(self).wf(),
+            !final(self).failed(),
+            final(self).tx_held() == old(self).tx_held(),
+            final(self).conn_recv_spec().window_spec() == old(self).conn_recv_spec().window_spec(),
+            match old(self).tx_part(id) {
+                Some(p) => final(self).tx_part(id) matches Some(q) && q.flush_point() == q.all_written().len()
+                    && q.all_written() == p.all_written() && q.fin_written_spec() == p.fin_written_spec()
+                    && q.state() == p.state() && q.sent_end() == p.sent_end() && q.reset_spec() == p.reset_spec()
+                    && q.held_spec() == p.held_spec() && q.flight_spec() == p.flight_spec(),
+                None => final(self).tx_part(id) is None,
+            },
+            forall|j: u64| j != id ==> #[trigger] final(self).tx_part(j) == old(self).tx_part(j),
+            forall|j: u64| #[trigger] final(self).send_room_spec(j) == old(self).send_room_spec(j),
+            forall|j: u64| #[trigger] final(self).reset_code(j) == old(self).reset_code(j),
+            forall|j: u64| #[trigger] final(self).rx_trace(j) == old(self).rx_trace(j),
+            forall|j: u64| #[trigger] final(self).is_removed(j) == old(self).is_removed(j),
+    {
+        let ghost s0 = *self;
+        if let Some(i) = self.find(id) {
+            proof {
+                lemma_part_at(s0, i as int);
+                assert(entry_ok(s0.entries@[i as int], s0.rx_bidi, s0.rx_uni));
+            }
+            let mut e = Entry { id: 0, recv: None, send: None };
+            self.entries.set_and_swap(i, &mut e);
+            if let Some(mut p) = e.send.take() {
+                p.flush();
+                e.send = Some(p);
+            }
+            let ghost ne = e;
+            self.entries.set_and_swap(i, &mut e);
+            proof {
+                assert(self.entries@ == s0.entries@.update(i as int, ne));
+                lemma_swap_same_rx(s0, *self, i as int, ne);
+                lemma_part_at(*self, i as int);
+                assert forall|j: u64| j != id implies #[trigger] self.tx_part(j) == s0.tx_part(j) by {
+                    lemma_part_other(s0, *self, i as int, j);
+                }
+                assert(self.tx_held() == s0.tx_held()) by {
+                    lemma_held_same(s0, *self, i as int);
+                }
+                assert forall|j: u64| #[trigger] self.send_room_spec(j) == s0.send_room_spec(j) by {
+                    if j != id {
+                        lemma_part_other(s0, *self, i as int, j);
+                    }
+                }
+            }
+        }
+    }
+
     /// The application stops reading stream `id` with error `code`: STOP_SENDING is queued if
     /// the receiving part exists and data may still arrive. No MAX_STREAM_DATA is sent for it
     /// afterwards; its `Data`/`Reset` events still come, up to the terminal one.
@@ -4442,6 +4501,45 @@ impl Streams {
     }
 }
 
+/// Another id's sending part is untouched by a swap at `i`.
+proof fn lemma_part_other(s0: Streams, s1: Streams, i: int, j: u64)
+    requires
+        s0.wf(),
+        s1.wf(),
+        0 <= i < s0.entries@.len(),
+        s1.entries@ == s0.entries@.update(i, s1.entries@[i]),
+        s1.entries@[i].id == s0.entries@[i].id,
+        j != s0.entries@[i].id,
+    ensures
+        s1.tx_part(j) == s0.tx_part(j),
+{
+    if has_id(s0.entries@, j) {
+        let k = choose|k: int| 0 <= k < s0.entries@.len() && (#[trigger] s0.entries@[k]).id == j;
+        assert(s1.entries@[k] == s0.entries@[k]);
+        lemma_part_at(s0, k);
+        lemma_part_at(s1, k);
+    } else {
+        assert(!has_id(s1.entries@, j)) by {
+            if has_id(s1.entries@, j) {
+                let k = choose|k: int| 0 <= k < s1.entries@.len() && (#[trigger] s1.entries@[k]).id == j;
+                assert(s1.entries@[k] == s0.entries@[k]);
+            }
+        }
+    }
+}
+
+/// A swap at `i` that keeps the part's reservation keeps the connection's sum.
+proof fn lemma_held_same(s0: Streams, s1: Streams, i: int)
+    requires
+        0 <= i < s0.entries@.len(),
+        s1.entries@ == s0.entries@.update(i, s1.entries@[i]),
+        val(s1.entries@[i], 9) == val(s0.entries@[i], 9),
+    ensures
+        s1.tx_held() == s0.tx_held(),
+{
+    lemma_sum_update(s0.entries@, i, s1.entries@[i], 9);
+}
+
 /// `lemma_swap` for an entry whose receiving part is unchanged and whose sending part kept its
 /// bytes sent and its reset: no record changes.
 proof fn lemma_swap_same_rx(s0: Streams, s1: Streams, i: int, ne: Entry)
@@ -4570,12 +4668,23 @@ impl Streams {
         self.entries.iter().filter_map(|e| e.send.as_ref()).map(SendStream::buf_capacity).sum()
     }
 
-    /// Test support: stream `id`'s sending part's acked and lost range counts.
+    /// Test support: stream `id`'s sending part's acked, lost and in-flight counts.
     #[doc(hidden)]
-    pub fn send_range_counts(&self, id: u64) -> Option<(usize, usize)> {
+    pub fn send_range_counts(&self, id: u64) -> Option<(usize, usize, usize)> {
         for e in &self.entries {
             if e.id == id {
                 return e.send.as_ref().map(SendStream::range_counts);
+            }
+        }
+        None
+    }
+
+    /// Test support: stream `id`'s sending part's bytes buffered, the window its range bound is in (D10 (d)).
+    #[doc(hidden)]
+    pub fn send_buffered(&self, id: u64) -> Option<usize> {
+        for e in &self.entries {
+            if e.id == id {
+                return e.send.as_ref().map(SendStream::buffered);
             }
         }
         None

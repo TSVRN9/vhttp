@@ -1,0 +1,12 @@
+diff --git a/crates/quic/src/send_stream.rs b/crates/quic/src/send_stream.rs
+--- a/crates/quic/src/send_stream.rs
++++ b/crates/quic/src/send_stream.rs
+@@ -1734,8 +1734,6 @@
+         }
+         let ghost sp0 = s0.open_slots();
+         if short && end - off < FLOOR {
+-            self.slots[self.nslots] = (off, end);
+-            self.nslots = self.nslots + 1;
+         }
+         self.credit.consume(end - off);
+         self.sent_end = end;

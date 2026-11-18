@@ -1,0 +1,18 @@
+diff --git a/crates/quic/src/send_stream.rs b/crates/quic/src/send_stream.rs
+--- a/crates/quic/src/send_stream.rs
++++ b/crates/quic/src/send_stream.rs
+@@ -722,12 +722,8 @@
+ {
+     if r <= m {
+         Some(r)
+-    } else if r >= 2 * FLOOR && m >= FLOOR {
+-        if m < r - FLOOR {
+-            Some(m)
+-        } else {
+-            Some(r - FLOOR)
+-        }
++    } else if m > 0 {
++        Some(m)
+     } else {
+         None
+     }

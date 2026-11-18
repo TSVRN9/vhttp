@@ -1,0 +1,11 @@
+diff --git a/crates/quic/src/send_stream.rs b/crates/quic/src/send_stream.rs
+--- a/crates/quic/src/send_stream.rs
++++ b/crates/quic/src/send_stream.rs
+@@ -2361,6 +2361,7 @@
+             }
+             return (false, Ghost(work));
+         }
++        let Ghost(_c9) = self.flight.insert_piece(off, end);
+         proof {
+             lemma_piece_free(s0.acked@, s0.lost@, s0.flight@, s0.open_slots(), s0.acked_base, s0.sent_end, off, end);
+         }

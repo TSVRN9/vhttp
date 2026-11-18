@@ -73,6 +73,7 @@ fn local_uni_open_frames() -> Vec<Frame> {
     p.initial_max_streams_uni = 1;
     let mut s = with(&local(), &p);
     assert_eq!(s.write(3, &[0x00, 0x04, 0x00], false), Ok(()));
+    s.flush(3);
     for id in [7, 2, 1, 4, 11] {
         assert_eq!(s.write(id, b"x", false), Err(()));
     }
@@ -118,25 +119,32 @@ fn conn_send_limit() {
     assert_eq!(poll(&mut s, 1200), vec![S(0, 5, b"567", false)]);
 }
 
+/// Each frame fills its budget exactly; a room short of `FLOOR` sends nothing, and the unflushed tail below `FLOOR`
+/// waits for its flush point (9b2 D10 (c)).
 #[test]
 fn budget() {
-    let bytes: Vec<u8> = (0..100).collect();
-    let mut s = fresh();
+    let bytes: Vec<u8> = (0..1000u32).map(|i| i as u8).collect();
+    let mut p = peer();
+    p.initial_max_stream_data_bidi_local = 1000;
+    let mut s = with(&local(), &p);
     assert_eq!(feed(&mut s, S(0, 0, b"GET", true)).0, Ok(()));
     assert_eq!(s.write(0, &bytes, false), Ok(()));
-    let out = poll(&mut s, 20);
-    assert_eq!(out, vec![S(0, 0, &bytes[0..17], false)]);
+    let out = poll(&mut s, 300);
+    assert_eq!(out, vec![S(0, 0, &bytes[0..296], false)]);
     let e = enc(&out[0]);
-    assert_eq!((&e[..3], e.len()), (&[0x0a, 0x00, 0x11][..], 20));
-    let out = poll(&mut s, 20);
-    assert_eq!(out, vec![S(0, 17, &bytes[17..33], false)]);
+    assert_eq!((&e[..4], e.len()), (&[0x0a, 0x00, 0x41, 0x28][..], 300));
+    let out = poll(&mut s, 300);
+    assert_eq!(out, vec![S(0, 296, &bytes[296..590], false)]);
     let e = enc(&out[0]);
-    assert_eq!((&e[..4], e.len()), (&[0x0e, 0x00, 0x11, 0x10][..], 20));
+    assert_eq!((&e[..6], e.len()), (&[0x0e, 0x00, 0x41, 0x28, 0x41, 0x26][..], 300));
     assert_eq!(poll(&mut s, 4), vec![]);
-    let out = poll(&mut s, 70);
-    assert_eq!(out, vec![S(0, 33, &bytes[33..98], false)]);
-    assert_eq!(enc(&out[0]).len(), 70);
-    assert_eq!(poll(&mut s, 1200), vec![S(0, 98, &bytes[98..100], false)]);
+    assert_eq!(poll(&mut s, 100), vec![]);
+    let out = poll(&mut s, 300);
+    assert_eq!(out, vec![S(0, 590, &bytes[590..884], false)]);
+    assert_eq!(enc(&out[0]).len(), 300);
+    assert_eq!(poll(&mut s, 1200), vec![]);
+    s.flush(0);
+    assert_eq!(poll(&mut s, 1200), vec![S(0, 884, &bytes[884..1000], false)]);
 }
 
 #[test]
@@ -196,6 +204,7 @@ fn stop_after_partial_frames() -> Vec<Frame> {
     let mut all = Vec::new();
     assert_eq!(feed(&mut s, S(0, 0, b"GET", true)).0, Ok(()));
     assert_eq!(s.write(0, b"hello", false), Ok(()));
+    s.flush(0);
     let out = poll(&mut s, 1200);
     assert_eq!(out, vec![S(0, 0, b"hello", false)]);
     all.extend(out);

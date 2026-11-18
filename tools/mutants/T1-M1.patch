@@ -1,7 +1,7 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -4218,7 +4218,7 @@
+@@ -4222,7 +4222,7 @@
          if now > self.now {
              self.now = now;
          }

@@ -1,5 +1,6 @@
 """Cost-charge gate (9b1 D6a). Usage: python3 -I tools/cost_charge.py ROOT
-In ROOT/crates/quic/src/avl.rs, ROOT/crates/quic/src/frags.rs, ROOT/crates/quic/src/crypto_stream.rs and every
+In ROOT/crates/quic/src/avl.rs, ROOT/crates/quic/src/frags.rs, ROOT/crates/quic/src/crypto_stream.rs,
+ROOT/crates/quic/src/ranges.rs, ROOT/crates/quic/src/send_stream.rs (9b2 Task 8a) and every
 ROOT/crates/byteq/src/*.rs (found by listing the directory, so a new byteq file is gated; one with no `verus!` block may
 hold no fn), inside `verus!` (comments and strings blanked, fns found by tools/acceptance.py's parser):
   - every `while` has an `invariant` (or `invariant_except_break`) clause naming `work`, the ghost cost accumulator, and
@@ -12,8 +13,10 @@ hold no fn), inside `verus!` (comments and strings blanked, fns found by tools/a
     (the costs; `NAME(`, `path::NAME(` or `.NAME(` on any receiver, for NAME such a fn; a std method of another name,
     such as `out.append(..)`, is not one) is the tail of a block (its value passes on), or a `let` whose pattern binds each cost as `Ghost(x)`, and from there to the next
     binding of the same name `x` appears in a `work = work + E` update, in a `Ghost(..)` the fn builds (not a call
-    argument), or, in frags.rs's public wrappers Frags::insert, Frags::after_insert, Frags::take_front and Frags::run_end only (keyed
-    by file and impl path: queue.rs's ByteQueue::take_front is no wrapper), in an `assert`; any other fn that calls one
+    argument), or, in frags.rs's public wrappers Frags::insert, Frags::after_insert, Frags::take_front and Frags::run_end,
+    crypto_stream.rs's CryptoStream::on_fill and send_stream.rs's SendStream::on_data_acked, on_data_lost, poll_data,
+    next_off, want, reset and write only (keyed by file and impl path: queue.rs's ByteQueue::take_front is no wrapper), in
+    an `assert`; any other fn that calls one
     returns a cost itself;
   - no `loop`, `for .. in` or `exec_allows_no_decreases_clause` (loops and recursion this gate does not see).
 In the per-fn files ROOT/crates/quic/src/conn.rs and ROOT/crates/quictls/src/server.rs (9b2 fix round 1, I6), their
@@ -25,7 +28,8 @@ binds no ghost but `work` to a literal (`let ghost [mut] X: nat = N;`, a deleted
 shape) and builds no literal `Ghost(N)` after its first callee cost call or charge of work (a stubbed return), but for
 LITERAL_OK's keyed fns (avl::bal, frags::walk, frags::walk_run: match arms returning literals after a recursive arm's
 text; an entry that no longer fires fails).
-Fails naming file:line; fails closed on a missing file (avl.rs, frags.rs, crypto_stream.rs, conn.rs, server.rs, or no byteq src/*.rs), no verus! block, or no looping or recursive fn or bound cost.
+Fails naming file:line; fails closed on a missing file (avl.rs, frags.rs, crypto_stream.rs, ranges.rs, send_stream.rs,
+conn.rs, server.rs, or no byteq src/*.rs), no verus! block, or no looping or recursive fn or bound cost.
 Limit: a stubbed literal cost arm in avl::bal, frags::walk or frags::walk_run is not seen (LITERAL_OK; owned by
 carryover cat-C15-semantic-cost, 9b4). Limit: a stub helper cost fn (a fn returning a literal Ghost(N) before any call,
 bound and charged by its caller) is not seen (cat-C15-semantic-cost). Limit: a structural check, not a proof that the amount charged is right (the cost ensures are upper bounds, so an
@@ -37,7 +41,8 @@ import os, re, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import acceptance as acc  # noqa: E402
 
-FILES = ['crates/quic/src/avl.rs', 'crates/quic/src/frags.rs', 'crates/quic/src/crypto_stream.rs', 'crates/quic/src/ranges.rs']
+FILES = ['crates/quic/src/avl.rs', 'crates/quic/src/frags.rs', 'crates/quic/src/crypto_stream.rs', 'crates/quic/src/ranges.rs',
+         'crates/quic/src/send_stream.rs']
 DIRS = ['crates/byteq/src']
 # Per-fn files: only their cost-carrying fns (an exec fn returning a Ghost<nat>) and the callers of one are checked, by
 # the callee-cost rules; their whiles and other fns are not this gate's (9b2 fix round 1, I6).
@@ -57,7 +62,9 @@ DROPS = {
 }
 INV = re.compile(r'\b(invariant_except_break|invariant|ensures|decreases)\b')
 WRAPPERS = {('crates/quic/src/frags.rs', 'Frags::' + n) for n in ('insert', 'after_insert', 'take_front', 'run_end')} | {
-    ('crates/quic/src/crypto_stream.rs', 'CryptoStream::on_fill')}
+    ('crates/quic/src/crypto_stream.rs', 'CryptoStream::on_fill')} | {
+    ('crates/quic/src/send_stream.rs', 'SendStream::' + n)
+    for n in ('on_data_acked', 'on_data_lost', 'poll_data', 'next_off', 'want', 'reset', 'write')}
 UPDATE = re.compile(r'\bwork\s*=\s*work\s*\+\s*([^;]*?)\s*;')
 ASSIGN = re.compile(r'(?<![\w.])work\s*=(?!=)')
 

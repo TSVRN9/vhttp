@@ -1046,7 +1046,7 @@ impl RangeSet {
             final(self).wf(),
             final(self)@ == old(self)@.remove(old(self)@.index_of((s, e))),
             forall|x: nat| #[trigger] covers(final(self)@, x) <==> covers(old(self)@, x) && !(s <= x && x < e),
-            forall|p: (u64, u64)| #[trigger] final(self)@.contains(p) ==> old(self)@.contains(p),
+            forall|p: (u64, u64)| #[trigger] final(self)@.contains(p) <==> old(self)@.contains(p) && p != (s, e),
             final(self).ht() <= old(self).ht() + 1,
             r@ <= c_rs() * (old(self).ht() + 1),
     {
@@ -1055,6 +1055,7 @@ impl RangeSet {
         proof {
             assert(t0 == old(self)@);
             lemma_small(t0);
+            assert(c_split6() == 37 && c_join2() == 13 && c_pop() == 6 && c_rs() == 100);
             assert(c_split6() == 37 && c_join2() == 13 && c_pop() == 6 && c_first() == 1);
         }
         let t = self.t.take();

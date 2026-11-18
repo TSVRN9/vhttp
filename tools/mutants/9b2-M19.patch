@@ -1,0 +1,12 @@
+diff --git a/crates/quic/src/send_stream.rs b/crates/quic/src/send_stream.rs
+--- a/crates/quic/src/send_stream.rs
++++ b/crates/quic/src/send_stream.rs
+@@ -2182,7 +2182,7 @@
+             self.peak = 0;
+         }
+         self.acked_base = b;
+-        let (_closed, Ghost(c3)) = self.close_slots(b);
++        let (_closed, Ghost(c3)) = self.close_slots(b + FLOOR);
+         proof {
+             work = work + c3;
+             assert(self.buf@ =~= aw.subrange(b as int, self.written as int));

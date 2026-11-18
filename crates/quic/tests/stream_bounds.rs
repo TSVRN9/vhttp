@@ -107,9 +107,11 @@ fn room_after_reset() {
 
 /// The credit-drip adversary with simulated PTOs: one byte of stream credit per round, every
 /// other packet that carried only new data acked, retransmissions never acked, and everything
-/// outstanding declared lost every 20 rounds. The gate keeps each count within
-/// 2 * `MAX_SEND_RANGES` + 1. Not exercised: the adversary that splits a large lost range by
-/// partial retransmission (3d D4's ~1000-range term).
+/// outstanding declared lost every 20 rounds. After every round the sending part's acked, lost
+/// and in-flight sets hold at most `buffered/256 + 4` entries (D10 (d), proved in
+/// `SendStream::wf`), and no new byte goes while the acked ranges alone fill the
+/// `MAX_SEND_RANGES` gate (a throttle on new data, not the bound). A 1-byte credit drip makes
+/// credit-cut short pieces, which the four slots cap, so the gate need not close here.
 #[test]
 fn range_gate_pto_cycles() {
     let mut p = peer();
@@ -118,14 +120,12 @@ fn range_gate_pto_cycles() {
     let mut s = Streams::new(&local(), &p);
     assert_eq!(feed(&mut s, S(0, 0, b"GET", true)), Ok(()));
     assert_eq!(s.write(0, &[9; 10_000], true), Ok(()));
-    let cap = 2 * MAX_SEND_RANGES + 1;
     let mut outstanding: Vec<Frame> = Vec::new();
     let mut hi = 0u64; // end of the highest byte sent: new data starts here
     let mut new_only = 0u32;
-    let mut closed_rounds = 0u32;
     for r in 0..400u64 {
         assert_eq!(feed(&mut s, Frame::MaxStreamData { stream_id: 0, max: r + 2 }), Ok(()));
-        let (a, l) = s.send_range_counts(0).unwrap();
+        let (a, l, _) = s.send_range_counts(0).unwrap();
         // A poll retransmits every lost range before any new data, so the gate it meets is
         // closed exactly when the acked ranges alone fill it.
         let closed = a >= MAX_SEND_RANGES;
@@ -143,7 +143,6 @@ fn range_gate_pto_cycles() {
         }
         hi = end;
         if closed {
-            closed_rounds += 1;
             assert!(!any_new, "round {r}: new data with {a} acked + {l} lost ranges");
         }
         if all_new {
@@ -161,10 +160,10 @@ fn range_gate_pto_cycles() {
                 s.on_frame_lost(&f);
             }
         }
-        let (a, l) = s.send_range_counts(0).unwrap();
-        assert!(a <= cap && l <= cap, "round {r}: {a} acked, {l} lost ranges");
+        let (a, l, f) = s.send_range_counts(0).unwrap();
+        let b = s.send_buffered(0).unwrap();
+        assert!(a + l + f <= b / 256 + 4, "round {r}: {a} acked, {l} lost, {f} in flight, {b} buffered");
     }
-    assert!(closed_rounds > 0, "the gate never closed");
 }
 
 /// Carryover mem-9b2-send-cap: a send queue keeps its capacity until it is empty, so withheld ACKs

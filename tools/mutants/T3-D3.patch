@@ -1,7 +1,7 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -2020,7 +2020,6 @@
+@@ -2012,7 +2012,6 @@
              proof {
                  assert(none@.take(0) =~= Seq::<u8>::empty());
              }

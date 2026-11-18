@@ -127,3 +127,45 @@ tail).
   `held_capacity_within_cap` (40 streams × 64 KiB, every piece but the last acknowledged: Σ capacity at most 1 MiB
   after every call) and `room_refills_as_acks_arrive` in `crates/quic/tests/stream_bounds.rs`.
 - **Evidence**: Task 8's report (fix rounds 0 and 1); carryovers `mem-9b2-send-cap`, `mem-9b2-send-room`.
+
+## SendStream range lists: unbounded, quadratic, reachable by any client after the handshake (9b2 Task 8a, D10)
+
+- **Defect** (class C15, a bug): `SendStream`'s `acked` and `lost` were `Vec<(u64, u64)>` lists whose lengths no `wf`
+  clause bounded, and `range_insert`/`range_remove` rebuilt the whole `Vec` per call. Measured by the plan's ruling-11
+  experiment (2026-11-13, ledger `progress.md`): under a peer that acknowledges odd pieces and loses even ones each list
+  reached about B/(2m) ranges (B bytes buffered, m the piece size): 2048 at 4 KiB in 1-byte pieces, 437 at 1 MiB in
+  1200-byte pieces, 7283 in the plan's selective-ACK scenario against the 66 it planned; a run of ACKs cost quadratic
+  time, and memory reached about 16 MiB per connection at 1-byte pieces. streams.rs:26-28 documented "about 2·64 per
+  send stream", pinned at 129 by `range_gate_pto_cycles` and `alternate_ack_range_growth`: never true.
+- **Why it could occur**: `MAX_SEND_RANGES` gated only `poll_data`'s new data, at call time, while ACK arrivals and
+  `retransmit`'s split of `lost[0]` were ungated; no `wf` clause bounded the lists, and send_stream.rs:184's `ponytail:`
+  said so ("per-stream hole bound is tested (D4), not proven"); `range_insert` and `range_remove` proved only `in_bounds`
+  ("Order and merging are exec behavior (tested)", and :92's `ponytail:` deferred an interval tree); the two tests ran
+  only the credit-drip adversary, and `range_gate_pto_cycles`'s doc named the retransmit-split adversary "Not exercised"
+  with no tracker. A collection bound held by a gate, a test and a comment, not by a proof.
+- **Fix** (owner 2026-11-13, D10): `quic::ranges` on 9b1's AVL, `RangeSet` (merged) for `acked` and `lost` and
+  `PieceSet` (exact pieces) for `flight`, each op O(log n) with its cost in its ensures. `SendStream::wf` holds the
+  partition (every byte of `[acked_base, sent_end)` acknowledged, lost or in exactly one piece in flight; no acked range
+  starts at `acked_base`), the item rule (each item at least `FLOOR` = 256 bytes long or holding a whole open slot, at
+  most `MAX_FLUSH` = 4 short new pieces open) and the bound `acked + lost + flight <= (sent_end − acked_base)/256 +
+  slots` (`ranges::lemma_bound`, from piece edges: ACKs and losses move whole pieces, a cut leaves both parts at least
+  FLOOR). Tiny writes coalesce to flush points (`flush`; `Connection::stream_write` and `crypto_write` flush). Per stream
+  at most `⌊W/256⌋ + 4` nodes of 40 bytes (`node_size`); ACK, loss and poll at most `400·(h + 1) + 40` cost units
+  (`on_data_acked_w`, `on_data_lost_w`, `poll_data_w`). conn's `on_acked_record` no longer coalesces STREAM frames
+  (`stream_run` and its `ponytail:` go): each frame is one piece.
+- **Catch**: the bound and the partition in `SendStream::wf`, proved at every mutator; the cost ensures under
+  `scripts/cost-charge.sh` (send_stream.rs and ranges.rs in its `FILES`, the six wrappers in `WRAPPERS`); mutants
+  9b2-M16 (retransmit without the floor), 9b2-M17 (a short piece with no slot), 9b2-M18 (an ACK leaving its piece in
+  flight) and 9b2-M19 (slots closed `FLOOR` past `acked_base`), each killed by Verus; the selective-ACK tests
+  (`send_ranges_bounded_under_selective_acks`, `input_cost::send_selective_acks`: after every call the three sets within
+  `buffered()/256 + 4`, each ACK or loss at most `8·(h + 1)` node allocations and one live node more, no realloc) and
+  `partition_never_forgets`; `range_gate_pto_cycles` and `alternate_ack_range_growth` now check the proved bound. No
+  mutant drops a tree without `free`: an implicit `Drop` is invisible to Verus and to the gate (D15); review checks it.
+- **Class sweep** (a collection bound held by test or comment, not proof): `grep -rniE "not proven|tested,? not prov"
+  crates/*/src` at this commit finds two hits, neither a collection bound: crates/h3/src/conn.rs:9 and
+  crates/quic/src/streams.rs:9, each the heading of its module's caller-obligation list (event order, abort signals,
+  output routing), stated for the caller to keep (owner: the caller, the server's pipeline; checked by its own proofs
+  and the interop tests). streams.rs:26-28's "tested not proven" range claim is gone, replaced by the proved bound.
+- **Evidence**: tests `ranges::ranges_model`, `send_stream::partition_never_forgets`,
+  `send_stream::send_ranges_bounded_under_selective_acks`, `input_cost::send_selective_acks`; mutants 9b2-M16..M19
+  (`scripts/mutants.sh run 9b2-M16 9b2-M17 9b2-M18 9b2-M19`); spec D10, D15, D16.

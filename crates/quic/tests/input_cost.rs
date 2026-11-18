@@ -352,27 +352,161 @@ fn send_ack_1k() {
     check("send_ack_1k", 256 << 10, write_send_ack, Alloc::Queue);
 }
 
-/// 64 KiB written and sent in 1 KiB pieces, each acknowledged in order: no `realloc`, and no ACK requests more than
-/// 64 bytes, so none copies a stream byte (in-order ACKs leave the range lists empty; 64 bytes is the one 4-entry
-/// `Vec` of `(u64, u64)` that `range_insert` builds, Task 8's lists only: Task 8a restates it for the AVL).
+/// A height bound for the three range trees with `n` nodes in all: an AVL tree of `n` nodes is at most
+/// `1.45·log2(n + 2)` high, below `2·log2(n + 2)`.
+fn h_max(n: usize) -> usize {
+    2 * (usize::BITS - (n + 2).leading_zeros()) as usize
+}
+
+/// Node allocations per ACK or loss: `NODE_C · (h + 1)` (D10 (e)): `split` and `join` re-box the nodes on their path
+/// (`take_piece`, `add`, `remove_range`), a handful of paths per call.
+const NODE_C: usize = 8;
+
+/// One ACK or loss on `s`, measured: (allocations, frees, reallocs, requested bytes), and the nodes before it.
+fn measure(s: &mut SendStream, f: impl FnOnce(&mut SendStream)) -> ([usize; 4], usize) {
+    let (a, l, fl) = s.range_counts();
+    let k0 = K.with(|k| k.get());
+    f(s);
+    let k1 = K.with(|k| k.get());
+    ([k1[0] + k1[1] - k0[0] - k0[1], k1[3] - k0[3], k1[2] - k0[2], k1[4] - k0[4]], a + l + fl)
+}
+
+/// The per-call rule for an ACK or a loss: no `realloc`, at most `NODE_C·(h + 1)` allocations, of nodes only (40
+/// bytes each), and at most one live node more after it (allocations minus frees).
+fn node_call_ok(m: [usize; 4], n: usize) -> bool {
+    m[2] == 0 && m[0] <= NODE_C * (h_max(n) + 1) && m[3] <= 40 * m[0] && m[0] <= m[1] + 1
+}
+
+/// 64 KiB written and sent in 1 KiB pieces, acknowledged in order and, on a second stream, out of order (odd pieces,
+/// then even ones backwards): no ACK copies a stream byte, reallocates, allocates more than `NODE_C·(h + 1)` nodes, or
+/// adds more than one live node (D10 (h)).
 #[test]
 fn ack_copies_no_stream_bytes() {
     const W: usize = 1 << 16;
-    let mut s = SendStream::new(W as u64);
-    assert_eq!(s.write(&bytes(W), true), Ok(()));
-    while s.poll_data(1024, u64::MAX).is_some() {}
+    let n = W / 1024;
+    let orders: [Vec<usize>; 2] = [
+        (0..n).collect(),
+        (1..n).step_by(2).chain((0..n).step_by(2).rev()).collect(),
+    ];
+    for order in orders {
+        let mut s = SendStream::new(W as u64);
+        assert_eq!(s.write(&bytes(W), true), Ok(()));
+        while s.poll_data(1024, u64::MAX).is_some() {}
+        let mut bad = Vec::new();
+        for &i in &order {
+            let (m, nodes) = measure(&mut s, |s| s.on_data_acked((i * 1024) as u64, 1024, i == n - 1));
+            if !node_call_ok(m, nodes) {
+                bad.push((i, m, nodes));
+            }
+        }
+        assert!(bad.is_empty(), "ACKs over the node rule (piece, [allocs, frees, reallocs, bytes], nodes): {bad:?}");
+        assert_eq!(s.state_exec(), SendState::DataRecvd);
+    }
+}
+
+/// Totals of a selective-ACK run over the stream's own calls (the test's accessors not counted): requested bytes,
+/// allocations, and the most allocations of one ACK or loss (printed).
+#[derive(Default)]
+struct SelRun {
+    bytes: usize,
+    allocs: usize,
+    worst: usize,
+}
+
+impl SelRun {
+    /// Runs one call of the stream, adding its allocations to the totals.
+    fn call<R>(&mut self, f: impl FnOnce() -> R) -> (R, [usize; 4]) {
+        let k0 = K.with(|k| k.get());
+        let r = f();
+        let k1 = K.with(|k| k.get());
+        let m = [k1[0] + k1[1] - k0[0] - k0[1], k1[3] - k0[3], k1[2] - k0[2], k1[4] - k0[4]];
+        self.bytes += m[3];
+        self.allocs += m[0];
+        (r, m)
+    }
+}
+
+/// The selective-ACK adversary at `b` bytes in pieces of `m` (1200, or 1 written and flushed each): each round sends
+/// what it can at room 1200, then the peer acknowledges odd pieces in flight and loses even ones (parity over all
+/// pieces); after 8 rounds everything is acknowledged. After every call the three sets hold at most
+/// `buffered()/256 + 4` entries, and each ACK or loss passes `node_call_ok`.
+fn sel_acks(b: usize, m: usize) -> SelRun {
+    let mut s = SendStream::new(1 << 40);
+    let mut written = 0usize;
+    let mut run = SelRun::default();
     let mut bad = Vec::new();
-    for i in 0..W / 1024 {
-        let a = K.with(|k| k.get());
-        s.on_data_acked((i * 1024) as u64, 1024, i == W / 1024 - 1);
-        let b = K.with(|k| k.get());
-        let (re, req) = (b[2] - a[2], b[4] - a[4]);
-        if re != 0 || req > 64 {
-            bad.push((i, re, req));
+    let check = |s: &SendStream| {
+        let (a, l, f) = s.range_counts();
+        assert!(a + l + f <= s.buffered() / 256 + 4, "b={b} m={m}: {a} + {l} + {f} > {} / 256 + 4", s.buffered());
+    };
+    let data = bytes(b);
+    if m > 1 {
+        run.call(|| assert_eq!(s.write(&data, true), Ok(())));
+        written = b;
+    }
+    // Sends what it can: 1-byte writes flushed one at a time (at most `MAX_FLUSH` short pieces open), or the backlog.
+    let send = |s: &mut SendStream, written: &mut usize, run: &mut SelRun| loop {
+        if m == 1 && *written < b && s.range_sets().1.is_empty() {
+            let fin = *written + 1 == b;
+            run.call(|| {
+                assert_eq!(s.write(&[7], fin), Ok(()));
+                s.flush();
+            });
+            *written += 1;
+        }
+        let (got, _) = run.call(|| s.poll_data(1200, u64::MAX).is_some());
+        check(s);
+        if !got {
+            break;
+        }
+    };
+    let mut parity = 0usize;
+    for round in 0..9 {
+        send(&mut s, &mut written, &mut run);
+        for (x, y) in s.range_sets().2 {
+            parity += 1;
+            let fin = y as usize == b;
+            let nodes = s.range_counts();
+            let ack = round == 8 || parity % 2 == 1;
+            let (_, c) = run.call(|| if ack { s.on_data_acked(x, y - x, fin) } else { s.on_data_lost(x, y - x, fin) });
+            check(&s);
+            run.worst = run.worst.max(c[0]);
+            if !node_call_ok(c, nodes.0 + nodes.1 + nodes.2) {
+                bad.push((x, y, c, nodes));
+            }
         }
     }
-    assert!(bad.is_empty(), "ACKs that realloc or request more than 64 bytes (ack, reallocs, bytes): {bad:?}");
-    assert_eq!(s.state_exec(), SendState::DataRecvd);
+    while s.state_exec() != SendState::DataRecvd {
+        send(&mut s, &mut written, &mut run);
+        for (x, y) in s.range_sets().2 {
+            let nodes = s.range_counts();
+            let (_, c) = run.call(|| s.on_data_acked(x, y - x, y as usize == b));
+            check(&s);
+            run.worst = run.worst.max(c[0]);
+            if !node_call_ok(c, nodes.0 + nodes.1 + nodes.2) {
+                bad.push((x, y, c, nodes));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "b={b} m={m}: calls over the node rule (piece, [allocs, frees, reallocs, bytes], nodes): {:?}",
+        &bad[..bad.len().min(8)]);
+    eprintln!("sel_acks b={b} m={m}: bytes {} allocs {} worst-call allocs {}", run.bytes, run.allocs, run.worst);
+    run
+}
+
+/// D10 (d), (e), (h) under the ruling-11 adversary (spec D15): B = 4 KiB, 64 KiB, 1 MiB in 1200-byte pieces and 4 KiB,
+/// 64 KiB in 1-byte pieces. Counts, never time (Task 8 ruling): the stream's requested bytes at 16·B at most 24× those
+/// at B, and each ACK or loss within `NODE_C·(h + 1)` allocations (`node_call_ok`, in `sel_acks`): the O(log n) per
+/// call. Allocation totals are not held to 24×: about n calls of O(log n) nodes each grow as n·log n, and at 4 KiB the
+/// trees are a few nodes high (measured 56, 3163, 104122 allocations).
+#[test]
+fn send_selective_acks() {
+    let big: Vec<SelRun> = [4 << 10, 64 << 10, 1 << 20].iter().map(|&b| sel_acks(b, 1200)).collect();
+    let one: Vec<SelRun> = [4 << 10, 64 << 10].iter().map(|&b| sel_acks(b, 1)).collect();
+    for (lo, hi) in big.windows(2).map(|w| (&w[0], &w[1])).chain([(&one[0], &one[1])]) {
+        assert!(hi.bytes <= 24 * lo.bytes, "bytes {} -> {} (> 24x)", lo.bytes, hi.bytes);
+    }
+    assert!(big.iter().chain(&one).all(|r| r.worst > 0));
 }
 
 #[test]

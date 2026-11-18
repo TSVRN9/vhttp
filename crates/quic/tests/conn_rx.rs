@@ -420,23 +420,6 @@ fn challenge_flood_dropped() {
 }
 
 #[test]
-fn stream_run_coalesces() {
-    let s = |id, offset, data: &[u8], fin| Frame::Stream { stream_id: id, offset, data: data.to_vec(), fin };
-    let adj = [s(4, 10, &[1, 2], false), s(4, 12, &[3], false), s(4, 13, &[4], true), Frame::Ping];
-    let (run, e) = stream_run(&adj, 0).unwrap();
-    assert_eq!(run, s(4, 10, &[1, 2, 3, 4], true));
-    assert_eq!(e, 3);
-    // A gap, another stream, a frame of another type, and the end of the record end a run.
-    assert!(stream_run(&[s(4, 10, &[1], false), s(4, 12, &[2], false)], 0).is_none());
-    assert!(stream_run(&[s(4, 10, &[1], false), s(8, 11, &[2], false)], 0).is_none());
-    assert!(stream_run(&adj, 2).is_none());
-    assert!(stream_run(&[Frame::Ping, s(4, 0, &[1], false)], 0).is_none());
-    let (run, e) = stream_run(&[s(4, 0, &[1], false), s(4, 1, &[2], false), s(4, 9, &[3], false)], 0).unwrap();
-    assert_eq!(run, s(4, 0, &[1, 2], false));
-    assert_eq!(e, 2);
-}
-
-#[test]
 fn spoofed_datagrams_take_no_slot() {
     let mut c = established_rx();
     for q in 1..=3 {

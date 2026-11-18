@@ -1933,8 +1933,8 @@ impl Connection {
         Ok(())
     }
 
-    // ponytail: per incoming ACK at most 64 records × distinct stream runs per record × O(R) range work (R ≈ 2·64 + ~1000, 3d D4); coalescing turns a 200-frame single-stream record into one call. Cap STREAM frames per stream per packet if a split adversary still makes this hot.
-    /// The frames of one acknowledged record, each run of adjacent STREAM frames in one call.
+    /// The frames of one acknowledged record, one call each: a STREAM frame is one piece, found and moved in O(log n)
+    /// (D10 (b), (e)); a coalesced run would be no piece.
     #[verifier::spinoff_prover]
     fn on_acked_record(&mut self, k: PacketKind, frames: &[Frame])
         requires
@@ -1953,16 +1953,8 @@ impl Connection {
                 self.frames_kept(*old(self)),
             decreases frames@.len() - j,
         {
-            match stream_run(frames, j) {
-                Some((run, e)) => {
-                    self.on_acked_frame(k, &run);
-                    j = e;
-                },
-                None => {
-                    self.on_acked_frame(k, &frames[j]);
-                    j += 1;
-                },
-            }
+            self.on_acked_frame(k, &frames[j]);
+            j += 1;
         }
     }
 
@@ -4036,24 +4028,36 @@ impl Connection {
             final(self).crypto_end_spec(PacketKind::Initial) == old(self).crypto_end_spec(PacketKind::Initial),
             final(self).phase_spec() == old(self).phase_spec(),
             drained_kept(*final(self), *old(self)),
+            final(self).crypto_flushed(level),
     {
-        if !matches!(self.lc.phase(), Phase::Open) {
-            return;
-        }
         // The queue holds at most `MAX_QUEUE` bytes (`SendStream::write`'s requires); nothing proves a bound on the
         // bytes TLS writes per level yet, so a write past it is dropped, as one past `VARINT_MAX` is
         // (carryover cat-C15-crypto-write).
-        if data.len() > MAX_QUEUE {
-            return;
+        if matches!(self.lc.phase(), Phase::Open) && data.len() <= MAX_QUEUE {
+            match level {
+                PacketKind::Initial => if self.live_i && self.ctx_i.buffered() <= MAX_QUEUE - data.len() {
+                    let _ = self.ctx_i.write(data, false);
+                },
+                PacketKind::Handshake => if self.live_h && self.ctx_h.buffered() <= MAX_QUEUE - data.len() {
+                    let _ = self.ctx_h.write(data, false);
+                },
+                PacketKind::OneRtt => {},
+            }
         }
+        // Every write is a flush point: a TLS message goes at the next transmission (D10 (c)).
         match level {
-            PacketKind::Initial => if self.live_i && self.ctx_i.buffered() <= MAX_QUEUE - data.len() {
-                let _ = self.ctx_i.write(data, false);
-            },
-            PacketKind::Handshake => if self.live_h && self.ctx_h.buffered() <= MAX_QUEUE - data.len() {
-                let _ = self.ctx_h.write(data, false);
-            },
+            PacketKind::Initial => self.ctx_i.flush(),
+            PacketKind::Handshake => self.ctx_h.flush(),
             PacketKind::OneRtt => {},
+        }
+    }
+
+    /// Level `k`'s CRYPTO context is flushed: every byte written may go as a short piece (D10 (c)).
+    pub closed spec fn crypto_flushed(&self, k: PacketKind) -> bool {
+        match k {
+            PacketKind::Initial => self.ctx_i.flush_point() == self.ctx_i.all_written().len(),
+            PacketKind::Handshake => self.ctx_h.flush_point() == self.ctx_h.all_written().len(),
+            PacketKind::OneRtt => true,
         }
     }
 
@@ -4297,6 +4301,7 @@ impl Connection {
             r matches Ok(n) ==> n <= data@.len() && (n < data@.len() ==> n == old(self).send_room_spec(id)),
             r matches Ok(n) ==> (n > 0 || data@.len() == 0 && fin) ==> final(self).fin_written(id) == (fin && n
                 == data@.len()),
+            r matches Ok(n) && n == data@.len() ==> final(self).flushed(id),
             final(self).events_spec() == old(self).events_spec(),
             final(self).keeps_later(*old(self)),
     {
@@ -4320,10 +4325,23 @@ impl Connection {
             },
             None => Err(()),
         };
+        // A write taken whole is a flush point (D10 (c)): each complete H3 output goes at the next transmission.
+        if let Ok(n) = r {
+            if n == data.len() {
+                if let Some(s) = &mut self.streams {
+                    s.flush(id);
+                }
+            }
+        }
         proof {
             self.lemma_keeps_streams(o);
         }
         r
+    }
+
+    /// Stream `id`'s sending part, if any, is flushed.
+    pub closed spec fn flushed(&self, id: u64) -> bool {
+        self.streams matches Some(s) ==> (s.tx_part(id) matches Some(p) ==> p.flush_point() == p.all_written().len())
     }
 
     /// The application abandons sending on `id` (RESET_STREAM).
@@ -9519,55 +9537,6 @@ fn has_non_probing(frames: &[Frame]) -> (r: bool)
     false
 }
 
-/// The STREAM frame covering the run of adjacent STREAM frames of one stream that starts at
-/// `frames[j]`, FIN from the last, and the index after the run; None when no frame follows on
-/// from `frames[j]`, so a lone frame costs no copy. The copy is at most one record's bytes.
-/// Public for its test only: no record exists before Task 2a-i.
-#[doc(hidden)]
-#[verifier::spinoff_prover]
-pub fn stream_run(frames: &[Frame], j: usize) -> (r: Option<(Frame, usize)>)
-    requires
-        j < frames@.len(),
-    ensures
-        r matches Some((_, e)) ==> j < e <= frames@.len(),
-{
-    let (id, off, first, mut last_fin) = match &frames[j] {
-        Frame::Stream { stream_id, offset, data, fin } => (*stream_id, *offset, data, *fin),
-        _ => return None,
-    };
-    if first.len() as u64 > u64::MAX - off {
-        return None;
-    }
-    let mut next = off + first.len() as u64;
-    let mut run: Vec<u8> = Vec::new();
-    let mut e = j + 1;
-    while e < frames.len()
-        invariant
-            j < e <= frames@.len(),
-        decreases frames@.len() - e,
-    {
-        match &frames[e] {
-            Frame::Stream { stream_id, offset, data, fin } => {
-                if *stream_id != id || *offset != next || data.len() as u64 > u64::MAX - next {
-                    break;
-                }
-                if e == j + 1 {
-                    run.extend_from_slice(first.as_slice());
-                }
-                run.extend_from_slice(data.as_slice());
-                next = next + data.len() as u64;
-                last_fin = *fin;
-            },
-            _ => break,
-        }
-        e += 1;
-    }
-    if e == j + 1 {
-        return None;
-    }
-    Some((Frame::Stream { stream_id: id, offset: off, data: run, fin: last_fin }, e))
-}
-
 /// `TransportParams` derives no `Clone`.
 fn copy_tp(t: &TransportParams) -> (r: TransportParams)
     ensures
@@ -10664,10 +10633,16 @@ impl Connection {
         c.0.saturating_add(c.1).saturating_add(tx)
     }
 
-    /// Test support: stream `id`'s acked and lost send-range counts (3d Task 1).
+    /// Test support: stream `id`'s acked, lost and in-flight send-range counts (3d Task 1, 9b2 Task 8a).
     #[doc(hidden)]
-    pub fn send_range_counts(&self, id: u64) -> Option<(usize, usize)> {
+    pub fn send_range_counts(&self, id: u64) -> Option<(usize, usize, usize)> {
         self.streams.as_ref().and_then(|s| s.send_range_counts(id))
+    }
+
+    /// Test support: stream `id`'s send bytes buffered (9b2 Task 8a).
+    #[doc(hidden)]
+    pub fn send_buffered(&self, id: u64) -> Option<usize> {
+        self.streams.as_ref().and_then(|s| s.send_buffered(id))
     }
 
     /// Test support: the amplification budget of `q`, None when absent (the only reading of a
