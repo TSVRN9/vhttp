@@ -72,8 +72,9 @@ const H3_F: usize = 2 * std::mem::size_of::<FieldLine>() + 2 * EXPAND + 2;
 /// byteq's `MIN_CAP` (9b2 D4); named apart so the RFC-quantity gate, which reads constants by name, never sees it.
 const QUEUE_MIN_CAP: usize = 64;
 
-/// One input call: its kind, allocator counts (`k[5]` its largest single request), the bytes it was given, the bytes
-/// of the buffered frame it completes (0: none), the bytes the stream holds after it.
+/// One input call: its kind, allocator counts (`k[5]` its largest single request), the bytes it was given, `f` (the
+/// bytes of every frame completed in this call, 0: none), the bytes the stream holds after it.
+// `f` counts a frame wholly inside the call's data like one completed across calls (controller ruling, 9b3 Task 8 M5).
 #[derive(Clone, Copy)]
 struct Call {
     tag: &'static str,
@@ -486,6 +487,25 @@ fn control_bytewise() {
     assert_eq!(ev, vec![UniEvent::PeerSettings(want)]);
     report("control_bytewise", ids.len(), &r);
     let fails = per_call_ok("control_bytewise", ids.len(), &r.0, true, COST_A);
+    assert!(fails.is_empty(), "{fails:#?}");
+}
+
+#[test]
+fn control_preamble_one_call() {
+    // The control stream type and a largest SETTINGS frame (361 pairs, a 1,023-byte payload) in one call: d = 1,027,
+    // the frame wholly inside the call's bytes, so `f` is its 1,026 bytes.
+    let ids = settings_ids(361);
+    let p = settings_payload(&ids);
+    let fr = frame(0x04, &p);
+    let mut b = vec![0x00];
+    b.extend_from_slice(&fr);
+    let d = b.len();
+    let f = fr.len();
+    let (r, ev) = feed_uni(&b, d, "preamble", |_, _| f);
+    let want: Vec<(u64, u64)> = ids.iter().map(|&i| (i, 0)).collect();
+    assert_eq!(ev, vec![UniEvent::PeerSettings(want)]);
+    report("control_preamble_one_call", ids.len(), &r);
+    let fails = per_call_ok("control_preamble_one_call", ids.len(), &r.0, true, COST_A);
     assert!(fails.is_empty(), "{fails:#?}");
 }
 
