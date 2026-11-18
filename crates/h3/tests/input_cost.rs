@@ -8,7 +8,8 @@ use h3::conn::{H3Conn, Output};
 use h3::frame::serialize_frame_header;
 use h3::message::RequestHead;
 use h3::qpack::field_section::FieldLine;
-use h3::request::{ReqEvent, RequestStream};
+use byteq::capvec::CapVec;
+use h3::request::{ReqEvent, RequestStream, MAX_REQ_EVENTS};
 use h3::uni::{SeenUni, UniEvent, UniStream};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -297,12 +298,19 @@ fn feed_request(fr: &[u8], step: usize, tag: &'static str) -> (Run, Vec<ReqEvent
         let last = (i + 1) * step >= fr.len();
         let mut ev = Vec::new();
         r.call(tag, ch.len(), if last { fr.len() } else { 0 }, || {
-            assert_eq!(s.on_data(ch, false, &mut ev), Ok(()));
+            ev = req_call(&mut s, ch);
             s.buffered_len()
         });
         all.extend(ev);
     }
     (r, all)
+}
+
+/// One `on_data` call (no FIN) with its `MAX_REQ_EVENTS` event buffer, which the call's allocations include.
+fn req_call(s: &mut RequestStream, b: &[u8]) -> Vec<ReqEvent> {
+    let mut ev = CapVec::new(MAX_REQ_EVENTS);
+    assert_eq!(s.on_data(b, false, &mut ev).0, Ok(()));
+    ev.into_vec()
 }
 
 /// The request's headers: (name, value length).
@@ -331,7 +339,6 @@ fn completing_ok(name: &str, m: usize, r: &Run, fr: usize) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "9b3: fails bytewise on top_up's append (Task 7); un-ignored by Task 7"]
 fn cookie_lines_linear() {
     let (v, mut fails, mut whole, mut bytewise) = (34, Vec::new(), Vec::new(), Vec::new());
     for m in [226, 452, 904] {
@@ -403,8 +410,6 @@ fn huffman_max_expansion() {
 }
 
 #[test]
-#[ignore = "9b3: fails today, top_up's append grows the partial-frame buffer by realloc (65,537 bytes for d = 1 at \
-            byte 32,768); un-ignored by Task 7"]
 fn headers_bytewise() {
     let fr = headers(&date_lines(413, 120));
     assert_eq!(fr.len(), 50399, "the RCA's frame bytes");
@@ -417,18 +422,15 @@ fn headers_bytewise() {
 }
 
 #[test]
-#[ignore = "9b3: fails today, one Body event per DATA frame; un-ignored by Task 7"]
 fn data_frames_events() {
     let mut s = RequestStream::new();
-    let mut ev = Vec::new();
-    assert_eq!(s.on_data(&headers(&[]), false, &mut ev), Ok(()));
-    assert_eq!(ev.len(), 1);
+    assert_eq!(req_call(&mut s, &headers(&[])).len(), 1);
     let n = 5461;
     let data: Vec<u8> = (0..n).flat_map(|i| [0x00, 0x01, i as u8]).collect();
     let mut r = Run::default();
     let mut ev = Vec::new();
     r.call("data", data.len(), 0, || {
-        assert_eq!(s.on_data(&data, false, &mut ev), Ok(()));
+        ev = req_call(&mut s, &data);
         s.buffered_len()
     });
     report("data_frames_events", n, &r);

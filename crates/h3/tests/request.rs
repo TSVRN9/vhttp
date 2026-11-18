@@ -2,6 +2,7 @@ use h3::codes::*;
 use h3::frame::serialize_frame_header;
 use h3::message::RequestHead;
 use h3::qpack::field_section::{encode_field_section, FieldLine};
+use byteq::capvec::CapVec;
 use h3::request::*;
 
 fn fl(n: &str, v: &str) -> FieldLine {
@@ -62,10 +63,22 @@ fn summary(ev: Vec<ReqEvent>) -> Vec<Ev> {
     out
 }
 
+/// One `on_data` call with a fresh `MAX_REQ_EVENTS` event buffer: at most 4 events, at most one Body; its events
+/// are appended to `ev`.
+fn call(s: &mut RequestStream, bytes: &[u8], fin: bool, ev: &mut Vec<ReqEvent>) -> Result<(), ReqError> {
+    let mut e = CapVec::new(MAX_REQ_EVENTS);
+    let r = s.on_data(bytes, fin, &mut e).0;
+    let e = e.into_vec();
+    assert!(e.len() <= MAX_REQ_EVENTS, "{} events in one call", e.len());
+    assert!(e.iter().filter(|x| matches!(x, ReqEvent::Body(_))).count() <= 1, "more than one Body in one call");
+    ev.extend(e);
+    r
+}
+
 fn run(bytes: &[u8], fin: bool) -> (Result<(), ReqError>, Vec<Ev>) {
     let mut s = RequestStream::new();
     let mut ev = Vec::new();
-    let r = s.on_data(bytes, fin, &mut ev);
+    let r = call(&mut s, bytes, fin, &mut ev);
     (r, summary(ev))
 }
 
@@ -74,11 +87,11 @@ fn run_bytewise(bytes: &[u8], fin: bool) -> (Result<(), ReqError>, Vec<Ev>) {
     let mut s = RequestStream::new();
     let mut ev = Vec::new();
     for b in bytes {
-        if let Err(e) = s.on_data(&[*b], false, &mut ev) {
+        if let Err(e) = call(&mut s, &[*b], false, &mut ev) {
             return (Err(e), summary(ev));
         }
     }
-    let r = s.on_data(&[], fin, &mut ev);
+    let r = call(&mut s, &[], fin, &mut ev);
     (r, summary(ev))
 }
 
@@ -244,9 +257,9 @@ fn unknown_frames_ignored() {
     huge.extend_from_slice(&[0u8; 100]);
     let mut s = RequestStream::new();
     let mut ev = Vec::new();
-    assert_eq!(s.on_data(&huge, false, &mut ev), Ok(()));
+    assert_eq!(call(&mut s, &huge, false, &mut ev), Ok(()));
     assert_eq!(s.buffered_len(), 0);
-    assert_eq!(s.on_data(&[0u8; 1000], false, &mut ev), Ok(()));
+    assert_eq!(call(&mut s, &[0u8; 1000], false, &mut ev), Ok(()));
     assert_eq!(s.buffered_len(), 0);
     assert!(ev.is_empty());
 }
@@ -259,7 +272,51 @@ fn chunking() {
     let b = post_body_bytes();
     let mut s = RequestStream::new();
     let mut ev = Vec::new();
-    assert_eq!(s.on_data(&b[..7], false, &mut ev), Ok(()));
-    assert_eq!(s.on_data(&b[7..], true, &mut ev), Ok(()));
+    assert_eq!(call(&mut s, &b[..7], false, &mut ev), Ok(()));
+    assert_eq!(call(&mut s, &b[7..], true, &mut ev), Ok(()));
     assert_eq!(summary(ev), post_events());
+}
+
+/// Review Focus 1 (F20): a frame header that straddles calls. The DATA frame's first byte ends one call; the next call
+/// carries its other 2 bytes and 2 bytes of the next frame's header, which the stream then holds; the call after
+/// completes that header.
+#[test]
+fn header_straddles_calls() {
+    let mut s = RequestStream::new();
+    let mut ev = Vec::new();
+    let mut first = req("POST", &[]);
+    first.push(0x00);
+    assert_eq!(call(&mut s, &first, false, &mut ev), Ok(()));
+    assert_eq!(s.buffered_len(), 1);
+    // DATA "x" completed, then a DATA header whose 2-byte length is cut after its first byte.
+    let mut e2 = Vec::new();
+    assert_eq!(call(&mut s, &[0x01, b'x', 0x00, 0x40], false, &mut e2), Ok(()));
+    assert_eq!(s.buffered_len(), 2);
+    assert_eq!(summary(e2), vec![Ev::Body(b"x".to_vec())]);
+    let mut e3 = Vec::new();
+    assert_eq!(call(&mut s, &[0x03, b'a', b'b', b'c'], true, &mut e3), Ok(()));
+    assert_eq!(s.buffered_len(), 0);
+    assert_eq!(summary(e3), vec![Ev::Body(b"abc".to_vec()), Ev::End]);
+}
+
+/// Review Focus 4: the content-length runs out in a call of 1-byte DATA frames. One Body holds the bytes it allows,
+/// then H3_MESSAGE_ERROR; at most 4 events.
+#[test]
+fn content_length_overflow_one_body() {
+    let data: Vec<u8> = b"hello!!!".iter().flat_map(|b| [0x00, 0x01, *b]).collect();
+    let head = req("POST", &[("content-length", "5")]);
+    // The headers in their own call, then the DATA frames.
+    let mut s = RequestStream::new();
+    let mut ev = Vec::new();
+    assert_eq!(call(&mut s, &head, false, &mut ev), Ok(()));
+    let mut ev = Vec::new();
+    assert_eq!(call(&mut s, &data, false, &mut ev), Err(ReqError::Stream(H3_MESSAGE_ERROR)));
+    assert_eq!(ev.len(), 1);
+    assert!(matches!(&ev[0], ReqEvent::Body(b) if b == b"hello"));
+    // All in one call: Head, then one Body.
+    let mut s = RequestStream::new();
+    let mut ev = Vec::new();
+    assert_eq!(call(&mut s, &cat(&[&head, &data]), false, &mut ev), Err(ReqError::Stream(H3_MESSAGE_ERROR)));
+    assert_eq!(ev.len(), 2);
+    assert!(matches!(&ev[1], ReqEvent::Body(b) if b == b"hello"));
 }

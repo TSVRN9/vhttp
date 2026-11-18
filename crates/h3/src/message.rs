@@ -1797,6 +1797,45 @@ pub proof fn lemma_section_size(b: Seq<u8>, budget: u64)
     }
 }
 
+/// The bounded decoder's lines take at least one encoded byte each and decode to at most 76 bytes per byte
+/// (`lemma_line_expansion`), so their bytes and count are at most 77 per encoded byte.
+proof fn lemma_lines_expansion(b: Seq<u8>, left: u64)
+    ensures
+        rfc_field_lines_bounded(b, left) matches Ok(f) ==> fields_bytes(f) + f.len() <= 77 * b.len(),
+    decreases b.len(),
+{
+    if b.len() == 0 {
+        assert(fields_bytes(Seq::<(Seq<u8>, Seq<u8>)>::empty()) == 0);
+    } else {
+        lemma_field_line_consumed(b);
+        lemma_line_expansion(b);
+        if let Some((f, c)) = rfc_field_line(b) {
+            if field_line_size(f) <= left {
+                let l2 = (left - field_line_size(f)) as u64;
+                lemma_lines_expansion(b.skip(c as int), l2);
+                if let Ok(rest) = rfc_field_lines_bounded(b.skip(c as int), l2) {
+                    lemma_fields_bytes_prepend(f, rest);
+                }
+            }
+        }
+    }
+}
+
+/// A field section the bounded decoder accepts decodes to at most 77 bytes and lines per encoded byte: what
+/// `headers_frame` charges for validating it.
+pub proof fn lemma_section_expansion(b: Seq<u8>, budget: u64)
+    ensures
+        rfc_decode_field_section_bounded(b, budget) matches Ok(f) ==> fields_bytes(f) + f.len() <= 77 * b.len(),
+{
+    if let Some(c) = rfc_section_start(b) {
+        crate::qpack::int::lemma_prefix_int_consumed(8, b);
+        if let crate::qpack::int::PrefixIntSpec::Value { consumed: c1, .. } = crate::qpack::int::rfc_prefix_int(8, b) {
+            crate::qpack::int::lemma_prefix_int_consumed(7, b.skip(c1 as int));
+        }
+        lemma_lines_expansion(b.skip(c as int), budget);
+    }
+}
+
 /// One field line copied into exact buffers: two allocations, one unit per byte.
 fn copy_line(f: &FieldLine) -> (r: (FieldLine, Ghost<nat>))
     ensures

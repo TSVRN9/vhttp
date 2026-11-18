@@ -31,7 +31,8 @@ use crate::frame::*;
 pub use crate::limits::*;
 use crate::message::*;
 use crate::qpack::field_section::*;
-use crate::request::{ReqError, ReqEvent, RequestStream, SpecReqEvent};
+use crate::request::{ReqError, ReqEvent, RequestStream, SpecReqEvent, MAX_REQ_EVENTS};
+use byteq::capvec::CapVec;
 use crate::uni::{SeenUni, SpecUniEvent, UniEvent, UniKind, UniStream};
 // Used only in ghost code, which a plain `cargo build` erases.
 #[allow(unused_imports)]
@@ -656,20 +657,26 @@ proof fn lemma_writes_one(x: SpecOutput, id: u64)
     }
 }
 
-/// Moves `v` into reverse order, so popping yields its elements first to last.
-fn rev<T>(v: Vec<T>) -> (r: Vec<T>)
+/// Moves `v` into reverse order in an exact buffer, so popping yields its elements first to last: one allocation,
+/// one unit per element moved.
+fn rev<T>(v: Vec<T>) -> (r: (Vec<T>, Ghost<nat>))
     ensures
-        r@.len() == v@.len(),
-        forall|i: int| 0 <= i < v@.len() ==> r@[i] == v@[v@.len() - 1 - i],
+        r.0@.len() == v@.len(),
+        forall|i: int| 0 <= i < v@.len() ==> r.0@[i] == v@[v@.len() - 1 - i],
+        r.1@ <= v@.len() + 1,
 {
     let ghost v0 = v@;
     let mut v = v;
-    let mut r: Vec<T> = Vec::new();
+    let mut r: CapVec<T> = CapVec::new(v.len());
+    let ghost mut work: nat = 1;
     while v.len() > 0
         invariant
             v@.len() + r@.len() == v0.len(),
             v@ == v0.take(v@.len() as int),
             forall|i: int| 0 <= i < r@.len() ==> r@[i] == v0[v0.len() - 1 - i],
+            r.wf(),
+            r.cap() == v0.len(),
+            work == r@.len() + 1,
         decreases v@.len(),
     {
         let ghost n = v@.len();
@@ -680,11 +687,14 @@ fn rev<T>(v: Vec<T>) -> (r: Vec<T>)
                     assert(v@ =~= v0.take(v@.len() as int));
                 }
                 r.push(x);
+                proof {
+                    work = work + 1;
+                }
             },
             None => {},
         }
     }
-    r
+    (r.into_vec(), Ghost(work))
 }
 
 fn status_line(status: u16) -> (f: FieldLine)
@@ -1685,19 +1695,41 @@ proof fn lemma_answer_done(
     assert(req_outs(id, s, tr, err, cx, added(o1, o2)));
 }
 
+/// One more output that is request-only and no close keeps `req_only` and `no_close`.
+proof fn lemma_added_kept(a0: Seq<SpecOutput>, a1: Seq<SpecOutput>)
+    requires
+        req_only(a0),
+        no_close(a0),
+        a1 == a0 || (a1 == a0.push(a1.last()) && ctrl_free(a1.last()) && stop_ok(a1.last()) && body_ok(a1.last())
+            && !(a1.last() is CloseConnection)),
+    ensures
+        req_only(a1),
+        no_close(a1),
+{
+    if a1 != a0 {
+        assert forall|i: int| 0 <= i < a1.len() implies ctrl_free(#[trigger] a1[i]) && stop_ok(a1[i]) && body_ok(
+            a1[i],
+        ) && !(a1[i] is CloseConnection) by {
+            if i < a1.len() - 1 {
+                assert(a1[i] == a0[i]);
+            }
+        }
+    }
+}
+
 /// Outputs what the request machine's new events `evs` mean, in order; stops at a request the
 /// connection answers itself (`true`). Otherwise (`false`) the outputs followed by the error's
 /// outputs are `req_outs`.
 fn deliver(
     e: &mut ReqEntry,
-    evs: Vec<ReqEvent>,
+    evs: CapVec<ReqEvent>,
     fin: bool,
     peer: Option<u64>,
     Ghost(ev): Ghost<Seq<SpecReqEvent>>,
     Ghost(err): Ghost<Option<ReqError>>,
     Ghost(cx): Ghost<Ctx>,
     out: &mut Vec<Output>,
-) -> (answered: bool)
+) -> (r: (bool, Ghost<nat>))
     requires
         ev == request::views(evs@),
         cx == (Ctx { fin, peer, send_open: old(e).send_open }),
@@ -1711,7 +1743,7 @@ fn deliver(
         extends(old(out)@, final(out)@),
         req_only(added(old(out)@, final(out)@)),
         no_close(added(old(out)@, final(out)@)),
-        answered ==> req_outs(
+        r.0 ==> req_outs(
             old(e).id,
             ev,
             fields_view(old(e).trailers@),
@@ -1719,7 +1751,7 @@ fn deliver(
             cx,
             added(old(out)@, final(out)@),
         ),
-        !answered ==> req_outs(
+        !r.0 ==> req_outs(
             old(e).id,
             ev,
             fields_view(old(e).trailers@),
@@ -1727,21 +1759,24 @@ fn deliver(
             cx,
             added(old(out)@, final(out)@) + err_outs(old(e).id, err, cx),
         ),
-        answered == !no_internal(ev),
+        r.0 == !no_internal(ev),
         final(e).head == (old(e).head || has_request(added(old(out)@, final(out)@))),
         final(e).is_head == (old(e).is_head || head_req(added(old(out)@, final(out)@))),
-        answered ==> !final(e).rx_open && !final(e).send_open && final(e).fin_seen == (old(
+        r.0 ==> !final(e).rx_open && !final(e).send_open && final(e).fin_seen == (old(
             e,
         ).fin_seen || fin),
-        !answered ==> final(e).rx_open && final(e).send_open == old(e).send_open
+        !r.0 ==> final(e).rx_open && final(e).send_open == old(e).send_open
             && final(e).fin_seen == old(e).fin_seen,
+        r.1@ <= c_dlv() * (ev.len() + 1),
 {
     let ghost id = e.id;
     let ghost o0 = out@;
     let ghost tr0 = fields_view(e.trailers@);
     let n = evs.len();
     let ghost evs0 = evs@;
-    let mut rv = rev(evs);
+    let (rv0, Ghost(wr)) = rev(evs.into_vec());
+    let mut rv = rv0;
+    let ghost mut work: nat = wr;
     let mut k: usize = 0;
     proof {
         assert forall|i: int| 0 <= i < rv@.len() implies request::body_nonempty(#[trigger] rv@[i]) by {
@@ -1794,6 +1829,8 @@ fn deliver(
             forall|i: int| 0 <= i < k ==> !internal_head(#[trigger] ev[i]),
             e.head == (old(e).head || has_request(added(o0, out@))),
             e.is_head == (old(e).is_head || head_req(added(o0, out@))),
+            work <= n + 1 + 31 * k,
+            ev.len() == n,
         decreases n - k,
     {
         let ghost tr = fields_view(e.trailers@);
@@ -1804,7 +1841,7 @@ fn deliver(
                 proof {
                     assert(false);
                 }
-                return false;
+                return (false, Ghost(work));
             },
         };
         proof {
@@ -1813,6 +1850,7 @@ fn deliver(
         }
         match x {
             ReqEvent::Head(RequestHead::Connect { .. }) => {
+                // `answer`'s cost is Task 9's (D10: constant encodings).
                 answer(e, 501, fin, peer, out);
                 proof {
                     lemma_answer_done(id, ev, k as int, tr, tr0, err, cx, 501, o0, o1, out@);
@@ -1822,9 +1860,11 @@ fn deliver(
                     lemma_head_req_concat(added(o0, o1), added(o1, out@));
                     assert(internal_head(ev[k as int]));
                 }
-                return true;
+                return (true, Ghost(work + 31));
             },
             ReqEvent::Head(RequestHead::Request(req)) => {
+                // `is_http_scheme`: two `eq_ci_x` against 4- and 5-byte literals, at most 11 units, and the literals' 9
+                // stack writes.
                 if !is_http_scheme(req.scheme.as_slice()) {
                     answer(e, 421, fin, peer, out);
                     proof {
@@ -1835,14 +1875,20 @@ fn deliver(
                         lemma_head_req_concat(added(o0, o1), added(o1, out@));
                         assert(internal_head(ev[k as int]));
                     }
-                    return true;
+                    return (true, Ghost(work + 31));
                 }
                 e.head = true;
                 let head_method: [u8; 4] = [72u8, 69u8, 65u8, 68u8];
                 proof {
                     assert(head_method@ =~= lit_head_method());
                 }
-                e.is_head = e.is_head || eq_bytes(req.method.as_slice(), &head_method);
+                let (is_hm, Ghost(ch)) = eq_bytes_w(req.method.as_slice(), &head_method);
+                proof {
+                    // at most c_eq·(4 + 1) = 5, against the 4-byte literal
+                    assert(ch <= 5);
+                    work = work + ch;
+                }
+                e.is_head = e.is_head || is_hm;
                 let w = Output::Request { stream_id: e.id, head: req };
                 proof {
                     lemma_deliver(id, ev, k as int, tr, tr, tr0, err, cx, o0, o1, w);
@@ -1893,25 +1939,25 @@ fn deliver(
             },
         }
         proof {
-            let a = added(o0, out@);
-            if out@.len() > o1.len() {
-                assert(a == added(o0, o1).push(a.last()));
-                assert forall|i: int| 0 <= i < a.len() implies ctrl_free(#[trigger] a[i]) && stop_ok(
-                    a[i],
-                ) && body_ok(a[i]) && !(a[i] is CloseConnection) by {
-                    if i < a.len() - 1 {
-                        assert(a[i] == added(o0, o1)[i]);
-                    }
-                }
-            }
+            lemma_added_kept(added(o0, o1), added(o0, out@));
         }
         k += 1;
+        proof {
+            work = work + 26;
+        }
     }
     proof {
         assert(ev.skip(n as int) =~= Seq::<SpecReqEvent>::empty());
         assert(req_outs(id, ev.skip(n as int), fields_view(e.trailers@), err, cx, err_outs(id, err, cx)));
     }
-    false
+    (false, Ghost(work))
+}
+
+/// The cost constant of `deliver`, per event: at most 31 (an `http` scheme check, a HEAD method check, an output) and
+/// one for the reversal.
+#[verifier::inline]
+spec fn c_dlv() -> nat {
+    32
 }
 
 /// Outputs what the request machine's error means (`err_outs`); `true` for a connection error.
@@ -2012,15 +2058,18 @@ fn feed_req(e: &mut ReqEntry, data: &[u8], fin: bool, peer: Option<u64>, out: &m
     let ghost o0 = out@;
     let ghost em0 = e.stream.emitted();
     let ghost so = e.send_open;
-    let mut evs: Vec<ReqEvent> = Vec::new();
-    let res = e.stream.on_data(data, fin, &mut evs);
+    let mut evs: CapVec<ReqEvent> = CapVec::new(MAX_REQ_EVENTS);
+    // Task 11 charges `on_data`'s and `deliver`'s costs once `feed_req` returns its cost.
+    let (res, Ghost(_cr)) = e.stream.on_data(data, fin, &mut evs);
     proof {
         assert(evs@.skip(0) =~= evs@);
         assert(e.stream.emitted().skip(em0.len() as int) =~= request::views(evs@));
     }
     let ghost err = request::err_of(res);
     let ghost cx = Ctx { fin, peer, send_open: e.send_open };
-    if deliver(e, evs, fin, peer, Ghost(request::views(evs@)), Ghost(err), Ghost(cx), out) {
+    let ghost evv = request::views(evs@);
+    let (answered, Ghost(_cd)) = deliver(e, evs, fin, peer, Ghost(evv), Ghost(err), Ghost(cx), out);
+    if answered {
         proof {
             lemma_added_refl(out@);
             lemma_req_concat(added(o0, out@), Seq::empty(), false);
