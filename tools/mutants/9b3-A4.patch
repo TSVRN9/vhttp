@@ -1,0 +1,11 @@
+--- a/crates/h3/src/qpack/field_section.rs
++++ b/crates/h3/src/qpack/field_section.rs
+@@ -1330,7 +1330,7 @@
+                     work = work + cl + 1;
+                 }
+                 let ghost done = fields_view(out@);
+-                left = left - f.name.len() as u64 - f.value.len() as u64 - 32;
++                left = left - f.name.len() as u64 - f.value.len() as u64;
+                 out.push(f);
+                 pos += k;
+                 proof {

@@ -1223,10 +1223,12 @@ fn pseudo_first_x(fields: &[FieldLine]) -> (r: (bool, Ghost<nat>))
     let ghost fv = fields_view(fields@);
     let mut seen = false;
     let mut i = 0;
+    let ghost mut work: nat = 1;
     while i < fields.len()
         invariant
             i <= fields.len(),
             fv == fields_view(fields@),
+            work == i + 1,
             seen == exists|k: int| 0 <= k < i && !is_pseudo((#[trigger] fv[k]).0),
             forall|a: int, b: int|
                 0 <= a < b < i && !is_pseudo((#[trigger] fv[a]).0) ==> !is_pseudo(
@@ -1247,14 +1249,17 @@ fn pseudo_first_x(fields: &[FieldLine]) -> (r: (bool, Ghost<nat>))
                     }
                 }
             }
-            return (false, Ghost((i + 1) as nat));
+            return (false, Ghost(work + 1));
         }
         if !p {
             seen = true;
         }
         i += 1;
+        proof {
+            work = work + 1;
+        }
     }
-    (true, Ghost((i + 1) as nat))
+    (true, Ghost(work))
 }
 
 /// The cost constant of `pseudo_once_x`: five counts and their literals (33 bytes written).
@@ -1354,16 +1359,18 @@ fn parse_cl_w(v: &[u8]) -> (r: (Option<u64>, Ghost<nat>))
 {
     let mut acc: u64 = 0;
     let mut i = 0;
+    let ghost mut work: nat = 1;
     while i < v.len()
         invariant
             i <= v.len(),
+            work == i + 1,
             forall|k: int| 0 <= k < i ==> 48 <= #[trigger] v@[k] && v@[k] <= 57,
             acc as int == digits_val(v@.take(i as int)),
         decreases v.len() - i,
     {
         let b = v[i];
         if b < 48 || b > 57 {
-            return (None, Ghost((i + 1) as nat));
+            return (None, Ghost(work));
         }
         let d = (b - 48) as u64;
         proof {
@@ -1375,16 +1382,19 @@ fn parse_cl_w(v: &[u8]) -> (r: (Option<u64>, Ghost<nat>))
                 lemma_digits_mono(v@, i as int + 1, v@.len() as int);
                 assert(v@.take(v@.len() as int) =~= v@);
             }
-            return (None, Ghost((i + 1) as nat));
+            return (None, Ghost(work));
         }
         acc = acc * 10 + d;
         i += 1;
+        proof {
+            work = work + 1;
+        }
     }
     assert(v@.take(v.len() as int) =~= v@);
     if v.len() == 0 {
-        (None, Ghost(1))
+        (None, Ghost(work))
     } else {
-        (Some(acc), Ghost((i + 1) as nat))
+        (Some(acc), Ghost(work))
     }
 }
 
@@ -1538,9 +1548,11 @@ fn eq_ci_x(s: &[u8], lit: &[u8]) -> (r: (bool, Ghost<nat>))
         return (false, Ghost(1));
     }
     let mut i = 0;
+    let ghost mut work: nat = 1;
     while i < s.len()
         invariant
             i <= s.len(),
+            work == i + 1,
             s@.len() == lit@.len(),
             forall|k: int|
                 0 <= k < i ==> (if 65 <= #[trigger] s@[k] && s@[k] <= 90 {
@@ -1556,11 +1568,14 @@ fn eq_ci_x(s: &[u8], lit: &[u8]) -> (r: (bool, Ghost<nat>))
             s[i]
         };
         if c != lit[i] {
-            return (false, Ghost((i + 1) as nat));
+            return (false, Ghost(work));
         }
         i += 1;
+        proof {
+            work = work + 1;
+        }
     }
-    (true, Ghost((i + 1) as nat))
+    (true, Ghost(work))
 }
 
 /// A scheme we serve: "http" or "https", case-insensitively (RFC 3986 §3.1).
@@ -1581,18 +1596,23 @@ fn no_at_x(s: &[u8]) -> (r: (bool, Ghost<nat>))
         r.1@ <= s@.len() + 1,
 {
     let mut i = 0;
+    let ghost mut work: nat = 1;
     while i < s.len()
         invariant
             i <= s.len(),
+            work == i + 1,
             forall|k: int| 0 <= k < i ==> (#[trigger] s@[k]) != 64u8,
         decreases s.len() - i,
     {
         if s[i] == 64 {
-            return (false, Ghost((i + 1) as nat));
+            return (false, Ghost(work));
         }
         i += 1;
+        proof {
+            work = work + 1;
+        }
     }
-    (true, Ghost((i + 1) as nat))
+    (true, Ghost(work))
 }
 
 proof fn lemma_trailing_digits(s: Seq<u8>, i: int)
@@ -1623,24 +1643,27 @@ fn authority_form_x(a: &[u8]) -> (r: (bool, Ghost<nat>))
         r.1@ <= 2 * a@.len() + 2,
 {
     let mut i = a.len();
+    let ghost mut work: nat = 1;
     while i > 0 && 48 <= a[i - 1] && a[i - 1] <= 57
         invariant
             i <= a.len(),
+            work == a.len() - i + 1,
             forall|k: int| i <= k < a.len() ==> is_digit(#[trigger] a@[k]),
         decreases i,
     {
         i -= 1;
+        proof {
+            work = work + 1;
+        }
     }
     proof {
         lemma_trailing_digits(a@, i as int);
     }
-    // The scan took `a.len() - i` steps.
-    let ghost scan: nat = (a.len() - i) as nat;
     if i < a.len() && i >= 2 && a[i - 1] == 58 {
         let (na, Ghost(wn)) = no_at_x(a);
-        (na, Ghost(scan + 1 + wn))
+        (na, Ghost(work + wn))
     } else {
-        (false, Ghost(scan + 1))
+        (false, Ghost(work))
     }
 }
 

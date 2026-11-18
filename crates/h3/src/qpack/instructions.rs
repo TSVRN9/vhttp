@@ -123,19 +123,13 @@ pub fn process_encoder_stream(buf: &[u8]) -> (r: (Result<usize, u64>, Ghost<nat>
         assert(buf@.skip(0) =~= buf@);
         lemma_add_ok_zero(rfc_encoder_stream(buf@));
     }
-    loop
+    while pos < buf.len()
         invariant
             pos <= buf.len(),
             work <= 12 * pos + 1,
             rfc_encoder_stream(buf@) == add_ok(rfc_encoder_stream(buf@.skip(pos as int)), pos as nat),
         decreases buf.len() - pos,
     {
-        if pos == buf.len() {
-            proof {
-                assert(buf@.skip(pos as int).len() == 0);
-            }
-            return (Ok(pos), Ghost(work));
-        }
         if buf[pos] & 0xE0 != 0x20 {
             return (Err(QPACK_ENCODER_STREAM_ERROR), Ghost(work + 1));
         }
@@ -162,6 +156,10 @@ pub fn process_encoder_stream(buf: &[u8]) -> (r: (Result<usize, u64>, Ghost<nat>
             },
         }
     }
+    proof {
+        assert(buf@.skip(pos as int).len() == 0);
+    }
+    (Ok(pos), Ghost(work))
 }
 
 /// Split: once `b` scans to `Ok(n)`, bytes appended after it are scanned as if the first `n`
@@ -253,19 +251,13 @@ pub fn process_decoder_stream(buf: &[u8]) -> (r: (Result<usize, u64>, Ghost<nat>
         assert(buf@.skip(0) =~= buf@);
         lemma_add_ok_zero(rfc_decoder_stream(buf@));
     }
-    loop
+    while pos < buf.len()
         invariant
             pos <= buf.len(),
             work <= 12 * pos + 1,
             rfc_decoder_stream(buf@) == add_ok(rfc_decoder_stream(buf@.skip(pos as int)), pos as nat),
         decreases buf.len() - pos,
     {
-        if pos == buf.len() {
-            proof {
-                assert(buf@.skip(pos as int).len() == 0);
-            }
-            return (Ok(pos), Ghost(work));
-        }
         if buf[pos] & 0xC0 != 0x40 {
             return (Err(QPACK_DECODER_STREAM_ERROR), Ghost(work + 1));
         }
@@ -289,6 +281,10 @@ pub fn process_decoder_stream(buf: &[u8]) -> (r: (Result<usize, u64>, Ghost<nat>
             },
         }
     }
+    proof {
+        assert(buf@.skip(pos as int).len() == 0);
+    }
+    (Ok(pos), Ghost(work))
 }
 
 /// Split: once `b` scans to `Ok(n)`, bytes appended after it are scanned as if the first `n`

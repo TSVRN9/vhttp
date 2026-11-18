@@ -390,6 +390,9 @@ proof fn lemma_field_lines_append(a: Seq<u8>, c: Seq<u8>)
         rfc_field_lines(a + c) == Some(rfc_field_lines(a).unwrap() + rfc_field_lines(c).unwrap()),
     decreases a.len(),
 {
+    // Each line's facts come from lemma_field_line_consumed and lemma_field_line_append; its definition stays closed
+    // (seed robustness, docs/rca/2026-11-16-smt-order-fragility.md).
+    hide(rfc_field_line);
     if a.len() == 0 {
         assert(a + c =~= c);
         assert(rfc_field_lines(a).unwrap() + rfc_field_lines(c).unwrap() =~= rfc_field_lines(
@@ -890,6 +893,17 @@ pub open spec fn lines_inv(lines: Seq<u8>, pos: int, acc: Lines) -> bool {
     }
 }
 
+/// The size of decoded lines (RFC 9114 §4.2.2): Σ `field_line_size`.
+pub open spec fn lines_size(s: Lines) -> int
+    decreases s.len(),
+{
+    if s.len() == 0 {
+        0
+    } else {
+        lines_size(s.drop_last()) + field_line_size(s.last())
+    }
+}
+
 /// `decode_lines_bounded`'s invariant at `pos` with `left` of the budget.
 pub open spec fn lines_bounded_inv(lines: Seq<u8>, budget: u64, pos: int, left: u64, acc: Lines) -> bool {
     rfc_field_lines_bounded(lines, budget) == match rfc_field_lines_bounded(lines.skip(pos), left) {
@@ -1290,6 +1304,8 @@ fn decode_lines_bounded(lines: &[u8], budget: u64) -> (r: (Result<Vec<FieldLine>
             pos <= lines@.len(),
             lines@.len() <= usize::MAX / 8,
             lines_bounded_inv(lines@, budget, pos as int, left, fields_view(out@)),
+            // What is left is the budget less the RFC 9114 §4.2.2 size of the lines decoded so far.
+            left == budget - lines_size(fields_view(out@)),
             out.wf(),
             out.cap() == cap,
             cap <= lines@.len(),
@@ -1313,9 +1329,13 @@ fn decode_lines_bounded(lines: &[u8], budget: u64) -> (r: (Result<Vec<FieldLine>
                     assert(fields_view(out@.push(f)) =~= fields_view(out@).push(f@));
                     work = work + cl + 1;
                 }
+                let ghost done = fields_view(out@);
                 left = left - f.name.len() as u64 - f.value.len() as u64 - 32;
                 out.push(f);
                 pos += k;
+                proof {
+                    assert(done.push(f@).drop_last() =~= done);
+                }
             },
             Err(e) => {
                 proof {

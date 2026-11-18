@@ -63,9 +63,10 @@ const EXPAND: usize = 76;
 /// h3's per-byte constant for the frame a call completes (controller ruling after Task 4: QPACK decode expands its
 /// input, so 9b2's `COST_A` is not it). An encoded byte can be a whole line, so `decode_lines_bounded`'s `out` takes
 /// at most one `FieldLine` slot per encoded byte (`CapVec::new(min(lines.len(), budget/32))`) and `build_headers`'
-/// one more; each line's `EXPAND` bytes per encoded byte are copied by the decoder and at most once more
-/// (`build_headers` for a regular field, `validate_request` for a pseudo-header), plus a 2-byte "; " per cookie line.
-/// Still O(f).
+/// one more; each line's `EXPAND` bytes per encoded byte are copied by the decoder and once more (`build_headers` for a
+/// regular field, `validate_request` for a pseudo-header), plus a 2-byte "; " per cookie line. A `host` value is copied
+/// a third time (`request_authority_x`, when `:authority` is absent); `host` is not in the static table, so its value
+/// is a string literal of at most 8/5 bytes per encoded byte, within the slots' slack. Still O(f).
 const H3_F: usize = 2 * std::mem::size_of::<FieldLine>() + 2 * EXPAND + 2;
 /// byteq's `MIN_CAP` (9b2 D4); named apart so the RFC-quantity gate, which reads constants by name, never sees it.
 const QUEUE_MIN_CAP: usize = 64;

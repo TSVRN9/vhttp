@@ -93,3 +93,4 @@ T7-M8	quic	crypto_stream	lemma_crypto_floor	crypto_alloc:duplicate_ooo_frames_al
 9b3-A1	h3	qpack::field_section	indexed_line	-	postcondition not satisfied.*line_allowed_err	9b3 T6 (allowed predicate) A1: line_allowed_err's QPACK arm requires the line to decode (is Some for is None)
 9b3-A2	h3	message	connect_x	-	postcondition not satisfied.*connect_allowed_err	9b3 T6 (allowed predicate) A2: connect_allowed_err allows the error on a valid CONNECT authority (the negation dropped)
 9b3-A3	h3	message	request_x	-	postcondition not satisfied.*request_allowed_err	9b3 T6 (allowed predicate) A3: request_allowed_err allows the error on a valid request (the negation dropped)
+9b3-A4	h3	qpack::field_section	decode_lines_bounded	-	invariant not satisfied.*left == budget - lines_size	9b3 T6 fix round 1 (review I2, rule 1d) A4: line_allowed_err's left re-anchored: decode_lines_bounded charges a line its name and value but not RFC 9114 §4.2.2's 32 bytes

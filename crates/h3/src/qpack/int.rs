@@ -405,28 +405,24 @@ pub fn parse_prefix_int_w(n: u8, buf: &[u8]) -> (r: (PrefixInt, Ghost<nat>))
     let mut acc: u64 = pre as u64;
     let mut p: u64 = 1;
     let mut i: usize = 1;
+    let ghost mut work: nat = 1;
     proof {
         lemma2_to64();
         assert(buf@.skip(1) == buf@.skip(i as int));
     }
-    loop
+    while i < buf.len()
         invariant
             1 <= i <= buf@.len(),
             i <= 11,
+            work == i,
             acc <= PREFIX_INT_MAX,
             i <= 10 ==> p as nat == pow2(7 * (i - 1) as nat),
             i <= 10 ==> p > 0,
             rfc_prefix_int(n, buf@) == rfc_prefix_cont(buf@.skip(i as int), (i - 1) as nat, acc as nat),
         decreases buf@.len() - i,
     {
-        if i >= buf.len() {
-            proof {
-                assert(buf@.skip(i as int).len() == 0);
-            }
-            return (PrefixInt::Incomplete, Ghost(i as nat));
-        }
         if i > PREFIX_INT_MAX_CONT {
-            return (PrefixInt::TooLarge, Ghost(i as nat));
+            return (PrefixInt::TooLarge, Ghost(work));
         }
         let byte = buf[i];
         let d: u64 = (byte & 127) as u64;
@@ -451,7 +447,7 @@ pub fn parse_prefix_int_w(n: u8, buf: &[u8]) -> (r: (PrefixInt, Ghost<nat>))
                         p > 0,
                 ;
             }
-            return (PrefixInt::TooLarge, Ghost(i as nat));
+            return (PrefixInt::TooLarge, Ghost(work));
         }
         proof {
             let x = (PREFIX_INT_MAX - acc) as nat;
@@ -465,7 +461,7 @@ pub fn parse_prefix_int_w(n: u8, buf: &[u8]) -> (r: (PrefixInt, Ghost<nat>))
         }
         acc = acc + d * p;
         if byte & 128 == 0 {
-            return (PrefixInt::Value { value: acc, consumed: i + 1 }, Ghost(i as nat));
+            return (PrefixInt::Value { value: acc, consumed: i + 1 }, Ghost(work));
         }
         if i < PREFIX_INT_MAX_CONT {
             proof {
@@ -489,7 +485,14 @@ pub fn parse_prefix_int_w(n: u8, buf: &[u8]) -> (r: (PrefixInt, Ghost<nat>))
             p = p * 128;
         }
         i += 1;
+        proof {
+            work = work + 1;
+        }
     }
+    proof {
+        assert(buf@.skip(i as int).len() == 0);
+    }
+    (PrefixInt::Incomplete, Ghost(work))
 }
 
 pub fn parse_prefix_int(n: u8, buf: &[u8]) -> (r: PrefixInt)
