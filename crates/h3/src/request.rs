@@ -117,6 +117,75 @@ pub open spec fn bodies_from(s: Seq<ReqEvent>, a: int) -> bool {
     forall|i: int| a <= i < s.len() ==> body_nonempty(#[trigger] s[i])
 }
 
+/// The field lines an event carries: a request head's regular fields, or a trailer section.
+pub open spec fn ev_line(e: SpecReqEvent) -> nat {
+    match e {
+        SpecReqEvent::Head(SpecRequestHead::Request(r)) => r.headers.len(),
+        SpecReqEvent::Trailers(t) => t.len(),
+        _ => 0,
+    }
+}
+
+/// The field lines events carry.
+pub open spec fn ev_lines(s: Seq<SpecReqEvent>) -> nat
+    decreases s.len(),
+{
+    if s.len() == 0 {
+        0
+    } else {
+        ev_lines(s.drop_last()) + ev_line(s.last())
+    }
+}
+
+/// How many `Body` events `s` holds.
+pub open spec fn nbody(s: Seq<SpecReqEvent>) -> nat
+    decreases s.len(),
+{
+    if s.len() == 0 {
+        0
+    } else {
+        nbody(s.drop_last()) + if s.last() is BodyBytes {
+            1nat
+        } else {
+            0nat
+        }
+    }
+}
+
+pub proof fn lemma_tally_empty()
+    ensures
+        ev_lines(Seq::empty()) == 0,
+        nbody(Seq::empty()) == 0,
+{
+}
+
+pub proof fn lemma_tally_push(s: Seq<SpecReqEvent>, x: SpecReqEvent)
+    ensures
+        ev_lines(s.push(x)) == ev_lines(s) + ev_line(x),
+        nbody(s.push(x)) == nbody(s) + if x is BodyBytes {
+            1nat
+        } else {
+            0nat
+        },
+{
+    assert(s.push(x).drop_last() =~= s);
+}
+
+pub proof fn lemma_tally_append(a: Seq<SpecReqEvent>, b: Seq<SpecReqEvent>)
+    ensures
+        ev_lines(a + b) == ev_lines(a) + ev_lines(b),
+        nbody(a + b) == nbody(a) + nbody(b),
+    decreases b.len(),
+{
+    if b.len() == 0 {
+        assert(a + b =~= a);
+    } else {
+        lemma_tally_append(a, b.drop_last());
+        assert((a + b).drop_last() =~= a + b.drop_last());
+        assert((a + b).last() == b.last());
+    }
+}
+
 pub open spec fn err_of(r: Result<(), ReqError>) -> Option<ReqError> {
     match r {
         Ok(_) => None,
@@ -824,6 +893,15 @@ pub open spec fn c_frame() -> nat {
     41021
 }
 
+/// The bytes a step consumed: `k`, none for a partial frame, all of `r` (of `len` bytes) for an error.
+spec fn used(res: Result<Option<usize>, ReqError>, len: nat) -> nat {
+    match res {
+        Ok(Some(k)) => k as nat,
+        Ok(None) => 0,
+        Err(_) => len,
+    }
+}
+
 /// A step's cost: `c_st` per byte consumed, `c_st` for a step that consumes nothing, `c_st` per byte of `r` (plus one)
 /// for one that fails.
 spec fn step_cost(res: Result<Option<usize>, ReqError>, w: nat, len: nat) -> bool {
@@ -850,16 +928,70 @@ spec fn room(b: Option<CapVec<u8>>, n: nat) -> bool {
     }
 }
 
-/// `len - base` events returned in this call, leaving room for what phase `ph` still allows: in `Body`, a Body,
-/// Trailers and End; in `Trailers`, End. Content is pending only in `Body`.
-spec fn ev_ok(len: nat, base: nat, cap: nat, ph: Phase, b: Option<CapVec<u8>>) -> bool {
+/// `s.len() - base` events returned in this call, leaving room for what phase `ph` still allows: in `Body`, a Body,
+/// Trailers and End; in `Trailers`, End. Content is pending only in `Body`, and the call's one Body is returned only
+/// on leaving it.
+spec fn ev_ok(s: Seq<ReqEvent>, base: nat, cap: nat, ph: Phase, b: Option<CapVec<u8>>) -> bool {
+    let len = s.len();
     &&& base <= len
     &&& base + MAX_REQ_EVENTS <= cap
     &&& match ph {
-        Phase::AwaitHeaders => len == base && b is None,
-        Phase::Body { .. } => len <= base + 1,
-        Phase::Trailers { .. } => len <= base + 3 && b is None,
+        Phase::AwaitHeaders => len == base && b is None && nbody(views(s.skip(base as int))) == 0,
+        Phase::Body { .. } => len <= base + 1 && nbody(views(s.skip(base as int))) == 0,
+        Phase::Trailers { .. } => len <= base + 3 && b is None && nbody(views(s.skip(base as int))) <= 1,
     }
+}
+
+/// After an error: at most 3 events returned, and at most one Body counting the pending content.
+spec fn err_ok(s: Seq<ReqEvent>, base: nat, b: Option<CapVec<u8>>) -> bool {
+    &&& base <= s.len() <= base + 3
+    &&& nbody(views(s.skip(base as int))) + (if b is Some {
+        1nat
+    } else {
+        0nat
+    }) <= 1
+}
+
+/// `ev_ok` gives `err_ok` when the step fails without returning an event.
+proof fn lemma_err_ok(s: Seq<ReqEvent>, base: nat, cap: nat, ph: Phase, b: Option<CapVec<u8>>)
+    requires
+        ev_ok(s, base, cap, ph, b),
+    ensures
+        err_ok(s, base, b),
+{
+}
+
+/// The tallies of the events after `a` add up over an extension.
+proof fn lemma_tally(s1: Seq<ReqEvent>, s2: Seq<ReqEvent>, a: int)
+    requires
+        0 <= a <= s1.len() <= s2.len(),
+        s2.take(s1.len() as int) == s1,
+    ensures
+        ev_lines(views(s2.skip(a))) == ev_lines(views(s1.skip(a))) + ev_lines(views(s2.skip(s1.len() as int))),
+        nbody(views(s2.skip(a))) == nbody(views(s1.skip(a))) + nbody(views(s2.skip(s1.len() as int))),
+        s2.take(a) == s1.take(a),
+{
+    lemma_views_split(s1, s2, a);
+    lemma_tally_append(views(s1.skip(a)), views(s2.skip(s1.len() as int)));
+}
+
+/// A request head's regular fields are at most its lines: `merge_step` pushes or updates in place.
+proof fn lemma_request_headers_len(f: Seq<(Seq<u8>, Seq<u8>)>)
+    ensures
+        request_headers(f).len() <= f.len(),
+    decreases f.len(),
+{
+    if f.len() > 0 {
+        lemma_request_headers_len(f.drop_last());
+    }
+}
+
+/// A validated request head has at most as many regular fields as the section has lines.
+proof fn lemma_validate_lines(f: Seq<(Seq<u8>, Seq<u8>)>)
+    ensures
+        rfc_validate_request(f) matches Ok(SpecRequestHead::Request(r)) ==> r.headers.len() <= f.len(),
+{
+    lemma_request_headers_len(f);
 }
 
 /// A frame header is read whole from `r`'s first `m` bytes once they cover it (N5).
@@ -930,12 +1062,20 @@ proof fn lemma_concat_merge(a: Seq<SpecReqEvent>, e0: Seq<ReqEvent>, e1: Seq<Req
         e1.len() >= e0.len(),
         e1.take(e0.len() as int) == e0,
         bodies_from(e1, e0.len() as int),
+        ev_lines(views(e1.skip(e0.len() as int))) == 0,
+        nbody(views(e1.skip(e0.len() as int))) == if p.len() > 0 {
+            1nat
+        } else {
+            0nat
+        },
 {
     assert(e0.take(e0.len() as int) =~= e0);
+    lemma_no_event(e0, a);
     if p.len() > 0 {
         lemma_views_push(e0, k, e1.last());
         lemma_views_push(e0, e0.len() as int, e1.last());
         lemma_push_all_push(a, views(e0.skip(k)), e1.last()@);
+        lemma_tally_push(Seq::empty(), e1.last()@);
     }
 }
 
@@ -949,16 +1089,20 @@ proof fn lemma_flush_push(a: Seq<SpecReqEvent>, e0: Seq<ReqEvent>, e1: Seq<ReqEv
         bodies_from(e1, e0.len() as int),
         e2 == e1.push(e2.last()),
         !(e2.last()@ is BodyBytes),
+        ev_lines(views(e1.skip(e0.len() as int))) == 0,
     ensures
         push_all(a, views(e2.skip(e0.len() as int))) == add_body(a, p).push(e2.last()@),
         e2.len() >= e0.len(),
         e2.take(e0.len() as int) == e0,
         bodies_from(e2, e0.len() as int),
+        ev_lines(views(e2.skip(e0.len() as int))) == ev_line(e2.last()@),
+        nbody(views(e2.skip(e0.len() as int))) == nbody(views(e1.skip(e0.len() as int))),
 {
     let x = e2.last();
     lemma_no_event(e0, a);
     lemma_views_push(e1, e0.len() as int, x);
     lemma_push_all_push(a, views(e1.skip(e0.len() as int)), x@);
+    lemma_tally_push(views(e1.skip(e0.len() as int)), x@);
     assert forall|i: int| e0.len() <= i < e2.len() implies body_nonempty(#[trigger] e2[i]) by {
         if i < e1.len() {
             assert(e2[i] == e1[i]);
@@ -1041,6 +1185,7 @@ fn headers_frame(p: &[u8], ph: &mut Phase, events: &mut CapVec<ReqEvent>) -> (r:
                 &&& *old(ph) is AwaitHeaders ==> *final(ph) is Body
                 &&& *old(ph) is Body ==> *final(ph) is Trailers
                 &&& !(final(events)@.last()@ is BodyBytes)
+                &&& ev_line(final(events)@.last()@) <= 77 * p@.len()
             },
             Err(e) => {
                 &&& final(events)@ == old(events)@
@@ -1058,6 +1203,8 @@ fn headers_frame(p: &[u8], ph: &mut Phase, events: &mut CapVec<ReqEvent>) -> (r:
     proof {
         lemma_section_size(p@, MAX_FIELD_SECTION_SIZE);
         lemma_section_expansion(p@, MAX_FIELD_SECTION_SIZE);
+        lemma_validate_lines(fields_view(fields@));
+        assert(fields_view(fields@).len() == fields@.len());
     }
     // The decoded lines' bytes and count, at most 77 per encoded byte; freeing the lines costs 2n + 1.
     let ghost x: nat = fields_bytes(fields_view(fields@)) + fields@.len() + 1;
@@ -1153,6 +1300,7 @@ proof fn lemma_no_event(e0: Seq<ReqEvent>, acc: Seq<SpecReqEvent>)
     ensures
         push_all(acc, views(e0.skip(e0.len() as int))) == acc,
         e0.take(e0.len() as int) == e0,
+        views(e0.skip(e0.len() as int)) == Seq::<SpecReqEvent>::empty(),
 {
     assert(e0.skip(e0.len() as int) =~= Seq::<ReqEvent>::empty());
     assert(views(Seq::<ReqEvent>::empty()) =~= Seq::<SpecReqEvent>::empty());
@@ -1332,7 +1480,7 @@ fn step_frame(
         *old(mode) is Frames,
         r@.len() > 0,
         old(events).wf(),
-        ev_ok(old(events)@.len(), base, old(events).cap(), *old(ph), *old(body)),
+        ev_ok(old(events)@, base, old(events).cap(), *old(ph), *old(body)),
         room(*old(body), 0),
         0 <= lo <= r@.len(),
         buf_shape(r@.take(lo)),
@@ -1353,8 +1501,9 @@ fn step_frame(
         ),
         bodies_from(final(events)@, old(events)@.len() as int),
         *final(body) == *old(body) || *final(body) is None,
-        res.0 is Ok ==> ev_ok(final(events)@.len(), base, final(events).cap(), *final(ph), *final(body)),
-        res.0 is Err ==> final(events)@.len() <= base + 3,
+        res.0 is Ok ==> ev_ok(final(events)@, base, final(events).cap(), *final(ph), *final(body)),
+        res.0 is Err ==> err_ok(final(events)@, base, *final(body)),
+        ev_lines(views(final(events)@.skip(old(events)@.len() as int))) <= 77 * used(res.0, r@.len()),
         res.0 matches Ok(Some(k)) ==> lo < k,
         step_cost(res.0, res.1@, r@.len()),
 {
@@ -1399,6 +1548,7 @@ fn step_frame(
                 rest(*mode, ph0, a0, r@ + t, f) == (a0, Some(e)) by {
                 lemma_frame_at(r@, ph0, a0, hdr_len as nat, ty, len, t, f);
             }
+            lemma_err_ok(ev0, base, events.cap(), ph0, *body);
         }
         return (Err(e), Ghost(18));
     }
@@ -1426,6 +1576,7 @@ fn step_frame(
             if hr is Ok {
                 lemma_flush_push(acc, ev0, ev1, events@, p0);
             }
+            lemma_tally(ev0, events@, base as int);
         }
         return match hr {
             Err(e) => (Err(e), Ghost(wf + wh + 18)),
@@ -1474,7 +1625,7 @@ fn run(
     requires
         mode_ok(*old(mode), *old(ph)),
         old(events).wf(),
-        ev_ok(old(events)@.len(), base, old(events).cap(), *old(ph), *old(body)),
+        ev_ok(old(events)@, base, old(events).cap(), *old(ph), *old(body)),
         0 <= lo <= s@.len(),
         buf_shape(s@.take(lo)),
         lo > 0 ==> *old(mode) is Frames,
@@ -1499,13 +1650,15 @@ fn run(
         room(*final(body), 0),
         match r.0 {
             Ok(n) => {
-                &&& ev_ok(final(events)@.len(), base, final(events).cap(), *final(ph), *final(body))
+                &&& ev_ok(final(events)@, base, final(events).cap(), *final(ph), *final(body))
                 &&& room(*final(body), more as nat)
                 &&& r.1@ <= c_run() * (n + 1)
+                &&& ev_lines(views(final(events)@.skip(old(events)@.len() as int))) <= 77 * n
             },
             Err(_) => {
-                &&& final(events)@.len() <= base + 3
+                &&& err_ok(final(events)@, base, *final(body))
                 &&& r.1@ <= c_run() * (s@.len() + 1)
+                &&& ev_lines(views(final(events)@.skip(old(events)@.len() as int))) <= 77 * s@.len()
             },
         },
 {
@@ -1534,13 +1687,14 @@ fn run(
             events@.take(ev0.len() as int) == ev0,
             acc == push_all(acc0, views(events@.skip(ev0.len() as int))),
             bodies_from(events@, ev0.len() as int),
-            ev_ok(events@.len(), base, events.cap(), *ph, *body),
+            ev_ok(events@, base, events.cap(), *ph, *body),
             0 <= lo <= s@.len(),
             buf_shape(s@.take(lo)),
             pos < lo ==> pos == 0 && *mode is Frames,
             s@.len() - lo + more <= usize::MAX,
             room(*body, (s@.len() - (if pos < lo { lo } else { pos as int }) + more) as nat),
             work <= c_run() * pos,
+            ev_lines(views(events@.skip(ev0.len() as int))) <= 77 * pos,
             forall|t: Seq<u8>, f: bool| #[trigger]
                 rest(m0, ph0, add_body(acc0, p0), s@ + t, f) == rest(
                     *mode,
@@ -1583,7 +1737,11 @@ fn run(
             if !(m1 is Frames) {
                 lemma_no_event(ev1, acc1);
                 assert(events@ == ev1);
+                if res is Err {
+                    lemma_err_ok(events@, base, events.cap(), *ph, *body);
+                }
             }
+            lemma_tally(ev1, events@, ev0.len() as int);
             lemma_views_split(ev1, events@, ev0.len() as int);
             lemma_bodies_trans(ev0.len() as int, ev1, events@);
             lemma_push_all_append(
@@ -1826,6 +1984,9 @@ impl RequestStream {
                 err_of(r.0),
             ),
             r.1@ <= c_req() * (data@.len() + 16) + c_frame() * old(self).buffered(),
+            ev_lines(views(final(events)@.skip(old(events)@.len() as int))) <= 77 * (data@.len() + 16
+                + old(self).buffered()),
+            nbody(views(final(events)@.skip(old(events)@.len() as int))) <= 1,
     {
         hide(rfc_req);
         hide(rfc_skip);
@@ -1833,6 +1994,8 @@ impl RequestStream {
         hide(rfc_headers);
         hide(ready);
         hide(push_all);
+        hide(ev_lines);
+        hide(nbody);
         let ghost all0 = self.all@;
         let ghost ev0 = events@;
         let ghost base = ev0.len();
@@ -1844,6 +2007,7 @@ impl RequestStream {
             assert(events@.take(ev0.len() as int) =~= ev0);
             assert(events@.skip(ev0.len() as int) =~= Seq::<ReqEvent>::empty());
             assert(views(Seq::<ReqEvent>::empty()) =~= Seq::<SpecReqEvent>::empty());
+            lemma_tally_empty();
             assert(self.emitted@ + Seq::<SpecReqEvent>::empty() =~= self.emitted@);
             assert(all0 + data@.take(0) =~= all0);
         }
@@ -1861,9 +2025,10 @@ impl RequestStream {
                 bodies_from(events@, ev0.len() as int),
                 events.wf(),
                 events.cap() == old(events).cap(),
-                ev_ok(events@.len(), base, events.cap(), self.phase, body),
+                ev_ok(events@, base, events.cap(), self.phase, body),
                 room(body, (data@.len() - j) as nat),
                 work + c_run() * self.buf@.len() <= c_run() * b0 + c_it() * j + j,
+                ev_lines(views(events@.skip(ev0.len() as int))) + 77 * self.buf@.len() <= 77 * b0 + 77 * j,
             decreases data@.len() - j,
         {
             let ghost s1 = *self;
@@ -1872,6 +2037,7 @@ impl RequestStream {
             proof {
                 lemma_bodies_trans(ev0.len() as int, e1, events@);
                 lemma_grew_trans(*old(self), s1, *self, ev0, e1, events@);
+                lemma_tally(e1, events@, ev0.len() as int);
             }
             match res {
                 Err(e) => {
@@ -1884,6 +2050,7 @@ impl RequestStream {
                     proof {
                         lemma_grew_trans(*old(self), s2, *self, ev0, e2, events@);
                         lemma_bodies_trans(ev0.len() as int, e2, events@);
+                        lemma_tally(e2, events@, ev0.len() as int);
                     }
                     self.done = true;
                     return (Err(e), Ghost(work + w + wb + 1));
@@ -1904,6 +2071,7 @@ impl RequestStream {
         proof {
             lemma_grew_trans(*old(self), s2, *self, ev0, e2, events@);
             lemma_bodies_trans(ev0.len() as int, e2, events@);
+            lemma_tally(e2, events@, ev0.len() as int);
             work = work + wb;
         }
         let ghost acc = concat_bodies(self.emitted@);
@@ -1936,6 +2104,7 @@ impl RequestStream {
         events.push(ReqEvent::End);
         proof {
             lemma_views_push(e3, ev0.len() as int, ReqEvent::End);
+            lemma_tally_push(views(e3.skip(ev0.len() as int)), SpecReqEvent::End);
             lemma_push_all_push(Seq::empty(), self.emitted@, SpecReqEvent::End);
             assert(old(self).emitted@ + views(e3.skip(ev0.len() as int)).push(SpecReqEvent::End)
                 =~= self.emitted@.push(SpecReqEvent::End));
@@ -1955,6 +2124,12 @@ impl RequestStream {
             final(events).cap() == old(events).cap(),
             final(events)@.len() <= old(events)@.len() + 1,
             pend(*old(body)).len() == 0 ==> final(events)@.len() == old(events)@.len(),
+            ev_lines(views(final(events)@.skip(old(events)@.len() as int))) == 0,
+            nbody(views(final(events)@.skip(old(events)@.len() as int))) <= if *old(body) is Some {
+                1nat
+            } else {
+                0nat
+            },
             grew(*old(self), *final(self), old(events)@, final(events)@),
             bodies_from(final(events)@, old(events)@.len() as int),
             concat_bodies(final(self).emitted@) == acc_of(*old(self), pend(*old(body))),
@@ -1999,7 +2174,7 @@ impl RequestStream {
             !old(self).done,
             j < data@.len(),
             old(events).wf(),
-            ev_ok(old(events)@.len(), base, old(events).cap(), old(self).phase, *old(body)),
+            ev_ok(old(events)@, base, old(events).cap(), old(self).phase, *old(body)),
             room(*old(body), (data@.len() - j) as nat),
         ensures
             grew(*old(self), *final(self), old(events)@, final(events)@),
@@ -2014,10 +2189,12 @@ impl RequestStream {
                     &&& j < j2 <= data@.len()
                     &&& final(self).all@ == old(self).all@ + data@.subrange(j as int, j2 as int)
                     &&& ready(*final(self), acc_of(*final(self), pend(*final(body))))
-                    &&& ev_ok(final(events)@.len(), base, final(events).cap(), final(self).phase, *final(body))
+                    &&& ev_ok(final(events)@, base, final(events).cap(), final(self).phase, *final(body))
                     &&& room(*final(body), (data@.len() - j2) as nat)
                     &&& r.1@ + c_run() * final(self).buf@.len() <= c_run() * old(self).buf@.len() + c_it() * (j2
                         - j)
+                    &&& ev_lines(views(final(events)@.skip(old(events)@.len() as int)))
+                        + 77 * final(self).buf@.len() <= 77 * old(self).buf@.len() + 77 * (j2 - j)
                 },
                 Err(e) => {
                     &&& final(self).all@ == old(self).all@ + data@.skip(j as int)
@@ -2026,9 +2203,11 @@ impl RequestStream {
                             acc_of(*final(self), pend(*final(body))),
                             Some(e),
                         )
-                    &&& base <= final(events)@.len() <= base + 3
+                    &&& err_ok(final(events)@, base, *final(body))
                     &&& base + MAX_REQ_EVENTS <= final(events).cap()
                     &&& r.1@ <= c_run() * old(self).buf@.len() + c_it() * (data@.len() - j)
+                    &&& ev_lines(views(final(events)@.skip(old(events)@.len() as int)))
+                        <= 77 * old(self).buf@.len() + 77 * (data@.len() - j)
                 },
             },
     {

@@ -1695,6 +1695,64 @@ proof fn lemma_answer_done(
     assert(req_outs(id, s, tr, err, cx, added(o1, o2)));
 }
 
+/// The buffers an event's value frees when it is dropped: a request head's four strings, its field list and each
+/// line's two; a CONNECT's authority; a body; a trailer list and each line's two.
+spec fn ev_frees(e: SpecReqEvent) -> nat {
+    match e {
+        SpecReqEvent::Head(SpecRequestHead::Request(r)) => 5 + 2 * r.headers.len(),
+        SpecReqEvent::Head(SpecRequestHead::Connect { .. }) => 1,
+        SpecReqEvent::BodyBytes(_) => 1,
+        SpecReqEvent::Trailers(t) => 1 + 2 * t.len(),
+        SpecReqEvent::End => 0,
+    }
+}
+
+/// The buffers events free when they are dropped.
+spec fn frees(s: Seq<SpecReqEvent>) -> nat
+    decreases s.len(),
+{
+    if s.len() == 0 {
+        0
+    } else {
+        frees(s.drop_last()) + ev_frees(s.last())
+    }
+}
+
+/// Events free at most 5 buffers each and 2 per field line they carry.
+proof fn lemma_frees(s: Seq<SpecReqEvent>)
+    ensures
+        frees(s) <= 5 * s.len() + 2 * request::ev_lines(s),
+    decreases s.len(),
+{
+    if s.len() > 0 {
+        lemma_frees(s.drop_last());
+    }
+}
+
+/// The events from `k` on carry at most the lines all of them do.
+proof fn lemma_lines_suffix(s: Seq<SpecReqEvent>, k: int)
+    requires
+        0 <= k <= s.len(),
+    ensures
+        request::ev_lines(s.skip(k)) <= request::ev_lines(s),
+{
+    request::lemma_tally_append(s.take(k), s.skip(k));
+    assert(s.take(k) + s.skip(k) =~= s);
+}
+
+/// `deliver`'s cost on an answered return at event `k`: the work so far, the reversed buffer's free and the events it
+/// drops stay within its bound.
+proof fn lemma_answered_cost(ev: Seq<SpecReqEvent>, k: int, work: nat)
+    requires
+        0 <= k < ev.len(),
+        work <= ev.len() + 2 + 31 * k,
+    ensures
+        work + 32 + frees(ev.skip(k)) <= c_dlv() * (ev.len() + 1) + 2 * request::ev_lines(ev),
+{
+    lemma_frees(ev.skip(k));
+    lemma_lines_suffix(ev, k);
+}
+
 /// One more output that is request-only and no close keeps `req_only` and `no_close`.
 proof fn lemma_added_kept(a0: Seq<SpecOutput>, a1: Seq<SpecOutput>)
     requires
@@ -1767,7 +1825,7 @@ fn deliver(
         ).fin_seen || fin),
         !r.0 ==> final(e).rx_open && final(e).send_open == old(e).send_open
             && final(e).fin_seen == old(e).fin_seen,
-        r.1@ <= c_dlv() * (ev.len() + 1),
+        r.1@ <= c_dlv() * (ev.len() + 1) + 2 * request::ev_lines(ev),
 {
     let ghost id = e.id;
     let ghost o0 = out@;
@@ -1860,7 +1918,11 @@ fn deliver(
                     lemma_head_req_concat(added(o0, o1), added(o1, out@));
                     assert(internal_head(ev[k as int]));
                 }
-                return (true, Ghost(work + 32));
+                proof {
+                    lemma_answered_cost(ev, k as int, work);
+                }
+                // The answered event and those after it are dropped here.
+                return (true, Ghost(work + 32 + frees(ev.skip(k as int))));
             },
             ReqEvent::Head(RequestHead::Request(req)) => {
                 // `is_http_scheme`: two `eq_ci_x` against 4- and 5-byte literals, at most 11 units, and the literals' 9
@@ -1875,7 +1937,11 @@ fn deliver(
                         lemma_head_req_concat(added(o0, o1), added(o1, out@));
                         assert(internal_head(ev[k as int]));
                     }
-                    return (true, Ghost(work + 32));
+                    proof {
+                        lemma_answered_cost(ev, k as int, work);
+                    }
+                    // The answered event and those after it are dropped here.
+                    return (true, Ghost(work + 32 + frees(ev.skip(k as int))));
                 }
                 e.head = true;
                 let head_method: [u8; 4] = [72u8, 69u8, 65u8, 68u8];
@@ -1954,7 +2020,8 @@ fn deliver(
 }
 
 /// The cost constant of `deliver`, per event: at most 31 (an `http` scheme check, a HEAD method check, an output) and
-/// one for the reversal; the reversal's allocation and the two frees fit the constant term.
+/// one for the reversal; the reversal's allocation and the two frees fit the constant term. On an answered return
+/// the dropped events (`frees`, at most 5 each plus 2 per field line) add `2·ev_lines(ev)` to the bound.
 #[verifier::inline]
 spec fn c_dlv() -> nat {
     32
