@@ -320,6 +320,7 @@ cct=$tmp/cost/crates/quictls/src
 cfresh() {
   rm -rf "${tmp:?}/cost"; mkdir -p "$ccq" "$ccb" "$cct"
   cp "$root/crates/quic/src/avl.rs" "$root/crates/quic/src/frags.rs" "$root/crates/quic/src/crypto_stream.rs" "$root/crates/quic/src/conn.rs" "$ccq/"
+  cp "$root/crates/quic/src/ranges.rs" "$ccq/"
   cp "$root"/crates/byteq/src/*.rs "$ccb/"; cp "$root/crates/quictls/src/server.rs" "$cct/"
 }
 cc() { "$root/scripts/cost-charge.sh" "$tmp/cost"; }
@@ -425,6 +426,11 @@ cfresh
 once '^        \(mk\(l, k, v, r\), Ghost\(1\)\)$' "$ccq/avl.rs"
 sed -i 's/^        (mk(l, k, v, r), Ghost(1))$/        (mk(l, k, v, r), Ghost(1nat + 0))/' "$ccq/avl.rs"
 expect_fail "cost-charge: a stale literal-return exemption (fix round 2)" "literal-return exemption for bal matches no literal cost" cc
+cfresh
+once '^                    let Ghost\(c4\) = free\(l3\);$' "$ccq/ranges.rs"
+fl=$(grep -n '^                    let Ghost(c4) = free(l3);$' "$ccq/ranges.rs" | cut -d: -f1)
+sed -i 's/^                    let Ghost(c4) = free(l3);$/                    free(l3);/; s/^                        work = work + c3 + c4;$/                        work = work + c3;/' "$ccq/ranges.rs"
+expect_fail "cost-charge: add's left-neighbour detach drops free's cost (ranges.rs, 9b2 Task 8a)" "crates/quic/src/ranges.rs:$fl: RangeSet::take_left drops the cost free returns" cc
 
 # The no-realloc claim (spec "The bound", TRUSTED.md's Vec row): fill's fresh piece made by CapVec::new(0) instead of
 # CapVec::new(n) must fail crypto_ooo_cost_linear on reallocs (under Verus it fails push's precondition). A copy of the

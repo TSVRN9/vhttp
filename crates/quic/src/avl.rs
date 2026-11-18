@@ -1458,4 +1458,76 @@ pub fn drain_cap<V>(t: Tree<V>, out: &mut byteq::capvec::CapVec<(u64, V)>) -> (r
     }
 }
 
+/// The cost constant of `first`.
+pub open spec fn c_first() -> nat {
+    1
+}
+
+/// The first entry, if any: one unit per node on the left spine, its empty left child included.
+pub fn first<V>(t: &Tree<V>) -> (r: (Option<(u64, &V)>, Ghost<nat>))
+    requires
+        wf(*t),
+    ensures
+        (r.0 is Some) == (seq(*t).len() > 0),
+        r.0 matches Some(p) ==> p.0 == seq(*t)[0].0 && *p.1 == seq(*t)[0].1,
+        r.1@ <= c_first() * (ht(*t) + 1),
+    decreases *t,
+{
+    let ghost mut work: nat = 1;
+    match t {
+        None => (None, Ghost(work)),
+        Some(b) => {
+            proof {
+                lemma_seq_node(*t);
+                assert(wf(b.left));
+                assert(ht(b.left) + 1 <= ht(*t));
+                assert(c_first() == 1);
+            }
+            if b.left.is_none() {
+                proof {
+                    // The empty left child.
+                    work = work + 1;
+                }
+                (Some((b.key, &b.val)), Ghost(work))
+            } else {
+                let (r, Ghost(c)) = first(&b.left);
+                proof {
+                    work = work + c;
+                }
+                (r, Ghost(work))
+            }
+        },
+    }
+}
+
+/// The cost constant of `free`.
+pub open spec fn c_free() -> nat {
+    1
+}
+
+/// Drops every node of `t` here, one unit each and one per empty child: an implicit `Drop` is uncharged (D10 (a)).
+pub fn free<V>(t: Tree<V>) -> (r: Ghost<nat>)
+    ensures
+        r@ <= c_free() * (2 * seq(t).len() + 1),
+    decreases t,
+{
+    let ghost t0 = t;
+    let ghost mut work: nat = 1;
+    match t {
+        None => Ghost(work),
+        Some(n) => {
+            let Node { key: _, val: _, h: _, left: l, right: r } = *n;
+            proof {
+                assert(seq(t0).len() == seq(l).len() + 1 + seq(r).len());
+            }
+            let Ghost(cl) = free(l);
+            let Ghost(cr) = free(r);
+            proof {
+                work = work + cl + cr;
+            }
+            Ghost(work)
+        },
+    }
+}
+
 } // verus!

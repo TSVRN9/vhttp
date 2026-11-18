@@ -37,6 +37,7 @@ pub mod payload;
 pub mod pipeline;
 pub mod pn;
 pub mod protect;
+pub mod ranges;
 pub mod reassembly;
 pub mod recovery;
 pub mod recv_stream;
