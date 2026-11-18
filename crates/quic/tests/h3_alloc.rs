@@ -121,9 +121,7 @@ fn get() -> Vec<u8> {
     out
 }
 
-/// A GET answered by 3 MiB: the send buffer is full and nothing has been polled, so there is no room. The send
-/// room counts queue capacity (9b2 Task 8): `send_response` writes `MAX_SEND_BUFFER/3` into the empty queue, and the
-/// flush appends the rest of its buffer's first half, after which no write fits.
+/// A GET answered by 3 MiB: the send buffer is full and nothing has been polled, so there is no room.
 fn deferred() -> H3Server {
     let mut s = H3Server::new(established());
     let mut app = Vec::new();
@@ -133,7 +131,6 @@ fn deferred() -> H3Server {
     assert_eq!(app.len(), 2);
     let r = Response { status: 200, headers: vec![], body: vec![0x5a; 3 << 20] };
     assert_eq!(s.send_response(0, &r, &mut app), Ok(()));
-    s.pump(&mut app);
     assert!(s.pending_bytes() > 1 << 20);
     s
 }

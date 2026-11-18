@@ -33,9 +33,9 @@
 //! Enforced here since Phase 3d (former caller obligations):
 //! - **Our own uni streams:** at most `MAX_OWN_UNI` (3), in `StreamIds::wf`; `write` refuses a
 //!   fourth (`uni_openable`).
-//! - **Write backpressure:** Σ send-queue capacity (each queue's buffers, as requested from the
-//!   allocator) ≤ `MAX_SEND_BUFFER` (1 MiB) is in `wf`; `write` fails, changing nothing, beyond
-//!   `send_room(id)`.
+//! - **Write backpressure:** Σ send-queue reservations (`max(128, 6·peak)` per non-empty queue,
+//!   which bounds its buffers) ≤ `MAX_SEND_BUFFER` (1 MiB) is in `wf`; `write` fails, changing
+//!   nothing, beyond `send_room(id)`.
 //! - **Receive window pinned (3d D8):** every mutator keeps the connection window at
 //!   `initial_max_data`, and `lemma_wf` bounds receive memory by 2·window.
 use vstd::prelude::*;
@@ -356,14 +356,16 @@ pub open spec fn post_rest(
 
 /// Per-entry quantities: 0 counted, 1 retired, 2 buffered, 3 physically buffered; 4 + k is 1
 /// for a stream of type k; on the sending part, 8 bytes sent (`sent_end`), 9 the send queue's
-/// held capacity (`held_spec`).
+/// reservation (`held_spec`), 10 its buffers' capacity (`capacity_spec`).
 spec fn val(e: Entry, q: int) -> int {
     if q >= 8 {
         match e.send {
             Some(p) => if q == 8 {
                 p.sent_end() as int
-            } else {
+            } else if q == 9 {
                 p.held_spec() as int
+            } else {
+                p.capacity_spec() as int
             },
             None => 0,
         }
@@ -483,6 +485,24 @@ proof fn lemma_sum_prefix_le(s: Seq<Entry>, i: int)
     }
 }
 
+/// Each part's capacity within its reservation, summed.
+proof fn lemma_sum_cap(s: Seq<Entry>)
+    requires
+        forall|k: int| 0 <= k < s.len() ==> 0 <= val(#[trigger] s[k], 10) <= val(s[k], 9),
+    ensures
+        0 <= sum(s, 10) <= sum(s, 9),
+    decreases s.len(),
+{
+    if s.len() > 0 {
+        let p = s.drop_last();
+        assert forall|k: int| 0 <= k < p.len() implies 0 <= val(#[trigger] p[k], 10) <= val(p[k], 9) by {
+            assert(p[k] == s[k]);
+        }
+        lemma_sum_cap(p);
+        assert(0 <= val(s[s.len() - 1], 10) <= val(s[s.len() - 1], 9));
+    }
+}
+
 proof fn lemma_sum_buf_nonneg(s: Seq<Entry>)
     ensures
         sum(s, 9) >= 0,
@@ -493,7 +513,7 @@ proof fn lemma_sum_buf_nonneg(s: Seq<Entry>)
     }
 }
 
-/// One sending part's buffered bytes are at most the whole's (`tx_buffered`).
+/// One sending part's buffered bytes are at most the whole's (`tx_held`).
 proof fn lemma_sum_buf_le(s: Seq<Entry>, i: int)
     requires
         0 <= i < s.len(),
@@ -757,9 +777,14 @@ impl Streams {
         self.tx_gone@ + sum(self.entries@, 8)
     }
 
-    /// Σ `held_spec()` over the sending parts: the bytes their send queues requested from the allocator.
-    pub closed spec fn tx_buffered(&self) -> int {
+    /// Σ `held_spec()` over the sending parts: their send queues' reservations.
+    pub closed spec fn tx_held(&self) -> int {
         sum(self.entries@, 9)
+    }
+
+    /// Σ `capacity_spec()` over the sending parts: the bytes their send queues requested from the allocator.
+    pub closed spec fn tx_capacity(&self) -> int {
+        sum(self.entries@, 10)
     }
 
     /// Streams with an entry.
@@ -821,7 +846,7 @@ impl Streams {
         &&& self.ids.peer_credit_spec(false).window_spec() <= MAX_LOCAL_STREAMS
         &&& self.tx_uni <= VARINT_MAX
         &&& self.conn_recv.window_spec() == self.rx_conn@
-        &&& self.tx_buffered() <= MAX_SEND_BUFFER as int
+        &&& self.tx_held() <= MAX_SEND_BUFFER as int
         // What we sent, removed streams included, is what the peer's MAX_DATA was spent on.
         &&& self.conn_send.used_spec() == self.tx_gone@ + sum(self.entries@, 8)
         // Connection flow control (§4.1, §4.5, §19.9).
@@ -890,9 +915,9 @@ impl Streams {
                 self.tx_part(id) is Some ==> self.tx_part(id)->0.wf() && self.tx_part(
                     id,
                 )->0.sent_end() <= self.tx_part(id)->0.max(),
-            // Memory: the send queues' buffers hold at most `MAX_SEND_BUFFER` bytes in all
-            // (each part's `held_spec`, the bytes its queue requested from the allocator).
-            0 <= self.tx_buffered() <= MAX_SEND_BUFFER,
+            // Memory: the send queues' buffers hold at most their reservations, at most
+            // `MAX_SEND_BUFFER` bytes in all.
+            0 <= self.tx_capacity() <= self.tx_held() <= MAX_SEND_BUFFER,
             // Memory: receive buffers within twice the pinned window (3d D8).
             self.rx_buffered_phys() <= 2 * self.conn_recv_spec().window_spec(),
             self.ids_spec().local_uni_spec().used_spec() <= MAX_OWN_UNI,
@@ -933,6 +958,13 @@ impl Streams {
             }
         }
         lemma_sum_buf_nonneg(s);
+        assert forall|k: int| 0 <= k < s.len() implies 0 <= val(#[trigger] s[k], 10) <= val(s[k], 9) by {
+            assert(entry_ok(s[k], self.rx_bidi, self.rx_uni));
+            if let Some(p) = s[k].send {
+                p.lemma_held();
+            }
+        }
+        lemma_sum_cap(s);
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9114#section-6.2
@@ -962,7 +994,7 @@ impl Streams {
             forall|id: u64| !#[trigger] r.is_removed(id),
             forall|id: u64| !#[trigger] r.send_reset(id),
             r.conn_recv_spec().window_spec() == local.initial_max_data,
-            r.tx_buffered() == 0,
+            r.tx_held() == 0,
     {
         let r = Streams {
             ids: StreamIds::new(
@@ -1120,7 +1152,7 @@ impl Streams {
         ensures
             final(self).wf(),
             final(self).same_rest(*old(self)),
-            final(self).tx_buffered() == old(self).tx_buffered(),
+            final(self).tx_held() == old(self).tx_held(),
             final(self).ids.peer_opened_spec(x % 4 == 0) == x / 4 + 1,
             final(self).ids.peer_opened_spec(x % 4 != 0) == old(self).ids.peer_opened_spec(
                 x % 4 != 0,
@@ -1161,7 +1193,7 @@ impl Streams {
         ensures
             final(self).wf(),
             final(self).same_rest(*old(self)),
-            final(self).tx_buffered() == old(self).tx_buffered(),
+            final(self).tx_held() == old(self).tx_held(),
             final(self).ids.peer_created(id),
             forall|b: bool| #[trigger]
                 final(self).ids.peer_credit_spec(b) == old(self).ids.peer_credit_spec(b),
@@ -1179,7 +1211,7 @@ impl Streams {
             invariant
                 self.wf(),
                 self.same_rest(s0),
-                self.tx_buffered() == s0.tx_buffered(),
+                self.tx_held() == s0.tx_held(),
                 s0.wf(),
                 id <= VARINT_MAX,
                 id % 4 == 0 || id % 4 == 2,
@@ -1236,7 +1268,7 @@ impl Streams {
             final(self).removed == old(self).removed,
             final(self).resets == old(self).resets,
             final(self).failed == old(self).failed,
-            final(self).tx_buffered() == old(self).tx_buffered(),
+            final(self).tx_held() == old(self).tx_held(),
             final(self).rx_conn == old(self).rx_conn,
             r == rx_outcome(*old(self), f@),
             r is Err ==> final(ev)@ == old(ev)@,
@@ -1325,7 +1357,7 @@ impl Streams {
             final(self).removed == old(self).removed,
             final(self).failed == old(self).failed,
             final(self).same_traces(*old(self)),
-            final(self).tx_buffered() <= old(self).tx_buffered(),
+            final(self).tx_held() <= old(self).tx_held(),
             final(self).rx_conn == old(self).rx_conn,
             event_views(final(ev)@) == event_views(old(ev)@) + frame_events(
                 *old(self),
@@ -1427,7 +1459,7 @@ impl Streams {
             final(self).failed == old(self).failed,
             final(self).conn_recv == old(self).conn_recv,
             final(self).conn_counted == old(self).conn_counted,
-            final(self).tx_buffered() <= old(self).tx_buffered(),
+            final(self).tx_held() <= old(self).tx_held(),
             final(self).rx_conn == old(self).rx_conn,
             ({
                 let id = old(self).entries@[i as int].id;
@@ -1498,7 +1530,7 @@ impl Streams {
             final(self).wf(),
             r is Err ==> final(self).failed_spec(),
             r is Ok ==> final(self).failed_spec() == old(self).failed_spec(),
-            final(self).tx_buffered() <= old(self).tx_buffered(),
+            final(self).tx_held() <= old(self).tx_held(),
             final(self).rx_conn == old(self).rx_conn,
             rfc_stream_frame_check(old(self).ids_spec(), f@) is Some ==> *final(self) == old(
                 self,
@@ -1559,7 +1591,7 @@ impl Streams {
         ensures
             final(self).wf(),
             final(self).failed == old(self).failed,
-            final(self).tx_buffered() <= old(self).tx_buffered(),
+            final(self).tx_held() <= old(self).tx_held(),
             final(self).rx_conn == old(self).rx_conn,
             r == rx_outcome(*old(self), f@),
             post_rest(
@@ -1601,7 +1633,7 @@ impl Streams {
         ensures
             final(self).wf(),
             final(self).failed == old(self).failed,
-            final(self).tx_buffered() <= old(self).tx_buffered(),
+            final(self).tx_held() <= old(self).tx_held(),
             final(self).rx_conn == old(self).rx_conn,
             r == rx_outcome(*old(self), f@),
             post_rest(
@@ -1663,7 +1695,7 @@ impl Streams {
         ensures
             final(self).wf(),
             final(self).failed == old(self).failed,
-            final(self).tx_buffered() <= old(self).tx_buffered(),
+            final(self).tx_held() <= old(self).tx_held(),
             final(self).rx_conn == old(self).rx_conn,
             post_rest(s0, *final(self), f, ev0, ev1, r),
     {
@@ -1686,7 +1718,7 @@ impl Streams {
         ensures
             final(self).wf(),
             r is Err <==> final(self).failed(),
-            final(self).tx_buffered() <= old(self).tx_buffered(),
+            final(self).tx_held() <= old(self).tx_held(),
             final(self).conn_recv_spec().window_spec() == old(self).conn_recv_spec().window_spec(),
             rfc_stream_frame_check(old(self).ids_spec(), f@) is Some ==> *final(self) == old(
                 self,
@@ -2290,7 +2322,7 @@ proof fn lemma_gc(s0: Streams, s1: Streams, i: int, e: Entry)
         },
     ensures
         s1.wf(),
-        s1.tx_buffered() <= s0.tx_buffered(),
+        s1.tx_held() <= s0.tx_held(),
 {
     let a = s0.entries@;
     let t = s1.entries@;
@@ -2402,7 +2434,7 @@ proof fn lemma_open_one(s0: Streams, s1: Streams, x: u64, e: Entry)
     ensures
         s1.wf(),
         s1.same_rest(s0),
-        s1.tx_buffered() == s0.tx_buffered(),
+        s1.tx_held() == s0.tx_held(),
 {
     let b = x % 4 == 0;
     let a = s0.entries@;
@@ -2939,6 +2971,53 @@ fn fit(room: usize, hdr: usize, w: usize, want: u64) -> (r: Option<u64>)
     }
 }
 
+/// The fit rule: the best length over 1-, 2-, 4- and 8-byte length fields; 0 (a lone FIN) when
+/// only `hdr + 1` fits (split from `poll_stream` for the rlimit).
+fn best_fit(room: usize, hdr: usize, want: u64) -> (best: u64)
+    requires
+        hdr + 1 <= room,
+    ensures
+        best <= VARINT_MAX,
+        hdr + rfc_varint_min_len(best) + best <= room,
+{
+    let mut best: u64 = 0;
+    let ghost mut bw: int = 1;
+    if let Some(n) = fit(room, hdr, 1, want) {
+        if n > best {
+            best = n;
+            proof {
+                bw = 1;
+            }
+        }
+    }
+    if let Some(n) = fit(room, hdr, 2, want) {
+        if n > best {
+            best = n;
+            proof {
+                bw = 2;
+            }
+        }
+    }
+    if let Some(n) = fit(room, hdr, 4, want) {
+        if n > best {
+            best = n;
+            proof {
+                bw = 4;
+            }
+        }
+    }
+    if let Some(n) = fit(room, hdr, 8, want) {
+        if n > best {
+            best = n;
+            proof {
+                bw = 8;
+            }
+        }
+    }
+    assert(hdr + bw + best <= room && rfc_varint_min_len(best) <= bw);
+    best
+}
+
 //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
 //# An endpoint MUST NOT send data on any stream without ensuring that it
 //# is within the flow control limits set by its peer.
@@ -3027,43 +3106,7 @@ fn poll_stream(
         if *room < hdr + 1 {
             break;
         }
-        // The fit rule: the best length over 1-, 2-, 4- and 8-byte length fields; 0 (a lone
-        // FIN) when only `hdr + 1` fits.
-        let want = p.want();
-        let mut best: u64 = 0;
-        let ghost mut bw: int = 1;
-        if let Some(n) = fit(*room, hdr, 1, want) {
-            if n > best {
-                best = n;
-                proof {
-                    bw = 1;
-                }
-            }
-        }
-        if let Some(n) = fit(*room, hdr, 2, want) {
-            if n > best {
-                best = n;
-                proof {
-                    bw = 2;
-                }
-            }
-        }
-        if let Some(n) = fit(*room, hdr, 4, want) {
-            if n > best {
-                best = n;
-                proof {
-                    bw = 4;
-                }
-            }
-        }
-        if let Some(n) = fit(*room, hdr, 8, want) {
-            if n > best {
-                best = n;
-                proof {
-                    bw = 8;
-                }
-            }
-        }
+        let best = best_fit(*room, hdr, p.want());
         proof {
             cs.lemma_wf();
         }
@@ -3121,7 +3164,7 @@ spec fn kept(s0: Streams, s: Streams) -> bool {
     &&& s.rx_bidi == s0.rx_bidi
     &&& s.rx_uni == s0.rx_uni
     &&& s.rx_conn == s0.rx_conn
-    &&& s.tx_buffered() <= s0.tx_buffered()
+    &&& s.tx_held() <= s0.tx_held()
     &&& s.entries@.len() == s0.entries@.len()
     &&& forall|k: int|
         0 <= k < s.entries@.len() ==> (#[trigger] s.entries@[k]).id == s0.entries@[k].id
@@ -3205,7 +3248,7 @@ proof fn lemma_swap(s0: Streams, s1: Streams, i: int, ne: Entry)
         s1.tx_gone == s0.tx_gone,
     ensures
         s1.wf(),
-        s1.tx_buffered() == s0.tx_buffered() - val(s0.entries@[i], 9) + val(ne, 9),
+        s1.tx_held() == s0.tx_held() - val(s0.entries@[i], 9) + val(ne, 9),
         forall|j: u64| j != ne.id ==> #[trigger] s1.rx_trace(j) == s0.rx_trace(j),
         ne.recv matches Some(r) ==> s1.rx_spec(ne.id) == r.rfc(),
         ne.recv is None ==> s1.rx_trace(ne.id) == s0.rx_trace(ne.id),
@@ -3254,7 +3297,7 @@ proof fn lemma_swap_kept(s0: Streams, s1: Streams, s2: Streams, i: int, ne: Entr
         s2.rx_bidi == s1.rx_bidi,
         s2.rx_uni == s1.rx_uni,
         s2.rx_conn == s1.rx_conn,
-        s2.tx_buffered() <= s1.tx_buffered(),
+        s2.tx_held() <= s1.tx_held(),
     ensures
         kept(s0, s2),
         sends_same(s0, s1) && sstate(ne) == sstate(s1.entries@[i]) ==> sends_same(s0, s2),
@@ -3360,14 +3403,14 @@ impl Streams {
         &&& id / 4 < MAX_OWN_UNI
     }
 
-    /// How many more bytes `write` accepts on stream `id`: the most `d` such that a write of `d` bytes, and every
-    /// shorter one, keeps the send queues' held capacity within `MAX_SEND_BUFFER` (`id`'s part's `room_spec`, the
-    /// other parts' capacity set aside; for a stream with no sending part, an empty queue's).
+    /// How many more bytes `write` accepts on stream `id`: the most `d` that keeps the send queues'
+    /// reservations within `MAX_SEND_BUFFER` (`id`'s part's `room_spec`, the other parts' reservations
+    /// set aside; for a stream with no sending part, an empty queue's).
     pub closed spec fn send_room_spec(&self, id: u64) -> int {
-        let b = MAX_SEND_BUFFER - self.tx_buffered();
+        let b = MAX_SEND_BUFFER - self.tx_held();
         match self.tx_part(id) {
             Some(p) => p.room_spec((b + p.held_spec()) as nat) as int,
-            None => byteq::queue::empty_room(b as nat) as int,
+            None => res_room(b as nat, 0) as int,
         }
     }
 
@@ -3388,7 +3431,7 @@ impl Streams {
                 self.wf(),
                 i <= self.entries@.len(),
                 acc == sum(self.entries@.take(i as int), 9),
-                acc <= self.tx_buffered(),
+                acc <= self.tx_held(),
             decreases self.entries@.len() - i,
         {
             proof {
@@ -3413,17 +3456,15 @@ impl Streams {
                     lemma_part_at(*self, k as int);
                     lemma_sum_buf_le(self.entries@, k as int);
                     assert(entry_ok(self.entries@[k as int], self.rx_bidi, self.rx_uni));
-                    assert(MAX_SEND_BUFFER <= byteq::queue::MAX_QUEUE) by (compute_only);
-                    p.lemma_room((free + p.held_spec()) as nat, 0);
                 }
-                return p.room((free + p.held() as u64) as usize) as u64;
+                return p.room(free + p.held());
             }
             proof {
                 lemma_part_at(*self, k as int);
             }
         }
-        if free >= byteq::queue::MIN_CAP as u64 {
-            free / 3
+        if free >= 128 {
+            free / 6
         } else {
             0
         }
@@ -3512,7 +3553,8 @@ impl Streams {
             let p0 = s0.entries@[i as int].send->0;
             lemma_sum_buf_le(s0.entries@, i as int);
             assert(MAX_SEND_BUFFER <= byteq::queue::MAX_QUEUE) by (compute_only);
-            p0.lemma_room((MAX_SEND_BUFFER - s0.tx_buffered() + p0.held_spec()) as nat, data@.len() as nat);
+            p0.lemma_room((MAX_SEND_BUFFER - s0.tx_held() + p0.held_spec()) as nat, data@.len() as nat);
+            p0.lemma_held();
         }
         let mut e = Entry { id: 0, recv: None, send: None };
         self.entries.set_and_swap(i, &mut e);
@@ -3539,7 +3581,7 @@ impl Streams {
         requires
             old(self).wf(),
             !has_id(old(self).entries@, id),
-            data@.len() <= byteq::queue::empty_room((MAX_SEND_BUFFER - old(self).tx_buffered()) as nat),
+            data@.len() <= res_room((MAX_SEND_BUFFER - old(self).tx_held()) as nat, 0),
         ensures
             final(self).wf(),
             final(self).failed() == old(self).failed(),
@@ -3570,7 +3612,7 @@ impl Streams {
         proof {
             lemma_sum_buf_nonneg(s0.entries@);
             assert(MAX_SEND_BUFFER <= byteq::queue::MAX_QUEUE) by (compute_only);
-            p.lemma_room((MAX_SEND_BUFFER - s0.tx_buffered()) as nat, data@.len() as nat);
+            p.lemma_room((MAX_SEND_BUFFER - s0.tx_held()) as nat, data@.len() as nat);
         }
         let _ = p.write(data, fin);
         let e = Entry { id, recv: None, send: Some(p) };
@@ -3597,7 +3639,7 @@ impl Streams {
         ensures
             final(self).wf(),
             !final(self).failed(),
-            final(self).tx_buffered() <= old(self).tx_buffered(),
+            final(self).tx_held() <= old(self).tx_held(),
             final(self).conn_recv_spec().window_spec() == old(self).conn_recv_spec().window_spec(),
             final(self).reset_code(id) == match old(self).tx_part(id) {
                 Some(p) => if p.state() is Ready || p.state() is Send || p.state() is DataSent {
@@ -3659,7 +3701,7 @@ impl Streams {
         ensures
             final(self).wf(),
             !final(self).failed(),
-            final(self).tx_buffered() <= old(self).tx_buffered(),
+            final(self).tx_held() <= old(self).tx_held(),
             final(self).conn_recv_spec().window_spec() == old(self).conn_recv_spec().window_spec(),
             forall|j: u64| j != id ==> #[trigger] final(self).rx_trace(j) == old(self).rx_trace(j),
             final(self).rx_trace(id) == old(self).rx_trace(id) || final(self).rx_trace(id) == old(
@@ -3718,7 +3760,7 @@ impl Streams {
         ensures
             final(self).wf(),
             !final(self).failed(),
-            final(self).tx_buffered() <= old(self).tx_buffered(),
+            final(self).tx_held() <= old(self).tx_held(),
             final(self).conn_recv_spec().window_spec() == old(self).conn_recv_spec().window_spec(),
             ({
                 let new = final(out)@.skip(old(out)@.len() as int);
@@ -4257,7 +4299,7 @@ impl Streams {
         ensures
             final(self).wf(),
             !final(self).failed(),
-            final(self).tx_buffered() <= old(self).tx_buffered(),
+            final(self).tx_held() <= old(self).tx_held(),
             final(self).conn_recv_spec().window_spec() == old(self).conn_recv_spec().window_spec(),
             forall|j: u64| #[trigger] final(self).reset_code(j) == old(self).reset_code(j),
             forall|j: u64| #[trigger] final(self).rx_trace(j) == old(self).rx_trace(j),
@@ -4291,7 +4333,7 @@ impl Streams {
         ensures
             final(self).wf(),
             !final(self).failed(),
-            final(self).tx_buffered() <= old(self).tx_buffered(),
+            final(self).tx_held() <= old(self).tx_held(),
             final(self).conn_recv_spec().window_spec() == old(self).conn_recv_spec().window_spec(),
             forall|j: u64| #[trigger] final(self).reset_code(j) == old(self).reset_code(j),
             forall|j: u64| #[trigger] final(self).rx_trace(j) == old(self).rx_trace(j),
@@ -4332,7 +4374,7 @@ impl Streams {
         ensures
             final(self).wf(),
             final(self).failed == old(self).failed,
-            final(self).tx_buffered() <= old(self).tx_buffered(),
+            final(self).tx_held() <= old(self).tx_held(),
             final(self).rx_conn == old(self).rx_conn,
             forall|j: u64| #[trigger] final(self).reset_code(j) == old(self).reset_code(j),
             forall|j: u64| #[trigger] final(self).rx_trace(j) == old(self).rx_trace(j),
@@ -4355,7 +4397,7 @@ impl Streams {
         ensures
             final(self).wf(),
             final(self).failed == old(self).failed,
-            final(self).tx_buffered() <= old(self).tx_buffered(),
+            final(self).tx_held() <= old(self).tx_held(),
             final(self).rx_conn == old(self).rx_conn,
             forall|j: u64| #[trigger] final(self).reset_code(j) == old(self).reset_code(j),
             forall|j: u64| #[trigger] final(self).rx_trace(j) == old(self).rx_trace(j),
@@ -4416,7 +4458,7 @@ proof fn lemma_swap_same_rx(s0: Streams, s1: Streams, i: int, ne: Entry)
         s1 == (Streams { entries: s1.entries, ..s0 }),
     ensures
         s1.wf(),
-        s1.tx_buffered() <= s0.tx_buffered(),
+        s1.tx_held() <= s0.tx_held(),
         forall|j: u64| #[trigger] s1.rx_trace(j) == s0.rx_trace(j),
         ne.recv matches Some(r) ==> s1.rx_spec(ne.id) == r.rfc(),
         ne.recv is None ==> s1.rx_trace(ne.id) == s0.rx_trace(ne.id),
@@ -4454,7 +4496,7 @@ proof fn lemma_push_local(s0: Streams, s1: Streams, e: Entry)
     ensures
         s1.wf(),
         forall|j: u64| #[trigger] s1.rx_trace(j) == s0.rx_trace(j),
-        s1.tx_buffered() == s0.tx_buffered() + val(e, 9),
+        s1.tx_held() == s0.tx_held() + val(e, 9),
 {
     let a = s0.entries@;
     let t = s1.entries@;

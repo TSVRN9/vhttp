@@ -103,3 +103,27 @@ Per call kind: `crypto_one_byte_frames`' 1-byte frames that do not close a gap r
 1200; `reader_one_byte_push`'s single `next_message` moves the reader's `Vec` (the `split_off` tail is empty), so its
 cost is the push reallocs (T1). The patterns do not exercise Q2 (one pop takes everything), Q8 (one write) or T2 (no
 tail).
+
+## mem-9b2-send-cap: send room counted lengths, the allocator held capacity (9b2 Task 8)
+
+- **Defect**: once `SendStream`'s buffer became a `ByteQueue` (Task 8, 60d5cc3), `Streams::send_room` and the
+  `MAX_SEND_BUFFER` sum in `Streams::wf` still counted buffered lengths, while a queue keeps both of its buffers until it
+  is empty (D4: `drop_front` frees nothing; capacity up to `2·max(MIN_CAP, 3·peak)`). Measured: 64 KiB written, every
+  1 KiB piece but the last acknowledged, 310,272 bytes held for 1,024 buffered; a peer withholding one ACK per stream
+  freed room while each part kept about 6x its peak, so a connection's memory was bounded by its live parts, not by
+  1 MiB.
+- **Escape**: the old buffer (`split_off` on ACK) dropped its acknowledged prefix's memory, so "length bounds memory"
+  held by construction and was never a proof obligation; Task 8 changed the representation and the sum kept its
+  meaning on paper only. vstd models lengths, not capacity (spec D16), so nothing flagged it; the queue's own
+  `requested()` bound was per queue, never summed.
+- **Fix** (owner decisions 2026-11-16 and 2026-11-17): each sending part holds a reservation, `max(128, 6·peak)` while
+  its queue is non-empty and 0 once it empties (`SendStream::held_spec`, an exec `peak` with `peak == buf.peak()` in
+  `wf`). `Streams::wf` sums the reservations against `MAX_SEND_BUFFER`, `send_room(id)` is `B/6 − len` of the part's
+  share `B`, and `SendStream::lemma_held` proves the queue's `requested()` (both buffers while migrating) within the
+  reservation.
+- **Catch**: `Streams::lemma_wf` exports `tx_capacity() <= tx_held() <= MAX_SEND_BUFFER`, where `tx_capacity` sums
+  `requested()` itself; a path that lets a queue's capacity outgrow its share fails verification at every `Streams`
+  mutator that ensures `wf`. Against the allocator's own sizes (`SendStream::buf_capacity`, the queue's `caps`):
+  `held_capacity_within_cap` (40 streams × 64 KiB, every piece but the last acknowledged: Σ capacity at most 1 MiB
+  after every call) and `room_refills_as_acks_arrive` in `crates/quic/tests/stream_bounds.rs`.
+- **Evidence**: Task 8's report (fix rounds 0 and 1); carryovers `mem-9b2-send-cap`, `mem-9b2-send-room`.

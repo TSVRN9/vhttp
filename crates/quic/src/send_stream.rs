@@ -200,11 +200,36 @@ fn clamp_end(off: u64, len: u64, end: u64) -> (r: u64)
     }
 }
 
+/// The reservation a send queue of peak `pk` holds against `MAX_SEND_BUFFER` (owner decision
+/// 2026-11-17, option (b)): none while empty, else `2·max(MIN_CAP, 3·pk)` = `max(128, 6·pk)`, which
+/// bounds both of its buffers while it migrates (`ByteQueue::lemma_wf`).
+pub open spec fn res_of(pk: nat) -> nat {
+    if pk == 0 {
+        0
+    } else if 6 * pk < 128 {
+        128
+    } else {
+        6 * pk
+    }
+}
+
+/// The most bytes a write may take into a queue of length `len` with `b` bytes of reservation to
+/// spend: its peak may reach `b/6` (none below 128).
+pub open spec fn res_room(b: nat, len: nat) -> nat {
+    if b >= 128 && b / 6 >= len {
+        (b / 6 - len) as nat
+    } else {
+        0
+    }
+}
+
 /// The sending part of one stream.
 pub struct SendStream {
     state: SendState,
     /// The bytes `[acked_base, written)`.
     buf: ByteQueue,
+    /// `buf`'s peak, kept in exec for the reservation.
+    peak: u64,
     acked_base: u64,
     written: u64,
     sent_end: u64,
@@ -287,20 +312,25 @@ impl SendStream {
         self.buf@.len()
     }
 
-    /// The bytes the send queue's buffers requested from the allocator (both while it migrates): what the stream holds
-    /// in memory, which `MAX_SEND_BUFFER` bounds over a connection (carryover mem-9b2-send-cap).
+    /// The largest length plus write since the queue was last empty.
+    pub closed spec fn peak_spec(&self) -> nat {
+        self.peak as nat
+    }
+
+    /// The reservation the stream holds against `MAX_SEND_BUFFER` (`res_of` its peak); its queue's buffers are within
+    /// it (`lemma_held`), so the connection's sum bounds memory (carryover mem-9b2-send-cap).
     pub closed spec fn held_spec(&self) -> nat {
+        res_of(self.peak as nat)
+    }
+
+    /// The bytes the send queue's buffers requested from the allocator (both while it migrates).
+    pub closed spec fn capacity_spec(&self) -> nat {
         self.buf.requested()
     }
 
-    /// `held_spec` after a `write` of `d` bytes (`ByteQueue::req_after`).
-    pub closed spec fn held_after(&self, d: nat) -> nat {
-        self.buf.req_after(d)
-    }
-
-    /// The most bytes a `write` may take with `held_spec` within `b` after it and after every shorter one.
+    /// The most bytes a `write` may take with the reservation within `b`.
     pub closed spec fn room_spec(&self, b: nat) -> nat {
-        self.buf.room_spec(b)
+        res_room(b, self.buf@.len())
     }
 
     /// Ranges held in the acked and lost lists.
@@ -344,6 +374,7 @@ impl SendStream {
     /// `wf` except the clauses `on_data_acked` restores only at its end.
     closed spec fn core(&self) -> bool {
         &&& self.buf.wf()
+        &&& self.peak == self.buf.peak()
         &&& self.credit.wf()
         &&& self.credit.used_spec() == self.sent_end
         &&& self.sent_end <= self.credit.max_spec()
@@ -410,38 +441,66 @@ impl SendStream {
         self.credit.lemma_wf();
     }
 
-    /// A write of at most `room_spec(b)` bytes leaves `held_spec` within `b` (and the buffer's length within it);
-    /// one of `room_spec(b) + 1` would not.
+    /// The queue's buffers are within the reservation, the second buffer of a migration included.
+    pub proof fn lemma_held(&self)
+        requires
+            self.wf(),
+        ensures
+            self.buffered_spec() <= self.peak_spec(),
+            self.capacity_spec() <= self.held_spec(),
+            self.peak_spec() == 0 ==> self.buffered_spec() == 0,
+    {
+        self.buf.lemma_wf();
+    }
+
+    /// A write of at most `room_spec(b)` bytes leaves the reservation within `b`, its peak `max(peak, len + d)`; one of
+    /// `room_spec(b) + 1` bytes would not.
     pub proof fn lemma_room(&self, b: nat, d: nat)
         requires
             self.wf(),
             self.held_spec() <= b,
         ensures
-            d <= self.room_spec(b) ==> self.buffered_spec() + d <= self.held_after(d) <= b,
-            d == self.room_spec(b) + 1 ==> self.held_after(d) > b,
-            self.room_spec(b) <= 2 * b + 1,
-            self.buffered_spec() == 0 ==> self.room_spec(b) == byteq::queue::empty_room(b),
+            d <= self.room_spec(b) ==> self.buffered_spec() + d <= b && res_of(
+                vstd::math::max(self.peak_spec() as int, (self.buffered_spec() + d) as int) as nat,
+            ) <= b,
+            d == self.room_spec(b) + 1 ==> res_of(
+                vstd::math::max(self.peak_spec() as int, (self.buffered_spec() + d) as int) as nat,
+            ) > b,
+            self.room_spec(b) <= b,
     {
-        self.buf.lemma_room(b, d);
+        self.lemma_held();
     }
 
-    pub fn held(&self) -> (r: usize)
+    pub fn held(&self) -> (r: u64)
         requires
             self.wf(),
         ensures
             r == self.held_spec(),
     {
-        self.buf.held()
+        proof {
+            self.buf.lemma_wf();
+        }
+        if self.peak == 0 {
+            0
+        } else if 6 * self.peak < 128 {
+            128
+        } else {
+            6 * self.peak
+        }
     }
 
-    pub fn room(&self, b: usize) -> (r: usize)
+    pub fn room(&self, b: u64) -> (r: u64)
         requires
             self.wf(),
-            self.held_spec() <= b <= byteq::queue::MAX_QUEUE,
         ensures
             r == self.room_spec(b as nat),
     {
-        self.buf.room(b)
+        let len = self.buf.len() as u64;
+        if b >= 128 && b / 6 >= len {
+            b / 6 - len
+        } else {
+            0
+        }
     }
 
     /// The send buffer's length: the bytes written past `acked_base`, none once reset.
@@ -478,10 +537,12 @@ impl SendStream {
             r.reset_spec() is None,
             r.buffered_spec() == 0,
             r.held_spec() == 0,
+            r.peak_spec() == 0,
     {
         let r = SendStream {
             state: SendState::Ready,
             buf: ByteQueue::new(),
+            peak: 0,
             acked_base: 0,
             written: 0,
             sent_end: 0,
@@ -548,7 +609,13 @@ impl SendStream {
                 > VARINT_MAX),
             r is Err ==> *final(self) == *old(self),
             r is Ok ==> final(self).buffered_spec() == old(self).buffered_spec() + data@.len(),
-            r is Ok ==> final(self).held_spec() == old(self).held_after(data@.len() as nat),
+            r is Ok ==> final(self).peak_spec() == vstd::math::max(
+                old(self).peak_spec() as int,
+                (old(self).buffered_spec() + data@.len()) as int,
+            ),
+            r is Ok ==> final(self).held_spec() == res_of(
+                vstd::math::max(old(self).peak_spec() as int, (old(self).buffered_spec() + data@.len()) as int) as nat,
+            ),
             r is Ok ==> {
                 &&& final(self).all_written() == old(self).all_written() + data@
                 &&& final(self).fin_written_spec() == fin
@@ -566,8 +633,12 @@ impl SendStream {
             return Err(());
         }
         let ghost aw = self.all_written@;
+        let len = self.buf.len() as u64;
         let Ghost(w) = self.buf.push_slice(data);
         assert(w <= 7 * data@.len() + 4);
+        if len + data.len() as u64 > self.peak {
+            self.peak = len + data.len() as u64;
+        }
         self.written = self.written + data.len() as u64;
         self.all_written = Ghost(aw + data@);
         self.fin_written = fin;
@@ -846,6 +917,7 @@ impl SendStream {
         self.reset = Some((code, self.sent_end));
         self.reset_pending = true;
         self.buf = ByteQueue::new();
+        self.peak = 0;
         self.lost = Vec::new();
         self.acked = Vec::new();
         self.fin_lost = false;
@@ -1005,6 +1077,7 @@ impl SendStream {
             final(self).core(),
             *final(self) == (SendStream {
                 buf: final(self).buf,
+                peak: final(self).peak,
                 acked: final(self).acked,
                 lost: final(self).lost,
                 acked_base: final(self).acked_base,
@@ -1012,7 +1085,7 @@ impl SendStream {
             }),
             final(self).acked_base >= old(self).acked_base,
             final(self).buf@.len() <= old(self).buf@.len(),
-            final(self).buf.requested() <= old(self).buf.requested(),
+            final(self).peak <= old(self).peak,
     {
         let ab = self.acked_base;
         let se = self.sent_end;
@@ -1024,6 +1097,12 @@ impl SendStream {
             }
             let Ghost(w) = self.buf.drop_front((nb - ab) as usize);
             assert(w <= 2);
+            proof {
+                self.buf.lemma_wf();
+            }
+            if self.buf.len() == 0 {
+                self.peak = 0;
+            }
             range_remove(&mut self.acked, 0, nb, Ghost(ab), Ghost(se));
             range_remove(&mut self.lost, 0, nb, Ghost(ab), Ghost(se));
             self.acked_base = nb;
