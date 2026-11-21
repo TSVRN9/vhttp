@@ -85,10 +85,14 @@ crate.
   - Residual (owner 9b4): the gate runs on h3 only. Every other crate is still measured on one path; 9b4 extends
     `rlimit-seeds.sh` to every crate (and carries tls `build_flight` and the crypto/ctcore ceilings into it).
     Seeds are a sample, not a proof of robustness: 5 seeds bound the cost of the gate (about 2 minutes for h3). At
-    9b3 Task 8's fix round (5 seeds): the h3 maximum is `conn::H3Conn::request_data` at 5,309,193 (text unchanged since
-    9b3 Task 1); the widest spreads among fns above 2,000,000 are the untouched `conn::H3Conn::lemma_step_trans`
-    (0.49M-3.10M, 6.3x) and `qpack::field_section::lemma_name_out` (0.48M-2.40M, 5.0x), then `conn::H3Conn::uni_data`
-    (2.24M-4.51M, 2.0x, rewritten by 9b3 Task 11). The next restructuring of h3's proofs should start with those.
+    9b3 Task 9's fix round (5 seeds): the h3 maximum is `conn::H3Conn::shutdown` at about 6.10M (text unchanged; it
+    reached 8,205,126, over the cap, on one seed from a one-unit edit in `deliver` before it was spun off, incident 6).
+    `conn::H3Conn::request_data` is at about 4.84M. The widest spreads among fns above 2,000,000 are the untouched
+    `conn::H3Conn::lemma_step_trans` (0.49M-3.10M, 6.3x at Task 8) and `qpack::field_section::lemma_name_out`
+    (0.48M-2.40M, 5.0x). `conn::H3Conn::uni_data` is spun off at 2.63M-3.98M. `shutdown` and `uni_data` are pinned by
+    `spinoff_prover`, not fixed at the source. Carryover `rca-smt-conn-pinned` (owner 9b3) closes that pin: 9b3
+    Task 11 rewrites conn's stream entry points and splits both. The next restructuring of h3's proofs should start
+    with those.
 - **Evidence**:
   - Gate demos (`scripts/gate-demos.sh`): "rlimit-seeds: passes seed 0, FAIL row under seed 1", "rlimit-seeds: over
     the cap under seed 1 only", "rlimit-seeds: over its ceiling line", "rlimit-seeds: a malformed ceilings line",
