@@ -2595,8 +2595,10 @@ impl Streams {
     //# Both endpoints MUST maintain flow control state
     //# for the stream in the unterminated direction until that direction
     //# enters a terminal state.
-    /// Removes entry `i` once all its parts are terminal; a removed peer stream is re-credited
-    /// (MAX_STREAMS), and its buffers are dropped.
+    /// Removes entry `i` once all its parts are terminal and it is not queued; a removed peer stream
+    /// is re-credited (MAX_STREAMS), and its buffers are dropped. The drop is uncharged here: a
+    /// "Data Read" receiving part's ring slot vector (one free; delivery freed its pages) and the
+    /// sending part (cat-C15-semantic-cost, 9b4); `deliver_some` charges its own removal.
     fn gc(&mut self, i: usize)
         requires
             old(self).wf(),
@@ -3175,7 +3177,8 @@ spec fn fed(
 }
 
 /// STREAM or RESET_STREAM `f` to `rs`. The costs `on_data`, `deliver` and `on_reset` return are
-/// not composed past this frame path (the pipeline half, Task 10d; `find`'s scan, Q20, 9b4).
+/// dropped here: their composition through `Streams::on_frame` and `on_datagram` has no owner yet
+/// (raised to the controller in the 9b2 Task 10 report); `find`'s scan is Q20's (9b4).
 fn feed_recv(rs: &mut RecvStream, f: &Frame, room: u64, ev: &mut Vec<StreamEvent>) -> (r: Result<
     u64,
     u64,
