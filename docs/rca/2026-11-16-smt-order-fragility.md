@@ -42,6 +42,14 @@ crate.
      the same task `uni::UniStream::determine` spread 1.54M-4.19M over seeds 0-4 (2.7x); its fix round moved its
      sequence reasoning into per-path lemmas behind an opaque `determined` predicate (1.58M-1.77M, 1.12x), and
      `on_data` likewise behind `fed` (2.32M-2.37M).
+  6. 9b3 Task 9: the proof fns behind the constant 421/501 answers (`lemma_answer_421`/`_501` and the lemmas they call)
+     measured 3.5M-4.9M in conn's shared solver process, though each only chains lemmas over hidden specs. A bisect
+     pinned it to the solver's state, not the proof. The body of `lemma_answer_421` cost 1,840 alone, and 3.5M once its
+     ensures restated a fact the last lemma call had just ensured. Marking every one of these lemmas
+     `#[verifier::spinoff_prover]` took `lemma_answer_421` to 621,513 and `lemma_answer_501` to 896,005 (seed 0). The
+     unchanged-text `conn::H3Conn::shutdown` moved from 3.50M-4.73M (Task 8) to 4.20M-6.64M over seeds 0-4 in the same
+     task. Spinning it off as well did not change that, so it was left as it was. It stays under the cap, and joins the
+     Residual's list below for the next restructuring.
 - **Escape**: the rlimit gate (`scripts/rlimit-gate.sh`, `tools/rl.py --gate`) and the ceilings ratchet
   (`scripts/rlimit-ceilings.sh`) measure one run under Z3's default seed. A number from one run says nothing about the
   margin: a proof can pass at 7.9M on that path and fail on the next. The ceilings file even recorded fns above the
