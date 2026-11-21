@@ -1,0 +1,15 @@
+diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
+index b4d70d4..38b3a3d 100644
+--- a/crates/quic/src/conn.rs
++++ b/crates/quic/src/conn.rs
+@@ -3274,7 +3274,9 @@ impl Connection {
+             self.lemma_path_event(s0, s0.hs_path, AmpEv::Validated);
+         }
+         let Ghost(c) = self.discard(PacketKind::Initial);
+-        Ghost(c)
++        // Mutant 9b2-M36: the first Handshake packet discards the Handshake space too, a second retire.
++        let Ghost(c2) = self.discard(PacketKind::Handshake);
++        Ghost(c + c2)
+     }
+ 
+     /// `self` is `o` with an event other than `Sent` pushed on `id`'s trace.

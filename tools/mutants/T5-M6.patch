@@ -1,8 +1,8 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
-index 9823d9c..b415978 100644
+index a43974a..7a72103 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -195,11 +195,12 @@ fn initial_end(c: &Connection) -> (r: u64)
+@@ -206,11 +206,12 @@ fn initial_end(c: &Connection) -> (r: u64)
      requires
          c.wf(),
      ensures

@@ -1,8 +1,8 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
-index a9a165c..204013e 100644
+index a43974a..40ef97b 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -1970,6 +1970,7 @@ impl<'a> QuicServer<'a> {
+@@ -2008,6 +2008,7 @@ impl<'a> QuicServer<'a> {
                          assert(dv[i as int] == ev@[i as int].deep_view());
                          assert(dv[i as int] is PeerParams);
                      }

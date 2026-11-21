@@ -1,0 +1,15 @@
+diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
+index a43974a..c406a41 100644
+--- a/crates/quictls/src/server.rs
++++ b/crates/quictls/src/server.rs
+@@ -1198,7 +1198,10 @@ impl<'a> QuicServer<'a> {
+         if !was && self.h3.conn().handshake_complete() {
+             if let Some((v, p)) = keep {
+                 let Ghost(cr) = self.refeed(v.as_slice(), p, now, r, v.len());
++                // Mutant 9b2-M37: the stash is refed twice, its pipeline half run again.
++                let Ghost(cr2) = self.refeed(v.as_slice(), p, now, r, v.len());
+                 proof {
++                    work = work + cr2;
+                     refed = true;
+                     lemma_refeed_cost(cr, v@.len());
+                     work = work + cr;

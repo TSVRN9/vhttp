@@ -1,8 +1,8 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
-index a9a165c..fb5b907 100644
+index a43974a..31fa18a 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -1400,7 +1400,7 @@ impl<'a> QuicServer<'a> {
+@@ -1438,7 +1438,7 @@ impl<'a> QuicServer<'a> {
                  self.h3.lemma_conn_wf();
                  lemma_held_ok_of(self.h3.conn_spec());
              }

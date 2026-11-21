@@ -1,8 +1,8 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
-index a9a165c..680a807 100644
+index a43974a..0033804 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -491,6 +491,8 @@ pub struct QuicServer<'a> {
+@@ -502,6 +502,8 @@ pub struct QuicServer<'a> {
      /// The connection when `level` left Initial: `init_end` is the end of what it had received.
      #[allow(dead_code)]
      init_rx: Ghost<Connection>,
@@ -11,7 +11,7 @@ index a9a165c..680a807 100644
      /// D13: the last datagram `receive` left CRYPTO backlog after while the handshake was incomplete, and its path;
      /// `pump_backlog` refeeds its 1-RTT packets once the handshake completes there.
      stash: Option<(CapVec<u8>, PathId)>,
-@@ -767,6 +769,8 @@ impl<'a> QuicServer<'a> {
+@@ -787,6 +789,8 @@ impl<'a> QuicServer<'a> {
              init_end: 0,
              fed_i: 0,
              fed_h: 0,
@@ -20,16 +20,16 @@ index a9a165c..680a807 100644
              init_rx: Ghost(cs),
              stash: None,
              log: Ghost(Seq::empty()),
-@@ -861,6 +865,8 @@ impl<'a> QuicServer<'a> {
+@@ -881,6 +885,8 @@ impl<'a> QuicServer<'a> {
          hide(spec_on_crypto);
          let ghost mut work: nat = 0;
          let was = self.h3.conn().handshake_complete();
 +        self.pre_end = initial_end(self.h3.conn());
 +        self.pre_rx = Ghost(self.h3.conn_spec());
          let ghost c0 = self.h3.conn_spec();
-         receive_datagram(self.h3.conn_mut(), d, path, now, &r.conn, &self.keys);
-         // The datagram's own bytes, at most: a datagram past `MAX_FEED` opens no packet (`pipeline::receive`).
-@@ -2274,14 +2280,14 @@ impl<'a> QuicServer<'a> {
+         let Ghost(cp) = quic::pipeline::receive(self.h3.conn_mut(), d, path, now, &r.conn, &self.keys);
+         proof {
+@@ -2312,14 +2318,14 @@ impl<'a> QuicServer<'a> {
          ensures
              *final(self) == (QuicServer { init_end: final(self).init_end, init_rx: final(self).init_rx, ..*old(self) }),
              final(self).init_end == old(self).fed_i,

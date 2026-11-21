@@ -1,8 +1,8 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
-index 9823d9c..a7b16f4 100644
+index a43974a..bc77762 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -831,7 +831,7 @@ impl<'a> QuicServer<'a> {
+@@ -851,7 +851,7 @@ impl<'a> QuicServer<'a> {
                  }
              }
          }

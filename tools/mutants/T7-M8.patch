@@ -1,7 +1,8 @@
 diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
+index 46567b3..039c69a 100644
 --- a/crates/quic/src/crypto_stream.rs
 +++ b/crates/quic/src/crypto_stream.rs
-@@ -54,7 +54,13 @@
+@@ -54,7 +54,13 @@ pub open spec fn ooo_held(s: CryptoStream, off: u64, d: Seq<u8>) -> nat {
  
  /// The number of maximal runs they form.
  pub open spec fn ooo_runs(s: CryptoStream, off: u64, d: Seq<u8>) -> nat {
@@ -16,7 +17,7 @@ diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
  }
  
  /// The errors `on_crypto` may return: CRYPTO_BUFFER_EXCEEDED when a non-empty frame would take
-@@ -182,6 +188,7 @@
+@@ -182,6 +188,7 @@ pub struct CryptoStream {
      /// The teardown slot: retired stores (`retire`), freed a bounded piece per call (`free_some`). Its keys are
      /// all below `base`, so a store retired onto a full slot joins it in O(log n).
      td: Tree<CapVec<u8>>,
@@ -24,7 +25,7 @@ diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
      /// Every insertion since the last `retire`, which records the bytes below its base (read,
      /// but not data received anew) as zeros.
      ins: Ghost<Seq<(nat, Seq<u8>)>>,
-@@ -333,6 +340,7 @@
+@@ -333,6 +340,7 @@ impl CryptoStream {
              hi: 0,
              st: Frags::new(),
              td: None,
@@ -32,7 +33,7 @@ diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
              ins: Ghost(Seq::empty()),
              hist: Ghost(Seq::empty()),
          };
-@@ -539,13 +547,16 @@
+@@ -586,7 +594,7 @@ impl CryptoStream {
          } else {
              0
          };
@@ -41,9 +42,10 @@ diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
              //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
              //# If an endpoint does not expand its buffer, it MUST close
              //# the connection with a CRYPTO_BUFFER_EXCEEDED error code.
-             return Err(CRYPTO_BUFFER_EXCEEDED);
+@@ -596,6 +604,9 @@ impl CryptoStream {
+         proof {
+             work = work + ci;
          }
-         self.st.insert(self.contig, offset, data);
 +        if self.frames < u64::MAX {
 +            self.frames = self.frames + 1;
 +        }

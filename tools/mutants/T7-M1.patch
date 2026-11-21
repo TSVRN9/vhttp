@@ -1,7 +1,8 @@
 diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
+index 46567b3..dbebe7f 100644
 --- a/crates/quic/src/crypto_stream.rs
 +++ b/crates/quic/src/crypto_stream.rs
-@@ -73,7 +73,7 @@
+@@ -73,7 +73,7 @@ pub open spec fn crypto_allowed_err(s: CryptoStream, offset: u64, len: nat, c: u
      let d = Seq::new(len, |_i: int| 0u8);
      &&& c == CRYPTO_BUFFER_EXCEEDED
      &&& len > 0
@@ -10,7 +11,7 @@ diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
  }
  
  /// The out-of-order positions depend on the frame's length, not its bytes.
-@@ -539,7 +539,7 @@
+@@ -586,7 +586,7 @@ impl CryptoStream {
          } else {
              0
          };

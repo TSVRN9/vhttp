@@ -1,8 +1,8 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
-index 9823d9c..b8a01ce 100644
+index a43974a..a66b009 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -284,7 +284,7 @@ fn shut(c: &mut Connection, code: u64, now: u64)
+@@ -295,7 +295,7 @@ fn shut(c: &mut Connection, code: u64, now: u64)
          final(c).rx_measure() <= old(c).rx_measure(),
  {
      let none: Vec<u8> = Vec::new();

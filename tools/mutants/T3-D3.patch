@@ -1,12 +1,12 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index cbfbdf0..1a91456 100644
+index b4d70d4..5905220 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -3665,7 +3665,6 @@ impl Connection {
+@@ -3901,7 +3901,6 @@ impl Connection {
              lemma_backlog3(self.crx_i, self.crx_h, self.crx_1);
          }
          if let Err(c) = r {
 -            self.close_crypto_err(c, now, pto);
-             return Err(c);
+             return (Err(c), Ghost(work));
          }
-         Ok(())
+         (Ok(()), Ghost(work))

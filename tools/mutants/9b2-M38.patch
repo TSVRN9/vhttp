@@ -1,0 +1,15 @@
+diff --git a/crates/quic/src/streams.rs b/crates/quic/src/streams.rs
+index 0a730d0..cae3992 100644
+--- a/crates/quic/src/streams.rs
++++ b/crates/quic/src/streams.rs
+@@ -1681,8 +1681,8 @@ pub open spec fn c_gc() -> nat {
+ /// delivery of at most its bytes (`deliver`); RESET_STREAM's ring free (`on_reset`).
+ pub open spec fn c_feed(f: SpecFrame) -> nat {
+     match f {
+-        SpecFrame::Stream { data, .. } => (c_ri() + 1) * (data.len() + 2 * (PAGE as nat)) + NP_MAX as nat + c_rd() * (data.len()
+-            + data.len() / (PAGE as nat) + 2) + 1,
++        // Mutant 9b2-M38: the bound leaves out the delivery of the frame's bytes (`deliver`).
++        SpecFrame::Stream { data, .. } => (c_ri() + 1) * (data.len() + 2 * (PAGE as nat)) + NP_MAX as nat,
+         SpecFrame::ResetStream { .. } => c_rfree(),
+         _ => 0,
+     }

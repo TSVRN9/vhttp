@@ -1,12 +1,13 @@
 diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
+index 46567b3..69d2b4c 100644
 --- a/crates/quic/src/crypto_stream.rs
 +++ b/crates/quic/src/crypto_stream.rs
-@@ -543,7 +543,7 @@
+@@ -590,7 +590,7 @@ impl CryptoStream {
              //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
              //# If an endpoint does not expand its buffer, it MUST close
              //# the connection with a CRYPTO_BUFFER_EXCEEDED error code.
--            return Err(CRYPTO_BUFFER_EXCEEDED);
-+            return Ok(());
+-            return (Err(CRYPTO_BUFFER_EXCEEDED), Ghost(work));
++            return (Ok(()), Ghost(work));
          }
-         self.st.insert(self.contig, offset, data);
-         let end = offset + data.len() as u64;
+         let Ghost(ci) = self.st.insert_c(self.contig, offset, data);
+         proof {
