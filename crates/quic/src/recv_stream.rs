@@ -5,6 +5,9 @@ use vstd::prelude::*;
 use crate::codes::*;
 use crate::flow::*;
 use crate::reassembly::*;
+// Used only in contracts, which a plain `cargo build` erases.
+#[allow(unused_imports)]
+use crate::ring::MAX_RECV_WINDOW;
 // Used only in ghost code, which a plain `cargo build` erases.
 #[allow(unused_imports)]
 use wire::varint::*;
@@ -1169,7 +1172,7 @@ impl RecvStream {
 
     pub fn new(id: u64, window: u64) -> (r: RecvStream)
         requires
-            window <= VARINT_MAX,
+            window <= MAX_RECV_WINDOW,
         ensures
             r.wf(),
             r.id_spec() == id,

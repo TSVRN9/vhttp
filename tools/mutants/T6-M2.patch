@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/recv_stream.rs b/crates/quic/src/recv_stream.rs
-index c881c1f..b982ffe 100644
+index f7f519a..7a1aab2 100644
 --- a/crates/quic/src/recv_stream.rs
 +++ b/crates/quic/src/recv_stream.rs
-@@ -164,7 +164,7 @@ pub open spec fn recv_data(id: u64, s: SpecRecv, off: nat, data: Seq<u8>, fin: b
+@@ -167,7 +167,7 @@ pub open spec fn recv_data(id: u64, s: SpecRecv, off: nat, data: Seq<u8>, fin: b
              state,
              ins,
              delivered: n,
@@ -11,7 +11,7 @@ index c881c1f..b982ffe 100644
                  end
              } else {
                  s.high
-@@ -1599,7 +1599,7 @@ impl RecvStream {
+@@ -1602,7 +1602,7 @@ impl RecvStream {
          } else {
              self.final_size
          };
@@ -20,7 +20,7 @@ index c881c1f..b982ffe 100644
              end
          } else {
              self.high
-@@ -1663,7 +1663,7 @@ impl RecvStream {
+@@ -1666,7 +1666,7 @@ impl RecvStream {
          } else {
              self.final_size
          };

@@ -41,6 +41,7 @@ pub mod ranges;
 pub mod reassembly;
 pub mod recovery;
 pub mod recv_stream;
+pub mod ring;
 pub mod route;
 pub mod send_stream;
 pub mod sent;

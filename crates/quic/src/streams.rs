@@ -55,6 +55,9 @@ use crate::frame::*;
 #[allow(unused_imports)]
 use crate::payload::*;
 use crate::recv_stream::*;
+// Used only in contracts, which a plain `cargo build` erases.
+#[allow(unused_imports)]
+use crate::ring::MAX_RECV_WINDOW;
 use crate::send_stream::*;
 use crate::stream_id::*;
 use crate::tp::*;
@@ -1372,6 +1375,8 @@ impl Streams {
         &&& self.conn_send.wf()
         &&& self.rx_bidi <= VARINT_MAX
         &&& self.rx_uni <= VARINT_MAX
+        &&& crate::ring::window_ok(self.rx_bidi)
+        &&& crate::ring::window_ok(self.rx_uni)
         &&& self.ids.peer_credit_spec(true).window_spec() <= MAX_LOCAL_STREAMS
         &&& self.ids.peer_credit_spec(false).window_spec() <= MAX_LOCAL_STREAMS
         &&& self.tx_uni <= VARINT_MAX
@@ -1509,6 +1514,8 @@ impl Streams {
             local.initial_max_streams_uni >= 3,
             local.initial_max_streams_bidi <= MAX_LOCAL_STREAMS,
             local.initial_max_streams_uni <= MAX_LOCAL_STREAMS,
+            local.initial_max_stream_data_bidi_remote <= MAX_RECV_WINDOW,
+            local.initial_max_stream_data_uni <= MAX_RECV_WINDOW,
             stream_tp_ok(local@),
             stream_tp_ok(peer@),
         ensures
@@ -1551,6 +1558,8 @@ impl Streams {
         };
         proof {
             r.ids.lemma_wf();
+            crate::ring::lemma_window_ok(r.rx_bidi);
+            crate::ring::lemma_window_ok(r.rx_uni);
             assert(r.ids.peer_credit_spec(true).window_spec() == r.ids.peer_limit(true));
             assert(r.ids.peer_credit_spec(false).window_spec() == r.ids.peer_limit(false));
             assert forall|id: u64| #[trigger] r.rtr@.contains_key(id) == r.ids.peer_created(id) by {
@@ -1697,6 +1706,10 @@ impl Streams {
         let ghost s0 = *self;
         let bidi = x % 4 == 0;
         let _ = self.ids.on_peer_stream(x);
+        proof {
+            crate::ring::lemma_window_ok(self.rx_bidi);
+            crate::ring::lemma_window_ok(self.rx_uni);
+        }
         let recv = RecvStream::new(x, if bidi { self.rx_bidi } else { self.rx_uni });
         let send = if bidi {
             Some(SendStream::new(self.tx_bidi))

@@ -300,7 +300,7 @@ printf 'assume_specification[ f ](x: u8);\n' >> "$tmp/escape/crates/demo/src/lib
 expect_fail "escape-gate: assume_specification" "unaccounted escape" esc
 
 # cost-charge gate (scripts/cost-charge.sh, 9b1 D6a), on copies of the real avl.rs, frags.rs, ranges.rs, send_stream.rs
-# (9b2 Task 8a: copied, so the gate's file list fails closed on neither) and every byteq src/*.rs:
+# (9b2 Task 8a: copied, so the gate's file list fails closed on neither), ring.rs (9b2 Task 9) and every byteq src/*.rs:
 # fill's while without its `work` invariant line (named by its line), a recursive exec fn returning no
 # Ghost<nat>, fill's ensures not reading its cost, fill's charge deleted or made `+ 0`, take_run's in-loop charge deleted, open_up dropping gather's
 # cost, merge binding rebuild's cost as a plain name, a call on a receiver other than self dropping push_slice's cost
@@ -321,7 +321,7 @@ cct=$tmp/cost/crates/quictls/src
 cfresh() {
   rm -rf "${tmp:?}/cost"; mkdir -p "$ccq" "$ccb" "$cct"
   cp "$root/crates/quic/src/avl.rs" "$root/crates/quic/src/frags.rs" "$root/crates/quic/src/crypto_stream.rs" "$root/crates/quic/src/conn.rs" "$ccq/"
-  cp "$root/crates/quic/src/ranges.rs" "$root/crates/quic/src/send_stream.rs" "$ccq/"
+  cp "$root/crates/quic/src/ranges.rs" "$root/crates/quic/src/send_stream.rs" "$root/crates/quic/src/ring.rs" "$ccq/"
   cp "$root"/crates/byteq/src/*.rs "$ccb/"; cp "$root/crates/quictls/src/server.rs" "$cct/"
 }
 cc() { "$root/scripts/cost-charge.sh" "$tmp/cost"; }
@@ -440,6 +440,14 @@ cl=$(awk -v w="$sl" 'NR > w && /^                work = work \+ 1;$/ { print NR;
 [ -n "$cl" ] || die "cost-charge demo: close_slots' charge not found in the copy"
 sed -i "${cl}d" "$ccq/send_stream.rs"
 expect_fail "cost-charge: close_slots' while without its charge (send_stream.rs, 9b2 Task 8a, D15)" "crates/quic/src/send_stream.rs:$sl: while whose body does not charge work" cc
+cfresh
+once '^            let Ghost\(c\) = self\.take_page\(pos, nxt, &mut out\);$' "$ccq/ring.rs"
+tl=$(grep -n '^            let Ghost(c) = self.take_page(pos, nxt, &mut out);$' "$ccq/ring.rs" | cut -d: -f1)
+# deliver's charge of take_page's cost, the first `work = work + c + 1;` after that call
+cl=$(awk -v w="$tl" 'NR > w && /^                work = work \+ c \+ 1;$/ { print NR; exit }' "$ccq/ring.rs")
+[ -n "$cl" ] || die "cost-charge demo: deliver's take_page charge not found in the copy"
+sed -i "${cl}s/work = work + c + 1;/work = work + 1;/" "$ccq/ring.rs"
+expect_fail "cost-charge: deliver drops take_page's cost (ring.rs, 9b2 Task 9, D11)" "crates/quic/src/ring.rs:$tl: Ring::deliver drops the cost c binds from take_page" cc
 
 # The no-realloc claim (spec "The bound", TRUSTED.md's Vec row): fill's fresh piece made by CapVec::new(0) instead of
 # CapVec::new(n) must fail crypto_ooo_cost_linear on reallocs (under Verus it fails push's precondition). A copy of the

@@ -1,6 +1,6 @@
 """Cost-charge gate (9b1 D6a). Usage: python3 -I tools/cost_charge.py ROOT
 In ROOT/crates/quic/src/avl.rs, ROOT/crates/quic/src/frags.rs, ROOT/crates/quic/src/crypto_stream.rs,
-ROOT/crates/quic/src/ranges.rs, ROOT/crates/quic/src/send_stream.rs (9b2 Task 8a) and every
+ROOT/crates/quic/src/ranges.rs, ROOT/crates/quic/src/send_stream.rs (9b2 Task 8a), ROOT/crates/quic/src/ring.rs (9b2 Task 9) and every
 ROOT/crates/byteq/src/*.rs (found by listing the directory, so a new byteq file is gated; one with no `verus!` block may
 hold no fn), inside `verus!` (comments and strings blanked, fns found by tools/acceptance.py's parser):
   - every `while` has an `invariant` (or `invariant_except_break`) clause naming `work`, the ghost cost accumulator, and
@@ -29,7 +29,7 @@ shape) and builds no literal `Ghost(N)` after its first callee cost call or char
 LITERAL_OK's keyed fns (avl::bal, frags::walk, frags::walk_run: match arms returning literals after a recursive arm's
 text; an entry that no longer fires fails).
 Fails naming file:line; fails closed on a missing file (avl.rs, frags.rs, crypto_stream.rs, ranges.rs, send_stream.rs,
-conn.rs, server.rs, or no byteq src/*.rs), no verus! block, or no looping or recursive fn or bound cost.
+ring.rs, conn.rs, server.rs, or no byteq src/*.rs), no verus! block, or no looping or recursive fn or bound cost.
 Limit: a stubbed literal cost arm in avl::bal, frags::walk or frags::walk_run is not seen (LITERAL_OK; owned by
 carryover cat-C15-semantic-cost, 9b4). Limit: a stub helper cost fn (a fn returning a literal Ghost(N) before any call,
 bound and charged by its caller) is not seen (cat-C15-semantic-cost). Limit: a structural check, not a proof that the amount charged is right (the cost ensures are upper bounds, so an
@@ -42,7 +42,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import acceptance as acc  # noqa: E402
 
 FILES = ['crates/quic/src/avl.rs', 'crates/quic/src/frags.rs', 'crates/quic/src/crypto_stream.rs', 'crates/quic/src/ranges.rs',
-         'crates/quic/src/send_stream.rs']
+         'crates/quic/src/send_stream.rs', 'crates/quic/src/ring.rs']
 DIRS = ['crates/byteq/src']
 # Per-fn files: only their cost-carrying fns (an exec fn returning a Ghost<nat>) and the callers of one are checked, by
 # the callee-cost rules; their whiles and other fns are not this gate's (9b2 fix round 1, I6).
