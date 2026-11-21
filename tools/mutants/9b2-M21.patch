@@ -1,7 +1,8 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
+index 73f1192..2a2f73b 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -3422,7 +3422,6 @@
+@@ -3500,7 +3500,6 @@ impl Connection {
              final(self).paths == old(self).paths,
              final(self).wf(),
              final(self).frames_kept_np(*old(self)),
@@ -9,7 +10,7 @@ diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
      {
          let ghost fv = frames_view(frames@);
          let mut j: usize = 0;
-@@ -3430,7 +3429,8 @@
+@@ -3508,7 +3507,8 @@ impl Connection {
              assert(fv.subrange(0, fv.len() as int) =~= fv);
          }
          // D10 (b): `pend` is the pieces of the frames not yet reported, then `rest`.
@@ -19,14 +20,14 @@ diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
              invariant
                  self.paths == old(self).paths,
                  j <= frames@.len(),
-@@ -3447,10 +3447,6 @@
-             }
+@@ -3526,10 +3526,6 @@ impl Connection {
              self.on_acked_frame(k, &frames[j]);
              j += 1;
--        }
+         }
 -        proof {
 -            lemma_pend_end(fv, Seq::<SentPacket>::empty(), rest);
 -            lemma_pend_kept(old(self).pend@, self.pend@, k);
-         }
+-        }
      }
  
+     // Post-handshake CRYPTO is buffered here and read and fed to TLS by quictls; we send no NewSessionTicket.
