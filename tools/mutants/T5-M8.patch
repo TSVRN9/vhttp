@@ -1,8 +1,8 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
-index 275a535..623a590 100644
+index 9823d9c..5f279d0 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -182,7 +182,7 @@ proof fn lemma_superseded_allowed_err_rejects(s: QuicServer)
+@@ -183,7 +183,7 @@ proof fn lemma_superseded_allowed_err_rejects(s: QuicServer)
  /// ID is at most 20 bytes, so `allowed_tp_err`'s over-20 disjunct is a §7.3 mismatch
  /// (`lemma_long_cid_mismatch`).
  spec fn tp_allowed_err(c: Connection, b: Seq<u8>) -> bool {

@@ -1,8 +1,8 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
-index 275a535..fed0fd5 100644
+index 9823d9c..2c64ad6 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -490,6 +490,8 @@ pub struct QuicServer<'a> {
+@@ -491,6 +491,8 @@ pub struct QuicServer<'a> {
      /// The connection when `level` left Initial: `init_end` is the end of what it had received.
      #[allow(dead_code)]
      init_rx: Ghost<Connection>,
@@ -11,7 +11,7 @@ index 275a535..fed0fd5 100644
      /// D13: the last datagram `receive` left CRYPTO backlog after while the handshake was incomplete, and its path;
      /// `pump_backlog` refeeds its 1-RTT packets once the handshake completes there.
      stash: Option<(CapVec<u8>, PathId)>,
-@@ -766,6 +768,8 @@ impl<'a> QuicServer<'a> {
+@@ -767,6 +769,8 @@ impl<'a> QuicServer<'a> {
              init_end: 0,
              fed_i: 0,
              fed_h: 0,
@@ -20,7 +20,7 @@ index 275a535..fed0fd5 100644
              init_rx: Ghost(cs),
              stash: None,
              log: Ghost(Seq::empty()),
-@@ -860,6 +864,8 @@ impl<'a> QuicServer<'a> {
+@@ -861,6 +865,8 @@ impl<'a> QuicServer<'a> {
          hide(spec_on_crypto);
          let ghost mut work: nat = 0;
          let was = self.h3.conn().handshake_complete();

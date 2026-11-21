@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index e74b2c0..172e12b 100644
+index 5c2c387..b8736e8 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -6301,7 +6301,7 @@ impl Connection {
+@@ -6303,7 +6303,7 @@ impl Connection {
          let ghost s0 = *self;
          let Ghost(c1) = self.discard(PacketKind::Initial);
          let ghost s1 = *self;
