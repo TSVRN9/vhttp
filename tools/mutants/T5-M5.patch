@@ -1,7 +1,8 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
+index e83e092..72b02e5 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -1879,10 +1879,6 @@
+@@ -1880,10 +1880,6 @@ impl<'a> QuicServer<'a> {
              res.1@ <= c_done(final(self).conn_spec(), old(self).conn_spec()),
      {
          let ghost mut work: nat = 0;
@@ -12,7 +13,7 @@ diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
          proof {
              // The Initial offset is what TLS was handed (live), or the end (discarded).
              self.h3.lemma_conn_wf();
-@@ -1967,6 +1963,10 @@
+@@ -1968,6 +1964,10 @@ impl<'a> QuicServer<'a> {
              }
              i += 1;
          }

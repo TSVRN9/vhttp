@@ -1,14 +1,11 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
+index e83e092..57ae2f6 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -1683,6 +1683,22 @@
-             shut(self.h3.conn_mut(), PROTOCOL_VIOLATION, now);
-             proof {
-                 Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
-+            }
-+            self.sync_keys();
-+            return false;
-+        }
+@@ -1688,6 +1688,22 @@ impl<'a> QuicServer<'a> {
+             self.sync_keys();
+             return false;
+         }
 +        let u = self.h3.conn().crypto_unread(PacketKind::Initial);
 +        let mut b: CapVec<u8> = CapVec::new(u as usize);
 +        let _ = self.h3.conn_mut().crypto_read(PacketKind::Initial, u, &mut b);
@@ -21,6 +18,10 @@ diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
 +            shut(self.h3.conn_mut(), PROTOCOL_VIOLATION, now);
 +            proof {
 +                Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c1);
-             }
-             self.sync_keys();
-             return false;
++            }
++            self.sync_keys();
++            return false;
++        }
+         self.sync_keys();
+         true
+     }

@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index 73f1192..06e1b94 100644
+index dbc5f54..eb2195e 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -6206,8 +6206,7 @@ impl Connection {
+@@ -6207,8 +6207,7 @@ impl Connection {
              return Ghost(0);
          }
          // ALPN first: §8.1's close is owed whatever else is wrong.
