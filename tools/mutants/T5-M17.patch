@@ -1,7 +1,8 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
+index 2438cfa..2a487fc 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -1640,7 +1640,7 @@
+@@ -1645,7 +1645,7 @@ impl<'a> QuicServer<'a> {
              proof {
                  assert(c0.crypto_received(PacketKind::Initial, (e - 1) as nat));
              }

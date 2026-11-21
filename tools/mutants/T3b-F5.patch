@@ -1,7 +1,8 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
+index fbeaa1c..69d8ae9 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -1969,7 +1969,6 @@
+@@ -3402,7 +3402,6 @@ impl Connection {
          requires
              old(self).wf(),
              old(self).phase_spec() is Open,

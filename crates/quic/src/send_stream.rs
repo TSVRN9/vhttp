@@ -711,6 +711,22 @@ proof fn lemma_piece_space(
     }
 }
 
+/// A piece over bytes no piece in flight covers is not in flight: a poll's piece is fresh (D10 (b)).
+proof fn lemma_fresh(f: Seq<(u64, u64)>, s: u64, e: u64)
+    requires
+        s < e,
+        forall|x: nat| s <= x < e ==> !covers(f, x),
+    ensures
+        !f.to_set().contains((s, e)),
+{
+    f.to_set_ensures();
+    if f.contains((s, e)) {
+        let i = choose|i: int| 0 <= i < f.len() && f[i] == (s, e);
+        assert(inr(f[i], s as nat));
+        assert(covers(f, s as nat));
+    }
+}
+
 /// The bytes `retransmit` takes off a lost range of `r` (D10 (c)): all of it if it fits in `m`, else `min(m, r −
 /// FLOOR)` when both parts stay at least `FLOOR`, else none (split from `retransmit` for the rlimit).
 fn resend_len(r: u64, m: u64) -> (k: Option<u64>)
@@ -1068,6 +1084,37 @@ impl SendStream {
         self.buf.lemma_wf();
     }
 
+    /// `in_flight` in terms of `flight_spec`.
+    pub proof fn lemma_in_flight(&self, off: u64, len: u64)
+        ensures
+            self.in_flight(off, len) <==> off + len <= VARINT_MAX && self.flight_spec().contains(
+                (off, (off + len) as u64),
+            ),
+    {
+        self.flight@.to_set_ensures();
+    }
+
+    /// No piece is in flight in Ready, Data Recvd or a reset state: nothing sent, or everything acknowledged, or the
+    /// trees cleared (D10 (b): a removed or reset part's flight is empty).
+    pub proof fn lemma_flight_idle(&self)
+        requires
+            self.wf(),
+        ensures
+            self.state() is Ready || self.state() is DataRecvd || is_reset(self.state()) ==> self.flight_spec()
+                == Set::<(u64, u64)>::empty(),
+    {
+        self.flight@.to_set_ensures();
+        if self.state is Ready || self.state is DataRecvd || is_reset(self.state) {
+            if !is_reset(self.state) {
+                reveal(parts);
+                if self.flight@.len() > 0 {
+                    assert(self.acked_base <= self.flight@[0].0 < self.flight@[0].1 <= self.sent_end);
+                }
+            }
+            assert(self.flight_spec() =~= Set::<(u64, u64)>::empty());
+        }
+    }
+
     /// A write of at most `room_spec(b)` bytes leaves the reservation within `b`, its peak `max(peak, len + d)`; one of
     /// `room_spec(b) + 1` bytes would not.
     pub proof fn lemma_room(&self, b: nat, d: nat)
@@ -1249,6 +1296,7 @@ impl SendStream {
                 &&& final(self).max() == old(self).max()
                 &&& final(self).reset_spec() == old(self).reset_spec()
             },
+            final(self).flight_spec() == old(self).flight_spec(),
     {
         let open = match self.state {
             SendState::Ready | SendState::Send => true,
@@ -1329,6 +1377,9 @@ impl SendStream {
                 (c@.off, (c@.off + c@.data.len()) as u64),
             )),
             (r is None || r->0@.data.len() == 0) ==> final(self).flight_spec() == old(self).flight_spec(),
+            r matches Some(c) ==> (c@.data.len() > 0 ==> !old(self).flight_spec().contains(
+                (c@.off, (c@.off + c@.data.len()) as u64),
+            )),
             final(self).flush_point() == old(self).flush_point(),
     {
         let (r, Ghost(c)) = self.poll_data_w(max_len, conn_avail);
@@ -1361,6 +1412,9 @@ impl SendStream {
                 (c@.off, (c@.off + c@.data.len()) as u64),
             )),
             (r.0 is None || r.0->0@.data.len() == 0) ==> final(self).flight_spec() == old(self).flight_spec(),
+            r.0 matches Some(c) ==> (c@.data.len() > 0 ==> !old(self).flight_spec().contains(
+                (c@.off, (c@.off + c@.data.len()) as u64),
+            )),
             final(self).flush_point() == old(self).flush_point(),
             r.1@ <= c_ss1() * (old(self).ht() + 1) + c_ss2() * MAX_FLUSH + max_len,
     {
@@ -1430,6 +1484,7 @@ impl SendStream {
             r.0 matches Some(c) ==> final(self).flight_spec() == old(self).flight_spec().insert(
                 (c@.off, (c@.off + c@.data.len()) as u64),
             ),
+            r.0 matches Some(c) ==> !old(self).flight_spec().contains((c@.off, (c@.off + c@.data.len()) as u64)),
             final(self).flush_point() == old(self).flush_point(),
             ({
                 let (s, e) = old(self).lost@[0];
@@ -1507,6 +1562,7 @@ impl SendStream {
             final(self).flight_spec() == old(self).flight_spec().insert(
                 (old(self).lost@[0].0, (old(self).lost@[0].0 + k) as u64),
             ),
+            !old(self).flight_spec().contains((old(self).lost@[0].0, (old(self).lost@[0].0 + k) as u64)),
             r@ <= c_rs() * (old(self).lost.ht() + 1) + c_rs() * (old(self).lost.ht() + 1) + c_rs() * (old(
                 self,
             ).flight.ht() + 1),
@@ -1529,6 +1585,7 @@ impl SendStream {
         proof {
             lemma_piece_space(s0.acked@, s0.lost@, s0.flight@, s0.open_slots(), s0.acked_base, s0.sent_end, (s
                 + k) as u64);
+            lemma_fresh(s0.flight@, s, (s + k) as u64);
         }
         let Ghost(c1) = self.lost.take_first(k);
         let Ghost(c2) = self.flight.insert_piece(s, s + k);
@@ -1573,6 +1630,9 @@ impl SendStream {
                 (c@.off, (c@.off + c@.data.len()) as u64),
             )),
             (r.0 is None || r.0->0@.data.len() == 0) ==> final(self).flight_spec() == old(self).flight_spec(),
+            r.0 matches Some(c) ==> (c@.data.len() > 0 ==> !old(self).flight_spec().contains(
+                (c@.off, (c@.off + c@.data.len()) as u64),
+            )),
             final(self).flush_point() == old(self).flush_point(),
             r.1@ <= c_ss1() * (old(self).ht() + 1) + c_ss2() * MAX_FLUSH + max_len,
     {
@@ -1716,6 +1776,7 @@ impl SendStream {
             final(self).credit.used_spec() == end,
             final(self).credit.max_spec() == old(self).credit.max_spec(),
             final(self).flight_spec() == old(self).flight_spec().insert((old(self).sent_end, end)),
+            !old(self).flight_spec().contains((old(self).sent_end, end)),
             r@ <= c_rs() * (old(self).flight.ht() + 1),
     {
         let ghost mut work: nat = 0;
@@ -1727,6 +1788,7 @@ impl SendStream {
             self.lost.lemma_wf();
             self.credit.lemma_wf();
             lemma_parts_end(s0.acked@, s0.lost@, s0.flight@, s0.open_slots(), s0.acked_base, off);
+            lemma_fresh(s0.flight@, off, end);
         }
         let Ghost(c1) = self.flight.insert_piece(off, end);
         proof {
@@ -1929,6 +1991,7 @@ impl SendStream {
                 (code, old(self).sent_end()),
             ) && final(self).pending_reset() == Some((code, old(self).sent_end()))
                 && final(self).buffered_spec() == 0,
+            fresh ==> final(self).flight_spec() == Set::<(u64, u64)>::empty(),
             !fresh ==> *final(self) == *old(self),
     {
         self.reset(code)
@@ -1954,6 +2017,7 @@ impl SendStream {
             } else {
                 old(self).max()
             },
+            final(self).flight_spec() == old(self).flight_spec(),
     {
         self.credit.on_max(max);
     }
@@ -1992,6 +2056,7 @@ impl SendStream {
             final(self).next_off() == old(self).next_off(),
             final(self).reset_spec() == old(self).reset_spec(),
             final(self).pending_reset() is None,
+            final(self).flight_spec() == old(self).flight_spec(),
     {
         self.reset_pending = false;
     }
@@ -2015,6 +2080,7 @@ impl SendStream {
             } else {
                 old(self).pending_reset()
             },
+            final(self).flight_spec() == old(self).flight_spec(),
     {
         if let SendState::ResetSent = self.state {
             self.reset_pending = true;
@@ -2041,6 +2107,7 @@ impl SendStream {
             final(self).reset_spec() == old(self).reset_spec(),
             final(self).pending_reset() is None
                 || final(self).pending_reset() == old(self).pending_reset(),
+            final(self).flight_spec() == old(self).flight_spec(),
     {
         if let SendState::ResetSent = self.state {
             self.state = SendState::ResetRecvd;
@@ -2214,6 +2281,8 @@ impl SendStream {
     pub fn on_data_acked(&mut self, off: u64, len: u64, fin: bool)
         requires
             old(self).wf(),
+            // D10 (b): conn hands back the edges of a piece it sent; checked past the Send/Data Sent gate.
+            !is_reset(old(self).state()) && len > 0 ==> old(self).in_flight(off, len),
         ensures
             final(self).wf(),
             final(self).buffered_spec() <= old(self).buffered_spec(),
@@ -2251,6 +2320,7 @@ impl SendStream {
     fn on_data_acked_w(&mut self, off: u64, len: u64, fin: bool) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
+            !is_reset(old(self).state()) && len > 0 ==> old(self).in_flight(off, len),
         ensures
             final(self).wf(),
             final(self).buffered_spec() <= old(self).buffered_spec(),
@@ -2284,16 +2354,11 @@ impl SendStream {
             _ => return Ghost(work),
         }
         if len > 0 {
-            // A piece ends at most at VARINT_MAX: a larger end is no piece.
-            if off > VARINT_MAX || len > VARINT_MAX - off {
-                return Ghost(work);
-            }
-            let (hit, Ghost(c)) = self.ack_piece(off, off + len);
+            // The piece is in flight (the requires): `take` finds it, so no miss branch.
+            let (_hit, Ghost(c)) = self.ack_piece(off, off + len);
             proof {
                 work = work + c;
-            }
-            if !hit {
-                return Ghost(work);
+                assert(_hit);
             }
         }
         if fin {
@@ -2408,6 +2473,8 @@ impl SendStream {
     pub fn on_data_lost(&mut self, off: u64, len: u64, fin: bool)
         requires
             old(self).wf(),
+            // D10 (b): conn hands back the edges of a piece it sent; checked past the Send/Data Sent gate.
+            !is_reset(old(self).state()) && len > 0 ==> old(self).in_flight(off, len),
         ensures
             final(self).wf(),
             final(self).buffered_spec() <= old(self).buffered_spec(),
@@ -2440,6 +2507,7 @@ impl SendStream {
     fn on_data_lost_w(&mut self, off: u64, len: u64, fin: bool) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
+            !is_reset(old(self).state()) && len > 0 ==> old(self).in_flight(off, len),
         ensures
             final(self).wf(),
             final(self).buffered_spec() <= old(self).buffered_spec(),
@@ -2477,20 +2545,11 @@ impl SendStream {
                 self.lost.lemma_wf();
                 self.acked.lemma_wf();
             }
-            if off > VARINT_MAX || len > VARINT_MAX - off {
-                return Ghost(work);
-            }
-            let (hit, Ghost(c1)) = self.flight.take_piece(off, off + len);
+            // The piece is in flight (the requires): `take` finds it, so no miss branch.
+            let (_hit, Ghost(c1)) = self.flight.take_piece(off, off + len);
             proof {
                 work = work + c1;
-            }
-            if !hit {
-                proof {
-                    self.flight@.to_set_ensures();
-                    s0.flight@.to_set_ensures();
-                    assert(self.flight_spec() =~= s0.flight_spec());
-                }
-                return Ghost(work);
+                assert(_hit);
             }
             proof {
                 lemma_piece_free(s0.acked@, s0.lost@, s0.flight@, s0.open_slots(), s0.acked_base, s0.sent_end, off, (

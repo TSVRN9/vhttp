@@ -1,8 +1,8 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
-index 91d508a..232b46c 100644
+index 2438cfa..cec31ec 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -2108,7 +2108,9 @@ impl<'a> QuicServer<'a> {
+@@ -2113,7 +2113,9 @@ impl<'a> QuicServer<'a> {
          }
          match parse_transport_params(b.as_slice(), true) {
              Err(_) => {

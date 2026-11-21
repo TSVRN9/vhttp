@@ -9,7 +9,10 @@
 //! Caller obligations (Phase 3d; stated here, not proven by this module):
 //! - **Frames polled are frames sent.** Report every frame `poll_frames` returns to
 //!   `on_frame_acked` or `on_frame_lost` once its packet is acknowledged or declared lost; one
-//!   that is never transmitted is reported lost at once.
+//!   that is never transmitted is reported lost at once. For STREAM pieces this is proved, not
+//!   only stated: `poll_frames` ensures each stream's `tx_flight` gains exactly the pieces it returns
+//!   (`tx_gained`), `on_frame_acked`/`on_frame_lost` require the piece in flight unless the part was
+//!   reset (`piece_in_flight`), and `Connection::wf`'s `pieces_ok` ties them (9b2 D10 (b)).
 //! - **`start()` first.** Call `H3Conn::start` before delivering the first `StreamEvent` or
 //!   calling `send_response`, so SETTINGS opens stream 3 (RFC 9114 §6.2.1, §7.2.4.2).
 //! - **Every event, in order.** Pass each `StreamEvent` to `H3Conn` in the order pushed
@@ -42,6 +45,9 @@
 //! - **Receive window pinned (3d D8):** every mutator keeps the connection window at
 //!   `initial_max_data`, and `lemma_wf` bounds receive memory by 2·window.
 use vstd::prelude::*;
+// Used only in ghost code, which a plain `cargo build` erases.
+#[allow(unused_imports)]
+use vstd::multiset::Multiset;
 use crate::codes::*;
 use crate::flow::*;
 use crate::frame::*;
@@ -348,11 +354,519 @@ pub open spec fn post_rest(
             == Some(j)
     &&& forall|j: u64| #[trigger] s0.reset_code(j) is Some ==> s1.reset_code(j) == s0.reset_code(j)
     &&& stop_resets(s0, s1, f, r)
+    // D10 (b): no unreset stream's flight changes; a STOP_SENDING's stream is reset, a new one's flight empty.
+    &&& tx_kept_but(s0, s1, None)
     // E5: a closed peer stream is re-credited only as its entry is removed.
     &&& forall|b: bool| #[trigger]
         s1.peer_closed(b) == s0.peer_closed(b) || (s1.peer_closed(b) == s0.peer_closed(b) + 1
             && (frame_stream_id(f) matches Some(id) && (id % 4 == 0) == b && (id % 4 == 0 || id
             % 4 == 2) && s1.is_removed(id) && !s0.is_removed(id)))
+}
+
+// ---- Pieces in flight (D10 (b)) ----
+
+/// A piece's key: CRYPTO `None`, STREAM its stream; and the piece `(start, end)`.
+pub type PieceKey = (Option<u64>, (u64, u64));
+
+/// Each stream id's reset flag and pieces in flight: what conn's `pieces_ok` reads of `Streams`.
+pub type TxView = spec_fn(u64) -> (bool, Set<(u64, u64)>);
+
+/// The key of a data frame whose end passes `VARINT_MAX`: no frame sent has one, so none is counted.
+pub open spec fn bad_piece() -> (u64, u64) {
+    (0, 0)
+}
+
+/// Bytes `[off, off + len)` as a piece, `bad_piece()` past `VARINT_MAX`.
+pub open spec fn span(off: u64, len: nat) -> (u64, u64) {
+    if off + len <= VARINT_MAX {
+        (off, (off + len) as u64)
+    } else {
+        bad_piece()
+    }
+}
+
+/// A frame's piece: CRYPTO and STREAM frames with data have one, keyed by their target.
+pub open spec fn piece_of(f: SpecFrame) -> Option<PieceKey> {
+    match f {
+        SpecFrame::Crypto { offset, data } => if data.len() > 0 {
+            Some((None, span(offset, data.len())))
+        } else {
+            None
+        },
+        SpecFrame::Stream { stream_id, offset, data, .. } => if data.len() > 0 {
+            Some((Some(stream_id), span(offset, data.len())))
+        } else {
+            None
+        },
+        _ => None,
+    }
+}
+
+pub open spec fn ms_of(k: Option<PieceKey>) -> Multiset<PieceKey> {
+    match k {
+        Some(k) => Multiset::singleton(k),
+        None => Multiset::empty(),
+    }
+}
+
+/// The pieces of `sf`, counted.
+#[verifier::opaque]
+pub open spec fn frame_pieces(sf: Seq<SpecFrame>) -> Multiset<PieceKey>
+    decreases sf.len(),
+{
+    if sf.len() == 0 {
+        Multiset::empty()
+    } else {
+        frame_pieces(sf.drop_last()).add(ms_of(piece_of(sf.last())))
+    }
+}
+
+/// 1 if `p` is in `f`.
+pub open spec fn ind(f: Set<(u64, u64)>, p: (u64, u64)) -> nat {
+    if f.contains(p) {
+        1
+    } else {
+        0
+    }
+}
+
+/// `s1`'s pieces in flight are `s0`'s and, per stream, exactly `new`'s, each once and fresh; `new` holds no CRYPTO
+/// or out-of-range piece (`poll_frames`, D10 (b)).
+pub open spec fn tx_gained(s0: Streams, s1: Streams, new: Seq<SpecFrame>) -> bool {
+    &&& forall|j: u64, q: (u64, u64)|
+        q != bad_piece() ==> #[trigger] frame_pieces(new).count((Some(j), q)) + ind(s0.tx_flight(j), q) == ind(
+            s1.tx_flight(j),
+            q,
+        )
+    &&& forall|q: (u64, u64)| #[trigger] frame_pieces(new).count((None, q)) == 0
+    &&& forall|k: Option<u64>| #[trigger] frame_pieces(new).count((k, bad_piece())) == 0
+}
+
+/// A STREAM frame with data whose part `s` has not reset: its piece is in flight there, and in range (D10 (b)).
+pub open spec fn piece_in_flight(s: Streams, f: SpecFrame) -> bool {
+    match f {
+        SpecFrame::Stream { stream_id, offset, data, .. } => data.len() > 0 && !s.send_reset(stream_id) ==> offset
+            + data.len() <= VARINT_MAX && s.tx_flight(stream_id).contains((offset, (offset + data.len()) as u64)),
+        _ => true,
+    }
+}
+
+/// That piece left the flight from `s0` to `s1`.
+pub open spec fn piece_removed(s0: Streams, s1: Streams, f: SpecFrame) -> bool {
+    match f {
+        SpecFrame::Stream { stream_id, offset, data, .. } => data.len() > 0 && !s0.send_reset(stream_id) ==> s1.tx_flight(
+            stream_id,
+        ) == s0.tx_flight(stream_id).remove((offset, (offset + data.len()) as u64)),
+        _ => true,
+    }
+}
+
+/// The stream whose piece frame `f` carries, if it is a STREAM frame with data.
+pub open spec fn piece_stream(f: SpecFrame) -> Option<u64> {
+    match piece_of(f) {
+        Some((Some(id), _)) => Some(id),
+        _ => None,
+    }
+}
+
+/// Every stream other than `j` that `s1` has not reset has `s0`'s flight and reset flag (D10 (b); re-review F2).
+pub open spec fn tx_kept_but(s0: Streams, s1: Streams, j: Option<u64>) -> bool {
+    forall|id: u64|
+        Some(id) != j && !#[trigger] s1.send_reset(id) ==> s1.tx_flight(id) == s0.tx_flight(id) && s1.send_reset(id)
+            == s0.send_reset(id)
+}
+
+#[verifier::spinoff_prover]
+pub proof fn lemma_frame_pieces_push(sf: Seq<SpecFrame>, f: SpecFrame)
+    ensures
+        frame_pieces(sf.push(f)) == frame_pieces(sf).add(ms_of(piece_of(f))),
+{
+    reveal(frame_pieces);
+    assert(sf.push(f).drop_last() =~= sf);
+}
+
+#[verifier::spinoff_prover]
+pub proof fn lemma_frame_pieces_add(a: Seq<SpecFrame>, b: Seq<SpecFrame>)
+    ensures
+        frame_pieces(a + b) == frame_pieces(a).add(frame_pieces(b)),
+    decreases b.len(),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    reveal(frame_pieces);
+    if b.len() == 0 {
+        assert(a + b =~= a);
+        assert(frame_pieces(a).add(frame_pieces(b)) =~= frame_pieces(a));
+    } else {
+        lemma_frame_pieces_add(a, b.drop_last());
+        assert((a + b).drop_last() =~= a + b.drop_last());
+        assert((a + b).last() == b.last());
+        assert(frame_pieces(a + b) =~= frame_pieces(a).add(frame_pieces(b)));
+    }
+}
+
+/// No frame of `sf` has a piece.
+#[verifier::spinoff_prover]
+pub proof fn lemma_frame_pieces_none(sf: Seq<SpecFrame>)
+    requires
+        forall|i: int| 0 <= i < sf.len() ==> piece_of(#[trigger] sf[i]) is None,
+    ensures
+        frame_pieces(sf) == Multiset::<PieceKey>::empty(),
+    decreases sf.len(),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    reveal(frame_pieces);
+    if sf.len() > 0 {
+        let p = sf.drop_last();
+        assert forall|i: int| 0 <= i < p.len() implies piece_of(#[trigger] p[i]) is None by {
+            assert(p[i] == sf[i]);
+        }
+        lemma_frame_pieces_none(p);
+        assert(piece_of(sf[sf.len() - 1]) is None);
+        assert(frame_pieces(sf) =~= Multiset::<PieceKey>::empty());
+    }
+}
+
+/// `f1` is `f0` with `new`'s pieces, all of stream `id`, each fresh and once; none out of range.
+spec fn gained(f0: Set<(u64, u64)>, f1: Set<(u64, u64)>, new: Seq<SpecFrame>, id: u64) -> bool {
+    &&& forall|q: (u64, u64)|
+        q != bad_piece() ==> #[trigger] frame_pieces(new).count((Some(id), q)) + ind(f0, q) == ind(f1, q)
+    &&& forall|k: Option<u64>, q: (u64, u64)| k != Some(id) ==> #[trigger] frame_pieces(new).count((k, q)) == 0
+    &&& forall|k: Option<u64>| #[trigger] frame_pieces(new).count((k, bad_piece())) == 0
+}
+
+#[verifier::spinoff_prover]
+proof fn lemma_gained_empty(f: Set<(u64, u64)>, id: u64)
+    ensures
+        gained(f, f, Seq::empty(), id),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    reveal(frame_pieces);
+}
+
+/// One STREAM frame of stream `id` that `poll_data` returned: its piece, if it has data, joined flight fresh.
+#[verifier::spinoff_prover]
+proof fn lemma_gained_one(f0: Set<(u64, u64)>, f1: Set<(u64, u64)>, g: SpecFrame, id: u64)
+    requires
+        g matches SpecFrame::Stream { stream_id, offset, data, .. } && stream_id == id && offset + data.len()
+            <= VARINT_MAX && (data.len() == 0 ==> f1 == f0) && (data.len() > 0 ==> f1 == f0.insert(
+            (offset, (offset + data.len()) as u64),
+        ) && !f0.contains((offset, (offset + data.len()) as u64))),
+    ensures
+        gained(f0, f1, seq![g], id),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    lemma_frame_pieces_push(Seq::empty(), g);
+    reveal(frame_pieces);
+    assert(seq![g] =~= Seq::<SpecFrame>::empty().push(g));
+    assert(frame_pieces(Seq::<SpecFrame>::empty()) == Multiset::<PieceKey>::empty());
+    if let SpecFrame::Stream { offset, data, .. } = g {
+        if data.len() > 0 {
+            assert(offset < (offset + data.len()) as u64);
+        }
+    }
+}
+
+#[verifier::spinoff_prover]
+proof fn lemma_gained_trans(
+    f0: Set<(u64, u64)>,
+    f1: Set<(u64, u64)>,
+    f2: Set<(u64, u64)>,
+    a: Seq<SpecFrame>,
+    b: Seq<SpecFrame>,
+    id: u64,
+)
+    requires
+        gained(f0, f1, a, id),
+        gained(f1, f2, b, id),
+    ensures
+        gained(f0, f2, a + b, id),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    lemma_frame_pieces_add(a, b);
+    assert forall|q: (u64, u64)| q != bad_piece() implies #[trigger] frame_pieces(a + b).count((Some(id), q)) + ind(
+        f0,
+        q,
+    ) == ind(f2, q) by {
+        assert(frame_pieces(a).count((Some(id), q)) + ind(f0, q) == ind(f1, q));
+        assert(frame_pieces(b).count((Some(id), q)) + ind(f1, q) == ind(f2, q));
+    }
+    assert forall|k: Option<u64>, q: (u64, u64)| k != Some(id) implies #[trigger] frame_pieces(a + b).count((k, q))
+        == 0 by {
+        assert(frame_pieces(a).count((k, q)) == 0 && frame_pieces(b).count((k, q)) == 0);
+    }
+    assert forall|k: Option<u64>| #[trigger] frame_pieces(a + b).count((k, bad_piece())) == 0 by {
+        assert(frame_pieces(a).count((k, bad_piece())) == 0 && frame_pieces(b).count((k, bad_piece())) == 0);
+    }
+}
+
+#[verifier::spinoff_prover]
+proof fn lemma_tx_gained_trans(s0: Streams, s1: Streams, s2: Streams, a: Seq<SpecFrame>, b: Seq<SpecFrame>)
+    requires
+        tx_gained(s0, s1, a),
+        tx_gained(s1, s2, b),
+    ensures
+        tx_gained(s0, s2, a + b),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    lemma_frame_pieces_add(a, b);
+    assert forall|j: u64, q: (u64, u64)| q != bad_piece() implies #[trigger] frame_pieces(a + b).count((Some(j), q))
+        + ind(s0.tx_flight(j), q) == ind(s2.tx_flight(j), q) by {
+        assert(frame_pieces(a).count((Some(j), q)) + ind(s0.tx_flight(j), q) == ind(s1.tx_flight(j), q));
+        assert(frame_pieces(b).count((Some(j), q)) + ind(s1.tx_flight(j), q) == ind(s2.tx_flight(j), q));
+    }
+    assert forall|q: (u64, u64)| #[trigger] frame_pieces(a + b).count((None, q)) == 0 by {
+        assert(frame_pieces(a).count((None, q)) == 0 && frame_pieces(b).count((None, q)) == 0);
+    }
+    assert forall|k: Option<u64>| #[trigger] frame_pieces(a + b).count((k, bad_piece())) == 0 by {
+        assert(frame_pieces(a).count((k, bad_piece())) == 0 && frame_pieces(b).count((k, bad_piece())) == 0);
+    }
+}
+
+/// Entry `i`'s sending part gained `new`'s pieces; every other entry as before.
+#[verifier::spinoff_prover]
+proof fn lemma_tx_gained_at(s1: Streams, s2: Streams, i: int, ne: Entry, new: Seq<SpecFrame>)
+    requires
+        s1.wf(),
+        s2.wf(),
+        0 <= i < s1.entries@.len(),
+        ne.id == s1.entries@[i].id,
+        s2.entries@ == s1.entries@.update(i, ne),
+        s1.entries@[i].send is Some,
+        ne.send is Some,
+        gained(s1.entries@[i].send->0.flight_spec(), ne.send->0.flight_spec(), new, ne.id),
+    ensures
+        tx_gained(s1, s2, new),
+{
+    lemma_part_at(s1, i);
+    lemma_part_at(s2, i);
+    assert(s2.entries@[i] == ne);
+    assert forall|j: u64, q: (u64, u64)| q != bad_piece() implies #[trigger] frame_pieces(new).count((Some(j), q))
+        + ind(s1.tx_flight(j), q) == ind(s2.tx_flight(j), q) by {
+        if j != ne.id {
+            lemma_part_other(s1, s2, i, j);
+            assert(frame_pieces(new).count((Some(j), q)) == 0);
+        }
+    }
+    assert forall|q: (u64, u64)| #[trigger] frame_pieces(new).count((None, q)) == 0 by {
+        assert(None::<u64> != Some(ne.id));
+    }
+}
+
+/// `c` extends `b`, which extends `a`: `c`'s frames past `a` are `b`'s past `a`, then `c`'s past `b`.
+#[verifier::spinoff_prover]
+proof fn lemma_skip_split(a: Seq<Frame>, b: Seq<Frame>, c: Seq<Frame>)
+    requires
+        a.len() <= b.len() <= c.len(),
+        b.subrange(0, a.len() as int) == a,
+        c.subrange(0, b.len() as int) == b,
+    ensures
+        frames_view(c.skip(a.len() as int)) == frames_view(b.skip(a.len() as int)) + frames_view(
+            c.skip(b.len() as int),
+        ),
+        c.subrange(0, a.len() as int) == a,
+{
+    assert forall|k: int| 0 <= k < b.len() implies #[trigger] c[k] == b[k] by {
+        assert(c.subrange(0, b.len() as int)[k] == c[k]);
+    }
+    assert(c.subrange(0, a.len() as int) =~= a);
+    assert(frames_view(c.skip(a.len() as int)) =~= frames_view(b.skip(a.len() as int)) + frames_view(
+        c.skip(b.len() as int),
+    ));
+}
+
+/// `send_op`'s swap at entry `i` (ID `id`): the acked or lost piece left that part's flight; no other changed.
+#[verifier::spinoff_prover]
+proof fn lemma_send_op_flight(s0: Streams, s1: Streams, i: int, e0: Entry, ne: Entry, op: u8, off: u64, len: u64)
+    requires
+        s0.wf(),
+        s1.wf(),
+        0 <= i < s0.entries@.len(),
+        e0 == s0.entries@[i],
+        ne.id == e0.id,
+        s1.entries@ == s0.entries@.update(i, ne),
+        s1.resets == s0.resets,
+        e0.send is None ==> ne.send is None,
+        e0.send matches Some(p0) ==> ne.send matches Some(p1) && ((op == 0 || op == 2) && len > 0 && !is_reset(
+            p0.state(),
+        ) && p0.in_flight(off, len) ==> p1.flight_spec() == p0.flight_spec().remove((off, (off + len) as u64))) && (
+        !((op == 0 || op == 2) && len > 0) ==> p1.flight_spec() == p0.flight_spec()) && p1.reset_spec()
+            == p0.reset_spec(),
+        (op == 0 || op == 2) && len > 0 && !s0.send_reset(e0.id) ==> off + len <= VARINT_MAX && s0.tx_flight(
+            e0.id,
+        ).contains((off, (off + len) as u64)),
+    ensures
+        (op == 0 || op == 2) && len > 0 && !s0.send_reset(e0.id) ==> s1.tx_flight(e0.id) == s0.tx_flight(e0.id).remove(
+            (off, (off + len) as u64),
+        ),
+        tx_kept_but(
+            s0,
+            s1,
+            if (op == 0 || op == 2) && len > 0 {
+                Some(e0.id)
+            } else {
+                None
+            },
+        ),
+{
+    let id = e0.id;
+    lemma_part_at(s0, i);
+    lemma_part_at(s1, i);
+    assert(s1.entries@[i] == ne);
+    assert(entry_ok(e0, s0.rx_bidi, s0.rx_uni));
+    if let Some(p0) = e0.send {
+        p0.lemma_wf();
+        p0.lemma_in_flight(off, len);
+        assert(p0.reset_spec() is Some <==> is_reset(p0.state()));
+    }
+    assert forall|j: u64| j != id implies #[trigger] s1.tx_flight(j) == s0.tx_flight(j) by {
+        lemma_part_other(s0, s1, i, j);
+    }
+}
+
+/// A swap at entry `i`: its part's flight kept unless the part is now reset, every other entry kept.
+#[verifier::spinoff_prover]
+proof fn lemma_swap_flight(s0: Streams, s1: Streams, i: int, ne: Entry)
+    requires
+        s0.wf(),
+        s1.wf(),
+        0 <= i < s0.entries@.len(),
+        ne.id == s0.entries@[i].id,
+        s1.entries@ == s0.entries@.update(i, ne),
+        forall|j: u64| #[trigger] s0.send_reset(j) ==> s1.send_reset(j),
+        forall|j: u64| j != ne.id ==> #[trigger] s1.send_reset(j) == s0.send_reset(j),
+        s1.send_reset(ne.id) || sflight(ne) == sflight(s0.entries@[i]),
+    ensures
+        tx_kept_but(s0, s1, None),
+{
+    lemma_part_at(s0, i);
+    lemma_part_at(s1, i);
+    assert(s1.entries@[i] == ne);
+    assert forall|j: u64| !#[trigger] s1.send_reset(j) implies s1.tx_flight(j) == s0.tx_flight(j) && s1.send_reset(j)
+        == s0.send_reset(j) by {
+        if j != ne.id {
+            lemma_part_other(s0, s1, i, j);
+        }
+    }
+}
+
+/// A pushed entry whose part, if any, has nothing in flight: every flight as before.
+#[verifier::spinoff_prover]
+proof fn lemma_push_flight(s0: Streams, s1: Streams, e: Entry)
+    requires
+        s0.wf(),
+        s1.wf(),
+        s1.entries@ == s0.entries@.push(e),
+        e.send matches Some(p) ==> p.flight_spec() == Set::<(u64, u64)>::empty(),
+    ensures
+        forall|j: u64| #[trigger] s1.tx_flight(j) == s0.tx_flight(j),
+{
+    let n = s0.entries@.len() as int;
+    lemma_part_at(s1, n);
+    assert(s1.entries@[n] == e);
+    assert(!has_id(s0.entries@, e.id)) by {
+        if has_id(s0.entries@, e.id) {
+            let k = choose|k: int| 0 <= k < s0.entries@.len() && (#[trigger] s0.entries@[k]).id == e.id;
+            assert(s1.entries@[k] == s0.entries@[k]);
+        }
+    }
+    assert forall|j: u64| #[trigger] s1.tx_flight(j) == s0.tx_flight(j) by {
+        if j != e.id && has_id(s1.entries@, j) {
+            let k = choose|k: int| 0 <= k < s1.entries@.len() && (#[trigger] s1.entries@[k]).id == j;
+            assert(k < n);
+            assert(s1.entries@[k] == s0.entries@[k]);
+            lemma_part_at(s1, k);
+            lemma_part_at(s0, k);
+        } else if j != e.id && has_id(s0.entries@, j) {
+            let k = choose|k: int| 0 <= k < s0.entries@.len() && (#[trigger] s0.entries@[k]).id == j;
+            assert(s1.entries@[k] == s0.entries@[k]);
+        }
+    }
+}
+
+/// Every flight and reset code as before: `tx_kept_but(.., None)`.
+proof fn lemma_kept_of_flights(s0: Streams, s1: Streams)
+    requires
+        forall|j: u64| #[trigger] s1.tx_flight(j) == s0.tx_flight(j),
+        forall|j: u64| #[trigger] s1.reset_code(j) == s0.reset_code(j),
+    ensures
+        tx_kept_but(s0, s1, None),
+        forall|j: u64| #[trigger] s1.send_reset(j) == s0.send_reset(j),
+{
+    assert forall|j: u64| #[trigger] s1.send_reset(j) == s0.send_reset(j) by {
+        assert(s1.reset_code(j) == s0.reset_code(j));
+    }
+}
+
+/// `gc` removed entry `i`, terminal in both parts: no unreset stream's flight changed (a Data Recvd part's is empty).
+#[verifier::spinoff_prover]
+proof fn lemma_gc_flight(s0: Streams, s1: Streams, i: int)
+    requires
+        s0.wf(),
+        s1.wf(),
+        0 <= i < s0.entries@.len(),
+        s1.entries@ == s0.entries@.remove(i),
+        s1.resets == s0.resets,
+        s0.entries@[i].send matches Some(p) ==> p.state() is DataRecvd || p.state() is ResetRecvd,
+    ensures
+        tx_kept_but(s0, s1, None),
+{
+    let a = s0.entries@;
+    let id = a[i].id;
+    assert forall|j: u64| !#[trigger] s1.send_reset(j) implies s1.tx_flight(j) == s0.tx_flight(j) && s1.send_reset(j)
+        == s0.send_reset(j) by {
+        if j == id {
+            assert(!has_id(s1.entries@, id)) by {
+                if has_id(s1.entries@, id) {
+                    let k = choose|k: int| 0 <= k < s1.entries@.len() && (#[trigger] s1.entries@[k]).id == id;
+                    if k < i {
+                        assert(s1.entries@[k] == a[k]);
+                    } else {
+                        assert(s1.entries@[k] == a[k + 1]);
+                    }
+                }
+            }
+            lemma_part_at(s0, i);
+            assert(entry_ok(a[i], s0.rx_bidi, s0.rx_uni));
+            if let Some(p) = a[i].send {
+                p.lemma_wf();
+                p.lemma_flight_idle();
+            }
+        } else if has_id(s1.entries@, j) {
+            let k = choose|k: int| 0 <= k < s1.entries@.len() && (#[trigger] s1.entries@[k]).id == j;
+            lemma_part_at(s1, k);
+            if k < i {
+                assert(s1.entries@[k] == a[k]);
+                lemma_part_at(s0, k);
+            } else {
+                assert(s1.entries@[k] == a[k + 1]);
+                lemma_part_at(s0, k + 1);
+            }
+        } else if has_id(a, j) {
+            let k = choose|k: int| 0 <= k < a.len() && (#[trigger] a[k]).id == j;
+            assert(k != i);
+            if k < i {
+                assert(s1.entries@[k] == a[k]);
+            } else {
+                assert(s1.entries@[k - 1] == a[k]);
+            }
+        }
+    }
+}
+
+/// Every flight as before, and no piece in `new`.
+#[verifier::spinoff_prover]
+proof fn lemma_tx_gained_same(s0: Streams, s1: Streams, new: Seq<SpecFrame>)
+    requires
+        forall|j: u64| #[trigger] s1.tx_flight(j) == s0.tx_flight(j),
+        frame_pieces(new) == Multiset::<PieceKey>::empty(),
+    ensures
+        tx_gained(s0, s1, new),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    assert forall|j: u64, q: (u64, u64)| q != bad_piece() implies #[trigger] frame_pieces(new).count((Some(j), q))
+        + ind(s0.tx_flight(j), q) == ind(s1.tx_flight(j), q) by {
+        assert(s1.tx_flight(j) == s0.tx_flight(j));
+    }
 }
 
 // ---- Sums over the entries ----
@@ -769,6 +1283,19 @@ impl Streams {
         }
     }
 
+    /// The pieces in flight of stream `id`'s sending part; none without one (D10 (b)).
+    pub closed spec fn tx_flight(&self, id: u64) -> Set<(u64, u64)> {
+        match self.tx_part(id) {
+            Some(p) => p.flight_spec(),
+            None => Set::empty(),
+        }
+    }
+
+    /// Per stream: reset, and its pieces in flight (conn's `pieces_ok` reads only this).
+    pub open spec fn tx_view(&self) -> TxView {
+        |id: u64| (self.send_reset(id), self.tx_flight(id))
+    }
+
     /// Peer stream `id` is open: created and not yet removed, so it has a receiving part.
     pub open spec fn rx_live(&self, id: u64) -> bool {
         self.ids_spec().peer_created(id) && !self.is_removed(id)
@@ -996,6 +1523,7 @@ impl Streams {
             forall|id: u64| #[trigger] r.rx_trace(id) == Seq::<SpecRecvIn>::empty(),
             forall|id: u64| !#[trigger] r.is_removed(id),
             forall|id: u64| !#[trigger] r.send_reset(id),
+            forall|id: u64| #[trigger] r.tx_flight(id) == Set::<(u64, u64)>::empty(),
             r.conn_recv_spec().window_spec() == local.initial_max_data,
             r.tx_held() == 0,
     {
@@ -1164,6 +1692,7 @@ impl Streams {
                 final(self).ids.peer_credit_spec(b) == old(self).ids.peer_credit_spec(b),
             final(self).ids.local_uni_spec() == old(self).ids.local_uni_spec(),
             parts_kept(*old(self), *final(self)),
+            forall|j: u64| #[trigger] final(self).tx_flight(j) == old(self).tx_flight(j),
     {
         let ghost s0 = *self;
         let bidi = x % 4 == 0;
@@ -1180,6 +1709,7 @@ impl Streams {
         proof {
             lemma_open_one(s0, *self, x, e);
             lemma_part_push(s0, *self, e);
+            lemma_push_flight(s0, *self, e);
         }
     }
 
@@ -1202,6 +1732,7 @@ impl Streams {
                 final(self).ids.peer_credit_spec(b) == old(self).ids.peer_credit_spec(b),
             final(self).ids.local_uni_spec() == old(self).ids.local_uni_spec(),
             parts_kept(*old(self), *final(self)),
+            forall|j: u64| #[trigger] final(self).tx_flight(j) == old(self).tx_flight(j),
     {
         let ghost s0 = *self;
         let bidi = id % 4 == 0;
@@ -1225,6 +1756,7 @@ impl Streams {
                 self.ids.local_uni_spec() == s0.ids.local_uni_spec(),
                 peer_id_allowed(id, s0.ids.peer_limit(bidi)),
                 parts_kept(s0, *self),
+                forall|j: u64| #[trigger] self.tx_flight(j) == s0.tx_flight(j),
             decreases id + 4 - x,
         {
             proof {
@@ -1242,6 +1774,9 @@ impl Streams {
                 assert forall|j: u64| #[trigger] s0.tx_part(j) is Some implies self.tx_part(j)
                     == s0.tx_part(j) by {
                     assert(s1.tx_part(j) == s0.tx_part(j));
+                }
+                assert forall|j: u64| #[trigger] self.tx_flight(j) == s0.tx_flight(j) by {
+                    assert(s1.tx_flight(j) == s0.tx_flight(j));
                 }
             }
             x = x + 4;
@@ -1282,6 +1817,7 @@ impl Streams {
             ),
             forall|j: u64| #[trigger]
                 final(self).rx_trace(j) == rx_trace_after(*old(self), f@, r, j),
+            tx_kept_but(*old(self), *final(self), None),
     {
         let ghost s0 = *self;
         let ghost id = self.entries@[i as int].id;
@@ -1319,7 +1855,7 @@ impl Streams {
             assert(self.entries@ == a.update(i as int, ne));
             lemma_counted_monotone(id, s0.rx_window(id), rs0.trace(), frame_recv_in(f@)->0);
         }
-        match res {
+        let r = match res {
             Ok(n) => {
                 proof {
                     lemma_recv_ok(s0, i as int, ne, n);
@@ -1340,7 +1876,12 @@ impl Streams {
                 }
                 Err(c)
             },
+        };
+        proof {
+            assert(ne.send == e0.send);
+            lemma_swap_flight(s0, *self, i as int, ne);
         }
+        r
     }
 
     /// STOP_SENDING or MAX_STREAM_DATA `f` to entry `i`'s sending part.
@@ -1385,6 +1926,7 @@ impl Streams {
                     _ => true,
                 }
             }),
+            tx_kept_but(*old(self), *final(self), None),
     {
         let ghost s0 = *self;
         let ghost id = self.entries@[i as int].id;
@@ -1442,6 +1984,7 @@ impl Streams {
             } else {
                 assert(event_views(ev@) =~= event_views(ev0).push(ev@.last()@));
             }
+            lemma_swap_flight(s0, *self, i as int, ne);
         }
     }
 
@@ -1476,6 +2019,7 @@ impl Streams {
                     final(self).peer_closed(b) == old(self).peer_closed(b) + 1 && (id % 4 == 0)
                         == b && final(self).is_removed(id))
             }),
+            tx_kept_but(*old(self), *final(self), None),
     {
         let ghost s0 = *self;
         let ghost a = self.entries@;
@@ -1516,6 +2060,7 @@ impl Streams {
             }
             proof {
                 lemma_gc(s0, *self, i as int, e);
+                lemma_gc_flight(s0, *self, i as int);
             }
         }
     }
@@ -1552,6 +2097,7 @@ impl Streams {
             self.failed = true;
             proof {
                 assert(equiv(s0, *self));
+                assert forall|j: u64| #[trigger] self.tx_flight(j) == s0.tx_flight(j) by {}
                 lemma_post_refl(s0, f@, event_views(ev@), Err(c));
                 lemma_post_after(s0, s0, *self, f@, event_views(ev@), event_views(ev@), Err(c));
             }
@@ -1568,6 +2114,7 @@ impl Streams {
             self.ids.lemma_wf();
             assert(equiv(s0, s1));
             assert(parts_kept(s0, s1));
+            assert forall|j: u64| #[trigger] s1.tx_flight(j) == s0.tx_flight(j) by {}
         }
         let r = self.deliver(f, id, ev);
         let ghost s2 = *self;
@@ -1577,6 +2124,7 @@ impl Streams {
         proof {
             lemma_post_before(s0, s1, s2, f@, event_views(old(ev)@), event_views(ev@), r);
             assert(equiv(s2, *self));
+            assert forall|j: u64| #[trigger] self.tx_flight(j) == s2.tx_flight(j) by {}
             lemma_post_after(s0, s2, *self, f@, event_views(old(ev)@), event_views(ev@), r);
         }
         r
@@ -1626,6 +2174,7 @@ impl Streams {
     }
 
     /// `deliver` to entry `i`, then `gc`.
+    #[verifier::spinoff_prover]
     fn deliver_at(&mut self, i: usize, f: &Frame, ev: &mut Vec<StreamEvent>) -> (r: Result<(), u64>)
         requires
             old(self).wf(),
@@ -1921,11 +2470,17 @@ proof fn lemma_post_before(
     requires
         equiv(s0, s1),
         parts_kept(s0, s1),
+        forall|j: u64| #[trigger] s1.tx_flight(j) == s0.tx_flight(j),
         post_rest(s1, s2, f, ev0, ev1, r),
     ensures
         post_rest(s0, s2, f, ev0, ev1, r),
         rx_outcome(s1, f) == rx_outcome(s0, f),
 {
+    assert forall|j: u64| !#[trigger] s2.send_reset(j) implies s2.tx_flight(j) == s0.tx_flight(j) && s2.send_reset(j)
+        == s0.send_reset(j) by {
+        assert(s1.send_reset(j) == s0.send_reset(j));
+        assert(s1.tx_flight(j) == s0.tx_flight(j));
+    }
     if let SpecFrame::StopSending { stream_id, .. } = f {
         if s0.tx_part(stream_id) is Some {
             assert(s1.tx_part(stream_id) == s0.tx_part(stream_id));
@@ -1977,10 +2532,16 @@ proof fn lemma_post_after(
 )
     requires
         equiv(s1, s2),
+        forall|j: u64| #[trigger] s2.tx_flight(j) == s1.tx_flight(j),
         post_rest(s0, s1, f, ev0, ev1, r),
     ensures
         post_rest(s0, s2, f, ev0, ev1, r),
 {
+    assert forall|j: u64| !#[trigger] s2.send_reset(j) implies s2.tx_flight(j) == s0.tx_flight(j) && s2.send_reset(j)
+        == s0.send_reset(j) by {
+        assert(s1.send_reset(j) == s2.send_reset(j));
+        assert(s2.tx_flight(j) == s1.tx_flight(j));
+    }
     assert(frame_events(s0, s1, f) == frame_events(s0, s2, f));
     assert forall|j: u64| #[trigger] s2.rx_trace(j) == rx_trace_after(s0, f, r, j) by {
         assert(s1.rx_trace(j) == rx_trace_after(s0, f, r, j));
@@ -2035,9 +2596,14 @@ proof fn lemma_post_gc(
         forall|b: bool| #[trigger]
             s2.peer_closed(b) == s1.peer_closed(b) || (s2.peer_closed(b) == s1.peer_closed(b) + 1
                 && (id % 4 == 0) == b && s2.is_removed(id)),
+        tx_kept_but(s1, s2, None),
     ensures
         post_rest(s0, s2, f, ev0, ev1, r),
 {
+    assert forall|j: u64| !#[trigger] s2.send_reset(j) implies s2.tx_flight(j) == s0.tx_flight(j) && s2.send_reset(j)
+        == s0.send_reset(j) by {
+        assert(s1.send_reset(j) == s2.send_reset(j));
+    }
     assert(frame_events(s0, s1, f) == frame_events(s0, s2, f));
     assert forall|j: u64| #[trigger] s2.rx_trace(j) == rx_trace_after(s0, f, r, j) by {
         assert(s1.rx_trace(j) == rx_trace_after(s0, f, r, j));
@@ -2926,9 +3492,12 @@ fn emit(
         out_ok(s0, pre, budget, old(out)@, *old(room)),
         out_tx(cur, pre.len() as int, old(out)@),
         tx_inv(cur, f@),
+        piece_of(f@) is None,
+        no_piece(old(out)@, pre.len() as int),
     ensures
         out_ok(s0, pre, budget, final(out)@, *final(room)),
         out_tx(cur, pre.len() as int, final(out)@),
+        no_piece(final(out)@, pre.len() as int),
 {
     // ponytail: double serialization for control frames; compute lengths with varint_len if it shows in profiles.
     let mut b: Vec<u8> = Vec::new();
@@ -3066,12 +3635,16 @@ fn poll_stream(
         final(out)@.len() >= old(out)@.len(),
         final(out)@.subrange(0, old(out)@.len() as int) == old(out)@,
         streamed(final(out)@, old(out)@.len() as int, id, final(p).sent_end()),
+        gained(old(p).flight_spec(), final(p).flight_spec(), frames_view(final(out)@.skip(old(out)@.len() as int)), id),
 {
+    hide(out_ok);
     let ghost p0 = *p;
     let ghost c0 = *cs;
     let ghost o0 = out@;
     proof {
         assert(out@.subrange(0, o0.len() as int) =~= o0);
+        assert(frames_view(o0.skip(o0.len() as int)) =~= Seq::<SpecFrame>::empty());
+        lemma_gained_empty(p0.flight_spec(), id);
     }
     loop
         invariant
@@ -3091,6 +3664,7 @@ fn poll_stream(
             out@.len() >= o0.len(),
             out@.subrange(0, o0.len() as int) == o0,
             streamed(out@, o0.len() as int, id, p.sent_end()),
+            gained(p0.flight_spec(), p.flight_spec(), frames_view(out@.skip(o0.len() as int)), id),
         decreases *room,
     {
         // `next_off` Some does not mean `poll_data` sends: loop on what `poll_data` returns.
@@ -3110,41 +3684,109 @@ fn poll_stream(
             break;
         }
         let best = best_fit(*room, hdr, p.want());
-        proof {
-            cs.lemma_wf();
-        }
         let ghost ps = p.sent_end();
-        match p.poll_data(best, cs.available()) {
-            None => break,
-            Some(c) => {
-                let ghost cv = c@;
-                proof {
-                    p.lemma_wf();
-                    lemma_stream_frame_len(id, cv.off, cv.data, cv.fin);
-                    lemma_vlen_mono(cv.data.len() as u64, best);
-                }
-                //= https://www.rfc-editor.org/rfc/rfc9000#section-19.9
-                //# The sum of
-                //# the final sizes on all streams -- including streams in terminal
-                //# states -- MUST NOT exceed the value advertised by a receiver.
-                cs.consume(c.new_bytes);
-                let n = c.data.len();
-                let len = hdr + varint_len(n as u64) + n;
-                let f = Frame::Stream { stream_id: id, offset: c.off, data: c.data, fin: c.fin };
-                proof {
-                    assert(f@ == SpecFrame::Stream {
-                        stream_id: id,
-                        offset: cv.off,
-                        data: cv.data,
-                        fin: cv.fin,
-                    });
-                    lemma_out_push(s0, pre, budget, out@, *room, f, (*room - len) as usize);
-                    lemma_streamed_push(out@, o0, id, ps, p.sent_end(), f);
-                }
-                *room = *room - len;
-                out.push(f);
-            },
+        let ghost ob = out@;
+        let ghost pf = p.flight_spec();
+        if !poll_chunk(p, id, off, hdr, best, cs, room, out, Ghost(s0), Ghost(pre), Ghost(budget)) {
+            break;
         }
+        proof {
+            lemma_streamed_push(ob, o0, id, ps, p.sent_end(), out@.last());
+            assert(ob.push(out@.last()) =~= out@);
+            assert(frames_view(out@.skip(o0.len() as int)) =~= frames_view(ob.skip(o0.len() as int)) + seq![
+                out@.last()@,
+            ]);
+            lemma_gained_trans(p0.flight_spec(), pf, p.flight_spec(), frames_view(ob.skip(o0.len() as int)), seq![
+                out@.last()@,
+            ], id);
+        }
+    }
+}
+
+/// One `poll_data` of `p` at `off`, sized `best`, appended to `out` as a STREAM frame of stream `id` (split from
+/// `poll_stream` for the rlimit). `false`: nothing sent, nothing changed.
+#[verifier::spinoff_prover]
+fn poll_chunk(
+    p: &mut SendStream,
+    id: u64,
+    off: u64,
+    hdr: usize,
+    best: u64,
+    cs: &mut SendCredit,
+    room: &mut usize,
+    out: &mut Vec<Frame>,
+    Ghost(s0): Ghost<Streams>,
+    Ghost(pre): Ghost<Seq<Frame>>,
+    Ghost(budget): Ghost<nat>,
+) -> (sent: bool)
+    requires
+        old(p).wf(),
+        old(cs).wf(),
+        id <= VARINT_MAX,
+        match s0.tx_part(id) {
+            Some(q) => !no_data(q.state()),
+            None => false,
+        },
+        out_ok(s0, pre, budget, old(out)@, *old(room)),
+        old(p).next_off() == Some(off),
+        hdr == 1 + rfc_varint_min_len(id) + if off > 0 {
+            rfc_varint_min_len(off)
+        } else {
+            0
+        },
+        best <= VARINT_MAX,
+        hdr + rfc_varint_min_len(best) + best <= *old(room),
+    ensures
+        final(p).wf(),
+        final(cs).wf(),
+        final(p).reset_spec() == old(p).reset_spec(),
+        final(cs).max() == old(cs).max(),
+        final(p).sent_end() - old(p).sent_end() == final(cs).used() - old(cs).used(),
+        final(p).sent_end() >= old(p).sent_end(),
+        final(p).held_spec() <= old(p).held_spec(),
+        out_ok(s0, pre, budget, final(out)@, *final(room)),
+        !sent ==> final(out)@ == old(out)@ && *final(p) == *old(p),
+        sent ==> *final(room) < *old(room) && final(out)@.len() == old(out)@.len() + 1 && final(out)@.drop_last()
+            == old(out)@ && (final(out)@.last()@ matches SpecFrame::Stream { stream_id, offset, data, .. }
+            && stream_id == id && offset + data.len() <= final(p).sent_end()),
+        sent ==> gained(old(p).flight_spec(), final(p).flight_spec(), seq![final(out)@.last()@], id),
+{
+    hide(out_ok);
+    proof {
+        cs.lemma_wf();
+    }
+    let ghost p0 = *p;
+    match p.poll_data(best, cs.available()) {
+        None => false,
+        Some(c) => {
+            let ghost cv = c@;
+            proof {
+                p.lemma_wf();
+                lemma_stream_frame_len(id, cv.off, cv.data, cv.fin);
+                lemma_vlen_mono(cv.data.len() as u64, best);
+            }
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-19.9
+            //# The sum of
+            //# the final sizes on all streams -- including streams in terminal
+            //# states -- MUST NOT exceed the value advertised by a receiver.
+            cs.consume(c.new_bytes);
+            let n = c.data.len();
+            let len = hdr + varint_len(n as u64) + n;
+            let f = Frame::Stream { stream_id: id, offset: c.off, data: c.data, fin: c.fin };
+            proof {
+                assert(f@ == SpecFrame::Stream { stream_id: id, offset: cv.off, data: cv.data, fin: cv.fin });
+                lemma_out_push(s0, pre, budget, out@, *room, f, (*room - len) as usize);
+            }
+            *room = *room - len;
+            let ghost ob = out@;
+            out.push(f);
+            proof {
+                assert(out@.drop_last() =~= ob);
+                p0.lemma_wf();
+                lemma_gained_one(p0.flight_spec(), p.flight_spec(), out@.last()@, id);
+            }
+            true
+        },
     }
 }
 
@@ -3178,10 +3820,62 @@ spec fn kept(s0: Streams, s: Streams) -> bool {
         ).stopped && s.rx_spec(j).events == s0.rx_spec(j).events
 }
 
-/// Every sending part is in the state it had at the start.
+/// The pieces in flight of an entry's sending part.
+spec fn sflight(e: Entry) -> Option<Set<(u64, u64)>> {
+    match e.send {
+        Some(p) => Some(p.flight_spec()),
+        None => None,
+    }
+}
+
+/// Every sending part is in the state it had at the start, with the same pieces in flight.
 spec fn sends_same(s0: Streams, s: Streams) -> bool {
-    forall|k: int|
+    &&& forall|k: int|
         0 <= k < s.entries@.len() ==> sstate(#[trigger] s.entries@[k]) == sstate(s0.entries@[k])
+    &&& forall|k: int|
+        0 <= k < s.entries@.len() ==> sflight(#[trigger] s.entries@[k]) == sflight(s0.entries@[k])
+}
+
+/// No frame of `out` from `n` on has a piece: the control frames (D10 (b)).
+spec fn no_piece(out: Seq<Frame>, n: int) -> bool {
+    forall|k: int| n <= k < out.len() ==> piece_of(#[trigger] out[k]@) is None
+}
+
+#[verifier::spinoff_prover]
+proof fn lemma_no_piece(out: Seq<Frame>, n: int)
+    requires
+        0 <= n <= out.len(),
+        no_piece(out, n),
+    ensures
+        frame_pieces(frames_view(out.skip(n))) == Multiset::<PieceKey>::empty(),
+{
+    let v = frames_view(out.skip(n));
+    assert forall|i: int| 0 <= i < v.len() implies piece_of(#[trigger] v[i]) is None by {
+        assert(v[i] == out[n + i]@);
+    }
+    lemma_frame_pieces_none(v);
+}
+
+/// `sends_same` with the same IDs at each index: every stream's flight as at the start.
+#[verifier::spinoff_prover]
+proof fn lemma_flights_same(s0: Streams, s: Streams)
+    requires
+        kept(s0, s),
+        sends_same(s0, s),
+    ensures
+        forall|j: u64| #[trigger] s.tx_flight(j) == s0.tx_flight(j),
+{
+    assert forall|j: u64| #[trigger] s.tx_flight(j) == s0.tx_flight(j) by {
+        if has_id(s.entries@, j) {
+            let k = choose|k: int| 0 <= k < s.entries@.len() && (#[trigger] s.entries@[k]).id == j;
+            lemma_part_at(s, k);
+            lemma_part_at(s0, k);
+            assert(sflight(s.entries@[k]) == sflight(s0.entries@[k]));
+        } else if has_id(s0.entries@, j) {
+            let k = choose|k: int| 0 <= k < s0.entries@.len() && (#[trigger] s0.entries@[k]).id == j;
+            assert(s.entries@[k].id == j);
+        }
+    }
 }
 
 /// A receiving part's spec after at most one more Credit or Stop input `i`: the same but
@@ -3303,7 +3997,8 @@ proof fn lemma_swap_kept(s0: Streams, s1: Streams, s2: Streams, i: int, ne: Entr
         s2.tx_held() <= s1.tx_held(),
     ensures
         kept(s0, s2),
-        sends_same(s0, s1) && sstate(ne) == sstate(s1.entries@[i]) ==> sends_same(s0, s2),
+        sends_same(s0, s1) && sstate(ne) == sstate(s1.entries@[i]) && sflight(ne) == sflight(s1.entries@[i])
+            ==> sends_same(s0, s2),
 {
     assert forall|k: int| 0 <= k < s2.entries@.len() implies (#[trigger] s2.entries@[k]).id
         == s0.entries@[k].id by {
@@ -3325,9 +4020,15 @@ proof fn lemma_swap_kept(s0: Streams, s1: Streams, s2: Streams, i: int, ne: Entr
             assert(s1.rx_spec(j) == s1.entries@[i].recv->0.rfc());
         }
     }
-    if sends_same(s0, s1) && sstate(ne) == sstate(s1.entries@[i]) {
+    if sends_same(s0, s1) && sstate(ne) == sstate(s1.entries@[i]) && sflight(ne) == sflight(s1.entries@[i]) {
         assert forall|k: int| 0 <= k < s2.entries@.len() implies sstate(#[trigger] s2.entries@[k])
             == sstate(s0.entries@[k]) by {
+            if k != i {
+                assert(s2.entries@[k] == s1.entries@[k]);
+            }
+        }
+        assert forall|k: int| 0 <= k < s2.entries@.len() implies sflight(#[trigger] s2.entries@[k])
+            == sflight(s0.entries@[k]) by {
             if k != i {
                 assert(s2.entries@[k] == s1.entries@[k]);
             }
@@ -3498,15 +4199,23 @@ impl Streams {
             forall|j: u64| #[trigger] final(self).reset_code(j) == old(self).reset_code(j),
             forall|j: u64| #[trigger] final(self).rx_trace(j) == old(self).rx_trace(j),
             forall|j: u64| #[trigger] final(self).is_removed(j) == old(self).is_removed(j),
+            // D10 (b): no flight changes, a new part's included (re-review F2, F3).
+            forall|j: u64| #[trigger] final(self).tx_flight(j) == old(self).tx_flight(j),
+            tx_kept_but(*old(self), *final(self), None),
     {
         // Before any swap, so a refusal changes nothing.
         if data.len() as u64 > self.send_room(id) {
             return Err(());
         }
-        match self.find(id) {
+        let ghost s0 = *self;
+        let r = match self.find(id) {
             Some(i) => self.write_at(i, data, fin),
             None => self.write_new(id, data, fin),
+        };
+        proof {
+            lemma_kept_of_flights(s0, *self);
         }
+        r
     }
 
     fn write_at(&mut self, i: usize, data: &[u8], fin: bool) -> (r: Result<(), ()>)
@@ -3535,6 +4244,7 @@ impl Streams {
                 &&& forall|j: u64| #[trigger] final(self).reset_code(j) == old(self).reset_code(j)
                 &&& forall|j: u64| #[trigger] final(self).rx_trace(j) == old(self).rx_trace(j)
                 &&& forall|j: u64| #[trigger] final(self).is_removed(j) == old(self).is_removed(j)
+                &&& forall|j: u64| #[trigger] final(self).tx_flight(j) == old(self).tx_flight(j)
             }),
     {
         let ghost s0 = *self;
@@ -3576,6 +4286,11 @@ impl Streams {
             lemma_swap(s0, *self, i as int, ne);
             lemma_part_at(*self, i as int);
             assert forall|j: u64| #[trigger] self.rx_trace(j) == s0.rx_trace(j) by {}
+            assert forall|j: u64| #[trigger] self.tx_flight(j) == s0.tx_flight(j) by {
+                if j != id {
+                    lemma_part_other(s0, *self, i as int, j);
+                }
+            }
         }
         Ok(())
     }
@@ -3600,6 +4315,7 @@ impl Streams {
             forall|j: u64| #[trigger] final(self).reset_code(j) == old(self).reset_code(j),
             forall|j: u64| #[trigger] final(self).rx_trace(j) == old(self).rx_trace(j),
             forall|j: u64| #[trigger] final(self).is_removed(j) == old(self).is_removed(j),
+            forall|j: u64| #[trigger] final(self).tx_flight(j) == old(self).tx_flight(j),
     {
         let ghost s0 = *self;
         proof {
@@ -3624,6 +4340,18 @@ impl Streams {
             lemma_push_local(s0, *self, e);
             lemma_part_at(*self, s0.entries@.len() as int);
             assert(self.entries@[s0.entries@.len() as int] == e);
+            assert forall|j: u64| #[trigger] self.tx_flight(j) == s0.tx_flight(j) by {
+                if j != id && has_id(self.entries@, j) {
+                    let k = choose|k: int| 0 <= k < self.entries@.len() && (#[trigger] self.entries@[k]).id == j;
+                    assert(k < s0.entries@.len());
+                    assert(self.entries@[k] == s0.entries@[k]);
+                    lemma_part_at(*self, k);
+                    lemma_part_at(s0, k);
+                } else if j != id && has_id(s0.entries@, j) {
+                    let k = choose|k: int| 0 <= k < s0.entries@.len() && (#[trigger] s0.entries@[k]).id == j;
+                    assert(self.entries@[k] == s0.entries@[k]);
+                }
+            }
         }
         Ok(())
     }
@@ -3656,6 +4384,9 @@ impl Streams {
                 j != id ==> #[trigger] final(self).reset_code(j) == old(self).reset_code(j),
             forall|j: u64| #[trigger] final(self).rx_trace(j) == old(self).rx_trace(j),
             forall|j: u64| #[trigger] final(self).is_removed(j) == old(self).is_removed(j),
+            // D10 (b): only `id` may change, and then it is reset (its flight emptied).
+            tx_kept_but(*old(self), *final(self), None),
+            forall|j: u64| #[trigger] old(self).send_reset(j) ==> final(self).send_reset(j),
     {
         let ghost s0 = *self;
         if let Some(i) = self.find(id) {
@@ -3688,6 +4419,10 @@ impl Streams {
                     }
                     lemma_swap(s0, *self, i as int, ne);
                     assert forall|j: u64| #[trigger] self.rx_trace(j) == s0.rx_trace(j) by {}
+                    assert forall|j: u64| j != id implies #[trigger] self.tx_flight(j) == s0.tx_flight(j) by {
+                        lemma_part_other(s0, *self, i as int, j);
+                    }
+                    assert(self.send_reset(id));
                 }
             }
         }
@@ -3711,6 +4446,8 @@ impl Streams {
                 None => final(self).tx_part(id) is None,
             },
             forall|j: u64| j != id ==> #[trigger] final(self).tx_part(j) == old(self).tx_part(j),
+            forall|j: u64| #[trigger] final(self).tx_flight(j) == old(self).tx_flight(j),
+            tx_kept_but(*old(self), *final(self), None),
             forall|j: u64| #[trigger] final(self).send_room_spec(j) == old(self).send_room_spec(j),
             forall|j: u64| #[trigger] final(self).reset_code(j) == old(self).reset_code(j),
             forall|j: u64| #[trigger] final(self).rx_trace(j) == old(self).rx_trace(j),
@@ -3745,7 +4482,15 @@ impl Streams {
                         lemma_part_other(s0, *self, i as int, j);
                     }
                 }
+                assert forall|j: u64| #[trigger] self.tx_flight(j) == s0.tx_flight(j) by {
+                    if j != id {
+                        lemma_part_other(s0, *self, i as int, j);
+                    }
+                }
             }
+        }
+        proof {
+            lemma_kept_of_flights(s0, *self);
         }
     }
 
@@ -3770,6 +4515,8 @@ impl Streams {
                 ==> final(self).rx_spec(id).stopped,
             forall|j: u64| #[trigger] final(self).reset_code(j) == old(self).reset_code(j),
             forall|j: u64| #[trigger] final(self).is_removed(j) == old(self).is_removed(j),
+            forall|j: u64| #[trigger] final(self).tx_flight(j) == old(self).tx_flight(j),
+            tx_kept_but(*old(self), *final(self), None),
     {
         let ghost s0 = *self;
         proof {
@@ -3799,8 +4546,18 @@ impl Streams {
                 proof {
                     assert(self.entries@ == s0.entries@.update(i as int, ne));
                     lemma_swap(s0, *self, i as int, ne);
+                    lemma_part_at(s0, i as int);
+                    lemma_part_at(*self, i as int);
+                    assert forall|j: u64| #[trigger] self.tx_flight(j) == s0.tx_flight(j) by {
+                        if j != id {
+                            lemma_part_other(s0, *self, i as int, j);
+                        }
+                    }
                 }
             }
+        }
+        proof {
+            lemma_kept_of_flights(s0, *self);
         }
     }
 }
@@ -3836,6 +4593,9 @@ impl Streams {
             forall|j: u64| #[trigger] final(self).reset_code(j) == old(self).reset_code(j),
             forall|j: u64| #[trigger] final(self).is_removed(j) == old(self).is_removed(j),
             forall|j: u64| #[trigger] final(self).rx_spec(j).events == old(self).rx_spec(j).events,
+            // D10 (b): each stream's flight gains exactly the pieces of the STREAM frames returned for it.
+            tx_gained(*old(self), *final(self), frames_view(final(out)@.skip(old(out)@.len() as int))),
+            forall|j: u64| #[trigger] final(self).send_reset(j) == old(self).send_reset(j),
     {
         let ghost s0 = *self;
         let ghost pre = out@;
@@ -3845,9 +4605,24 @@ impl Streams {
             lemma_out_init(s0, pre, b, room);
         }
         self.poll_control(&mut room, out, Ghost(s0), Ghost(pre), Ghost(b));
+        let ghost sm = *self;
+        let ghost om = out@;
+        proof {
+            lemma_flights_same(s0, sm);
+            assert(pre.len() <= om.len() && om.subrange(0, pre.len() as int) == pre);
+            lemma_no_piece(om, pre.len() as int);
+            lemma_tx_gained_same(s0, sm, frames_view(om.skip(pre.len() as int)));
+        }
         self.poll_streams(&mut room, out, Ghost(s0), Ghost(pre), Ghost(b));
         proof {
             lemma_poll_post(s0, *self, pre, b, out@, room);
+            lemma_skip_split(pre, om, out@);
+            lemma_tx_gained_trans(s0, sm, *self, frames_view(om.skip(pre.len() as int)), frames_view(
+                out@.skip(om.len() as int),
+            ));
+            assert forall|j: u64| #[trigger] self.send_reset(j) == s0.send_reset(j) by {
+                assert(self.reset_code(j) == s0.reset_code(j));
+            }
         }
     }
 
@@ -3865,11 +4640,13 @@ impl Streams {
             sends_same(s0, *old(self)),
             out_ok(s0, pre, budget, old(out)@, *old(room)),
             out_tx(*old(self), pre.len() as int, old(out)@),
+            no_piece(old(out)@, pre.len() as int),
         ensures
             kept(s0, *final(self)),
             sends_same(s0, *final(self)),
             out_ok(s0, pre, budget, final(out)@, *final(room)),
             out_tx(*final(self), pre.len() as int, final(out)@),
+            no_piece(final(out)@, pre.len() as int),
     {
         self.poll_resets(room, out, Ghost(s0), Ghost(pre), Ghost(budget));
         self.poll_stops(room, out, Ghost(s0), Ghost(pre), Ghost(budget));
@@ -3893,11 +4670,13 @@ impl Streams {
             sends_same(s0, *old(self)),
             out_ok(s0, pre, budget, old(out)@, *old(room)),
             out_tx(*old(self), pre.len() as int, old(out)@),
+            no_piece(old(out)@, pre.len() as int),
         ensures
             kept(s0, *final(self)),
             sends_same(s0, *final(self)),
             out_ok(s0, pre, budget, final(out)@, *final(room)),
             out_tx(*final(self), pre.len() as int, final(out)@),
+            no_piece(final(out)@, pre.len() as int),
     {
         let mut i: usize = 0;
         while i < self.entries.len()
@@ -3906,6 +4685,7 @@ impl Streams {
                 sends_same(s0, *self),
                 out_ok(s0, pre, budget, out@, *room),
                 out_tx(*self, pre.len() as int, out@),
+                no_piece(out@, pre.len() as int),
             decreases self.entries@.len() - i,
         {
             proof {
@@ -3991,11 +4771,13 @@ impl Streams {
             sends_same(s0, *old(self)),
             out_ok(s0, pre, budget, old(out)@, *old(room)),
             out_tx(*old(self), pre.len() as int, old(out)@),
+            no_piece(old(out)@, pre.len() as int),
         ensures
             kept(s0, *final(self)),
             sends_same(s0, *final(self)),
             out_ok(s0, pre, budget, final(out)@, *final(room)),
             out_tx(*final(self), pre.len() as int, final(out)@),
+            no_piece(final(out)@, pre.len() as int),
     {
         let mut i: usize = 0;
         while i < self.entries.len()
@@ -4004,6 +4786,7 @@ impl Streams {
                 sends_same(s0, *self),
                 out_ok(s0, pre, budget, out@, *room),
                 out_tx(*self, pre.len() as int, out@),
+                no_piece(out@, pre.len() as int),
             decreases self.entries@.len() - i,
         {
             proof {
@@ -4127,11 +4910,13 @@ impl Streams {
             sends_same(s0, *old(self)),
             out_ok(s0, pre, budget, old(out)@, *old(room)),
             out_tx(*old(self), pre.len() as int, old(out)@),
+            no_piece(old(out)@, pre.len() as int),
         ensures
             kept(s0, *final(self)),
             sends_same(s0, *final(self)),
             out_ok(s0, pre, budget, final(out)@, *final(room)),
             out_tx(*final(self), pre.len() as int, final(out)@),
+            no_piece(final(out)@, pre.len() as int),
     {
         if let Some(v) = self.conn_recv.pending() {
             proof {
@@ -4168,11 +4953,13 @@ impl Streams {
             sends_same(s0, *old(self)),
             out_ok(s0, pre, budget, old(out)@, *old(room)),
             out_tx(*old(self), pre.len() as int, old(out)@),
+            no_piece(old(out)@, pre.len() as int),
         ensures
             kept(s0, *final(self)),
             sends_same(s0, *final(self)),
             out_ok(s0, pre, budget, final(out)@, *final(room)),
             out_tx(*final(self), pre.len() as int, final(out)@),
+            no_piece(final(out)@, pre.len() as int),
     {
         let mut i: usize = 0;
         while i < self.entries.len()
@@ -4181,6 +4968,7 @@ impl Streams {
                 sends_same(s0, *self),
                 out_ok(s0, pre, budget, out@, *room),
                 out_tx(*self, pre.len() as int, out@),
+                no_piece(out@, pre.len() as int),
             decreases self.entries@.len() - i,
         {
             let id = self.entries[i].id;
@@ -4224,11 +5012,13 @@ impl Streams {
             sends_same(s0, *old(self)),
             out_ok(s0, pre, budget, old(out)@, *old(room)),
             out_tx(*old(self), pre.len() as int, old(out)@),
+            no_piece(old(out)@, pre.len() as int),
         ensures
             kept(s0, *final(self)),
             sends_same(s0, *final(self)),
             out_ok(s0, pre, budget, final(out)@, *final(room)),
             out_tx(*final(self), pre.len() as int, final(out)@),
+            no_piece(final(out)@, pre.len() as int),
     {
         if let Some(v) = self.ids.pending_max_streams(bidi) {
             let f = Frame::MaxStreams { bidi, max: v };
@@ -4260,10 +5050,25 @@ impl Streams {
             kept(s0, *final(self)),
             out_ok(s0, pre, budget, final(out)@, *final(room)),
             out_tx(*final(self), pre.len() as int, final(out)@),
+            tx_gained(*old(self), *final(self), frames_view(final(out)@.skip(old(out)@.len() as int))),
+            final(out)@.len() >= old(out)@.len(),
+            final(out)@.subrange(0, old(out)@.len() as int) == old(out)@,
     {
+        hide(out_ok);
+        let ghost sa = *self;
+        let ghost oa = out@;
+        proof {
+            assert(frames_view(oa.skip(oa.len() as int)) =~= Seq::<SpecFrame>::empty());
+            lemma_frame_pieces_none(Seq::<SpecFrame>::empty());
+            lemma_tx_gained_same(sa, sa, Seq::<SpecFrame>::empty());
+            assert(oa.subrange(0, oa.len() as int) =~= oa);
+        }
         let mut i: usize = 0;
         while i < self.entries.len()
             invariant
+                tx_gained(sa, *self, frames_view(out@.skip(oa.len() as int))),
+                out@.len() >= oa.len(),
+                out@.subrange(0, oa.len() as int) == oa,
                 kept(s0, *self),
                 forall|k: int|
                     i <= k < self.entries@.len() ==> sstate(#[trigger] self.entries@[k]) == sstate(
@@ -4285,7 +5090,15 @@ impl Streams {
                 None => false,
             };
             if open {
+                let ghost sb = *self;
+                let ghost ob = out@;
                 self.poll_stream_at(i, room, out, Ghost(s0), Ghost(pre), Ghost(budget));
+                proof {
+                    lemma_skip_split(oa, ob, out@);
+                    lemma_tx_gained_trans(sa, sb, *self, frames_view(ob.skip(oa.len() as int)), frames_view(
+                        out@.skip(ob.len() as int),
+                    ));
+                }
             }
             i += 1;
         }
@@ -4314,9 +5127,16 @@ impl Streams {
                     == old(self).entries@[k],
             out_ok(s0, pre, budget, final(out)@, *final(room)),
             out_tx(*final(self), pre.len() as int, final(out)@),
+            tx_gained(*old(self), *final(self), frames_view(final(out)@.skip(old(out)@.len() as int))),
+            final(out)@.len() >= old(out)@.len(),
+            final(out)@.subrange(0, old(out)@.len() as int) == old(out)@,
     {
+        hide(out_ok);
         let ghost s1 = *self;
         proof {
+            assert(pre.len() <= out@.len()) by {
+                reveal(out_ok);
+            }
             lemma_id_bound(s1, i as int);
             lemma_part_at(s0, i as int);
             assert(s0.entries@[i as int].id == s1.entries@[i as int].id);
@@ -4325,6 +5145,7 @@ impl Streams {
         let ghost o0 = out@;
         let mut e = Entry { id: 0, recv: None, send: None };
         self.entries.set_and_swap(i, &mut e);
+        let ghost e0 = e;
         proof {
             assert(entry_ok(e, s1.rx_bidi, s1.rx_uni));
         }
@@ -4346,6 +5167,7 @@ impl Streams {
             lemma_tx_grows(s1, *self, i as int, pre.len() as int, o0);
             lemma_part_at(*self, i as int);
             lemma_out_tx_stream(*self, pre.len() as int, o0, out@, id);
+            lemma_tx_gained_at(s1, *self, i as int, ne, frames_view(out@.skip(o0.len() as int)));
         }
     }
 
@@ -4355,6 +5177,8 @@ impl Streams {
         requires
             old(self).wf(),
             !old(self).failed(),
+            // D10 (b): a STREAM frame's piece is in flight unless its part was reset (conn's `pieces_ok`).
+            piece_in_flight(*old(self), f@),
         ensures
             final(self).wf(),
             !final(self).failed(),
@@ -4370,7 +5194,11 @@ impl Streams {
                 ) == old(self).peer_closed(b) + 1 && (frame_stream_id(f@) matches Some(id) && (id
                     % 4 == 0) == b && (id % 4 == 0 || id % 4 == 2) && final(self).is_removed(id)
                     && !old(self).is_removed(id))),
+            piece_removed(*old(self), *final(self), f@),
+            tx_kept_but(*old(self), *final(self), piece_stream(f@)),
+            forall|j: u64| #[trigger] final(self).send_reset(j) == old(self).send_reset(j),
     {
+        let ghost s0 = *self;
         match f {
             Frame::Stream { stream_id, offset, data, fin } => {
                 self.send_op(*stream_id, 0, *offset, data.len() as u64, *fin);
@@ -4378,7 +5206,11 @@ impl Streams {
             Frame::ResetStream { stream_id, .. } => {
                 self.send_op(*stream_id, 1, 0, 0, false);
             },
-            _ => {},
+            _ => {
+                proof {
+                    assert(tx_kept_but(s0, *self, None));
+                }
+            },
         }
     }
 
@@ -4389,6 +5221,8 @@ impl Streams {
         requires
             old(self).wf(),
             !old(self).failed(),
+            // D10 (b): a STREAM frame's piece is in flight unless its part was reset (conn's `pieces_ok`).
+            piece_in_flight(*old(self), f@),
         ensures
             final(self).wf(),
             !final(self).failed(),
@@ -4397,6 +5231,9 @@ impl Streams {
             forall|j: u64| #[trigger] final(self).reset_code(j) == old(self).reset_code(j),
             forall|j: u64| #[trigger] final(self).rx_trace(j) == old(self).rx_trace(j),
             forall|j: u64| #[trigger] final(self).is_removed(j) == old(self).is_removed(j),
+            piece_removed(*old(self), *final(self), f@),
+            tx_kept_but(*old(self), *final(self), piece_stream(f@)),
+            forall|j: u64| #[trigger] final(self).send_reset(j) == old(self).send_reset(j),
     {
         let ghost s0 = *self;
         match f {
@@ -4412,6 +5249,7 @@ impl Streams {
                 self.conn_recv.on_lost();
                 proof {
                     assert(forall|j: u64| #[trigger] self.rx_trace(j) == s0.rx_trace(j));
+                    assert(tx_kept_but(s0, *self, None));
                 }
             },
             Frame::MaxStreams { bidi, .. } => {
@@ -4419,9 +5257,14 @@ impl Streams {
                 proof {
                     lemma_ids_frame(s0, *self);
                     assert(forall|j: u64| #[trigger] self.rx_trace(j) == s0.rx_trace(j));
+                    assert(tx_kept_but(s0, *self, None));
                 }
             },
-            _ => {},
+            _ => {
+                proof {
+                    assert(tx_kept_but(s0, *self, None));
+                }
+            },
         }
     }
 
@@ -4438,13 +5281,19 @@ impl Streams {
             forall|j: u64| #[trigger] final(self).reset_code(j) == old(self).reset_code(j),
             forall|j: u64| #[trigger] final(self).rx_trace(j) == old(self).rx_trace(j),
             forall|j: u64| #[trigger] final(self).is_removed(j) == old(self).is_removed(j),
+            forall|j: u64| #[trigger] final(self).tx_flight(j) == old(self).tx_flight(j),
+            final(self).resets == old(self).resets,
     {
         let ghost s0 = *self;
         if let Some(i) = self.find(id) {
             proof {
                 assert(kept(s0, s0));
+                assert(sends_same(s0, s0));
             }
             self.recv_op_at(i, op, Ghost(s0), Ghost(0), Ghost(Seq::<Frame>::empty()));
+            proof {
+                lemma_flights_same(s0, *self);
+            }
         }
     }
 
@@ -4453,6 +5302,9 @@ impl Streams {
     fn send_op(&mut self, id: u64, op: u8, off: u64, len: u64, fin: bool)
         requires
             old(self).wf(),
+            (op == 0 || op == 2) && len > 0 && !old(self).send_reset(id) ==> off + len <= VARINT_MAX && old(
+                self,
+            ).tx_flight(id).contains((off, (off + len) as u64)),
         ensures
             final(self).wf(),
             final(self).failed == old(self).failed,
@@ -4468,35 +5320,110 @@ impl Streams {
                     b,
                 ) == old(self).peer_closed(b) + 1 && (id % 4 == 0) == b && (id % 4 == 0 || id % 4
                     == 2) && final(self).is_removed(id) && !old(self).is_removed(id)),
+            (op == 0 || op == 2) && len > 0 && !old(self).send_reset(id) ==> final(self).tx_flight(id) == old(
+                self,
+            ).tx_flight(id).remove((off, (off + len) as u64)),
+            tx_kept_but(
+                *old(self),
+                *final(self),
+                if (op == 0 || op == 2) && len > 0 {
+                    Some(id)
+                } else {
+                    None
+                },
+            ),
+            final(self).resets == old(self).resets,
     {
         let ghost s0 = *self;
         if let Some(i) = self.find(id) {
-            let mut e = Entry { id: 0, recv: None, send: None };
-            self.entries.set_and_swap(i, &mut e);
-            proof {
-                assert(entry_ok(e, s0.rx_bidi, s0.rx_uni));
-            }
-            if let Some(mut p) = e.send.take() {
-                if op == 0 {
-                    p.on_data_acked(off, len, fin);
-                } else if op == 1 {
-                    p.on_reset_acked();
-                } else if op == 2 {
-                    p.on_data_lost(off, len, fin);
-                } else {
-                    p.on_reset_lost();
-                }
-                e.send = Some(p);
-            }
-            let ghost ne = e;
-            self.entries.set_and_swap(i, &mut e);
-            proof {
-                assert(self.entries@ == s0.entries@.update(i as int, ne));
-                lemma_swap_same_rx(s0, *self, i as int, ne);
-            }
+            self.send_op_at(i, op, off, len, fin);
             if op < 2 {
+                let ghost s1 = *self;
                 self.gc(i);
+                proof {
+                    assert(self.send_reset(id) == s1.send_reset(id));
+                    assert(!self.send_reset(id) ==> self.tx_flight(id) == s1.tx_flight(id));
+                    assert forall|j: u64| !#[trigger] self.send_reset(j) implies self.send_reset(j) == s1.send_reset(j)
+                        && self.tx_flight(j) == s1.tx_flight(j) by {}
+                }
             }
+        } else {
+            proof {
+                assert(self.tx_flight(id) == Set::<(u64, u64)>::empty());
+            }
+        }
+    }
+
+    /// `send_op` on entry `i`, before its `gc` (split from it for the rlimit).
+    #[verifier::spinoff_prover]
+    fn send_op_at(&mut self, i: usize, op: u8, off: u64, len: u64, fin: bool)
+        requires
+            old(self).wf(),
+            i < old(self).entries@.len(),
+            (op == 0 || op == 2) && len > 0 && !old(self).send_reset(old(self).entries@[i as int].id) ==> off + len
+                <= VARINT_MAX && old(self).tx_flight(old(self).entries@[i as int].id).contains(
+                (off, (off + len) as u64),
+            ),
+        ensures
+            final(self).wf(),
+            final(self).entries@.len() == old(self).entries@.len(),
+            final(self).entries@[i as int].id == old(self).entries@[i as int].id,
+            final(self).failed == old(self).failed,
+            final(self).tx_held() <= old(self).tx_held(),
+            final(self).rx_conn == old(self).rx_conn,
+            final(self).ids == old(self).ids,
+            final(self).removed == old(self).removed,
+            final(self).resets == old(self).resets,
+            final(self).same_traces(*old(self)),
+            forall|j: u64| #[trigger] final(self).reset_code(j) == old(self).reset_code(j),
+            forall|j: u64| #[trigger] final(self).rx_trace(j) == old(self).rx_trace(j),
+            forall|j: u64| #[trigger] final(self).is_removed(j) == old(self).is_removed(j),
+            forall|b: bool| #[trigger] final(self).peer_closed(b) == old(self).peer_closed(b),
+            (op == 0 || op == 2) && len > 0 && !old(self).send_reset(old(self).entries@[i as int].id)
+                ==> final(self).tx_flight(old(self).entries@[i as int].id) == old(self).tx_flight(
+                old(self).entries@[i as int].id,
+            ).remove((off, (off + len) as u64)),
+            tx_kept_but(
+                *old(self),
+                *final(self),
+                if (op == 0 || op == 2) && len > 0 {
+                    Some(old(self).entries@[i as int].id)
+                } else {
+                    None
+                },
+            ),
+    {
+        let ghost s0 = *self;
+        let mut e = Entry { id: 0, recv: None, send: None };
+        self.entries.set_and_swap(i, &mut e);
+        proof {
+            assert(entry_ok(e, s0.rx_bidi, s0.rx_uni));
+        }
+        let ghost e0 = e;
+        if let Some(mut p) = e.send.take() {
+            proof {
+                lemma_part_at(s0, i as int);
+                p.lemma_wf();
+                p.lemma_flight_idle();
+                p.lemma_in_flight(off, len);
+            }
+            if op == 0 {
+                p.on_data_acked(off, len, fin);
+            } else if op == 1 {
+                p.on_reset_acked();
+            } else if op == 2 {
+                p.on_data_lost(off, len, fin);
+            } else {
+                p.on_reset_lost();
+            }
+            e.send = Some(p);
+        }
+        let ghost ne = e;
+        self.entries.set_and_swap(i, &mut e);
+        proof {
+            assert(self.entries@ == s0.entries@.update(i as int, ne));
+            lemma_swap_same_rx(s0, *self, i as int, ne);
+            lemma_send_op_flight(s0, *self, i as int, e0, ne, op, off, len);
         }
     }
 }

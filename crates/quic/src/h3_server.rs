@@ -303,6 +303,8 @@ pub struct H3Server {
 impl H3Server {
     pub closed spec fn wf(&self) -> bool {
         &&& self.conn.wf()
+        // D10 (b): nothing pending between calls; carried here across QuicServer calls (re-review F4).
+        &&& self.conn.settled()
         &&& self.h3.wf()
         &&& offs_ok(self.pending@)
     }
@@ -373,6 +375,7 @@ impl H3Server {
     pub fn new(conn: Connection) -> (s: H3Server)
         requires
             conn.wf(),
+            conn.settled(),
         ensures
             s.wf(),
             s.history_ok(),
@@ -427,8 +430,9 @@ impl H3Server {
         ensures
             *r == old(self).conn_spec(),
             r.wf(),
+            r.settled(),
             final(self).conn_spec() == *final(r),
-            final(r).wf() ==> final(self).wf(),
+            final(r).wf() && final(r).settled() ==> final(self).wf(),
             final(self).history_ok() == old(self).history_ok(),
             final(self).h3_spec() == old(self).h3_spec(),
             final(self).started_spec() == old(self).started_spec(),
@@ -486,11 +490,15 @@ impl H3Server {
     fn flush_head(&mut self) -> (more: bool)
         requires
             old(self).conn.wf(),
+
+            old(self).conn.settled(),
             offs_ok(old(self).pending@),
             old(self).log_ok(),
             old(self).pending@.len() > 0,
         ensures
             final(self).conn.wf(),
+
+            final(self).conn.settled(),
             offs_ok(final(self).pending@),
             final(self).log_ok(),
             more ==> final(self).pending@.len() < old(self).pending@.len(),
@@ -630,10 +638,14 @@ impl H3Server {
     fn flush(&mut self)
         requires
             old(self).conn.wf(),
+
+            old(self).conn.settled(),
             offs_ok(old(self).pending@),
             old(self).log_ok(),
         ensures
             final(self).conn.wf(),
+
+            final(self).conn.settled(),
             offs_ok(final(self).pending@),
             final(self).log_ok(),
             final(self).h3 == old(self).h3,
@@ -652,6 +664,8 @@ impl H3Server {
         while self.pending.len() > 0
             invariant
                 self.conn.wf(),
+
+                self.conn.settled(),
                 offs_ok(self.pending@),
                 self.log_ok(),
                 self.h3 == old(self).h3,
@@ -678,10 +692,14 @@ impl H3Server {
     fn apply_one(&mut self, o: Output, app: &mut Vec<AppEvent>)
         requires
             old(self).conn.wf(),
+
+            old(self).conn.settled(),
             offs_ok(old(self).pending@),
             old(self).log_ok(),
         ensures
             final(self).conn.wf(),
+
+            final(self).conn.settled(),
             offs_ok(final(self).pending@),
             final(self).log_ok(),
             final(self).h3 == old(self).h3,
@@ -799,10 +817,14 @@ impl H3Server {
     fn apply(&mut self, outs: Vec<Output>, app: &mut Vec<AppEvent>)
         requires
             old(self).conn.wf(),
+
+            old(self).conn.settled(),
             offs_ok(old(self).pending@),
             old(self).log_ok(),
         ensures
             final(self).conn.wf(),
+
+            final(self).conn.settled(),
             offs_ok(final(self).pending@),
             final(self).log_ok(),
             final(self).h3 == old(self).h3,
@@ -827,6 +849,8 @@ impl H3Server {
             invariant
                 it.seq() == s,
                 self.conn.wf(),
+
+                self.conn.settled(),
                 offs_ok(self.pending@),
                 self.log_ok(),
                 self.h3 == old(self).h3,

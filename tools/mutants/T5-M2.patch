@@ -1,8 +1,8 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
-index 91d508a..61b7391 100644
+index 2438cfa..377a2e1 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -2024,7 +2024,7 @@ impl<'a> QuicServer<'a> {
+@@ -2029,7 +2029,7 @@ impl<'a> QuicServer<'a> {
          let ghost c0 = self.h3.conn_spec();
          // `Complete` gives 1-RTT keys, above Initial too: TLS leaves Initial there if the batch has
          // no `Secrets { Handshake }`.

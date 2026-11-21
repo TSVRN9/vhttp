@@ -264,9 +264,11 @@ spec fn report_code(code: u64) -> u64 {
 fn shut(c: &mut Connection, code: u64, now: u64)
     requires
         old(c).wf(),
+        old(c).settled(),
         code <= 0x3fff_ffff_ffff_ffff,
     ensures
         final(c).wf(),
+        final(c).settled(),
         final(c).out_log() == old(c).out_log(),
         old(c).phase_spec() is Open ==> final(c).phase_spec() is Closing
             && final(c).close_spec() == Some((false, code, Seq::<u8>::empty())),
@@ -331,8 +333,10 @@ fn shut(c: &mut Connection, code: u64, now: u64)
 fn report(c: &mut Connection, code: u64, now: u64)
     requires
         old(c).wf(),
+        old(c).settled(),
     ensures
         final(c).wf(),
+        final(c).settled(),
         final(c).out_log() == old(c).out_log(),
         old(c).phase_spec() is Open ==> final(c).phase_spec() is Closing
             && final(c).close_spec() == Some((false, report_code(code), Seq::<u8>::empty())),
@@ -725,6 +729,7 @@ impl<'a> QuicServer<'a> {
         requires
             cfg.wf(),
             c.wf(),
+            c.settled(),
             !c.peer_tp_known_spec(),
             c.phase_spec() is Open && c.live(PacketKind::Initial) ==> c.crypto_base_spec(PacketKind::Initial) == 0,
             c.phase_spec() is Open && c.live(PacketKind::Handshake) ==> c.crypto_base_spec(PacketKind::Handshake) == 0,

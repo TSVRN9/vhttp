@@ -1,11 +1,12 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
+index fbeaa1c..bdc75fb 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -2012,7 +2012,6 @@
+@@ -3445,7 +3445,6 @@ impl Connection {
              proof {
                  assert(none@.take(0) =~= Seq::<u8>::empty());
              }
 -            self.lc.enter_closing(now, pto, false, c, none.as_slice());
+             let ghost cs = *self;
              self.streams = None;
-             return Err(c);
-         }
+             proof {

@@ -1,11 +1,12 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
+index fbeaa1c..2380576 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -3707,7 +3707,6 @@
+@@ -5186,7 +5186,6 @@ impl Connection {
          proof {
              self.recovery.lemma_pto_pos(PacketKind::OneRtt, self.peer_mad_spec());
          }
 -        self.lc.enter_closing(self.now, pto, app, code, reason);
+         let ghost cs = *self;
          self.streams = None;
          proof {
-             assert forall|t: u64| t < u64::MAX && t <= o.now && #[trigger] o.timers_later(t) implies self.timers_later(t) by {

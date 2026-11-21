@@ -1,7 +1,8 @@
 diff --git a/crates/quic/src/send_stream.rs b/crates/quic/src/send_stream.rs
+index a3d2aaa..1d0cb04 100644
 --- a/crates/quic/src/send_stream.rs
 +++ b/crates/quic/src/send_stream.rs
-@@ -1734,8 +1734,6 @@
+@@ -1796,8 +1796,6 @@ impl SendStream {
          }
          let ghost sp0 = s0.open_slots();
          if short && end - off < FLOOR {

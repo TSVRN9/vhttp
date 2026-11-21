@@ -137,6 +137,7 @@ pub fn accept_datagram(
 ) -> (r: Option<Connection>)
     ensures
         r matches Some(c) ==> c.wf(),
+        r matches Some(c) ==> c.settled(),
         r is Some ==> rfc_long_header(d@) matches Some(SpecHeader::Long { ty: LongType::Initial, .. }),
         r matches Some(c) ==> !c.peer_tp_known_spec(),
         r matches Some(c) ==> (c.phase_spec() is Open && c.live(PacketKind::Initial) ==> c.crypto_base_spec(PacketKind::Initial) == 0),
@@ -201,8 +202,10 @@ pub fn receive(
 )
     requires
         old(c).wf(),
+        old(c).settled(),
     ensures
         final(c).wf(),
+        final(c).settled(),
         final(c).out_log() == old(c).out_log(),
         // §8.1: counted on a known path, whatever decrypted.
         old(c).has_path(path) && !(old(c).phase_spec() is Draining) && !(old(c).phase_spec() is Closed)
@@ -295,8 +298,10 @@ pub fn refeed_one_rtt(
 )
     requires
         old(c).wf(),
+        old(c).settled(),
     ensures
         final(c).wf(),
+        final(c).settled(),
         final(c).out_log() == old(c).out_log(),
         !old(c).live(PacketKind::OneRtt) ==> *final(c) == *old(c),
         !(old(c).phase_spec() is Open) ==> *final(c) == *old(c),
@@ -354,8 +359,10 @@ pub fn transmit(c: &mut Connection, now: u64, keys: &[Option<KeyPair>; 3], out: 
     Option<PathId>)
     requires
         old(c).wf(),
+        old(c).settled(),
     ensures
         final(c).wf(),
+        final(c).settled(),
         r matches Some(q) ==> {
             let l = final(c).out_log().last();
             &&& final(c).out_log() == old(c).out_log().push(l)
@@ -401,6 +408,7 @@ fn settled_later(
 ) -> (r: Option<Option<u64>>)
     requires
         old(c).wf(),
+        old(c).settled(),
         now < u64::MAX,
     ensures
         r matches Some(t) ==> later(t, now),
@@ -416,6 +424,7 @@ fn settled_later(
     while i < cap
         invariant
             c.wf(),
+            c.settled(),
             now < u64::MAX,
             c.timers_later(now),
         decreases cap - i,
