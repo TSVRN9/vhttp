@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index 136488d..d16d834 100644
+index cbfbdf0..14cb45f 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -6131,7 +6131,7 @@ impl Connection {
+@@ -6196,7 +6196,7 @@ impl Connection {
          let ghost mut work: nat = 0;
          if let Some(d) = &mut self.dead {
              // The reaping within `B_PUMP - C_DSTEP` and the step's frees (`DeadStreams::reap`'s cost).

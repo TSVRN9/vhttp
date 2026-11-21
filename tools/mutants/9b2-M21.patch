@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index 3a1f5c1..0c47ad1 100644
+index cbfbdf0..9abf0e6 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -3518,7 +3518,6 @@ impl Connection {
+@@ -3583,7 +3583,6 @@ impl Connection {
              final(self).paths == old(self).paths,
              final(self).wf(),
              final(self).frames_kept_np(*old(self)),
@@ -10,7 +10,7 @@ index 3a1f5c1..0c47ad1 100644
      {
          let ghost fv = frames_view(frames@);
          let mut j: usize = 0;
-@@ -3526,7 +3525,8 @@ impl Connection {
+@@ -3591,7 +3590,8 @@ impl Connection {
              assert(fv.subrange(0, fv.len() as int) =~= fv);
          }
          // D10 (b): `pend` is the pieces of the frames not yet reported, then `rest`.
@@ -20,7 +20,7 @@ index 3a1f5c1..0c47ad1 100644
              invariant
                  self.paths == old(self).paths,
                  j <= frames@.len(),
-@@ -3544,10 +3544,6 @@ impl Connection {
+@@ -3609,10 +3609,6 @@ impl Connection {
              self.on_acked_frame(k, &frames[j]);
              j += 1;
          }
