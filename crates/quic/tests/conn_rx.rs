@@ -25,6 +25,7 @@ fn read_all(c: &mut Connection, k: PacketKind) -> Vec<u8> {
 fn free_all(c: &mut Connection) -> usize {
     let mut n = 0;
     while c.teardown_pending() {
+        assert!(n < 100_000, "teardown still pending after {n} calls");
         let _ = c.free_teardown();
         n += 1;
     }
