@@ -1282,17 +1282,19 @@ pub fn pop_min<V>(t: Tree<V>) -> (r: (Tree<V>, u64, V, Ghost<nat>))
 /// Frees the first `(budget - 1) / (c_pop() * (ht(t) + 1) + 1)` entries (at least one: a stored height is at most 126),
 /// each a `pop_min` plus one unit for its value, after one unit for the root's height read, so the cost stays within
 /// `budget` (D7(d)).
-pub fn pop_some<V>(t: &mut Tree<V>, budget: u64) -> (r: Ghost<nat>)
+pub fn pop_some<V>(t: &mut Tree<V>, budget: u64) -> (r: (u64, Ghost<nat>))
     requires
         wf(*old(t)),
         c_pop() * 127 + 2 <= budget,
     ensures
         wf(*final(t)),
+        // How many went.
+        r.0 == seq(*old(t)).len() - seq(*final(t)).len(),
         seq(*old(t)).len() > 0 ==> seq(*final(t)).len() < seq(*old(t)).len(),
         seq(*final(t)).len() <= seq(*old(t)).len(),
         // The smallest entries go: what stays is a suffix.
         seq(*final(t)) == seq(*old(t)).skip(seq(*old(t)).len() - seq(*final(t)).len()),
-        r@ <= budget,
+        r.1@ <= budget,
 {
     let ghost n0 = seq(*t).len();
     let ghost s0 = seq(*t);
@@ -1345,7 +1347,7 @@ pub fn pop_some<V>(t: &mut Tree<V>, budget: u64) -> (r: Ghost<nat>)
     proof {
         vstd::arithmetic::mul::lemma_mul_inequality(i as int, n as int, u as int);
     }
-    Ghost(work)
+    (i, Ghost(work))
 }
 
 /// `b`'s first entry `(m, mv)` sits between `a`'s keys and the rest of `b`'s.

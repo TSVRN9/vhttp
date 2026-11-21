@@ -842,6 +842,13 @@ fn stream_backlog_pumped() {
     use h3::qpack::field_section::{encode_field_section, FieldLine};
     use quic::h3_server::AppEvent;
     let (mut s, mut c, _) = established();
+    // The key discards' teardown slots first (the CRYPTO send contexts' sets, D10 (e)), as the shell's loop does.
+    let mut k = 0u8;
+    while s.has_backlog() {
+        assert!(k < 32, "still backlog after {k} pumps");
+        s.pump_backlog(NOW, &R(100 + k), &mut Vec::new());
+        k += 1;
+    }
     let fl = |n: &[u8], v: &[u8]| FieldLine { name: n.to_vec(), value: v.to_vec() };
     let mut h = Vec::new();
     encode_field_section(

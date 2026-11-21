@@ -769,3 +769,48 @@ fn path_cap_rx() {
     c.on_datagram(4, 1200, vec![one(5, vec![Frame::PathChallenge(D(4))])], None, 30, &rnd(3));
     assert!(!c.response_owed(4));
 }
+
+/// D10 (e): the Handshake key discard with CRYPTO pieces in flight retires the send context in place: its sets move to
+/// its teardown slot in O(1), `teardown_pending()` holds until `free_teardown` (the pump's teardown half) has emptied
+/// it, then not.
+#[test]
+fn discard_reaps_ctx() {
+    let mut c = conn();
+    c.on_datagram(0, 1200, vec![hs(0, vec![Frame::Ping])], None, 10, &rnd(9));
+    c.crypto_write(PacketKind::Handshake, &[3; 4000]);
+    while c.poll_transmit(10).is_some() {}
+    // The Initial discard (the Handshake packet) left its stores in slots; empty them first.
+    free_all(&mut c);
+    assert_eq!(c.crypto_send_td(PacketKind::Handshake), 0);
+    c.on_peer_params(&ptp(), 10);
+    c.on_handshake_complete(b"h3", 10, &rnd(2));
+    assert!(c.handshake_complete());
+    assert!(c.crypto_send_td(PacketKind::Handshake) > 0);
+    assert!(c.teardown_pending());
+    assert!(free_all(&mut c) > 0);
+    assert!(!c.teardown_pending());
+    assert_eq!(c.crypto_send_td(PacketKind::Handshake), 0);
+}
+
+/// D13: a connection leaving Open moves its streams whole to the dead slot in O(1); `teardown_pending()` holds until
+/// `free_teardown` has freed every entry (each its sets, then its buffers) and the emptied vectors, then not.
+#[test]
+fn close_buries_streams() {
+    let mut c = established_rx();
+    free_all(&mut c);
+    let get = |id: u64| Frame::Stream { stream_id: id, offset: 0, data: b"GET".to_vec(), fin: true };
+    c.on_datagram(0, 1200, vec![one(1, vec![get(0), get(4), get(8)])], None, 20, &rnd(3));
+    for id in [0, 4, 8] {
+        assert_eq!(c.stream_write(id, &[6; 90], false), Ok(90));
+    }
+    while c.poll_transmit(20).is_some() {}
+    assert!(c.dead_entries().is_none());
+    c.close(0x0a, false, &[], 21);
+    assert_eq!(c.phase(), Phase::Closing);
+    assert!(!c.streams_live());
+    assert_eq!(c.dead_entries(), Some(3));
+    assert!(c.teardown_pending());
+    assert!(free_all(&mut c) >= 4);
+    assert!(!c.teardown_pending());
+    assert!(c.dead_entries().is_none());
+}

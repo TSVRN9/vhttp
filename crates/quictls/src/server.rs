@@ -75,7 +75,7 @@ spec fn loads_ok(c: Connection) -> bool {
 
 /// One `CryptoStream::retire`'s cost: a join onto the slot (`avl::join2`, heights at most 126).
 pub open spec fn c_retire() -> nat {
-    quic::avl::c_join2() * 127 + 1
+    quic::avl::c_join2() * 127 + 1 + quic::send_stream::c_sfree()
 }
 
 /// The two retires of the call that completes the handshake (Initial's and Handshake's discard), else none.
@@ -461,9 +461,10 @@ fn key_events(ev: &Vec<TlsEvent>) -> (r: (bool, bool))
 
 /// From `o` to `c`: an open `c` was open in `o`, every level drained in `o` still is, and a
 /// completed handshake stays completed.
-/// The most STREAM backlog a connection holds (`Connection::lemma_rx_measure`).
+/// The most `Connection::rx_measure` reaches (`Connection::lemma_rx_measure`): the STREAM backlog and the send side's
+/// nodes, live and in teardown slots.
 pub open spec fn rx_bound() -> nat {
-    (IDQ_CAP * (MAX_RECV_WINDOW + 1)) as nat
+    quic::conn::rx_cap()
 }
 
 spec fn fed_kept(c: Connection, o: Connection) -> bool {
@@ -600,7 +601,7 @@ impl<'a> QuicServer<'a> {
         let c = self.h3.conn_spec();
         ||| c.phase_spec() is Open && self.crypto_pending_spec()
         ||| c.phase_spec() is Open && c.stream_backlog()
-        ||| c.crypto_td_total() > 0
+        ||| c.td_pending()
     }
 
     /// Unread CRYPTO bytes at a level at or above TLS's.
@@ -615,10 +616,9 @@ impl<'a> QuicServer<'a> {
         ||| c.crypto_contiguous_spec(PacketKind::OneRtt) > c.crypto_base_spec(PacketKind::OneRtt)
     }
 
-    /// `pump_backlog`'s progress measure (D13): the CRYPTO positions held and teardown nodes, the STREAM backlog
-    /// (per queued stream one plus its bytes past delivery, `Connection::rx_measure`), one while open, and a stashed
-    /// datagram's room, which its refeed spends: at most `MAX_UDP_PAYLOAD` CRYPTO bytes, and a STREAM backlog of at
-    /// most `rx_bound()` (a full queue, `IDQ_CAP` streams of a window each).
+    /// `pump_backlog`'s progress measure (D13): the CRYPTO positions held and teardown nodes, the STREAM backlog and
+    /// the send side's nodes (`Connection::rx_measure`), one while open, and a stashed datagram's room, which its
+    /// refeed spends: at most `MAX_UDP_PAYLOAD` CRYPTO bytes, and an `rx_measure` of at most `rx_bound()`.
     pub closed spec fn backlog_measure(&self) -> nat {
         self.h3.conn_spec().crypto_backlog() + self.h3.conn_spec().rx_measure() + (if self.h3.conn_spec().phase_spec()
             is Open {

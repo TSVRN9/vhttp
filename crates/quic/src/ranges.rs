@@ -782,6 +782,41 @@ impl RangeSet {
         Ghost(work)
     }
 
+    /// Frees the first ranges within `budget` (`avl::pop_some`): at least one while any remain; the rest stay.
+    pub fn reap_some(&mut self, budget: u64) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            c_pop() * 127 + 2 <= budget,
+        ensures
+            final(self).wf(),
+            final(self)@.len() <= old(self)@.len(),
+            old(self)@.len() > 0 ==> final(self)@.len() < old(self)@.len(),
+            r@ <= budget,
+    {
+        let ghost s0 = self@;
+        let (k, Ghost(c)) = pop_some(&mut self.t, budget);
+        self.n = self.n - k;
+        proof {
+            let s1 = seq(self.t);
+            assert(s1 == s0.skip(k as int));
+            assert forall|i: int| 0 <= i < s1.len() implies #[trigger] s1[i] == s0[i + k] by {}
+            assert(merged(s1)) by {
+                assert forall|i: int, j: int| 0 <= i < j < s1.len() implies #[trigger] s1[i].1 < #[trigger] s1[j].0 by {
+                    assert(s1[i] == s0[i + k] && s1[j] == s0[j + k]);
+                }
+                assert forall|i: int| 0 <= i < s1.len() implies #[trigger] s1[i].0 < s1[i].1 by {
+                    assert(s1[i] == s0[i + k]);
+                }
+            }
+            assert(capped(s1)) by {
+                assert forall|i: int| 0 <= i < s1.len() implies #[trigger] s1[i].1 <= VARINT_MAX by {
+                    assert(s1[i] == s0[i + k]);
+                }
+            }
+        }
+        Ghost(c)
+    }
+
     pub fn first(&self) -> (r: (Option<(u64, u64)>, Ghost<nat>))
         requires
             self.wf(),
@@ -1329,6 +1364,41 @@ impl PieceSet {
             work = work + c;
         }
         Ghost(work)
+    }
+
+    /// Frees the first ranges within `budget` (`avl::pop_some`): at least one while any remain; the rest stay.
+    pub fn reap_some(&mut self, budget: u64) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            c_pop() * 127 + 2 <= budget,
+        ensures
+            final(self).wf(),
+            final(self)@.len() <= old(self)@.len(),
+            old(self)@.len() > 0 ==> final(self)@.len() < old(self)@.len(),
+            r@ <= budget,
+    {
+        let ghost s0 = self@;
+        let (k, Ghost(c)) = pop_some(&mut self.t, budget);
+        self.n = self.n - k;
+        proof {
+            let s1 = seq(self.t);
+            assert(s1 == s0.skip(k as int));
+            assert forall|i: int| 0 <= i < s1.len() implies #[trigger] s1[i] == s0[i + k] by {}
+            assert(disjoint(s1)) by {
+                assert forall|i: int, j: int| 0 <= i < j < s1.len() implies #[trigger] s1[i].1 <= #[trigger] s1[j].0 by {
+                    assert(s1[i] == s0[i + k] && s1[j] == s0[j + k]);
+                }
+                assert forall|i: int| 0 <= i < s1.len() implies #[trigger] s1[i].0 < s1[i].1 by {
+                    assert(s1[i] == s0[i + k]);
+                }
+            }
+            assert(capped(s1)) by {
+                assert forall|i: int| 0 <= i < s1.len() implies #[trigger] s1[i].1 <= VARINT_MAX by {
+                    assert(s1[i] == s0[i + k]);
+                }
+            }
+        }
+        Ghost(c)
     }
 
     /// Adds the piece `[s, e)`, which no piece meets.

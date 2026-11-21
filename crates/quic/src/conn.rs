@@ -74,10 +74,33 @@ pub const H3_ALPN: [u8; 2] = *b"h3";
 /// The work one `pump_backlog` spends per kind of backlog: CRYPTO bytes handed to TLS, teardown-slot frees.
 pub const B_PUMP: u64 = 4096;
 
-/// `pump_backlog`'s STREAM half (`Streams::deliver_some` with `B_PUMP`): the delivery, the id lookup and the entry's
-/// removal, and its buffers freed.
+/// `backlog_step`'s STREAM half (`Streams::deliver_some` with `B_PUMP`): the delivery, the reaping of the head's
+/// sending part's teardown slot (its own `B_PUMP`, D10 (e)), the id lookup and the entry's removal, and its buffers
+/// freed.
 pub open spec fn c_dsome() -> nat {
-    c_rd() * (B_PUMP as nat + B_PUMP as nat / (PAGE as nat) + 2) + 2 * max_entries() + 3 + c_rfree()
+    c_rd() * (B_PUMP as nat + B_PUMP as nat / (PAGE as nat) + 2) + B_PUMP as nat + 2 * max_entries() + 3 + c_rfree()
+        + c_sfree()
+}
+
+/// The most `Connection::rx_measure` reaches (`lemma_rx_measure`): a full stream queue of windows, every sending part's
+/// weighted nodes (live or dead), the open weight, and the CRYPTO send contexts' nodes under the queue's bound.
+pub open spec fn rx_cap() -> nat {
+    rx_cap_q() + rx_cap_d() + max_entries() + 1 + 2 * rx_cap_c()
+}
+
+/// A full stream queue of windows, and every live sending part's weighted nodes.
+pub open spec fn rx_cap_q() -> nat {
+    (IDQ_CAP * (MAX_RECV_WINDOW + 1)) as nat
+}
+
+/// The dead streams' measure (`DeadStreams::lemma_measure`), which bounds the live parts' weight too.
+pub open spec fn rx_cap_d() -> nat {
+    (max_entries() * (1 + 2058 * kw()) + 1) as nat
+}
+
+/// A CRYPTO send context's weighted nodes (`SendStream::lemma_weight_max`).
+pub open spec fn rx_cap_c() -> nat {
+    3 * ((byteq::queue::MAX_QUEUE as nat) / (crate::ranges::FLOOR as nat) + crate::ranges::MAX_FLUSH as nat)
 }
 
 pub open spec fn space_idx(k: PacketKind) -> int {
@@ -1123,6 +1146,8 @@ pub struct Connection {
     ctx_i: SendStream,
     ctx_h: SendStream,
     streams: Option<Streams>,
+    /// A closed connection's streams, freed a bounded step per `backlog_step` (D13).
+    dead: Option<DeadStreams>,
     events: Vec<StreamEvent>,
     local_cids: LocalCids,
     peer_cids: PeerCids,
@@ -1226,18 +1251,56 @@ impl Connection {
         backlog3(self.crx_i, self.crx_h, self.crx_1)
     }
 
-    /// D13's STREAM backlog measure (`Streams::rx_backlog`), 0 without streams.
+    /// D13's measure off the CRYPTO receive levels: the streams' (`Streams::measure`: the delivery backlog and the
+    /// sending parts' weighted nodes), a closed connection's dead streams', `max_entries() + 1` while Open (what a
+    /// close moves to `dead`, so a close never raises it), and the CRYPTO send contexts' nodes, those in their sets
+    /// twice (a key discard's `retire` moves them to the slot).
     pub closed spec fn rx_measure(&self) -> nat {
+        self.streams_measure() + self.dead_measure() + self.open_weight() + self.ctx_weight()
+    }
+
+    pub closed spec fn streams_measure(&self) -> nat {
         match self.streams {
-            Some(s) => s.rx_backlog(),
+            Some(s) => s.measure(),
             None => 0,
         }
     }
 
-    /// The streams are as in `o`. Opaque, so `read_open` states it as one atom (rlimit).
+    pub closed spec fn dead_measure(&self) -> nat {
+        match self.dead {
+            Some(d) => d.measure(),
+            None => 0,
+        }
+    }
+
+    pub closed spec fn open_weight(&self) -> nat {
+        if self.lc.phase_spec() is Open {
+            max_entries() + 1
+        } else {
+            0
+        }
+    }
+
+    pub closed spec fn ctx_weight(&self) -> nat {
+        2 * self.ctx_i.ranges_held() + self.ctx_i.td_nodes() + 2 * self.ctx_h.ranges_held() + self.ctx_h.td_nodes()
+    }
+
+    /// A teardown slot holds something: a CRYPTO level's, a CRYPTO send context's, or a closed connection's streams.
+    pub closed spec fn td_pending(&self) -> bool {
+        ||| self.crypto_td_total() > 0
+        ||| self.ctx_i.td_nodes() > 0
+        ||| self.ctx_h.td_nodes() > 0
+        ||| self.dead is Some
+    }
+
+    /// The streams, dead streams and CRYPTO send contexts are as in `o`. Opaque, so `read_open` states it as one atom
+    /// (rlimit).
     #[verifier::opaque]
     spec fn same_streams(&self, o: Connection) -> bool {
-        self.streams == o.streams
+        &&& self.streams == o.streams
+        &&& self.dead == o.dead
+        &&& self.ctx_i == o.ctx_i
+        &&& self.ctx_h == o.ctx_h
     }
 
     /// Some stream has bytes or the FIN left to deliver (D13).
@@ -1248,18 +1311,32 @@ impl Connection {
         }
     }
 
-    /// The STREAM backlog: bounded, positive while any, and only while open.
+    /// The measure: bounded (`rx_cap`), positive while any stream is queued, and stream backlog only while open.
     pub proof fn lemma_rx_measure(&self)
         requires
             self.wf(),
         ensures
-            self.rx_measure() <= IDQ_CAP * (MAX_RECV_WINDOW + 1),
+            self.rx_measure() <= rx_cap(),
             self.stream_backlog() ==> self.rx_measure() > 0,
             self.stream_backlog() ==> self.phase_spec() is Open,
     {
+        let cap_q = rx_cap_q();
+        let cap_d = rx_cap_d();
+        assert(max_entries() * (2058 * kw()) <= max_entries() * (1 + 2058 * kw()) + 1) by (nonlinear_arith);
+        assert(max_entries() * (1 + 2058 * kw()) + 1 >= 0) by (nonlinear_arith);
         if let Some(s) = self.streams {
-            s.lemma_rx_backlog();
+            s.lemma_measure();
+            assert(self.dead is None);
+            assert(self.streams_measure() + self.dead_measure() <= cap_q + cap_d);
+        } else if let Some(d) = self.dead {
+            d.lemma_measure();
+            assert(self.streams_measure() + self.dead_measure() <= cap_q + cap_d);
         }
+        self.ctx_i.lemma_weight_max();
+        self.ctx_h.lemma_weight_max();
+        assert(self.ctx_weight() <= 2 * rx_cap_c());
+        assert(self.open_weight() <= max_entries() + 1);
+        assert(self.streams_measure() + self.dead_measure() <= cap_q + cap_d);
     }
 
     /// `stream_backlog`. O(1).
@@ -1735,12 +1812,12 @@ impl Connection {
         &&& cids_only(self.cid_updates@)
     }
 
-    /// `Streams` is never called after an `Err`, and closing drops it, which frees the buffers. That drop is uncharged:
-    /// up to `max_entries()` receive rings of at most `c_rfree()` frees each, and the sending parts' trees
-    /// (cat-C15-semantic-cost, 9b4; a RESET_STREAM's ring drop and `deliver_some`'s removal are charged, 9b2 Task 10).
+    /// `Streams` is never called after an `Err`. Closing moves it whole to `dead` in O(1) (`bury_streams`), whose
+    /// rings, queues and trees `backlog_step` frees a bounded step at a time (D13; 9b2 Task 10b).
     closed spec fn wf_streams(&self) -> bool {
         &&& self.streams matches Some(s) ==> s.wf() && !s.failed() && self.lc.phase_spec() is Open
         &&& !(self.lc.phase_spec() is Open) ==> self.streams is None
+        &&& self.dead matches Some(d) ==> d.wf() && !(self.lc.phase_spec() is Open)
     }
 
     /// §8.1, per path: the budget's `Sent` entries are exactly the logged datagrams.
@@ -2354,6 +2431,7 @@ impl Connection {
             ctx_i: SendStream::new(VARINT_MAX),
             ctx_h: SendStream::new(VARINT_MAX),
             streams: None,
+            dead: None,
             events: Vec::new(),
             local_cids: LocalCids::new(l0, token0),
             peer_cids,
@@ -3320,7 +3398,7 @@ impl Connection {
                 let pto = self.pto();
                 self.lc.enter_draining(now, pto);
                 let ghost cs = *self;
-                self.streams = None;
+                self.bury_streams();
                 proof {
                     Connection::lemma_streams_conn(cs, *self);
                 }
@@ -3510,7 +3588,7 @@ impl Connection {
             }
             self.lc.enter_closing(now, pto, false, c, none.as_slice());
             let ghost cs = *self;
-            self.streams = None;
+            self.bury_streams();
             proof {
                 Connection::lemma_streams_conn(cs, *self);
             }
@@ -3551,7 +3629,7 @@ impl Connection {
             }
             let none: Vec<u8> = Vec::new();
             self.lc.enter_closing(now, pto, false, c, none.as_slice());
-            self.streams = None;
+            self.bury_streams();
             proof {
                 Connection::lemma_streams_conn(*old(self), *self);
             }
@@ -4416,7 +4494,7 @@ impl Connection {
         self.repair_pairs(a);
         self.lc.close_silently();
         let ghost cs = *self;
-        self.streams = None;
+        self.bury_streams();
         proof {
             Connection::lemma_streams_conn(cs, *self);
         }
@@ -5095,6 +5173,31 @@ impl Connection {
     // Discard and close
     // =========================================================================
 
+    /// Leaving Open: the streams move whole to `dead` in O(1), freed by `backlog_step` (D13). Its measure takes at
+    /// most what the streams' and the open weight held (`Streams::into_dead`).
+    fn bury_streams(&mut self)
+        requires
+            old(self).streams matches Some(s) ==> s.wf() && old(self).dead is None,
+        ensures
+            *final(self) == (Connection { streams: None, dead: final(self).dead, ..*old(self) }),
+            old(self).streams is None ==> final(self).dead == old(self).dead,
+            old(self).streams is Some ==> (final(self).dead matches Some(d) && d.wf()),
+            final(self).dead_measure() <= old(self).dead_measure() + old(self).streams_measure() + max_entries() + 1,
+    {
+        let ghost o = *self;
+        if let Some(s) = self.streams.take() {
+            proof {
+                assert(o.streams == Some(s));
+                assert(o.streams_measure() == s.measure());
+                assert(o.dead_measure() == 0);
+            }
+            proof {
+                s.lemma_measure();
+            }
+            self.dead = Some(s.into_dead());
+        }
+    }
+
     /// Drops an Initial or Handshake space, once (RFC 9001 §4.9). `sent(k)` is drained, not
     /// replaced: a fresh `SentPackets` would reset `next_pn` and break `wf_pn`.
     #[verifier::spinoff_prover]
@@ -5125,10 +5228,11 @@ impl Connection {
             final(self).crypto_kept(*old(self)),
             drained_kept(*final(self), *old(self)),
             crypto_drained(*final(self), k),
-            // The store's retire (`CryptoStream::retire`). Excluded: the space's in-flight drain and recovery reset
-            // (`drain_inflight`, `on_space_discarded`), the old send and receive state's drop, the CID update's push
-            // (Q27): the cost sweep's other sites (docs/rca/2026-11-12-cost-sweep.md, 9b4).
-            r@ <= crate::avl::c_join2() * 127 + 1,
+            // The store's retire (`CryptoStream::retire`) and the send context's (`SendStream::retire`). Excluded: the
+            // space's in-flight drain and recovery reset (`drain_inflight`, `on_space_discarded`), the old receive
+            // state's drop, the CID update's push (Q27): the cost sweep's other sites (docs/rca/2026-11-12-cost-sweep.md,
+            // 9b4).
+            r@ <= crate::avl::c_join2() * 127 + 1 + c_sfree(),
     {
         proof {
             reveal(crate::crx::crx_ok);
@@ -5148,11 +5252,11 @@ impl Connection {
                 proof {
                     work = work + c;
                 }
-                // Task 10b (spec D15): replacing ctx_i drops its three range trees here at O(nodes) (up to
-                // ⌊flight/256⌋ + 4), uncharged and unseen by the cost gate, as `SendStream::reset_w` frees its trees at
-                // O(nodes); reachable from network input (key discard here, a peer's STOP_SENDING there). Owner: Task
-                // 10b's `retire` moves the trees to the teardown slot in O(1).
-                self.ctx_i = SendStream::new(VARINT_MAX);
+                // Its three trees move to its teardown slot in O(1), freed by `free_teardown` (D10 (e)).
+                let Ghost(c2) = self.ctx_i.retire();
+                proof {
+                    work = work + c2;
+                }
                 self.recv_i = RecvPns::new(k);
                 self.cid_updates.push(CidUpdate::Remove(slice_to_vec(self.ids.odcid())));
             },
@@ -5166,11 +5270,10 @@ impl Connection {
                 proof {
                     work = work + c;
                 }
-                // Task 10b (spec D15): replacing ctx_h drops its three range trees here at O(nodes) (up to
-                // ⌊flight/256⌋ + 4), uncharged and unseen by the cost gate, as `SendStream::reset_w` frees its trees at
-                // O(nodes); reachable from network input (key discard here, a peer's STOP_SENDING there). Owner: Task
-                // 10b's `retire` moves the trees to the teardown slot in O(1).
-                self.ctx_h = SendStream::new(VARINT_MAX);
+                let Ghost(c2) = self.ctx_h.retire();
+                proof {
+                    work = work + c2;
+                }
                 self.recv_h = RecvPns::new(k);
             },
             PacketKind::OneRtt => {},
@@ -5253,7 +5356,7 @@ impl Connection {
         }
         self.lc.enter_closing(self.now, pto, app, code, reason);
         let ghost cs = *self;
-        self.streams = None;
+        self.bury_streams();
         proof {
             Connection::lemma_streams_conn(cs, *self);
         }
@@ -5536,12 +5639,15 @@ impl Connection {
         }
     }
 
-    /// Some teardown slot holds a retired store.
+    /// Some teardown slot holds something (`td_pending`). O(1).
     pub fn teardown_pending(&self) -> (r: bool)
+        requires
+            self.wf(),
         ensures
-            r == (self.crypto_td_total() > 0),
+            r == self.td_pending(),
     {
-        self.crx_i.has_td() || self.crx_h.has_td() || self.crx_1.has_td()
+        self.crx_i.has_td() || self.crx_h.has_td() || self.crx_1.has_td() || self.ctx_i.has_td() || self.ctx_h.has_td()
+            || self.dead.is_some()
     }
 
     /// D13's STREAM half and teardown, each with its own `B_PUMP`: the stream queue's head delivers
@@ -5571,6 +5677,10 @@ impl Connection {
             final(self).peer_tp_known_spec() == old(self).peer_tp_known_spec(),
             final(self).rx_measure() <= old(self).rx_measure(),
             old(self).stream_backlog() ==> final(self).rx_measure() < old(self).rx_measure(),
+            // The send side's teardown (D10 (e)): a CRYPTO send context's slot or a closed connection's streams.
+            old(self).crypto_td_total() == 0 && old(self).td_pending() ==> final(self).rx_measure() < old(
+                self,
+            ).rx_measure(),
             r@ <= B_PUMP + c_dsome(),
     {
         let ghost c0 = *self;
@@ -5632,8 +5742,9 @@ impl Connection {
         Connection::lemma_crypto_kept_refl(c0);
     }
 
-    /// Frees part of the first non-empty teardown slot: at least one node while any remain, at most `B_PUMP` units
-    /// of work. Nothing else changes.
+    /// Frees part of the first non-empty teardown slot (a CRYPTO level's, a CRYPTO send context's, a closed
+    /// connection's streams): at least one node or entry while any remain, at most `B_PUMP` units of work. Nothing
+    /// else changes.
     #[verifier::spinoff_prover]
     pub fn free_teardown(&mut self) -> (r: Ghost<nat>)
         requires
@@ -5641,6 +5752,9 @@ impl Connection {
             old(self).settled(),
         ensures
             final(self).rx_measure() <= old(self).rx_measure(),
+            old(self).crypto_td_total() == 0 && old(self).td_pending() ==> final(self).rx_measure() < old(
+                self,
+            ).rx_measure(),
             final(self).wf(),
             final(self).settled(),
             r@ <= B_PUMP,
@@ -5663,18 +5777,274 @@ impl Connection {
         proof {
             reveal(crate::crx::crx_ok);
         }
+        let ghost c0 = *self;
         let Ghost(c) = if self.crx_i.has_td() {
             self.crx_i.free_some()
         } else if self.crx_h.has_td() {
             self.crx_h.free_some()
-        } else {
+        } else if self.crx_1.has_td() {
             self.crx_1.free_some()
+        } else {
+            let Ghost(c1) = self.free_send_td();
+            proof {
+                Connection::lemma_td_frame(c0, *self);
+            }
+            Ghost(c1)
         };
         proof {
             lemma_backlog3(old(self).crx_i, old(self).crx_h, old(self).crx_1);
             lemma_backlog3(self.crx_i, self.crx_h, self.crx_1);
         }
         Ghost(c)
+    }
+
+    /// The send side's teardown, once the CRYPTO levels' slots are empty: a CRYPTO send context's slot (key discard),
+    /// else a closed connection's streams (`DeadStreams::reap`, the emptied vectors dropped last); at most `B_PUMP`.
+    fn free_send_td(&mut self) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            old(self).settled(),
+        ensures
+            final(self).wf(),
+            final(self).settled(),
+            *final(self) == (Connection { ctx_i: final(self).ctx_i, ctx_h: final(self).ctx_h, dead: final(self).dead, ..*old(self) }),
+            final(self).ctx_i.flight_spec() == old(self).ctx_i.flight_spec(),
+            final(self).ctx_h.flight_spec() == old(self).ctx_h.flight_spec(),
+            final(self).rx_measure() <= old(self).rx_measure(),
+            old(self).td_pending() && old(self).crypto_td_total() == 0 ==> final(self).rx_measure() < old(
+                self,
+            ).rx_measure(),
+            r@ <= B_PUMP,
+    {
+        if self.ctx_i.has_td() {
+            self.reap_ctx_i()
+        } else if self.ctx_h.has_td() {
+            self.reap_ctx_h()
+        } else {
+            self.reap_dead()
+        }
+    }
+
+    /// `free_send_td` on ctx_i's slot (split for the rlimit).
+    #[verifier::spinoff_prover]
+    fn reap_ctx_i(&mut self) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            old(self).settled(),
+            old(self).ctx_i.td_nodes() > 0,
+        ensures
+            final(self).wf(),
+            final(self).settled(),
+            *final(self) == (Connection { ctx_i: final(self).ctx_i, ctx_h: final(self).ctx_h, dead: final(self).dead, ..*old(self) }),
+            final(self).ctx_i.flight_spec() == old(self).ctx_i.flight_spec(),
+            final(self).ctx_h.flight_spec() == old(self).ctx_h.flight_spec(),
+            final(self).rx_measure() <= old(self).rx_measure(),
+            old(self).td_pending() && old(self).crypto_td_total() == 0 ==> final(self).rx_measure() < old(
+                self,
+            ).rx_measure(),
+            r@ <= B_PUMP,
+    {
+        proof {
+            assert(crate::avl::c_pop() * 127 + 2 <= B_PUMP);
+        }
+        let ghost c0 = *self;
+        let Ghost(c) = self.ctx_i.reap(B_PUMP);
+        proof {
+            self.ctx_i.lemma_same_but_td(c0.ctx_i);
+            Connection::lemma_ctx_frame(c0, *self);
+            Connection::lemma_ctx_measure(c0, *self);
+        }
+        Ghost(c)
+    }
+
+    /// `free_send_td` on ctx_h's slot (split for the rlimit).
+    #[verifier::spinoff_prover]
+    fn reap_ctx_h(&mut self) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            old(self).settled(),
+            old(self).ctx_h.td_nodes() > 0,
+        ensures
+            final(self).wf(),
+            final(self).settled(),
+            *final(self) == (Connection { ctx_i: final(self).ctx_i, ctx_h: final(self).ctx_h, dead: final(self).dead, ..*old(self) }),
+            final(self).ctx_i.flight_spec() == old(self).ctx_i.flight_spec(),
+            final(self).ctx_h.flight_spec() == old(self).ctx_h.flight_spec(),
+            final(self).rx_measure() <= old(self).rx_measure(),
+            old(self).td_pending() && old(self).crypto_td_total() == 0 ==> final(self).rx_measure() < old(
+                self,
+            ).rx_measure(),
+            r@ <= B_PUMP,
+    {
+        proof {
+            assert(crate::avl::c_pop() * 127 + 2 <= B_PUMP);
+        }
+        let ghost c0 = *self;
+        let Ghost(c) = self.ctx_h.reap(B_PUMP);
+        proof {
+            self.ctx_h.lemma_same_but_td(c0.ctx_h);
+            Connection::lemma_ctx_frame(c0, *self);
+            Connection::lemma_ctx_measure(c0, *self);
+        }
+        Ghost(c)
+    }
+
+    /// `free_send_td` on a closed connection's streams: one bounded step, or the emptied vectors dropped.
+    fn reap_dead(&mut self) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            old(self).settled(),
+            old(self).ctx_i.td_nodes() == 0,
+            old(self).ctx_h.td_nodes() == 0,
+        ensures
+            final(self).wf(),
+            final(self).settled(),
+            *final(self) == (Connection { ctx_i: final(self).ctx_i, ctx_h: final(self).ctx_h, dead: final(self).dead, ..*old(self) }),
+            final(self).ctx_i.flight_spec() == old(self).ctx_i.flight_spec(),
+            final(self).ctx_h.flight_spec() == old(self).ctx_h.flight_spec(),
+            final(self).rx_measure() <= old(self).rx_measure(),
+            old(self).td_pending() && old(self).crypto_td_total() == 0 ==> final(self).rx_measure() < old(
+                self,
+            ).rx_measure(),
+            r@ <= B_PUMP,
+    {
+        let empty = match &self.dead {
+            Some(d) => d.is_empty(),
+            None => false,
+        };
+        if empty {
+            self.drop_dead()
+        } else {
+            self.step_dead()
+        }
+    }
+
+    /// `reap_dead` on dead streams with no entry left: the emptied vectors go, the entries' and the queue's.
+    #[verifier::spinoff_prover]
+    fn drop_dead(&mut self) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            old(self).settled(),
+            old(self).dead matches Some(d) && d.len_spec() == 0,
+        ensures
+            final(self).wf(),
+            final(self).settled(),
+            *final(self) == (Connection { ctx_i: final(self).ctx_i, ctx_h: final(self).ctx_h, dead: final(self).dead, ..*old(self) }),
+            final(self).ctx_i.flight_spec() == old(self).ctx_i.flight_spec(),
+            final(self).ctx_h.flight_spec() == old(self).ctx_h.flight_spec(),
+            final(self).rx_measure() <= old(self).rx_measure(),
+            old(self).td_pending() && old(self).crypto_td_total() == 0 ==> final(self).rx_measure() < old(
+                self,
+            ).rx_measure(),
+            r@ <= B_PUMP,
+    {
+        let ghost c0 = *self;
+        proof {
+            self.dead->0.lemma_measure();
+        }
+        self.dead = None;
+        proof {
+            Connection::lemma_ctx_frame(c0, *self);
+            Connection::lemma_ctx_measure(c0, *self);
+        }
+        Ghost(c_dfree())
+    }
+
+    /// `reap_dead`'s step on dead streams with entries left (`DeadStreams::reap`), within `B_PUMP`.
+    #[verifier::spinoff_prover]
+    fn step_dead(&mut self) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            old(self).settled(),
+            old(self).ctx_i.td_nodes() == 0,
+            old(self).ctx_h.td_nodes() == 0,
+            !(old(self).dead matches Some(d) && d.len_spec() == 0),
+        ensures
+            final(self).wf(),
+            final(self).settled(),
+            *final(self) == (Connection { ctx_i: final(self).ctx_i, ctx_h: final(self).ctx_h, dead: final(self).dead, ..*old(self) }),
+            final(self).ctx_i.flight_spec() == old(self).ctx_i.flight_spec(),
+            final(self).ctx_h.flight_spec() == old(self).ctx_h.flight_spec(),
+            final(self).rx_measure() <= old(self).rx_measure(),
+            old(self).td_pending() && old(self).crypto_td_total() == 0 ==> final(self).rx_measure() < old(
+                self,
+            ).rx_measure(),
+            r@ <= B_PUMP,
+    {
+        proof {
+            assert(C_DSTEP == c_dstep()) by (compute_only);
+            assert(crate::avl::c_pop() * 127 + 2 + c_dstep() <= B_PUMP);
+        }
+        let ghost c0 = *self;
+        let ghost mut work: nat = 0;
+        if let Some(d) = &mut self.dead {
+            // The reaping within `B_PUMP - C_DSTEP` and the step's frees (`DeadStreams::reap`'s cost).
+            let Ghost(c) = d.reap(B_PUMP - C_DSTEP);
+            proof {
+                work = work + c;
+            }
+        }
+        proof {
+            Connection::lemma_ctx_frame(c0, *self);
+            Connection::lemma_ctx_measure(c0, *self);
+        }
+        Ghost(work)
+    }
+
+    /// `free_send_td`'s frame: only the send contexts' slots and the dead streams changed, each still well formed;
+    /// the flights and everything else as before keep `wf` and `settled`.
+    proof fn lemma_ctx_frame(c0: Connection, c1: Connection)
+        requires
+            c0.wf(),
+            c0.settled(),
+            c1 == (Connection { ctx_i: c1.ctx_i, ctx_h: c1.ctx_h, dead: c1.dead, ..c0 }),
+            c1.ctx_i.wf(),
+            c1.ctx_h.wf(),
+            c1.ctx_i.flight_spec() == c0.ctx_i.flight_spec(),
+            c1.ctx_h.flight_spec() == c0.ctx_h.flight_spec(),
+            c1.dead matches Some(d) ==> d.wf(),
+            c1.dead is Some ==> c0.dead is Some,
+        ensures
+            c1.wf(),
+            c1.settled(),
+    {
+        assert(c0.wf_pieces());
+        assert(c1.wf_pieces());
+    }
+
+    /// The measure across `free_send_td`'s frame: the parts that changed, the rest as before.
+    proof fn lemma_ctx_measure(c0: Connection, c1: Connection)
+        requires
+            c1 == (Connection { ctx_i: c1.ctx_i, ctx_h: c1.ctx_h, dead: c1.dead, ..c0 }),
+        ensures
+            c1.rx_measure() + c0.ctx_weight() + c0.dead_measure() == c0.rx_measure() + c1.ctx_weight() + c1.dead_measure(),
+            c1.td_pending() == (c1.crypto_td_total() > 0 || c1.ctx_i.td_nodes() > 0 || c1.ctx_h.td_nodes() > 0
+                || c1.dead is Some),
+            c1.crypto_td_total() == c0.crypto_td_total(),
+    {
+    }
+
+    /// `free_send_td` changes only the send side's teardown: every CRYPTO receive, phase and level fact holds.
+    proof fn lemma_td_frame(c0: Connection, c1: Connection)
+        requires
+            c1 == (Connection { ctx_i: c1.ctx_i, ctx_h: c1.ctx_h, dead: c1.dead, ..c0 }),
+        ensures
+            c1.crypto_kept(c0),
+            drained_kept(c1, c0),
+            c1.crypto_backlog() == c0.crypto_backlog(),
+            c1.crypto_td_total() == c0.crypto_td_total(),
+            c1.out_log() == c0.out_log(),
+            c1.phase_spec() == c0.phase_spec(),
+            c1.close_spec() == c0.close_spec(),
+            forall|k: PacketKind| #[trigger] c1.crypto_end_spec(k) == c0.crypto_end_spec(k),
+            forall|k: PacketKind| #[trigger] c1.crypto_held(k) == c0.crypto_held(k),
+            forall|k: PacketKind| #[trigger] c1.crypto_contiguous_spec(k) == c0.crypto_contiguous_spec(k),
+            forall|k: PacketKind| #[trigger] c1.crypto_base_spec(k) == c0.crypto_base_spec(k),
+            forall|k: PacketKind, p: nat| #[trigger] c1.crypto_received(k, p) == c0.crypto_received(k, p),
+            forall|k: PacketKind| #[trigger] c1.live(k) == c0.live(k),
+            c1.peer_tp_known_spec() == c0.peer_tp_known_spec(),
+    {
+        Connection::lemma_crypto_kept_refl(c0);
     }
 
     /// Queues CRYPTO data for `level`; ignored once its space is discarded.
@@ -5820,7 +6190,7 @@ impl Connection {
             // Initial's and Handshake's retires, only in the call that completes. Excluded: `discard`'s own (above),
             // `issue_cids` and a close (`close_internal`): the cost sweep's other sites (9b4).
             r@ <= (if !old(self).live(PacketKind::OneRtt) && final(self).live(PacketKind::OneRtt) {
-                2 * (crate::avl::c_join2() * 127 + 1)
+                2 * (crate::avl::c_join2() * 127 + 1 + c_sfree())
             } else {
                 0
             }),
@@ -5846,6 +6216,41 @@ impl Connection {
             self.close_internal(INTERNAL_ERROR);
             return Ghost(0);
         }
+        let ghost sm = *self;
+        let Ghost(c) = self.complete_open(rand);
+        proof {
+            reveal(crate::crx::crx_ok);
+            assert forall|k: PacketKind| #[trigger] crypto_drained(*old(self), k) implies crypto_drained(*self, k) by {
+                assert(crypto_drained(sm, k));
+            }
+        }
+        Ghost(c)
+    }
+
+    /// `on_handshake_complete` past its checks: both spaces discarded (their retires), 1-RTT live, CIDs issued (split
+    /// for the rlimit).
+    #[verifier::spinoff_prover]
+    fn complete_open(&mut self, rand: &[u8; RAND_LEN]) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            old(self).settled(),
+            old(self).phase_spec() is Open,
+            !old(self).live(PacketKind::OneRtt),
+            old(self).peer_tp is Some,
+            old(self).streams is Some,
+        ensures
+            final(self).rx_measure() <= old(self).rx_measure(),
+            final(self).wf(),
+            final(self).settled(),
+            final(self).out_log() == old(self).out_log(),
+            final(self).crypto_kept(*old(self)),
+            final(self).crypto_end_spec(PacketKind::Initial) == old(self).crypto_end_spec(PacketKind::Initial),
+            final(self).phase_spec() == old(self).phase_spec(),
+            drained_kept(*final(self), *old(self)),
+            final(self).live(PacketKind::OneRtt),
+            crypto_drained(*final(self), PacketKind::Initial) && crypto_drained(*final(self), PacketKind::Handshake),
+            r@ <= 2 * (crate::avl::c_join2() * 127 + 1 + c_sfree()),
+    {
         let ghost s0 = *self;
         let Ghost(c1) = self.discard(PacketKind::Initial);
         let ghost s1 = *self;
@@ -6116,7 +6521,7 @@ impl Connection {
             let pto = self.pto();
             self.lc.enter_draining(self.now, pto);
             let ghost cs = *self;
-            self.streams = None;
+            self.bury_streams();
             proof {
                 Connection::lemma_streams_conn(cs, *self);
             }
@@ -7064,7 +7469,7 @@ impl Connection {
             Some(n) => n,
             None => {
                 self.lc.close_silently();
-                self.streams = None;
+                self.bury_streams();
                 proof {
                     lemma_pieces_none(
                         old(self).sent_i.inflight_spec(),
@@ -9372,7 +9777,7 @@ impl Connection {
             Some((_, _, None)) => {
                 self.lc.close_silently();
                 let ghost cs = *self;
-                self.streams = None;
+                self.bury_streams();
                 proof {
                     Connection::lemma_streams_conn(cs, *self);
                 }
@@ -9489,7 +9894,7 @@ impl Connection {
         self.complete && self.sent_1.next_pn() >= PN_MAX) {
             self.lc.close_silently();
             let ghost cs = *self;
-            self.streams = None;
+            self.bury_streams();
             proof {
                 Connection::lemma_streams_conn(cs, *self);
             }
@@ -10742,7 +11147,7 @@ impl Connection {
             None => {
                 self.lc.close_silently();
                 let ghost cs = *self;
-                self.streams = None;
+                self.bury_streams();
                 proof {
                     Connection::lemma_streams_conn(cs, *self);
                 }
@@ -10757,7 +11162,7 @@ impl Connection {
             if !self.fresh_dcid(v) {
                 self.lc.close_silently();
                 let ghost cs = *self;
-                self.streams = None;
+                self.bury_streams();
                 proof {
                     Connection::lemma_streams_conn(cs, *self);
                 }
@@ -10806,7 +11211,7 @@ impl Connection {
         self.lc.on_timeout(t);
         if !matches!(self.lc.phase(), Phase::Open) {
             let ghost cs = *self;
-            self.streams = None;
+            self.bury_streams();
             proof {
                 Connection::lemma_streams_conn(cs, *self);
             }
@@ -10821,7 +11226,7 @@ impl Connection {
                 if t >= d {
                     self.lc.close_silently();
                     let ghost cs = *self;
-                    self.streams = None;
+                    self.bury_streams();
                     proof {
                         Connection::lemma_streams_conn(cs, *self);
                     }
@@ -12595,6 +13000,22 @@ impl Connection {
             PacketKind::OneRtt => (self.crx_1.capacities(), 0),
         };
         c.0.saturating_add(c.1).saturating_add(tx)
+    }
+
+    /// Test support: the nodes in level `k`'s CRYPTO send context's teardown slot (D10 (e)); none at 1-RTT.
+    #[doc(hidden)]
+    pub fn crypto_send_td(&self, k: PacketKind) -> usize {
+        match k {
+            PacketKind::Initial => self.ctx_i.td_len(),
+            PacketKind::Handshake => self.ctx_h.td_len(),
+            PacketKind::OneRtt => 0,
+        }
+    }
+
+    /// Test support: a closed connection's streams left to free (D13), if any.
+    #[doc(hidden)]
+    pub fn dead_entries(&self) -> Option<usize> {
+        self.dead.as_ref().map(DeadStreams::entries_left)
     }
 
     /// Test support: stream `id`'s acked, lost and in-flight send-range counts (3d Task 1, 9b2 Task 8a).

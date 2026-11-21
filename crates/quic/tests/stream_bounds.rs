@@ -254,3 +254,58 @@ fn room_refills_as_acks_arrive() {
     assert_eq!((s.send_room(0), s.send_room(4)), (174_762, 174_762));
     assert_eq!(s.send_capacity(), 0);
 }
+
+/// Review Focus 7 (D10 (e), D13): STOP_SENDING on a stream holding hundreds of ranges resets it in O(1): its sets move
+/// to its teardown slot, whose window stays charged against `MAX_SEND_BUFFER`, so another stream's room stays below
+/// `MAX_SEND_BUFFER/6` while the slot holds nodes. The part is queued; `deliver_some` (the pump's STREAM half) frees
+/// the slot a budget at a time, and only then does the room come back whole and the finished entry go.
+#[test]
+fn stop_sending_reaps_by_pump() {
+    let mut p = peer();
+    p.initial_max_data = 1 << 30;
+    p.initial_max_stream_data_bidi_local = 1 << 30;
+    let mut s = Streams::new(&local(), &p);
+    assert_eq!(feed(&mut s, S(0, 0, b"GET", true)), Ok(()));
+    assert_eq!(s.write(0, &vec![7u8; 174_762], false), Ok(()));
+    let mut sent = Vec::new();
+    loop {
+        let out = poll(&mut s, 280);
+        if out.is_empty() {
+            break;
+        }
+        sent.extend(out);
+    }
+    for (i, f) in sent.iter().enumerate() {
+        if i % 2 == 1 {
+            s.on_frame_acked(f);
+        } else {
+            s.on_frame_lost(f);
+        }
+    }
+    let (a, l, f) = s.send_range_counts(0).unwrap();
+    assert!(a + l >= 600 && f == 0, "{a} acked, {l} lost, {f} in flight");
+    assert!(!s.stream_backlog());
+    assert_eq!(feed(&mut s, Frame::StopSending { stream_id: 0, error_code: 5 }), Ok(()));
+    assert_eq!(s.send_range_counts(0), Some((0, 0, 0)));
+    assert_eq!(s.send_td_len(0), Some(a + l));
+    assert!(s.stream_backlog());
+    // The RESET_STREAM goes and is acknowledged: both parts are terminal, but the slot keeps the entry.
+    let out = poll(&mut s, 1200);
+    assert!(out.iter().any(|f| matches!(f, Frame::ResetStream { stream_id: 0, .. })));
+    for f in &out {
+        s.on_frame_acked(f);
+    }
+    assert_eq!(s.open_streams(), 1);
+    let mut ev = Vec::new();
+    let mut steps = 0;
+    while s.stream_backlog() {
+        assert!(steps < 1000, "still backlog after {steps} steps");
+        assert!(s.send_room(4) < 174_762);
+        assert_eq!(s.open_streams(), 1);
+        let _ = s.deliver_some(4096, &mut ev);
+        steps += 1;
+    }
+    assert!(steps >= 2, "{steps} steps");
+    assert_eq!(s.send_room(4), 174_762);
+    assert_eq!(s.open_streams(), 0);
+}

@@ -410,3 +410,46 @@ fn range_gate_closes() {
     let c = s.poll_data(1200, u64::MAX).unwrap();
     assert_eq!(c.off, 130 * 256);
 }
+
+/// A stream of `w` bytes sent in `FLOOR`-byte pieces, odd pieces acknowledged and even ones lost: about `w / 256` nodes
+/// in its acked and lost sets.
+fn ranged(w: usize) -> SendStream {
+    let mut s = SendStream::new(w as u64);
+    assert_eq!(s.write(&vec![5u8; w], false), Ok(()));
+    let mut p = Vec::new();
+    while let Some(c) = s.poll_data(256, u64::MAX) {
+        p.push((c.off, c.data.len() as u64));
+    }
+    for (i, &(o, n)) in p.iter().enumerate() {
+        if i % 2 == 1 {
+            s.on_data_acked(o, n, false);
+        } else {
+            s.on_data_lost(o, n, false);
+        }
+    }
+    s
+}
+
+/// D10 (e), Review Focus 7: `reset` moves the stream's thousands of acked and lost ranges to its teardown slot whole
+/// (its own sets empty at once), and `reap(4096)` frees them, each call fewer, at least one node per call.
+#[test]
+fn reset_moves_trees() {
+    let mut s = ranged(1 << 20);
+    let (a, l, f) = s.range_counts();
+    assert!(a >= 2000 && l >= 2000 && f == 0, "{a} acked, {l} lost, {f} in flight");
+    assert!(s.reset(3));
+    assert_eq!(s.range_counts(), (0, 0, 0));
+    assert_eq!(s.td_len(), a + l);
+    assert!(s.has_td());
+    let mut calls = 0;
+    while s.has_td() {
+        let before = s.td_len();
+        let _ = s.reap(4096);
+        assert!(s.td_len() < before);
+        calls += 1;
+    }
+    assert_eq!(s.td_len(), 0);
+    // `pop_some`'s budget: `(4096 - 1) / (6·(h + 1) + 1)` nodes per call at height h, at least 1.
+    assert!(calls >= 2 && calls < a + l, "{calls} calls for {} nodes", a + l);
+    assert!(!s.reset(4));
+}

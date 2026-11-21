@@ -519,3 +519,35 @@ fn send_selective_acks() {
 fn stream_reverse_fill() {
     check("stream_reverse_fill", 16 << 10, reverse_fill, Alloc::None);
 }
+
+/// D10 (e), Review Focus 7: `reset` of a stream holding thousands of acked and lost ranges (1 MiB in 256-byte pieces,
+/// odd ones acknowledged, even ones lost) allocates nothing and frees only its queue's buffers (`c_sfree`, at most
+/// two): its sets move to the teardown slot whole. Each `reap(4096)` then frees more nodes than it allocates (`pop_min`
+/// re-boxes the nodes on its path), and no call reallocates.
+#[test]
+fn reset_allocates_nothing() {
+    const W: usize = 1 << 20;
+    let mut s = SendStream::new(W as u64);
+    assert_eq!(s.write(&bytes(W), false), Ok(()));
+    let mut p = Vec::new();
+    while let Some(c) = s.poll_data(256, u64::MAX) {
+        p.push((c.off, c.data.len() as u64));
+    }
+    for (i, &(o, n)) in p.iter().enumerate() {
+        if i % 2 == 1 {
+            s.on_data_acked(o, n, false);
+        } else {
+            s.on_data_lost(o, n, false);
+        }
+    }
+    let (m, nodes) = measure(&mut s, |s| assert!(s.reset(3)));
+    assert!(nodes >= 4000, "{nodes} nodes");
+    assert!(m[0] == 0 && m[2] == 0 && m[1] <= 2, "reset: [allocs, frees, reallocs, bytes] {m:?}");
+    assert_eq!(s.td_len(), nodes);
+    while s.has_td() {
+        let (m, _) = measure(&mut s, |s| {
+            let _ = s.reap(4096);
+        });
+        assert!(m[2] == 0 && m[0] < m[1], "reap: [allocs, frees, reallocs, bytes] {m:?}");
+    }
+}

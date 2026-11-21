@@ -1,14 +1,16 @@
 //! A fixed-capacity FIFO of stream ids (9b2 D13): the receiving parts with STREAM bytes or a FIN
-//! left to deliver, so `pump_backlog` pops one without scanning the streams. `IDQ_CAP` slots in
+//! left to deliver and the sending parts with a non-empty teardown slot (D10 (e)), so `backlog_step`
+//! pops one without scanning the streams. `IDQ_CAP` slots in
 //! one exact `CapVec`, filled on first use and then reused in a ring; push and pop are O(1).
 use byteq::capvec::CapVec;
 use vstd::prelude::*;
 
 verus! {
 
-/// The slots: one per peer stream we let be open, 100 bidirectional and 100 unidirectional
-/// (`2 * MAX_LOCAL_STREAMS`, streams.rs).
-pub const IDQ_CAP: usize = 200;
+/// The slots: one per stream that can have an entry, 100 peer bidirectional, 100 peer unidirectional and our 3
+/// unidirectional (`max_entries()`, `2 * MAX_LOCAL_STREAMS + MAX_OWN_UNI`, streams.rs): every queued id is a live
+/// entry's (`Streams::wf`'s `qinv`).
+pub const IDQ_CAP: usize = 203;
 
 pub struct IdQueue {
     q: CapVec<u64>,

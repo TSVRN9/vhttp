@@ -776,6 +776,47 @@ pub open spec fn res_room(b: nat, len: nat) -> nat {
     }
 }
 
+/// A teardown slot's trees (D10 (e)): the acked, lost and in-flight sets `reset` or `retire` moved out of a part.
+pub struct TdSets {
+    acked: RangeSet,
+    lost: RangeSet,
+    flight: PieceSet,
+}
+
+/// The nodes in a teardown slot.
+pub closed spec fn td_count(td: TdSets) -> nat {
+    td.acked@.len() + td.lost@.len() + td.flight@.len()
+}
+
+/// The teardown slot `td` with window `w`, of a part reset or not (`reset`): its sets well formed, empty exactly
+/// when `w` is 0, empty unless reset (each move runs once, onto an empty slot), and bounded by the window as the
+/// part's own sets were (D10 (d)). Opaque: `wf` carries it as one atom; `lemma_td` states it.
+#[verifier::opaque]
+pub closed spec fn td_ok(td: TdSets, w: u64, reset: bool) -> bool {
+    &&& td.acked.wf()
+    &&& td.lost.wf()
+    &&& td.flight.wf()
+    &&& (td_count(td) == 0 <==> w == 0)
+    &&& td_count(td) > 0 ==> reset
+    &&& td_count(td) <= (w as nat) / (FLOOR as nat) + MAX_FLUSH
+    &&& w <= byteq::queue::MAX_QUEUE
+}
+
+/// The frees of dropping a part whose sets and slot are empty: its queue's at most two buffers (the second while it
+/// migrates); the empty trees are `None`.
+pub open spec fn c_sfree() -> nat {
+    2
+}
+
+/// `res_of` does not fall as the peak grows.
+pub proof fn lemma_res_mono(a: nat, b: nat)
+    requires
+        a <= b,
+    ensures
+        res_of(a) <= res_of(b),
+{
+}
+
 /// The sending part of one stream.
 pub struct SendStream {
     state: SendState,
@@ -804,6 +845,10 @@ pub struct SendStream {
     /// The RESET_STREAM's error code and final size, once reset.
     reset: Option<(u64, u64)>,
     reset_pending: bool,
+    /// The teardown slot (D10 (e)): the sets `reset` or `retire` moved out in O(1), freed by `reap`.
+    td: TdSets,
+    /// The window `sent_end - acked_base` at the move, charged until the slot is empty (`Streams::tx_dead`); 0 then.
+    td_w: u64,
     all_written: Ghost<Seq<u8>>,
 }
 
@@ -903,6 +948,21 @@ impl SendStream {
     /// Ranges and pieces held in the three sets: one tree node each.
     pub closed spec fn ranges_held(&self) -> nat {
         self.acked@.len() + self.lost@.len() + self.flight@.len()
+    }
+
+    /// The nodes in the teardown slot.
+    pub closed spec fn td_nodes(&self) -> nat {
+        td_count(self.td)
+    }
+
+    /// The window charged for the teardown slot until it is empty; 0 exactly when it is.
+    pub closed spec fn td_window(&self) -> nat {
+        self.td_w as nat
+    }
+
+    /// `self` is `o` but for the teardown slot (`reap`).
+    pub closed spec fn same_but_td(&self, o: SendStream) -> bool {
+        *self == (SendStream { td: self.td, td_w: self.td_w, ..o })
     }
 
     /// The largest of the three trees' heights: per-call costs are in it (D10 (e)).
@@ -1023,6 +1083,85 @@ impl SendStream {
         &&& self.state is DataSent ==> !(self.acked_base == self.written && self.fin_acked)
         // Memory: the buffer holds exactly the bytes past the acknowledged prefix (none once reset).
         &&& !is_reset(self.state) ==> self.buf@.len() == self.written - self.acked_base
+        &&& td_ok(self.td, self.td_w, is_reset(self.state))
+    }
+
+    /// A part not reset whose window `[acked_base, sent_end)` is empty holds no set item and no open slot.
+    proof fn lemma_empty_window(&self)
+        requires
+            self.wf(),
+            !is_reset(self.state),
+            self.sent_end == self.acked_base,
+        ensures
+            self.ranges_held() == 0,
+            self.nslots == 0,
+    {
+        lemma_parts_end(self.acked@, self.lost@, self.flight@, self.open_slots(), self.acked_base, self.sent_end);
+        if self.acked@.len() > 0 {
+            assert(self.acked_base <= self.acked@[0].0 < self.acked@[0].1 <= self.sent_end);
+        }
+        if self.lost@.len() > 0 {
+            assert(self.acked_base <= self.lost@[0].0 < self.lost@[0].1 <= self.sent_end);
+        }
+        if self.flight@.len() > 0 {
+            assert(self.acked_base <= self.flight@[0].0 < self.flight@[0].1 <= self.sent_end);
+        }
+        if self.nslots > 0 {
+            assert(self.acked_base < self.open_slots()[0].1 <= self.sent_end);
+        }
+    }
+
+    /// A terminal or reset part holds nothing in its sets: everything acknowledged, or moved to the slot.
+    pub proof fn lemma_sets_idle(&self)
+        requires
+            self.wf(),
+            self.state() is DataRecvd || is_reset(self.state()),
+        ensures
+            self.ranges_held() == 0,
+    {
+        if !is_reset(self.state) {
+            self.lemma_empty_window();
+        }
+    }
+
+    /// The teardown slot's invariant (`td_ok`).
+    pub proof fn lemma_td(&self)
+        requires
+            self.wf(),
+        ensures
+            self.td_nodes() > 0 ==> is_reset(self.state()),
+            (self.td_nodes() == 0) == (self.td_window() == 0),
+            self.td_nodes() <= self.td_window() / (FLOOR as nat) + MAX_FLUSH,
+            self.td_window() <= byteq::queue::MAX_QUEUE,
+    {
+        reveal(td_ok);
+    }
+
+    /// Everything but the slot is as in `o`.
+    pub proof fn lemma_same_but_td(&self, o: SendStream)
+        requires
+            self.same_but_td(o),
+        ensures
+            self.state() == o.state(),
+            self.all_written() == o.all_written(),
+            self.fin_written_spec() == o.fin_written_spec(),
+            self.acked_base_spec() == o.acked_base_spec(),
+            self.fin_acked_spec() == o.fin_acked_spec(),
+            self.reset_spec() == o.reset_spec(),
+            self.buffered_spec() == o.buffered_spec(),
+            self.peak_spec() == o.peak_spec(),
+            self.held_spec() == o.held_spec(),
+            self.capacity_spec() == o.capacity_spec(),
+            forall|b: nat| #[trigger] self.room_spec(b) == o.room_spec(b),
+            self.range_count() == o.range_count(),
+            self.ranges_held() == o.ranges_held(),
+            self.flight_spec() == o.flight_spec(),
+            self.flush_point() == o.flush_point(),
+            self.sent_end() == o.sent_end(),
+            self.max() == o.max(),
+            self.next_off() == o.next_off(),
+            self.pending_reset() == o.pending_reset(),
+    {
     }
 
     /// The invariant, in terms of the accessors.
@@ -1080,6 +1219,7 @@ impl SendStream {
             self.buffered_spec() <= self.peak_spec(),
             self.capacity_spec() <= self.held_spec(),
             self.peak_spec() == 0 ==> self.buffered_spec() == 0,
+            self.held_spec() == res_of(self.peak_spec()),
     {
         self.buf.lemma_wf();
     }
@@ -1151,6 +1291,68 @@ impl SendStream {
         }
     }
 
+    /// The reservation the part holds against `MAX_SEND_BUFFER`: its queue's (`held_spec`) and its teardown slot's
+    /// window (`res_of(td_window())`, D10 (e)), so `send_room` recovers only when the slot is freed.
+    pub fn reserved(&self) -> (r: u64)
+        requires
+            self.wf(),
+        ensures
+            r == self.held_spec() + res_of(self.td_window()),
+    {
+        proof {
+            self.lemma_td();
+            self.buf.lemma_wf();
+        }
+        let h = self.held();
+        let d = if self.td_w == 0 {
+            0
+        } else if 6 * self.td_w < 128 {
+            128
+        } else {
+            6 * self.td_w
+        };
+        h + d
+    }
+
+    /// The part's nodes, those held weighing twice (a move to the slot halves them; D13's measure), within its
+    /// reservation: at most 2058 under `MAX_SEND_BUFFER` (686 per side, `⌊2^20/6/256⌋ + MAX_FLUSH`).
+    pub proof fn lemma_weight(&self)
+        requires
+            self.wf(),
+            self.held_spec() + res_of(self.td_window()) <= 1048576,
+        ensures
+            2 * self.ranges_held() + self.td_nodes() <= 2058,
+    {
+        self.lemma_wf();
+        self.lemma_held();
+        self.lemma_td();
+        vstd::arithmetic::div_mod::lemma_div_is_ordered(self.buffered_spec() as int, 174762, FLOOR as int);
+        vstd::arithmetic::div_mod::lemma_div_is_ordered(self.td_window() as int, 174762, FLOOR as int);
+        assert(174762int / (FLOOR as int) == 682) by (compute_only);
+    }
+
+    /// The part's weighted nodes, from the queue's bound alone (a CRYPTO context, under no `MAX_SEND_BUFFER`).
+    pub proof fn lemma_weight_max(&self)
+        requires
+            self.wf(),
+        ensures
+            2 * self.ranges_held() + self.td_nodes() <= 3 * ((byteq::queue::MAX_QUEUE as nat) / (FLOOR as nat) + MAX_FLUSH),
+    {
+        self.lemma_wf();
+        self.lemma_td();
+        self.buf.lemma_wf();
+        vstd::arithmetic::div_mod::lemma_div_is_ordered(
+            self.buffered_spec() as int,
+            byteq::queue::MAX_QUEUE as int,
+            FLOOR as int,
+        );
+        vstd::arithmetic::div_mod::lemma_div_is_ordered(
+            self.td_window() as int,
+            byteq::queue::MAX_QUEUE as int,
+            FLOOR as int,
+        );
+    }
+
     pub fn room(&self, b: u64) -> (r: u64)
         requires
             self.wf(),
@@ -1202,6 +1404,9 @@ impl SendStream {
             r.peak_spec() == 0,
             r.flight_spec() == Set::<(u64, u64)>::empty(),
             r.flush_point() == 0,
+            r.td_nodes() == 0,
+            r.td_window() == 0,
+            r.ranges_held() == 0,
     {
         let r = SendStream {
             state: SendState::Ready,
@@ -1222,6 +1427,8 @@ impl SendStream {
             credit: SendCredit::new(max),
             reset: None,
             reset_pending: false,
+            td: TdSets { acked: RangeSet::new(), lost: RangeSet::new(), flight: PieceSet::new() },
+            td_w: 0,
             all_written: Ghost(Seq::empty()),
         };
         proof {
@@ -1230,6 +1437,7 @@ impl SendStream {
             assert(r.open_slots() =~= Seq::<(u64, u64)>::empty());
             r.flight@.to_set_ensures();
             assert(r.flight_spec() =~= Set::<(u64, u64)>::empty());
+            reveal(td_ok);
         }
         r
     }
@@ -1274,6 +1482,9 @@ impl SendStream {
             old(self).wf(),
             old(self).buffered_spec() + data@.len() <= byteq::queue::MAX_QUEUE,
         ensures
+            final(self).ranges_held() == old(self).ranges_held(),
+            final(self).td_nodes() == old(self).td_nodes(),
+            final(self).td_window() == old(self).td_window(),
             final(self).wf(),
             send_step_ok(old(self).state(), final(self).state()),
             r is Err <==> (!(old(self).state() is Ready || old(self).state() is Send)
@@ -1329,6 +1540,8 @@ impl SendStream {
         requires
             old(self).wf(),
         ensures
+            final(self).td_nodes() == old(self).td_nodes(),
+            final(self).td_window() == old(self).td_window(),
             final(self).wf(),
             final(self).flush_point() == final(self).all_written().len(),
             final(self).state() == old(self).state(),
@@ -1359,6 +1572,8 @@ impl SendStream {
         requires
             old(self).wf(),
         ensures
+            final(self).td_nodes() == old(self).td_nodes(),
+            final(self).td_window() == old(self).td_window(),
             final(self).wf(),
             send_step_ok(old(self).state(), final(self).state()),
             final(self).all_written() == old(self).all_written(),
@@ -1394,6 +1609,8 @@ impl SendStream {
         requires
             old(self).wf(),
         ensures
+            final(self).td == old(self).td,
+            final(self).td_w == old(self).td_w,
             final(self).wf(),
             send_step_ok(old(self).state(), final(self).state()),
             final(self).all_written() == old(self).all_written(),
@@ -1468,6 +1685,8 @@ impl SendStream {
             old(self).lost@.len() > 0,
             !no_data(old(self).state),
         ensures
+            final(self).td == old(self).td,
+            final(self).td_w == old(self).td_w,
             final(self).wf(),
             send_step_ok(old(self).state(), final(self).state()),
             final(self).all_written() == old(self).all_written(),
@@ -1614,6 +1833,8 @@ impl SendStream {
             old(self).lost@.len() == 0,
             !no_data(old(self).state),
         ensures
+            final(self).td == old(self).td,
+            final(self).td_w == old(self).td_w,
             final(self).wf(),
             send_step_ok(old(self).state(), final(self).state()),
             final(self).all_written() == old(self).all_written(),
@@ -1884,7 +2105,8 @@ impl SendStream {
     }
 
     /// Abandons the stream with RESET_STREAM `code` (final size: the bytes sent). `fresh`:
-    /// the stream was not already reset or fully acknowledged.
+    /// the stream was not already reset or fully acknowledged. O(1): the three sets move to the teardown slot,
+    /// freed by `reap` (D10 (e)).
     pub fn reset(&mut self, code: u64) -> (fresh: bool)
         requires
             old(self).wf(),
@@ -1904,21 +2126,20 @@ impl SendStream {
             ) && final(self).pending_reset() == Some((code, old(self).sent_end()))
                 && final(self).buffered_spec() == 0,
             fresh ==> final(self).flight_spec() == Set::<(u64, u64)>::empty(),
+            // The move: the sets to the slot, the window charged no more than the reservation it leaves.
+            fresh ==> final(self).ranges_held() == 0 && final(self).td_nodes() == old(self).ranges_held()
+                && old(self).td_nodes() == 0 && final(self).td_window() <= old(self).peak_spec()
+                && final(self).held_spec() == 0,
             !fresh ==> *final(self) == *old(self),
     {
         let (fresh, Ghost(c)) = self.reset_w(code);
         proof {
-            assert(c <= crate::avl::c_free() * (2 * old(self).ranges_held() + 3));
+            assert(c <= c_sfree());
         }
         fresh
     }
 
-    /// `reset`, with its cost: the three trees freed node by node, O(nodes) until Task 10b moves them to a teardown
-    /// slot in O(1) (review M3, an interim inside the phase).
-    // Task 10b (spec D15): these trees are freed here at O(nodes), up to ⌊W/256⌋ + 4, and the CRYPTO contexts' trees
-    // conn.rs's `discard` drops by replacing `ctx_i`/`ctx_h` are dropped at O(nodes) uncharged; both are reachable from
-    // network input (a peer's STOP_SENDING reaches `on_stop_sending` → `reset`; key discard reaches `discard`). Owner:
-    // Task 10b (`reset` and `retire` move the trees to a teardown slot in O(1), drained by `pump_backlog`).
+    /// `reset`, with its cost: the old queue's buffers freed; the sets move whole.
     fn reset_w(&mut self, code: u64) -> (r: (bool, Ghost<nat>))
         requires
             old(self).wf(),
@@ -1938,24 +2159,51 @@ impl SendStream {
             ) && final(self).pending_reset() == Some((code, old(self).sent_end()))
                 && final(self).buffered_spec() == 0,
             r.0 ==> final(self).flight_spec() == Set::<(u64, u64)>::empty(),
+            r.0 ==> final(self).ranges_held() == 0 && final(self).td_nodes() == old(self).ranges_held()
+                && old(self).td_nodes() == 0 && final(self).td_window() <= old(self).peak_spec()
+                && final(self).held_spec() == 0,
             !r.0 ==> *final(self) == *old(self),
-            r.1@ <= crate::avl::c_free() * (2 * old(self).ranges_held() + 3),
+            r.1@ <= c_sfree(),
     {
         let ghost mut work: nat = 0;
         match self.state {
             SendState::Ready | SendState::Send | SendState::DataSent => {},
             _ => return (false, Ghost(work)),
         }
-        let Ghost(c1) = self.lost.clear();
-        let Ghost(c2) = self.acked.clear();
-        let Ghost(c3) = self.flight.clear();
         proof {
-            work = work + c1 + c2 + c3;
+            reveal(td_ok);
+            self.acked.lemma_wf();
+            self.lost.lemma_wf();
+            self.flight.lemma_wf();
+            self.buf.lemma_wf();
+            assert(self.sent_end - self.acked_base <= self.buf@.len());
+            if self.sent_end == self.acked_base {
+                self.lemma_empty_window();
+            }
         }
+        let n = self.acked.len() + self.lost.len() + self.flight.len();
+        let w = self.sent_end - self.acked_base;
+        let mut acked = RangeSet::new();
+        let mut lost = RangeSet::new();
+        let mut flight = PieceSet::new();
+        core::mem::swap(&mut self.acked, &mut acked);
+        core::mem::swap(&mut self.lost, &mut lost);
+        core::mem::swap(&mut self.flight, &mut flight);
+        // The slot is empty (`td_ok`: a part not reset holds none), so nothing is dropped here.
+        self.td = TdSets { acked, lost, flight };
+        self.td_w = if n == 0 {
+            0
+        } else {
+            w
+        };
         self.state = SendState::ResetSent;
         self.reset = Some((code, self.sent_end));
         self.reset_pending = true;
+        // The old queue's buffers are freed here: at most two.
         self.buf = ByteQueue::new();
+        proof {
+            work = work + c_sfree();
+        }
         self.peak = 0;
         self.nslots = 0;
         self.fin_lost = false;
@@ -1963,8 +2211,96 @@ impl SendStream {
         proof {
             self.flight@.to_set_ensures();
             assert(self.flight_spec() =~= Set::<(u64, u64)>::empty());
+            vstd::arithmetic::div_mod::lemma_div_is_ordered(
+                (old(self).sent_end - old(self).acked_base) as int,
+                w as int,
+                FLOOR as int,
+            );
+            assert(self.td_nodes() == old(self).ranges_held());
+            reveal(td_ok);
         }
         (true, Ghost(work))
+    }
+
+    /// Retires a CRYPTO context at key discard (RFC 9001 §4.9), once: its three sets move to the teardown slot in
+    /// O(1), its queue is freed, and it ends in Reset Recvd, terminal, with no RESET_STREAM owed, so nothing is sent
+    /// from it again and no later `reset` meets a full slot.
+    pub fn retire(&mut self) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).state() is ResetRecvd || final(self).state() is DataRecvd,
+            final(self).pending_reset() is None,
+            final(self).flight_spec() == Set::<(u64, u64)>::empty(),
+            final(self).ranges_held() == 0,
+            final(self).buffered_spec() == 0,
+            final(self).td_nodes() == old(self).td_nodes() + old(self).ranges_held(),
+            r@ <= c_sfree(),
+    {
+        let (_, Ghost(c)) = self.reset_w(0);
+        proof {
+            self.lemma_flight_idle();
+            if !is_reset(self.state) {
+                // Data Recvd: everything acknowledged, nothing held.
+                self.lemma_empty_window();
+            }
+        }
+        if let SendState::ResetSent = self.state {
+            self.state = SendState::ResetRecvd;
+            self.reset_pending = false;
+        }
+        proof {
+            reveal(td_ok);
+        }
+        Ghost(c)
+    }
+
+    /// The teardown slot holds nodes. O(1).
+    pub fn has_td(&self) -> (r: bool)
+        requires
+            self.wf(),
+        ensures
+            r == (self.td_nodes() > 0),
+    {
+        proof {
+            reveal(td_ok);
+        }
+        self.td_w > 0
+    }
+
+    /// Frees part of the teardown slot within `budget` (`avl::pop_some`, D7(d)): at least one node while any remain.
+    /// Nothing else changes, but the window, which goes to 0 with the last node.
+    pub fn reap(&mut self, budget: u64) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            crate::avl::c_pop() * 127 + 2 <= budget,
+        ensures
+            final(self).wf(),
+            final(self).same_but_td(*old(self)),
+            final(self).td_nodes() <= old(self).td_nodes(),
+            old(self).td_nodes() > 0 ==> final(self).td_nodes() < old(self).td_nodes(),
+            final(self).td_window() <= old(self).td_window(),
+            r@ <= budget,
+    {
+        proof {
+            reveal(td_ok);
+        }
+        let Ghost(c) = if self.td.acked.len() > 0 {
+            self.td.acked.reap_some(budget)
+        } else if self.td.lost.len() > 0 {
+            self.td.lost.reap_some(budget)
+        } else {
+            self.td.flight.reap_some(budget)
+        };
+        if self.td.acked.len() == 0 && self.td.lost.len() == 0 && self.td.flight.len() == 0 {
+            self.td_w = 0;
+        }
+        proof {
+            reveal(td_ok);
+            vstd::arithmetic::div_mod::lemma_div_is_ordered(0, self.td_w as int, FLOOR as int);
+        }
+        Ghost(c)
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-3.5
@@ -1992,6 +2328,9 @@ impl SendStream {
             ) && final(self).pending_reset() == Some((code, old(self).sent_end()))
                 && final(self).buffered_spec() == 0,
             fresh ==> final(self).flight_spec() == Set::<(u64, u64)>::empty(),
+            fresh ==> final(self).ranges_held() == 0 && final(self).td_nodes() == old(self).ranges_held()
+                && old(self).td_nodes() == 0 && final(self).td_window() <= old(self).peak_spec()
+                && final(self).held_spec() == 0,
             !fresh ==> *final(self) == *old(self),
     {
         self.reset(code)
@@ -2002,6 +2341,9 @@ impl SendStream {
         requires
             old(self).wf(),
         ensures
+            final(self).ranges_held() == old(self).ranges_held(),
+            final(self).td_nodes() == old(self).td_nodes(),
+            final(self).td_window() == old(self).td_window(),
             final(self).wf(),
             final(self).buffered_spec() <= old(self).buffered_spec(),
             final(self).held_spec() <= old(self).held_spec(),
@@ -2046,6 +2388,9 @@ impl SendStream {
         requires
             old(self).wf(),
         ensures
+            final(self).ranges_held() == old(self).ranges_held(),
+            final(self).td_nodes() == old(self).td_nodes(),
+            final(self).td_window() == old(self).td_window(),
             final(self).wf(),
             final(self).buffered_spec() <= old(self).buffered_spec(),
             final(self).held_spec() <= old(self).held_spec(),
@@ -2066,6 +2411,9 @@ impl SendStream {
         requires
             old(self).wf(),
         ensures
+            final(self).ranges_held() == old(self).ranges_held(),
+            final(self).td_nodes() == old(self).td_nodes(),
+            final(self).td_window() == old(self).td_window(),
             final(self).wf(),
             final(self).buffered_spec() <= old(self).buffered_spec(),
             final(self).held_spec() <= old(self).held_spec(),
@@ -2092,6 +2440,9 @@ impl SendStream {
         requires
             old(self).wf(),
         ensures
+            final(self).ranges_held() == old(self).ranges_held(),
+            final(self).td_nodes() == old(self).td_nodes(),
+            final(self).td_window() == old(self).td_window(),
             final(self).wf(),
             final(self).buffered_spec() <= old(self).buffered_spec(),
             final(self).held_spec() <= old(self).held_spec(),
@@ -2284,6 +2635,8 @@ impl SendStream {
             // D10 (b): conn hands back the edges of a piece it sent; checked past the Send/Data Sent gate.
             !is_reset(old(self).state()) && len > 0 ==> old(self).in_flight(off, len),
         ensures
+            final(self).td_nodes() == old(self).td_nodes(),
+            final(self).td_window() == old(self).td_window(),
             final(self).wf(),
             final(self).buffered_spec() <= old(self).buffered_spec(),
             final(self).held_spec() <= old(self).held_spec(),
@@ -2322,6 +2675,8 @@ impl SendStream {
             old(self).wf(),
             !is_reset(old(self).state()) && len > 0 ==> old(self).in_flight(off, len),
         ensures
+            final(self).td == old(self).td,
+            final(self).td_w == old(self).td_w,
             final(self).wf(),
             final(self).buffered_spec() <= old(self).buffered_spec(),
             final(self).held_spec() <= old(self).held_spec(),
@@ -2476,6 +2831,8 @@ impl SendStream {
             // D10 (b): conn hands back the edges of a piece it sent; checked past the Send/Data Sent gate.
             !is_reset(old(self).state()) && len > 0 ==> old(self).in_flight(off, len),
         ensures
+            final(self).td_nodes() == old(self).td_nodes(),
+            final(self).td_window() == old(self).td_window(),
             final(self).wf(),
             final(self).buffered_spec() <= old(self).buffered_spec(),
             final(self).held_spec() <= old(self).held_spec(),
@@ -2509,6 +2866,8 @@ impl SendStream {
             old(self).wf(),
             !is_reset(old(self).state()) && len > 0 ==> old(self).in_flight(off, len),
         ensures
+            final(self).td == old(self).td,
+            final(self).td_w == old(self).td_w,
             final(self).wf(),
             final(self).buffered_spec() <= old(self).buffered_spec(),
             final(self).held_spec() <= old(self).held_spec(),
@@ -2603,6 +2962,12 @@ impl SendStream {
     #[doc(hidden)]
     pub fn range_counts(&self) -> (usize, usize, usize) {
         (self.acked.len() as usize, self.lost.len() as usize, self.flight.len() as usize)
+    }
+
+    /// Test support: the nodes in the teardown slot.
+    #[doc(hidden)]
+    pub fn td_len(&self) -> usize {
+        (self.td.acked.len() + self.td.lost.len() + self.td.flight.len()) as usize
     }
 
     /// Test support: the acked and lost ranges and the pieces in flight.

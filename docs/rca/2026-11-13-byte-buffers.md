@@ -180,3 +180,32 @@ tail).
   failed as written until 0dee01b took the regex from the run. **Why**: the regex was written before the run, from the
   proof's shape. **Catch**: `scripts/mutants.sh run <id>` fails a row whose regex matches no error block of the mutated
   verification (it did here), and every new or retargeted row is run before its task commits.
+
+## Teardowns at O(nodes), and drops no cost saw (9b2 Task 10b, D10 (e), D13)
+
+- **What**: three teardowns reachable from network input freed O(nodes) in one call, uncharged or charged only by
+  their size: `SendStream::reset_w` cleared the acked, lost and in-flight trees node by node (a peer's STOP_SENDING,
+  up to `⌊W/256⌋ + 4` nodes); conn.rs `discard` replaced `ctx_i`/`ctx_h` with `SendStream::new`, dropping their trees
+  implicitly (key discard); and every close (`self.streams = None`, 13 sites) dropped the whole `Streams`, up to
+  `max_entries()` receive rings and every sending part's trees and queues, unseen by any cost. `deliver_some` also
+  charged its removal's sending part only by slack inside `c_rfree()` (Task 10 review M1).
+- **Why**: a drop by assignment or at scope end is invisible to Verus and to `scripts/cost-charge.sh` (D15): the cost
+  convention charges what a ghost `work` names, and nothing names an implicit `Drop`. Task 8a made the tree teardown
+  explicit (`clear`, charged O(nodes)) as an interim; the close sites predate the cost ghost.
+- **Fix**: `reset` and `retire` move the three trees into the part's teardown slot in O(1) (`TdSets`, `td_ok` in
+  `SendStream::wf`: a slot holds nodes only on a reset part, bounded by its window); `reap` frees a budget of them
+  (`avl::pop_some`). A part whose slot holds nodes is queued (`qinv`), its window stays charged in its reservation,
+  and `deliver_some` reaps it and removes it only once the slot is empty; `gc` asserts a dropped sending part holds no
+  node. `discard` retires the CRYPTO send contexts in place; closing moves `Streams` whole to `Connection::dead`
+  (`bury_streams`), freed a step per `backlog_step` (`DeadStreams::reap`: each entry's sets to its slot, the slot
+  reaped, the entry's ring and queue dropped, `c_dstep()`). `deliver_some` charges `c_rfree() + c_sfree()`.
+- **Catch**: the cost ensures (`reset_w`'s `r@ <= c_sfree()`, `reap`'s `r@ <= budget`, `DeadStreams::reap`'s), the
+  progress measure in `backlog_step`'s and `pump_backlog`'s ensures (a slot or a dead entry left means the measure
+  falls), and mutants 9b2-M25 (`reset_w` clearing in place, killed at its cost ensures) and 9b2-M26 (`gc` removing a
+  queued entry, killed at its assertion that the dropped part holds no node), each under `scripts/mutants.sh run`. The
+  class (a tree-holding value dropped implicitly) still has no mechanical catch beyond these sites: cat-C15-semantic-cost
+  (9b4) owns a semantic check; the frame and ACK/loss paths' `gc` drops are 9b2 Task 10d's (item 5).
+- **Class sweep**: `grep -nE "= SendStream::new|streams = None|= Streams::new|= RecvStream::new"
+  crates/quic/src/{conn,streams}.rs` at this commit: `Streams::new` only in `on_peer_params` (replacing `None`) and
+  `SendStream::new`/`RecvStream::new` only for new entries, the accept constructor, and two `RecvStream::new(0, 0)`
+  placeholders on arms their requires make unreachable (`deliver_entry`, `feed_entry`); no `streams = None` is left.

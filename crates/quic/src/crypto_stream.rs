@@ -705,7 +705,7 @@ impl CryptoStream {
             assert(crate::avl::c_pop() * 127 + 2 <= B_PUMP);
         }
         let ghost a = *self;
-        let Ghost(c) = crate::avl::pop_some(&mut self.td, B_PUMP);
+        let (_, Ghost(c)) = crate::avl::pop_some(&mut self.td, B_PUMP);
         proof {
             assert(self.st == a.st);
             assert(crate::avl::wf(self.td));
