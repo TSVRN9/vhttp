@@ -207,20 +207,15 @@ fn gap_filled_client_hello_completes_without_another_datagram() {
     check_response(&r.1);
 }
 
-/// D13 (9b2 Task 10b fix round 1): a connection closed silently by its idle timeout, holding streams, is kept until
-/// its backlog is freed: its streams go to the dead slot at the close and its stores and send contexts at
-/// `retire_closed`, and `pump` frees them a bounded `backlog_step` at a time, at most `MAX_PUMPS` per wake. Its
-/// removal then frees no stream state. Each wake frees at most `MAX_PUMPS` proved per-call bounds (frees are units of
-/// `backlog_step`'s `B_PUMP + c_dsome()` = 75,202, `retire_closed`'s `5·c_retire()` and the CRYPTO step's).
-#[test]
-fn idle_closed_connection_kept_until_drained() {
-    const PER_CALL: usize = 75_202 + 5 * 1654 + 18 * 4096 + 5608;
+/// A server with one connection, handshake complete, then `open` request streams left open (no FIN) and `answered`
+/// GETs whose responses the client takes; it acknowledges only the even 1-RTT packet numbers, so the other responses'
+/// sending parts keep their pieces in flight (tree nodes) at a close.
+fn busy_server(open: u64, answered: u64, from: SocketAddr) -> (Server<'static>, Client) {
     let cfg: &'static _ = Box::leak(Box::new(
         load_config(include_bytes!("data/cert.pem"), include_bytes!("data/key.pem"), vec![]).unwrap(),
     ));
     let mut s = Server::new(cfg, rng);
     let mut c = Client::new();
-    let from: SocketAddr = "127.0.0.1:50002".parse().unwrap();
     let mut got = Vec::new();
     for round in 0..8u64 {
         if !c.handshaking() && round > 1 {
@@ -230,33 +225,94 @@ fn idle_closed_connection_kept_until_drained() {
         exchange(&mut s, &mut c, from, 10 + round, ds, &mut got);
     }
     assert!(!c.handshaking());
-    // 24 request streams left open (no FIN): each an entry, each two dead steps at least (its slot, then its drop).
     let mut frames = vec![stream(2, 0, &[0x00, 0x04, 0x00], false)];
-    for i in 0..24 {
-        frames.push(stream(4 * i, 0, &get(), false));
+    for i in 0..open + answered {
+        frames.push(stream(4 * i, 0, &get(), i >= open));
     }
     let ds = c.datagrams(Some(frames));
     exchange(&mut s, &mut c, from, 30, ds, &mut got);
+    let l = c.largest_one_rtt().expect("1-RTT packets");
+    let top = l - l % 2;
+    let ack = quic::ack::AckFrame { largest: top, delay: 0, first_range: 0, ranges: vec![(0, 0); (top / 2) as usize], ecn: None };
+    let ds = c.datagrams(Some(vec![Frame::Ack(ack)]));
+    exchange(&mut s, &mut c, from, 31, ds, &mut got);
+    (s, c)
+}
+
+/// D13 (9b2 Task 10b fix rounds 1 and 2): a connection closed silently by its idle timeout, holding open streams and
+/// answered ones whose responses are acknowledged only in part (sending parts with pieces in flight), is kept until its
+/// backlog is freed. Its streams go to the dead slot at the close, its stores and send contexts to their slots at
+/// `retire_closed`, and `pump` frees them a bounded `backlog_step` at a time, at most `MAX_PUMPS` per wake: so while it
+/// is kept nothing is held outside the slots, the dead entries fall by at most `MAX_PUMPS` per wake (one per step at
+/// most), and the wake that removes it frees at most `REMOVAL_FREES`, the last steps and the Connection's own drop.
+/// Under the old rule (removal at Closed) the whole teardown happens in one wake and this test fails.
+#[test]
+fn idle_closed_connection_kept_until_drained() {
+    use quic::payload::PacketKind;
+    // The removing wake frees 146 here (fix round 2); the Connection's own drop is about 100 of them.
+    const REMOVAL_FREES: usize = 250;
+    let from: SocketAddr = "127.0.0.1:50002".parse().unwrap();
+    let (mut s, _c) = busy_server(24, 12, from);
     let mut send = Vec::new();
-    s.on_wake(31, &mut send).unwrap();
+    s.on_wake(32, &mut send).unwrap();
     assert_eq!(s.conn_count(), 1);
+    let held: usize = (0..36u64).filter_map(|i| s.quic(0).conn().send_range_counts(4 * i)).map(|(a, l, f)| a + l + f).sum();
+    assert!(held > 0, "no sending part holds a piece");
     // Past the idle timeout (30 s): closed silently, its streams buried.
     let mut now = 100_000_000;
     let mut wakes = 0;
+    let mut dead: Option<usize> = None;
     loop {
         let f0 = frees();
         let mut send = Vec::new();
         s.on_wake(now, &mut send).unwrap();
         let f = frees() - f0;
-        assert!(f <= MAX_PUMPS * PER_CALL, "wake {wakes} freed {f}");
         wakes += 1;
         if s.conn_count() == 0 {
+            assert!(f <= REMOVAL_FREES, "the removing wake freed {f}");
             break;
         }
+        let q = s.quic(0).conn();
         assert!(s.has_backlog(), "kept without backlog after wake {wakes}");
+        assert!(!q.streams_live());
+        for k in [PacketKind::Initial, PacketKind::Handshake] {
+            assert_eq!(q.crypto_send_ranges(k), 0, "{k:?}'s send context not retired");
+        }
+        for k in [PacketKind::Initial, PacketKind::Handshake, PacketKind::OneRtt] {
+            assert_eq!(q.crypto_unread(k), 0);
+        }
+        let d = q.dead_entries().unwrap_or(0);
+        if let Some(p) = dead {
+            assert!(p - d <= MAX_PUMPS, "dead entries {p} -> {d} in one wake");
+        }
+        dead = Some(d);
         assert!(wakes < 100, "still kept after {wakes} wakes");
         now += 1;
     }
     assert!(wakes >= 2, "the teardown took {wakes} wake(s): not kept across a wake");
     assert!(!s.has_backlog());
+}
+
+/// m6 (9b2 Task 10b fix round 2): admission counts every connection held, so `conns` stays within MAX_CONNS while a
+/// Closed connection drains: one connection closed and draining, then MAX_CONNS + 4 new Initials.
+#[test]
+fn conns_capped_while_closed_drain() {
+    use quic::route::MAX_CONNS;
+    let from: SocketAddr = "127.0.0.1:50003".parse().unwrap();
+    let (mut s, _c) = busy_server(24, 12, from);
+    let mut send = Vec::new();
+    s.on_wake(100_000_000, &mut send).unwrap();
+    assert_eq!(s.conn_count(), 1);
+    assert!(s.has_backlog(), "the closed connection drained in one wake");
+    for n in 0..MAX_CONNS + 4 {
+        let mut odcid = [0xd0u8; 8];
+        odcid[6] = (n >> 8) as u8;
+        odcid[7] = n as u8;
+        let mut c = Client::with_odcid(odcid);
+        let d = c.datagrams(None);
+        let mut send = Vec::new();
+        s.on_datagram(&d[0], from, 100_000_001, &mut send).unwrap();
+        assert!(s.conn_count() <= MAX_CONNS, "{} connections after {} Initials", s.conn_count(), n + 1);
+    }
+    assert_eq!(s.conn_count(), MAX_CONNS);
 }

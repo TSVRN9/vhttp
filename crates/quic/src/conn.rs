@@ -1287,6 +1287,17 @@ impl Connection {
         2 * self.ctx_i.ranges_held() + self.ctx_i.td_nodes() + 2 * self.ctx_h.ranges_held() + self.ctx_h.td_nodes()
     }
 
+    /// What could hold a stream, store or tree outside a teardown slot is empty: no streams, no CRYPTO byte held at any
+    /// level, both Initial and Handshake spaces discarded and so their send contexts' sets moved to their slots
+    /// (`ctx_done`). With `!td_pending()`, the connection then holds none of them at all (9b2 Task 10b, D13).
+    pub closed spec fn closed_retired(&self) -> bool {
+        &&& self.streams is None
+        &&& forall|k: PacketKind| #[trigger] self.crypto_held(k) == 0
+        &&& !self.live_i && !self.live_h
+        &&& self.ctx_i.ranges_held() == 0
+        &&& self.ctx_h.ranges_held() == 0
+    }
+
     /// A teardown slot holds something: a CRYPTO level's, a CRYPTO send context's, or a closed connection's streams.
     pub closed spec fn td_pending(&self) -> bool {
         ||| self.crypto_td_total() > 0
@@ -1799,6 +1810,7 @@ impl Connection {
         &&& crate::crx::crx_ok(self.crx_i, self.crx_h, self.crx_1, self.live_i, self.live_h, self.complete, self.lc.phase_spec() is Open)
         &&& self.ctx_i.wf()
         &&& self.ctx_h.wf()
+        &&& ctxs_done(self.ctx_i, self.live_i, self.ctx_h, self.live_h)
         &&& self.local_cids.wf()
         &&& self.peer_cids.wf()
         &&& local_tp_ok(self.local_tp@)
@@ -2469,6 +2481,7 @@ impl Connection {
             assert(c.wf_parts()) by {
                 reveal(crate::crx::crx_ok);
                 assert(c.cid_updates@.len() == 2);
+                lemma_ctx_both(c);
             }
             lemma_backlog3(c.crx_i, c.crx_h, c.crx_1);
             assert(c.wf_amp());
@@ -5033,6 +5046,7 @@ impl Connection {
 
     /// §13.3: frame `f` of an acknowledged record of space `k`.
     #[verifier::spinoff_prover]
+    #[verifier::spinoff_prover]
     fn on_acked_frame(&mut self, k: PacketKind, f: &Frame)
         requires
             old(self).wf(),
@@ -5073,8 +5087,37 @@ impl Connection {
                 }
             },
             Frame::Crypto { offset, data } => match k {
-                PacketKind::Initial => self.ctx_i.on_data_acked(*offset, data.len() as u64, false),
-                PacketKind::Handshake => self.ctx_h.on_data_acked(*offset, data.len() as u64, false),
+                PacketKind::Initial => {
+                    let ghost c = self.ctx_i;
+                    proof {
+                        lemma_ctx_both(*old(self));
+                        lemma_ctx_done(c, self.live_i);
+                    }
+                    self.ctx_i.on_data_acked(*offset, data.len() as u64, false);
+                    proof {
+                        // A discarded space's context is terminal: the ACK leaves it as it was.
+                        if !self.live_i {
+                            assert(self.ctx_i == c);
+                        }
+                        lemma_ctx_done(self.ctx_i, self.live_i);
+                        lemma_ctx_both(*self);
+                    }
+                },
+                PacketKind::Handshake => {
+                    let ghost c = self.ctx_h;
+                    proof {
+                        lemma_ctx_both(*old(self));
+                        lemma_ctx_done(c, self.live_h);
+                    }
+                    self.ctx_h.on_data_acked(*offset, data.len() as u64, false);
+                    proof {
+                        if !self.live_h {
+                            assert(self.ctx_h == c);
+                        }
+                        lemma_ctx_done(self.ctx_h, self.live_h);
+                        lemma_ctx_both(*self);
+                    }
+                },
                 PacketKind::OneRtt => {},
             },
             Frame::HandshakeDone => self.hs_done = HsDone::Acked,
@@ -5155,8 +5198,37 @@ impl Connection {
                 }
             },
             Frame::Crypto { offset, data } => match k {
-                PacketKind::Initial => self.ctx_i.on_data_lost(*offset, data.len() as u64, false),
-                PacketKind::Handshake => self.ctx_h.on_data_lost(*offset, data.len() as u64, false),
+                PacketKind::Initial => {
+                    let ghost c = self.ctx_i;
+                    proof {
+                        lemma_ctx_both(*old(self));
+                        lemma_ctx_done(c, self.live_i);
+                    }
+                    self.ctx_i.on_data_lost(*offset, data.len() as u64, false);
+                    proof {
+                        // A discarded space's context is terminal: the loss leaves it as it was.
+                        if !self.live_i {
+                            assert(self.ctx_i == c);
+                        }
+                        lemma_ctx_done(self.ctx_i, self.live_i);
+                        lemma_ctx_both(*self);
+                    }
+                },
+                PacketKind::Handshake => {
+                    let ghost c = self.ctx_h;
+                    proof {
+                        lemma_ctx_both(*old(self));
+                        lemma_ctx_done(c, self.live_h);
+                    }
+                    self.ctx_h.on_data_lost(*offset, data.len() as u64, false);
+                    proof {
+                        if !self.live_h {
+                            assert(self.ctx_h == c);
+                        }
+                        lemma_ctx_done(self.ctx_h, self.live_h);
+                        lemma_ctx_both(*self);
+                    }
+                },
                 PacketKind::OneRtt => {},
             },
             Frame::HandshakeDone => {
@@ -5288,6 +5360,8 @@ impl Connection {
             // D10 (b): the space's records dropped unreported and its context replaced, at a settled point.
             assert(self.sent(k).inflight_spec() =~= Seq::<SentPacket>::empty());
             Connection::lemma_drop_conn(*old(self), *self, k);
+            lemma_ctx_both(*old(self));
+            lemma_ctx_both(*self);
             assert(cids_only(self.cid_updates@));
             lemma_backlog3(old(self).crx_i, old(self).crx_h, old(self).crx_1);
             lemma_backlog3(self.crx_i, self.crx_h, self.crx_1);
@@ -5416,7 +5490,11 @@ impl Connection {
     /// A Closed connection's Initial and Handshake spaces are discarded (RFC 9000 §10.2: nothing is sent or
     /// processed after the closing or draining period): their send contexts' sets move to their teardown slots
     /// (`SendStream::retire`) and their stores to theirs, so the shell frees them through `backlog_step` before it
-    /// drops the connection, not in its destructor. A no-op on a connection not Closed. At most two discards.
+    /// drops the connection, not in its destructor. A no-op on a connection not Closed. Its cost: at most two discards'
+    /// retires. Excluded, as `discard` names them: each space's in-flight drain (`drain_inflight`, at most
+    /// `MAX_INFLIGHT` records moved) and recovery reset (`on_space_discarded`), the old receive state's drop
+    /// (`RecvPns::new` replacing `recv_i`/`recv_h`) and the CID update's push (Q27): the cost sweep's other sites
+    /// (docs/rca/2026-11-12-cost-sweep.md, owner 9b4).
     #[verifier::spinoff_prover]
     pub fn discard_closed(&mut self) -> (r: Ghost<nat>)
         requires
@@ -5436,6 +5514,8 @@ impl Connection {
             old(self).phase_spec() is Closed ==> !final(self).live(PacketKind::Initial) && !final(self).live(
                 PacketKind::Handshake,
             ),
+            old(self).phase_spec() is Closed && (forall|k: PacketKind| #[trigger] old(self).crypto_held(k) == 0)
+                ==> final(self).closed_retired(),
             r@ <= 2 * (crate::avl::c_join2() * 127 + 1 + c_sfree()),
     {
         if !matches!(self.lc.phase(), Phase::Closed) {
@@ -5452,6 +5532,8 @@ impl Connection {
             assert forall|k: PacketKind| #[trigger] crypto_drained(s0, k) implies crypto_drained(*self, k) by {
                 assert(crypto_drained(s1, k));
             }
+            Connection::lemma_crypto_kept_elim(*self, s0);
+            lemma_ctx_both(*self);
         }
         Ghost(work)
     }
@@ -6046,6 +6128,8 @@ impl Connection {
         requires
             c0.wf(),
             c0.settled(),
+            c1.ctx_i.state() == c0.ctx_i.state() && c1.ctx_i.ranges_held() == c0.ctx_i.ranges_held(),
+            c1.ctx_h.state() == c0.ctx_h.state() && c1.ctx_h.ranges_held() == c0.ctx_h.ranges_held(),
             c1 == (Connection { ctx_i: c1.ctx_i, ctx_h: c1.ctx_h, dead: c1.dead, ..c0 }),
             c1.ctx_i.wf(),
             c1.ctx_h.wf(),
@@ -6057,6 +6141,8 @@ impl Connection {
             c1.wf(),
             c1.settled(),
     {
+        lemma_ctx_both(c0);
+        lemma_ctx_both(c1);
         assert(c0.wf_pieces());
         assert(c1.wf_pieces());
     }
@@ -6133,6 +6219,11 @@ impl Connection {
             PacketKind::Initial => self.ctx_i.flush(),
             PacketKind::Handshake => self.ctx_h.flush(),
             PacketKind::OneRtt => {},
+        }
+        proof {
+            // Writes only reach a live space's context; a flush keeps the state and the sets.
+            lemma_ctx_both(*old(self));
+            lemma_ctx_both(*self);
         }
     }
 
@@ -7024,10 +7115,17 @@ impl Connection {
             return;
         }
         let max_len = *left - head;
+        proof {
+            lemma_ctx_both(*self);
+        }
         let chunk = match k {
             PacketKind::Initial => self.ctx_i.poll_data(max_len as u64, VARINT_MAX),
             _ => self.ctx_h.poll_data(max_len as u64, VARINT_MAX),
         };
+        proof {
+            // A discarded space's context is terminal, so `next_off` was `None` and no poll happened.
+            lemma_ctx_both(*self);
+        }
         if let Some(c) = chunk {
             let ghost sf0 = frames_view(fs@);
             let ghost g = SpecFrame::Crypto { offset: c.off, data: c.data@ };
@@ -11618,6 +11716,39 @@ impl Connection {
 // =============================================================================
 
 /// No level holds an unread in-order CRYPTO byte.
+/// A discarded space's CRYPTO send context was retired at its discard: terminal, its sets moved to its slot.
+/// Opaque: `wf` carries it as one atom; `lemma_ctx_done` states it.
+#[verifier::opaque]
+pub open spec fn ctx_done(c: SendStream, live: bool) -> bool {
+    !live ==> (c.state() is ResetRecvd || c.state() is DataRecvd) && c.ranges_held() == 0
+}
+
+/// Both contexts' `ctx_done`, unfolded.
+proof fn lemma_ctx_both(c: Connection)
+    ensures
+        ctxs_done(c.ctx_i, c.live_i, c.ctx_h, c.live_h) == (ctx_done(c.ctx_i, c.live_i) && ctx_done(c.ctx_h, c.live_h)),
+        ctx_done(c.ctx_i, c.live_i) == (!c.live_i ==> (c.ctx_i.state() is ResetRecvd || c.ctx_i.state() is DataRecvd)
+            && c.ctx_i.ranges_held() == 0),
+        ctx_done(c.ctx_h, c.live_h) == (!c.live_h ==> (c.ctx_h.state() is ResetRecvd || c.ctx_h.state() is DataRecvd)
+            && c.ctx_h.ranges_held() == 0),
+{
+    reveal(ctx_done);
+    reveal(ctxs_done);
+}
+
+/// Both contexts' `ctx_done`, one atom in `wf`.
+#[verifier::opaque]
+pub open spec fn ctxs_done(ci: SendStream, li: bool, ch: SendStream, lh: bool) -> bool {
+    ctx_done(ci, li) && ctx_done(ch, lh)
+}
+
+pub proof fn lemma_ctx_done(c: SendStream, live: bool)
+    ensures
+        ctx_done(c, live) == (!live ==> (c.state() is ResetRecvd || c.state() is DataRecvd) && c.ranges_held() == 0),
+{
+    reveal(ctx_done);
+}
+
 pub open spec fn crypto_all_drained(c: Connection) -> bool {
     forall|k: PacketKind| #[trigger] crypto_drained(c, k)
 }
@@ -13059,6 +13190,17 @@ impl Connection {
             PacketKind::Handshake => self.ctx_h.td_len(),
             PacketKind::OneRtt => 0,
         }
+    }
+
+    /// Test support: the acked, lost and in-flight ranges level `k`'s CRYPTO send context holds outside its slot.
+    #[doc(hidden)]
+    pub fn crypto_send_ranges(&self, k: PacketKind) -> usize {
+        let (a, l, f) = match k {
+            PacketKind::Initial => self.ctx_i.range_counts(),
+            PacketKind::Handshake => self.ctx_h.range_counts(),
+            PacketKind::OneRtt => (0, 0, 0),
+        };
+        a + l + f
     }
 
     /// Test support: a closed connection's streams left to free (D13), if any.

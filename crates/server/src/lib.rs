@@ -9,7 +9,7 @@ use h3::qpack::field_section::FieldLine;
 use quic::aead::MAX_UDP_PAYLOAD;
 use quic::conn::RAND_LEN;
 use quic::h3_server::{AppEvent, SendError};
-use quic::route::{route, CidTable, ConnId, Route};
+use quic::route::{route, CidTable, ConnId, Route, MAX_CONNS};
 use quic::tp::{default_transport_params, TransportParams};
 use quictls::server::{QuicServer, Rand};
 use std::io;
@@ -203,7 +203,7 @@ impl Conn<'_> {
 type Outbox = Vec<(Vec<u8>, SocketAddr)>;
 
 /// The socket-free server: datagrams and wake-ups in, datagrams out.
-// ponytail: linear scans over conns and route's CID/token lists (<= MAX_CONNS = 102 connections; route costs <= 512 CID and 816 CT token comparisons per datagram); a random-keyed SipHash index before production, never a sorted Vec (it leaks token order, §10.3.1). Connections are capped by route's has_room (MAX_CONNS), counted at the first applied Add, which service applies before the next datagram; nothing is evicted, and RFC 9000 §10.1's 3*PTO floor lets a peer hold a slot up to 55.6 min (3d2 note), which admission must plan for. every DCID is keyed, so MAX_CONNS (102) and route's linear scan are reachable, and each unauthenticated Initial costs a P-256 signature (~15 ms); Retry or a per-source handshake limit before deployment.
+// ponytail: linear scans over conns and route's CID/token lists (<= MAX_CONNS = 102 connections; route costs <= 512 CID and 816 CT token comparisons per datagram); a random-keyed SipHash index before production, never a sorted Vec (it leaks token order, §10.3.1). Connections are capped at MAX_CONNS by `conns.len()` (every connection held, a Closed one draining its teardown slots included) and by route's has_room (the routed ones, counted at the first applied Add, which service applies before the next datagram); nothing is evicted, and RFC 9000 §10.1's 3*PTO floor lets a peer hold a slot up to 55.6 min (3d2 note), which admission must plan for. every DCID is keyed, so MAX_CONNS (102) and route's linear scan are reachable, and each unauthenticated Initial costs a P-256 signature (~15 ms); Retry or a per-source handshake limit before deployment.
 pub struct Server<'a> {
     cfg: &'a ServerConfig,
     table: CidTable,
@@ -221,6 +221,12 @@ impl<'a> Server<'a> {
     #[doc(hidden)]
     pub fn conn_count(&self) -> usize {
         self.conns.len()
+    }
+
+    /// Test support: connection `i`'s QUIC state.
+    #[doc(hidden)]
+    pub fn quic(&self, i: usize) -> &QuicServer<'a> {
+        &self.conns[i].q
     }
 
     #[doc(hidden)]
@@ -267,6 +273,10 @@ impl<'a> Server<'a> {
                     }
                 }
             }
+            // Admission counts every connection held, a Closed one still draining its teardown slots included, not
+            // only the routed ones (route's `has_room`): `conns` stays within MAX_CONNS. A refused Initial is dropped
+            // silently, as route drops one when its table is full.
+            Route::NewInitial if self.conns.len() >= MAX_CONNS => {}
             Route::NewInitial => {
                 let r = rand(self.rng)?;
                 if let (Some(q), _) = QuicServer::accept(self.cfg, d, 0, now, &r, &local_params(), &mut app) {

@@ -1314,6 +1314,8 @@ impl<'a> QuicServer<'a> {
             final(self).keys == old(self).keys,
             final(self).stash == old(self).stash,
             final(self).conn_spec().live(PacketKind::OneRtt) == old(self).conn_spec().live(PacketKind::OneRtt),
+            !(old(self).conn_spec().phase_spec() is Open) ==> (forall|k: PacketKind|
+                #[trigger] final(self).conn_spec().crypto_held(k) == 0),
     {
         if matches!(self.h3.conn().phase(), Phase::Open) {
             return Ghost(0);
@@ -1381,10 +1383,18 @@ impl<'a> QuicServer<'a> {
             final(self).wf(),
             crypto_held_ok(final(self).conn_spec()),
             final(self).one_rtt_forgotten(),
-            // The three stores' retires and the two spaces' discards.
+            // The shell calls it before each pump of a Closed connection: it never raises the measure, so the pumps
+            // still end (D13), and a Closed connection holds no stream, store or tree outside its teardown slots.
+            final(self).backlog_measure() <= old(self).backlog_measure(),
+            final(self).conn_spec().phase_spec() == old(self).conn_spec().phase_spec(),
+            final(self).conn_spec().phase_spec() is Closed ==> final(self).conn_spec().closed_retired(),
+            // The three stores' retires and the two spaces' discards. Excluded, as `Connection::discard` names them:
+            // each space's in-flight drain (`drain_inflight`) and recovery reset (`on_space_discarded`), the old receive
+            // state's drop and the CID update's push (Q27), the cost sweep's other sites (owner 9b4).
             cost@ <= 5 * c_retire(),
     {
         let ghost mut work: nat = 0;
+        let ghost q0 = *self;
         if self.h3.conn().is_closed() {
             proof {
                 self.h3.lemma_conn_wf();
@@ -1402,6 +1412,9 @@ impl<'a> QuicServer<'a> {
         }
         self.forget_failed();
         self.sync_keys();
+        proof {
+            assert(self.h3 == q0.h3 || q0.h3.conn_spec().phase_spec() is Closed);
+        }
         Ghost(work)
     }
 

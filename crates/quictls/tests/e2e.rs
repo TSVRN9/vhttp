@@ -212,6 +212,13 @@ fn dup(fs: &[Frame]) -> Vec<Frame> {
             Frame::Stream { stream_id, offset, data, fin } => {
                 Frame::Stream { stream_id: *stream_id, offset: *offset, data: data.clone(), fin: *fin }
             },
+            Frame::Ack(a) => Frame::Ack(quic::ack::AckFrame {
+                largest: a.largest,
+                delay: a.delay,
+                first_range: a.first_range,
+                ranges: a.ranges.clone(),
+                ecn: a.ecn,
+            }),
             _ => panic!("dup"),
         })
         .collect()
@@ -232,8 +239,21 @@ impl Client {
 
     /// A client whose ClientHello carries `pad` 40-byte dummy ALPN protocols after `h3`.
     pub fn with_alpn_pad(pad: usize) -> Client {
+        Client::with_pad_odcid(pad, qc::S1)
+    }
+
+    /// The largest packet number received at 1-RTT, if any.
+    pub fn largest_one_rtt(&self) -> Option<u64> {
+        self.largest[2]
+    }
+
+    /// A client whose first Initial goes to `odcid` (a server tells connections apart by it).
+    pub fn with_odcid(odcid: [u8; 8]) -> Client {
+        Client::with_pad_odcid(0, odcid)
+    }
+
+    fn with_pad_odcid(pad: usize, odcid: [u8; 8]) -> Client {
         let (tls, log) = rustls_client(pad);
-        let odcid = qc::S1;
         let mut c = Client {
             tls,
             log,
