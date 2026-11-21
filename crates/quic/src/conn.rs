@@ -2639,12 +2639,65 @@ impl Connection {
             packets@.len() == 0 && old(self).phase_spec() is Open ==> (!(error matches Some((_, h))
                 && old(self).gate_spec(path, datagram_len, &h)) ==> final(self).phase_spec() is Open),
     {
+        let known = match self.arrive(path, datagram_len, now) {
+            Some(k) => k,
+            None => return ,
+        };
+        let ghost sc = *self;
+        let ghost g = plains_crypto(crate::protect::plains_view(packets@));
+        proof {
+            assert(forall|h: PlainPacket| sc.gate_spec(path, datagram_len, &h) == old(self).gate_spec(path, datagram_len, &h));
+        }
+        self.on_counted(path, datagram_len, known, packets, error, rand);
+        proof {
+            Connection::lemma_dgram_post(*old(self), sc, *self, path, datagram_len as nat, known, g);
+        }
+    }
+
+    /// The clock moves to `now` (never back) and the challenge slices drawn so far are released (split from
+    /// `arrive` for the rlimit).
+    #[verifier::spinoff_prover]
+    fn stamp(&mut self, now: u64)
+        requires
+            old(self).wf(),
+            old(self).settled(),
+        ensures
+            final(self).wf(),
+            final(self).settled(),
+            *final(self) == (Connection { now: final(self).now, chal_used: 0, ..*old(self) }),
+            final(self).now >= old(self).now,
+    {
         if now > self.now {
             self.now = now;
         }
         self.chal_used = 0;
+    }
+
+    /// `on_datagram`'s start (split from it for the rlimit): the clock and the challenge slices, then, unless
+    /// draining or closed (`None`), whether `path` is known and, if so, the datagram counted on it (§8.1).
+    #[verifier::spinoff_prover]
+    fn arrive(&mut self, path: PathId, datagram_len: usize, now: u64) -> (r: Option<bool>)
+        requires
+            old(self).wf(),
+            old(self).settled(),
+        ensures
+            final(self).wf(),
+            final(self).settled(),
+            final(self).out_log() == old(self).out_log(),
+            final(self).crypto_kept(*old(self)),
+            final(self).crypto_kept_g(*old(self), 0),
+            final(self).phase_spec() == old(self).phase_spec(),
+            r is None <==> (old(self).phase_spec() is Draining || old(self).phase_spec() is Closed),
+            r matches Some(k) ==> k == old(self).paths.has(path) && final(self).paths.has(path) == k,
+            r matches Some(k) ==> (k ==> final(self).paths.amp_trace(path) == old(self).paths.amp_trace(path).push(
+                AmpEv::Recv(datagram_len as nat),
+            )),
+            r is Some ==> final(self).paths.path(path).responses == old(self).paths.path(path).responses,
+            *final(self) == (Connection { now: final(self).now, chal_used: final(self).chal_used, paths: final(self).paths, ..*old(self) }),
+    {
+        self.stamp(now);
         if matches!(self.lc.phase(), Phase::Draining | Phase::Closed) {
-            return;
+            return None;
         }
         // A path is added only by a packet that passes the gate: slots never free, and a garbage or
         // replayed datagram from a spoofed address must not take one. Nothing is ever sent to an
@@ -2654,21 +2707,33 @@ impl Connection {
             // §8.1: counted even if every packet is dropped.
             self.count_recv(path, datagram_len as u64);
         }
-        let ghost sc = *self;
-        let ghost g = plains_crypto(crate::protect::plains_view(packets@));
-        self.on_counted(path, datagram_len, known, packets, error, rand);
-        proof {
-            Connection::lemma_crypto_kept_g_trans(*old(self), sc, *self, 0, g);
-            if !(old(self).phase_spec() is Open) {
-                Connection::lemma_crypto_kept_trans(*old(self), sc, *self);
-            }
-            reveal(recv_counted);
-            if known {
-                let t0 = old(self).paths.amp_trace(path);
-                assert(self.paths.amp_trace(path).take(t0.len() + 1 as int) =~= t0.push(AmpEv::Recv(datagram_len as nat))) by {
-                    assert(sc.paths.has(path));
-                    assert(sc.paths.amp_trace(path) == t0.push(AmpEv::Recv(datagram_len as nat)));
-                }
+        Some(known)
+    }
+
+    /// `on_datagram`'s ensures from `on_counted`'s, after the count (split from it for the rlimit): the CRYPTO
+    /// frame composes across the count, and a known path's trace starts with this datagram's `Recv`.
+    proof fn lemma_dgram_post(o: Connection, sc: Connection, c: Connection, path: PathId, n: nat, known: bool, g: nat)
+        requires
+            sc.crypto_kept_g(o, 0),
+            sc.crypto_kept(o),
+            c.crypto_kept_g(sc, g),
+            !(o.phase_spec() is Open) ==> c.crypto_kept(sc),
+            c.amp_grew(sc),
+            known ==> sc.paths.has(path) && sc.paths.amp_trace(path) == o.paths.amp_trace(path).push(AmpEv::Recv(n)),
+        ensures
+            c.crypto_kept_g(o, g),
+            !(o.phase_spec() is Open) ==> c.crypto_kept(o),
+            known ==> recv_counted(o.paths.amp_trace(path), c.paths.amp_trace(path), n),
+    {
+        Connection::lemma_crypto_kept_g_trans(o, sc, c, 0, g);
+        if !(o.phase_spec() is Open) {
+            Connection::lemma_crypto_kept_trans(o, sc, c);
+        }
+        reveal(recv_counted);
+        if known {
+            let t0 = o.paths.amp_trace(path);
+            assert(c.paths.amp_trace(path).take(t0.len() + 1 as int) =~= t0.push(AmpEv::Recv(n))) by {
+                assert(sc.paths.amp_trace(path) == t0.push(AmpEv::Recv(n)));
             }
         }
     }
