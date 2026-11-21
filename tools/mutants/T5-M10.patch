@@ -1,8 +1,7 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
-index 2438cfa..5d3dd1f 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -2273,7 +2273,6 @@ impl<'a> QuicServer<'a> {
+@@ -2308,7 +2308,6 @@
          }
          if matches!(self.level, Level::Initial) {
              // TLS leaves Initial here (no `Secrets { Handshake }` before it): as `on_secrets` does.

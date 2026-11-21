@@ -1,8 +1,7 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
-index 2438cfa..a7054a5 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -2030,7 +2030,6 @@ impl<'a> QuicServer<'a> {
+@@ -2065,7 +2065,6 @@
          // `Complete` gives 1-RTT keys, above Initial too: TLS leaves Initial there if the batch has
          // no `Secrets { Handshake }`.
          if (to_hs || done) && self.unconsumed(Level::Initial, PacketKind::Initial) {

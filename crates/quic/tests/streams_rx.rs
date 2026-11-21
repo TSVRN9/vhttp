@@ -60,7 +60,44 @@ fn out_of_order_frames() {
     let mut ev = Vec::new();
     assert_eq!(s.on_frame(&S(4, 3, b"lo", true), &mut ev), Ok(()));
     assert_eq!(s.on_frame(&S(4, 0, b"hel", false), &mut ev), Ok(()));
-    assert_eq!(ev, vec![D(4, b"hello", true)]);
+    // A frame delivers at most its own length (D12); the rest waits in the queue (D13).
+    assert_eq!(ev, vec![D(4, b"hel", false)]);
+    assert!(s.stream_backlog());
+    let _ = s.deliver_some(4096, &mut ev);
+    assert_eq!(ev, vec![D(4, b"hel", false), D(4, b"lo", true)]);
+    assert!(!s.stream_backlog());
+}
+
+/// Review Focus 1: all 100 bytes delivered, then a 0-byte FIN frame: the stream reaches "Data
+/// Read" and is removed in that call.
+#[test]
+fn fin_only_frame_removes_in_that_call() {
+    let mut s = fresh();
+    assert_eq!(feed(&mut s, S(2, 0, &[1; 100], false)), (Ok(()), vec![D(2, &[1; 100], false)]));
+    assert_eq!(s.open_streams(), 1);
+    assert_eq!(feed(&mut s, S(2, 100, b"", true)), (Ok(()), vec![D(2, b"", true)]));
+    assert_eq!(s.open_streams(), 0);
+    assert!(!s.stream_backlog());
+}
+
+/// Review Focus 4: a stream in "Size Known" queued with bytes left, then RESET_STREAM with its
+/// final size: one `Reset` event, the entry still there; `deliver_some` pops it, emits no `Data`
+/// for it, and removes it in that call.
+#[test]
+fn reset_after_queued_dropped_on_pop() {
+    let mut s = fresh();
+    assert_eq!(feed(&mut s, S(2, 10, b"", true)).0, Ok(()));
+    assert_eq!(feed(&mut s, S(2, 1, b"bcd", false)), (Ok(()), vec![]));
+    assert_eq!(feed(&mut s, S(2, 0, b"a", false)), (Ok(()), vec![D(2, b"a", false)]));
+    assert!(s.stream_backlog());
+    let rst = Frame::ResetStream { stream_id: 2, error_code: 7, final_size: 10 };
+    assert_eq!(feed(&mut s, rst), (Ok(()), vec![StreamEvent::Reset { id: 2, code: 7 }]));
+    assert_eq!(s.open_streams(), 1);
+    let mut ev = Vec::new();
+    let _ = s.deliver_some(4096, &mut ev);
+    assert_eq!(ev, vec![]);
+    assert_eq!(s.open_streams(), 0);
+    assert!(!s.stream_backlog());
 }
 
 #[test]

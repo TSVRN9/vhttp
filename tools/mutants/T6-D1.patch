@@ -1,8 +1,7 @@
 diff --git a/crates/quic/src/recv_stream.rs b/crates/quic/src/recv_stream.rs
-index f7f519a..22e5f4e 100644
 --- a/crates/quic/src/recv_stream.rs
 +++ b/crates/quic/src/recv_stream.rs
-@@ -1575,9 +1575,6 @@ impl RecvStream {
+@@ -1691,9 +1691,6 @@
              Some(f) => end > f || (fin && end != f),
              None => fin && end < self.high,
          };

@@ -19,6 +19,11 @@ use quic::conn::*;
 #[allow(unused_imports)]
 use quic::datagram::*;
 use quic::h3_server::*;
+// Used only in contracts, which a plain `cargo build` erases.
+#[allow(unused_imports)]
+use quic::idq::IDQ_CAP;
+#[allow(unused_imports)]
+use quic::ring::MAX_RECV_WINDOW;
 use quic::lifecycle::Phase;
 use quic::payload::PacketKind;
 use quic::pipeline::{accept_datagram, initial_dcid, receive as receive_datagram, refeed_one_rtt};
@@ -275,6 +280,7 @@ fn shut(c: &mut Connection, code: u64, now: u64)
         !(old(c).phase_spec() is Open) ==> final(c).phase_spec() == old(c).phase_spec()
             && final(c).close_spec() == old(c).close_spec(),
         final(c).crypto_kept(*old(c)),
+        final(c).rx_measure() <= old(c).rx_measure(),
 {
     let none: Vec<u8> = Vec::new();
     c.close(code, false, none.as_slice(), now);
@@ -343,6 +349,7 @@ fn report(c: &mut Connection, code: u64, now: u64)
         !(old(c).phase_spec() is Open) ==> final(c).phase_spec() == old(c).phase_spec()
             && final(c).close_spec() == old(c).close_spec(),
         final(c).crypto_kept(*old(c)),
+        final(c).rx_measure() <= old(c).rx_measure(),
 {
     if CRYPTO_ERROR_BASE <= code && code <= CRYPTO_ERROR_BASE + 0xff {
         c.on_tls_alert((code - CRYPTO_ERROR_BASE) as u8, now);
@@ -454,8 +461,14 @@ fn key_events(ev: &Vec<TlsEvent>) -> (r: (bool, bool))
 
 /// From `o` to `c`: an open `c` was open in `o`, every level drained in `o` still is, and a
 /// completed handshake stays completed.
+/// The most STREAM backlog a connection holds (`Connection::lemma_rx_measure`).
+pub open spec fn rx_bound() -> nat {
+    (IDQ_CAP * (MAX_RECV_WINDOW + 1)) as nat
+}
+
 spec fn fed_kept(c: Connection, o: Connection) -> bool {
     &&& c.phase_spec() is Open ==> o.phase_spec() is Open && drained_kept(c, o)
+    &&& c.rx_measure() <= o.rx_measure()
     &&& o.live(PacketKind::OneRtt) ==> c.live(PacketKind::OneRtt)
     &&& forall|k: PacketKind| #[trigger] c.crypto_held(k) <= o.crypto_held(k)
     &&& forall|k: PacketKind| #[trigger] c.crypto_load(k) <= o.crypto_load(k)
@@ -581,10 +594,12 @@ impl<'a> QuicServer<'a> {
         &&& self.keys_ok()
     }
 
-    /// D13's backlog: unread CRYPTO bytes at a level TLS expects while open, or a non-empty teardown slot.
+    /// D13's backlog: unread CRYPTO bytes at a level TLS expects while open, a stream with bytes or its FIN left to
+    /// deliver while open, or a non-empty teardown slot.
     pub closed spec fn has_backlog_spec(&self) -> bool {
         let c = self.h3.conn_spec();
         ||| c.phase_spec() is Open && self.crypto_pending_spec()
+        ||| c.phase_spec() is Open && c.stream_backlog()
         ||| c.crypto_td_total() > 0
     }
 
@@ -600,15 +615,18 @@ impl<'a> QuicServer<'a> {
         ||| c.crypto_contiguous_spec(PacketKind::OneRtt) > c.crypto_base_spec(PacketKind::OneRtt)
     }
 
-    /// `pump_backlog`'s progress measure (D13): the CRYPTO positions held and teardown nodes, one while open, and
-    /// a stashed datagram's room, which its refeed (at most `MAX_UDP_PAYLOAD` bytes) spends.
+    /// `pump_backlog`'s progress measure (D13): the CRYPTO positions held and teardown nodes, the STREAM backlog
+    /// (per queued stream one plus its bytes past delivery, `Connection::rx_measure`), one while open, and a stashed
+    /// datagram's room, which its refeed spends: at most `MAX_UDP_PAYLOAD` CRYPTO bytes, and a STREAM backlog of at
+    /// most `rx_bound()` (a full queue, `IDQ_CAP` streams of a window each).
     pub closed spec fn backlog_measure(&self) -> nat {
-        self.h3.conn_spec().crypto_backlog() + (if self.h3.conn_spec().phase_spec() is Open {
+        self.h3.conn_spec().crypto_backlog() + self.h3.conn_spec().rx_measure() + (if self.h3.conn_spec().phase_spec()
+            is Open {
             1nat
         } else {
             0nat
         }) + (if self.stash is Some {
-            (2 * (MAX_UDP_PAYLOAD + 1)) as nat
+            (2 * (MAX_UDP_PAYLOAD + 1) + rx_bound()) as nat
         } else {
             0nat
         })
@@ -1007,6 +1025,7 @@ impl<'a> QuicServer<'a> {
             app_grew(old(app)@, final(app)@),
             crypto_held_ok(final(self).conn_spec()),
             final(self).conn_spec().crypto_backlog() <= old(self).conn_spec().crypto_backlog(),
+            final(self).conn_spec().rx_measure() <= old(self).conn_spec().rx_measure(),
             final(self).conn_spec().phase_spec() is Open ==> old(self).conn_spec().phase_spec() is Open,
             final(self).stash == old(self).stash,
             // A close's retires (`drop_if_closed`). Excluded: `h3.pump` (9b4).
@@ -1015,6 +1034,7 @@ impl<'a> QuicServer<'a> {
         let ghost c2 = self.h3.conn_spec();
         self.h3.pump(app);
         proof {
+            self.h3.conn_spec().lemma_keeps_crypto(c2);
             Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c2);
             self.h3.lemma_conn_wf();
             if self.h3.conn_spec().phase_spec() is Open {
@@ -1051,7 +1071,8 @@ impl<'a> QuicServer<'a> {
         ensures
             r == self.has_backlog_spec(),
     {
-        self.crypto_pending() || self.h3.conn().teardown_pending()
+        let c = self.h3.conn();
+        self.crypto_pending() || (matches!(c.phase(), Phase::Open) && c.has_stream_backlog()) || c.teardown_pending()
     }
 
     /// D13: one bounded step of backlog. Open or not, at most `B_PUMP` of teardown freed (key discard fills slots on
@@ -1060,7 +1081,10 @@ impl<'a> QuicServer<'a> {
     /// the handshake completed here, HTTP/3, a closed connection's CRYPTO bytes dropped, the keys synced. Returns its
     /// work and its progress `(delivered, freed)`: the CRYPTO backlog's drop across the CRYPTO step (the positions
     /// read for TLS), and the teardown nodes freed.
-    pub fn pump_backlog(&mut self, now: u64, r: &Rand, app: &mut Vec<AppEvent>) -> (res: (Ghost<nat>, Ghost<(nat, nat)>))
+    pub fn pump_backlog(&mut self, now: u64, r: &Rand, app: &mut Vec<AppEvent>) -> (res: (
+        Ghost<nat>,
+        Ghost<(nat, nat, nat)>,
+    ))
         requires
             old(self).wf(),
             crypto_held_ok(old(self).conn_spec()),
@@ -1069,21 +1093,26 @@ impl<'a> QuicServer<'a> {
             final(self).one_rtt_forgotten(),
             app_grew(old(app)@, final(app)@),
             crypto_held_ok(final(self).conn_spec()),
-            // Progress (D13, as built): it frees a teardown node, takes at least one and at least `min(B_PUMP,
-            // pending_unread)` CRYPTO positions off the backlog (the unread bytes at the one level it feeds: the lowest
-            // at or above TLS's with any), or the connection leaves Open; the measure falls, so the shell's loop ends.
-            old(self).has_backlog_spec() ==> res.1@.1 >= 1 || (res.1@.0 >= 1 && res.1@.0 >= (if old(self).pending_unread()
-                < B_PUMP {
+            // Progress (D13, as built): it frees a teardown node, delivers from the stream queue's head (its STREAM
+            // measure falls), takes at least one and at least `min(B_PUMP, pending_unread)` CRYPTO positions off the
+            // backlog (the unread bytes at the one level it feeds: the lowest at or above TLS's with any), or the
+            // connection leaves Open; the measure falls, so the shell's loop ends.
+            old(self).has_backlog_spec() ==> res.1@.1 >= 1 || res.1@.2 >= 1 || (res.1@.0 >= 1 && res.1@.0 >= (if old(
+                self,
+            ).pending_unread() < B_PUMP {
                 old(self).pending_unread()
             } else {
                 B_PUMP as nat
             })) || (old(self).conn_spec().phase_spec() is Open && !(final(self).conn_spec().phase_spec() is Open)),
+            old(self).conn_spec().stream_backlog() ==> res.1@.2 >= 1,
             old(self).has_backlog_spec() ==> final(self).backlog_measure() < old(self).backlog_measure(),
-            // Its budgets: `B_PUMP` of teardown, `B_PUMP` CRYPTO bytes read and the completing call's retires, the
-            // refed datagram's 1-RTT read, a close's retires. Excluded: the refeed's pipeline half (`refeed_one_rtt`,
-            // Task 10), TLS's own step (D14, 9b5), `h3.pump` (9b4), and the drop of the refed stash (O(1), a
-            // `CapVec<u8>`; frees are outside the ghost cost, cat-C15-semantic-cost, 9b4).
-            res.0@ <= B_PUMP + (18 * B_PUMP + 5608 + 2 * c_retire()) + (18 * MAX_UDP_PAYLOAD + 5608) + 3 * c_retire(),
+            // Its budgets: `B_PUMP` of STREAM delivery and `B_PUMP` of teardown (`Connection::backlog_step`), `B_PUMP`
+            // CRYPTO bytes read and the completing call's retires, the refed datagram's 1-RTT read, a close's retires.
+            // Excluded: the refeed's pipeline half (`refeed_one_rtt`, Task 10d), TLS's own step (D14, 9b5), `h3.pump`
+            // (9b4), and the drop of the refed stash (O(1), a `CapVec<u8>`; frees are outside the ghost cost,
+            // cat-C15-semantic-cost, 9b4).
+            res.0@ <= (B_PUMP + c_dsome()) + (18 * B_PUMP + 5608 + 2 * c_retire()) + (18 * MAX_UDP_PAYLOAD + 5608) + 3
+                * c_retire(),
     {
         let ghost mut work: nat = 0;
         let was = self.h3.conn().handshake_complete();
@@ -1092,12 +1121,13 @@ impl<'a> QuicServer<'a> {
         proof {
             Connection::lemma_backlog_split(c0);
         }
-        let Ghost(cf) = self.h3.conn_mut().free_teardown();
+        let Ghost(cf) = self.h3.conn_mut().backlog_step();
         proof {
             work = work + cf;
         }
         let ghost c1 = self.h3.conn_spec();
         let ghost freed: nat = (c0.crypto_td_total() - c1.crypto_td_total()) as nat;
+        let ghost popped: nat = (c0.rx_measure() - c1.rx_measure()) as nat;
         proof {
             self.h3.lemma_conn_wf();
             Connection::lemma_crypto_kept_elim(c1, c0);
@@ -1146,11 +1176,15 @@ impl<'a> QuicServer<'a> {
             assert(cfin.phase_spec() is Open ==> c0.phase_spec() is Open);
             if refed {
                 assert(c3.crypto_backlog() <= c2.crypto_backlog() + MAX_UDP_PAYLOAD);
+                // The refed datagram's STREAM frames: the backlog stays within its bound (D13 stash term).
+                self.h3.lemma_conn_wf();
+                cfin.lemma_rx_measure();
             } else {
                 assert(c3.crypto_backlog() <= c2.crypto_backlog());
+                assert(c3.rx_measure() <= c0.rx_measure());
             }
         }
-        (Ghost(work), Ghost((delivered, freed)))
+        (Ghost(work), Ghost((delivered, freed, popped)))
     }
 
     /// The unread CRYPTO bytes at the level `pump_crypto` feeds: the lowest at or above TLS's with any.
@@ -1274,6 +1308,7 @@ impl<'a> QuicServer<'a> {
             final(self).core_ok(),
             crypto_held_ok(final(self).conn_spec()),
             final(self).conn_spec().crypto_backlog() <= old(self).conn_spec().crypto_backlog(),
+            final(self).conn_spec().rx_measure() <= old(self).conn_spec().rx_measure(),
             final(self).conn_spec().phase_spec() == old(self).conn_spec().phase_spec(),
             final(self).keys == old(self).keys,
             final(self).stash == old(self).stash,

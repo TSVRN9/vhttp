@@ -1,8 +1,12 @@
 //! Stream reassembly (RFC 9000 §2.2): ranges received in any order are buffered past the
-//! delivered offset and popped as an ordered byte stream. The first bytes received at an
-//! offset win. STREAM data uses it; CRYPTO data, whose span no flow control bounds, uses
-//! `frags`.
+//! delivered offset in a page ring (`quic::ring`, 9b2 D11) and popped as an ordered byte stream,
+//! at most `max` bytes per call. The first bytes received at an offset win. STREAM data uses it;
+//! CRYPTO data, whose span no flow control bounds, uses `frags`.
 use vstd::prelude::*;
+use crate::ring::*;
+// Used only in ghost code, which a plain `cargo build` erases.
+#[allow(unused_imports)]
+use crate::frags::*;
 // Used only in ghost code, which a plain `cargo build` erases.
 #[allow(unused_imports)]
 use wire::varint::*;
@@ -214,13 +218,28 @@ proof fn lemma_prefix_of(m: Map<nat, u8>, s: Seq<u8>)
     assert(rfc_prefix(m, c) =~= s.take(c as int));
 }
 
-/// Out-of-order buffer: `buf[head + i]`/`have[head + i]` describe offset `base + i`;
-/// everything below `base` was delivered. `buf[..head]` is delivered space awaiting compaction.
+/// `put` of a frame on the bytes received from `b` on is the bytes received with the frame, from `b` on.
+pub proof fn lemma_from_put(ins: Seq<(nat, Seq<u8>)>, b: nat, off: nat, d: Seq<u8>)
+    ensures
+        put(from(rfc_received(ins), b), b, off, d) == from(rfc_received(ins.push((off, d))), b),
+{
+    lemma_received_push(ins, off, d);
+    let m = rfc_received(ins);
+    let m2 = rfc_received(ins.push((off, d)));
+    let l = put(from(m, b), b, off, d);
+    let r = from(m2, b);
+    assert forall|k: nat| l.contains_key(k) <==> r.contains_key(k) by {}
+    assert forall|k: nat| l.contains_key(k) implies l[k] == r[k] by {}
+    assert(l =~= r);
+}
+
+/// The out-of-order buffer of one stream (9b2 D12): a page ring (`quic::ring`) holding the bytes received at or past
+/// `base`, the next offset to deliver, `end`, one past the last byte held (or `base`), and `cnt`, the offsets received
+/// (delivered ones included), so "all data received" is one comparison.
 pub struct Reassembly {
-    base: u64,
-    head: usize,
-    buf: Vec<u8>,
-    have: Vec<bool>,
+    r: Ring,
+    end: u64,
+    cnt: u64,
     ins: Ghost<Seq<(nat, Seq<u8>)>>,
 }
 
@@ -232,35 +251,33 @@ impl Reassembly {
 
     /// The delivered offset.
     pub closed spec fn base(&self) -> nat {
-        self.base as nat
+        self.r.base_spec()
+    }
+
+    /// The stream window the ring holds: offsets `[base, base + window)`.
+    pub closed spec fn window(&self) -> nat {
+        self.r.window()
     }
 
     pub closed spec fn buf_len_spec(&self) -> usize {
-        (self.buf@.len() - self.head) as usize
+        (self.end - self.r.base_spec()) as usize
     }
 
-    /// The physical length of each of the two buffers, delivered space awaiting compaction
-    /// included.
-    pub closed spec fn phys_len(&self) -> nat {
-        self.buf@.len()
+    /// The ring's pages allocated, `PAGE` positions each.
+    pub closed spec fn pages(&self) -> nat {
+        self.r.pages()
     }
 
     pub closed spec fn wf(&self) -> bool {
         let m = rfc_received(self.ins@);
-        &&& self.buf@.len() == self.have@.len()
-        &&& self.head <= self.buf@.len()
-        &&& self.head == 0 || 2 * self.head < self.buf@.len()
-        &&& self.base + self.buf@.len() - self.head <= VARINT_MAX
-        &&& forall|i: int|
-            self.head <= i < self.have@.len() ==> (#[trigger] self.have@[i] <==> m.contains_key(
-                (self.base + i - self.head) as nat,
-            ))
-        &&& forall|i: int|
-            self.head <= i < self.buf@.len() && self.have@[i] ==> #[trigger] self.buf@[i] == m[(
-            self.base + i - self.head) as nat]
-        &&& self.base <= rfc_contiguous(m)
-        &&& forall|k: nat| #[trigger]
-            m.contains_key(k) ==> k < self.base + self.buf@.len() - self.head
+        &&& self.r.wf()
+        &&& self.r.view() == from(m, self.r.base_spec())
+        &&& self.r.base_spec() <= rfc_contiguous(m)
+        &&& self.r.base_spec() <= self.end <= self.r.base_spec() + self.r.window()
+        &&& self.end <= VARINT_MAX
+        &&& forall|k: nat| #[trigger] m.contains_key(k) ==> k < self.end
+        &&& self.end > self.r.base_spec() ==> m.contains_key((self.end - 1) as nat)
+        &&& self.cnt as nat == m.dom().len()
     }
 
     /// The invariant, in terms of the accessors.
@@ -273,16 +290,37 @@ impl Reassembly {
             forall|k: nat| #[trigger]
                 rfc_received(self.inserted()).contains_key(k) ==> k < self.base()
                     + self.buf_len(),
-            self.buf_len() <= self.phys_len() <= 2 * self.buf_len(),
+            self.buf_len() <= self.window() <= MAX_RECV_WINDOW,
+            // Memory follows the bytes held (D11): `pages · PAGE <= span + 2 · PAGE`, none when nothing is held.
+            self.pages() * PAGE <= self.buf_len() + 2 * PAGE,
+            self.buf_len() == 0 ==> self.pages() == 0,
     {
+        self.r.lemma_wf();
+        let m = rfc_received(self.ins@);
+        if self.r.pages() > 0 {
+            let p = choose|p: nat|
+                self.r.view().contains_key(p) && self.r.pages() * PAGE <= p + 1 - self.r.base_spec() + 2 * PAGE;
+            assert(from(m, self.r.base_spec()).contains_key(p));
+            assert(m.contains_key(p));
+        }
     }
 
-    /// The window ends at a received byte: no unreceived slot past the last byte held. Not part
-    /// of `wf`; a stream that keeps it carries it in its own `wf`.
+    /// The window ends at a received byte: no unreceived slot past the last byte held.
     pub closed spec fn tight(&self) -> bool {
         self.buf_len() > 0 ==> rfc_received(self.inserted()).contains_key(
             (self.base() + self.buf_len() - 1) as nat,
         )
+    }
+
+    /// Every `wf` buffer is tight: `end` is one past a received byte.
+    pub proof fn lemma_tight(&self)
+        requires
+            self.wf(),
+        ensures
+            self.tight(),
+    {
+        hide(rfc_contiguous);
+        hide(from);
     }
 
     pub proof fn lemma_new_tight(&self)
@@ -294,8 +332,7 @@ impl Reassembly {
     {
     }
 
-    /// `insert` of non-empty data keeps the window tight: its new end is the old end or
-    /// `off + d.len()`, and the last byte of each is received.
+    /// `insert` of non-empty data keeps the window tight (every `wf` one is).
     pub proof fn lemma_insert_tight(a: Reassembly, b: Reassembly, off: u64, d: Seq<u8>)
         requires
             a.wf(),
@@ -313,22 +350,13 @@ impl Reassembly {
         ensures
             b.tight(),
     {
-        // Only `lemma_wf` and `lemma_received_push` are needed. Without `hide(rfc_contiguous)`
-        // this exceeds rlimit 4; the other two hides each lower it by about 18%.
-        hide(Reassembly::wf);
         hide(rfc_received);
         hide(rfc_contiguous);
-        lemma_received_push(a.inserted(), off as nat, d);
-        a.lemma_wf();
-        b.lemma_wf();
-        let mb = rfc_received(b.inserted());
-        assert(mb.contains_key((off + d.len() - 1) as nat));
-        if a.buf_len() > 0 {
-            assert(mb.contains_key((a.base() + a.buf_len() - 1) as nat));
-        }
+        hide(from);
+        b.lemma_tight();
     }
 
-    /// `pop` keeps the window tight: the same insertions and end, and `base` not lowered.
+    /// `pop` keeps the window tight (every `wf` one is).
     pub proof fn lemma_pop_tight(a: Reassembly, b: Reassembly)
         requires
             a.wf(),
@@ -340,10 +368,13 @@ impl Reassembly {
         ensures
             b.tight(),
     {
+        hide(rfc_received);
+        hide(rfc_contiguous);
+        hide(from);
+        b.lemma_tight();
     }
 
-    /// `insert` of data ending inside the window (a duplicate, or empty data at a held offset)
-    /// keeps it tight: the old last byte is still received, so the end does not move.
+    /// `insert` of data ending inside the window keeps it tight (every `wf` one is).
     pub proof fn lemma_insert_tight_within(a: Reassembly, b: Reassembly, off: u64, d: Seq<u8>)
         requires
             a.wf(),
@@ -356,42 +387,41 @@ impl Reassembly {
         ensures
             b.tight(),
     {
-        hide(Reassembly::wf);
         hide(rfc_received);
         hide(rfc_contiguous);
-        lemma_received_push(a.inserted(), off as nat, d);
-        a.lemma_wf();
-        b.lemma_wf();
-        if a.buf_len() > 0 {
-            assert(rfc_received(b.inserted()).contains_key((a.base() + a.buf_len() - 1) as nat));
-        }
+        hide(from);
+        b.lemma_tight();
     }
 
-    pub fn new() -> (r: Reassembly)
+    /// An empty buffer for window `w`: no ring memory until the first byte.
+    pub fn new(w: u64) -> (r: Reassembly)
+        requires
+            w <= MAX_RECV_WINDOW,
         ensures
             r.wf(),
             r.inserted() == Seq::<(nat, Seq<u8>)>::empty(),
             r.base() == 0,
             r.buf_len() == 0,
+            r.window() == w,
+            r.pages() == 0,
     {
-        let r = Reassembly {
-            base: 0,
-            head: 0,
-            buf: Vec::new(),
-            have: Vec::new(),
-            ins: Ghost(Seq::empty()),
-        };
+        let r = Reassembly { r: Ring::new(w), end: 0, cnt: 0, ins: Ghost(Seq::empty()) };
         proof {
-            lemma_contiguous_exists(rfc_received(r.ins@));
+            let m = rfc_received(r.ins@);
+            lemma_contiguous_exists(m);
+            assert(from(m, 0) =~= Map::<nat, u8>::empty());
+            assert(m.dom() =~= Set::<nat>::empty());
         }
         r
     }
 
     pub fn base_exec(&self) -> (r: u64)
+        requires
+            self.wf(),
         ensures
             r == self.base(),
     {
-        self.base
+        self.r.base_exec()
     }
 
     #[verifier::when_used_as_spec(buf_len_spec)]
@@ -401,107 +431,122 @@ impl Reassembly {
         ensures
             r == self.buf_len_spec(),
     {
-        self.buf.len() - self.head
+        proof {
+            self.r.lemma_wf();
+        }
+        (self.end - self.r.base_exec()) as usize
     }
 
-    /// `insert`'s copy: the bytes of `data` from index `j` on go into the slots not yet held
-    /// (split from `insert` for the rlimit).
-    #[verifier::spinoff_prover]
-    fn fill(&mut self, off: u64, data: &[u8], j: usize)
+    /// The byte at `base` was received: `pop` would hand over at least one. O(1).
+    pub fn ready(&self) -> (r: bool)
         requires
-            ({
-                let m = rfc_received(old(self).ins@);
-                let len = old(self).buf@.len();
-                let h = old(self).head as int;
-                &&& old(self).have@.len() == len
-                &&& h <= len
-                &&& h == 0 || 2 * h < len
-                &&& old(self).base + len - h <= VARINT_MAX
-                &&& off + data@.len() <= old(self).base + len - h
-                &&& j <= data@.len()
-                &&& j < data@.len() ==> old(self).base <= off + j
-                &&& old(self).base <= rfc_contiguous(m)
-                &&& forall|k: nat| #[trigger] m.contains_key(k) ==> k < old(self).base + len - h
-                &&& forall|i: int|
-                    h <= i < len ==> (#[trigger] old(self).have@[i] <==> (m.contains_key(
-                        (old(self).base + i - h) as nat,
-                    ) || (off <= old(self).base + i - h < off + j)))
-                &&& forall|i: int|
-                    h <= i < len && old(self).have@[i] ==> #[trigger] old(self).buf@[i] == if m.contains_key(
-                        (old(self).base + i - h) as nat,
-                    ) {
-                        m[(old(self).base + i - h) as nat]
-                    } else {
-                        data@[old(self).base + i - h - off]
-                    }
-            }),
+            self.wf(),
         ensures
-            final(self).ins@ == old(self).ins@,
-            final(self).base == old(self).base,
-            final(self).head == old(self).head,
-            final(self).buf@.len() == old(self).buf@.len(),
-            final(self).have@.len() == old(self).buf@.len(),
-            ({
-                let m = rfc_received(old(self).ins@);
-                let len = old(self).buf@.len();
-                let h = old(self).head as int;
-                &&& forall|i: int|
-                    h <= i < len ==> (#[trigger] final(self).have@[i] <==> (m.contains_key(
-                        (old(self).base + i - h) as nat,
-                    ) || (off <= old(self).base + i - h < off + data@.len())))
-                &&& forall|i: int|
-                    h <= i < len && final(self).have@[i] ==> #[trigger] final(self).buf@[i] == if m.contains_key(
-                        (old(self).base + i - h) as nat,
-                    ) {
-                        m[(old(self).base + i - h) as nat]
-                    } else {
-                        data@[old(self).base + i - h - off]
-                    }
-            }),
+            r == (rfc_contiguous(rfc_received(self.inserted())) > self.base()),
+    {
+        let r = self.r.ready();
+        proof {
+            let m = rfc_received(self.ins@);
+            let b = self.r.base_spec();
+            lemma_contiguous_exists(m);
+            assert(from(m, b).contains_key(b) == m.contains_key(b));
+            if rfc_contiguous(m) > b {
+                assert(m.contains_key(b));
+            }
+        }
+        r
+    }
+
+    /// Every offset below `f` was received, given none at or past `f` was: "Data Recvd" once `f` is
+    /// the final size. O(1).
+    pub fn complete_to(&self, f: u64) -> (r: bool)
+        requires
+            self.wf(),
+            forall|k: nat| #[trigger] rfc_received(self.inserted()).contains_key(k) ==> k < f,
+        ensures
+            r == (rfc_contiguous(rfc_received(self.inserted())) == f),
+    {
+        proof {
+            let m = rfc_received(self.ins@);
+            let all = Set::<nat>::range(0, f as nat);
+            assert forall|k: nat| #[trigger] m.dom().contains(k) implies all.contains(k) by {
+                assert(rfc_received(self.inserted()).contains_key(k));
+            }
+            lemma_contiguous_exists(m);
+            if self.cnt == f {
+                vstd::set_lib::lemma_subset_equality(m.dom(), all);
+                assert(!m.contains_key(f as nat));
+                lemma_contiguous_is(m, f as nat);
+            }
+            if rfc_contiguous(m) == f {
+                assert forall|k: nat| #[trigger] all.contains(k) implies m.dom().contains(k) by {
+                    assert(m.contains_key(k));
+                }
+                assert(m.dom() =~= all);
+            }
+        }
+        self.cnt == f
+    }
+
+    /// The offsets of `[lo, end)` not yet received, `lo` at or past `base` (split from `insert`). Costs `end - lo`.
+    fn count_new(&self, lo: u64, end: u64) -> (r: (u64, Ghost<nat>))
+        requires
+            self.wf(),
+            self.base() <= lo <= end <= self.base() + self.window(),
+        ensures
+            r.0 as nat == Set::<nat>::range(lo as nat, end as nat).filter(
+                |q: nat| !rfc_received(self.inserted()).contains_key(q),
+            ).len(),
+            r.0 <= end - lo,
+            r.1@ <= end - lo,
     {
         let ghost m = rfc_received(self.ins@);
-        let ghost len = self.buf@.len();
-        let ghost h = self.head as int;
-        let ghost end = off + data@.len();
-        let mut j = j;
-        while j < data.len()
-            invariant
-                self.ins@ == old(self).ins@,
-                self.base == old(self).base,
-                self.head == h,
-                m == rfc_received(self.ins@),
-                self.buf@.len() == len,
-                self.have@.len() == len,
-                h <= len,
-                h == 0 || 2 * h < len,
-                self.base + len - h <= VARINT_MAX,
-                end == off + data@.len(),
-                end <= self.base + len - h,
-                j <= data@.len(),
-                j < data@.len() ==> self.base <= off + j,
-                self.base <= rfc_contiguous(m),
-                forall|k: nat| #[trigger] m.contains_key(k) ==> k < self.base + len - h,
-                forall|i: int|
-                    h <= i < len ==> (#[trigger] self.have@[i] <==> (m.contains_key(
-                        (self.base + i - h) as nat,
-                    ) || (off <= self.base + i - h < off + j))),
-                forall|i: int|
-                    h <= i < len && self.have@[i] ==> #[trigger] self.buf@[i] == if m.contains_key(
-                        (self.base + i - h) as nat,
-                    ) {
-                        m[(self.base + i - h) as nat]
-                    } else {
-                        data@[self.base + i - h - off]
-                    },
-            decreases data@.len() - j,
-        {
-            let idx = (off + j as u64 - self.base) as usize + self.head;
-            if !self.have[idx] {
-                self.buf[idx] = data[j];
-                self.have[idx] = true;
-            }
-            j = j + 1;
+        let ghost nf = |q: nat| !m.contains_key(q);
+        let ghost mut work: nat = 0;
+        let mut p = lo;
+        let mut fresh: u64 = 0;
+        proof {
+            assert(Set::<nat>::range(lo as nat, lo as nat).filter(nf) =~= Set::<nat>::empty());
         }
+        while p < end
+            invariant
+                self.wf(),
+                m == rfc_received(self.ins@),
+                nf == (|q: nat| !m.contains_key(q)),
+                self.base() <= lo <= p <= end <= self.base() + self.window(),
+                fresh as nat == Set::<nat>::range(lo as nat, p as nat).filter(nf).len(),
+                fresh <= p - lo,
+                work == p - lo,
+            decreases end - p,
+        {
+            let ghost s0 = Set::<nat>::range(lo as nat, p as nat).filter(nf);
+            let h = self.r.holds(p);
+            let ghost s1 = Set::<nat>::range(lo as nat, (p + 1) as nat).filter(nf);
+            proof {
+                assert(from(m, self.base()).contains_key(p as nat) == m.contains_key(p as nat));
+                assert(!s0.contains(p as nat));
+                assert(nf(p as nat) == !h);
+                assert forall|q: nat| #[trigger] s1.contains(q) == (s0.contains(q) || (q == p && nf(q))) by {
+                    assert(Set::<nat>::range(lo as nat, (p + 1) as nat).contains(q) == (lo <= q < p + 1));
+                    assert(Set::<nat>::range(lo as nat, p as nat).contains(q) == (lo <= q < p));
+                }
+            }
+            if !h {
+                proof {
+                    assert(s1 =~= s0.insert(p as nat));
+                }
+                fresh = fresh + 1;
+            } else {
+                proof {
+                    assert(s1 =~= s0);
+                }
+            }
+            p = p + 1;
+            proof {
+                work = work + 1;
+            }
+        }
+        (fresh, Ghost(work))
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
@@ -509,17 +554,19 @@ impl Reassembly {
     //# discarded.
     // The MAY that follows (different data at the same offset as PROTOCOL_VIOLATION) is
     // declined: the first bytes received win, and later different bytes are discarded.
-    /// Buffers `data` at `off`. Bytes below `base`, or at an offset already held, are dropped.
-    /// The caller bounds `off + data.len()`, which bounds the buffer. Empty data changes only the
-    /// ghost log: extending the window to `off` would add unreceived slots.
-    pub fn insert(&mut self, off: u64, data: &[u8])
+    /// Buffers `data` at `off` in the ring. Bytes below `base`, or at an offset already held, are dropped. The caller
+    /// keeps `off + data.len()` within the window. Costs the ring's insert: `O(d + PAGE)`, plus the slot vector on the
+    /// stream's first byte.
+    pub fn insert(&mut self, off: u64, data: &[u8]) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
             off + data@.len() <= VARINT_MAX,
+            off + data@.len() <= old(self).base() + old(self).window(),
         ensures
             final(self).wf(),
             final(self).inserted() == old(self).inserted().push((off as nat, data@)),
             final(self).base() == old(self).base(),
+            final(self).window() == old(self).window(),
             final(self).base() + final(self).buf_len() <= if old(self).base() + old(self).buf_len()
                 >= off + data@.len() {
                 old(self).base() + old(self).buf_len()
@@ -529,183 +576,154 @@ impl Reassembly {
             // An empty insert is a no-op but for the log, which records no byte.
             data@.len() == 0 ==> {
                 &&& final(self).buf_len() == old(self).buf_len()
-                &&& final(self).phys_len() == old(self).phys_len()
+                &&& final(self).pages() == old(self).pages()
                 &&& rfc_received(final(self).inserted()) == rfc_received(old(self).inserted())
                 &&& old(self).tight() ==> final(self).tight()
             },
+            r@ <= (c_ri() + 1) * (data@.len() + 2 * PAGE) + NP_MAX,
     {
-        if data.len() == 0 {
-            proof {
-                lemma_received_push(self.ins@, off as nat, data@);
-                assert(rfc_received(self.ins@.push((off as nat, data@))) =~= rfc_received(self.ins@));
-            }
-            self.ins = Ghost(self.ins@.push((off as nat, data@)));
-            return;
-        }
         let ghost m = rfc_received(self.ins@);
-        let ghost hw = (old(self).base + old(self).buf@.len() - old(self).head) as int;
+        let ghost b = self.r.base_spec();
         let end = off + data.len() as u64;
-        while self.base + ((self.buf.len() - self.head) as u64) < end
-            invariant
-                self.wf(),
-                self.ins@ == old(self).ins@,
-                self.base == old(self).base,
-                self.head == old(self).head,
-                end == off + data@.len(),
-                end <= VARINT_MAX,
-                self.base + self.buf@.len() - self.head <= if hw >= end {
-                    hw
-                } else {
-                    end as int
-                },
-            decreases end - (self.base + self.buf@.len() - self.head),
-        {
-            self.buf.push(0);
-            self.have.push(false);
-        }
-        let ghost len = self.buf@.len();
-        let ghost h = self.head as int;
-        let j: usize = if off >= self.base {
-            0
-        } else if self.base - off < data.len() as u64 {
-            (self.base - off) as usize
+        let base = self.r.base_exec();
+        let lo = if off < base {
+            base
         } else {
-            data.len()
+            off
         };
-        self.fill(off, data, j);
+        let (fresh, Ghost(c0)) = if lo < end {
+            self.count_new(lo, end)
+        } else {
+            (0, Ghost(0))
+        };
+        proof {
+            // The frame's offsets not received are those at or past `lo`: below `base` all are.
+            let rr = Set::<nat>::range(off as nat, end as nat);
+            let nf = |q: nat| !m.contains_key(q);
+            let df = rr.difference(m.dom());
+            if lo < end {
+                assert(df =~= Set::<nat>::range(lo as nat, end as nat).filter(nf)) by {
+                    lemma_contiguous_exists(m);
+                }
+            } else {
+                assert(df =~= Set::<nat>::empty()) by {
+                    lemma_contiguous_exists(m);
+                }
+            }
+            lemma_received_push(old(self).ins@, off as nat, data@);
+            let m2 = rfc_received(old(self).ins@.push((off as nat, data@)));
+            assert(m2.dom() =~= m.dom() + df);
+            vstd::set_lib::lemma_set_disjoint_lens(m.dom(), df);
+            let top = if end > old(self).end { end } else { old(self).end };
+            assert(m2.dom().subset_of(Set::<nat>::range(0, top as nat)));
+            vstd::set_lib::lemma_len_subset(m2.dom(), Set::<nat>::range(0, top as nat));
+        }
+        self.cnt = self.cnt + fresh;
+        // An empty frame records its offset only: no ring memory for it.
+        let Ghost(c) = if data.len() > 0 {
+            self.r.insert_bytes(off, data)
+        } else {
+            Ghost(0)
+        };
+        if data.len() > 0 && end > self.end {
+            self.end = end;
+        }
         self.ins = Ghost(self.ins@.push((off as nat, data@)));
         proof {
             let m2 = rfc_received(self.ins@);
+            lemma_from_put(old(self).ins@, b, off as nat, data@);
             lemma_received_push(old(self).ins@, off as nat, data@);
             lemma_contiguous_exists(m);
             lemma_contiguous_exists(m2);
-            if rfc_contiguous(m2) < self.base {
+            if rfc_contiguous(m2) < b {
                 assert(m.contains_key(rfc_contiguous(m2)));
             }
-            assert(forall|i: int|
-                h <= i < self.have@.len() ==> (#[trigger] self.have@[i] <==> m2.contains_key(
-                    (self.base + i - h) as nat,
-                )));
-            assert(forall|i: int|
-                h <= i < self.buf@.len() && self.have@[i] ==> #[trigger] self.buf@[i] == m2[(
-                self.base + i - h) as nat]);
-            assert(self.base <= rfc_contiguous(m2));
-            assert(forall|k: nat| #[trigger] m2.contains_key(k) ==> k < self.base + len - h);
-        }
-    }
-
-    /// `pop`'s scan: appends the held run starting at `head` to `out` and returns its end
-    /// (split from `pop` for the rlimit).
-    #[verifier::spinoff_prover]
-    fn run_end(&self, out: &mut Vec<u8>) -> (n: usize)
-        requires
-            self.wf(),
-        ensures
-            self.head <= n <= self.have@.len(),
-            forall|k: int| self.head <= k < n ==> #[trigger] self.have@[k],
-            n < self.have@.len() ==> !self.have@[n as int],
-            final(out)@ == old(out)@ + self.buf@.subrange(self.head as int, n as int),
-    {
-        let ghost h = self.head as int;
-        let mut n: usize = self.head;
-        while n < self.have.len() && self.have[n]
-            invariant
-                self.buf@.len() == self.have@.len(),
-                h == self.head,
-                h <= n <= self.have@.len(),
-                forall|k: int| h <= k < n ==> #[trigger] self.have@[k],
-                out@ == old(out)@ + self.buf@.subrange(h, n as int),
-            decreases self.have@.len() - n,
-        {
-            out.push(self.buf[n]);
-            proof {
-                assert(self.buf@.subrange(h, n + 1) =~= self.buf@.subrange(h, n as int).push(
-                    self.buf@[n as int],
-                ));
+            if data@.len() > 0 && end > old(self).end {
+                assert(m2.contains_key((end - 1) as nat));
+            } else if self.end > b {
+                assert(m.contains_key((self.end - 1) as nat));
             }
-            n = n + 1;
+            if data@.len() == 0 {
+                assert(m2 =~= m);
+            }
+            let d = data@.len();
+            assert((c_ri() + 1) * (d + 2 * PAGE) == c_ri() * (d + 2 * PAGE) + d + 2 * PAGE) by (nonlinear_arith);
         }
-        n
+        Ghost(c + c0)
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
     //# Endpoints MUST be able to deliver stream data to an application as an
     //# ordered byte stream.
-    /// Appends the contiguous bytes past `base` to `out` and advances `base` past them.
-    /// Delivered space is reclaimed only once it is at least half the buffer, so each byte is
-    /// copied O(1) times amortized. A full drain releases the allocation.
-    pub fn pop(&mut self, out: &mut Vec<u8>)
+    /// Hands over the contiguous bytes from `base`, at most `max`, in one exact allocation, and advances `base` past
+    /// them; pages past delivery are freed. Costs the ring's deliver: `O(max + max/PAGE)`, nothing amortized.
+    pub fn pop(&mut self, max: u64) -> (r: (Vec<u8>, Ghost<nat>))
         requires
             old(self).wf(),
         ensures
             final(self).wf(),
             final(self).inserted() == old(self).inserted(),
-            final(self).base() == rfc_contiguous(rfc_received(old(self).inserted())),
+            final(self).window() == old(self).window(),
+            final(self).base() == old(self).base() + r.0@.len(),
             final(self).base() + final(self).buf_len() == old(self).base() + old(self).buf_len(),
-            final(out)@ == old(out)@ + rfc_prefix(
-                rfc_received(old(self).inserted()),
-                final(self).base(),
-            ).subrange(old(self).base() as int, final(self).base() as int),
+            r.0@.len() == if old(self).base() + max <= rfc_contiguous(rfc_received(old(self).inserted())) {
+                max as nat
+            } else {
+                (rfc_contiguous(rfc_received(old(self).inserted())) - old(self).base()) as nat
+            },
+            r.0@ == rfc_prefix(rfc_received(old(self).inserted()), final(self).base()).subrange(
+                old(self).base() as int,
+                final(self).base() as int,
+            ),
+            r.1@ <= c_rd() * (max + max as nat / (PAGE as nat) + 2),
     {
         let ghost m = rfc_received(self.ins@);
-        let ghost b = self.base as nat;
-        let ghost h = self.head as int;
+        let ghost b = self.r.base_spec();
         proof {
             lemma_contiguous_exists(m);
+            self.r.lemma_wf();
         }
-        let n = self.run_end(out);
-        let ghost run = self.buf@.subrange(h, n as int);
+        let (v, Ghost(c)) = self.r.deliver(max);
+        let ghost k = v@.len();
         proof {
-            let c = b + (n - h) as nat;
-            assert forall|j: nat| j < c implies m.contains_key(j) by {
-                if j >= b {
-                    assert(self.have@[h + j - b]);
+            let n = rfc_contiguous(m);
+            assert forall|p: nat| b <= p < b + k implies m.contains_key(p) by {
+                assert(old(self).r.view().contains_key(p));
+            }
+            assert forall|p: nat| p < b + k implies m.contains_key(p) by {
+                if p >= b {
+                    assert(old(self).r.view().contains_key(p));
                 }
             }
-            if n < self.have@.len() {
-                assert(!self.have@[n as int]);
+            if k < max {
+                assert(!from(m, b).contains_key(b + k));
+                assert(!m.contains_key(b + k));
+                lemma_contiguous_is(m, b + k);
+            } else if b + k > n {
+                assert(m.contains_key(n));
             }
-            lemma_contiguous_is(m, c);
-            assert(run =~= rfc_prefix(m, c).subrange(b as int, c as int)) by {
-                assert forall|k: int| 0 <= k < n - h implies run[k] == m[(b + k) as nat] by {
-                    assert(self.have@[h + k]);
+            // `end` is not received, so delivery stops at or before it.
+            assert(!m.contains_key(self.end as nat));
+            if b + k > self.end {
+                assert(m.contains_key(self.end as nat));
+            }
+            assert(from(from(m, b), b + k) =~= from(m, b + k));
+            assert(v@ =~= rfc_prefix(m, b + k).subrange(b as int, (b + k) as int)) by {
+                assert forall|i: int| 0 <= i < k implies #[trigger] v@[i] == m[(b + i) as nat] by {
+                    assert(from(m, b).contains_key((b + i) as nat));
                 }
             }
         }
-        if n == self.head {
-            return;
-        }
-        self.base = self.base + (n - self.head) as u64;
-        self.head = n;
-        if self.head >= self.buf.len() - self.head {
-            if self.head == self.buf.len() {
-                // Fresh vecs, not `clear()`: drained space must not keep its allocation.
-                self.buf = Vec::new();
-                self.have = Vec::new();
-            } else {
-                // `head >= 1`, so `split_off` returns a new tail-sized allocation and the old
-                // one is dropped.
-                let t = self.buf.split_off(self.head);
-                self.buf = t;
-                let t = self.have.split_off(self.head);
-                self.have = t;
-            }
-            self.head = 0;
-            proof {
-                assert forall|i: int| 0 <= i < self.have@.len() implies #[trigger] self.have@[i]
-                    == old(self).have@[i + n] && self.buf@[i] == old(self).buf@[i + n] by {}
-            }
-        }
+        (v.into_vec(), Ghost(c))
     }
 }
 
 } // verus!
 
 impl Reassembly {
-    /// Test support: the allocated capacities of `buf` and `have`. Verus models `Vec` length,
-    /// not capacity, so capacity release is checked by test only (TRUSTED.md).
+    /// Test support: the ring's pages allocated (Verus counts them as `pages()`; a page is 256 bytes and 256 flags).
     #[doc(hidden)]
-    pub fn capacities(&self) -> (usize, usize) {
-        (self.buf.capacity(), self.have.capacity())
+    pub fn page_count(&self) -> usize {
+        self.r.page_count()
     }
 }

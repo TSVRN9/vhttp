@@ -1,8 +1,7 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
-index 2438cfa..a537aa7 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -1621,7 +1621,6 @@ impl<'a> QuicServer<'a> {
+@@ -1656,7 +1656,6 @@
              !cont ==> !(final(self).conn_spec().phase_spec() is Open),
              cont ==> final(self).h3 == old(self).h3,
              fed_kept(final(self).conn_spec(), old(self).conn_spec()),

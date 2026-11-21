@@ -831,3 +831,56 @@ fn closing_with_backlog_frees_slots() {
     }
     assert!(!s.conn().teardown_pending());
 }
+
+/// D13, end to end: a request whose bytes arrive with byte 0 last. The frame filling the gap hands h3
+/// one byte (a frame delivers at most its own length, D12); the rest waits in the stream queue
+/// (`has_backlog`), and `pump_backlog` delivers it until none is left: the whole body reaches h3.
+#[test]
+fn stream_backlog_pumped() {
+    use h3::conn::Output;
+    use h3::frame::serialize_frame_header;
+    use h3::qpack::field_section::{encode_field_section, FieldLine};
+    use quic::h3_server::AppEvent;
+    let (mut s, mut c, _) = established();
+    let fl = |n: &[u8], v: &[u8]| FieldLine { name: n.to_vec(), value: v.to_vec() };
+    let mut h = Vec::new();
+    encode_field_section(
+        &[fl(b":method", b"POST"), fl(b":scheme", b"https"), fl(b":authority", b"localhost"), fl(b":path", b"/")],
+        &mut h,
+    );
+    // Within the test's stream window (100 bytes, `qc::ltp`).
+    let body = vec![b'x'; 50];
+    let mut w = Vec::new();
+    serialize_frame_header(0x01, h.len() as u64, &mut w);
+    w.extend_from_slice(&h);
+    serialize_frame_header(0x00, body.len() as u64, &mut w);
+    w.extend_from_slice(&body);
+    let mut app = Vec::new();
+    let tail = Frame::Stream { stream_id: 0, offset: 1, data: w[1..].to_vec(), fin: true };
+    let d = c.dgram(vec![(Level::OneRtt, vec![tail])]);
+    s.receive(&d, 0, NOW, &R(70), &mut app);
+    assert!(!s.has_backlog());
+    let head = Frame::Stream { stream_id: 0, offset: 0, data: w[..1].to_vec(), fin: false };
+    let d = c.dgram(vec![(Level::OneRtt, vec![head])]);
+    s.receive(&d, 0, NOW, &R(71), &mut app);
+    assert!(s.has_backlog());
+    assert_eq!(s.conn().phase(), Phase::Open);
+    let mut n = 0u8;
+    while s.has_backlog() {
+        assert!(n < 32, "still backlog after {n} pumps");
+        s.pump_backlog(NOW, &R(72 + n), &mut app);
+        n += 1;
+    }
+    let mut got = 0;
+    let (mut req, mut end) = (false, false);
+    for e in &app {
+        match e {
+            AppEvent::H3(Output::Request { stream_id: 0, .. }) => req = true,
+            AppEvent::H3(Output::RequestBody { stream_id: 0, data }) => got += data.len(),
+            AppEvent::H3(Output::RequestEnd { stream_id: 0, .. }) => end = true,
+            _ => {},
+        }
+    }
+    assert!(req && end, "request {req}, end {end}");
+    assert_eq!(got, body.len());
+}

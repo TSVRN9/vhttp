@@ -172,3 +172,11 @@ tail).
   `input_cost::send_selective_acks`; mutants 9b2-M16..M19, `scripts/mutants.sh run 9b2-M16 9b2-M17 9b2-M18 9b2-M19` at
   e0037c5: "mutants: run ok (4 mutants killed)" (M16 at `SendStream::retransmit`, resend_piece's item rule; M17 at
   `push_piece`; M18 at `ack_piece`; M19 at `drop_prefix`); spec D10, D15, D16.
+
+## 9b2-M22's regex was predicted, not read from a run (9b2 Task 9)
+
+- **What**: 9b2-M22 (Page::write_new loses first-writer-wins) was committed (a9011bc) with a regex naming the loop
+  invariant the author expected to fail; `mutants.sh run` killed it at the in-loop `bytes` assertion instead, so the row
+  failed as written until 0dee01b took the regex from the run. **Why**: the regex was written before the run, from the
+  proof's shape. **Catch**: `scripts/mutants.sh run <id>` fails a row whose regex matches no error block of the mutated
+  verification (it did here), and every new or retargeted row is run before its task commits.

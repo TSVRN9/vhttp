@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Delivers everything ready, at most `max` bytes.
 fn take(r: &mut Ring, max: u64) -> Vec<u8> {
     let (out, _) = r.deliver(max);
-    assert_eq!(out.capacity() >= out.len(), true);
+    assert_eq!(out.capacity(), out.len());
     out.as_slice().to_vec()
 }
 

@@ -43,7 +43,8 @@
 //!   which bounds its buffers) ≤ `MAX_SEND_BUFFER` (1 MiB) is in `wf`; `write` fails, changing
 //!   nothing, beyond `send_room(id)`.
 //! - **Receive window pinned (3d D8):** every mutator keeps the connection window at
-//!   `initial_max_data`, and `lemma_wf` bounds receive memory by 2·window.
+//!   `initial_max_data`, and `lemma_wf` bounds receive memory (ring positions) by the window plus
+//!   two pages per stream (9b2 D11).
 use vstd::prelude::*;
 // Used only in ghost code, which a plain `cargo build` erases.
 #[allow(unused_imports)]
@@ -54,10 +55,13 @@ use crate::frame::*;
 // `PacketKind` and `frame_permitted` appear only in contracts, which a plain `cargo build` erases.
 #[allow(unused_imports)]
 use crate::payload::*;
+use crate::idq::*;
 use crate::recv_stream::*;
-// Used only in contracts, which a plain `cargo build` erases.
+// Used only in contracts and ghost code, which a plain `cargo build` erases.
 #[allow(unused_imports)]
-use crate::ring::MAX_RECV_WINDOW;
+use crate::ring::*;
+#[allow(unused_imports)]
+use crate::reassembly::*;
 use crate::send_stream::*;
 use crate::stream_id::*;
 use crate::tp::*;
@@ -74,6 +78,9 @@ struct Entry {
     id: u64,
     recv: Option<RecvStream>,
     send: Option<SendStream>,
+    /// The id is in `Streams::q` (9b2 D13): set when bytes or the FIN are left to deliver, cleared
+    /// only by `deliver_some` as it pops the id.
+    queued: bool,
 }
 
 // ponytail: matches the linear-scan bound above; raise both together.
@@ -267,13 +274,29 @@ pub open spec fn rx_outcome(s: Streams, f: SpecFrame) -> Result<(), u64> {
     }
 }
 
-/// The receive trace of stream `j` after one frame: the frame's input appended, for its own
+/// The receiving-part inputs a STREAM or RESET_STREAM frame gives: STREAM's data, then a delivery
+/// of at most its length (9b2 D12: no frame hands over more bytes than it carries; `deliver_some`
+/// hands over the rest); RESET_STREAM's reset.
+pub open spec fn frame_recv_ins(f: SpecFrame) -> Seq<SpecRecvIn> {
+    match f {
+        SpecFrame::Stream { offset, data, fin, .. } => seq![
+            SpecRecvIn::Data { off: offset as nat, data, fin },
+            SpecRecvIn::Deliver { max: data.len() },
+        ],
+        SpecFrame::ResetStream { error_code, final_size, .. } => seq![
+            SpecRecvIn::Reset { code: error_code, final_size: final_size as nat },
+        ],
+        _ => Seq::empty(),
+    }
+}
+
+/// The receive trace of stream `j` after one frame: the frame's inputs appended, for its own
 /// stream unless that stream was removed.
 pub open spec fn rx_trace_after(s0: Streams, f: SpecFrame, r: Result<(), u64>, j: u64) -> Seq<
     SpecRecvIn,
 > {
     if r is Ok && frame_stream_id(f) == Some(j) && frame_recv_in(f) is Some && !s0.is_removed(j) {
-        s0.rx_trace(j).push(frame_recv_in(f)->0)
+        s0.rx_trace(j) + frame_recv_ins(f)
     } else {
         s0.rx_trace(j)
     }
@@ -1059,7 +1082,8 @@ proof fn lemma_sum_kind_nonneg(s: Seq<Entry>, q: int)
 
 /// The per-entry bounds behind the connection-level ones.
 spec fn terms_ok(e: Entry) -> bool {
-    &&& 0 <= val(e, 2) <= val(e, 3) <= 2 * val(e, 2)
+    &&& 0 <= val(e, 2)
+    &&& 0 <= val(e, 3) <= val(e, 2) + 2 * PAGE
     &&& val(e, 2) <= val(e, 0) - val(e, 1)
     &&& 0 <= val(e, 1) <= val(e, 0)
 }
@@ -1068,7 +1092,8 @@ proof fn lemma_sum_bounds(s: Seq<Entry>)
     requires
         forall|k: int| 0 <= k < s.len() ==> terms_ok(#[trigger] s[k]),
     ensures
-        0 <= sum(s, 2) <= sum(s, 3) <= 2 * sum(s, 2),
+        0 <= sum(s, 2),
+        0 <= sum(s, 3) <= sum(s, 2) + 2 * PAGE * s.len(),
         sum(s, 2) <= sum(s, 0) - sum(s, 1),
         0 <= sum(s, 1) <= sum(s, 0),
     decreases s.len(),
@@ -1183,6 +1208,364 @@ spec fn records_ok(
     &&& forall|id: u64| #[trigger] resets.contains_key(id) ==> created(ids, id)
 }
 
+// ---- The delivery queue (9b2 D13) ----
+
+/// Entry `e`'s receiving part has bytes or the FIN left to deliver.
+spec fn eready(e: Entry) -> bool {
+    e.recv matches Some(r) && recv_ready(r.rfc())
+}
+
+/// The queued entries.
+spec fn qcount(s: Seq<Entry>) -> nat
+    decreases s.len(),
+{
+    if s.len() == 0 {
+        0
+    } else {
+        qcount(s.drop_last()) + if s.last().queued {
+            1nat
+        } else {
+            0nat
+        }
+    }
+}
+
+/// Some queued entry is stream `id`.
+spec fn qd(s: Seq<Entry>, id: u64) -> bool {
+    exists|i: int| 0 <= i < s.len() && (#[trigger] s[i]).id == id && s[i].queued
+}
+
+/// The queue holds each queued entry's id once, oldest first; a queued entry has a receiving part,
+/// and one with bytes or the FIN left to deliver is queued. Opaque: only the queue's lemmas read it.
+#[verifier::opaque]
+spec fn qinv(s: Seq<Entry>, qv: Seq<u64>) -> bool {
+    &&& qv.no_duplicates()
+    &&& qv.len() == qcount(s)
+    &&& forall|k: int| 0 <= k < qv.len() ==> qd(s, #[trigger] qv[k])
+    &&& forall|i: int| 0 <= i < s.len() ==> ((#[trigger] s[i]).queued ==> s[i].recv is Some)
+    &&& forall|i: int| 0 <= i < s.len() ==> (eready(#[trigger] s[i]) ==> s[i].queued)
+}
+
+/// The queue is well formed and `qinv` holds: one opaque conjunct of `Streams::wf`.
+#[verifier::opaque]
+spec fn queue_ok(s: Seq<Entry>, q: IdQueue) -> bool {
+    q.wf() && qinv(s, q@)
+}
+
+proof fn lemma_queue_ok(s: Seq<Entry>, q: IdQueue)
+    ensures
+        queue_ok(s, q) == (q.wf() && qinv(s, q@)),
+{
+    reveal(queue_ok);
+}
+
+/// The ids of `s` are distinct.
+spec fn ids_distinct(s: Seq<Entry>) -> bool {
+    forall|j: int, k: int|
+        0 <= j < s.len() && 0 <= k < s.len() && j != k ==> (#[trigger] s[j]).id != (#[trigger] s[k]).id
+}
+
+proof fn lemma_qcount_update(s: Seq<Entry>, i: int, e: Entry)
+    requires
+        0 <= i < s.len(),
+    ensures
+        qcount(s.update(i, e)) + (if s[i].queued {
+            1nat
+        } else {
+            0nat
+        }) == qcount(s) + (if e.queued {
+            1nat
+        } else {
+            0nat
+        }),
+    decreases s.len(),
+{
+    let t = s.update(i, e);
+    if i == s.len() - 1 {
+        assert(t.drop_last() =~= s.drop_last());
+    } else {
+        assert(t.drop_last() =~= s.drop_last().update(i, e));
+        lemma_qcount_update(s.drop_last(), i, e);
+    }
+}
+
+proof fn lemma_qcount_remove(s: Seq<Entry>, i: int)
+    requires
+        0 <= i < s.len(),
+    ensures
+        qcount(s.remove(i)) + (if s[i].queued {
+            1nat
+        } else {
+            0nat
+        }) == qcount(s),
+    decreases s.len(),
+{
+    if i == s.len() - 1 {
+        assert(s.remove(i) =~= s.drop_last());
+    } else {
+        assert(s.remove(i).drop_last() =~= s.drop_last().remove(i));
+        assert(s.remove(i).last() == s.last());
+        lemma_qcount_remove(s.drop_last(), i);
+    }
+}
+
+/// Queued entries are peer streams: at most the live ones of both directions.
+proof fn lemma_qcount_le(s: Seq<Entry>)
+    requires
+        forall|i: int| 0 <= i < s.len() ==> ((#[trigger] s[i]).queued ==> s[i].id % 4 == 0 || s[i].id % 4 == 2),
+    ensures
+        qcount(s) <= sum(s, 4) + sum(s, 6),
+    decreases s.len(),
+{
+    if s.len() > 0 {
+        let p = s.drop_last();
+        assert forall|i: int| 0 <= i < p.len() implies ((#[trigger] p[i]).queued ==> p[i].id % 4 == 0 || p[i].id
+            % 4 == 2) by {
+            assert(p[i] == s[i]);
+        }
+        lemma_qcount_le(p);
+        lemma_sum_kind_nonneg(p, 4);
+        lemma_sum_kind_nonneg(p, 6);
+        assert(s.last() == s[s.len() - 1]);
+    }
+}
+
+/// Entry `i` replaced by `ne` (same id), the queue going from `qv` to `qv2`: unchanged with the flag, `ne`'s id
+/// appended as it becomes queued, or popped (re-appended while still queued).
+proof fn lemma_qinv_set(s: Seq<Entry>, i: int, ne: Entry, qv: Seq<u64>, qv2: Seq<u64>)
+    requires
+        qinv(s, qv),
+        0 <= i < s.len(),
+        ids_distinct(s),
+        ne.id == s[i].id,
+        ne.queued ==> ne.recv is Some,
+        eready(ne) ==> ne.queued,
+        ({
+            ||| ne.queued == s[i].queued && qv2 == qv
+            ||| !s[i].queued && ne.queued && qv2 == qv.push(ne.id)
+            ||| qv.len() > 0 && qv[0] == ne.id && (if ne.queued {
+                qv2 == qv.drop_first().push(ne.id)
+            } else {
+                qv2 == qv.drop_first()
+            })
+        }),
+    ensures
+        qinv(s.update(i, ne), qv2),
+{
+    reveal(qinv);
+    let t = s.update(i, ne);
+    lemma_qcount_update(s, i, ne);
+    if qv.len() > 0 && qv[0] == ne.id && !(ne.queued == s[i].queued && qv2 == qv) && !(!s[i].queued && ne.queued
+        && qv2 == qv.push(ne.id)) {
+        // The popped id is entry `i`'s: the only entry with that id.
+        assert(qd(s, qv[0]));
+        let j = choose|j: int| 0 <= j < s.len() && (#[trigger] s[j]).id == qv[0] && s[j].queued;
+        assert(j == i);
+    }
+    if !s[i].queued && ne.queued && qv2 == qv.push(ne.id) {
+        assert forall|k: int| 0 <= k < qv.len() implies qv[k] != ne.id by {
+            assert(qd(s, qv[k]));
+            let j = choose|j: int| 0 <= j < s.len() && (#[trigger] s[j]).id == qv[k] && s[j].queued;
+            assert(j != i);
+        }
+    }
+    let rest = if qv.len() > 0 && qv[0] == ne.id && !(ne.queued == s[i].queued && qv2 == qv) && !(!s[i].queued
+        && ne.queued && qv2 == qv.push(ne.id)) {
+        qv.drop_first()
+    } else {
+        qv
+    };
+    assert forall|k: int| 0 <= k < qv2.len() implies qd(t, #[trigger] qv2[k]) by {
+        if qv2[k] == ne.id {
+            assert(t[i].id == ne.id);
+        } else {
+            let kk = if rest == qv { k } else { k + 1 };
+            assert(qv2[k] == qv[kk]);
+            assert(qd(s, qv[kk]));
+            let j = choose|j: int| 0 <= j < s.len() && (#[trigger] s[j]).id == qv[kk] && s[j].queued;
+            assert(j != i);
+            assert(t[j] == s[j]);
+        }
+    }
+    assert forall|k: int| 0 <= k < t.len() implies ((#[trigger] t[k]).queued ==> t[k].recv is Some) && (eready(t[k])
+        ==> t[k].queued) by {
+        if k != i {
+            assert(t[k] == s[k]);
+        }
+    }
+}
+
+/// Entry `i` removed while not queued.
+proof fn lemma_qinv_remove(s: Seq<Entry>, i: int, qv: Seq<u64>)
+    requires
+        qinv(s, qv),
+        0 <= i < s.len(),
+        !s[i].queued,
+    ensures
+        qinv(s.remove(i), qv),
+{
+    reveal(qinv);
+    let t = s.remove(i);
+    lemma_qcount_remove(s, i);
+    assert forall|k: int| 0 <= k < qv.len() implies qd(t, #[trigger] qv[k]) by {
+        assert(qd(s, qv[k]));
+        let j = choose|j: int| 0 <= j < s.len() && (#[trigger] s[j]).id == qv[k] && s[j].queued;
+        assert(j != i);
+        let jj = if j < i { j } else { j - 1 };
+        assert(t[jj] == s[j]);
+    }
+    assert forall|k: int| 0 <= k < t.len() implies ((#[trigger] t[k]).queued ==> t[k].recv is Some) && (eready(t[k])
+        ==> t[k].queued) by {
+        let kk = if k < i { k } else { k + 1 };
+        assert(t[k] == s[kk]);
+    }
+}
+
+/// An entry pushed unqueued with nothing to deliver.
+proof fn lemma_qinv_push(s: Seq<Entry>, e: Entry, qv: Seq<u64>)
+    requires
+        qinv(s, qv),
+        !e.queued,
+        !eready(e),
+    ensures
+        qinv(s.push(e), qv),
+{
+    reveal(qinv);
+    let t = s.push(e);
+    assert(t.drop_last() =~= s);
+    assert forall|k: int| 0 <= k < qv.len() implies qd(t, #[trigger] qv[k]) by {
+        assert(qd(s, qv[k]));
+        let j = choose|j: int| 0 <= j < s.len() && (#[trigger] s[j]).id == qv[k] && s[j].queued;
+        assert(t[j] == s[j]);
+    }
+    assert forall|k: int| 0 <= k < t.len() implies ((#[trigger] t[k]).queued ==> t[k].recv is Some) && (eready(t[k])
+        ==> t[k].queued) by {
+        if k < s.len() {
+            assert(t[k] == s[k]);
+        }
+    }
+}
+
+/// An empty queue over entries none of which is queued or has anything to deliver.
+proof fn lemma_qinv_empty()
+    ensures
+        qinv(Seq::<Entry>::empty(), Seq::<u64>::empty()),
+{
+    reveal(qinv);
+}
+
+/// What `qinv` gives: the queue as long as the queued entries, each queued id a queued entry's, queued entries
+/// with receiving parts.
+proof fn lemma_qinv_facts(s: Seq<Entry>, qv: Seq<u64>)
+    requires
+        qinv(s, qv),
+    ensures
+        qv.len() == qcount(s),
+        qv.no_duplicates(),
+        forall|k: int| 0 <= k < qv.len() ==> qd(s, #[trigger] qv[k]),
+        forall|i: int| 0 <= i < s.len() ==> ((#[trigger] s[i]).queued ==> s[i].recv is Some),
+        forall|i: int| 0 <= i < s.len() ==> (eready(#[trigger] s[i]) ==> s[i].queued),
+{
+    reveal(qinv);
+}
+
+/// `1 + recv_pending` of each queued id's receiving part, summed: what deliveries work off (D13's measure).
+spec fn qm(f: spec_fn(u64) -> nat, qv: Seq<u64>) -> nat
+    decreases qv.len(),
+{
+    if qv.len() == 0 {
+        0
+    } else {
+        qm(f, qv.drop_last()) + f(qv.last())
+    }
+}
+
+proof fn lemma_qm_push(f: spec_fn(u64) -> nat, qv: Seq<u64>, x: u64)
+    ensures
+        qm(f, qv.push(x)) == qm(f, qv) + f(x),
+{
+    assert(qv.push(x).drop_last() =~= qv);
+}
+
+proof fn lemma_qm_first(f: spec_fn(u64) -> nat, qv: Seq<u64>)
+    requires
+        qv.len() > 0,
+    ensures
+        qm(f, qv) == f(qv[0]) + qm(f, qv.drop_first()),
+    decreases qv.len(),
+{
+    if qv.len() > 1 {
+        lemma_qm_first(f, qv.drop_last());
+        assert(qv.drop_last().drop_first() =~= qv.drop_first().drop_last());
+        assert(qv.drop_first().last() == qv.last());
+    } else {
+        assert(qv.drop_first() =~= Seq::<u64>::empty());
+        assert(qv.drop_last() =~= Seq::<u64>::empty());
+    }
+}
+
+/// `qm` reads `f` only at the ids queued.
+proof fn lemma_qm_ext(f: spec_fn(u64) -> nat, g: spec_fn(u64) -> nat, qv: Seq<u64>)
+    requires
+        forall|k: int| 0 <= k < qv.len() ==> f(#[trigger] qv[k]) == g(qv[k]),
+    ensures
+        qm(f, qv) == qm(g, qv),
+    decreases qv.len(),
+{
+    if qv.len() > 0 {
+        let p = qv.drop_last();
+        assert forall|k: int| 0 <= k < p.len() implies f(#[trigger] p[k]) == g(p[k]) by {
+            assert(p[k] == qv[k]);
+        }
+        lemma_qm_ext(f, g, p);
+        assert(f(qv.last()) == g(qv[qv.len() - 1]));
+    }
+}
+
+proof fn lemma_qm_bound(f: spec_fn(u64) -> nat, qv: Seq<u64>, b: nat)
+    requires
+        forall|k: int| 0 <= k < qv.len() ==> f(#[trigger] qv[k]) <= b,
+    ensures
+        qm(f, qv) <= qv.len() * b,
+    decreases qv.len(),
+{
+    if qv.len() > 0 {
+        let p = qv.drop_last();
+        assert forall|k: int| 0 <= k < p.len() implies f(#[trigger] p[k]) <= b by {
+            assert(p[k] == qv[k]);
+        }
+        lemma_qm_bound(f, p, b);
+        assert(f(qv.last()) <= b) by {
+            assert(qv.last() == qv[qv.len() - 1]);
+        }
+        assert((p.len() + 1) * b == p.len() * b + b) by (nonlinear_arith);
+    }
+}
+
+proof fn lemma_qm_pos(f: spec_fn(u64) -> nat, qv: Seq<u64>)
+    requires
+        forall|k: int| 0 <= k < qv.len() ==> f(#[trigger] qv[k]) >= 1,
+    ensures
+        qm(f, qv) >= qv.len(),
+    decreases qv.len(),
+{
+    if qv.len() > 0 {
+        let p = qv.drop_last();
+        assert forall|k: int| 0 <= k < p.len() implies f(#[trigger] p[k]) >= 1 by {
+            assert(p[k] == qv[k]);
+        }
+        lemma_qm_pos(f, p);
+        assert(f(qv.last()) >= 1) by {
+            assert(qv.last() == qv[qv.len() - 1]);
+        }
+    }
+}
+
+/// The most entries: our peer streams of both directions and our own unidirectional ones.
+pub open spec fn max_entries() -> nat {
+    (2 * MAX_LOCAL_STREAMS + MAX_OWN_UNI) as nat
+}
+
 /// The connection's streams.
 pub struct Streams {
     ids: StreamIds,
@@ -1217,6 +1600,8 @@ pub struct Streams {
     gone: Ghost<nat>,
     /// Σ bytes sent (`sent_end`) over the removed entries.
     tx_gone: Ghost<nat>,
+    /// The streams with bytes or the FIN left to deliver (9b2 D13), each once.
+    q: IdQueue,
 }
 
 impl Streams {
@@ -1411,6 +1796,69 @@ impl Streams {
             self.removed@,
             self.resets@,
         )
+        // D13: the delivery queue.
+        &&& queue_ok(self.entries@, self.q)
+    }
+
+    /// The per-id term of `rx_backlog`.
+    spec fn qterm(&self) -> spec_fn(u64) -> nat {
+        |id: u64| 1 + recv_pending(self.rx_spec(id))
+    }
+
+    /// D13's STREAM backlog measure: per queued stream, one plus its bytes past delivery up to the
+    /// largest received offset. Each `deliver_some` lowers it while the queue is non-empty.
+    pub closed spec fn rx_backlog(&self) -> nat {
+        qm(self.qterm(), self.q@)
+    }
+
+    /// Some stream has bytes or the FIN left to deliver: the queue is non-empty.
+    pub closed spec fn stream_backlog_spec(&self) -> bool {
+        self.q@.len() > 0
+    }
+
+    /// Some stream has bytes or the FIN left to deliver. O(1).
+    pub fn stream_backlog(&self) -> (r: bool)
+        requires
+            self.wf(),
+        ensures
+            r == self.stream_backlog_spec(),
+    {
+        proof {
+            lemma_queue_ok(self.entries@, self.q);
+        }
+        self.q.len() > 0
+    }
+
+    /// The queue's bound: `IDQ_CAP` streams of at most a window each.
+    pub proof fn lemma_rx_backlog(&self)
+        requires
+            self.wf(),
+        ensures
+            self.rx_backlog() <= IDQ_CAP * (MAX_RECV_WINDOW + 1),
+            self.stream_backlog_spec() ==> self.rx_backlog() > 0,
+    {
+        let qv = self.q@;
+        lemma_queue_ok(self.entries@, self.q);
+        lemma_qinv_facts(self.entries@, qv);
+        assert forall|k: int| 0 <= k < qv.len() implies (self.qterm())(#[trigger] qv[k]) <= MAX_RECV_WINDOW + 1 by {
+            let id = qv[k];
+            assert(qd(self.entries@, id));
+            let i = choose|i: int| 0 <= i < self.entries@.len() && (#[trigger] self.entries@[i]).id == id
+                && self.entries@[i].queued;
+            let e = self.entries@[i];
+            assert(entry_ok(e, self.rx_bidi, self.rx_uni));
+            let r = e.recv->0;
+            r.lemma_wf();
+            assert(self.rx_spec(id) == r.rfc());
+        }
+        lemma_qm_bound(self.qterm(), qv, (MAX_RECV_WINDOW + 1) as nat);
+        assert forall|k: int| 0 <= k < qv.len() implies (self.qterm())(#[trigger] qv[k]) >= 1 by {}
+        lemma_qm_pos(self.qterm(), qv);
+        self.q.lemma_len();
+        assert(qv.len() * (MAX_RECV_WINDOW + 1) <= IDQ_CAP * (MAX_RECV_WINDOW + 1)) by (nonlinear_arith)
+            requires
+                qv.len() <= IDQ_CAP,
+        ;
     }
 
     /// The invariant's consequences, in terms of the accessors.
@@ -1425,10 +1873,11 @@ impl Streams {
             self.conn_recv_spec().consumed_spec() <= self.conn_counted_spec()
                 <= self.conn_recv_spec().limit_spec() <= VARINT_MAX,
             // Memory: no receive buffer goes beyond the advertised connection window, and the
-            // physical buffers are at most twice that.
-            0 <= self.rx_buffered() <= self.rx_buffered_phys() <= 2 * self.rx_buffered(),
+            // ring pages hold at most that plus two pages per stream (D11).
+            0 <= self.rx_buffered(),
+            0 <= self.rx_buffered_phys() <= self.rx_buffered() + 2 * PAGE * self.live_streams(),
             self.rx_buffered() <= self.conn_counted_spec() - self.conn_recv_spec().consumed_spec(),
-            self.rx_buffered_phys() <= 2 * self.conn_recv_spec().limit_spec(),
+            self.rx_buffered_phys() <= self.conn_recv_spec().limit_spec() + 2 * PAGE * self.live_streams(),
             // Live peer streams: at most our initial limit (binding obligation 1).
             forall|b: bool|
                 0 <= #[trigger] self.live_peer_streams(b) <= self.init_max_streams(b)
@@ -1453,8 +1902,9 @@ impl Streams {
             // Memory: the send queues' buffers hold at most their reservations, at most
             // `MAX_SEND_BUFFER` bytes in all.
             0 <= self.tx_capacity() <= self.tx_held() <= MAX_SEND_BUFFER,
-            // Memory: receive buffers within twice the pinned window (3d D8).
-            self.rx_buffered_phys() <= 2 * self.conn_recv_spec().window_spec(),
+            // Memory: receive buffers within the pinned window plus two pages per stream (3d D8, D11).
+            self.rx_buffered_phys() <= self.conn_recv_spec().window_spec() + 2 * PAGE * self.live_streams(),
+            self.live_streams() <= max_entries(),
             self.ids_spec().local_uni_spec().used_spec() <= MAX_OWN_UNI,
     {
         self.ids.lemma_wf();
@@ -1500,6 +1950,7 @@ impl Streams {
             }
         }
         lemma_sum_cap(s);
+        lemma_entries_bound(*self);
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9114#section-6.2
@@ -1533,6 +1984,7 @@ impl Streams {
             forall|id: u64| #[trigger] r.tx_flight(id) == Set::<(u64, u64)>::empty(),
             r.conn_recv_spec().window_spec() == local.initial_max_data,
             r.tx_held() == 0,
+            r.rx_backlog() == 0,
     {
         let r = Streams {
             ids: StreamIds::new(
@@ -1555,8 +2007,12 @@ impl Streams {
             resets: Ghost(Map::empty()),
             gone: Ghost(0),
             tx_gone: Ghost(0),
+            q: IdQueue::new(),
         };
         proof {
+            lemma_qinv_empty();
+            assert(r.entries@ =~= Seq::<Entry>::empty());
+            lemma_queue_ok(r.entries@, r.q);
             r.ids.lemma_wf();
             crate::ring::lemma_window_ok(r.rx_bidi);
             crate::ring::lemma_window_ok(r.rx_uni);
@@ -1619,6 +2075,7 @@ impl Streams {
         &&& self.resets == o.resets
         &&& self.gone == o.gone
         &&& self.tx_gone == o.tx_gone
+        &&& self.q == o.q
         &&& forall|j: u64| #[trigger] self.rx_trace(j) == o.rx_trace(j)
     }
 
@@ -1716,7 +2173,7 @@ impl Streams {
         } else {
             None
         };
-        let e = Entry { id: x, recv: Some(recv), send };
+        let e = Entry { id: x, recv: Some(recv), send, queued: false };
         self.entries.push(e);
         self.rtr = Ghost(self.rtr@.insert(x, Seq::empty()));
         proof {
@@ -1835,7 +2292,7 @@ impl Streams {
         let ghost s0 = *self;
         let ghost id = self.entries@[i as int].id;
         let ghost a = self.entries@;
-        let mut e = Entry { id: 0, recv: None, send: None };
+        let mut e = Entry { id: 0, recv: None, send: None, queued: false };
         self.entries.set_and_swap(i, &mut e);
         let ghost e0 = e;
         proof {
@@ -1844,11 +2301,11 @@ impl Streams {
             assert(!s0.removed@.contains(id));
             self.conn_recv.lemma_wf();
         }
-        let mut rs = match e.recv.take() {
-            Some(rs) => rs,
-            None => RecvStream::new(0, 0),  // unreachable: a client stream has a receiving part
-        };
-        let ghost rs0 = rs;
+        proof {
+            lemma_queue_ok(a, s0.q);
+            lemma_qinv_facts(a, s0.q@);
+            assert(eready(e0) ==> e0.queued);
+        }
         //= https://www.rfc-editor.org/rfc/rfc9000#section-4.5
         //# The receiver MUST use the final size of the stream to
         //# account for all bytes sent on the stream in its connection-level flow
@@ -1856,17 +2313,21 @@ impl Streams {
         // The stream reports only the growth of its final size, else high-water mark (`counted`),
         // so duplicate bytes count once; the connection credit we return is what it retired.
         let room = self.conn_recv.limit() - self.conn_counted;
-        let t0 = rs.retired_exec();
-        let res = feed_recv(&mut rs, f, room, ev);
-        let t1 = rs.retired_exec();
-        let ghost tr = rs.trace();
-        e.recv = Some(rs);
+        let (res, dt, enq) = feed_entry(&mut e, f, room, ev);
+        let xid = e.id;
+        let ghost tr = e.recv->0.trace();
         let ghost ne = e;
         self.entries.set_and_swap(i, &mut e);
         proof {
-            assert(rs0 == e0.recv->0);
             assert(self.entries@ == a.update(i as int, ne));
-            lemma_counted_monotone(id, s0.rx_window(id), rs0.trace(), frame_recv_in(f@)->0);
+            lemma_enqueue(s0, i as int, ne, enq);
+        }
+        // D13: bytes or the FIN left undelivered queue the stream, once.
+        if enq {
+            self.q.push(xid);
+        }
+        proof {
+            lemma_queue_ok(self.entries@, self.q);
         }
         let r = match res {
             Ok(n) => {
@@ -1874,7 +2335,7 @@ impl Streams {
                     lemma_recv_ok(s0, i as int, ne, n);
                 }
                 self.conn_counted = self.conn_counted + n;
-                self.conn_recv.on_consumed(t1 - t0);
+                self.conn_recv.on_consumed(dt);
                 self.rtr = Ghost(self.rtr@.insert(id, tr));
                 proof {
                     assert(forall|j: u64| #[trigger]
@@ -1895,6 +2356,135 @@ impl Streams {
             lemma_swap_flight(s0, *self, i as int, ne);
         }
         r
+    }
+
+    /// Delivers up to `budget` bytes of the stream at the queue's head (9b2 D13): pops its id, hands
+    /// at most `budget` bytes (or its FIN) to `ev`, re-queues it while bytes or the FIN are left,
+    /// and removes the entry once all its parts are terminal. One queue entry per call, so the call
+    /// lowers `rx_backlog` while the queue is non-empty. Costs the delivery, the id lookup (linear
+    /// in the open streams, Q20, 9b4's) and the entry's removal.
+    pub fn deliver_some(&mut self, budget: u64, ev: &mut Vec<StreamEvent>) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            !old(self).failed(),
+            budget >= 1,
+        ensures
+            final(self).wf(),
+            !final(self).failed(),
+            final(self).conn_recv_spec().window_spec() == old(self).conn_recv_spec().window_spec(),
+            final(self).tx_held() <= old(self).tx_held(),
+            tx_kept_but(*old(self), *final(self), None),
+            old(self).stream_backlog_spec() ==> final(self).rx_backlog() < old(self).rx_backlog(),
+            !old(self).stream_backlog_spec() ==> *final(self) == *old(self) && final(ev)@ == old(ev)@,
+            r@ <= c_rd() * (budget + budget as nat / (PAGE as nat) + 2) + 2 * max_entries() + 3 + c_rfree(),
+    {
+        let ghost s0 = *self;
+        proof {
+            lemma_queue_ok(self.entries@, self.q);
+            lemma_qinv_facts(self.entries@, self.q@);
+            self.q.lemma_len();
+        }
+        let x = match self.q.front() {
+            None => {
+                return Ghost(0);
+            },
+            Some(x) => x,
+        };
+        let i = match self.find(x) {
+            Some(i) => i,
+            None => {
+                proof {
+                    assert(qd(s0.entries@, x));
+                    let j = choose|j: int| 0 <= j < s0.entries@.len() && (#[trigger] s0.entries@[j]).id == x
+                        && s0.entries@[j].queued;
+                    assert(has_id(s0.entries@, x));
+                }
+                return Ghost(0);  // unreachable: a queued id is a live entry's (`qinv`)
+            },
+        };
+        proof {
+            lemma_entries_bound(s0);
+        }
+        let Ghost(c) = self.deliver_at_head(i, budget, ev);
+        let ghost s2 = *self;
+        self.gc(i);
+        proof {
+            lemma_backlog_same(s2, *self);
+        }
+        // The lookup's scan and the removal's shift, each at most the entries; the entry's buffers freed.
+        Ghost(c + 2 * s0.entries@.len() + 2 + c_rfree())
+    }
+
+    /// `deliver_some` on entry `i`, the queue's head: pops it, delivers at most `budget` bytes, and
+    /// re-queues it while bytes or the FIN are left (split for the rlimit).
+    #[verifier::spinoff_prover]
+    fn deliver_at_head(&mut self, i: usize, budget: u64, ev: &mut Vec<StreamEvent>) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            !old(self).failed(),
+            budget >= 1,
+            i < old(self).entries@.len(),
+            old(self).q@.len() > 0,
+            old(self).q@[0] == old(self).entries@[i as int].id,
+        ensures
+            final(self).wf(),
+            !final(self).failed(),
+            final(self).entries@.len() == old(self).entries@.len(),
+            final(self).entries@[i as int].id == old(self).entries@[i as int].id,
+            final(self).ids == old(self).ids,
+            final(self).removed == old(self).removed,
+            final(self).resets == old(self).resets,
+            final(self).rx_conn == old(self).rx_conn,
+            final(self).conn_recv_spec().window_spec() == old(self).conn_recv_spec().window_spec(),
+            final(self).tx_held() == old(self).tx_held(),
+            tx_kept_but(*old(self), *final(self), None),
+            final(self).rx_backlog() < old(self).rx_backlog(),
+            r@ <= c_rd() * (budget + budget as nat / (PAGE as nat) + 2) + 1,
+    {
+        let ghost s0 = *self;
+        let ghost a = self.entries@;
+        let ghost x = a[i as int].id;
+        proof {
+            lemma_queue_ok(a, s0.q);
+            lemma_qinv_facts(a, s0.q@);
+            assert(qd(a, x));
+            let j = choose|j: int| 0 <= j < a.len() && (#[trigger] a[j]).id == x && a[j].queued;
+            assert(entry_ok(a[j], s0.rx_bidi, s0.rx_uni));
+            assert(j == i as int);
+            assert(entry_ok(a[i as int], s0.rx_bidi, s0.rx_uni));
+            self.conn_recv.lemma_wf();
+            self.q.lemma_len();
+        }
+        let _ = self.q.pop();
+        let mut e = Entry { id: 0, recv: None, send: None, queued: false };
+        self.entries.set_and_swap(i, &mut e);
+        let ghost e0 = e;
+        let xid = e.id;
+        let (dt, Ghost(c), ready) = deliver_entry(&mut e, budget, ev);
+        let ghost tr = e.recv->0.trace();
+        let ghost ne = e;
+        self.entries.set_and_swap(i, &mut e);
+        proof {
+            assert(e0 == a[i as int]);
+            assert(self.entries@ == a.update(i as int, ne));
+            lemma_recv_ok(s0, i as int, ne, 0);
+        }
+        self.conn_recv.on_consumed(dt);
+        self.rtr = Ghost(self.rtr@.insert(x, tr));
+        if ready {
+            self.q.push(xid);
+        }
+        proof {
+            assert(ids_distinct(a));
+            lemma_qinv_set(a, i as int, ne, s0.q@, self.q@);
+            lemma_queue_ok(self.entries@, self.q);
+            assert forall|j: u64| j != x implies #[trigger] self.rx_spec(j) == s0.rx_spec(j) by {
+                assert(self.rx_trace(j) == s0.rx_trace(j));
+            }
+            lemma_pop_measure(s0, *self, x);
+            lemma_swap_flight(s0, *self, i as int, ne);
+        }
+        Ghost(c)
     }
 
     /// STOP_SENDING or MAX_STREAM_DATA `f` to entry `i`'s sending part.
@@ -1945,7 +2535,7 @@ impl Streams {
         let ghost id = self.entries@[i as int].id;
         let ghost a = self.entries@;
         let ghost ev0 = ev@;
-        let mut e = Entry { id: 0, recv: None, send: None };
+        let mut e = Entry { id: 0, recv: None, send: None, queued: false };
         self.entries.set_and_swap(i, &mut e);
         let ghost e0 = e;
         proof {
@@ -2039,9 +2629,10 @@ impl Streams {
         proof {
             assert(entry_ok(a[i as int], self.rx_bidi, self.rx_uni));
         }
+        // A queued entry stays until `deliver_some` pops it (D13: every queued id is a live entry's).
         let done = {
             let e = &self.entries[i];
-            (match &e.recv {
+            !e.queued && (match &e.recv {
                 Some(r) => r.is_terminal(),
                 None => true,
             }) && (match &e.send {
@@ -2326,7 +2917,215 @@ impl Streams {
     spec fn same_traces(&self, o: Streams) -> bool {
         &&& self.rx_bidi == o.rx_bidi
         &&& self.rx_uni == o.rx_uni
+        &&& self.q == o.q
         &&& forall|j: u64| #[trigger] self.rx_trace(j) == o.rx_trace(j)
+    }
+}
+
+/// Entries whose ids are distinct and of the form `4·n + 3` with `n < u`: at most `u`.
+proof fn lemma_sum7_le(s: Seq<Entry>, u: nat)
+    requires
+        ids_distinct(s),
+        forall|k: int| 0 <= k < s.len() && (#[trigger] s[k]).id % 4 == 3 ==> s[k].id / 4 < u,
+    ensures
+        sum(s, 7) <= u,
+    decreases u, s.len(),
+{
+    if u == 0 {
+        lemma_sum7_zero(s);
+        return;
+    }
+    let top = (4 * (u - 1) + 3) as int;
+    if exists|k: int| 0 <= k < s.len() && (#[trigger] s[k]).id == top {
+        let k = choose|k: int| 0 <= k < s.len() && (#[trigger] s[k]).id == top;
+        let t = s.remove(k);
+        lemma_sum_remove(s, k, 7);
+        assert forall|a: int, b: int| 0 <= a < t.len() && 0 <= b < t.len() && a != b implies (#[trigger] t[a]).id
+            != (#[trigger] t[b]).id by {
+            let aa = if a < k { a } else { a + 1 };
+            let bb = if b < k { b } else { b + 1 };
+            assert(t[a] == s[aa] && t[b] == s[bb]);
+        }
+        assert forall|j: int| 0 <= j < t.len() && (#[trigger] t[j]).id % 4 == 3 implies t[j].id / 4 < (u - 1) as nat by {
+            let jj = if j < k { j } else { j + 1 };
+            assert(t[j] == s[jj]);
+            assert(jj != k);
+        }
+        lemma_sum7_le(t, (u - 1) as nat);
+    } else {
+        assert forall|j: int| 0 <= j < s.len() && (#[trigger] s[j]).id % 4 == 3 implies s[j].id / 4 < (u - 1) as nat by {
+            assert(s[j].id != top);
+        }
+        lemma_sum7_le(s, (u - 1) as nat);
+    }
+}
+
+proof fn lemma_sum7_zero(s: Seq<Entry>)
+    requires
+        forall|k: int| 0 <= k < s.len() ==> (#[trigger] s[k]).id % 4 != 3,
+    ensures
+        sum(s, 7) == 0,
+    decreases s.len(),
+{
+    if s.len() > 0 {
+        let p = s.drop_last();
+        assert forall|k: int| 0 <= k < p.len() implies (#[trigger] p[k]).id % 4 != 3 by {
+            assert(p[k] == s[k]);
+        }
+        lemma_sum7_zero(p);
+        assert(s.last() == s[s.len() - 1]);
+    }
+}
+
+/// Every entry is of type 0, 2 or 3: the entries are the three kinds' counts.
+proof fn lemma_len_kinds(s: Seq<Entry>)
+    requires
+        forall|k: int| 0 <= k < s.len() ==> (#[trigger] s[k]).id % 4 != 1,
+    ensures
+        s.len() == sum(s, 4) + sum(s, 6) + sum(s, 7),
+    decreases s.len(),
+{
+    if s.len() > 0 {
+        let p = s.drop_last();
+        assert forall|k: int| 0 <= k < p.len() implies (#[trigger] p[k]).id % 4 != 1 by {
+            assert(p[k] == s[k]);
+        }
+        lemma_len_kinds(p);
+        assert(s.last() == s[s.len() - 1]);
+    }
+}
+
+/// At most `max_entries()` streams have an entry.
+proof fn lemma_entries_bound(st: Streams)
+    requires
+        st.wf(),
+    ensures
+        st.entries@.len() <= max_entries(),
+{
+    let s = st.entries@;
+    st.ids.lemma_wf();
+    lemma_sum_kind_nonneg(s, 4);
+    lemma_sum_kind_nonneg(s, 6);
+    assert(st.ids.peer_side_ok(true));
+    assert(st.ids.peer_side_ok(false));
+    assert forall|k: int| 0 <= k < s.len() implies (#[trigger] s[k]).id % 4 != 1 by {
+        assert(entry_ok(s[k], st.rx_bidi, st.rx_uni));
+    }
+    lemma_len_kinds(s);
+    assert forall|k: int| 0 <= k < s.len() && (#[trigger] s[k]).id % 4 == 3 implies s[k].id / 4
+        < st.ids.local_uni_spec().used_spec() by {
+        assert(created(st.ids, s[k].id));
+    }
+    lemma_sum7_le(s, st.ids.local_uni_spec().used_spec() as nat);
+    assert(st.live_peer_streams(true) <= MAX_LOCAL_STREAMS);
+    assert(st.live_peer_streams(false) <= MAX_LOCAL_STREAMS);
+}
+
+/// The queue's head `x` popped, its receiving part the only one changed: `rx_backlog` falls (by the head's term when
+/// it leaves, by the bytes delivered when it is re-queued).
+proof fn lemma_pop_measure(s0: Streams, s1: Streams, x: u64)
+    requires
+        s0.wf(),
+        s0.q@.len() > 0,
+        s0.q@[0] == x,
+        forall|j: u64| j != x ==> #[trigger] s1.rx_spec(j) == s0.rx_spec(j),
+        s1.q@ == s0.q@.drop_first() || (s1.q@ == s0.q@.drop_first().push(x) && recv_pending(s1.rx_spec(x))
+            < recv_pending(s0.rx_spec(x))),
+    ensures
+        s1.rx_backlog() < s0.rx_backlog(),
+{
+    let qv = s0.q@;
+    let rest = qv.drop_first();
+    lemma_queue_ok(s0.entries@, s0.q);
+    lemma_qinv_facts(s0.entries@, qv);
+    lemma_qm_first(s0.qterm(), qv);
+    assert forall|k: int| 0 <= k < rest.len() implies (s1.qterm())(#[trigger] rest[k]) == (s0.qterm())(rest[k]) by {
+        assert(rest[k] == qv[k + 1]);
+        assert(qv[k + 1] != qv[0]);
+    }
+    lemma_qm_ext(s1.qterm(), s0.qterm(), rest);
+    if s1.q@ != rest {
+        lemma_qm_push(s1.qterm(), rest, x);
+    }
+}
+
+/// Same queue, same receiving parts: same `rx_backlog`.
+proof fn lemma_backlog_same(s0: Streams, s1: Streams)
+    requires
+        s1.q@ == s0.q@,
+        s1.rx_bidi == s0.rx_bidi,
+        s1.rx_uni == s0.rx_uni,
+        forall|j: u64| #[trigger] s1.rx_trace(j) == s0.rx_trace(j),
+    ensures
+        s1.rx_backlog() == s0.rx_backlog(),
+{
+    let qv = s0.q@;
+    assert forall|k: int| 0 <= k < qv.len() implies (s1.qterm())(#[trigger] qv[k]) == (s0.qterm())(qv[k]) by {
+        assert(s1.rx_trace(qv[k]) == s0.rx_trace(qv[k]));
+    }
+    lemma_qm_ext(s1.qterm(), s0.qterm(), qv);
+}
+
+/// Same queue, the same bytes past delivery on every receiving part: same `rx_backlog`.
+proof fn lemma_backlog_pending(s0: Streams, s1: Streams)
+    requires
+        s1.q@ == s0.q@,
+        forall|j: u64| #[trigger] recv_pending(s1.rx_spec(j)) == recv_pending(s0.rx_spec(j)),
+    ensures
+        s1.rx_backlog() == s0.rx_backlog(),
+{
+    let qv = s0.q@;
+    assert forall|k: int| 0 <= k < qv.len() implies (s1.qterm())(#[trigger] qv[k]) == (s0.qterm())(qv[k]) by {
+        assert(recv_pending(s1.rx_spec(qv[k])) == recv_pending(s0.rx_spec(qv[k])));
+    }
+    lemma_qm_ext(s1.qterm(), s0.qterm(), qv);
+}
+
+/// `apply_recv`'s queue step: entry `i` became `ne`, queued now (`enq`, its id to be appended) if it has bytes or the
+/// FIN left and was not; the queue has room for it.
+proof fn lemma_enqueue(s0: Streams, i: int, ne: Entry, enq: bool)
+    requires
+        s0.wf(),
+        0 <= i < s0.entries@.len(),
+        ne.id == s0.entries@[i].id,
+        ne.recv is Some,
+        ne.id % 4 == 0 || ne.id % 4 == 2,
+        enq == (eready(ne) && !s0.entries@[i].queued),
+        ne.queued == (s0.entries@[i].queued || enq),
+    ensures
+        s0.q.wf(),
+        enq ==> s0.q@.len() < IDQ_CAP,
+        qinv(s0.entries@.update(i, ne), if enq {
+            s0.q@.push(ne.id)
+        } else {
+            s0.q@
+        }),
+{
+    let a = s0.entries@;
+    let t = a.update(i, ne);
+    lemma_queue_ok(a, s0.q);
+    lemma_qinv_facts(a, s0.q@);
+    assert(ids_distinct(a));
+    lemma_qinv_set(a, i, ne, s0.q@, if enq {
+        s0.q@.push(ne.id)
+    } else {
+        s0.q@
+    });
+    if enq {
+        s0.lemma_wf();
+        lemma_qcount_update(a, i, ne);
+        assert forall|k: int| 0 <= k < t.len() implies ((#[trigger] t[k]).queued ==> t[k].id % 4 == 0 || t[k].id
+            % 4 == 2) by {
+            if k != i {
+                assert(t[k] == a[k]);
+                assert(entry_ok(a[k], s0.rx_bidi, s0.rx_uni));
+            }
+        }
+        lemma_qcount_le(t);
+        lemma_sum_update(a, i, ne, 4);
+        lemma_sum_update(a, i, ne, 6);
+        assert(s0.live_peer_streams(true) <= MAX_LOCAL_STREAMS);
+        assert(s0.live_peer_streams(false) <= MAX_LOCAL_STREAMS);
     }
 }
 
@@ -2345,18 +3144,19 @@ fn frame_id(f: &Frame) -> (r: Option<u64>)
     }
 }
 
-/// What feeding input `i` to receiving part `r0` (now `r1`) did, with `room` bytes of
-/// connection credit left: `on_data`'s and `on_reset`'s shared contract.
+/// What feeding frame `f` to receiving part `r0` (now `r1`) did, with `room` bytes of connection
+/// credit left: `on_data` (then `deliver` of at most the frame's bytes) or `on_reset`. Its error
+/// and credit are those of the frame's own input.
 spec fn fed(
     r0: RecvStream,
     r1: RecvStream,
-    i: SpecRecvIn,
+    f: SpecFrame,
     room: u64,
     ev0: Seq<StreamEvent>,
     ev1: Seq<StreamEvent>,
     r: Result<u64, u64>,
 ) -> bool {
-    let t2 = r0.trace().push(i);
+    let t2 = r0.trace().push(frame_recv_in(f)->0);
     let s1 = r0.rfc();
     let s2 = rfc_recv(r0.id_spec(), r0.window_spec(), t2);
     &&& r1.wf()
@@ -2368,12 +3168,14 @@ spec fn fed(
     ) && r1 == r0 && ev1 == ev0
     &&& (s2.err is None && counted(s2) - counted(s1) <= room) ==> {
         &&& r == Ok::<u64, u64>((counted(s2) - counted(s1)) as u64)
-        &&& r1.trace() == t2
-        &&& event_views(ev1) == event_views(ev0) + s2.events.skip(s1.events.len() as int)
+        &&& r1.trace() == r0.trace() + frame_recv_ins(f)
+        &&& counted(r1.rfc()) == counted(s2)
+        &&& event_views(ev1) == event_views(ev0) + r1.rfc().events.skip(s1.events.len() as int)
     }
 }
 
-/// STREAM or RESET_STREAM `f` to `rs`.
+/// STREAM or RESET_STREAM `f` to `rs`. The costs `on_data`, `deliver` and `on_reset` return are
+/// not composed past this frame path (the pipeline half, Task 10d; `find`'s scan, Q20, 9b4).
 fn feed_recv(rs: &mut RecvStream, f: &Frame, room: u64, ev: &mut Vec<StreamEvent>) -> (r: Result<
     u64,
     u64,
@@ -2383,24 +3185,195 @@ fn feed_recv(rs: &mut RecvStream, f: &Frame, room: u64, ev: &mut Vec<StreamEvent
         frame_wf(f@),
         frame_recv_in(f@) is Some,
     ensures
-        fed(*old(rs), *final(rs), frame_recv_in(f@)->0, room, old(ev)@, final(ev)@, r),
+        fed(*old(rs), *final(rs), f@, room, old(ev)@, final(ev)@, r),
 {
+    let ghost r0 = *rs;
     match f {
-        Frame::Stream { offset, data, fin, .. } => rs.on_data(
-            *offset,
-            data.as_slice(),
-            *fin,
-            room,
-            ev,
-        ),
-        Frame::ResetStream { error_code, final_size, .. } => rs.on_reset(
-            *error_code,
-            *final_size,
-            room,
-            ev,
-        ),
+        Frame::Stream { .. } => feed_stream(rs, f, room, ev),
+        Frame::ResetStream { error_code, final_size, .. } => {
+            let (r, _) = rs.on_reset(*error_code, *final_size, room, ev);
+            proof {
+                assert(r0.trace() + frame_recv_ins(f@) =~= r0.trace().push(frame_recv_in(f@)->0));
+            }
+            r
+        },
         _ => Ok(0),
     }
+}
+
+/// `feed_recv` for STREAM: `on_data`, then `deliver` of at most the frame's bytes (D12).
+#[verifier::spinoff_prover]
+fn feed_stream(rs: &mut RecvStream, f: &Frame, room: u64, ev: &mut Vec<StreamEvent>) -> (r: Result<
+    u64,
+    u64,
+>)
+    requires
+        old(rs).wf(),
+        frame_wf(f@),
+        f@ is Stream,
+    ensures
+        fed(*old(rs), *final(rs), f@, room, old(ev)@, final(ev)@, r),
+        r matches Err(c) ==> match f@ {
+            SpecFrame::Stream { offset, data, fin, .. } => recv_allowed_err(
+                old(rs).rfc(),
+                offset as nat,
+                data.len(),
+                fin,
+                room as nat,
+                c,
+            ),
+            _ => true,
+        },
+{
+    let ghost r0 = *rs;
+    proof {
+        r0.lemma_wf();
+    }
+    match f {
+        Frame::Stream { offset, data, fin, .. } => {
+            let (r, _) = rs.on_data(*offset, data.as_slice(), *fin, room);
+            if r.is_ok() {
+                let ghost r1 = *rs;
+                let _ = rs.deliver(data.len() as u64, ev);
+                proof {
+                    let i = frame_recv_in(f@)->0;
+                    let d = SpecRecvIn::Deliver { max: data@.len() };
+                    r1.lemma_wf();
+                    lemma_recv_push(r0.id_spec(), r0.window_spec(), r1.trace(), d);
+                    lemma_deliver_fields(r0.id_spec(), r1.rfc(), data@.len());
+                    assert(r0.trace() + frame_recv_ins(f@) =~= r0.trace().push(i).push(d));
+                }
+            }
+            r
+        },
+        _ => Ok(0),
+    }
+}
+
+/// `deliver_at_head`'s step on the entry it took out: at most `budget` bytes delivered, the entry
+/// queued again while bytes or the FIN are left. Returns the credit retired, the cost, and whether
+/// it stays queued (split for the rlimit).
+#[verifier::spinoff_prover]
+fn deliver_entry(e: &mut Entry, budget: u64, ev: &mut Vec<StreamEvent>) -> (r: (u64, Ghost<nat>, bool))
+    requires
+        old(e).recv is Some,
+        old(e).recv->0.wf(),
+        budget >= 1,
+    ensures
+        final(e).id == old(e).id,
+        final(e).send == old(e).send,
+        final(e).recv is Some,
+        ({
+            let r0 = old(e).recv->0;
+            let r1 = final(e).recv->0;
+            &&& r1.wf()
+            &&& r1.id_spec() == r0.id_spec()
+            &&& r1.window_spec() == r0.window_spec()
+            &&& r1.trace() == r0.trace().push(SpecRecvIn::Deliver { max: budget as nat })
+            &&& counted(r1.rfc()) == counted(r0.rfc())
+            &&& retired(r0.rfc()) + r.0 == retired(r1.rfc())
+            &&& r.2 ==> recv_pending(r1.rfc()) < recv_pending(r0.rfc())
+        }),
+        r.2 == eready(*final(e)),
+        final(e).queued == r.2,
+        r.1@ <= c_rd() * (budget + budget as nat / (PAGE as nat) + 2) + 1,
+{
+    let mut rs = match e.recv.take() {
+        Some(rs) => rs,
+        None => RecvStream::new(0, 0),  // unreachable: required Some
+    };
+    let ghost rs0 = rs;
+    let t0 = rs.retired_exec();
+    let (_, c) = rs.deliver(budget, ev);
+    proof {
+        let x = rs0.id_spec();
+        let w = rs0.window_spec();
+        let d = SpecRecvIn::Deliver { max: budget as nat };
+        rs0.lemma_wf();
+        lemma_counted_monotone(x, w, rs0.trace(), d);
+        lemma_recv_push(x, w, rs0.trace(), d);
+        lemma_deliver_fields(x, rs0.rfc(), budget as nat);
+        lemma_deliver_progress(x, rs0.rfc(), budget as nat);
+    }
+    let t1 = rs.retired_exec();
+    let ready = rs.has_ready();
+    e.recv = Some(rs);
+    e.queued = ready;
+    (t1 - t0, c, ready)
+}
+
+/// `apply_recv`'s step on the entry it took out: the frame to its receiving part, then the queue
+/// flag (D13: an entry with bytes or the FIN left undelivered is queued). Returns the frame's
+/// result, the credit the part retired, and whether the entry was newly queued (split for the
+/// rlimit).
+#[verifier::spinoff_prover]
+fn feed_entry(e: &mut Entry, f: &Frame, room: u64, ev: &mut Vec<StreamEvent>) -> (r: (
+    Result<u64, u64>,
+    u64,
+    bool,
+))
+    requires
+        old(e).recv is Some,
+        old(e).recv->0.wf(),
+        frame_wf(f@),
+        frame_recv_in(f@) is Some,
+        eready(*old(e)) ==> old(e).queued,
+    ensures
+        final(e).id == old(e).id,
+        final(e).send == old(e).send,
+        final(e).recv is Some,
+        fed(old(e).recv->0, final(e).recv->0, f@, room, old(ev)@, final(ev)@, r.0),
+        retired(old(e).recv->0.rfc()) + r.1 == retired(final(e).recv->0.rfc()),
+        r.0 matches Ok(n) ==> counted(old(e).recv->0.rfc()) + n == counted(final(e).recv->0.rfc()),
+        r.2 == (eready(*final(e)) && !old(e).queued),
+        final(e).queued == (old(e).queued || r.2),
+        r.0 is Err ==> *final(e) == *old(e),
+        // A STREAM frame's errors are RFC 9000's (`on_data`); a RESET_STREAM's are `on_reset`'s.
+        r.0 matches Err(c) ==> match f@ {
+            SpecFrame::Stream { offset, data, fin, .. } => recv_allowed_err(
+                old(e).recv->0.rfc(),
+                offset as nat,
+                data.len(),
+                fin,
+                room as nat,
+                c,
+            ),
+            _ => true,
+        },
+{
+    let mut rs = match e.recv.take() {
+        Some(rs) => rs,
+        None => RecvStream::new(0, 0),  // unreachable: required Some
+    };
+    let ghost rs0 = rs;
+    let t0 = rs.retired_exec();
+    let res = match f {
+        Frame::Stream { .. } => feed_stream(&mut rs, f, room, ev),
+        _ => feed_recv(&mut rs, f, room, ev),
+    };
+    proof {
+        let id = rs0.id_spec();
+        let w = rs0.window_spec();
+        let i = frame_recv_in(f@)->0;
+        let t2 = rs0.trace().push(i);
+        if res is Ok {
+            lemma_counted_monotone(id, w, rs0.trace(), i);
+            if f@ is Stream {
+                lemma_counted_monotone(id, w, t2, frame_recv_ins(f@)[1]);
+                assert(rs.trace() =~= t2.push(frame_recv_ins(f@)[1]));
+            } else {
+                assert(rs.trace() =~= t2);
+            }
+        }
+    }
+    let t1 = rs.retired_exec();
+    let ready = rs.has_ready();
+    e.recv = Some(rs);
+    let enq = ready && !e.queued;
+    if enq {
+        e.queued = true;
+    }
+    (res, t1 - t0, enq)
 }
 
 /// `apply_recv`'s bookkeeping after its stream took `n` more bytes of connection credit.
@@ -2776,6 +3749,10 @@ proof fn lemma_update(
             && resets[ne.id] == c.0) && (resets.contains_key(ne.id) ==> p.reset_spec() is Some),
         ne.recv matches Some(r) ==> s0.removed@.contains(ne.id) ==> removed_ok(r.rfc()),
     ensures
+        (ne.queued == s0.entries@[i].queued && (eready(ne) ==> eready(s0.entries@[i]))) ==> queue_ok(
+            s0.entries@.update(i, ne),
+            s0.q,
+        ),
         entries_ok(
             s0.entries@.update(i, ne),
             s0.ids,
@@ -2800,6 +3777,16 @@ proof fn lemma_update(
     let id = ne.id;
     assert(entry_ok(a[i], s0.rx_bidi, s0.rx_uni));
     assert(!s0.removed@.contains(id));
+    if ne.queued == a[i].queued && (eready(ne) ==> eready(a[i])) {
+        lemma_queue_ok(a, s0.q);
+        lemma_qinv_facts(a, s0.q@);
+        assert(ids_distinct(a));
+        if eready(ne) {
+            assert(eready(a[i]) ==> a[i].queued);
+        }
+        lemma_qinv_set(a, i, ne, s0.q@, s0.q@);
+        lemma_queue_ok(t, s0.q);
+    }
     assert(s0.rtr@.contains_key(id) == (id % 4 == 0 || id % 4 == 2)) by {
         s0.ids.lemma_wf();
         assert(created(s0.ids, id));
@@ -2873,8 +3860,10 @@ proof fn lemma_gc(s0: Streams, s1: Streams, i: int, e: Entry)
         s0.wf(),
         0 <= i < s0.entries@.len(),
         e == s0.entries@[i],
+        !e.queued,
         e.recv matches Some(r) ==> terminal(r.rfc().state),
         s1.entries@ == s0.entries@.remove(i),
+        s1.q == s0.q,
         s1.conn_recv == s0.conn_recv,
         s1.conn_counted == s0.conn_counted,
         s1.conn_send == s0.conn_send,
@@ -2911,6 +3900,9 @@ proof fn lemma_gc(s0: Streams, s1: Streams, i: int, e: Entry)
     let id = e.id;
     s0.ids.lemma_wf();
     s1.ids.lemma_wf();
+    lemma_queue_ok(a, s0.q);
+    lemma_qinv_remove(a, i, s0.q@);
+    lemma_queue_ok(t, s1.q);
     assert(entry_ok(e, s0.rx_bidi, s0.rx_uni));
     lemma_sum_remove(a, i, 0);
     lemma_sum_remove(a, i, 1);
@@ -3000,6 +3992,8 @@ proof fn lemma_open_one(s0: Streams, s1: Streams, x: u64, e: Entry)
             && p.held_spec() == 0,
         s1.entries@ == s0.entries@.push(e),
         s1.rtr@ == s0.rtr@.insert(x, Seq::<SpecRecvIn>::empty()),
+        s1.q == s0.q,
+        !e.queued,
         s1.conn_recv == s0.conn_recv,
         s1.conn_counted == s0.conn_counted,
         s1.conn_send == s0.conn_send,
@@ -3026,6 +4020,14 @@ proof fn lemma_open_one(s0: Streams, s1: Streams, x: u64, e: Entry)
     let r = e.recv->0;
     r.lemma_wf();
     lemma_recv_inv(x, r.window_spec(), Seq::empty());
+    // Nothing to deliver yet: the queue is unchanged.
+    let m0 = rfc_received(Seq::<(nat, Seq<u8>)>::empty());
+    assert(m0 =~= Map::<nat, u8>::empty());
+    lemma_contiguous_is(m0, 0);
+    assert(!eready(e));
+    lemma_queue_ok(a, s0.q);
+    lemma_qinv_push(a, e, s0.q@);
+    lemma_queue_ok(t, s1.q);
     // The new entry counts nothing yet.
     assert(val(e, 0) == 0 && val(e, 1) == 0 && val(e, 2) == 0 && val(e, 3) == 0);
     assert(val(e, kq(b)) == 1 && val(e, kq(!b)) == 0 && val(e, 8) == 0 && val(e, 9) == 0);
@@ -3822,6 +4824,7 @@ spec fn kept(s0: Streams, s: Streams) -> bool {
     &&& s.rx_bidi == s0.rx_bidi
     &&& s.rx_uni == s0.rx_uni
     &&& s.rx_conn == s0.rx_conn
+    &&& s.q == s0.q
     &&& s.tx_held() <= s0.tx_held()
     &&& s.entries@.len() == s0.entries@.len()
     &&& forall|k: int|
@@ -3905,6 +4908,8 @@ proof fn lemma_ctl(r0: RecvStream, r1: RecvStream, i: SpecRecvIn)
         r1.rfc().events == r0.rfc().events,
         counted(r1.rfc()) == counted(r0.rfc()),
         retired(r1.rfc()) == retired(r0.rfc()),
+        recv_ready(r1.rfc()) == recv_ready(r0.rfc()),
+        recv_pending(r1.rfc()) == recv_pending(r0.rfc()),
         (r1.trace() == r0.trace() || i is Credit) ==> r1.rfc().stopped == r0.rfc().stopped,
         r1.trace() == r0.trace().push(i) && i is Stop ==> r1.rfc().stopped,
 {
@@ -3956,6 +4961,9 @@ proof fn lemma_swap(s0: Streams, s1: Streams, i: int, ne: Entry)
         s1.removed == s0.removed,
         s1.gone == s0.gone,
         s1.tx_gone == s0.tx_gone,
+        s1.q == s0.q,
+        ne.queued == s0.entries@[i].queued,
+        eready(ne) ==> eready(s0.entries@[i]),
     ensures
         s1.wf(),
         s1.tx_held() == s0.tx_held() - val(s0.entries@[i], 9) + val(ne, 9),
@@ -4002,6 +5010,7 @@ proof fn lemma_recv_op_post(
         s2.entries@ == s1.entries@.update(i, ne),
         ne.id == e0.id,
         ne.send == e0.send,
+        ne.queued == e0.queued,
         ne.recv is Some == e0.recv is Some,
         e0.recv is None ==> s2.rtr@ == s1.rtr@,
         ne.recv matches Some(r) ==> {
@@ -4015,6 +5024,7 @@ proof fn lemma_recv_op_post(
             &&& r.rfc().stopped == r0.rfc().stopped
             &&& counted(r.rfc()) == counted(r0.rfc())
             &&& retired(r.rfc()) == retired(r0.rfc())
+            &&& recv_ready(r.rfc()) == recv_ready(r0.rfc())
             &&& ctl_only ==> r.trace() == r0.trace()
         },
         s2 == (Streams { entries: s2.entries, rtr: s2.rtr, ..s1 }),
@@ -4047,6 +5057,7 @@ proof fn lemma_swap_kept(s0: Streams, s1: Streams, s2: Streams, i: int, ne: Entr
         0 <= i < s1.entries@.len(),
         ne.id == s1.entries@[i].id,
         s2.resets == s1.resets,
+        s2.q == s1.q,
         s2.wf(),
         forall|j: u64| j != ne.id ==> #[trigger] s2.rx_trace(j) == s1.rx_trace(j),
         ne.recv matches Some(r) ==> s2.rx_spec(ne.id) == r.rfc(),
@@ -4274,6 +5285,7 @@ impl Streams {
             // D10 (b): no flight changes, a new part's included (re-review F2, F3).
             forall|j: u64| #[trigger] final(self).tx_flight(j) == old(self).tx_flight(j),
             tx_kept_but(*old(self), *final(self), None),
+            final(self).rx_backlog() == old(self).rx_backlog(),
     {
         // Before any swap, so a refusal changes nothing.
         if data.len() as u64 > self.send_room(id) {
@@ -4286,6 +5298,7 @@ impl Streams {
         };
         proof {
             lemma_kept_of_flights(s0, *self);
+            lemma_backlog_same(s0, *self);
         }
         r
     }
@@ -4301,6 +5314,9 @@ impl Streams {
                 &&& final(self).wf()
                 &&& final(self).failed() == old(self).failed()
                 &&& final(self).rx_conn == old(self).rx_conn
+                &&& final(self).q == old(self).q
+                &&& final(self).rx_bidi == old(self).rx_bidi
+                &&& final(self).rx_uni == old(self).rx_uni
                 &&& r is Ok <==> match old(self).tx_part(id) {
                     Some(p) => write_ok(p, data@.len()),
                     None => old(self).uni_openable(id) && data@.len() <= VARINT_MAX,
@@ -4341,7 +5357,7 @@ impl Streams {
             p0.lemma_room((MAX_SEND_BUFFER - s0.tx_held() + p0.held_spec()) as nat, data@.len() as nat);
             p0.lemma_held();
         }
-        let mut e = Entry { id: 0, recv: None, send: None };
+        let mut e = Entry { id: 0, recv: None, send: None, queued: false };
         self.entries.set_and_swap(i, &mut e);
         if let Some(mut p) = e.send.take() {
             let _ = p.write(data, fin);
@@ -4376,6 +5392,9 @@ impl Streams {
             final(self).wf(),
             final(self).failed() == old(self).failed(),
             final(self).rx_conn == old(self).rx_conn,
+            final(self).q == old(self).q,
+            final(self).rx_bidi == old(self).rx_bidi,
+            final(self).rx_uni == old(self).rx_uni,
             r is Ok <==> old(self).uni_openable(id) && data@.len() <= VARINT_MAX,
             r is Err ==> *final(self) == *old(self),
             r is Ok ==> match final(self).tx_part(id) {
@@ -4406,7 +5425,7 @@ impl Streams {
             p.lemma_room((MAX_SEND_BUFFER - s0.tx_held()) as nat, data@.len() as nat);
         }
         let _ = p.write(data, fin);
-        let e = Entry { id, recv: None, send: Some(p) };
+        let e = Entry { id, recv: None, send: Some(p), queued: false };
         self.entries.push(e);
         proof {
             lemma_push_local(s0, *self, e);
@@ -4459,6 +5478,7 @@ impl Streams {
             // D10 (b): only `id` may change, and then it is reset (its flight emptied).
             tx_kept_but(*old(self), *final(self), None),
             forall|j: u64| #[trigger] old(self).send_reset(j) ==> final(self).send_reset(j),
+            final(self).rx_backlog() == old(self).rx_backlog(),
     {
         let ghost s0 = *self;
         if let Some(i) = self.find(id) {
@@ -4474,7 +5494,7 @@ impl Streams {
                 None => false,
             };
             if fresh {
-                let mut e = Entry { id: 0, recv: None, send: None };
+                let mut e = Entry { id: 0, recv: None, send: None, queued: false };
                 self.entries.set_and_swap(i, &mut e);
                 if let Some(mut p) = e.send.take() {
                     let _ = p.reset(code);
@@ -4495,6 +5515,7 @@ impl Streams {
                         lemma_part_other(s0, *self, i as int, j);
                     }
                     assert(self.send_reset(id));
+                    lemma_backlog_same(s0, *self);
                 }
             }
         }
@@ -4524,6 +5545,7 @@ impl Streams {
             forall|j: u64| #[trigger] final(self).reset_code(j) == old(self).reset_code(j),
             forall|j: u64| #[trigger] final(self).rx_trace(j) == old(self).rx_trace(j),
             forall|j: u64| #[trigger] final(self).is_removed(j) == old(self).is_removed(j),
+            final(self).rx_backlog() == old(self).rx_backlog(),
     {
         let ghost s0 = *self;
         if let Some(i) = self.find(id) {
@@ -4531,7 +5553,7 @@ impl Streams {
                 lemma_part_at(s0, i as int);
                 assert(entry_ok(s0.entries@[i as int], s0.rx_bidi, s0.rx_uni));
             }
-            let mut e = Entry { id: 0, recv: None, send: None };
+            let mut e = Entry { id: 0, recv: None, send: None, queued: false };
             self.entries.set_and_swap(i, &mut e);
             if let Some(mut p) = e.send.take() {
                 p.flush();
@@ -4563,6 +5585,7 @@ impl Streams {
         }
         proof {
             lemma_kept_of_flights(s0, *self);
+            lemma_backlog_same(s0, *self);
         }
     }
 
@@ -4583,12 +5606,14 @@ impl Streams {
             final(self).rx_trace(id) == old(self).rx_trace(id) || final(self).rx_trace(id) == old(
                 self,
             ).rx_trace(id).push(SpecRecvIn::Stop),
-            old(self).rx_live(id) && !terminal(old(self).rx_spec(id).state)
+            // Only while data may still arrive (Recv or Size Known; `RecvStream::stop`, §3.5).
+            old(self).rx_live(id) && (old(self).rx_spec(id).state is Recv || old(self).rx_spec(id).state is SizeKnown)
                 ==> final(self).rx_spec(id).stopped,
             forall|j: u64| #[trigger] final(self).reset_code(j) == old(self).reset_code(j),
             forall|j: u64| #[trigger] final(self).is_removed(j) == old(self).is_removed(j),
             forall|j: u64| #[trigger] final(self).tx_flight(j) == old(self).tx_flight(j),
             tx_kept_but(*old(self), *final(self), None),
+            final(self).rx_backlog() == old(self).rx_backlog(),
     {
         let ghost s0 = *self;
         proof {
@@ -4602,7 +5627,7 @@ impl Streams {
                 assert(entry_ok(s0.entries@[i as int], s0.rx_bidi, s0.rx_uni));
             }
             if self.entries[i].recv.is_some() {
-                let mut e = Entry { id: 0, recv: None, send: None };
+                let mut e = Entry { id: 0, recv: None, send: None, queued: false };
                 self.entries.set_and_swap(i, &mut e);
                 let ghost e0 = e;
                 if let Some(mut r) = e.recv.take() {
@@ -4625,6 +5650,14 @@ impl Streams {
                             lemma_part_other(s0, *self, i as int, j);
                         }
                     }
+                    assert forall|j: u64| #[trigger] recv_pending(self.rx_spec(j)) == recv_pending(
+                        s0.rx_spec(j),
+                    ) by {
+                        if j != id {
+                            assert(self.rx_trace(j) == s0.rx_trace(j));
+                        }
+                    }
+                    lemma_backlog_pending(s0, *self);
                 }
             }
         }
@@ -4810,7 +5843,7 @@ impl Streams {
             out_tx(*final(self), n, o),
     {
         let ghost s1 = *self;
-        let mut e = Entry { id: 0, recv: None, send: None };
+        let mut e = Entry { id: 0, recv: None, send: None, queued: false };
         self.entries.set_and_swap(i, &mut e);
         proof {
             assert(entry_ok(e, s1.rx_bidi, s1.rx_uni));
@@ -4917,7 +5950,7 @@ impl Streams {
     {
         let ghost s1 = *self;
         let ghost id = self.entries@[i as int].id;
-        let mut e = Entry { id: 0, recv: None, send: None };
+        let mut e = Entry { id: 0, recv: None, send: None, queued: false };
         self.entries.set_and_swap(i, &mut e);
         let ghost e0 = e;
         proof {
@@ -5203,7 +6236,7 @@ impl Streams {
         }
         let id = self.entries[i].id;
         let ghost o0 = out@;
-        let mut e = Entry { id: 0, recv: None, send: None };
+        let mut e = Entry { id: 0, recv: None, send: None, queued: false };
         self.entries.set_and_swap(i, &mut e);
         let ghost e0 = e;
         proof {
@@ -5454,7 +6487,7 @@ impl Streams {
             ),
     {
         let ghost s0 = *self;
-        let mut e = Entry { id: 0, recv: None, send: None };
+        let mut e = Entry { id: 0, recv: None, send: None, queued: false };
         self.entries.set_and_swap(i, &mut e);
         proof {
             assert(entry_ok(e, s0.rx_bidi, s0.rx_uni));
@@ -5535,6 +6568,7 @@ proof fn lemma_swap_same_rx(s0: Streams, s1: Streams, i: int, ne: Entry)
         0 <= i < s0.entries@.len(),
         ne.id == s0.entries@[i].id,
         ne.recv == s0.entries@[i].recv,
+        ne.queued == s0.entries@[i].queued,
         ne.send is Some == s0.entries@[i].send is Some,
         ne.send matches Some(p) ==> p.wf() && p.sent_end() == s0.entries@[i].send->0.sent_end()
             && p.reset_spec() == s0.entries@[i].send->0.reset_spec() && p.held_spec()
@@ -5574,6 +6608,7 @@ proof fn lemma_push_local(s0: Streams, s1: Streams, e: Entry)
                 &&& s1.ids.peer_credit_spec(b) == s0.ids.peer_credit_spec(b)
             },
         e.recv is None,
+        !e.queued,
         e.send matches Some(p) && p.wf() && p.reset_spec() is None && p.sent_end() == 0,
         sum(s0.entries@, 9) + val(e, 9) <= MAX_SEND_BUFFER,
         s1.entries@ == s0.entries@.push(e),
@@ -5585,6 +6620,9 @@ proof fn lemma_push_local(s0: Streams, s1: Streams, e: Entry)
 {
     let a = s0.entries@;
     let t = s1.entries@;
+    lemma_queue_ok(a, s0.q);
+    lemma_qinv_push(a, e, s0.q@);
+    lemma_queue_ok(t, s1.q);
     s0.ids.lemma_wf();
     s1.ids.lemma_wf();
     lemma_sum_push(a, e, 9);

@@ -3,7 +3,8 @@
 //! decrypted packets, datagram sizes, times and randomness, and the TLS calls below.
 //!
 //! Caller obligations, which `Connection` cannot state as `requires`:
-//! - Drain `poll_stream_events` after every `on_datagram`: `events` is bounded only by that.
+//! - Drain `poll_stream_events` after every `on_datagram` and every `backlog_step` (its `Streams::deliver_some`
+//!   hands over at most `B_PUMP` bytes per call, D13): `events` is bounded only by that.
 //!   `H3Server::pump` discharges this; 3e drives `Connection` before any stream exists.
 //! - After `on_timeout(now)`, poll `poll_transmit` to None before sleeping until `next_timeout`:
 //!   `settled_later` proves that timer is then later than `now`, so the sleep cannot spin. That the
@@ -48,6 +49,11 @@ use crate::route::*;
 use crate::send_stream::*;
 use crate::sent::*;
 use crate::streams::*;
+// Used only in contracts, which a plain `cargo build` erases.
+#[allow(unused_imports)]
+use crate::idq::IDQ_CAP;
+#[allow(unused_imports)]
+use crate::ring::*;
 use crate::tp::*;
 // Used only in ghost code, which a plain `cargo build` erases.
 #[allow(unused_imports)]
@@ -67,6 +73,12 @@ pub const H3_ALPN: [u8; 2] = *b"h3";
 
 /// The work one `pump_backlog` spends per kind of backlog: CRYPTO bytes handed to TLS, teardown-slot frees.
 pub const B_PUMP: u64 = 4096;
+
+/// `pump_backlog`'s STREAM half (`Streams::deliver_some` with `B_PUMP`): the delivery, the id lookup and the entry's
+/// removal, and its buffers freed.
+pub open spec fn c_dsome() -> nat {
+    c_rd() * (B_PUMP as nat + B_PUMP as nat / (PAGE as nat) + 2) + 2 * max_entries() + 3 + c_rfree()
+}
 
 pub open spec fn space_idx(k: PacketKind) -> int {
     match k {
@@ -1214,6 +1226,55 @@ impl Connection {
         backlog3(self.crx_i, self.crx_h, self.crx_1)
     }
 
+    /// D13's STREAM backlog measure (`Streams::rx_backlog`), 0 without streams.
+    pub closed spec fn rx_measure(&self) -> nat {
+        match self.streams {
+            Some(s) => s.rx_backlog(),
+            None => 0,
+        }
+    }
+
+    /// The streams are as in `o`. Opaque, so `read_open` states it as one atom (rlimit).
+    #[verifier::opaque]
+    spec fn same_streams(&self, o: Connection) -> bool {
+        self.streams == o.streams
+    }
+
+    /// Some stream has bytes or the FIN left to deliver (D13).
+    pub closed spec fn stream_backlog(&self) -> bool {
+        match self.streams {
+            Some(s) => s.stream_backlog_spec(),
+            None => false,
+        }
+    }
+
+    /// The STREAM backlog: bounded, positive while any, and only while open.
+    pub proof fn lemma_rx_measure(&self)
+        requires
+            self.wf(),
+        ensures
+            self.rx_measure() <= IDQ_CAP * (MAX_RECV_WINDOW + 1),
+            self.stream_backlog() ==> self.rx_measure() > 0,
+            self.stream_backlog() ==> self.phase_spec() is Open,
+    {
+        if let Some(s) = self.streams {
+            s.lemma_rx_backlog();
+        }
+    }
+
+    /// `stream_backlog`. O(1).
+    pub fn has_stream_backlog(&self) -> (r: bool)
+        requires
+            self.wf(),
+        ensures
+            r == self.stream_backlog(),
+    {
+        match &self.streams {
+            Some(s) => s.stream_backlog(),
+            None => false,
+        }
+    }
+
     /// The nodes in the three teardown slots.
     pub closed spec fn crypto_td_total(&self) -> nat {
         self.crx_i.td_nodes() + self.crx_h.td_nodes() + self.crx_1.td_nodes()
@@ -1674,7 +1735,9 @@ impl Connection {
         &&& cids_only(self.cid_updates@)
     }
 
-    /// `Streams` is never called after an `Err`, and closing drops it, which frees the buffers.
+    /// `Streams` is never called after an `Err`, and closing drops it, which frees the buffers. That drop is uncharged:
+    /// up to `max_entries()` receive rings of at most `c_rfree()` frees each, and the sending parts' trees
+    /// (cat-C15-semantic-cost, 9b4; a RESET_STREAM's ring drop and `deliver_some`'s removal are charged, 9b2 Task 10).
     closed spec fn wf_streams(&self) -> bool {
         &&& self.streams matches Some(s) ==> s.wf() && !s.failed() && self.lc.phase_spec() is Open
         &&& !(self.lc.phase_spec() is Open) ==> self.streams is None
@@ -5041,6 +5104,7 @@ impl Connection {
             !(k is OneRtt),
             old(self).settled(),
         ensures
+            final(self).rx_measure() <= old(self).rx_measure(),
             final(self).paths == old(self).paths,
             final(self).wf(),
             final(self).settled(),
@@ -5140,6 +5204,7 @@ impl Connection {
             old(self).settled(),
             code <= VARINT_MAX,
         ensures
+            final(self).rx_measure() <= old(self).rx_measure(),
             final(self).paths == old(self).paths,
             final(self).wf(),
             final(self).settled(),
@@ -5250,6 +5315,7 @@ impl Connection {
             old(self).settled(),
             !(old(self).phase_spec() is Open),
         ensures
+            final(self).rx_measure() <= old(self).rx_measure(),
             final(self).wf(),
             final(self).settled(),
             final(self).out_log() == old(self).out_log(),
@@ -5305,6 +5371,7 @@ impl Connection {
             old(out)@.len() == 0,
             old(out).cap() >= crypto_read_len(*old(self), level, max),
         ensures
+            final(self).rx_measure() <= old(self).rx_measure(),
             final(self).wf(),
             final(self).settled(),
             final(out).wf(),
@@ -5339,7 +5406,12 @@ impl Connection {
         if !matches!(self.lc.phase(), Phase::Open) {
             return Ghost(0);
         }
-        self.read_open(level, max, out)
+        let ghost c0 = *self;
+        let Ghost(c) = self.read_open(level, max, out);
+        proof {
+            reveal(Connection::same_streams);
+        }
+        Ghost(c)
     }
 
     /// `crypto_read` on an open connection (split from it for the rlimit).
@@ -5371,6 +5443,7 @@ impl Connection {
             final(self).crypto_held(level) + final(out)@.len() == old(self).crypto_held(level),
             final(self).crypto_backlog() + final(out)@.len() == old(self).crypto_backlog(),
             r@ <= 18 * crypto_read_len(*old(self), level, max) + 5608,
+            final(self).same_streams(*old(self)),
     {
         proof {
             Connection::lemma_read_pre(*self, level, max);
@@ -5382,6 +5455,7 @@ impl Connection {
         };
         proof {
             Connection::lemma_read_done(*old(self), *self, level, max, out@.len());
+            reveal(Connection::same_streams);
         }
         Ghost(c)
     }
@@ -5470,6 +5544,94 @@ impl Connection {
         self.crx_i.has_td() || self.crx_h.has_td() || self.crx_1.has_td()
     }
 
+    /// D13's STREAM half and teardown, each with its own `B_PUMP`: the stream queue's head delivers
+    /// at most `B_PUMP` bytes (its events to `poll_stream_events`), then `free_teardown`. While a
+    /// stream is queued the STREAM measure falls; nothing received, so it never grows.
+    pub fn backlog_step(&mut self) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            old(self).settled(),
+        ensures
+            final(self).wf(),
+            final(self).settled(),
+            old(self).crypto_td_total() > 0 ==> final(self).crypto_backlog() < old(self).crypto_backlog(),
+            old(self).crypto_td_total() > 0 ==> final(self).crypto_td_total() < old(self).crypto_td_total(),
+            final(self).crypto_td_total() <= old(self).crypto_td_total(),
+            final(self).crypto_kept(*old(self)),
+            drained_kept(*final(self), *old(self)),
+            final(self).out_log() == old(self).out_log(),
+            final(self).phase_spec() == old(self).phase_spec(),
+            final(self).close_spec() == old(self).close_spec(),
+            forall|k: PacketKind| #[trigger] final(self).crypto_end_spec(k) == old(self).crypto_end_spec(k),
+            forall|k: PacketKind| #[trigger] final(self).crypto_held(k) == old(self).crypto_held(k),
+            forall|k: PacketKind| #[trigger] final(self).crypto_contiguous_spec(k) == old(self).crypto_contiguous_spec(k),
+            forall|k: PacketKind| #[trigger] final(self).crypto_base_spec(k) == old(self).crypto_base_spec(k),
+            forall|k: PacketKind, p: nat| #[trigger] final(self).crypto_received(k, p) == old(self).crypto_received(k, p),
+            forall|k: PacketKind| #[trigger] final(self).live(k) == old(self).live(k),
+            final(self).peer_tp_known_spec() == old(self).peer_tp_known_spec(),
+            final(self).rx_measure() <= old(self).rx_measure(),
+            old(self).stream_backlog() ==> final(self).rx_measure() < old(self).rx_measure(),
+            r@ <= B_PUMP + c_dsome(),
+    {
+        let ghost c0 = *self;
+        let Ghost(cs) = self.deliver_streams();
+        let ghost c1 = *self;
+        let Ghost(ct) = self.free_teardown();
+        proof {
+            Connection::lemma_pump_frame(c0, c1);
+        }
+        Ghost(cs + ct)
+    }
+
+    /// `pump_backlog`'s STREAM half: `Streams::deliver_some` with `B_PUMP`. Only the streams and the
+    /// events change.
+    #[verifier::spinoff_prover]
+    fn deliver_streams(&mut self) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            old(self).settled(),
+        ensures
+            final(self).wf(),
+            final(self).settled(),
+            *final(self) == (Connection { streams: final(self).streams, events: final(self).events, ..*old(self) }),
+            final(self).rx_measure() <= old(self).rx_measure(),
+            old(self).stream_backlog() ==> final(self).rx_measure() < old(self).rx_measure(),
+            r@ <= c_dsome(),
+    {
+        let ghost o = *self;
+        let Ghost(c) = match &mut self.streams {
+            Some(s) => s.deliver_some(B_PUMP, &mut self.events),
+            None => Ghost(0),
+        };
+        proof {
+            Connection::lemma_streams_conn(o, *self);
+        }
+        Ghost(c)
+    }
+
+    /// `deliver_streams` changes only the streams and the events: every CRYPTO, phase and level fact holds.
+    proof fn lemma_pump_frame(c0: Connection, c1: Connection)
+        requires
+            c1 == (Connection { streams: c1.streams, events: c1.events, ..c0 }),
+        ensures
+            c1.crypto_kept(c0),
+            drained_kept(c1, c0),
+            c1.crypto_backlog() == c0.crypto_backlog(),
+            c1.crypto_td_total() == c0.crypto_td_total(),
+            c1.out_log() == c0.out_log(),
+            c1.phase_spec() == c0.phase_spec(),
+            c1.close_spec() == c0.close_spec(),
+            forall|k: PacketKind| #[trigger] c1.crypto_end_spec(k) == c0.crypto_end_spec(k),
+            forall|k: PacketKind| #[trigger] c1.crypto_held(k) == c0.crypto_held(k),
+            forall|k: PacketKind| #[trigger] c1.crypto_contiguous_spec(k) == c0.crypto_contiguous_spec(k),
+            forall|k: PacketKind| #[trigger] c1.crypto_base_spec(k) == c0.crypto_base_spec(k),
+            forall|k: PacketKind, p: nat| #[trigger] c1.crypto_received(k, p) == c0.crypto_received(k, p),
+            forall|k: PacketKind| #[trigger] c1.live(k) == c0.live(k),
+            c1.peer_tp_known_spec() == c0.peer_tp_known_spec(),
+    {
+        Connection::lemma_crypto_kept_refl(c0);
+    }
+
     /// Frees part of the first non-empty teardown slot: at least one node while any remain, at most `B_PUMP` units
     /// of work. Nothing else changes.
     #[verifier::spinoff_prover]
@@ -5478,6 +5640,7 @@ impl Connection {
             old(self).wf(),
             old(self).settled(),
         ensures
+            final(self).rx_measure() <= old(self).rx_measure(),
             final(self).wf(),
             final(self).settled(),
             r@ <= B_PUMP,
@@ -5522,6 +5685,7 @@ impl Connection {
             old(self).settled(),
             !(level is OneRtt),
         ensures
+            final(self).rx_measure() <= old(self).rx_measure(),
             final(self).wf(),
             final(self).settled(),
             final(self).out_log() == old(self).out_log(),
@@ -5585,6 +5749,7 @@ impl Connection {
             old(self).settled(),
             peer_tp_wf(tp@),
         ensures
+            final(self).rx_measure() <= old(self).rx_measure(),
             final(self).wf(),
             final(self).settled(),
             final(self).out_log() == old(self).out_log(),
@@ -5637,6 +5802,7 @@ impl Connection {
             old(self).wf(),
             old(self).settled(),
         ensures
+            final(self).rx_measure() <= old(self).rx_measure(),
             // §8.1: an open, not yet complete connection whose ALPN is not `h3` closes with 0x0178.
             old(self).phase_spec() is Open && !old(self).live(PacketKind::OneRtt) && alpn@ != seq![0x68u8, 0x33u8]
                 ==> final(self).phase_spec() is Closing
@@ -5720,6 +5886,7 @@ impl Connection {
             old(self).wf(),
             old(self).settled(),
         ensures
+            final(self).rx_measure() <= old(self).rx_measure(),
             final(self).wf(),
             final(self).settled(),
             final(self).out_log() == old(self).out_log(),
@@ -5741,6 +5908,7 @@ impl Connection {
         requires
             old(self).wf(),
         ensures
+            final(self).rx_measure() <= old(self).rx_measure(),
             final(self).paths == old(self).paths,
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
@@ -9873,12 +10041,15 @@ impl Connection {
         &&& forall|t: u64| t < u64::MAX && t <= o.now && #[trigger] o.timers_later(t) ==> self.timers_later(t)
         &&& self.crypto_same(o)
         &&& self.lc.phase_spec() is Open ==> o.lc.phase_spec() is Open
+        // Nothing received: the STREAM backlog does not grow (D13).
+        &&& self.rx_measure() <= o.rx_measure()
     }
 
     pub proof fn lemma_keeps_crypto(&self, o: Connection)
         requires
             self.keeps_later(o),
         ensures
+            self.rx_measure() <= o.rx_measure(),
             self.crypto_kept(o),
             drained_kept(*self, o),
             self.phase_spec() is Open ==> o.phase_spec() is Open,
@@ -9934,6 +10105,7 @@ impl Connection {
                 tokens_registered: self.tokens_registered,
                 ..o
             }),
+            self.rx_measure() <= o.rx_measure(),
         ensures
             self.keeps_later(o),
     {
@@ -11093,7 +11265,14 @@ proof fn lemma_recv_err(id: u64, window: u64, t: Seq<SpecRecvIn>)
     decreases t.len(),
 {
     if t.len() > 0 {
-        lemma_recv_err(id, window, t.drop_last());
+        let p = t.drop_last();
+        lemma_recv_err(id, window, p);
+        assert(p.push(t.last()) =~= t);
+        lemma_recv_push(id, window, p, t.last());
+        // A delivery has no error path (D12): it keeps the error field.
+        if let SpecRecvIn::Deliver { max } = t.last() {
+            lemma_deliver_fields(id, rfc_recv(id, window, p), max);
+        }
     }
 }
 

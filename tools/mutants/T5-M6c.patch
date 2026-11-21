@@ -1,8 +1,7 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
-index 2438cfa..f89b025 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -2195,7 +2195,7 @@ impl<'a> QuicServer<'a> {
+@@ -2230,7 +2230,7 @@
              forall|p: nat| #[trigger] final(self).init_rx@.crypto_received(PacketKind::Initial, p) ==> p < final(self).init_end,
              final(self).init_end > 0 ==> final(self).init_rx@.crypto_received(PacketKind::Initial, (final(self).init_end - 1) as nat),
      {

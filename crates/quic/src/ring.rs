@@ -1654,6 +1654,7 @@ impl Ring {
 
     /// Hands over the run of held positions from `base`, at most `max` bytes, in an exact `CapVec`, and frees each
     /// page that holds nothing past it. Costs `O(max + max/PAGE)`.
+    #[verifier::spinoff_prover]
     pub fn deliver(&mut self, max: u64) -> (r: (CapVec<u8>, Ghost<nat>))
         requires
             old(self).wf(),
@@ -1746,6 +1747,30 @@ impl Ring {
         }
         (out, Ghost(work))
     }
+
+    /// Position `p` of the window is held. O(1).
+    pub fn holds(&self, p: u64) -> (r: bool)
+        requires
+            self.wf(),
+            self.base_spec() <= p < self.base_spec() + self.window(),
+        ensures
+            r == self.view().contains_key(p as nat),
+    {
+        self.has(p)
+    }
+
+    /// The next offset to deliver.
+    pub fn base_exec(&self) -> (r: u64)
+        ensures
+            r == self.base_spec(),
+    {
+        self.base
+    }
+}
+
+/// Dropping a ring: its pages' three buffers each and the slot vector (`NP_MAX` bounds the slots, so the pages).
+pub open spec fn c_rfree() -> nat {
+    3 * NP_MAX as nat + 1
 }
 
 } // verus!

@@ -1,7 +1,7 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -189,11 +189,12 @@
+@@ -194,11 +194,12 @@
      requires
          c.wf(),
      ensures

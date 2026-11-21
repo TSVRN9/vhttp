@@ -313,24 +313,30 @@ fn reverse_fill(m: usize, r: &mut Run) {
     let s = bytes(m);
     let mut st = RecvStream::new(0, m as u64);
     let (mut got, mut recvd) = (0, 0);
+    let data_len = |ev: &Vec<StreamEvent>| -> usize {
+        ev.iter()
+            .map(|e| if let StreamEvent::Data { data, .. } = e { data.len() } else { 0 })
+            .sum()
+    };
+    // The frame path's shape (D12): each frame's `on_data`, then a delivery of at most its length.
     for off in (0..m).rev() {
         r.call("frame", 1, || {
             let mut ev = Vec::new();
-            assert!(st
-                .on_data(off as u64, &s[off..off + 1], false, u64::MAX, &mut ev)
-                .is_ok());
-            let n: usize = ev
-                .iter()
-                .map(|e| {
-                    if let StreamEvent::Data { data, .. } = e {
-                        data.len()
-                    } else {
-                        0
-                    }
-                })
-                .sum();
+            assert!(st.on_data(off as u64, &s[off..off + 1], false, u64::MAX).0.is_ok());
+            let _ = st.deliver(1, &mut ev);
+            let n = data_len(&ev);
             got += n;
             recvd += 1;
+            (Some(n), recvd - got)
+        });
+    }
+    // `pump_backlog`'s STREAM half: `B_PUMP`-sized deliveries until none is left (D13).
+    while st.has_ready() {
+        r.call("pump", 4096, || {
+            let mut ev = Vec::new();
+            let _ = st.deliver(4096, &mut ev);
+            let n = data_len(&ev);
+            got += n;
             (Some(n), recvd - got)
         });
     }
@@ -510,7 +516,6 @@ fn send_selective_acks() {
 }
 
 #[test]
-#[ignore = "9b2: fails today, zero-fill reallocs and eager whole-run delivery (Q1, Q3); un-ignored by Task 10"]
 fn stream_reverse_fill() {
     check("stream_reverse_fill", 16 << 10, reverse_fill, Alloc::None);
 }

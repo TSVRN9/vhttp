@@ -31,6 +31,7 @@ pub mod h3_server;
 pub mod handshake;
 pub mod header;
 pub mod hp;
+pub mod idq;
 pub mod lifecycle;
 pub mod path;
 pub mod payload;

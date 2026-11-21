@@ -1,8 +1,7 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index fbeaa1c..b63afac 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -5274,7 +5274,7 @@ impl Connection {
+@@ -5340,7 +5340,7 @@
          }
          // Each store moves to its teardown slot, no byte copied or freed here (`free_teardown`).
          let Ghost(c1) = self.crx_i.retire();

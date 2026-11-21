@@ -1,8 +1,7 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index fbeaa1c..9378516 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -5323,7 +5323,6 @@ impl Connection {
+@@ -5390,7 +5390,6 @@
              ) ==> crypto_drained(*final(self), level),
              old(self).crypto_end_spec(level) <= old(self).crypto_base_spec(level) ==> final(out)@.len() == 0,
              // The read hands over exactly the bytes its offset passes; no other level's moves.
