@@ -3980,6 +3980,65 @@ proof fn lemma_swap(s0: Streams, s1: Streams, i: int, ne: Entry)
     s0.ids.lemma_wf();
 }
 
+/// `recv_op_at`'s proof once entry `i` (`e0`) is back as `ne`, its receiving part moved by one control operation
+/// (`lemma_ctl`'s facts; `ctl_only`: no Credit input): `wf`, `kept`, `out_tx` and the traces (split for the rlimit).
+#[verifier::spinoff_prover]
+proof fn lemma_recv_op_post(
+    s0: Streams,
+    s1: Streams,
+    s2: Streams,
+    i: int,
+    e0: Entry,
+    ne: Entry,
+    n: int,
+    o: Seq<Frame>,
+    ctl_only: bool,
+)
+    requires
+        kept(s0, s1),
+        0 <= i < s1.entries@.len(),
+        out_tx(s1, n, o),
+        e0 == s1.entries@[i],
+        s2.entries@ == s1.entries@.update(i, ne),
+        ne.id == e0.id,
+        ne.send == e0.send,
+        ne.recv is Some == e0.recv is Some,
+        e0.recv is None ==> s2.rtr@ == s1.rtr@,
+        ne.recv matches Some(r) ==> {
+            let r0 = e0.recv->0;
+            &&& s2.rtr@ == s1.rtr@.insert(ne.id, r.trace())
+            &&& r.wf()
+            &&& r.id_spec() == r0.id_spec()
+            &&& r.window_spec() == r0.window_spec()
+            &&& r.rfc().state == r0.rfc().state
+            &&& r.rfc().events == r0.rfc().events
+            &&& r.rfc().stopped == r0.rfc().stopped
+            &&& counted(r.rfc()) == counted(r0.rfc())
+            &&& retired(r.rfc()) == retired(r0.rfc())
+            &&& ctl_only ==> r.trace() == r0.trace()
+        },
+        s2 == (Streams { entries: s2.entries, rtr: s2.rtr, ..s1 }),
+    ensures
+        out_tx(s2, n, o),
+        kept(s0, s2),
+        sends_same(s0, s1) ==> sends_same(s0, s2),
+        forall|j: u64| j != e0.id ==> #[trigger] s2.rx_trace(j) == s1.rx_trace(j),
+        ctl_only ==> forall|j: u64| #[trigger] s2.rx_trace(j) == s1.rx_trace(j),
+{
+    let id = e0.id;
+    assert(entry_ok(e0, s1.rx_bidi, s1.rx_uni));
+    lemma_swap(s1, s2, i, ne);
+    lemma_swap_kept(s0, s1, s2, i, ne);
+    lemma_tx_grows(s1, s2, i, n, o);
+    if ctl_only {
+        assert forall|j: u64| #[trigger] s2.rx_trace(j) == s1.rx_trace(j) by {
+            if j == id && ne.recv is Some {
+                assert(s1.rtr@[id] == e0.recv->0.trace());
+            }
+        }
+    }
+}
+
 /// `lemma_swap` during `poll_frames`: `kept` and `sends_same` carry over when the new entry's
 /// receive side and send state are as before (up to a Credit input).
 proof fn lemma_swap_kept(s0: Streams, s1: Streams, s2: Streams, i: int, ne: Entry)
@@ -4892,19 +4951,7 @@ impl Streams {
         self.entries.set_and_swap(i, &mut e);
         proof {
             assert(self.entries@ == s1.entries@.update(i as int, ne));
-            if e0.recv is None {
-                assert(self.rtr@ == s1.rtr@);
-            }
-            lemma_swap(s1, *self, i as int, ne);
-            lemma_swap_kept(s0, s1, *self, i as int, ne);
-            lemma_tx_grows(s1, *self, i as int, n, o);
-            if op != 1 {
-                assert forall|j: u64| #[trigger] self.rx_trace(j) == s1.rx_trace(j) by {
-                    if j == id && ne.recv is Some {
-                        assert(s1.rtr@[id] == e0.recv->0.trace());
-                    }
-                }
-            }
+            lemma_recv_op_post(s0, s1, *self, i as int, e0, ne, n, o, op != 1);
         }
     }
 
