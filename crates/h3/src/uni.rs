@@ -695,24 +695,6 @@ proof fn lemma_determined(b: Seq<u8>, n: nat, ty: u64, seen0: SeenUni)
     }
 }
 
-/// The sequences `determine` relates, with `b` the type bytes held after its push (split out for the rlimit: the
-/// extensional equalities stay here).
-proof fn lemma_determine_seqs(all0: Seq<u8>, data: Seq<u8>, i: nat)
-    requires
-        i <= data.len(),
-    ensures
-        (all0 + data.take(i as int)) + data.skip(i as int) == all0 + data,
-        (all0 + data.take(i as int)).take(all0.len() as int) == all0,
-        i == data.len() ==> all0 + data.take(i as int) == all0 + data,
-{
-    let b = all0 + data.take(i as int);
-    assert(b + data.skip(i as int) =~= all0 + data);
-    assert(b.take(all0.len() as int) =~= all0);
-    if i == data.len() {
-        assert(data.take(i as int) =~= data);
-    }
-}
-
 proof fn lemma_empty_events(e: Seq<SpecUniEvent>)
     requires
         e.len() == 0,
@@ -729,17 +711,6 @@ proof fn lemma_empty_bytes(e: Seq<u8>)
         e == Seq::<u8>::empty(),
 {
     assert(e =~= Seq::<u8>::empty());
-}
-
-/// The type varint's `n` bytes: what `all0` held and the first `n - all0.len()` of `data`.
-proof fn lemma_determine_take(all0: Seq<u8>, data: Seq<u8>, i: nat, n: nat)
-    requires
-        i <= data.len(),
-        all0.len() <= n <= all0.len() + i,
-    ensures
-        (all0 + data.take(i as int)).take(n as int) == all0 + data.take(n - all0.len()),
-{
-    assert((all0 + data.take(i as int)).take(n as int) =~= all0 + data.take(n - all0.len()));
 }
 
 /// A push stream or a second critical stream of one type (split out of `determine` for the rlimit).
@@ -1571,7 +1542,8 @@ impl UniStream {
     /// Feeds the next `data` (`fin`: the stream ends after it). `Err(code)` is a connection
     /// error. Afterwards the cumulative events and error are exactly `rfc_uni_stream` of every
     /// byte received, so they don't depend on how the bytes were chunked. A call returns at most `data.len() / 3 + 1`
-    /// events and costs at most `c_uni()` per byte given (and 16 more) plus `c_uni_frame()` per byte held before it.
+    /// events and costs at most `c_uni()` per byte given (and 16 more) plus `c_uni_frame()` per byte held before it
+    /// (`fed`).
     pub fn on_data(
         &mut self,
         data: &[u8],
@@ -1585,29 +1557,9 @@ impl UniStream {
             old(events).wf(),
             old(events)@.len() + data@.len() / 3 + 1 <= old(events).cap(),
         ensures
-            final(self).wf(),
-            final(self).all() == old(self).all() + data@,
-            final(self).done() == (r.0 is Err || fin),
-            !final(self).done() ==> final(self).buffered() < UNI_BUF_CAP,
-            final(events).wf(),
-            final(events).cap() == old(events).cap(),
-            final(events)@.len() >= old(events)@.len(),
-            final(events)@.take(old(events)@.len() as int) == old(events)@,
-            final(self).emitted() == old(self).emitted() + views(
-                final(events)@.skip(old(events)@.len() as int),
-            ),
-            rfc_uni_stream(final(self).all(), fin, final(self).seen_before()) == (
-                final(self).emitted(),
-                err_of(r.0),
-            ),
-            kind_of_bytes(old(self).all()) is Undetermined ==> final(self).seen_before() == *old(
-                seen,
-            ) && *final(seen) == seen_after(*old(seen), final(self).all()),
-            !(kind_of_bytes(old(self).all()) is Undetermined) ==> final(self).seen_before()
-                == old(self).seen_before() && *final(seen) == *old(seen),
-            r.1@ <= c_uni() * (data@.len() + 16) + c_uni_frame() * old(self).buffered(),
-            2 * ev_pairs(views(final(events)@.skip(old(events)@.len() as int))) <= data@.len() + old(self).buffered(),
+            fed(*old(self), *final(self), data@, fin, *old(seen), *final(seen), *old(events), *final(events), r.0, r.1@),
     {
+        hide(fed);
         hide(rfc_uni_stream);
         hide(tail_of);
         hide(ready);
@@ -1615,34 +1567,35 @@ impl UniStream {
         hide(split_ok);
         hide(one_frame);
         hide(rfc_varint_decode);
-        let ghost all0 = self.all@;
-        let ghost em0 = self.emitted@;
+        hide(kind_of_bytes);
+        hide(consumed);
+        hide(wf_live);
         let ghost s0 = *self;
-        self.done = true;
+        let ghost seen0 = *seen;
+        let ghost e0 = *events;
         proof {
-            lemma_pairs_none(events@);
-            lemma_set_done(s0, true);
-            lemma_grew_refl(*self, events@);
-            assert((all0 + data@) + Seq::<u8>::empty() =~= all0 + data@);
+            lemma_wf_unfold(s0);
         }
         if let UniKind::Ignored = self.kind {
-            self.all = Ghost(all0 + data@);
+            self.all = Ghost(s0.all@ + data@);
             self.done = fin;
             proof {
-                reveal(split_ok);
-                lemma_ignored_data(all0, self.seen0@, em0, self.ctrl, self.skip, self.buf@, data@, fin);
+                lemma_fed_ignored(s0, *self, data@, fin, seen0, e0);
             }
             return (Ok(()), Ghost(1));
         }
-        let ghost was_undetermined = self.kind is Undetermined;
+        self.done = true;
         let mut i: usize = 0;
         let ghost mut wd: nat = 0;
         if let UniKind::Undetermined = self.kind {
+            proof {
+                lemma_undetermined_done(s0, *self);
+            }
             let (dr, Ghost(w)) = self.determine(data, seen);
             match dr {
                 Err(e) => {
                     proof {
-                        lemma_grew_refl(*self, events@);
+                        lemma_fed_det_err(s0, *self, data@, fin, seen0, *seen, e0, e, w);
                     }
                     return (Err(e), Ghost(w + 1));
                 },
@@ -1650,8 +1603,7 @@ impl UniStream {
                     let ghost s1 = *self;
                     self.done = fin;
                     proof {
-                        lemma_set_done(s1, fin);
-                        lemma_grew_refl(*self, events@);
+                        lemma_fed_det_none(s0, s1, *self, data@, fin, seen0, *seen, e0, w);
                     }
                     return (Ok(()), Ghost(w + 1));
                 },
@@ -1663,34 +1615,28 @@ impl UniStream {
                     i = k;
                 },
             }
-        }
-        let rest = slice_subrange(data, i, data.len());
-        proof {
-            assert(data@.take(i as int) + rest@ =~= data@);
-            assert(self.all@ + rest@ =~= all0 + data@);
-            if !was_undetermined {
-                assert(data@.take(0) =~= Seq::<u8>::empty());
-                assert(all0 + Seq::<u8>::empty() =~= all0);
-                lemma_decode_prefix(all0, data@);
+        } else {
+            proof {
+                lemma_set_done(s0, true);
             }
         }
+        let ghost sm = *self;
+        let ghost seen1 = *seen;
+        let rest = slice_subrange(data, i, data.len());
         let (r, Ghost(wc)) = self.consume(rest, fin, events);
-        match r {
-            Ok(()) => {
-                let ghost s1 = *self;
-                self.done = false;
-                proof {
-                    lemma_set_done(s1, false);
-                }
-                (Ok(()), Ghost(wd + wc + 1))
-            },
-            Err(e) => (Err(e), Ghost(wd + wc + 1)),
+        let ghost sc = *self;
+        if r.is_ok() {
+            self.done = false;
         }
+        proof {
+            lemma_fed_consume(s0, sm, sc, *self, data@, i as nat, rest@, fin, seen0, seen1, e0, *events, r, wd, wc);
+        }
+        (r, Ghost(wd + wc + 1))
     }
 
     /// Reads the stream type from at most the 8 bytes a varint can take. `Ok(Some(i))`: a
     /// critical stream, with `data[i..]` still to feed and nothing held (bytes after the varint stay in `data`);
-    /// `Ok(None)`: all of `data` is consumed.
+    /// `Ok(None)`: all of `data` is consumed (`determined`).
     #[verifier::spinoff_prover]
     fn determine(&mut self, data: &[u8], seen: &mut SeenUni) -> (r: (Result<Option<usize>, u64>, Ghost<nat>))
         requires
@@ -1698,49 +1644,19 @@ impl UniStream {
             old(self).kind == kind_of_bytes(old(self).all@),
             wf_live(*old(self)),
         ensures
-            final(self).buf.wf(),
-            final(self).seen0@ == *old(seen),
-            *final(seen) == seen_after(*old(seen), old(self).all@ + data@),
-            final(self).done == old(self).done,
-            final(self).emitted@ == old(self).emitted@,
-            final(self).kind == kind_of_bytes(old(self).all@ + data@),
-            r.1@ <= 80,
-            match r.0 {
-                Err(e) => {
-                    &&& final(self).all@ == old(self).all@ + data@
-                    &&& forall|f: bool| #[trigger]
-                        rfc_uni_stream(final(self).all@, f, final(self).seen0@) == (
-                            final(self).emitted@,
-                            Some(e),
-                        )
-                },
-                Ok(None) => {
-                    &&& final(self).all@ == old(self).all@ + data@
-                    &&& final(self).kind is Undetermined || final(self).kind is Ignored
-                    &&& wf_live(*final(self))
-                    &&& forall|f: bool| #[trigger]
-                        rfc_uni_stream(final(self).all@, f, final(self).seen0@) == (
-                            final(self).emitted@,
-                            None::<u64>,
-                        )
-                },
-                Ok(Some(i)) => {
-                    &&& i <= data@.len()
-                    &&& final(self).all@ == old(self).all@ + data@.take(i as int)
-                    &&& final(self).kind is Control || final(self).kind is QpackEncoder || final(self).kind is QpackDecoder
-                    &&& live_s(*final(self))
-                    &&& final(self).buf@.len() == 0
-                },
-            },
+            determined(*old(self), *final(self), data@, *old(seen), *final(seen), r.0, r.1@),
     {
+        hide(determined);
         hide(rfc_varint_decode);
         hide(live_s);
         hide(wf_live);
         hide(rfc_uni_stream);
-        let ghost all0 = self.all@;
+        hide(kind_of_bytes);
+        hide(seen_after);
+        let ghost s0 = *self;
+        let ghost seen0 = *seen;
         proof {
-            lemma_undetermined_def(*self);
-            lemma_empty_events(self.emitted@);
+            lemma_undetermined_def(s0);
         }
         self.seen0 = Ghost(*seen);
         let bl = self.buf.len();
@@ -1752,38 +1668,25 @@ impl UniStream {
         };
         let head = slice_subrange(data, 0, i);
         let Ghost(wp) = self.buf.push_slice(head);
-        self.all = Ghost(all0 + data@.take(i as int));
         let ghost b = self.buf@;
-        proof {
-            lemma_determine_seqs(all0, data@, i as nat);
-        }
         // A varint parse over at most 8 bytes: a constant charge on its MIR bound (expected-cost.txt).
         let (n, ty) = match parse_varint(self.buf.as_slice()) {
             None => {
+                self.all = Ghost(s0.all@ + data@);
                 proof {
-                    lemma_decode_none_short(b);
-                    lemma_undetermined(b, self.seen0@);
-                }
-                self.all = Ghost(all0 + data@);
-                proof {
-                    lemma_undetermined_def(*self);
+                    lemma_det_none(s0, *self, data@, i as nat, head@, seen0, (wp + 17) as nat);
                 }
                 return (Ok(None), Ghost(wp + 17));
             },
             Some(x) => x,
         };
-        proof {
-            lemma_decode_take(b, n as nat, ty, bl as nat);
-            lemma_decode_prefix(b, data@.skip(i as int));
-        }
         self.kind = kind_of(ty);
         if ty == STREAM_PUSH || (ty == STREAM_CONTROL && seen.control) || (ty
             == STREAM_QPACK_ENCODER && seen.encoder) || (ty == STREAM_QPACK_DECODER
             && seen.decoder) {
-            self.all = Ghost(all0 + data@);
+            self.all = Ghost(s0.all@ + data@);
             proof {
-                assert(seen_mark(self.seen0@, ty) == self.seen0@);
-                lemma_creation_err(all0 + data@, n as nat, ty, self.seen0@);
+                lemma_det_err(s0, *self, data@, i as nat, head@, n as nat, ty, seen0, (wp + 17) as nat);
             }
             return (Err(H3_STREAM_CREATION_ERROR), Ghost(wp + 17));
         }
@@ -1791,22 +1694,20 @@ impl UniStream {
         seen.encoder = seen.encoder || ty == STREAM_QPACK_ENCODER;
         seen.decoder = seen.decoder || ty == STREAM_QPACK_DECODER;
         let Ghost(wd) = self.buf.drop_front(self.buf.len());
-        proof {
-            lemma_empty_bytes(self.buf@);
-        }
         if let UniKind::Ignored = self.kind {
-            self.all = Ghost(all0 + data@);
+            self.all = Ghost(s0.all@ + data@);
             proof {
-                lemma_determined_ignored(b, n as nat, ty, self.seen0@, data@.skip(i as int));
-                lemma_ignored_def(*self);
+                lemma_det_ignored(s0, *self, data@, i as nat, head@, b, n as nat, ty, seen0, *seen, (wp + wd + 17) as nat);
             }
             return (Ok(None), Ghost(wp + wd + 17));
         }
-        let k = n - bl;
-        self.all = Ghost(all0 + data@.take(k as int));
         proof {
-            lemma_determine_take(all0, data@, i as nat, n as nat);
-            lemma_determined_live(*self, b.take(n as int), n as nat, ty);
+            lemma_det_decoded(s0, data@, i as nat, head@, b, n as nat, ty);
+        }
+        let k = n - bl;
+        self.all = Ghost(s0.all@ + data@.take(k as int));
+        proof {
+            lemma_det_some(s0, *self, data@, i as nat, head@, b, n as nat, ty, seen0, *seen, (wp + wd + 17) as nat);
         }
         (Ok(Some(k)), Ghost(wp + wd + 17))
     }
@@ -2471,6 +2372,423 @@ proof fn lemma_qpack_split(k: UniKind, st: CtrlState, b: Seq<u8>, n: nat)
             rfc_tail(k, st, b + t, f) == rfc_tail(k, st, b.skip(n as int) + t, f) by {
             lemma_decoder_stream_split(b, t);
         }
+    }
+}
+
+/// What `determine` guarantees, from `s0` (shared `seen0`) to `s1` (`seen1`), having read `data`.
+spec fn determined(
+    s0: UniStream,
+    s1: UniStream,
+    data: Seq<u8>,
+    seen0: SeenUni,
+    seen1: SeenUni,
+    r: Result<Option<usize>, u64>,
+    w: nat,
+) -> bool {
+    &&& s1.buf.wf()
+    &&& s1.seen0@ == seen0
+    &&& seen1 == seen_after(seen0, s0.all@ + data)
+    &&& s1.done == s0.done
+    &&& s1.emitted@ == s0.emitted@
+    &&& s1.kind == kind_of_bytes(s0.all@ + data)
+    &&& w <= 80
+    &&& match r {
+        Err(e) => {
+            &&& s1.all@ == s0.all@ + data
+            &&& forall|f: bool| #[trigger] rfc_uni_stream(s1.all@, f, s1.seen0@) == (s1.emitted@, Some(e))
+        },
+        Ok(None) => {
+            &&& s1.all@ == s0.all@ + data
+            &&& s1.buf@.len() < 8
+            &&& s1.kind is Undetermined || s1.kind is Ignored
+            &&& wf_live(s1)
+            &&& forall|f: bool| #[trigger] rfc_uni_stream(s1.all@, f, s1.seen0@) == (s1.emitted@, None::<u64>)
+        },
+        Ok(Some(i)) => {
+            &&& i <= data.len()
+            &&& s1.all@ == s0.all@ + data.take(i as int)
+            &&& s1.kind is Control || s1.kind is QpackEncoder || s1.kind is QpackDecoder
+            &&& live_s(s1)
+            &&& s1.buf@.len() == 0
+        },
+    }
+}
+
+/// What every path of `determine` starts from: `s0` holds part of a type varint, and `head`, the first `i` bytes of
+/// `data` (as many as fill 8 with it), is pushed after it.
+spec fn det_start(s0: UniStream, data: Seq<u8>, i: nat, head: Seq<u8>) -> bool {
+    &&& s0.kind is Undetermined
+    &&& s0.kind == kind_of_bytes(s0.all@)
+    &&& wf_live(s0)
+    &&& i <= data.len()
+    &&& (i == data.len() || s0.buf@.len() + i == 8)
+    &&& head == data.subrange(0, i as int)
+}
+
+/// The fields `determine` leaves alone, and the new `seen0`.
+spec fn det_frame(s0: UniStream, s1: UniStream, seen0: SeenUni) -> bool {
+    &&& s1.buf.wf()
+    &&& s1.seen0@ == seen0
+    &&& s1.emitted@ == s0.emitted@
+    &&& s1.ctrl == s0.ctrl
+    &&& s1.skip == s0.skip
+    &&& s1.done == s0.done
+}
+
+/// A decoded type varint of `n` bytes from `b = s0.buf + head`: what it says about all of `s0.all + data`.
+proof fn lemma_det_decoded(s0: UniStream, data: Seq<u8>, i: nat, head: Seq<u8>, b: Seq<u8>, n: nat, ty: u64)
+    requires
+        det_start(s0, data, i, head),
+        b == s0.buf@ + head,
+        rfc_varint_decode(b) == Some((n, ty)),
+    ensures
+        s0.buf@.len() < n <= b.len(),
+        rfc_varint_decode(s0.all@ + data) == Some((n, ty)),
+        kind_of_bytes(s0.all@ + data) == rfc_kind_of(ty),
+        forall|x: SeenUni| #[trigger] seen_after(x, s0.all@ + data) == seen_mark(x, ty),
+        b.take(n as int) == s0.all@ + data.take(n - s0.buf@.len()),
+        forall|t: Seq<u8>| #[trigger] rfc_varint_decode(b.take(n as int) + t) == Some((n, ty)),
+        b + data.skip(i as int) == s0.all@ + data,
+{
+    lemma_undetermined_def(s0);
+    let bl = s0.buf@.len();
+    assert(b.take(bl as int) =~= s0.buf@);
+    lemma_decode_take(b, n, ty, bl);
+    assert(b + data.skip(i as int) =~= s0.all@ + data);
+    lemma_decode_prefix(b, data.skip(i as int));
+    assert(b.take(n as int) =~= s0.all@ + data.take(n - bl));
+}
+
+proof fn lemma_det_none(s0: UniStream, s1: UniStream, data: Seq<u8>, i: nat, head: Seq<u8>, seen0: SeenUni, w: nat)
+    requires
+        det_start(s0, data, i, head),
+        det_frame(s0, s1, seen0),
+        s1.kind == s0.kind,
+        s1.buf@ == s0.buf@ + head,
+        rfc_varint_decode(s1.buf@) is None,
+        s1.all@ == s0.all@ + data,
+        w <= 80,
+    ensures
+        determined(s0, s1, data, seen0, seen0, Ok(None), w),
+{
+    lemma_undetermined_def(s0);
+    lemma_undetermined_def(s1);
+    lemma_decode_none_short(s1.buf@);
+    assert(data.subrange(0, i as int) =~= data);
+    lemma_undetermined(s1.buf@, seen0);
+    lemma_empty_events(s0.emitted@);
+}
+
+proof fn lemma_det_err(
+    s0: UniStream,
+    s1: UniStream,
+    data: Seq<u8>,
+    i: nat,
+    head: Seq<u8>,
+    n: nat,
+    ty: u64,
+    seen0: SeenUni,
+    w: nat,
+)
+    requires
+        det_start(s0, data, i, head),
+        det_frame(s0, s1, seen0),
+        rfc_varint_decode(s0.buf@ + head) == Some((n, ty)),
+        s1.kind == rfc_kind_of(ty),
+        ty == STREAM_PUSH || rfc_duplicate(seen0, ty),
+        s1.all@ == s0.all@ + data,
+        w <= 80,
+    ensures
+        determined(s0, s1, data, seen0, seen0, Err(H3_STREAM_CREATION_ERROR), w),
+{
+    lemma_det_decoded(s0, data, i, head, s0.buf@ + head, n, ty);
+    assert(seen_mark(seen0, ty) == seen0);
+    lemma_creation_err(s0.all@ + data, n, ty, seen0);
+    lemma_undetermined_def(s0);
+    lemma_empty_events(s0.emitted@);
+}
+
+proof fn lemma_det_ignored(
+    s0: UniStream,
+    s1: UniStream,
+    data: Seq<u8>,
+    i: nat,
+    head: Seq<u8>,
+    b: Seq<u8>,
+    n: nat,
+    ty: u64,
+    seen0: SeenUni,
+    seen1: SeenUni,
+    w: nat,
+)
+    requires
+        det_start(s0, data, i, head),
+        det_frame(s0, s1, seen0),
+        b == s0.buf@ + head,
+        rfc_varint_decode(b) == Some((n, ty)),
+        s1.kind == rfc_kind_of(ty),
+        s1.kind is Ignored,
+        ty != STREAM_PUSH,
+        !rfc_duplicate(seen0, ty),
+        seen1 == seen_mark(seen0, ty),
+        s1.buf@.len() == 0,
+        s1.all@ == s0.all@ + data,
+        w <= 80,
+    ensures
+        determined(s0, s1, data, seen0, seen1, Ok(None), w),
+{
+    lemma_det_decoded(s0, data, i, head, b, n, ty);
+    lemma_undetermined_def(s0);
+    lemma_empty_events(s0.emitted@);
+    lemma_empty_bytes(s1.buf@);
+    lemma_determined_ignored(b, n, ty, seen0, data.skip(i as int));
+    lemma_ignored_def(s1);
+}
+
+proof fn lemma_det_some(
+    s0: UniStream,
+    s1: UniStream,
+    data: Seq<u8>,
+    i: nat,
+    head: Seq<u8>,
+    b: Seq<u8>,
+    n: nat,
+    ty: u64,
+    seen0: SeenUni,
+    seen1: SeenUni,
+    w: nat,
+)
+    requires
+        det_start(s0, data, i, head),
+        det_frame(s0, s1, seen0),
+        b == s0.buf@ + head,
+        rfc_varint_decode(b) == Some((n, ty)),
+        s1.kind == rfc_kind_of(ty),
+        !(s1.kind is Ignored),
+        ty != STREAM_PUSH,
+        !rfc_duplicate(seen0, ty),
+        seen1 == seen_mark(seen0, ty),
+        s1.buf@.len() == 0,
+        n >= s0.buf@.len(),
+        s1.all@ == s0.all@ + data.take(n - s0.buf@.len()),
+        w <= 80,
+    ensures
+        n - s0.buf@.len() <= i,
+        determined(s0, s1, data, seen0, seen1, Ok(Some((n - s0.buf@.len()) as usize)), w),
+{
+    lemma_det_decoded(s0, data, i, head, b, n, ty);
+    lemma_undetermined_def(s0);
+    lemma_empty_events(s0.emitted@);
+    lemma_determined_live(s1, b.take(n as int), n, ty);
+}
+
+/// What `UniStream::on_data` guarantees, from `s0` (events `e0`, shared `seen0`) to `s1` (`e1`, `seen1`), having fed
+/// `data` and returned `r` at `cost`.
+pub open spec fn fed(
+    s0: UniStream,
+    s1: UniStream,
+    data: Seq<u8>,
+    fin: bool,
+    seen0: SeenUni,
+    seen1: SeenUni,
+    e0: CapVec<UniEvent>,
+    e1: CapVec<UniEvent>,
+    r: Result<(), u64>,
+    cost: nat,
+) -> bool {
+    &&& s1.wf()
+    &&& s1.all() == s0.all() + data
+    &&& s1.done() == (r is Err || fin)
+    &&& !s1.done() ==> s1.buffered() < UNI_BUF_CAP
+    &&& e1.wf()
+    &&& e1.cap() == e0.cap()
+    &&& e1@.len() >= e0@.len()
+    &&& e1@.take(e0@.len() as int) == e0@
+    &&& s1.emitted() == s0.emitted() + views(e1@.skip(e0@.len() as int))
+    &&& rfc_uni_stream(s1.all(), fin, s1.seen_before()) == (s1.emitted(), err_of(r))
+    &&& kind_of_bytes(s0.all()) is Undetermined ==> s1.seen_before() == seen0 && seen1 == seen_after(seen0, s1.all())
+    &&& !(kind_of_bytes(s0.all()) is Undetermined) ==> s1.seen_before() == s0.seen_before() && seen1 == seen0
+    &&& cost <= c_uni() * (data.len() + 16) + c_uni_frame() * s0.buffered()
+    &&& 2 * ev_pairs(views(e1@.skip(e0@.len() as int))) <= data.len() + s0.buffered()
+}
+
+/// `wf` with its parts named (for callers that hide them).
+proof fn lemma_wf_unfold(s: UniStream)
+    requires
+        s.wf(),
+    ensures
+        s.buf.wf(),
+        s.kind == kind_of_bytes(s.all@),
+        !s.done ==> wf_live(s),
+        s.kind is Undetermined <==> rfc_varint_decode(s.all@) is None,
+{
+}
+
+/// A stream whose type has not arrived, marked done for the call: still `wf_live` (split out of `on_data`).
+proof fn lemma_undetermined_done(s0: UniStream, s: UniStream)
+    requires
+        s0.wf(),
+        !s0.done,
+        s0.kind is Undetermined,
+        s == (UniStream { done: true, ..s0 }),
+    ensures
+        wf_live(s),
+        s.kind == kind_of_bytes(s.all@),
+{
+}
+
+/// `on_data` on an ignored stream.
+proof fn lemma_fed_ignored(s0: UniStream, s1: UniStream, data: Seq<u8>, fin: bool, seen0: SeenUni, e0: CapVec<UniEvent>)
+    requires
+        s0.wf(),
+        !s0.done,
+        s0.kind is Ignored,
+        s1 == (UniStream { all: Ghost(s0.all@ + data), done: fin, ..s0 }),
+        e0.wf(),
+    ensures
+        fed(s0, s1, data, fin, seen0, seen0, e0, e0, Ok(()), 1),
+{
+    lemma_ignored_data(s0.all@, s0.seen0@, s0.emitted@, s0.ctrl, s0.skip, s0.buf@, data, fin);
+    lemma_pairs_none(e0@);
+    assert(e0@.take(e0@.len() as int) =~= e0@);
+    assert(views(e0@.skip(e0@.len() as int)) =~= Seq::<SpecUniEvent>::empty());
+    assert(s0.emitted@ + Seq::<SpecUniEvent>::empty() =~= s0.emitted@);
+}
+
+/// `on_data` when the type varint is a push stream or a second critical stream.
+proof fn lemma_fed_det_err(
+    s0: UniStream,
+    s1: UniStream,
+    data: Seq<u8>,
+    fin: bool,
+    seen0: SeenUni,
+    seen1: SeenUni,
+    e0: CapVec<UniEvent>,
+    e: u64,
+    w: nat,
+)
+    requires
+        s0.wf(),
+        !s0.done,
+        s0.kind is Undetermined,
+        s1.done,
+        s1.buf.wf(),
+        s1.seen0@ == seen0,
+        seen1 == seen_after(seen0, s0.all@ + data),
+        s1.emitted@ == s0.emitted@,
+        s1.kind == kind_of_bytes(s0.all@ + data),
+        s1.all@ == s0.all@ + data,
+        forall|f: bool| #[trigger] rfc_uni_stream(s1.all@, f, s1.seen0@) == (s1.emitted@, Some(e)),
+        w <= 80,
+        e0.wf(),
+    ensures
+        fed(s0, s1, data, fin, seen0, seen1, e0, e0, Err(e), w + 1),
+{
+    lemma_pairs_none(e0@);
+    assert(e0@.take(e0@.len() as int) =~= e0@);
+    assert(views(e0@.skip(e0@.len() as int)) =~= Seq::<SpecUniEvent>::empty());
+    assert(s0.emitted@ + Seq::<SpecUniEvent>::empty() =~= s0.emitted@);
+    assert(rfc_uni_stream(s1.all@, fin, s1.seen0@) == (s1.emitted@, Some(e)));
+}
+
+/// `on_data` when the type has not arrived or is unknown: all of `data` consumed, no event.
+proof fn lemma_fed_det_none(
+    s0: UniStream,
+    s1: UniStream,
+    s2: UniStream,
+    data: Seq<u8>,
+    fin: bool,
+    seen0: SeenUni,
+    seen1: SeenUni,
+    e0: CapVec<UniEvent>,
+    w: nat,
+)
+    requires
+        s0.wf(),
+        !s0.done,
+        s0.kind is Undetermined,
+        s1.buf.wf(),
+        s1.seen0@ == seen0,
+        seen1 == seen_after(seen0, s0.all@ + data),
+        s1.emitted@ == s0.emitted@,
+        s1.kind == kind_of_bytes(s0.all@ + data),
+        s1.all@ == s0.all@ + data,
+        s1.buf@.len() < 8,
+        wf_live(s1),
+        forall|f: bool| #[trigger] rfc_uni_stream(s1.all@, f, s1.seen0@) == (s1.emitted@, None::<u64>),
+        s2 == (UniStream { done: fin, ..s1 }),
+        w <= 80,
+        e0.wf(),
+    ensures
+        fed(s0, s2, data, fin, seen0, seen1, e0, e0, Ok(()), w + 1),
+{
+    lemma_set_done(s1, fin);
+    lemma_pairs_none(e0@);
+    assert(e0@.take(e0@.len() as int) =~= e0@);
+    assert(views(e0@.skip(e0@.len() as int)) =~= Seq::<SpecUniEvent>::empty());
+    assert(s0.emitted@ + Seq::<SpecUniEvent>::empty() =~= s0.emitted@);
+    assert(rfc_uni_stream(s1.all@, fin, s1.seen0@) == (s1.emitted@, None::<u64>));
+}
+
+/// `on_data` once the type is known: `consume` fed `data[i..]` from `sm` to `sc`; `s1` is `sc`, live again on `Ok`.
+proof fn lemma_fed_consume(
+    s0: UniStream,
+    sm: UniStream,
+    sc: UniStream,
+    s1: UniStream,
+    data: Seq<u8>,
+    i: nat,
+    rest: Seq<u8>,
+    fin: bool,
+    seen0: SeenUni,
+    seen1: SeenUni,
+    e0: CapVec<UniEvent>,
+    e1: CapVec<UniEvent>,
+    r: Result<(), u64>,
+    wd: nat,
+    wc: nat,
+)
+    requires
+        s0.wf(),
+        !s0.done,
+        !(s0.kind is Ignored),
+        i <= data.len(),
+        sm.all@ == s0.all@ + data.take(i as int),
+        s0.kind is Undetermined ==> {
+            &&& sm.seen0@ == seen0
+            &&& seen1 == seen_after(seen0, s0.all@ + data)
+            &&& sm.emitted@ == s0.emitted@
+            &&& sm.kind == kind_of_bytes(s0.all@ + data)
+            &&& sm.buf@.len() == 0
+            &&& wd <= 80
+        },
+        !(s0.kind is Undetermined) ==> sm == (UniStream { done: true, ..s0 }) && i == 0 && seen1 == seen0 && wd == 0,
+        rest == data.subrange(i as int, data.len() as int),
+        consumed(sm, sc, rest, e0@, e1@, fin, r),
+        wc <= c_uni_frame() * sm.buf@.len() + c_csm() * ((data.len() - i) as nat + 1),
+        2 * ev_pairs(views(e1@.skip(e0@.len() as int))) <= sm.buf@.len() + (data.len() - i),
+        e1.wf(),
+        e1.cap() == e0.cap(),
+        sm.done,
+        s1 == (if r is Ok {
+            UniStream { done: false, ..sc }
+        } else {
+            sc
+        }),
+    ensures
+        fed(s0, s1, data, fin, seen0, seen1, e0, e1, r, wd + wc + 1),
+{
+    hide(rfc_uni_stream);
+    hide(tail_of);
+    assert(data.take(i as int) + rest =~= data);
+    assert(sm.all@ + rest =~= s0.all@ + data);
+    if !(s0.kind is Undetermined) {
+        assert(data.take(0) =~= Seq::<u8>::empty());
+        assert(s0.all@ + Seq::<u8>::empty() =~= s0.all@);
+        lemma_decode_prefix(s0.all@, data);
+    }
+    if r is Ok {
+        lemma_set_done(sc, false);
     }
 }
 
