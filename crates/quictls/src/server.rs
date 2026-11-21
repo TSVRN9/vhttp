@@ -73,7 +73,8 @@ spec fn loads_ok(c: Connection) -> bool {
     forall|k: PacketKind| #[trigger] c.crypto_load(k) <= MAX_CRYPTO_BUFFER + MAX_UDP_PAYLOAD
 }
 
-/// One `CryptoStream::retire`'s cost: a join onto the slot (`avl::join2`, heights at most 126).
+/// One level's discard: the CRYPTO store's retire (a join onto the slot, `avl::join2`, heights at most 126) and the
+/// send context's (`SendStream::retire`, its queue's buffers, `c_sfree()`); a store's retire alone is within it.
 pub open spec fn c_retire() -> nat {
     quic::avl::c_join2() * 127 + 1 + quic::send_stream::c_sfree()
 }
@@ -853,8 +854,8 @@ impl<'a> QuicServer<'a> {
             // The CRYPTO reads handing TLS its bytes (two levels, then the refed 1-RTT one, each linear in `d`), the
             // stash copy (`d + 1`, only when there was no refeed), and the retires of completion and of a close.
             // Excluded: the pipeline half (`pipeline::receive`, `refeed_one_rtt`; Task 10), TLS's own step (D14,
-            // 9b5), `h3.pump` (9b4), and the free of the stash this one replaces (O(1), a `CapVec<u8>`; frees are
-            // outside the ghost cost, cat-C15-semantic-cost, 9b4).
+            // 9b5), `h3.pump` (9b4), and the free of the stash this one replaces (one `CapVec<u8>` buffer, uncharged:
+            // cat-C15-semantic-cost, 9b4).
             cost@ <= 3 * (18 * d.len() + 5608) + 5 * c_retire(),
     {
         hide(spec_on_crypto);
@@ -1110,8 +1111,7 @@ impl<'a> QuicServer<'a> {
             // `B_PUMP` of teardown (`Connection::backlog_step`, `B_PUMP + c_dsome()`), `B_PUMP`
             // CRYPTO bytes read and the completing call's retires, the refed datagram's 1-RTT read, a close's retires.
             // Excluded: the refeed's pipeline half (`refeed_one_rtt`, Task 10d), TLS's own step (D14, 9b5), `h3.pump`
-            // (9b4), and the drop of the refed stash (O(1), a `CapVec<u8>`; frees are outside the ghost cost,
-            // cat-C15-semantic-cost, 9b4).
+            // (9b4), and the drop of the refed stash (one `CapVec<u8>` buffer, uncharged: cat-C15-semantic-cost, 9b4).
             res.0@ <= (B_PUMP + c_dsome()) + (18 * B_PUMP + 5608 + 2 * c_retire()) + (18 * MAX_UDP_PAYLOAD + 5608) + 3
                 * c_retire(),
     {
@@ -1760,8 +1760,8 @@ impl<'a> QuicServer<'a> {
                 <= MAX_CRYPTO_BUFFER + max ==> final(self).conn_spec().crypto_held(level_kind(l)) <= MAX_CRYPTO_BUFFER,
             // The read's cost, linear in `max` (`Connection::crypto_read`), and the retires of the call that completes
             // (`feed_tls`). Excluded: TLS's own step (D14, 9b5), and the buffer's allocation (`CapVec::new(n)`, one
-            // allocator call, no byte written) and free (O(1), a `CapVec<u8>`): allocator calls are outside the ghost
-            // cost (cat-C15-semantic-cost, 9b4).
+            // allocator call, no byte written) and free (one `CapVec<u8>` buffer), both uncharged here
+            // (cat-C15-semantic-cost, 9b4).
             res.1@ <= 18 * max + 5608 + c_done(final(self).conn_spec(), old(self).conn_spec()),
     {
         let lk = kind(l);

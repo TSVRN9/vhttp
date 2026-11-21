@@ -71,7 +71,9 @@ pub const RAND_LEN: usize = 129;
 
 pub const H3_ALPN: [u8; 2] = *b"h3";
 
-/// The work one `pump_backlog` spends per kind of backlog: CRYPTO bytes handed to TLS, teardown-slot frees.
+/// The budget one `pump_backlog` call gives each kind of backlog, each charged at its kind's rate: CRYPTO bytes handed
+/// to TLS, STREAM bytes delivered from the queue's head, that head's send-side teardown slot reaped, and the teardown
+/// slots freed (`backlog_step`: `B_PUMP + c_dsome()` in all).
 pub const B_PUMP: u64 = 4096;
 
 /// `backlog_step`'s STREAM half (`Streams::deliver_some` with `B_PUMP`): the delivery, the reaping of the head's
