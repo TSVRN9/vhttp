@@ -1,5 +1,5 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
-index e83e092..445b656 100644
+index 275a535..fed0fd5 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
 @@ -490,6 +490,8 @@ pub struct QuicServer<'a> {
@@ -29,7 +29,7 @@ index e83e092..445b656 100644
          let ghost c0 = self.h3.conn_spec();
          receive_datagram(self.h3.conn_mut(), d, path, now, &r.conn, &self.keys);
          // The datagram's own bytes, at most: a datagram past `MAX_FEED` opens no packet (`pipeline::receive`).
-@@ -2225,14 +2231,14 @@ impl<'a> QuicServer<'a> {
+@@ -2261,14 +2267,14 @@ impl<'a> QuicServer<'a> {
          ensures
              *final(self) == (QuicServer { init_end: final(self).init_end, init_rx: final(self).init_rx, ..*old(self) }),
              final(self).init_end == old(self).fed_i,

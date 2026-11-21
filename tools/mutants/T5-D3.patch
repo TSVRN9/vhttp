@@ -1,8 +1,8 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
-index e83e092..ca2aab0 100644
+index 275a535..7384d29 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -2074,7 +2074,6 @@ impl<'a> QuicServer<'a> {
+@@ -2110,7 +2110,6 @@ impl<'a> QuicServer<'a> {
              return false;
          }
          if done && self.unconsumed(Level::Handshake, PacketKind::Handshake) {

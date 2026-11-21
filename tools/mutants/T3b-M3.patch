@@ -1,8 +1,8 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
-index e83e092..57ae2f6 100644
+index 275a535..9a7c72c 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -1688,6 +1688,22 @@ impl<'a> QuicServer<'a> {
+@@ -1724,6 +1724,22 @@ impl<'a> QuicServer<'a> {
              self.sync_keys();
              return false;
          }
