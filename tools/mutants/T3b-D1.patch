@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index 967c7ef..976874e 100644
+index 8e9825b..405bd70 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -5637,9 +5637,6 @@ impl Connection {
+@@ -5640,9 +5640,6 @@ impl Connection {
              old(self).phase_spec() is Open && max >= old(self).crypto_contiguous_spec(level) - old(self).crypto_base_spec(
                  level,
              ) ==> final(self).crypto_base_spec(level) == old(self).crypto_contiguous_spec(level),

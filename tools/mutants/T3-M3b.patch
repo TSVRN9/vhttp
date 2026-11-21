@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index 967c7ef..7d52ce5 100644
+index 8e9825b..ab3af19 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -11576,17 +11576,6 @@ impl Connection {
+@@ -11579,17 +11579,6 @@ impl Connection {
      {
          proof {
              reveal(crate::crx::crx_ok);

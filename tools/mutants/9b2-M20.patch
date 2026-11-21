@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index 967c7ef..5af40c5 100644
+index 8e9825b..3d2e664 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -12852,36 +12852,32 @@ fn record_frames(frames: &[Frame]) -> (r: Vec<Frame>)
+@@ -12855,36 +12855,32 @@ fn record_frames(frames: &[Frame]) -> (r: Vec<Frame>)
                  0,
              ),
          forall|j: int|
@@ -44,7 +44,7 @@ index 967c7ef..5af40c5 100644
              let ghost r0 = r@;
              r.push(c);
              proof {
-@@ -12898,7 +12894,7 @@ fn record_frames(frames: &[Frame]) -> (r: Vec<Frame>)
+@@ -12901,7 +12897,7 @@ fn record_frames(frames: &[Frame]) -> (r: Vec<Frame>)
                          assert(r@[i] == r0[i]);
                      }
                  }
@@ -53,7 +53,7 @@ index 967c7ef..5af40c5 100644
                      v,
                      frames@[m]@,
                      0,
-@@ -12911,16 +12907,8 @@ fn record_frames(frames: &[Frame]) -> (r: Vec<Frame>)
+@@ -12914,16 +12910,8 @@ fn record_frames(frames: &[Frame]) -> (r: Vec<Frame>)
                  }
              }
          }
