@@ -3600,19 +3600,38 @@ impl Connection {
             lemma_backlog3(self.crx_i, self.crx_h, self.crx_1);
         }
         if let Err(c) = r {
-            let none: Vec<u8> = Vec::new();
-            proof {
-                assert(none@.take(0) =~= Seq::<u8>::empty());
-            }
-            self.lc.enter_closing(now, pto, false, c, none.as_slice());
-            let ghost cs = *self;
-            self.bury_streams();
-            proof {
-                Connection::lemma_streams_conn(cs, *self);
-            }
+            self.close_crypto_err(c, now, pto);
             return Err(c);
         }
         Ok(())
+    }
+
+    /// `on_crypto_frame`'s close on CRYPTO_BUFFER_EXCEEDED: Closing with that code and no reason, the streams buried
+    /// (split for the rlimit).
+    #[verifier::spinoff_prover]
+    fn close_crypto_err(&mut self, c: u64, now: u64, pto: u64)
+        requires
+            old(self).wf(),
+            old(self).phase_spec() is Open,
+            c == CRYPTO_BUFFER_EXCEEDED,
+            pto == old(self).pto_spec(),
+        ensures
+            final(self).wf(),
+            *final(self) == (Connection { lc: final(self).lc, streams: None, dead: final(self).dead, ..*old(self) }),
+            final(self).phase_spec() is Closing,
+            final(self).close_spec() == Some((false, CRYPTO_BUFFER_EXCEEDED, Seq::<u8>::empty())),
+            final(self).dead_measure() <= old(self).dead_measure() + old(self).streams_measure() + max_entries() + 1,
+    {
+        let none: Vec<u8> = Vec::new();
+        proof {
+            assert(none@.take(0) =~= Seq::<u8>::empty());
+        }
+        self.lc.enter_closing(now, pto, false, c, none.as_slice());
+        let ghost cs = *self;
+        self.bury_streams();
+        proof {
+            Connection::lemma_streams_conn(cs, *self);
+        }
     }
 
     /// One of the nine stream-layer frames. On `Err` the connection is already Closing with
