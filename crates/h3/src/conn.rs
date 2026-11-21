@@ -856,46 +856,6 @@ const ANSWER_421: [u8; 6] = [0x01, 0x04, 0x00, 0x00, 0xFF, 0x06];
 /// the raw 3-byte value "501".
 const ANSWER_501: [u8; 10] = [0x01, 0x08, 0x00, 0x00, 0x5F, 0x09, 0x03, 0x35, 0x30, 0x31];
 
-/// No static entry below `n` is exactly `f`.
-spec fn no_exact_below(n: nat, f: (Seq<u8>, Seq<u8>)) -> bool
-    decreases n,
-{
-    n == 0 || (spec_static_entry((n - 1) as nat) != Some(f) && no_exact_below((n - 1) as nat, f))
-}
-
-/// No static entry below `n` has `name`.
-spec fn no_name_below(n: nat, name: Seq<u8>) -> bool
-    decreases n,
-{
-    n == 0 || (!spec_name_is((n - 1) as nat, name) && no_name_below((n - 1) as nat, name))
-}
-
-#[verifier::spinoff_prover]
-proof fn lemma_no_exact_below(n: nat, f: (Seq<u8>, Seq<u8>))
-    requires
-        no_exact_below(n, f),
-    ensures
-        forall|j: nat| j < n ==> spec_static_entry(j) != Some(f),
-    decreases n,
-{
-    if n > 0 {
-        lemma_no_exact_below((n - 1) as nat, f);
-    }
-}
-
-#[verifier::spinoff_prover]
-proof fn lemma_no_name_below(n: nat, name: Seq<u8>)
-    requires
-        no_name_below(n, name),
-    ensures
-        forall|j: nat| j < n ==> !spec_name_is(j, name),
-    decreases n,
-{
-    if n > 0 {
-        lemma_no_name_below((n - 1) as nat, name);
-    }
-}
-
 /// A zero first byte is the prefix integer 0 in one byte.
 #[verifier::spinoff_prover]
 proof fn lemma_zero_prefix(n: u8, b: Seq<u8>)
@@ -934,31 +894,6 @@ proof fn lemma_one_line_section(l: Seq<u8>, status: u16)
     reveal_with_fuel(rfc_field_lines, 2);
     assert(rfc_field_lines(l) == Some(seq![f] + Seq::<(Seq<u8>, Seq<u8>)>::empty()));
     assert(seq![f] + Seq::<(Seq<u8>, Seq<u8>)>::empty() =~= resp_fields(empty_response(status)));
-}
-
-/// No static entry below 69 is `:status 421` (`find_static`'s first exact match is 69).
-#[verifier::spinoff_prover]
-proof fn lemma_first_421()
-    ensures
-        forall|j: nat| j < 69 ==> spec_static_entry(j) != Some((lit_status(), status_digits(421))),
-{
-    assert(no_exact_below(69, (lit_status(), status_digits(421)))) by (compute_only);
-    lemma_no_exact_below(69, (lit_status(), status_digits(421)));
-}
-
-/// No static entry is `:status 501`, and 24 is the first named `:status` (`find_static` gives `Name(24)`).
-#[verifier::spinoff_prover]
-proof fn lemma_first_501()
-    ensures
-        forall|j: nat| j < STATIC_TABLE_LEN ==> spec_static_entry(j) != Some((lit_status(), status_digits(501))),
-        spec_name_is(24, lit_status()),
-        forall|j: nat| j < 24 ==> !spec_name_is(j, lit_status()),
-{
-    assert(no_exact_below(99, (lit_status(), status_digits(501)))) by (compute_only);
-    lemma_no_exact_below(99, (lit_status(), status_digits(501)));
-    assert(spec_name_is(24, lit_status())) by (compute_only);
-    assert(no_name_below(24, lit_status())) by (compute_only);
-    lemma_no_name_below(24, lit_status());
 }
 
 /// An empty response's section, `:status` and its 3 digits, is 7 + 3 + 32 = 42 bytes.
@@ -1003,30 +938,36 @@ proof fn lemma_entry_69()
     assert(spec_static_entry(69) == Some((lit_status(), status_digits(421)))) by (compute_only);
 }
 
-/// `encode_exact_line`'s bytes for entry 69, `FF 06`, decode to `:status 421`.
+/// Static entry 24 is `:status 103`, so a name reference to it names `:status`.
+#[verifier::spinoff_prover]
+proof fn lemma_entry_24()
+    ensures
+        spec_static_entry(24) == Some((lit_status(), seq![49u8, 48u8, 51u8])),
+{
+    assert(spec_static_entry(24) == Some((lit_status(), seq![49u8, 48u8, 51u8]))) by (compute_only);
+}
+
+/// The indexed line `FF 06` (static entry 69: 63 in the 6-bit prefix, then the continuation 6) decodes to
+/// `:status 421` (RFC 9204 §4.5.2).
 #[verifier::spinoff_prover]
 proof fn lemma_line_421()
     ensures
-        spec_prefix_int_bytes(6, 0xc0, 69) == line_421(),
         line_421().len() == 2,
         rfc_field_line(line_421()) == Some(((lit_status(), status_digits(421)), line_421().len())),
-        spec_static_entry(69) == Some((lit_status(), status_digits(421))),
 {
     hide(spec_static_entry);
     hide(rfc_prefix_int);
     lemma2_to64();
     lemma_entry_69();
-    // 69 in a 6-bit prefix under the indexed-line flags `11`: 63, then the continuation 6.
     assert(0xffu8 >> 2u8 == 63u8) by (bit_vector);
     assert(0xc0u8 | 63u8 == 0xFFu8) by (bit_vector);
-    let l = spec_prefix_int_bytes(6, 0xc0, 69);
-    assert(l =~= line_421());
+    assert(spec_prefix_int_bytes(6, 0xc0, 69) =~= line_421());
     theorem_prefix_int_roundtrip(6, 0xc0, 69);
     assert(0xFFu8 & 0x80u8 != 0u8) by (bit_vector);
     assert(0xFFu8 & 0x40u8 != 0u8) by (bit_vector);
 }
 
-/// `encode_string`'s bytes for the raw value "501", `03 '501'`, decode back to it.
+/// The raw string `03 '501'` (length 3 in the 7-bit prefix, no Huffman) decodes to "501" (RFC 9204 §4.1.2).
 #[verifier::spinoff_prover]
 proof fn lemma_value_501()
     ensures
@@ -1047,11 +988,11 @@ proof fn lemma_value_501()
     assert((3u8 >> 7u8) & 1u8 == 0u8) by (bit_vector);
 }
 
-/// `encode_name_line`'s bytes for entry 24 and the value "501", `5F 09 03 '501'`, decode to `:status 501`.
+/// The literal line `5F 09 03 '501'` (a name reference to static entry 24: 15 in the 4-bit prefix, then the
+/// continuation 9; then the value) decodes to `:status 501` (RFC 9204 §4.5.4).
 #[verifier::spinoff_prover]
 proof fn lemma_line_501()
     ensures
-        spec_prefix_int_bytes(4, 0x50, 24) + spec_prefix_int_bytes(7, 0x00, 3) + status_digits(501) == line_501(),
         line_501().len() == 6,
         rfc_field_line(line_501()) == Some(((lit_status(), status_digits(501)), line_501().len())),
 {
@@ -1059,16 +1000,14 @@ proof fn lemma_line_501()
     hide(rfc_prefix_int);
     hide(rfc_string);
     lemma2_to64();
-    lemma_first_501();
+    lemma_entry_24();
     lemma_value_501();
-    // 24 in a 4-bit prefix under the name-reference flags `0101`: 15, then the continuation 9.
     assert(0xffu8 >> 4u8 == 15u8) by (bit_vector);
     assert(0x50u8 | 15u8 == 0x5Fu8) by (bit_vector);
     let p = spec_prefix_int_bytes(4, 0x50, 24);
     let q = seq![0x03u8, 0x35u8, 0x30u8, 0x31u8];
     assert(p =~= seq![0x5Fu8, 0x09u8]);
     let l = p + q;
-    assert(p + spec_prefix_int_bytes(7, 0x00, 3) + status_digits(501) =~= l);
     theorem_prefix_int_roundtrip(4, 0x50, 24);
     lemma_prefix_int_append(4, p, q);
     assert(l[0] == 0x5Fu8);
@@ -1079,8 +1018,9 @@ proof fn lemma_line_501()
     assert(l =~= line_501());
 }
 
-/// A HEADERS frame of the prefix `00 00` and one `:status` line `l`, under 64 bytes, and no DATA, carries the empty
-/// response: type 1, the length in one byte, the section.
+/// A HEADERS frame (type 1, a one-byte length `n`) of the prefix `00 00` and one `:status` line `l`, and no DATA: its
+/// header parses to `(2, HEADERS, n)`, its section decodes (RFC 9204) to that one line, and it carries the empty
+/// response (`response_wire`).
 #[verifier::spinoff_prover]
 proof fn lemma_short_wire(l: Seq<u8>, n: u8, data: Seq<u8>, status: u16)
     requires
@@ -1089,78 +1029,72 @@ proof fn lemma_short_wire(l: Seq<u8>, n: u8, data: Seq<u8>, status: u16)
         l.len() + 2 == n <= 63,
         data == seq![1u8, n] + (seq![0u8, 0u8] + l),
     ensures
-        data == spec_frame_bytes(FRAME_HEADERS, seq![0u8, 0u8] + l) + body_frames(Seq::empty()),
+        data.len() == 2 + n,
+        rfc_frame_header(data) == Some((2nat, FRAME_HEADERS, n as u64)),
+        rfc_decode_field_section(data.subrange(2, 2 + n)) == Ok::<Fields, u64>(
+            seq![(lit_status(), status_digits(status))],
+        ),
         response_wire(data, empty_response(status)),
 {
+    hide(rfc_field_line);
+    hide(rfc_decode_field_section);
+    hide(response_wire);
     let enc = seq![0u8, 0u8] + l;
     lemma_one_line_section(l, status);
     lemma_serialize_bytes::<true>(FRAME_HEADERS);
     lemma_serialize_bytes::<true>(n as u64);
     assert(spec_frame_bytes(FRAME_HEADERS, enc) + body_frames(Seq::empty()) =~= data);
+    lemma_frame_bytes_roundtrip(FRAME_HEADERS, enc, Seq::empty());
+    assert(spec_frame_bytes(FRAME_HEADERS, enc).add(Seq::empty()) =~= data);
+    assert(data.subrange(2, 2 + n) =~= enc);
+    assert(resp_fields(empty_response(status)) =~= seq![(lit_status(), status_digits(status))]);
     lemma_write_wire(enc, data, empty_response(status));
 }
 
-/// `ANSWER_421` is what `write_response` emits for an empty 421: `encode_field_section` writes the prefix `00 00` and,
-/// `find_static` finding entry 69 the first exact match, `encode_exact_line`'s indexed line; `put_frame` frames it as
-/// HEADERS; no DATA. So it carries the response (`response_wire`), and its section is 42 bytes (`fits_peer`).
+/// What a peer receives as `ANSWER_421`: a HEADERS frame (header `01 04`) whose 4-byte field section decodes, by the
+/// RFC 9204 model, to exactly `[(":status", "421")]`, and no DATA, so it carries the empty 421 (`response_wire`).
 #[verifier::spinoff_prover]
 proof fn lemma_answer_421()
     ensures
-        ANSWER_421@ == spec_frame_bytes(FRAME_HEADERS, seq![0u8, 0u8] + spec_prefix_int_bytes(6, 0xc0, 69))
-            + body_frames(Seq::empty()),
-        spec_static_entry(69) == Some((lit_status(), status_digits(421))),
-        forall|j: nat| j < 69 ==> spec_static_entry(j) != Some((lit_status(), status_digits(421))),
+        ANSWER_421@.len() == 6,
+        rfc_frame_header(ANSWER_421@) == Some((2nat, FRAME_HEADERS, 4u64)),
+        rfc_decode_field_section(ANSWER_421@.subrange(2, 6)) == Ok::<Fields, u64>(
+            seq![(lit_status(), seq![0x34u8, 0x32u8, 0x31u8])],
+        ),
         response_wire(ANSWER_421@, empty_response(421)),
-        fields_size(resp_fields(empty_response(421))) == 42,
 {
-    hide(spec_static_entry);
     hide(rfc_field_line);
     hide(rfc_decode_field_section);
-    hide(spec_prefix_int_bytes);
+    hide(rfc_frame_header);
     hide(response_wire);
-    hide(spec_frame_bytes);
-    hide(body_frames);
     hide(line_421);
-    lemma_first_421();
     lemma_line_421();
-    lemma_status_size(421);
     lemma_answer_bytes();
     lemma_short_wire(line_421(), 4, ANSWER_421@, 421);
+    assert(status_digits(421) =~= seq![0x34u8, 0x32u8, 0x31u8]);
 }
 
-/// `ANSWER_501` is what `write_response` emits for an empty 501: no static entry is `:status 501`, so `find_static`
-/// gives the first entry named `:status`, 24, and `encode_name_line` writes its name reference (`5F 09`) and
-/// `encode_string` the raw value (`03 '501'`) after the prefix `00 00`; framed as HEADERS; no DATA.
+/// What a peer receives as `ANSWER_501`: a HEADERS frame (header `01 08`) whose 8-byte field section decodes, by the
+/// RFC 9204 model, to exactly `[(":status", "501")]`, and no DATA, so it carries the empty 501 (`response_wire`).
 #[verifier::spinoff_prover]
 proof fn lemma_answer_501()
     ensures
-        ANSWER_501@ == spec_frame_bytes(
-            FRAME_HEADERS,
-            seq![0u8, 0u8] + spec_prefix_int_bytes(4, 0x50, 24) + spec_prefix_int_bytes(7, 0x00, 3) + status_digits(
-                501,
-            ),
-        ) + body_frames(Seq::empty()),
-        forall|j: nat| j < STATIC_TABLE_LEN ==> spec_static_entry(j) != Some((lit_status(), status_digits(501))),
-        spec_name_is(24, lit_status()),
-        forall|j: nat| j < 24 ==> !spec_name_is(j, lit_status()),
+        ANSWER_501@.len() == 10,
+        rfc_frame_header(ANSWER_501@) == Some((2nat, FRAME_HEADERS, 8u64)),
+        rfc_decode_field_section(ANSWER_501@.subrange(2, 10)) == Ok::<Fields, u64>(
+            seq![(lit_status(), seq![0x35u8, 0x30u8, 0x31u8])],
+        ),
         response_wire(ANSWER_501@, empty_response(501)),
-        fields_size(resp_fields(empty_response(501))) == 42,
 {
-    hide(spec_static_entry);
     hide(rfc_field_line);
     hide(rfc_decode_field_section);
-    hide(spec_prefix_int_bytes);
+    hide(rfc_frame_header);
     hide(response_wire);
-    hide(spec_frame_bytes);
-    hide(body_frames);
     hide(line_501);
-    lemma_first_501();
     lemma_line_501();
-    lemma_status_size(501);
     lemma_answer_bytes();
     lemma_short_wire(line_501(), 8, ANSWER_501@, 501);
-    assert(seq![0u8, 0u8] + spec_prefix_int_bytes(4, 0x50, 24) + spec_prefix_int_bytes(7, 0x00, 3) + status_digits(501)
-        =~= seq![0u8, 0u8] + line_501());
+    assert(status_digits(501) =~= seq![0x35u8, 0x30u8, 0x31u8]);
 }
 
 /// Writes `r` on `id` with FIN, `:status` first. `false` (nothing written): the field section
@@ -1641,8 +1575,35 @@ fn find_uni(s: &Vec<UniEntry>, id: u64) -> (r: Option<usize>)
 
 /// The outputs one input call (`on_stream_data`, `on_stream_reset`, `on_stop_sending`) adds at most: on a request
 /// stream, one per event (at most `MAX_REQ_EVENTS`), then an answer's write and STOP_SENDING in place of its event, or
-/// a stream error's reset and STOP_SENDING (`feed_req`); a close or a reset elsewhere is one.
+/// a stream error's reset and STOP_SENDING (`feed_req`); a close or a reset elsewhere is one. `MAX_REQ_EVENTS + 2`,
+/// proved sufficient by the entry points' ensures (5 fails `feed_req`'s).
 pub const MAX_OUTS: usize = 6;
+
+/// The answer frame for `status`, `ANSWER_421` or `ANSWER_501`, copied into an exact buffer: one allocation and its
+/// at most 10 bytes.
+fn answer_frame(status: u16) -> (r: (Vec<u8>, Ghost<nat>))
+    requires
+        status == 501 || status == 421,
+    ensures
+        response_wire(r.0@, empty_response(status)),
+        r.1@ <= 11,
+{
+    if status == 421 {
+        let mut d: CapVec<u8> = CapVec::new(6);
+        let Ghost(c) = d.push_slice(&ANSWER_421);
+        proof {
+            lemma_answer_421();
+        }
+        (d.into_vec(), Ghost(1 + c))
+    } else {
+        let mut d: CapVec<u8> = CapVec::new(10);
+        let Ghost(c) = d.push_slice(&ANSWER_501);
+        proof {
+            lemma_answer_501();
+        }
+        (d.into_vec(), Ghost(1 + c))
+    }
+}
 
 /// Answers the request on `e` itself with an empty `status` response (rejecting it if the
 /// peer's limit doesn't admit that) and stops processing it.
@@ -1673,13 +1634,13 @@ fn answer(e: &mut ReqEntry, status: u16, fin: bool, peer: Option<u64>, out: &mut
         !final(e).rx_open && !final(e).send_open,
         final(e).fin_seen == (old(e).fin_seen || fin),
 {
+    hide(response_wire);
     let ghost o0 = out@;
     // One unit per output pushed (at most 2), and the limit comparison.
     let ghost mut work: nat = 3;
     proof {
         lemma_added_refl(o0);
-        lemma_answer_421();
-        lemma_answer_501();
+        lemma_status_size(status);
     }
     if e.send_open {
         //= https://www.rfc-editor.org/rfc/rfc9114#section-4.2.2
@@ -1687,25 +1648,17 @@ fn answer(e: &mut ReqEntry, status: u16, fin: bool, peer: Option<u64>, out: &mut
         //# has received this parameter SHOULD NOT send an HTTP message header
         //# that exceeds the indicated size, as the peer will likely refuse to
         //# process it.
-        // The section is `:status` and 3 digits: 7 + 3 + 32 = 42 (`lemma_answer_*`).
+        // The section is `:status` and 3 digits: 7 + 3 + 32 = 42 (`lemma_status_size`).
         let fits = match peer {
             None => true,
             Some(l) => 42 <= l,
         };
         if fits {
-            let mut d: CapVec<u8> = CapVec::new(if status == 421 { 6 } else { 10 });
-            if status == 421 {
-                let Ghost(c) = d.push_slice(&ANSWER_421);
-                proof {
-                    work = work + 1 + c;
-                }
-            } else {
-                let Ghost(c) = d.push_slice(&ANSWER_501);
-                proof {
-                    work = work + 1 + c;
-                }
+            let (data, Ghost(cf)) = answer_frame(status);
+            proof {
+                work = work + cf;
             }
-            let w = Output::StreamWrite { stream_id: e.id, data: d.into_vec(), fin: true };
+            let w = Output::StreamWrite { stream_id: e.id, data, fin: true };
             out.push(w);
             proof {
                 lemma_one_write(o0, out@, w, e.id, empty_response(status));
@@ -1729,8 +1682,8 @@ fn answer(e: &mut ReqEntry, status: u16, fin: bool, peer: Option<u64>, out: &mut
     Ghost(work)
 }
 
-/// `answer`'s cost: the limit comparison, at most 2 outputs, and the 421's or 501's buffer, one allocation and its
-/// at most 10 bytes.
+/// `answer`'s cost: the limit comparison, at most 2 outputs, and `answer_frame`'s buffer, one allocation and its at
+/// most 10 bytes.
 #[verifier::inline]
 spec fn c_ans() -> nat {
     14
@@ -2169,13 +2122,14 @@ proof fn lemma_lines_suffix(s: Seq<SpecReqEvent>, k: int)
     assert(s.take(k) + s.skip(k) =~= s);
 }
 
-/// `deliver`'s cost on an answered return at event `k`: the work so far, `extra` (the scheme check, the answer and the
-/// reversed buffer's free) and the events it drops stay within its bound.
+/// `deliver`'s cost on an answered return at event `k`: the work so far, `extra` (the event's step, the scheme check,
+/// the answer and the reversed buffer's free) and the events it drops stay within its bound. The lower bound on
+/// `extra` is the catch for an early return that drops its iteration's step or a free (RCA 2026-11-21-early-return-cost).
 proof fn lemma_answered_cost(ev: Seq<SpecReqEvent>, k: int, work: nat, extra: nat)
     requires
         0 <= k < ev.len(),
         work <= ev.len() + 2 + 31 * k,
-        extra <= 20 + c_ans() + 1,
+        c_step() + 1 <= extra <= c_step() + 20 + c_ans() + 1,
     ensures
         work + extra + frees(ev.skip(k)) <= c_dlv() * (ev.len() + 1) + 2 * request::ev_lines(ev),
 {
@@ -2345,7 +2299,22 @@ fn deliver(
             assert(x@ == ev[k as int]);
             assert(request::body_nonempty(x));
         }
-        // The status the connection answers this event with itself (D10), 0 for none.
+        // The status the connection answers this event with itself (D10), 0 for none: 501 for a CONNECT, which we do
+        // not implement, and 421 for a scheme other than http/https, for which we are not an origin.
+        //= https://www.rfc-editor.org/rfc/rfc9110#section-9.1
+        //# An origin server that receives a
+        //# request method that is unrecognized or not implemented SHOULD respond
+        //# with the 501 (Not Implemented) status code.
+        //= https://www.rfc-editor.org/rfc/rfc9110#section-15.5.20
+        //# An origin server (or
+        //# gateway acting on behalf of the origin server) sends 421 to reject a
+        //# target URI that does not match an origin for which the server has
+        //# been configured (Section 4.3.1) or does not match the connection
+        //# context over which the request was received (Section 7.4).
+        //= https://www.rfc-editor.org/rfc/rfc9110#section-7.4
+        //# Unless the connection is from a trusted gateway, an origin server
+        //# MUST reject a request if any scheme-specific requirements for the
+        //# target URI are not met.
         let ghost mut cs: nat = 0;
         let status: u16 = match &x {
             ReqEvent::Head(RequestHead::Connect { .. }) => 501,
@@ -2364,12 +2333,15 @@ fn deliver(
         };
         if status != 0 {
             let Ghost(ca) = answer(e, status, fin, peer, out);
+            // This event's step, as at the loop's end, its scheme check and answer, and the reversed buffer's free (1);
+            // `lemma_answered_cost` requires the step and the free to be in it. The answered event and those after it
+            // are dropped here.
+            let ghost extra: nat = c_step() + cs + ca + 1;
             proof {
                 lemma_answered_ret(id, ev, k as int, tr, tr0, err, cx, status, o0, o1, out@);
-                lemma_answered_cost(ev, k as int, work, cs + ca + 1);
+                lemma_answered_cost(ev, k as int, work, extra);
             }
-            // The reversed buffer (1), the answered event and those after it are dropped here.
-            return (true, Ghost(work + cs + ca + 1 + frees(ev.skip(k as int))));
+            return (true, Ghost(work + extra + frees(ev.skip(k as int))));
         }
         match x {
             ReqEvent::Head(RequestHead::Connect { .. }) => {
@@ -2445,9 +2417,8 @@ fn deliver(
         }
         k += 1;
         proof {
-            // the pop, the output push and the event's move (a request head's scheme and method checks are charged
-            // above, at most 20 + 5)
-            work = work + 6;
+            // a request head's scheme and method checks are charged above, at most 20 + 5
+            work = work + c_step();
         }
     }
     proof {
@@ -2457,12 +2428,19 @@ fn deliver(
     (false, Ghost(work + 1))
 }
 
-/// The cost constant of `deliver`, per event: at most 31 (an `http` scheme check 20, a HEAD method check 5, an output 6) and
-/// one for the reversal; the reversal's allocation and the two frees fit the constant term. On an answered return
-/// the dropped events (`frees`, at most 5 each plus 2 per field line) add `2·ev_lines(ev)` to the bound.
+/// The cost constant of `deliver`, per event: at most 31 (an `http` scheme check 20, a HEAD method check 5, the step
+/// `c_step` 6) and one for the reversal; the reversal's allocation and the two frees fit the constant term. On an
+/// answered return the dropped events (`frees`, at most 5 each plus 2 per field line) add `2·ev_lines(ev)` to the bound.
 #[verifier::inline]
 spec fn c_dlv() -> nat {
     32
+}
+
+/// `deliver`'s step per event, wherever the event's iteration ends (the loop's end or an answered return): the pop,
+/// the output push and the event's move. One name for both paths, so an early return cannot drop part of it.
+#[verifier::inline]
+spec fn c_step() -> nat {
+    6
 }
 
 /// Outputs what the request machine's error means (`err_outs`); `true` for a connection error.
