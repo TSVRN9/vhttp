@@ -1,8 +1,8 @@
 //! A fixed-capacity FIFO of stream ids (9b2 D13): the receiving parts with STREAM bytes or a FIN
 //! left to deliver and the sending parts with a non-empty teardown slot (D10 (e)), so `backlog_step`
-//! pops one without scanning the streams. `IDQ_CAP` slots in
-//! one exact `CapVec`, filled on first use and then reused in a ring; push and pop are O(1).
-use byteq::capvec::CapVec;
+//! pops one without scanning the streams. `IDQ_CAP` slots in an inline array used as a ring: the queue allocates
+//! nothing (9b2 Task 10d item 6: the `CapVec` it held was allocated, uncounted, when the transport parameters made the
+//! streams); push and pop are O(1).
 use vstd::prelude::*;
 
 verus! {
@@ -13,7 +13,7 @@ verus! {
 pub const IDQ_CAP: usize = 203;
 
 pub struct IdQueue {
-    q: CapVec<u64>,
+    q: [u64; IDQ_CAP],
     head: usize,
     len: usize,
 }
@@ -33,13 +33,8 @@ impl IdQueue {
     }
 
     pub closed spec fn wf(&self) -> bool {
-        &&& self.q.wf()
-        &&& self.q.cap() == IDQ_CAP
-        &&& self.q@.len() <= IDQ_CAP
         &&& self.len <= IDQ_CAP
         &&& self.head < IDQ_CAP
-        // Until every slot was used once, the queue sits in `[head, head + len)` with nothing past it.
-        &&& self.q@.len() < IDQ_CAP ==> self.head + self.len == self.q@.len()
     }
 
     pub proof fn lemma_len(&self)
@@ -50,13 +45,13 @@ impl IdQueue {
     {
     }
 
-    /// An empty queue; its slots are allocated here, once per connection.
+    /// An empty queue; its slots are inline, so nothing is allocated.
     pub fn new() -> (r: IdQueue)
         ensures
             r.wf(),
             r@ == Seq::<u64>::empty(),
     {
-        let r = IdQueue { q: CapVec::new(IDQ_CAP), head: 0, len: 0 };
+        let r = IdQueue { q: [0u64; IDQ_CAP], head: 0, len: 0 };
         proof {
             assert(r@ =~= Seq::<u64>::empty());
         }
@@ -87,11 +82,7 @@ impl IdQueue {
         } else {
             self.head + self.len
         };
-        if t < self.q.len() {
-            self.q.set(t, id);
-        } else {
-            self.q.push(id);
-        }
+        self.q.set(t, id);
         self.len = self.len + 1;
         proof {
             assert(self@ =~= old(self)@.push(id));
@@ -109,7 +100,7 @@ impl IdQueue {
         if self.len == 0 {
             None
         } else {
-            Some(*self.q.index(self.head))
+            Some(self.q[self.head])
         }
     }
 
@@ -125,7 +116,7 @@ impl IdQueue {
         if self.len == 0 {
             return None;
         }
-        let id = *self.q.index(self.head);
+        let id = self.q[self.head];
         self.head = if self.head + 1 >= IDQ_CAP {
             0
         } else {

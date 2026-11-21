@@ -8,6 +8,8 @@ use quic::crypto_stream::CryptoStream;
 use quic::CapVec;
 use quic::recv_stream::{RecvStream, StreamEvent};
 use quic::send_stream::{SendState, SendStream};
+use quic::streams::Streams;
+use quic::tp::default_transport_params;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
@@ -550,4 +552,19 @@ fn reset_allocates_nothing() {
         });
         assert!(m[2] == 0 && m[0] < m[1], "reap: [allocs, frees, reallocs, bytes] {m:?}");
     }
+}
+
+/// 9b2 Task 10d item 6 (Task 10 review M2): the streams a connection makes when the client's transport parameters arrive
+/// (`Streams::new`, from `on_peer_params` inside `feed`) allocate nothing, and dropping them frees nothing: the stream-id
+/// queue's slots are inline, so no allocation of that path sits outside a ghost cost.
+#[test]
+fn streams_new_allocates_nothing() {
+    let (l, p) = (default_transport_params(), default_transport_params());
+    let k0 = K.with(|k| k.get());
+    let s = Streams::new(&l, &p);
+    let k1 = K.with(|k| k.get());
+    drop(s);
+    let k2 = K.with(|k| k.get());
+    assert_eq!([k1[0] - k0[0], k1[1] - k0[1], k1[2] - k0[2]], [0, 0, 0], "Streams::new: [alloc, alloc_zeroed, realloc]");
+    assert_eq!(k2[3] - k1[3], 0, "dropping fresh streams freed");
 }
