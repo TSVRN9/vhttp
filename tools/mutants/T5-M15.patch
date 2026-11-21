@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index 8e9825b..af9d7fd 100644
+index 136488d..abbe8c7 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -5630,12 +5630,19 @@ impl Connection {
+@@ -5629,12 +5629,19 @@ impl Connection {
              final(self).wf(),
              final(self).settled(),
              final(out).wf(),
@@ -25,7 +25,7 @@ index 8e9825b..af9d7fd 100644
              // A read of at least the unread bytes drains the level.
              old(self).phase_spec() is Open && max >= old(self).crypto_contiguous_spec(level) - old(self).crypto_base_spec(
                  level,
-@@ -5650,8 +5657,12 @@ impl Connection {
+@@ -5649,8 +5656,12 @@ impl Connection {
              !(old(self).phase_spec() is Open) ==> final(out)@.len() == 0,
              final(self).phase_spec() == old(self).phase_spec(),
              drained_kept(*final(self), *old(self)),
@@ -40,7 +40,7 @@ index 8e9825b..af9d7fd 100644
              // The cost: linear in the bytes it may take (`CryptoStream::read`).
              r@ <= 18 * crypto_read_len(*old(self), level, max) + 5608,
      {
-@@ -5666,6 +5677,12 @@ impl Connection {
+@@ -5665,6 +5676,12 @@ impl Connection {
          proof {
              reveal(Connection::same_streams);
          }
