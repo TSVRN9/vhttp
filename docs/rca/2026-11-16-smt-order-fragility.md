@@ -34,6 +34,14 @@ crate.
   4. Earlier instances of the same class are in `catalog.md` under C11: 4c T1 (`tls` `build_flight` 11.65M to 16.5M
      when an import added vest_lib's broadcast lemmas) and 9a pre I2 (`Reassembly::insert` 6.85M to 11.54M with no
      edit to it).
+  5. 9b3 Task 8: two new proof fns (`lemma_encoder_stream_err`, `lemma_decoder_stream_err`) added beside the unchanged
+     `qpack::instructions::lemma_encoder_stream_split` sent it to 10,077,156 at seed 0 (crate max before: 6,442,976 over
+     5 seeds), and the unchanged-text `uni::UniStream::on_data` measured 10,498,662 in the same crate run. Fixed at the
+     source, not by placement: the two split lemmas `hide(rfc_prefix_int)` (they use it only through
+     `lemma_prefix_int_*`), which took them to at most 879,604 on every seed, and the new lemmas stay beside them. In
+     the same task `uni::UniStream::determine` spread 1.54M-4.19M over seeds 0-4 (2.7x); its fix round moved its
+     sequence reasoning into per-path lemmas behind an opaque `determined` predicate (1.58M-1.77M, 1.12x), and
+     `on_data` likewise behind `fed` (2.32M-2.37M).
 - **Escape**: the rlimit gate (`scripts/rlimit-gate.sh`, `tools/rl.py --gate`) and the ceilings ratchet
   (`scripts/rlimit-ceilings.sh`) measure one run under Z3's default seed. A number from one run says nothing about the
   margin: a proof can pass at 7.9M on that path and fail on the next. The ceilings file even recorded fns above the
@@ -66,9 +74,11 @@ crate.
   - h3's ceiling lines are all deleted: every fn is now below 8,000,000 under every seed.
   - Residual (owner 9b4): the gate runs on h3 only. Every other crate is still measured on one path; 9b4 extends
     `rlimit-seeds.sh` to every crate (and carries tls `build_flight` and the crypto/ctcore ceilings into it).
-    Seeds are a sample, not a proof of robustness: 5 seeds bound the cost of the gate (about 2 minutes for h3). The
-    thinnest h3 margin is the untouched `qpack::huffman::lemma_unique_bits`, which spreads from 3.77M to 6.43M across
-    seeds 0-4 (1.7x); the next restructuring of h3's proofs should start there.
+    Seeds are a sample, not a proof of robustness: 5 seeds bound the cost of the gate (about 2 minutes for h3). At
+    9b3 Task 8's fix round (5 seeds): the h3 maximum is `conn::H3Conn::request_data` at 5,309,193 (text unchanged since
+    9b3 Task 1); the widest spreads among fns above 2,000,000 are the untouched `conn::H3Conn::lemma_step_trans`
+    (0.49M-3.10M, 6.3x) and `qpack::field_section::lemma_name_out` (0.48M-2.40M, 5.0x), then `conn::H3Conn::uni_data`
+    (2.24M-4.51M, 2.0x, rewritten by 9b3 Task 11). The next restructuring of h3's proofs should start with those.
 - **Evidence**:
   - Gate demos (`scripts/gate-demos.sh`): "rlimit-seeds: passes seed 0, FAIL row under seed 1", "rlimit-seeds: over
     the cap under seed 1 only", "rlimit-seeds: over its ceiling line", "rlimit-seeds: a malformed ceilings line",
