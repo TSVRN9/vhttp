@@ -883,7 +883,7 @@ impl H3Server {
         let ghost e_view = e@;
         let ghost e0 = self.emitted@;
         let ghost a0 = app@;
-        let mut outs: Vec<Output> = Vec::new();
+        let mut outs: byteq::capvec::CapVec<Output> = byteq::capvec::CapVec::new(MAX_OUTS);
         let ghost o0 = outs@;
         let mut aborted: Option<u64> = None;
         match e {
@@ -911,7 +911,7 @@ impl H3Server {
             assert(s1.skip(0) =~= s1);
             assert(added(o0, o1) =~= outs_view(s1));
         }
-        self.apply(outs, app);
+        self.apply(outs.into_vec(), app);
         // E7: every peer reset of a request stream. Over-reporting after a completed request is harmless.
         if let Some(id) = aborted {
             let ghost a1 = app@;

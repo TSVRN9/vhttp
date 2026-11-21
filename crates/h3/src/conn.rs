@@ -21,6 +21,8 @@
 //!   knows it delivered `on_stream_reset`, and tells the application that any `RequestBody`
 //!   stream for that request has been aborted.
 use vstd::prelude::*;
+#[allow(unused_imports)]
+use vstd::arithmetic::power2::*;
 use vstd::slice::slice_to_vec;
 use wire::varint::VARINT_MAX;
 #[allow(unused_imports)]
@@ -36,7 +38,9 @@ use byteq::capvec::CapVec;
 use crate::uni::{SeenUni, SpecUniEvent, UniEvent, UniKind, UniStream};
 // Used only in ghost code, which a plain `cargo build` erases.
 #[allow(unused_imports)]
-use crate::qpack::int::PREFIX_INT_MAX;
+use crate::qpack::int::*;
+#[allow(unused_imports)]
+use crate::qpack::static_table::*;
 #[allow(unused_imports)]
 use crate::{request, uni};
 
@@ -845,6 +849,320 @@ proof fn lemma_one_write(o0: Seq<Output>, out: Seq<Output>, w: Output, id: u64, 
     assert(added(o0, out) =~= seq![w@]);
 }
 
+/// The input path's 421 (D10): HEADERS, the section prefix `00 00`, then `:status 421` as an indexed line of static
+/// entry 69 (`FF 06`).
+const ANSWER_421: [u8; 6] = [0x01, 0x04, 0x00, 0x00, 0xFF, 0x06];
+/// The input path's 501 (D10): HEADERS, `00 00`, then a literal line naming static entry 24 (`:status`, `5F 09`) with
+/// the raw 3-byte value "501".
+const ANSWER_501: [u8; 10] = [0x01, 0x08, 0x00, 0x00, 0x5F, 0x09, 0x03, 0x35, 0x30, 0x31];
+
+/// No static entry below `n` is exactly `f`.
+spec fn no_exact_below(n: nat, f: (Seq<u8>, Seq<u8>)) -> bool
+    decreases n,
+{
+    n == 0 || (spec_static_entry((n - 1) as nat) != Some(f) && no_exact_below((n - 1) as nat, f))
+}
+
+/// No static entry below `n` has `name`.
+spec fn no_name_below(n: nat, name: Seq<u8>) -> bool
+    decreases n,
+{
+    n == 0 || (!spec_name_is((n - 1) as nat, name) && no_name_below((n - 1) as nat, name))
+}
+
+#[verifier::spinoff_prover]
+proof fn lemma_no_exact_below(n: nat, f: (Seq<u8>, Seq<u8>))
+    requires
+        no_exact_below(n, f),
+    ensures
+        forall|j: nat| j < n ==> spec_static_entry(j) != Some(f),
+    decreases n,
+{
+    if n > 0 {
+        lemma_no_exact_below((n - 1) as nat, f);
+    }
+}
+
+#[verifier::spinoff_prover]
+proof fn lemma_no_name_below(n: nat, name: Seq<u8>)
+    requires
+        no_name_below(n, name),
+    ensures
+        forall|j: nat| j < n ==> !spec_name_is(j, name),
+    decreases n,
+{
+    if n > 0 {
+        lemma_no_name_below((n - 1) as nat, name);
+    }
+}
+
+/// A zero first byte is the prefix integer 0 in one byte.
+#[verifier::spinoff_prover]
+proof fn lemma_zero_prefix(n: u8, b: Seq<u8>)
+    requires
+        7 <= n <= 8,
+        b.len() > 0,
+        b[0] == 0u8,
+    ensures
+        rfc_prefix_int(n, b) == (PrefixIntSpec::Value { value: 0, consumed: 1 }),
+{
+    lemma2_to64();
+}
+
+/// The prefix `00 00` (Required Insert Count 0, Base 0) then one line `l` of `:status` decodes to an empty response's
+/// fields.
+#[verifier::spinoff_prover]
+proof fn lemma_one_line_section(l: Seq<u8>, status: u16)
+    requires
+        l.len() > 0,
+        rfc_field_line(l) == Some(((lit_status(), status_digits(status)), l.len())),
+    ensures
+        rfc_decode_field_section(seq![0u8, 0u8] + l) == Ok::<Fields, u64>(resp_fields(empty_response(status))),
+{
+    hide(rfc_field_line);
+    hide(rfc_prefix_int);
+    let f = (lit_status(), status_digits(status));
+    let b = seq![0u8, 0u8] + l;
+    let rest = b.skip(1);
+    assert(b[0] == 0u8);
+    assert(rest[0] == 0u8);
+    assert(rest.skip(1) =~= l);
+    lemma_zero_prefix(8, b);
+    lemma_zero_prefix(7, rest);
+    assert(0u8 & 0x80u8 == 0u8) by (bit_vector);
+    assert(l.skip(l.len() as int) =~= Seq::<u8>::empty());
+    reveal_with_fuel(rfc_field_lines, 2);
+    assert(rfc_field_lines(l) == Some(seq![f] + Seq::<(Seq<u8>, Seq<u8>)>::empty()));
+    assert(seq![f] + Seq::<(Seq<u8>, Seq<u8>)>::empty() =~= resp_fields(empty_response(status)));
+}
+
+/// No static entry below 69 is `:status 421` (`find_static`'s first exact match is 69).
+#[verifier::spinoff_prover]
+proof fn lemma_first_421()
+    ensures
+        forall|j: nat| j < 69 ==> spec_static_entry(j) != Some((lit_status(), status_digits(421))),
+{
+    assert(no_exact_below(69, (lit_status(), status_digits(421)))) by (compute_only);
+    lemma_no_exact_below(69, (lit_status(), status_digits(421)));
+}
+
+/// No static entry is `:status 501`, and 24 is the first named `:status` (`find_static` gives `Name(24)`).
+#[verifier::spinoff_prover]
+proof fn lemma_first_501()
+    ensures
+        forall|j: nat| j < STATIC_TABLE_LEN ==> spec_static_entry(j) != Some((lit_status(), status_digits(501))),
+        spec_name_is(24, lit_status()),
+        forall|j: nat| j < 24 ==> !spec_name_is(j, lit_status()),
+{
+    assert(no_exact_below(99, (lit_status(), status_digits(501)))) by (compute_only);
+    lemma_no_exact_below(99, (lit_status(), status_digits(501)));
+    assert(spec_name_is(24, lit_status())) by (compute_only);
+    assert(no_name_below(24, lit_status())) by (compute_only);
+    lemma_no_name_below(24, lit_status());
+}
+
+/// An empty response's section, `:status` and its 3 digits, is 7 + 3 + 32 = 42 bytes.
+#[verifier::spinoff_prover]
+proof fn lemma_status_size(status: u16)
+    ensures
+        fields_size(resp_fields(empty_response(status))) == 42,
+{
+    let r = resp_fields(empty_response(status));
+    assert(r =~= seq![(lit_status(), status_digits(status))]);
+    assert(r.drop_last() =~= Seq::<(Seq<u8>, Seq<u8>)>::empty());
+    reveal_with_fuel(fields_size, 2);
+}
+
+/// The indexed line of static entry 69.
+spec fn line_421() -> Seq<u8> {
+    seq![0xFFu8, 0x06u8]
+}
+
+/// The literal line naming static entry 24 with the raw value "501".
+spec fn line_501() -> Seq<u8> {
+    seq![0x5Fu8, 0x09u8, 0x03u8, 0x35u8, 0x30u8, 0x31u8]
+}
+
+/// `ANSWER_421` and `ANSWER_501` are HEADERS frames (type 1, a one-byte length) of the prefix `00 00` and the line.
+#[verifier::spinoff_prover]
+proof fn lemma_answer_bytes()
+    ensures
+        ANSWER_421@ == seq![1u8, 4u8] + (seq![0u8, 0u8] + line_421()),
+        ANSWER_501@ == seq![1u8, 8u8] + (seq![0u8, 0u8] + line_501()),
+{
+    assert(ANSWER_421@ =~= seq![1u8, 4u8] + (seq![0u8, 0u8] + line_421()));
+    assert(ANSWER_501@ =~= seq![1u8, 8u8] + (seq![0u8, 0u8] + line_501()));
+}
+
+/// Static entry 69 is `:status 421`.
+#[verifier::spinoff_prover]
+proof fn lemma_entry_69()
+    ensures
+        spec_static_entry(69) == Some((lit_status(), status_digits(421))),
+{
+    assert(spec_static_entry(69) == Some((lit_status(), status_digits(421)))) by (compute_only);
+}
+
+/// `encode_exact_line`'s bytes for entry 69, `FF 06`, decode to `:status 421`.
+#[verifier::spinoff_prover]
+proof fn lemma_line_421()
+    ensures
+        spec_prefix_int_bytes(6, 0xc0, 69) == line_421(),
+        line_421().len() == 2,
+        rfc_field_line(line_421()) == Some(((lit_status(), status_digits(421)), line_421().len())),
+        spec_static_entry(69) == Some((lit_status(), status_digits(421))),
+{
+    hide(spec_static_entry);
+    hide(rfc_prefix_int);
+    lemma2_to64();
+    lemma_entry_69();
+    // 69 in a 6-bit prefix under the indexed-line flags `11`: 63, then the continuation 6.
+    assert(0xffu8 >> 2u8 == 63u8) by (bit_vector);
+    assert(0xc0u8 | 63u8 == 0xFFu8) by (bit_vector);
+    let l = spec_prefix_int_bytes(6, 0xc0, 69);
+    assert(l =~= line_421());
+    theorem_prefix_int_roundtrip(6, 0xc0, 69);
+    assert(0xFFu8 & 0x80u8 != 0u8) by (bit_vector);
+    assert(0xFFu8 & 0x40u8 != 0u8) by (bit_vector);
+}
+
+/// `encode_string`'s bytes for the raw value "501", `03 '501'`, decode back to it.
+#[verifier::spinoff_prover]
+proof fn lemma_value_501()
+    ensures
+        spec_prefix_int_bytes(7, 0x00, 3) + status_digits(501) == seq![0x03u8, 0x35u8, 0x30u8, 0x31u8],
+        rfc_string(7, seq![0x03u8, 0x35u8, 0x30u8, 0x31u8]) == Some((status_digits(501), 4nat)),
+{
+    hide(rfc_prefix_int);
+    lemma2_to64();
+    let v = status_digits(501);
+    assert(v =~= seq![53u8, 48u8, 49u8]);
+    assert(0xffu8 >> 1u8 == 127u8) by (bit_vector);
+    assert(0x00u8 | 3u8 == 0x03u8) by (bit_vector);
+    let q = spec_prefix_int_bytes(7, 0x00, 3) + v;
+    assert(q =~= seq![0x03u8, 0x35u8, 0x30u8, 0x31u8]);
+    theorem_prefix_int_roundtrip(7, 0x00, 3);
+    lemma_prefix_int_append(7, spec_prefix_int_bytes(7, 0x00, 3), v);
+    assert(q.subrange(1, 4) =~= v);
+    assert((3u8 >> 7u8) & 1u8 == 0u8) by (bit_vector);
+}
+
+/// `encode_name_line`'s bytes for entry 24 and the value "501", `5F 09 03 '501'`, decode to `:status 501`.
+#[verifier::spinoff_prover]
+proof fn lemma_line_501()
+    ensures
+        spec_prefix_int_bytes(4, 0x50, 24) + spec_prefix_int_bytes(7, 0x00, 3) + status_digits(501) == line_501(),
+        line_501().len() == 6,
+        rfc_field_line(line_501()) == Some(((lit_status(), status_digits(501)), line_501().len())),
+{
+    hide(spec_static_entry);
+    hide(rfc_prefix_int);
+    hide(rfc_string);
+    lemma2_to64();
+    lemma_first_501();
+    lemma_value_501();
+    // 24 in a 4-bit prefix under the name-reference flags `0101`: 15, then the continuation 9.
+    assert(0xffu8 >> 4u8 == 15u8) by (bit_vector);
+    assert(0x50u8 | 15u8 == 0x5Fu8) by (bit_vector);
+    let p = spec_prefix_int_bytes(4, 0x50, 24);
+    let q = seq![0x03u8, 0x35u8, 0x30u8, 0x31u8];
+    assert(p =~= seq![0x5Fu8, 0x09u8]);
+    let l = p + q;
+    assert(p + spec_prefix_int_bytes(7, 0x00, 3) + status_digits(501) =~= l);
+    theorem_prefix_int_roundtrip(4, 0x50, 24);
+    lemma_prefix_int_append(4, p, q);
+    assert(l[0] == 0x5Fu8);
+    assert(l.skip(2) =~= q);
+    assert(0x5Fu8 & 0x80u8 == 0u8) by (bit_vector);
+    assert(0x5Fu8 & 0x40u8 != 0u8) by (bit_vector);
+    assert(0x5Fu8 & 0x10u8 != 0u8) by (bit_vector);
+    assert(l =~= line_501());
+}
+
+/// A HEADERS frame of the prefix `00 00` and one `:status` line `l`, under 64 bytes, and no DATA, carries the empty
+/// response: type 1, the length in one byte, the section.
+#[verifier::spinoff_prover]
+proof fn lemma_short_wire(l: Seq<u8>, n: u8, data: Seq<u8>, status: u16)
+    requires
+        l.len() > 0,
+        rfc_field_line(l) == Some(((lit_status(), status_digits(status)), l.len())),
+        l.len() + 2 == n <= 63,
+        data == seq![1u8, n] + (seq![0u8, 0u8] + l),
+    ensures
+        data == spec_frame_bytes(FRAME_HEADERS, seq![0u8, 0u8] + l) + body_frames(Seq::empty()),
+        response_wire(data, empty_response(status)),
+{
+    let enc = seq![0u8, 0u8] + l;
+    lemma_one_line_section(l, status);
+    lemma_serialize_bytes::<true>(FRAME_HEADERS);
+    lemma_serialize_bytes::<true>(n as u64);
+    assert(spec_frame_bytes(FRAME_HEADERS, enc) + body_frames(Seq::empty()) =~= data);
+    lemma_write_wire(enc, data, empty_response(status));
+}
+
+/// `ANSWER_421` is what `write_response` emits for an empty 421: `encode_field_section` writes the prefix `00 00` and,
+/// `find_static` finding entry 69 the first exact match, `encode_exact_line`'s indexed line; `put_frame` frames it as
+/// HEADERS; no DATA. So it carries the response (`response_wire`), and its section is 42 bytes (`fits_peer`).
+#[verifier::spinoff_prover]
+proof fn lemma_answer_421()
+    ensures
+        ANSWER_421@ == spec_frame_bytes(FRAME_HEADERS, seq![0u8, 0u8] + spec_prefix_int_bytes(6, 0xc0, 69))
+            + body_frames(Seq::empty()),
+        spec_static_entry(69) == Some((lit_status(), status_digits(421))),
+        forall|j: nat| j < 69 ==> spec_static_entry(j) != Some((lit_status(), status_digits(421))),
+        response_wire(ANSWER_421@, empty_response(421)),
+        fields_size(resp_fields(empty_response(421))) == 42,
+{
+    hide(spec_static_entry);
+    hide(rfc_field_line);
+    hide(rfc_decode_field_section);
+    hide(spec_prefix_int_bytes);
+    hide(response_wire);
+    hide(spec_frame_bytes);
+    hide(body_frames);
+    hide(line_421);
+    lemma_first_421();
+    lemma_line_421();
+    lemma_status_size(421);
+    lemma_answer_bytes();
+    lemma_short_wire(line_421(), 4, ANSWER_421@, 421);
+}
+
+/// `ANSWER_501` is what `write_response` emits for an empty 501: no static entry is `:status 501`, so `find_static`
+/// gives the first entry named `:status`, 24, and `encode_name_line` writes its name reference (`5F 09`) and
+/// `encode_string` the raw value (`03 '501'`) after the prefix `00 00`; framed as HEADERS; no DATA.
+#[verifier::spinoff_prover]
+proof fn lemma_answer_501()
+    ensures
+        ANSWER_501@ == spec_frame_bytes(
+            FRAME_HEADERS,
+            seq![0u8, 0u8] + spec_prefix_int_bytes(4, 0x50, 24) + spec_prefix_int_bytes(7, 0x00, 3) + status_digits(
+                501,
+            ),
+        ) + body_frames(Seq::empty()),
+        forall|j: nat| j < STATIC_TABLE_LEN ==> spec_static_entry(j) != Some((lit_status(), status_digits(501))),
+        spec_name_is(24, lit_status()),
+        forall|j: nat| j < 24 ==> !spec_name_is(j, lit_status()),
+        response_wire(ANSWER_501@, empty_response(501)),
+        fields_size(resp_fields(empty_response(501))) == 42,
+{
+    hide(spec_static_entry);
+    hide(rfc_field_line);
+    hide(rfc_decode_field_section);
+    hide(spec_prefix_int_bytes);
+    hide(response_wire);
+    hide(spec_frame_bytes);
+    hide(body_frames);
+    hide(line_501);
+    lemma_first_501();
+    lemma_line_501();
+    lemma_status_size(501);
+    lemma_answer_bytes();
+    lemma_short_wire(line_501(), 8, ANSWER_501@, 501);
+    assert(seq![0u8, 0u8] + spec_prefix_int_bytes(4, 0x50, 24) + spec_prefix_int_bytes(7, 0x00, 3) + status_digits(501)
+        =~= seq![0u8, 0u8] + line_501());
+}
+
 /// Writes `r` on `id` with FIN, `:status` first. `false` (nothing written): the field section
 /// exceeds the peer's limit, or a frame would be too long to encode.
 #[verifier::spinoff_prover]
@@ -1321,14 +1639,25 @@ fn find_uni(s: &Vec<UniEntry>, id: u64) -> (r: Option<usize>)
     None
 }
 
+/// The outputs one input call (`on_stream_data`, `on_stream_reset`, `on_stop_sending`) adds at most: on a request
+/// stream, one per event (at most `MAX_REQ_EVENTS`), then an answer's write and STOP_SENDING in place of its event, or
+/// a stream error's reset and STOP_SENDING (`feed_req`); a close or a reset elsewhere is one.
+pub const MAX_OUTS: usize = 6;
+
 /// Answers the request on `e` itself with an empty `status` response (rejecting it if the
 /// peer's limit doesn't admit that) and stops processing it.
-fn answer(e: &mut ReqEntry, status: u16, fin: bool, peer: Option<u64>, out: &mut Vec<Output>)
+fn answer(e: &mut ReqEntry, status: u16, fin: bool, peer: Option<u64>, out: &mut CapVec<Output>) -> (r: Ghost<nat>)
     requires
         old(e).id % 4 == 0,
         old(e).stream.wf(),
         status == 501 || status == 421,
+        old(out).wf(),
+        old(out)@.len() + 2 <= old(out).cap(),
     ensures
+        final(out).wf(),
+        final(out).cap() == old(out).cap(),
+        final(out)@.len() <= old(out)@.len() + 2,
+        r@ <= c_ans(),
         extends(old(out)@, final(out)@),
         answered_outs(
             old(e).id,
@@ -1345,17 +1674,42 @@ fn answer(e: &mut ReqEntry, status: u16, fin: bool, peer: Option<u64>, out: &mut
         final(e).fin_seen == (old(e).fin_seen || fin),
 {
     let ghost o0 = out@;
+    // One unit per output pushed (at most 2), and the limit comparison.
+    let ghost mut work: nat = 3;
     proof {
         lemma_added_refl(o0);
+        lemma_answer_421();
+        lemma_answer_501();
     }
     if e.send_open {
-        let r = Response { status, headers: Vec::new(), body: Vec::new() };
-        proof {
-            assert(fields_view(r.headers@) =~= Seq::<(Seq<u8>, Seq<u8>)>::empty());
-            assert(r.body@ =~= Seq::<u8>::empty());
-            assert(r@ == empty_response(status));
-        }
-        if write_response(e.id, &r, peer, out) {
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-4.2.2
+        //# An implementation that
+        //# has received this parameter SHOULD NOT send an HTTP message header
+        //# that exceeds the indicated size, as the peer will likely refuse to
+        //# process it.
+        // The section is `:status` and 3 digits: 7 + 3 + 32 = 42 (`lemma_answer_*`).
+        let fits = match peer {
+            None => true,
+            Some(l) => 42 <= l,
+        };
+        if fits {
+            let mut d: CapVec<u8> = CapVec::new(if status == 421 { 6 } else { 10 });
+            if status == 421 {
+                let Ghost(c) = d.push_slice(&ANSWER_421);
+                proof {
+                    work = work + 1 + c;
+                }
+            } else {
+                let Ghost(c) = d.push_slice(&ANSWER_501);
+                proof {
+                    work = work + 1 + c;
+                }
+            }
+            let w = Output::StreamWrite { stream_id: e.id, data: d.into_vec(), fin: true };
+            out.push(w);
+            proof {
+                lemma_one_write(o0, out@, w, e.id, empty_response(status));
+            }
             let ghost o1 = out@;
             stop(e.id, H3_NO_ERROR, fin, out);
             proof {
@@ -1372,11 +1726,25 @@ fn answer(e: &mut ReqEntry, status: u16, fin: bool, peer: Option<u64>, out: &mut
     e.rx_open = false;
     e.send_open = false;
     e.fin_seen = e.fin_seen || fin;
+    Ghost(work)
+}
+
+/// `answer`'s cost: the limit comparison, at most 2 outputs, and the 421's or 501's buffer, one allocation and its
+/// at most 10 bytes.
+#[verifier::inline]
+spec fn c_ans() -> nat {
+    14
 }
 
 /// STOP_SENDING with `code` unless `fin`.
-fn stop(id: u64, code: u64, fin: bool, out: &mut Vec<Output>)
+fn stop(id: u64, code: u64, fin: bool, out: &mut CapVec<Output>)
+    requires
+        old(out).wf(),
+        old(out)@.len() + 1 <= old(out).cap(),
     ensures
+        final(out).wf(),
+        final(out).cap() == old(out).cap(),
+        final(out)@.len() <= old(out)@.len() + 1,
         extends(old(out)@, final(out)@),
         added(old(out)@, final(out)@) == stop_outs(id, code, fin),
 {
@@ -1394,8 +1762,14 @@ fn stop(id: u64, code: u64, fin: bool, out: &mut Vec<Output>)
     }
 }
 
-fn reject(id: u64, fin: bool, out: &mut Vec<Output>)
+fn reject(id: u64, fin: bool, out: &mut CapVec<Output>)
+    requires
+        old(out).wf(),
+        old(out)@.len() + 2 <= old(out).cap(),
     ensures
+        final(out).wf(),
+        final(out).cap() == old(out).cap(),
+        final(out)@.len() <= old(out)@.len() + 2,
         extends(old(out)@, final(out)@),
         added(old(out)@, final(out)@) == rejected_outs(id, fin),
 {
@@ -1695,6 +2069,61 @@ proof fn lemma_answer_done(
     assert(req_outs(id, s, tr, err, cx, added(o1, o2)));
 }
 
+/// `deliver`'s answered return at event `k`: the outputs are complete and keep `deliver`'s output shape, and the head
+/// flags see nothing new (an answer is never a `Request`).
+proof fn lemma_answered_ret(
+    id: u64,
+    ev: Seq<SpecReqEvent>,
+    k: int,
+    tr: Fields,
+    tr0: Fields,
+    err: Option<ReqError>,
+    cx: Ctx,
+    status: u16,
+    o0: Seq<Output>,
+    o1: Seq<Output>,
+    o2: Seq<Output>,
+)
+    requires
+        0 <= k < ev.len(),
+        id % 4 == 0,
+        extends(o0, o1),
+        extends(o1, o2),
+        req_only(added(o0, o1)),
+        no_close(added(o0, o1)),
+        forall|x: Seq<SpecOutput>| #[trigger]
+            req_outs(id, ev.skip(k), tr, err, cx, x) ==> req_outs(
+                id,
+                ev,
+                tr0,
+                err,
+                cx,
+                added(o0, o1) + x,
+            ),
+        answered_outs(id, status, cx, added(o1, o2)),
+        match ev[k] {
+            SpecReqEvent::Head(SpecRequestHead::Connect { .. }) => status == 501,
+            SpecReqEvent::Head(SpecRequestHead::Request(r)) => !http_scheme(r.scheme) && status
+                == 421,
+            _ => false,
+        },
+    ensures
+        extends(o0, o2),
+        req_only(added(o0, o2)),
+        no_close(added(o0, o2)),
+        req_outs(id, ev, tr0, err, cx, added(o0, o2)),
+        has_request(added(o0, o2)) == has_request(added(o0, o1)),
+        head_req(added(o0, o2)) == head_req(added(o0, o1)),
+        !no_internal(ev),
+{
+    lemma_answer_done(id, ev, k, tr, tr0, err, cx, status, o0, o1, o2);
+    lemma_answered_shape(id, status, cx, added(o1, o2));
+    lemma_req_concat(added(o0, o1), added(o1, o2), false);
+    lemma_has_request_concat(added(o0, o1), added(o1, o2));
+    lemma_head_req_concat(added(o0, o1), added(o1, o2));
+    assert(internal_head(ev[k]));
+}
+
 /// The buffers an event's value frees when it is dropped: a request head's four strings, its field list and each
 /// line's two; a CONNECT's authority; a body; a trailer list and each line's two.
 spec fn ev_frees(e: SpecReqEvent) -> nat {
@@ -1742,12 +2171,13 @@ proof fn lemma_lines_suffix(s: Seq<SpecReqEvent>, k: int)
 
 /// `deliver`'s cost on an answered return at event `k`: the work so far, the reversed buffer's free and the events it
 /// drops stay within its bound.
-proof fn lemma_answered_cost(ev: Seq<SpecReqEvent>, k: int, work: nat)
+proof fn lemma_answered_cost(ev: Seq<SpecReqEvent>, k: int, work: nat, extra: nat)
     requires
         0 <= k < ev.len(),
         work <= ev.len() + 2 + 31 * k,
+        extra <= 20 + c_ans(),
     ensures
-        work + 32 + frees(ev.skip(k)) <= c_dlv() * (ev.len() + 1) + 2 * request::ev_lines(ev),
+        work + extra + frees(ev.skip(k)) <= c_dlv() * (ev.len() + 1) + 2 * request::ev_lines(ev),
 {
     lemma_frees(ev.skip(k));
     lemma_lines_suffix(ev, k);
@@ -1786,9 +2216,11 @@ fn deliver(
     Ghost(ev): Ghost<Seq<SpecReqEvent>>,
     Ghost(err): Ghost<Option<ReqError>>,
     Ghost(cx): Ghost<Ctx>,
-    out: &mut Vec<Output>,
+    out: &mut CapVec<Output>,
 ) -> (r: (bool, Ghost<nat>))
     requires
+        old(out).wf(),
+        old(out)@.len() + ev.len() + 1 <= old(out).cap(),
         ev == request::views(evs@),
         cx == (Ctx { fin, peer, send_open: old(e).send_open }),
         request::bodies_from(evs@, 0),
@@ -1826,6 +2258,9 @@ fn deliver(
         !r.0 ==> final(e).rx_open && final(e).send_open == old(e).send_open
             && final(e).fin_seen == old(e).fin_seen,
         r.1@ <= c_dlv() * (ev.len() + 1) + 2 * request::ev_lines(ev),
+        final(out).wf(),
+        final(out).cap() == old(out).cap(),
+        final(out)@.len() <= old(out)@.len() + ev.len() + (if r.0 { 1nat } else { 0nat }),
 {
     let ghost id = e.id;
     let ghost o0 = out@;
@@ -1889,6 +2324,10 @@ fn deliver(
             e.is_head == (old(e).is_head || head_req(added(o0, out@))),
             work <= n + 2 + 31 * k,
             ev.len() == n,
+            out.wf(),
+            out.cap() == old(out).cap(),
+            out@.len() <= o0.len() + k,
+            o0.len() + n + 1 <= out.cap(),
         decreases n - k,
     {
         let ghost tr = fields_view(e.trailers@);
@@ -1906,43 +2345,40 @@ fn deliver(
             assert(x@ == ev[k as int]);
             assert(request::body_nonempty(x));
         }
+        // The status the connection answers this event with itself (D10), 0 for none.
+        let ghost mut cs: nat = 0;
+        let status: u16 = match &x {
+            ReqEvent::Head(RequestHead::Connect { .. }) => 501,
+            ReqEvent::Head(RequestHead::Request(req)) => {
+                let (http, Ghost(c)) = is_http_scheme(req.scheme.as_slice());
+                proof {
+                    cs = c;
+                }
+                if http {
+                    0
+                } else {
+                    421
+                }
+            },
+            _ => 0,
+        };
+        if status != 0 {
+            let Ghost(ca) = answer(e, status, fin, peer, out);
+            proof {
+                lemma_answered_ret(id, ev, k as int, tr, tr0, err, cx, status, o0, o1, out@);
+                lemma_answered_cost(ev, k as int, work, cs + ca);
+            }
+            // The answered event and those after it are dropped here.
+            return (true, Ghost(work + cs + ca + frees(ev.skip(k as int))));
+        }
         match x {
             ReqEvent::Head(RequestHead::Connect { .. }) => {
-                // `answer`'s cost is Task 9's (D10: constant encodings).
-                answer(e, 501, fin, peer, out);
                 proof {
-                    lemma_answer_done(id, ev, k as int, tr, tr0, err, cx, 501, o0, o1, out@);
-                    lemma_answered_shape(id, 501, cx, added(o1, out@));
-                    lemma_req_concat(added(o0, o1), added(o1, out@), false);
-                    lemma_has_request_concat(added(o0, o1), added(o1, out@));
-                    lemma_head_req_concat(added(o0, o1), added(o1, out@));
-                    assert(internal_head(ev[k as int]));
+                    assert(false);
                 }
-                proof {
-                    lemma_answered_cost(ev, k as int, work);
-                }
-                // The answered event and those after it are dropped here.
-                return (true, Ghost(work + 32 + frees(ev.skip(k as int))));
+                return (false, Ghost(work));
             },
             ReqEvent::Head(RequestHead::Request(req)) => {
-                // `is_http_scheme`: two `eq_ci_x` against 4- and 5-byte literals, at most 11 units, and the literals' 9
-                // stack writes.
-                if !is_http_scheme(req.scheme.as_slice()) {
-                    answer(e, 421, fin, peer, out);
-                    proof {
-                        lemma_answer_done(id, ev, k as int, tr, tr0, err, cx, 421, o0, o1, out@);
-                        lemma_answered_shape(id, 421, cx, added(o1, out@));
-                        lemma_req_concat(added(o0, o1), added(o1, out@), false);
-                        lemma_has_request_concat(added(o0, o1), added(o1, out@));
-                        lemma_head_req_concat(added(o0, o1), added(o1, out@));
-                        assert(internal_head(ev[k as int]));
-                    }
-                    proof {
-                        lemma_answered_cost(ev, k as int, work);
-                    }
-                    // The answered event and those after it are dropped here.
-                    return (true, Ghost(work + 32 + frees(ev.skip(k as int))));
-                }
                 e.head = true;
                 let head_method: [u8; 4] = [72u8, 69u8, 65u8, 68u8];
                 proof {
@@ -1952,7 +2388,7 @@ fn deliver(
                 proof {
                     // at most c_eq·(4 + 1) = 5, against the 4-byte literal
                     assert(ch <= 5);
-                    work = work + ch;
+                    work = work + cs + ch;
                 }
                 e.is_head = e.is_head || is_hm;
                 let w = Output::Request { stream_id: e.id, head: req };
@@ -2009,7 +2445,9 @@ fn deliver(
         }
         k += 1;
         proof {
-            work = work + 26;
+            // the pop, the output push and the event's move (a request head's scheme and method checks are charged
+            // above, at most 20 + 5)
+            work = work + 6;
         }
     }
     proof {
@@ -2019,7 +2457,7 @@ fn deliver(
     (false, Ghost(work + 1))
 }
 
-/// The cost constant of `deliver`, per event: at most 31 (an `http` scheme check, a HEAD method check, an output) and
+/// The cost constant of `deliver`, per event: at most 31 (an `http` scheme check 20, a HEAD method check 5, an output 6) and
 /// one for the reversal; the reversal's allocation and the two frees fit the constant term. On an answered return
 /// the dropped events (`frees`, at most 5 each plus 2 per field line) add `2·ev_lines(ev)` to the bound.
 #[verifier::inline]
@@ -2034,12 +2472,17 @@ fn push_err(
     send_open: bool,
     fin: bool,
     Ghost(cx): Ghost<Ctx>,
-    out: &mut Vec<Output>,
+    out: &mut CapVec<Output>,
 ) -> (closing: bool)
     requires
         cx.send_open == send_open,
         cx.fin == fin,
+        old(out).wf(),
+        old(out)@.len() + 2 <= old(out).cap(),
     ensures
+        final(out).wf(),
+        final(out).cap() == old(out).cap(),
+        final(out)@.len() <= old(out)@.len() + 2,
         extends(old(out)@, final(out)@),
         added(old(out)@, final(out)@) == err_outs(id, request::err_of(*res), cx),
         closing == (*res matches Err(ReqError::Connection(_))),
@@ -2086,11 +2529,16 @@ pub open spec fn req_err(all: Seq<u8>, fin: bool) -> Option<ReqError> {
 
 /// Feeds `data` to the request machine of `e` and outputs what its events and error mean.
 /// Returns whether the connection must close (the last output is then CloseConnection).
-fn feed_req(e: &mut ReqEntry, data: &[u8], fin: bool, peer: Option<u64>, out: &mut Vec<Output>) -> (closing: bool)
+fn feed_req(e: &mut ReqEntry, data: &[u8], fin: bool, peer: Option<u64>, out: &mut CapVec<Output>) -> (closing: bool)
     requires
         req_entry_ok(*old(e)),
         old(e).rx_open,
+        old(out).wf(),
+        old(out)@.len() + MAX_OUTS <= old(out).cap(),
     ensures
+        final(out).wf(),
+        final(out).cap() == old(out).cap(),
+        final(out)@.len() <= old(out)@.len() + MAX_OUTS,
         final(e).id == old(e).id,
         req_entry_ok(*final(e)),
         extends(old(out)@, final(out)@),
@@ -2761,11 +3209,15 @@ impl H3Conn {
     }
 
     /// Outputs CloseConnection and latches the connection closed.
-    fn close(&mut self, code: u64, out: &mut Vec<Output>)
+    fn close(&mut self, code: u64, out: &mut CapVec<Output>)
         requires
             old(self).ctrl_inv(),
             !old(self).closed,
+            old(out).wf(),
+            old(out)@.len() + 1 <= old(out).cap(),
         ensures
+            final(out).wf(),
+            final(out).cap() == old(out).cap(),
             final(self).wf(),
             final(self).closed,
             final(self).ctrl == old(self).ctrl,
@@ -3026,10 +3478,15 @@ impl H3Conn {
     }
 
     /// Data on stream `stream_id` (`fin`: the peer's sending part ends after it).
-    pub fn on_stream_data(&mut self, stream_id: u64, data: &[u8], fin: bool, out: &mut Vec<Output>)
+    pub fn on_stream_data(&mut self, stream_id: u64, data: &[u8], fin: bool, out: &mut CapVec<Output>)
         requires
             old(self).wf(),
+            old(out).wf(),
+            old(out)@.len() + MAX_OUTS <= old(out).cap(),
         ensures
+            final(out).wf(),
+            final(out).cap() == old(out).cap(),
+            final(out)@.len() <= old(out)@.len() + MAX_OUTS,
             step(*old(self), *final(self), old(out)@, final(out)@),
             final(self).goaways() == old(self).goaways(),
             frame(*old(self), *final(self), Some(stream_id)),
@@ -3081,12 +3538,17 @@ impl H3Conn {
     }
 
     #[verifier::spinoff_prover]
-    fn request_data(&mut self, id: u64, data: &[u8], fin: bool, out: &mut Vec<Output>)
+    fn request_data(&mut self, id: u64, data: &[u8], fin: bool, out: &mut CapVec<Output>)
         requires
             old(self).wf(),
             !old(self).closed,
             id % 4 == 0,
+            old(out).wf(),
+            old(out)@.len() + MAX_OUTS <= old(out).cap(),
         ensures
+            final(out).wf(),
+            final(out).cap() == old(out).cap(),
+            final(out)@.len() <= old(out)@.len() + MAX_OUTS,
             step(*old(self), *final(self), old(out)@, final(out)@),
             final(self).goaways() == old(self).goaways(),
             final(self).peer_max == old(self).peer_max,
@@ -3185,14 +3647,19 @@ impl H3Conn {
 
     /// `request_data` for a stream with no entry yet (split out for the rlimit).
     #[verifier::spinoff_prover]
-    fn request_data_new(&mut self, id: u64, data: &[u8], fin: bool, out: &mut Vec<Output>)
+    fn request_data_new(&mut self, id: u64, data: &[u8], fin: bool, out: &mut CapVec<Output>)
         requires
             old(self).wf(),
             !old(self).closed,
             id % 4 == 0,
             !old(self).rstate@.contains_key(id),
             forall|k: int| 0 <= k < old(self).reqs@.len() ==> (#[trigger] old(self).reqs@[k]).id != id,
+            old(out).wf(),
+            old(out)@.len() + MAX_OUTS <= old(out).cap(),
         ensures
+            final(out).wf(),
+            final(out).cap() == old(out).cap(),
+            final(out)@.len() <= old(out)@.len() + MAX_OUTS,
             step(*old(self), *final(self), old(out)@, final(out)@),
             final(self).goaways() == old(self).goaways(),
             final(self).peer_max == old(self).peer_max,
@@ -3302,12 +3769,17 @@ impl H3Conn {
         }
     }
 
-    fn uni_data(&mut self, id: u64, data: &[u8], fin: bool, out: &mut Vec<Output>)
+    fn uni_data(&mut self, id: u64, data: &[u8], fin: bool, out: &mut CapVec<Output>)
         requires
             old(self).wf(),
             !old(self).closed,
             id % 4 == 2,
+            old(out).wf(),
+            old(out)@.len() + 1 <= old(out).cap(),
         ensures
+            final(out).wf(),
+            final(out).cap() == old(out).cap(),
+            final(out)@.len() <= old(out)@.len() + 1,
             step(*old(self), *final(self), old(out)@, final(out)@),
             final(self).goaways() == old(self).goaways(),
             frame(*old(self), *final(self), Some(id)),
@@ -3560,10 +4032,15 @@ impl H3Conn {
     /// is handled as H3_NO_ERROR would be. A reset peer control or QPACK stream closes the
     /// connection; any other uni stream is forgotten silently. A request stream is forgotten,
     /// and our sending part, if still open, is reset (`reset_outs`).
-    pub fn on_stream_reset(&mut self, stream_id: u64, _code: u64, out: &mut Vec<Output>)
+    pub fn on_stream_reset(&mut self, stream_id: u64, _code: u64, out: &mut CapVec<Output>)
         requires
             old(self).wf(),
+            old(out).wf(),
+            old(out)@.len() + MAX_OUTS <= old(out).cap(),
         ensures
+            final(out).wf(),
+            final(out).cap() == old(out).cap(),
+            final(out)@.len() <= old(out)@.len() + MAX_OUTS,
             step(*old(self), *final(self), old(out)@, final(out)@),
             final(self).goaways() == old(self).goaways(),
             frame(*old(self), *final(self), Some(stream_id)),
@@ -3682,10 +4159,15 @@ impl H3Conn {
     /// nothing (RFC 9114 §8). On our control stream it is a request to close a critical stream:
     /// H3_CLOSED_CRITICAL_STREAM. On a request stream, the pending response is dropped (the QUIC
     /// layer answers with RESET_STREAM, RFC 9000 §3.5); the request is still received.
-    pub fn on_stop_sending(&mut self, stream_id: u64, _code: u64, out: &mut Vec<Output>)
+    pub fn on_stop_sending(&mut self, stream_id: u64, _code: u64, out: &mut CapVec<Output>)
         requires
             old(self).wf(),
+            old(out).wf(),
+            old(out)@.len() + MAX_OUTS <= old(out).cap(),
         ensures
+            final(out).wf(),
+            final(out).cap() == old(out).cap(),
+            final(out)@.len() <= old(out)@.len() + MAX_OUTS,
             step(*old(self), *final(self), old(out)@, final(out)@),
             final(self).goaways() == old(self).goaways(),
             frame(*old(self), *final(self), Some(stream_id)),

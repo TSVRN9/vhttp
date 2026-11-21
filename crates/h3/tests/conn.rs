@@ -3,6 +3,27 @@ use h3::conn::*;
 use h3::frame::{parse_frame_header, parse_frame_payload, serialize_frame_header, Frame, FrameHeader};
 use h3::message::Response;
 use h3::qpack::field_section::{decode_field_section, encode_field_section, FieldLine};
+use byteq::capvec::CapVec;
+
+/// An input call into its own `CapVec::new(MAX_OUTS)`, as h3_server's `feed`, then appended to `out`.
+fn call(out: &mut Vec<Output>, f: impl FnOnce(&mut CapVec<Output>)) {
+    let mut o = CapVec::new(MAX_OUTS);
+    f(&mut o);
+    assert!(o.len() <= MAX_OUTS);
+    out.extend(o.into_vec());
+}
+
+fn data(c: &mut H3Conn, id: u64, b: &[u8], fin: bool, out: &mut Vec<Output>) {
+    call(out, |o| c.on_stream_data(id, b, fin, o));
+}
+
+fn reset(c: &mut H3Conn, id: u64, code: u64, out: &mut Vec<Output>) {
+    call(out, |o| c.on_stream_reset(id, code, o));
+}
+
+fn stop_sending(c: &mut H3Conn, id: u64, code: u64, out: &mut Vec<Output>) {
+    call(out, |o| c.on_stop_sending(id, code, o));
+}
 
 fn fl(n: &str, v: &str) -> FieldLine {
     FieldLine { name: n.as_bytes().to_vec(), value: v.as_bytes().to_vec() }
@@ -93,7 +114,7 @@ fn ready(pairs: &[(u8, u8)]) -> H3Conn {
     let mut c = H3Conn::new();
     let mut out = Vec::new();
     c.start(&mut out);
-    c.on_stream_data(2, &client_control(pairs), false, &mut out);
+    data(&mut c, 2, &client_control(pairs), false, &mut out);
     assert_eq!(out.len(), 1);
     c
 }
@@ -121,7 +142,7 @@ fn start_sends_settings() {
 fn end_to_end_get() {
     let mut c = ready(&[]);
     let mut out = Vec::new();
-    c.on_stream_data(0, &get("/index.html"), true, &mut out);
+    data(&mut c, 0, &get("/index.html"), true, &mut out);
     assert_eq!(out.len(), 2);
     let Output::Request { stream_id: 0, head } = &out[0] else { panic!() };
     assert_eq!(head.method, b"GET");
@@ -185,12 +206,12 @@ fn chunked_request_with_body_and_trailers() {
     let mut c = ready(&[]);
     let mut out = Vec::new();
     for x in &b {
-        c.on_stream_data(4, &[*x], false, &mut out);
+        data(&mut c, 4, &[*x], false, &mut out);
     }
-    c.on_stream_data(4, &[], true, &mut out);
+    data(&mut c, 4, &[], true, &mut out);
     let mut whole = ready(&[]);
     let mut out_whole = Vec::new();
-    whole.on_stream_data(4, &b, true, &mut out_whole);
+    data(&mut whole, 4, &b, true, &mut out_whole);
     assert_eq!(summary(&out), summary(&out_whole));
     let mut body = Vec::new();
     let mut ended = false;
@@ -235,7 +256,7 @@ fn bad_response_rejected() {
     ] {
         let mut c = ready(&[]);
         let mut out = Vec::new();
-        c.on_stream_data(0, &get("/"), true, &mut out);
+        data(&mut c, 0, &get("/"), true, &mut out);
         let mut out = Vec::new();
         assert_eq!(c.send_response(0, &r, &mut out), Err(()));
         assert!(out.is_empty());
@@ -245,7 +266,7 @@ fn bad_response_rejected() {
     // An accepted 200 with a matching content-length.
     let mut c = ready(&[]);
     let mut out = Vec::new();
-    c.on_stream_data(0, &get("/"), true, &mut out);
+    data(&mut c, 0, &get("/"), true, &mut out);
     let mut out = Vec::new();
     assert_eq!(c.send_response(0, &resp(200, &[("content-length", "2")], "hi"), &mut out), Ok(()));
     assert_eq!(out.len(), 1);
@@ -261,7 +282,7 @@ fn peer_field_section_limit() {
     // Peer MAX_FIELD_SECTION_SIZE = 50: :status alone is 7 + 3 + 32 = 42.
     let mut c = ready(&[(0x06, 50)]);
     let mut out = Vec::new();
-    c.on_stream_data(0, &get("/"), true, &mut out);
+    data(&mut c, 0, &get("/"), true, &mut out);
     let mut out = Vec::new();
     assert_eq!(c.send_response(0, &resp(200, &[("a", "b")], ""), &mut out), Err(()));
     assert!(out.is_empty());
@@ -273,7 +294,7 @@ fn connect_gets_501() {
     let mut c = ready(&[]);
     let mut out = Vec::new();
     let b = headers(&[fl(":method", "CONNECT"), fl(":authority", "example.com:443")]);
-    c.on_stream_data(0, &b, false, &mut out);
+    data(&mut c, 0, &b, false, &mut out);
     let (fr, fin) = write_on(&out, 0);
     assert!(fin);
     assert_eq!(status_of(&fr), b"501");
@@ -281,7 +302,7 @@ fn connect_gets_501() {
     assert!(!out.iter().any(|o| matches!(o, Output::Request { .. })));
     // The rest of the CONNECT stream is ignored.
     let mut out = Vec::new();
-    c.on_stream_data(0, &frame(0x00, b"tunnel"), false, &mut out);
+    data(&mut c, 0, &frame(0x00, b"tunnel"), false, &mut out);
     assert!(out.is_empty());
 }
 
@@ -291,7 +312,7 @@ fn malformed_connect_is_message_error() {
         let mut c = ready(&[]);
         let mut out = Vec::new();
         let b = headers(&[fl(":method", "CONNECT"), fl(":authority", a)]);
-        c.on_stream_data(0, &b, false, &mut out);
+        data(&mut c, 0, &b, false, &mut out);
         assert_eq!(out.len(), 2, "{a}");
         assert!(is_reset(&out[0], 0, H3_MESSAGE_ERROR), "{a}");
         assert!(is_stop(&out[1], 0, H3_MESSAGE_ERROR), "{a}");
@@ -311,7 +332,7 @@ fn te_in_trailers_is_message_error() {
     b.extend(headers(&[fl("te", "trailers")]));
     let mut c = ready(&[]);
     let mut out = Vec::new();
-    c.on_stream_data(0, &b, true, &mut out);
+    data(&mut c, 0, &b, true, &mut out);
     assert!(matches!(out[0], Output::Request { stream_id: 0, .. }));
     assert!(!out.iter().any(|o| matches!(o, Output::RequestEnd { .. })));
     assert!(out.iter().any(|o| is_reset(o, 0, H3_MESSAGE_ERROR)));
@@ -324,10 +345,10 @@ fn second_critical_stream() {
         let mut c = ready(&[]);
         let mut out = Vec::new();
         if first != 2 {
-            c.on_stream_data(first, &[ty], false, &mut out);
+            data(&mut c, first, &[ty], false, &mut out);
             assert!(out.is_empty());
         }
-        c.on_stream_data(10, &[ty], false, &mut out);
+        data(&mut c, 10, &[ty], false, &mut out);
         assert_eq!(out.len(), 1, "type {ty}");
         assert!(is_close(&out[0], H3_STREAM_CREATION_ERROR), "type {ty}");
     }
@@ -337,8 +358,8 @@ fn second_critical_stream() {
 fn goaway_above_highest_request() {
     let mut c = ready(&[]);
     let mut out = Vec::new();
-    c.on_stream_data(8, &get("/"), true, &mut out);
-    c.on_stream_data(0, &get("/"), true, &mut out);
+    data(&mut c, 8, &get("/"), true, &mut out);
+    data(&mut c, 0, &get("/"), true, &mut out);
     let mut out = Vec::new();
     c.shutdown(&mut out);
     let (fr, _) = write_on(&out, 3);
@@ -355,7 +376,7 @@ fn non_http_scheme_gets_421() {
         fl(":authority", "example.com"),
         fl(":path", "/"),
     ]);
-    c.on_stream_data(0, &b, true, &mut out);
+    data(&mut c, 0, &b, true, &mut out);
     assert_eq!(out.len(), 1);
     let (fr, _) = write_on(&out, 0);
     assert_eq!(status_of(&fr), b"421");
@@ -372,15 +393,15 @@ fn stream_error_resets() {
         fl(":path", "/"),
         fl("Accept", "*/*"),
     ]);
-    c.on_stream_data(0, &b, false, &mut out);
+    data(&mut c, 0, &b, false, &mut out);
     assert_eq!(out.len(), 2);
     assert!(is_reset(&out[0], 0, H3_MESSAGE_ERROR) && is_stop(&out[1], 0, H3_MESSAGE_ERROR));
     // Data still in flight on the reset stream is ignored, not a new request.
     let mut out = Vec::new();
-    c.on_stream_data(0, &frame(0x00, b"x"), false, &mut out);
+    data(&mut c, 0, &frame(0x00, b"x"), false, &mut out);
     assert!(out.is_empty());
     // Other streams are unaffected.
-    c.on_stream_data(4, &get("/"), true, &mut out);
+    data(&mut c, 4, &get("/"), true, &mut out);
     assert!(matches!(out[0], Output::Request { stream_id: 4, .. }));
 }
 
@@ -388,7 +409,7 @@ fn stream_error_resets() {
 fn goaway() {
     let mut c = ready(&[]);
     let mut out = Vec::new();
-    c.on_stream_data(0, &get("/"), true, &mut out);
+    data(&mut c, 0, &get("/"), true, &mut out);
     let mut out = Vec::new();
     c.shutdown(&mut out);
     let (fr, fin) = write_on(&out, 3);
@@ -396,7 +417,7 @@ fn goaway() {
     assert_eq!(fr.len(), 1);
     assert_eq!(parse_frame_payload(fr[0].0, &fr[0].1).0, Ok(Frame::Goaway(4)));
     let mut out = Vec::new();
-    c.on_stream_data(4, &get("/"), true, &mut out);
+    data(&mut c, 4, &get("/"), true, &mut out);
     assert!(out.iter().any(|o| is_reset(o, 4, H3_REQUEST_REJECTED)));
     assert!(!out.iter().any(|o| matches!(o, Output::Request { .. })));
     // Stream 0 was accepted before the GOAWAY: it can still be answered.
@@ -435,15 +456,15 @@ fn latch() {
     c.start(&mut out);
     let mut out = Vec::new();
     // A control stream whose first frame is not SETTINGS.
-    c.on_stream_data(2, &[0x00, 0x07, 0x01, 0x00], false, &mut out);
+    data(&mut c, 2, &[0x00, 0x07, 0x01, 0x00], false, &mut out);
     assert_eq!(out.len(), 1);
     assert!(is_close(&out[0], H3_MISSING_SETTINGS));
     let mut out = Vec::new();
-    c.on_stream_data(0, &get("/"), true, &mut out);
-    c.on_stream_data(6, &[0x00], false, &mut out);
-    c.on_stream_data(1, &[0x00], false, &mut out);
-    c.on_stream_reset(2, 0, &mut out);
-    c.on_stop_sending(3, 0, &mut out);
+    data(&mut c, 0, &get("/"), true, &mut out);
+    data(&mut c, 6, &[0x00], false, &mut out);
+    data(&mut c, 1, &[0x00], false, &mut out);
+    reset(&mut c, 2, 0, &mut out);
+    stop_sending(&mut c, 3, 0, &mut out);
     c.shutdown(&mut out);
     c.start(&mut out);
     assert!(out.is_empty());
@@ -456,7 +477,7 @@ fn bad_stream_id() {
     for id in [1u64, 3, 7] {
         let mut c = ready(&[]);
         let mut out = Vec::new();
-        c.on_stream_data(id, &[0x00], false, &mut out);
+        data(&mut c, id, &[0x00], false, &mut out);
         assert_eq!(out.len(), 1);
         assert!(is_close(&out[0], H3_STREAM_CREATION_ERROR));
     }
@@ -466,7 +487,7 @@ fn bad_stream_id() {
 fn stop_sending_control() {
     let mut c = ready(&[]);
     let mut out = Vec::new();
-    c.on_stop_sending(3, H3_NO_ERROR, &mut out);
+    stop_sending(&mut c, 3, H3_NO_ERROR, &mut out);
     assert_eq!(out.len(), 1);
     assert!(is_close(&out[0], H3_CLOSED_CRITICAL_STREAM));
 }
@@ -475,9 +496,9 @@ fn stop_sending_control() {
 fn stop_sending_request() {
     let mut c = ready(&[]);
     let mut out = Vec::new();
-    c.on_stream_data(0, &get("/"), false, &mut out);
+    data(&mut c, 0, &get("/"), false, &mut out);
     let mut out = Vec::new();
-    c.on_stop_sending(0, H3_REQUEST_CANCELLED, &mut out);
+    stop_sending(&mut c, 0, H3_REQUEST_CANCELLED, &mut out);
     assert!(out.is_empty());
     assert_eq!(c.send_response(0, &resp(200, &[], ""), &mut out), Err(()));
     assert!(out.is_empty());
@@ -488,47 +509,47 @@ fn stream_resets() {
     // A critical stream reset closes the connection; the error code doesn't matter.
     let mut c = ready(&[]);
     let mut out = Vec::new();
-    c.on_stream_reset(2, 0x1234, &mut out);
+    reset(&mut c, 2, 0x1234, &mut out);
     assert_eq!(out.len(), 1);
     assert!(is_close(&out[0], H3_CLOSED_CRITICAL_STREAM));
     // The encoder and decoder streams are critical too.
     for ty in [0x02u8, 0x03] {
         let mut c = ready(&[]);
         let mut out = Vec::new();
-        c.on_stream_data(6, &[ty], false, &mut out);
+        data(&mut c, 6, &[ty], false, &mut out);
         assert!(out.is_empty());
-        c.on_stream_reset(6, 0, &mut out);
+        reset(&mut c, 6, 0, &mut out);
         assert_eq!(out.len(), 1);
         assert!(is_close(&out[0], H3_CLOSED_CRITICAL_STREAM));
     }
     // An unknown-type uni stream reset is silent.
     let mut c = ready(&[]);
     let mut out = Vec::new();
-    c.on_stream_data(6, &[0x21], false, &mut out);
-    c.on_stream_reset(6, 0, &mut out);
+    data(&mut c, 6, &[0x21], false, &mut out);
+    reset(&mut c, 6, 0, &mut out);
     assert!(out.is_empty());
     // A request stream reset mid-request: our sending part is reset with H3_REQUEST_INCOMPLETE.
     let mut c = ready(&[]);
     let mut out = Vec::new();
-    c.on_stream_data(0, &get("/"), false, &mut out);
+    data(&mut c, 0, &get("/"), false, &mut out);
     let mut out = Vec::new();
-    c.on_stream_reset(0, H3_REQUEST_CANCELLED, &mut out);
+    reset(&mut c, 0, H3_REQUEST_CANCELLED, &mut out);
     assert_eq!(out.len(), 1);
     assert!(is_reset(&out[0], 0, H3_REQUEST_INCOMPLETE));
     let mut out = Vec::new();
     assert_eq!(c.send_response(0, &resp(200, &[], ""), &mut out), Err(()));
     // After the request ended, unanswered: H3_REQUEST_CANCELLED.
-    c.on_stream_data(4, &get("/"), true, &mut out);
+    data(&mut c, 4, &get("/"), true, &mut out);
     let mut out = Vec::new();
-    c.on_stream_reset(4, 0, &mut out);
+    reset(&mut c, 4, 0, &mut out);
     assert_eq!(out.len(), 1);
     assert!(is_reset(&out[0], 4, H3_REQUEST_CANCELLED));
     // Already answered: nothing to reset.
     let mut out = Vec::new();
-    c.on_stream_data(8, &get("/"), false, &mut out);
+    data(&mut c, 8, &get("/"), false, &mut out);
     assert_eq!(c.send_response(8, &resp(200, &[], ""), &mut out), Ok(()));
     let mut out = Vec::new();
-    c.on_stream_reset(8, 0, &mut out);
+    reset(&mut c, 8, 0, &mut out);
     assert!(out.is_empty());
 }
 
@@ -538,7 +559,7 @@ fn critical_stream_fin() {
     for (id, b) in [(2u64, vec![]), (6, vec![0x02u8]), (6, vec![0x03])] {
         let mut c = ready(&[]);
         let mut out = Vec::new();
-        c.on_stream_data(id, &b, true, &mut out);
+        data(&mut c, id, &b, true, &mut out);
         assert_eq!(out.len(), 1);
         assert!(is_close(&out[0], H3_CLOSED_CRITICAL_STREAM));
     }
@@ -549,19 +570,19 @@ fn only_open_directions_aborted() {
     // Rejected with the request complete: no STOP_SENDING.
     let mut c = ready(&[]);
     let mut out = Vec::new();
-    c.on_stream_data(0, &get("/"), true, &mut out);
+    data(&mut c, 0, &get("/"), true, &mut out);
     c.shutdown(&mut out);
     let mut out = Vec::new();
-    c.on_stream_data(4, &get("/"), true, &mut out);
+    data(&mut c, 4, &get("/"), true, &mut out);
     assert_eq!(out.len(), 1);
     assert!(is_reset(&out[0], 4, H3_REQUEST_REJECTED));
     // Answered early, then the rest of the request is malformed: the sent response is not reset.
     let mut c = ready(&[]);
     let mut out = Vec::new();
-    c.on_stream_data(0, &get("/"), false, &mut out);
+    data(&mut c, 0, &get("/"), false, &mut out);
     assert_eq!(c.send_response(0, &resp(200, &[], ""), &mut out), Ok(()));
     let mut out = Vec::new();
-    c.on_stream_data(0, &headers(&[fl(":path", "/")]), false, &mut out);
+    data(&mut c, 0, &headers(&[fl(":path", "/")]), false, &mut out);
     assert_eq!(out.len(), 1);
     assert!(is_stop(&out[0], 0, H3_MESSAGE_ERROR));
 }
@@ -594,9 +615,37 @@ fn head_and_bodiless_statuses() {
     for (req, r, ok) in cases {
         let mut c = ready(&[]);
         let mut out = Vec::new();
-        c.on_stream_data(0, &req, true, &mut out);
+        data(&mut c, 0, &req, true, &mut out);
         let mut out = Vec::new();
         assert_eq!(c.send_response(0, &r, &mut out), if ok { Ok(()) } else { Err(()) });
         assert_eq!(out.len(), if ok { 1 } else { 0 });
     }
+}
+
+/// D10: the input path's constant 501 (CONNECT) and 421 (a non-http scheme) are the bytes `send_response` writes for
+/// the same empty response.
+#[test]
+fn answers_match_send_response() {
+    let mut c = ready(&[]);
+    let mut out = Vec::new();
+    let connect = headers(&[fl(":method", "CONNECT"), fl(":authority", "a:1")]);
+    let ftp = headers(&[fl(":method", "GET"), fl(":scheme", "ftp"), fl(":authority", "a"), fl(":path", "/")]);
+    data(&mut c, 0, &connect, true, &mut out);
+    data(&mut c, 4, &ftp, true, &mut out);
+    data(&mut c, 8, &get("/"), true, &mut out);
+    data(&mut c, 12, &get("/"), true, &mut out);
+    assert!(c.send_response(8, &resp(501, &[], ""), &mut out).is_ok());
+    assert!(c.send_response(12, &resp(421, &[], ""), &mut out).is_ok());
+    let raw = |id: u64| {
+        out.iter()
+            .find_map(|o| match o {
+                Output::StreamWrite { stream_id, data, fin: true } if *stream_id == id => Some(data.clone()),
+                _ => None,
+            })
+            .unwrap()
+    };
+    assert_eq!(raw(0), raw(8));
+    assert_eq!(raw(4), raw(12));
+    assert_eq!(raw(0), [0x01, 0x08, 0x00, 0x00, 0x5F, 0x09, 0x03, b'5', b'0', b'1']);
+    assert_eq!(raw(4), [0x01, 0x04, 0x00, 0x00, 0xFF, 0x06]);
 }

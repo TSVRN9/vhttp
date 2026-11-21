@@ -1583,11 +1583,18 @@ pub open spec fn http_scheme(s: Seq<u8>) -> bool {
     eq_ci(s, lit_http()) || eq_ci(s, lit_https())
 }
 
-pub fn is_http_scheme(s: &[u8]) -> (r: bool)
+/// Costs two `eq_ci_x` against the 4- and 5-byte literals (at most 5 + 6) and the literals' 9 byte writes.
+pub fn is_http_scheme(s: &[u8]) -> (r: (bool, Ghost<nat>))
     ensures
-        r == http_scheme(s@),
+        r.0 == http_scheme(s@),
+        r.1@ <= 20,
 {
-    eq_ci_x(s, &x_http()).0 || eq_ci_x(s, &x_https()).0
+    let (a, Ghost(ca)) = eq_ci_x(s, &x_http());
+    if a {
+        return (true, Ghost(4 + ca));
+    }
+    let (b, Ghost(cb)) = eq_ci_x(s, &x_https());
+    (b, Ghost(9 + ca + cb))
 }
 
 fn no_at_x(s: &[u8]) -> (r: (bool, Ghost<nat>))

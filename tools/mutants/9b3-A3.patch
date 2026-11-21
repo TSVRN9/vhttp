@@ -1,6 +1,6 @@
 --- a/crates/h3/src/message.rs
 +++ b/crates/h3/src/message.rs
-@@ -2252,7 +2252,7 @@
+@@ -2259,7 +2259,7 @@
      h: Option<Seq<u8>>,
      c: u64,
  ) -> bool {

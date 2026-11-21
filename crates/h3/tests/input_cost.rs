@@ -4,7 +4,7 @@
 //! bytes, and, for the call that completes a buffered frame of `f` bytes, `fa·f + COST_B` more (`per_call_ok`): `fa` is
 //! `H3_F` for a request stream's frame (QPACK decode expands it), `COST_A` elsewhere.
 //! Each test is ignored until the task that makes it pass.
-use h3::conn::{H3Conn, Output};
+use h3::conn::{H3Conn, Output, MAX_OUTS};
 use h3::frame::serialize_frame_header;
 use h3::message::RequestHead;
 use h3::qpack::field_section::FieldLine;
@@ -545,9 +545,9 @@ fn ready() -> H3Conn {
     c.start(&mut out);
     let mut b = vec![0x00];
     b.extend(frame(0x04, &[]));
-    let mut out = Vec::new();
+    let mut out = CapVec::new(MAX_OUTS);
     c.on_stream_data(2, &b, false, &mut out);
-    assert!(out.is_empty());
+    assert!(out.len() == 0);
     c
 }
 
@@ -561,22 +561,50 @@ fn stream_table_flat() {
     // `held` is 0: H3Conn exposes no buffered count, and nothing is buffered after a whole frame (the strictest
     // queue allowance).
     for i in 0..n {
-        let mut out = Vec::new();
+        let mut out = CapVec::new(MAX_OUTS);
         r.call("open", fr.len(), 0, || {
             c.on_stream_data(4 * i, &fr, false, &mut out);
             0
         });
-        assert!(matches!(&out[..], [Output::Request { stream_id, .. }] if *stream_id == 4 * i));
+        assert!(matches!(out.as_slice(), [Output::Request { stream_id, .. }] if *stream_id == 4 * i));
     }
     for i in (0..n).rev() {
-        let mut out = Vec::new();
+        let mut out = CapVec::new(MAX_OUTS);
         r.call("data", 3, 0, || {
             c.on_stream_data(4 * i, &[0x00, 0x01, b'x'], false, &mut out);
             0
         });
-        assert!(matches!(&out[..], [Output::RequestBody { stream_id, data }] if *stream_id == 4 * i && data == b"x"));
+        assert!(matches!(out.as_slice(), [Output::RequestBody { stream_id, data }] if *stream_id == 4 * i && data == b"x"));
     }
     report("stream_table_flat", n as usize, &r);
     let fails = per_call_ok("stream_table_flat", n as usize, &r.0, false, COST_A);
+    assert!(fails.is_empty(), "{fails:#?}");
+}
+
+/// D10: a CONNECT (501) and a request with a non-http scheme (421) are answered on the input path with constant frames
+/// (`01 08 00 00 5F 09 03 '501'`, `01 04 00 00 FF 06`): no realloc in the call.
+#[test]
+fn answers_constant() {
+    // CONNECT (static 15) with `:authority a:1` (static name 0).
+    let connect = frame(0x01, &[0x00, 0x00, 0xCF, 0x50, 0x03, b'a', b':', b'1']);
+    // GET, `:scheme ftp` (static name 22: 0x5F 0x07), `:path /`, `:authority a`.
+    let ftp = frame(0x01, &[0x00, 0x00, 0xD1, 0x5F, 0x07, 0x03, b'f', b't', b'p', 0xC1, 0x50, 0x01, b'a']);
+    let want_501 = [0x01, 0x08, 0x00, 0x00, 0x5F, 0x09, 0x03, b'5', b'0', b'1'];
+    let want_421 = [0x01, 0x04, 0x00, 0x00, 0xFF, 0x06];
+    let mut c = ready();
+    let mut r = Run::default();
+    for (i, (fr, want)) in [(&connect, &want_501[..]), (&ftp, &want_421[..])].into_iter().enumerate() {
+        let mut out = CapVec::new(MAX_OUTS);
+        r.call("answer", fr.len(), fr.len(), || {
+            c.on_stream_data(4 * i as u64, fr, false, &mut out);
+            0
+        });
+        let [Output::StreamWrite { stream_id, data, fin: true }, Output::StopSending { code: 0x100, .. }] = out.as_slice() else {
+            panic!("expected the answer then STOP_SENDING(H3_NO_ERROR)")
+        };
+        assert_eq!((*stream_id, &data[..]), (4 * i as u64, want));
+    }
+    report("answers_constant", 2, &r);
+    let fails = per_call_ok("answers_constant", 2, &r.0, false, H3_F);
     assert!(fails.is_empty(), "{fails:#?}");
 }
