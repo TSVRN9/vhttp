@@ -26,7 +26,7 @@ use quic::idq::IDQ_CAP;
 use quic::ring::MAX_RECV_WINDOW;
 use quic::lifecycle::Phase;
 use quic::payload::PacketKind;
-use quic::pipeline::{accept_datagram, initial_dcid, receive as receive_datagram, refeed_one_rtt};
+use quic::pipeline::{accept_datagram, initial_dcid, refeed_one_rtt};
 #[allow(unused_imports)]
 use quic::protect::*;
 use quic::route::CidUpdate;
@@ -86,6 +86,17 @@ spec fn c_done(c: Connection, o: Connection) -> nat {
     } else {
         0
     }
+}
+
+/// A refeed of the stash (at most a UDP payload) costs at most its pipeline half and its 1-RTT read at that size.
+proof fn lemma_refeed_cost(c: nat, n: nat)
+    requires
+        n <= MAX_UDP_PAYLOAD,
+        c <= c_pipe(n) + 18 * n + 5608,
+    ensures
+        c <= c_pipe(MAX_UDP_PAYLOAD as nat) + 18 * MAX_UDP_PAYLOAD + 5608,
+{
+    lemma_pipe_mono(n, MAX_UDP_PAYLOAD as nat);
 }
 
 /// D6's step: from `o` within `crypto_held_ok`, at most `g <= MAX_UDP_PAYLOAD` more positions at each level still
@@ -717,29 +728,38 @@ impl<'a> QuicServer<'a> {
             res.0 matches Some(q) ==> q.wf() && q.one_rtt_forgotten(),
             app_grew(old(app)@, final(app)@),
             res.0 matches Some(q) ==> crypto_held_ok(q.conn_spec()),
-            // TLS's first step on the datagram's CRYPTO bytes (`accept_run`). Excluded: the pipeline half
-            // (`accept_datagram`, Task 10), TLS's own step (D14, 9b5), `h3.pump` (9b4).
-            res.1@ <= 2 * (18 * d.len() + 5608) + 5 * c_retire(),
+            // The pipeline half (`accept_datagram`, `c_unit()` per byte), then TLS's first step on the datagram's
+            // CRYPTO bytes (`accept_run`). Excluded: the connection's construction (`Connection::accept`'s tables,
+            // the cost sweep's sites, 9b4), TLS's own step (D14, 9b5), `h3.pump` (9b4).
+            res.1@ <= c_pipe(d.len() as nat) + 2 * (18 * d.len() + 5608) + 5 * c_retire(),
     {
+        let ghost mut work: nat = 0;
         let dcid = match initial_dcid(d) {
             Some(x) => x,
-            None => return (None, Ghost(0)),
+            None => return (None, Ghost(work)),
         };
         if dcid.len() > MAX_CID_LEN {
-            return (None, Ghost(0));
+            return (None, Ghost(work));
         }
         let keys = [Some(initial_keys(dcid.as_slice())), None, None];
         // `accept_datagram` checks that the accepting packet's DCID is `dcid`: the connection's
         // odcid is the DCID these keys come from (Task 2).
-        let c = match accept_datagram(d, path, now, &r.conn, local_tp, &keys) {
+        let (c, Ghost(cp)) = accept_datagram(d, path, now, &r.conn, local_tp, &keys);
+        proof {
+            work = work + cp;
+        }
+        let c = match c {
             Some(c) => c,
-            None => return (None, Ghost(0)),
+            None => return (None, Ghost(work)),
         };
         let ghost cs = c;
         let mut s = QuicServer::assemble(cfg, c, keys);
         // `accept_datagram` admits only a datagram within a UDP payload, so within `MAX_FEED`.
         let Ghost(cost) = s.accept_run(now, r, d.len(), app);
-        (Some(s), Ghost(cost))
+        proof {
+            work = work + cost;
+        }
+        (Some(s), Ghost(work))
     }
 
     /// The server around the accepted connection `c`, TLS at its start (split from `accept` for the rlimit).
@@ -851,18 +871,21 @@ impl<'a> QuicServer<'a> {
             // reads, or the level is drained, or the connection closed and dropped its CRYPTO bytes; a slot holds
             // one retired store.
             crypto_held_ok(final(self).conn_spec()),
-            // The CRYPTO reads handing TLS its bytes (two levels, then the refed 1-RTT one, each linear in `d`), the
-            // stash copy (`d + 1`, only when there was no refeed), and the retires of completion and of a close.
-            // Excluded: the pipeline half (`pipeline::receive`, `refeed_one_rtt`; Task 10), TLS's own step (D14,
-            // 9b5), `h3.pump` (9b4), and the free of the stash this one replaces (one `CapVec<u8>` buffer, uncharged:
-            // cat-C15-semantic-cost, 9b4).
-            cost@ <= 3 * (18 * d.len() + 5608) + 5 * c_retire(),
+            // The pipeline half (`pipeline::receive`, then `refeed_one_rtt` once TLS completes on this datagram;
+            // `c_unit()` per byte each), the CRYPTO reads handing TLS its bytes (two levels, then the refed 1-RTT one,
+            // each linear in `d`), the stash copy (`d + 1`, only when there was no refeed), and the retires of
+            // completion and of a close. Excluded: TLS's own step (D14, 9b5), `h3.pump` (9b4), and the free of the
+            // stash this one replaces (one `CapVec<u8>` buffer, uncharged: cat-C15-semantic-cost, 9b4).
+            cost@ <= 2 * c_pipe(d.len() as nat) + 3 * (18 * d.len() + 5608) + 5 * c_retire(),
     {
         hide(spec_on_crypto);
         let ghost mut work: nat = 0;
         let was = self.h3.conn().handshake_complete();
         let ghost c0 = self.h3.conn_spec();
-        receive_datagram(self.h3.conn_mut(), d, path, now, &r.conn, &self.keys);
+        let Ghost(cp) = quic::pipeline::receive(self.h3.conn_mut(), d, path, now, &r.conn, &self.keys);
+        proof {
+            work = work + cp;
+        }
         // The datagram's own bytes, at most: a datagram past `MAX_FEED` opens no packet (`pipeline::receive`).
         let max = if d.len() <= MAX_FEED {
             d.len()
@@ -888,6 +911,7 @@ impl<'a> QuicServer<'a> {
         let Ghost(c1) = self.tls_step(now, r, max);
         proof {
             work = work + c1;
+            assert(work <= c_pipe(d.len() as nat) + 2 * (18 * d.len() + 5608) + 2 * c_retire());
         }
         let ghost mut refed = false;
         if !was && self.h3.conn().handshake_complete() {
@@ -895,6 +919,8 @@ impl<'a> QuicServer<'a> {
             proof {
                 work = work + c2;
                 refed = true;
+                lemma_pipe_mono(max as nat, d.len() as nat);
+                assert(work <= 2 * c_pipe(d.len() as nat) + 3 * (18 * d.len() + 5608) + 2 * c_retire());
             }
         }
         // D13's stash: CRYPTO backlog left while the handshake is incomplete keeps this datagram, whose 1-RTT
@@ -943,15 +969,22 @@ impl<'a> QuicServer<'a> {
             } else {
                 0nat
             }),
-            // The 1-RTT read (`feed`; the handshake completed before, so no retire). Excluded: the pipeline half
-            // (`refeed_one_rtt`, Task 10), TLS's own step (D14, 9b5).
-            cost@ <= 18 * max + 5608,
+            // The refeed's pipeline half (`refeed_one_rtt`, `c_unit()` per byte), then the 1-RTT read (`feed`; the
+            // handshake completed before, so no retire). Excluded: TLS's own step (D14, 9b5).
+            cost@ <= c_pipe(max as nat) + 18 * max + 5608,
     {
         hide(spec_on_crypto);
+        let ghost mut work: nat = 0;
         let ghost c1 = self.h3.conn_spec();
         // The same datagram and path as the first pass, with its own randomness: the first
         // pass's `on_datagram` reset the challenge slices it drew.
-        refeed_one_rtt(self.h3.conn_mut(), d, path, now, &r.refeed, &self.keys);
+        let Ghost(cp) = refeed_one_rtt(self.h3.conn_mut(), d, path, now, &r.refeed, &self.keys);
+        proof {
+            if d.len() <= max {
+                lemma_pipe_mono(d.len() as nat, max as nat);
+            }
+            work = work + cp;
+        }
         proof {
             let c = self.h3.conn_spec();
             Connection::lemma_crypto_kept_g_elim(c, c1, d.len() as nat);
@@ -987,6 +1020,9 @@ impl<'a> QuicServer<'a> {
         let ghost c2 = self.h3.conn_spec();
         let (_, Ghost(w)) = self.feed(Level::OneRtt, now, r, true, max);
         proof {
+            work = work + w;
+        }
+        proof {
             let c = self.h3.conn_spec();
             self.h3.lemma_conn_wf();
             Connection::lemma_dead_drained(c);
@@ -1009,7 +1045,7 @@ impl<'a> QuicServer<'a> {
                 }
             }
         }
-        Ghost(w)
+        Ghost(work)
     }
 
     /// `receive`'s and `pump_backlog`'s tail: SETTINGS goes out once 1-RTT is live, a closed connection's CRYPTO
@@ -1109,11 +1145,12 @@ impl<'a> QuicServer<'a> {
             old(self).has_backlog_spec() ==> final(self).backlog_measure() < old(self).backlog_measure(),
             // Its budgets: `B_PUMP` of STREAM delivery, `B_PUMP` of the popped stream's send-side slot reaping and
             // `B_PUMP` of teardown (`Connection::backlog_step`, `B_PUMP + c_dsome()`), `B_PUMP`
-            // CRYPTO bytes read and the completing call's retires, the refed datagram's 1-RTT read, a close's retires.
-            // Excluded: the refeed's pipeline half (`refeed_one_rtt`, Task 10d), TLS's own step (D14, 9b5), `h3.pump`
-            // (9b4), and the drop of the refed stash (one `CapVec<u8>` buffer, uncharged: cat-C15-semantic-cost, 9b4).
-            res.0@ <= (B_PUMP + c_dsome()) + (18 * B_PUMP + 5608 + 2 * c_retire()) + (18 * MAX_UDP_PAYLOAD + 5608) + 3
-                * c_retire(),
+            // CRYPTO bytes read and the completing call's retires, the refed datagram's pipeline half
+            // (`refeed_one_rtt`, `c_unit()` per byte) and 1-RTT read, a close's retires. Excluded: TLS's own step (D14,
+            // 9b5), `h3.pump` (9b4), and the drop of the refed stash (one `CapVec<u8>` buffer, uncharged:
+            // cat-C15-semantic-cost, 9b4).
+            res.0@ <= (B_PUMP + c_dsome()) + (18 * B_PUMP + 5608 + 2 * c_retire()) + (c_pipe(MAX_UDP_PAYLOAD as nat)
+                + 18 * MAX_UDP_PAYLOAD + 5608) + 3 * c_retire(),
     {
         let ghost mut work: nat = 0;
         let was = self.h3.conn().handshake_complete();
@@ -1163,6 +1200,7 @@ impl<'a> QuicServer<'a> {
                 let Ghost(cr) = self.refeed(v.as_slice(), p, now, r, v.len());
                 proof {
                     refed = true;
+                    lemma_refeed_cost(cr, v@.len());
                     work = work + cr;
                 }
             }

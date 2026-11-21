@@ -32,7 +32,7 @@ fn S(stream_id: u64, offset: u64, d: &[u8], fin: bool) -> Frame {
 
 fn feed(s: &mut Streams, f: Frame) -> Result<(), u64> {
     let mut ev = Vec::new();
-    s.on_frame(&f, &mut ev)
+    s.on_frame(&f, &mut ev).0
 }
 
 fn poll(s: &mut Streams, budget: usize) -> Vec<Frame> {
@@ -206,7 +206,9 @@ fn held_capacity_within_cap() {
             for f in out {
                 match &f {
                     Frame::Stream { offset, data, .. } if *offset as usize + data.len() == W => held_back = Some(f),
-                    _ => s.on_frame_acked(&f),
+                    _ => {
+                        s.on_frame_acked(&f);
+                    },
                 }
                 assert!(s.send_capacity() <= 1 << 20);
             }

@@ -311,9 +311,12 @@ expect_fail "escape-gate: assume_specification" "unaccounted escape" esc
 # crypto_stream.rs nor the per-fn files conn.rs and quictls's server.rs: crypto_stream.rs's retire dropping join2's cost,
 # refeed's OneRtt feed cost stubbed to 0 behind `let _ =` (the call kept), the T3b-F1 mutant patch itself (the call
 # deleted, its cost a literal ghost 0), receive's returned cost
-# stubbed to `Ghost(0)`, crypto_drop dropping a retire's cost, the allowed validate_hs_path drop gone stale; fix round
+# stubbed to `Ghost(0)`, crypto_drop dropping a retire's cost; fix round
 # 2, each passed by b937472's tool: retire returning a literal `Ghost(1)`, `work = 0;` in receive's proof block, a second
-# `let ghost mut work` in receive, a stale LITERAL_OK entry (bal's arm no longer literal); the real tree passes.
+# `let ghost mut work` in receive, a stale LITERAL_OK entry (bal's arm no longer literal); 9b2 Task 10d, each passed by
+# the tool before it (which allowed validate_hs_path's drop and did not read pipeline.rs): validate_hs_path dropping
+# discard's cost as a statement, refeed_one_rtt dropping on_datagram's cost (pipeline.rs, a per-fn file now), a stale
+# not-a-cost exemption (transmit's `out.clear()` gone); the real tree passes.
 expect_pass "cost-charge: the real tree" "$root/scripts/cost-charge.sh" "$root"
 ccq=$tmp/cost/crates/quic/src
 ccb=$tmp/cost/crates/byteq/src
@@ -321,6 +324,7 @@ cct=$tmp/cost/crates/quictls/src
 cfresh() {
   rm -rf "${tmp:?}/cost"; mkdir -p "$ccq" "$ccb" "$cct"
   cp "$root/crates/quic/src/avl.rs" "$root/crates/quic/src/frags.rs" "$root/crates/quic/src/crypto_stream.rs" "$root/crates/quic/src/conn.rs" "$ccq/"
+  cp "$root/crates/quic/src/pipeline.rs" "$ccq/"
   cp "$root/crates/quic/src/ranges.rs" "$root/crates/quic/src/send_stream.rs" "$root/crates/quic/src/ring.rs" "$ccq/"
   cp "$root"/crates/byteq/src/*.rs "$ccb/"; cp "$root/crates/quictls/src/server.rs" "$cct/"
 }
@@ -409,12 +413,22 @@ once '^            work = work \+ c1 \+ c2 \+ c3;$' "$ccq/conn.rs"
 sed -i 's/^            work = work + c1 + c2 + c3;$/            work = work + c1 + c2;/' "$ccq/conn.rs"
 expect_fail "cost-charge: crypto_drop drops a retire's cost (conn.rs per-fn, I6)" "Connection::crypto_drop drops the cost c3 binds from retire" cc
 cfresh
-once '^        self\.discard\(PacketKind::Initial\);$' "$ccq/conn.rs"
-sed -i 's/^        self\.discard(PacketKind::Initial);$/        let Ghost(_c) = self.discard(PacketKind::Initial);/' "$ccq/conn.rs"
-expect_fail "cost-charge: a stale allowed drop (I6)" "allowed drop of discard in Connection::validate_hs_path matches no statement call" cc
+once '^        let Ghost\(c\) = self\.discard\(PacketKind::Initial\);$' "$ccq/conn.rs"
+sed -i 's/^        let Ghost(c) = self\.discard(PacketKind::Initial);$/        self.discard(PacketKind::Initial);/' "$ccq/conn.rs"
+expect_fail "cost-charge: validate_hs_path drops discard's cost, no allowance left (Task 10d item 2)" "Connection::validate_hs_path drops the cost discard returns" cc
 cfresh
-once '^        Ghost\(work\)$' "$ccq/crypto_stream.rs"
-sed -i 's/^        Ghost(work)$/        Ghost(1)/' "$ccq/crypto_stream.rs"
+once '^        let Ghost\(cd\) = c\.on_datagram\(path, 0, rx\.packets, rx\.error, now, rand\);$' "$ccq/pipeline.rs"
+sed -i 's/^        let Ghost(cd) = c\.on_datagram(path, 0, rx\.packets, rx\.error, now, rand);$/        c.on_datagram(path, 0, rx.packets, rx.error, now, rand);/' "$ccq/pipeline.rs"
+expect_fail "cost-charge: refeed_one_rtt drops on_datagram's cost (pipeline.rs, Task 10d item 3)" "refeed_one_rtt drops the cost on_datagram returns" cc
+cfresh
+once '^    out\.clear\(\);$' "$ccq/pipeline.rs"
+sed -i 's/^    out\.clear();$/    out.truncate(0);/' "$ccq/pipeline.rs"
+expect_fail "cost-charge: a stale not-a-cost exemption (Task 10d)" "not-a-cost exemption for clear in transmit matches no call" cc
+cfresh
+# retire's return (9b2 Task 10d: on_fill and on_crypto_c return Ghost(work) too, so the line is found inside retire)
+rtl=$(awk '/fn retire\(/ { f = 1 } f && /^        Ghost\(work\)$/ { print NR; exit }' "$ccq/crypto_stream.rs")
+[ -n "$rtl" ] || die "cost-charge demo: retire's Ghost(work) not found in the copy"
+sed -i "${rtl}s/^        Ghost(work)$/        Ghost(1)/" "$ccq/crypto_stream.rs"
 expect_fail "cost-charge: retire returns a literal Ghost(1) (crypto_stream.rs, fix round 2)" "CryptoStream::retire builds the literal cost Ghost(1)" cc
 cfresh
 once '^            assert\(refed ==> !keep\);$' "$cct/server.rs"

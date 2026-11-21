@@ -27,14 +27,14 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tls::config::ServerConfig;
 use tls::flight::Level;
 
-const NOW: u64 = 10;
+pub const NOW: u64 = 10;
 
 fn cfg() -> &'static ServerConfig {
     static C: OnceLock<ServerConfig> = OnceLock::new();
     C.get_or_init(tc::ecdsa_cfg)
 }
 
-fn R(n: u8) -> Rand {
+pub fn R(n: u8) -> Rand {
     Rand { conn: qc::rnd(n), refeed: qc::rnd(n + 50), complete: qc::rnd(n + 100), tls: [n; 96] }
 }
 
@@ -332,7 +332,7 @@ impl Client {
 
     /// One datagram of coalesced packets, Initial then Handshake then 1-RTT (RFC 9000 §12.2). An
     /// Initial packet is padded so that the datagram is 1200 bytes.
-    fn dgram(&mut self, parts: Vec<(Level, Vec<Frame>)>) -> Vec<u8> {
+    pub fn dgram(&mut self, parts: Vec<(Level, Vec<Frame>)>) -> Vec<u8> {
         let mut parts = parts;
         parts.sort_by_key(|(l, _)| idx(*l));
         let mut rest = Vec::new();
@@ -538,7 +538,7 @@ fn done(log: &[(bool, Pkts)]) -> bool {
 
 /// The server up to the point where the client holds the whole server flight: the HRR round and
 /// the flight round are done; the client's Finished is pending.
-fn flight() -> (QuicServer<'static>, Client, Vec<(bool, Pkts)>) {
+pub fn flight() -> (QuicServer<'static>, Client, Vec<(bool, Pkts)>) {
     let mut c = Client::new();
     let (mut s, mut log) = accept(&mut c);
     let d = c.datagrams(None);

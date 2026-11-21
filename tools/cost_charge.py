@@ -14,22 +14,26 @@ hold no fn), inside `verus!` (comments and strings blanked, fns found by tools/a
     such as `out.append(..)`, is not one) is the tail of a block (its value passes on), or a `let` whose pattern binds each cost as `Ghost(x)`, and from there to the next
     binding of the same name `x` appears in a `work = work + E` update, in a `Ghost(..)` the fn builds (not a call
     argument), or, in frags.rs's public wrappers Frags::insert, Frags::after_insert, Frags::take_front and Frags::run_end,
-    crypto_stream.rs's CryptoStream::on_fill and send_stream.rs's SendStream::on_data_acked, on_data_lost, poll_data,
+    crypto_stream.rs's CryptoStream::on_crypto and send_stream.rs's SendStream::on_data_acked, on_data_lost, poll_data,
     next_off, want, reset and write only (keyed by file and impl path: queue.rs's ByteQueue::take_front is no wrapper), in
     an `assert`; any other fn that calls one
     returns a cost itself;
   - no `loop`, `for .. in` or `exec_allows_no_decreases_clause` (loops and recursion this gate does not see).
-In the per-fn files ROOT/crates/quic/src/conn.rs and ROOT/crates/quictls/src/server.rs (9b2 fix round 1, I6), their
-exec fns returning a Ghost<nat> are callees too, and every fn there is held to the callee-cost rule above (no public
-wrappers), except the statement drops DROPS lists by (file, fn, callee), each an exclusion with an owner (an entry no
-statement matches fails); their whiles and loops are not this gate's. In every file: every assignment to `work` is
+In the per-fn files ROOT/crates/quic/src/conn.rs, ROOT/crates/quictls/src/server.rs (9b2 fix round 1, I6) and
+ROOT/crates/quic/src/pipeline.rs (9b2 Task 10d: the receive pipeline's costs), their exec fns returning a Ghost<nat> are
+callees too, and every fn there is held to the callee-cost rule above, with no public wrappers and no allowed drop
+(9b2 Task 10d charged the last one, validate_hs_path's discard, and removed the allowance); their whiles and loops are
+not this gate's. NOT_COSTS keys, by (file, fn, callee), the calls in those fns that only share a cost fn's name (a call
+matched by name, the class 9b4's path/type resolution ends: carryover cat-C15-semantic-cost): pipeline.rs's
+`Connection::accept(` (QuicServer::accept is the cost fn) and `out.clear()` on a Vec (RangeSet::clear is); an entry no
+call matches fails. In every file: every assignment to `work` is
 `work = work + E;`; a fn binds `work` once (`let ghost [mut] work` twice restarts the count); a fn returning a cost
 binds no ghost but `work` to a literal (`let ghost [mut] X: nat = N;`, a deleted callee's cost stubbed, the T3b-F1
 shape) and builds no literal `Ghost(N)` after its first callee cost call or charge of work (a stubbed return), but for
 LITERAL_OK's keyed fns (avl::bal, frags::walk, frags::walk_run: match arms returning literals after a recursive arm's
 text; an entry that no longer fires fails).
 Fails naming file:line; fails closed on a missing file (avl.rs, frags.rs, crypto_stream.rs, ranges.rs, send_stream.rs,
-ring.rs, conn.rs, server.rs, or no byteq src/*.rs), no verus! block, or no looping or recursive fn or bound cost.
+ring.rs, conn.rs, pipeline.rs, server.rs, or no byteq src/*.rs), no verus! block, or no looping or recursive fn or bound cost.
 Limit: a stubbed literal cost arm in avl::bal, frags::walk or frags::walk_run is not seen (LITERAL_OK; owned by
 carryover cat-C15-semantic-cost, 9b4). Limit: a stub helper cost fn (a fn returning a literal Ghost(N) before any call,
 bound and charged by its caller) is not seen (cat-C15-semantic-cost). Limit: a structural check, not a proof that the amount charged is right (the cost ensures are upper bounds, so an
@@ -46,7 +50,7 @@ FILES = ['crates/quic/src/avl.rs', 'crates/quic/src/frags.rs', 'crates/quic/src/
 DIRS = ['crates/byteq/src']
 # Per-fn files: only their cost-carrying fns (an exec fn returning a Ghost<nat>) and the callers of one are checked, by
 # the callee-cost rules; their whiles and other fns are not this gate's (9b2 fix round 1, I6).
-PERFN = ['crates/quic/src/conn.rs', 'crates/quictls/src/server.rs']
+PERFN = ['crates/quic/src/conn.rs', 'crates/quic/src/pipeline.rs', 'crates/quictls/src/server.rs']
 # Cost fns whose match arms return a literal cost after a recursive arm's text (the literal-return rule's only
 # exemption, by (file, fn); an entry that no longer fires fails): their literal arms are cat-C15-semantic-cost's.
 LITERAL_OK = {
@@ -54,15 +58,15 @@ LITERAL_OK = {
     ('crates/quic/src/frags.rs', 'walk'),
     ('crates/quic/src/frags.rs', 'walk_run'),
 }
-# Statement drops the gate allows, each an exclusion its fn's comment names and an owner holds: (file, fn, callee).
-# An entry no drop matches fails, so the list cannot go stale.
-DROPS = {
-    # The pipeline half (`on_datagram`'s frame path) does not compose its costs: Task 10 (9b2).
-    ('crates/quic/src/conn.rs', 'Connection::validate_hs_path', 'discard'),
+# Calls that share a cost fn's name but are not it (file, fn, callee): matched by name only until 9b4 resolves callees by
+# path/type (cat-C15-semantic-cost). An entry no call matches fails.
+NOT_COSTS = {
+    ('crates/quic/src/pipeline.rs', 'accept_datagram', 'accept'),  # Connection::accept, not QuicServer::accept
+    ('crates/quic/src/pipeline.rs', 'transmit', 'clear'),  # Vec::clear on the out buffer, not RangeSet::clear
 }
 INV = re.compile(r'\b(invariant_except_break|invariant|ensures|decreases)\b')
 WRAPPERS = {('crates/quic/src/frags.rs', 'Frags::' + n) for n in ('insert', 'after_insert', 'take_front', 'run_end')} | {
-    ('crates/quic/src/crypto_stream.rs', 'CryptoStream::on_fill')} | {
+    ('crates/quic/src/crypto_stream.rs', 'CryptoStream::on_crypto')} | {
     ('crates/quic/src/send_stream.rs', 'SendStream::' + n)
     for n in ('on_data_acked', 'on_data_lost', 'poll_data', 'next_off', 'want', 'reset', 'write')}
 UPDATE = re.compile(r'\bwork\s*=\s*work\s*\+\s*([^;]*?)\s*;')
@@ -158,7 +162,7 @@ def bodies(root):
 def check(root):
     errs, nfn, nwhile, nbound = [], 0, 0, 0
     files = bodies(root)
-    seen, lits_seen = set(), set()
+    lits_seen, nc_seen = set(), set()
     costs = {}
     for rel, s, fl in files:
         for path, name, ret, clauses, k, end, e2 in fl:
@@ -186,7 +190,13 @@ def check(root):
                 lit = [x for x in lit if 'builds the literal cost' not in x]
             errs += lit
             if rel in PERFN:
-                errs += dropped(s, line, path, name, ret, end, e2, costs, call, False, {d[2] for d in DROPS if d[:2] == (rel, path)}, seen)
+                skip = {d[2] for d in NOT_COSTS if d[:2] == (rel, path)}
+                if skip:
+                    nc_seen.update((rel, path, c.group(1)) for c in call.finditer(s, end, e2) if c.group(1) in skip)
+                    pc = re.compile(r'(?<!\w)(%s)\s*(?:::<[^>]*>\s*)?\(' % '|'.join(map(re.escape, sorted(set(costs) - skip))))
+                else:
+                    pc = call
+                errs += dropped(s, line, path, name, ret, end, e2, costs, pc, False)
                 nbound += len(binds_in(s, end, e2, call))
                 continue
             for bad in re.finditer(r'\bloop\b|\bfor\s+[^{;]*?\bin\b', body):
@@ -216,7 +226,7 @@ def check(root):
                     errs.append('%s: while whose body does not charge work (`work = work + E`, E not 0)' % line(w))
             if rec and not charges(body):
                 errs.append('%s: %s recurses but its body does not charge work (`work = work + E`, E not 0)' % (line(k), path))
-            errs += dropped(s, line, path, name, ret, end, e2, costs, call, (rel, path) in WRAPPERS, set(), seen)
+            errs += dropped(s, line, path, name, ret, end, e2, costs, call, (rel, path) in WRAPPERS)
             nbound += len(binds_in(s, end, e2, call))
             if not (rec or whiles): continue
             nfn += 1
@@ -229,11 +239,10 @@ def check(root):
             for r in reads:
                 if len(ens) < 2 or not re.search(r'(?<![\w.])' + re.escape(r), ens[1]):
                     errs.append('%s: %s %s but its ensures do not read its cost %s' % (line(k), path, why, r))
+    for d in sorted(NOT_COSTS - nc_seen):
+        errs.append('%s: not-a-cost exemption for %s in %s matches no call' % (d[0], d[2], d[1]))
     for d in sorted(LITERAL_OK - lits_seen):
         errs.append('%s: literal-return exemption for %s matches no literal cost' % d)
-    for d in sorted(DROPS):
-        if d[1:] not in seen:
-            errs.append('%s: allowed drop of %s in %s matches no statement call' % (d[0], d[2], d[1]))
     if errs:
         raise ValueError('\n'.join(errs))
     if nfn == 0 or nwhile == 0 or nbound == 0:
@@ -275,9 +284,8 @@ def binds_in(s, a, b, call):
     return out
 
 
-def dropped(s, line, path, name, ret, a, b, costs, call, wrap, allow, seen):
-    """Errors for callee costs fn `path` (body s[a:b]) drops; a statement call to a callee in `allow` is an allowed
-    drop (recorded in `seen` as (file, fn, callee) once the caller knows the file)."""
+def dropped(s, line, path, name, ret, a, b, costs, call, wrap):
+    """Errors for callee costs fn `path` (body s[a:b]) drops."""
     errs, ours = [], cost_idx(ret) is not None
     lets = binds_in(s, a, b, call)
     covered = [(l, e) for l, _, _, e in lets]
@@ -285,9 +293,6 @@ def dropped(s, line, path, name, ret, a, b, costs, call, wrap, allow, seen):
         if any(l < c.start() < e for l, e in covered): continue
         z = acc.match_paren(s, s.index('(', c.end() - 1))
         tail = re.match(r'\s*\}', s[z:b]) is not None
-        if not tail and c.group(1) in allow and re.match(r'\s*;', s[z:b]):
-            seen.add((path, c.group(1)))
-            continue
         if not tail:
             errs.append('%s: %s drops the cost %s returns (neither bound by a let nor the tail of a block)' % (line(c.start()), path, c.group(1)))
         elif not ours:

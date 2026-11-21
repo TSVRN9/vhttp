@@ -442,7 +442,7 @@ impl CryptoStream {
         Ghost(work)
     }
 
-    /// A CRYPTO frame's `offset` and `data`.
+    /// A CRYPTO frame's `offset` and `data` (`on_crypto_c` without its cost).
     pub fn on_crypto(&mut self, offset: u64, data: &[u8]) -> (r: Result<(), u64>)
         requires
             old(self).wf(),
@@ -466,6 +466,42 @@ impl CryptoStream {
             final(self).td_nodes() == old(self).td_nodes(),
             final(self).load() <= old(self).load() + data@.len(),
     {
+        let (r, Ghost(c)) = self.on_crypto_c(offset, data);
+        proof {
+            assert(c <= 10 * data@.len() + 16078);
+        }
+        r
+    }
+
+    /// A CRYPTO frame's `offset` and `data`, with its cost (9b2 Task 10d): the store's walk and insert
+    /// (`Frags::after_insert_c`, `insert_c`) or the insert and the run walk (`run_end_w`), O(d) at the tree's
+    /// height cap.
+    pub fn on_crypto_c(&mut self, offset: u64, data: &[u8]) -> (r: (Result<(), u64>, Ghost<nat>))
+        requires
+            old(self).wf(),
+            offset + data@.len() <= VARINT_MAX,
+        ensures
+            final(self).wf(),
+            r.0 is Err <==> crypto_allowed_err(*old(self), offset, data@.len(), CRYPTO_BUFFER_EXCEEDED),
+            r.0 is Err ==> r.0 == Err::<(), u64>(CRYPTO_BUFFER_EXCEEDED),
+            r.0 matches Err(c) ==> crypto_allowed_err(*old(self), offset, data@.len(), c),
+            (r.0 is Err || offset + data@.len() <= old(self).base_spec() || data@.len() == 0)
+                ==> *final(self) == *old(self),
+            (r.0 is Ok && offset + data@.len() > old(self).base_spec() && data@.len() > 0) ==> {
+                &&& final(self).inserted_frames() == old(self).inserted_frames().push((offset as nat, data@))
+                &&& final(self).base_spec() == old(self).base_spec()
+            },
+            // The record of what arrived only grows, and so does its end.
+            forall|p: nat| #[trigger] old(self).received(p) ==> final(self).received(p),
+            final(self).end_spec() >= old(self).end_spec(),
+            // At most one position held per byte of the frame.
+            final(self).held_spec() <= old(self).held_spec() + data@.len(),
+            final(self).td_nodes() == old(self).td_nodes(),
+            final(self).load() <= old(self).load() + data@.len(),
+            // The store's walk and insert (9b2 Task 10d): linear in the frame's bytes.
+            r.1@ <= 10 * data@.len() + 16078,
+    {
+        let ghost mut work: nat = 0;
         let end = offset + data.len() as u64;
         if end <= self.base {
             //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
@@ -479,12 +515,12 @@ impl CryptoStream {
             proof {
                 lemma_same(*self, offset, data@);
             }
-            return Ok(());
+            return (Ok(()), Ghost(work));
         }
         if data.len() == 0 {
             // No bytes: nothing is buffered, so the buffer is not exceeded at any offset
             // (RFC 9000 §7.5), and the end is not moved past what was received (RFC 9001 §4.1.3).
-            return Ok(());
+            return (Ok(()), Ghost(work));
         }
         let ghost a = *self;
         if end <= self.contig {
@@ -495,13 +531,20 @@ impl CryptoStream {
                 lemma_same(a, offset, data@);
                 lemma_hist_step(a, *self, offset, data@);
             }
-            return Ok(());
+            return (Ok(()), Ghost(work));
         }
         if offset > self.contig {
-            self.on_ooo(offset, data)
+            let (r, Ghost(c)) = self.on_ooo(offset, data);
+            proof {
+                work = work + c;
+            }
+            (r, Ghost(work))
         } else {
-            self.on_fill(offset, data);
-            Ok(())
+            let Ghost(c) = self.on_fill(offset, data);
+            proof {
+                work = work + c;
+            }
+            (Ok(()), Ghost(work))
         }
     }
 
@@ -510,16 +553,18 @@ impl CryptoStream {
     /// store's count includes the in-order run `[base, contig)`, a run of its own since `contig`
     /// is not held: the out-of-order bytes are the rest (`lemma_ooo_count`).
     #[verifier::spinoff_prover]
-    fn on_ooo(&mut self, offset: u64, data: &[u8]) -> (r: Result<(), u64>)
+    fn on_ooo(&mut self, offset: u64, data: &[u8]) -> (r: (Result<(), u64>, Ghost<nat>))
         requires
             old(self).wf(),
             offset + data@.len() <= VARINT_MAX,
             offset > old(self).contig,
             data@.len() > 0,
         ensures
-            r is Err <==> crypto_allowed_err(*old(self), offset, data@.len(), CRYPTO_BUFFER_EXCEEDED),
-            r is Err ==> r == Err::<(), u64>(CRYPTO_BUFFER_EXCEEDED) && *final(self) == *old(self),
-            r is Ok ==> stepped(*final(self), *old(self), offset, data@),
+            r.0 is Err <==> crypto_allowed_err(*old(self), offset, data@.len(), CRYPTO_BUFFER_EXCEEDED),
+            r.0 is Err ==> r.0 == Err::<(), u64>(CRYPTO_BUFFER_EXCEEDED) && *final(self) == *old(self),
+            r.0 is Ok ==> stepped(*final(self), *old(self), offset, data@),
+            // The walk (`after_insert_c`) and the insert (`insert_c`).
+            r.1@ <= 10 * data@.len() + 15945,
     {
         hide(rfc_received);
         hide(rfc_contiguous);
@@ -530,8 +575,10 @@ impl CryptoStream {
         hide(runs);
         hide(above);
         let ghost a = *self;
-        let (h, c) = self.st.after_insert(self.contig, offset, data);
+        let ghost mut work: nat = 0;
+        let ((h, c), Ghost(cw)) = self.st.after_insert_c(self.contig, offset, data);
         proof {
+            work = work + cw;
             lemma_ooo_count(a, offset, data@);
         }
         let run: usize = if self.contig > self.base {
@@ -543,9 +590,12 @@ impl CryptoStream {
             //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
             //# If an endpoint does not expand its buffer, it MUST close
             //# the connection with a CRYPTO_BUFFER_EXCEEDED error code.
-            return Err(CRYPTO_BUFFER_EXCEEDED);
+            return (Err(CRYPTO_BUFFER_EXCEEDED), Ghost(work));
         }
-        self.st.insert(self.contig, offset, data);
+        let Ghost(ci) = self.st.insert_c(self.contig, offset, data);
+        proof {
+            work = work + ci;
+        }
         let end = offset + data.len() as u64;
         if end > self.hi {
             self.hi = end;
@@ -556,7 +606,7 @@ impl CryptoStream {
             lemma_ooo_post(a, *self, offset, data@);
             lemma_hist_step(a, *self, offset, data@);
         }
-        Ok(())
+        (Ok(()), Ghost(work))
     }
 
     /// `on_crypto` for data reaching the contiguous end: the frame goes into the store, and the
@@ -564,7 +614,7 @@ impl CryptoStream {
     /// stays out of order is a subset of what was, so nothing is refused (`lemma_fill_post`). The
     /// walk meets at most `d/K + 133` chunks (split from `on_crypto` for the rlimit).
     #[verifier::spinoff_prover]
-    fn on_fill(&mut self, offset: u64, data: &[u8])
+    fn on_fill(&mut self, offset: u64, data: &[u8]) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
             offset + data@.len() <= VARINT_MAX,
@@ -572,11 +622,17 @@ impl CryptoStream {
         ensures
             !crypto_allowed_err(*old(self), offset, data@.len(), CRYPTO_BUFFER_EXCEEDED),
             stepped(*final(self), *old(self), offset, data@),
+            // The insert (`insert_c`) and the run walk (`run_end_w`).
+            r@ <= 9 * data@.len() + 16078,
     {
         hide(rfc_received);
         hide(rfc_contiguous);
         let ghost a = *self;
-        self.st.insert(self.contig, offset, data);
+        let ghost mut work: nat = 0;
+        let Ghost(ci) = self.st.insert_c(self.contig, offset, data);
+        proof {
+            work = work + ci;
+        }
         let (r, Ghost(c)) = self.st.run_end_w(self.contig);
         let end = offset + data.len() as u64;
         self.contig = r;
@@ -592,7 +648,11 @@ impl CryptoStream {
             self.st.lemma_chunks_in_held(a.contig as nat, r as nat);
             lemma_walk_chunks((r - a.contig) as nat, data@.len());
             assert(c <= c_re1() * (self.st.tree_ht() + 1) + c_re2() * (data@.len() / (K as nat) + 133));
+            self.st.lemma_tree_ht();
+            vstd::arithmetic::div_mod::lemma_div_is_ordered_by_denominator(data@.len() as int, 1, K as int);
+            work = work + c;
         }
+        Ghost(work)
     }
 
     /// Moves `min(max, unread)` in-order bytes into the empty `out`, an exact buffer for them; returns its cost

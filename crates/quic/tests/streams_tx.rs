@@ -44,7 +44,7 @@ fn with(l: &TransportParams, p: &TransportParams) -> Streams {
 /// One frame into `s`, returning the result and the events it pushed.
 fn feed(s: &mut Streams, f: Frame) -> (Result<(), u64>, Vec<StreamEvent>) {
     let mut ev = Vec::new();
-    let r = s.on_frame(&f, &mut ev);
+    let r = s.on_frame(&f, &mut ev).0;
     (r, ev)
 }
 
@@ -226,7 +226,7 @@ fn stop_sending_after_partial() {
 fn app_reset_and_stop() {
     let mut s = fresh();
     let mut ev = Vec::new();
-    assert_eq!(s.on_frame(&S(0, 0, b"GET", false), &mut ev), Ok(()));
+    assert_eq!(s.on_frame(&S(0, 0, b"GET", false), &mut ev).0, Ok(()));
     s.reset(0, 0x10c);
     s.stop_sending(0, 0x10c);
     assert_eq!(
@@ -236,7 +236,7 @@ fn app_reset_and_stop() {
             Frame::StopSending { stream_id: 0, error_code: 0x10c },
         ]
     );
-    assert_eq!(s.on_frame(&S(0, 3, b"x", true), &mut ev), Ok(()));
+    assert_eq!(s.on_frame(&S(0, 3, b"x", true), &mut ev).0, Ok(()));
     assert_eq!(ev, vec![D(0, b"GET", false), D(0, b"x", true)]);
     assert_eq!(s.open_streams(), 1);
     s.on_frame_acked(&Frame::ResetStream { stream_id: 0, error_code: 0x10c, final_size: 0 });
@@ -247,9 +247,9 @@ fn app_reset_and_stop() {
 fn reset_one_direction() {
     let mut s = fresh();
     let mut ev = Vec::new();
-    assert_eq!(s.on_frame(&S(0, 0, b"GET", false), &mut ev), Ok(()));
+    assert_eq!(s.on_frame(&S(0, 0, b"GET", false), &mut ev).0, Ok(()));
     let f = Frame::ResetStream { stream_id: 0, error_code: 1, final_size: 3 };
-    assert_eq!(s.on_frame(&f, &mut ev), Ok(()));
+    assert_eq!(s.on_frame(&f, &mut ev).0, Ok(()));
     assert_eq!(ev, vec![D(0, b"GET", false), StreamEvent::Reset { id: 0, code: 1 }]);
     assert_eq!(s.write(0, b"resp", true), Ok(()));
     assert_eq!(feed(&mut s, Frame::MaxStreamData { stream_id: 0, max: 200 }).0, Ok(()));

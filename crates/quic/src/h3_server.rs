@@ -1160,7 +1160,7 @@ impl H3Server {
         }
     }
 
-    /// `Connection::on_datagram`, then `pump`.
+    /// `Connection::on_datagram`, then `pump`; returns the connection's cost (`pump`'s is 9b4's).
     #[verifier::spinoff_prover]
     pub fn on_datagram(
         &mut self,
@@ -1171,7 +1171,7 @@ impl H3Server {
         now: u64,
         rand: &[u8; RAND_LEN],
         app: &mut Vec<AppEvent>,
-    )
+    ) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
             old(self).history_ok(),
@@ -1183,9 +1183,11 @@ impl H3Server {
             final(self).conn_spec().out_log() == old(self).conn_spec().out_log(),
             final(self).started_spec() ==> final(self).conn_spec().events_spec().len() == 0,
             app_grew(old(app)@, final(app)@),
+            r@ <= c_unit() * crate::crypto_count::plains_load(crate::protect::plains_view(packets@)),
     {
-        self.conn.on_datagram(path, datagram_len, packets, error, now, rand);
+        let Ghost(c) = self.conn.on_datagram(path, datagram_len, packets, error, now, rand);
         self.pump(app);
+        Ghost(c)
     }
 
     /// `Connection::on_timeout`, then `pump`.

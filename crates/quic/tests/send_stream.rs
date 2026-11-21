@@ -100,14 +100,14 @@ fn reset_stops_stream() {
 #[test]
 fn stop_sending_forces_reset() {
     let mut s = SendStream::new(100);
-    assert!(s.on_stop_sending(5));
+    assert!(s.on_stop_sending(5).0);
     assert_eq!(s.pending_reset(), Some((5, 0)));
 
     let mut s = SendStream::new(100);
     assert_eq!(s.write(b"ab", true), Ok(()));
     assert!(s.poll_data(100, 100).is_some());
     assert_eq!(s.state_exec(), SendState::DataSent);
-    assert!(s.on_stop_sending(6));
+    assert!(s.on_stop_sending(6).0);
     assert_eq!(s.pending_reset(), Some((6, 2)));
 
     let mut s = SendStream::new(100);
@@ -115,12 +115,12 @@ fn stop_sending_forces_reset() {
     assert!(s.poll_data(100, 100).is_some());
     s.on_data_acked(0, 2, true);
     assert_eq!(s.state_exec(), SendState::DataRecvd);
-    assert!(!s.on_stop_sending(7));
+    assert!(!s.on_stop_sending(7).0);
     assert_eq!(s.pending_reset(), None);
 
     let mut s = SendStream::new(100);
     assert!(s.reset(1));
-    assert!(!s.on_stop_sending(8));
+    assert!(!s.on_stop_sending(8).0);
 }
 
 #[test]

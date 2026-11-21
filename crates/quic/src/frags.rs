@@ -1444,6 +1444,26 @@ impl Frags {
         assert forall|i: int| 0 <= i < f.len() implies #[trigger] end(f[i]) <= VARINT_MAX by {}
     }
 
+    /// `after_insert` with its cost at the tree's height cap (126), for callers composing it (9b2 Task 10d):
+    /// `2 · (2 · 127 + d + 3)`.
+    pub fn after_insert_c(&self, lo: u64, off: u64, data: &[u8]) -> (r: ((u64, usize), Ghost<nat>))
+        requires
+            self.wf(),
+            off + data@.len() <= VARINT_MAX,
+        ensures
+            r.0.0 == put(self.view(), lo as nat, off as nat, data@).dom().len(),
+            r.0.1 == runs(put(self.view(), lo as nat, off as nat, data@).dom()),
+            r.1@ <= 2 * data@.len() + 514,
+    {
+        let (r, Ghost(c)) = self.after_insert_w(lo, off, data);
+        proof {
+            self.lemma_m_le(lo, off, data@);
+            lemma_ht_le(self.t);
+            assert(c <= c_walk() * (2 * (ht(self.t) + 1) + data@.len() + 3));
+        }
+        (r, Ghost(c))
+    }
+
     /// The `(held, count)` that `insert(lo, off, data)` would give, `self` unchanged.
     pub fn after_insert(&self, lo: u64, off: u64, data: &[u8]) -> (r: (u64, usize))
         requires
@@ -5324,6 +5344,28 @@ impl Frags {
                 + 4 * K));
             assert(c <= 112 * (ht(old(self).t) + 1) + 8 * data@.len() + 1207);
         }
+    }
+
+    /// `insert` with its cost at the tree's height cap (126), for callers composing it (9b2 Task 10d: the CRYPTO
+    /// frame path): `112 · 127 + 8 d + 1207`.
+    pub fn insert_c(&mut self, lo: u64, off: u64, data: &[u8]) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            off + data@.len() <= VARINT_MAX,
+        ensures
+            final(self).wf(),
+            final(self).view() == put(old(self).view(), lo as nat, off as nat, data@),
+            final(self).held() == put(old(self).view(), lo as nat, off as nat, data@).dom().len(),
+            final(self).count() == runs(put(old(self).view(), lo as nat, off as nat, data@).dom()),
+            (forall|k: nat| (if lo >= off { lo } else { off }) <= k < off + data@.len() ==> #[trigger]
+                old(self).view().contains_key(k)) ==> *final(self) == *old(self),
+            r@ <= 8 * data@.len() + 15431,
+    {
+        proof {
+            lemma_ht_le(self.t);
+        }
+        let Ghost(c) = self.insert_w(lo, off, data);
+        Ghost(c)
     }
 
     /// `take_front`, and its cost: the run's chunks that fit whole, then, if the limit falls inside a chunk, that

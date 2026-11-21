@@ -1671,6 +1671,34 @@ proof fn lemma_qm_pos(f: spec_fn(u64) -> nat, qv: Seq<u64>)
     }
 }
 
+/// One entry's removal (`Streams::gc`, 9b2 Task 10d item 5): the removal's shift (at most the entries), the receiving
+/// part's ring (`c_rfree`) and the sending part's queue (`c_sfree`; its sets and slot are empty then).
+pub open spec fn c_gc() -> nat {
+    max_entries() + 1 + c_rfree() + c_sfree()
+}
+
+/// What a frame costs its receiving part (`feed_recv`, 9b2 Task 10d item 4): STREAM's insert (`on_data`) and the
+/// delivery of at most its bytes (`deliver`); RESET_STREAM's ring free (`on_reset`).
+pub open spec fn c_feed(f: SpecFrame) -> nat {
+    match f {
+        SpecFrame::Stream { data, .. } => (c_ri() + 1) * (data.len() + 2 * (PAGE as nat)) + NP_MAX as nat + c_rd() * (data.len()
+            + data.len() / (PAGE as nat) + 2) + 1,
+        SpecFrame::ResetStream { .. } => c_rfree(),
+        _ => 0,
+    }
+}
+
+/// One stream-layer frame's cost (`Streams::on_frame`, 9b2 Task 10d items 4 and 5): its receiving part's
+/// (`c_feed`), a STOP_SENDING's reset (`c_sfree`) and the entry's removal (`c_gc`). Excluded: the id lookup's scan
+/// and the entries' growth (Q20, docs/rca/2026-11-12-cost-sweep.md, 9b4).
+pub open spec fn c_srx(f: SpecFrame) -> nat {
+    c_feed(f) + (if f is StopSending {
+        c_sfree()
+    } else {
+        0
+    }) + c_gc()
+}
+
 /// The most entries: our peer streams of both directions and our own unidirectional ones.
 pub open spec fn max_entries() -> nat {
     (2 * MAX_LOCAL_STREAMS + MAX_OWN_UNI) as nat
@@ -2125,6 +2153,21 @@ impl Streams {
     /// Some stream has bytes or the FIN left to deliver: the queue is non-empty.
     pub closed spec fn stream_backlog_spec(&self) -> bool {
         self.q@.len() > 0
+    }
+
+    /// The streams with an entry (9b2 Task 10d: `gc`'s removals are charged against them).
+    pub closed spec fn n_entries(&self) -> nat {
+        self.entries@.len()
+    }
+
+    /// At most `max_entries()` streams have an entry.
+    pub proof fn lemma_n_entries(&self)
+        requires
+            self.wf(),
+        ensures
+            self.n_entries() <= max_entries(),
+    {
+        lemma_entries_bound(*self);
     }
 
     /// Some stream has bytes or the FIN left to deliver. O(1).
@@ -2595,10 +2638,7 @@ impl Streams {
     }
 
     /// STREAM or RESET_STREAM `f` to entry `i`'s receiving part, then the connection credit.
-    fn apply_recv(&mut self, i: usize, f: &Frame, ev: &mut Vec<StreamEvent>) -> (r: Result<
-        (),
-        u64,
-    >)
+    fn apply_recv(&mut self, i: usize, f: &Frame, ev: &mut Vec<StreamEvent>) -> (r: (Result<(), u64>, Ghost<nat>))
         requires
             old(self).wf(),
             i < old(self).entries@.len(),
@@ -2616,16 +2656,17 @@ impl Streams {
             final(self).failed == old(self).failed,
             final(self).tx_held() == old(self).tx_held(),
             final(self).rx_conn == old(self).rx_conn,
-            r == rx_outcome(*old(self), f@),
-            r is Err ==> final(ev)@ == old(ev)@,
-            r is Ok ==> event_views(final(ev)@) == event_views(old(ev)@) + frame_events(
+            r.0 == rx_outcome(*old(self), f@),
+            r.0 is Err ==> final(ev)@ == old(ev)@,
+            r.0 is Ok ==> event_views(final(ev)@) == event_views(old(ev)@) + frame_events(
                 *old(self),
                 *final(self),
                 f@,
             ),
             forall|j: u64| #[trigger]
-                final(self).rx_trace(j) == rx_trace_after(*old(self), f@, r, j),
+                final(self).rx_trace(j) == rx_trace_after(*old(self), f@, r.0, j),
             tx_kept_but(*old(self), *final(self), None),
+            r.1@ <= c_feed(f@),
     {
         let ghost s0 = *self;
         let ghost id = self.entries@[i as int].id;
@@ -2651,7 +2692,7 @@ impl Streams {
         // The stream reports only the growth of its final size, else high-water mark (`counted`),
         // so duplicate bytes count once; the connection credit we return is what it retired.
         let room = self.conn_recv.limit() - self.conn_counted;
-        let (res, dt, enq) = feed_entry(&mut e, f, room, ev);
+        let (res, dt, enq, Ghost(c)) = feed_entry(&mut e, f, room, ev);
         let xid = e.id;
         let ghost tr = e.recv->0.trace();
         let ghost ne = e;
@@ -2693,7 +2734,7 @@ impl Streams {
             assert(ne.send == e0.send);
             lemma_swap_flight(s0, *self, i as int, ne);
         }
-        r
+        (r, Ghost(c))
     }
 
     /// Works the stream at the queue's head (9b2 D13, D10 (e)): pops its id, hands at most `budget` bytes (or its
@@ -2748,12 +2789,13 @@ impl Streams {
         }
         let Ghost(c) = self.deliver_at_head(i, budget, ev);
         let ghost s2 = *self;
-        self.gc(i);
+        let Ghost(cg) = self.gc(i);
         proof {
             lemma_backlog_same(s2, *self);
+            lemma_gc_one(cg, s2.n_entries(), self.n_entries());
         }
-        // The lookup's scan and the removal's shift, each at most the entries; the entry's buffers freed.
-        Ghost(c + 2 * s0.entries@.len() + 2 + c_rfree() + c_sfree())
+        // The lookup's scan, at most the entries; the removal's shift and the entry's buffers (`gc`).
+        Ghost(c + s0.entries@.len() + 1 + cg)
     }
 
     /// `deliver_some` on entry `i`, the queue's head: pops it, delivers at most `budget` bytes, reaps at most
@@ -2846,7 +2888,7 @@ impl Streams {
     }
 
     /// STOP_SENDING or MAX_STREAM_DATA `f` to entry `i`'s sending part.
-    fn apply_send(&mut self, i: usize, f: &Frame, ev: &mut Vec<StreamEvent>)
+    fn apply_send(&mut self, i: usize, f: &Frame, ev: &mut Vec<StreamEvent>) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
             i < old(self).entries@.len(),
@@ -2890,8 +2932,15 @@ impl Streams {
                 }
             }),
             tx_kept_but(*old(self), *final(self), None),
+            // A STOP_SENDING's reset frees the old queue's buffers.
+            r@ <= (if f@ is StopSending {
+                c_sfree()
+            } else {
+                0
+            }),
     {
         let ghost s0 = *self;
+        let ghost mut work: nat = 0;
         let ghost id = self.entries@[i as int].id;
         let ghost a = self.entries@;
         let ghost ev0 = ev@;
@@ -2913,7 +2962,11 @@ impl Streams {
                     //# MUST send a RESET_STREAM frame if the stream is in the "Ready" or
                     //# "Send" state.
                     // We reset in Data Sent too; `poll_frames` sends the RESET_STREAM.
-                    if p.on_stop_sending(*error_code) {
+                    let (fresh, Ghost(c)) = p.on_stop_sending(*error_code);
+                    proof {
+                        work = work + c;
+                    }
+                    if fresh {
                         ev.push(StreamEvent::StopSending { id: *stream_id, code: *error_code });
                         self.resets = Ghost(self.resets@.insert(*stream_id, *error_code));
                     }
@@ -2972,6 +3025,7 @@ impl Streams {
             }
             lemma_swap_flight(s0, *self, i as int, ne);
         }
+        Ghost(work)
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-4.4
@@ -2981,13 +3035,15 @@ impl Streams {
     /// Removes entry `i` once all its parts are terminal and it is not queued (so its sending part's teardown slot is
     /// empty, `qinv`); a removed peer stream is re-credited (MAX_STREAMS), and its buffers are dropped: a "Data Read"
     /// receiving part's ring slot vector (one free; delivery freed its pages) and the sending part's queue (its sets
-    /// and slot are empty, asserted below: at most `c_sfree()`). `deliver_some` charges its own removal; the frame and
-    /// ACK/loss paths' removals are Task 10d's (item 5).
-    fn gc(&mut self, i: usize)
+    /// and slot are empty, asserted below: at most `c_sfree()`). Returns the removal's cost (`c_gc`, 0 when it removes
+    /// nothing), so every caller charges it: `deliver_some`, the frame path and the ACK path (9b2 Task 10d item 5).
+    fn gc(&mut self, i: usize) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
             i < old(self).entries@.len(),
         ensures
+            final(self).n_entries() <= old(self).n_entries() <= final(self).n_entries() + 1,
+            r@ <= (old(self).n_entries() - final(self).n_entries()) * c_gc(),
             final(self).wf(),
             final(self).same_traces(*old(self)),
             final(self).resets == old(self).resets,
@@ -3013,6 +3069,7 @@ impl Streams {
     {
         let ghost s0 = *self;
         let ghost a = self.entries@;
+        let ghost mut work: nat = 0;
         proof {
             assert(entry_ok(a[i as int], self.rx_bidi, self.rx_uni));
         }
@@ -3053,6 +3110,9 @@ impl Streams {
                 lemma_sum_remove(a, i as int, 11);
                 lemma_sum_w_nonneg(a);
                 lemma_sum_w_nonneg(a.remove(i as int));
+                lemma_entries_bound(s0);
+                // The shift, the ring and the queue.
+                work = work + s0.entries@.len() + 1 + c_rfree() + c_sfree();
             }
             self.tx_gone = Ghost((self.tx_gone@ + val(e, 8)) as nat);
             if e.id % 4 != 3 {
@@ -3065,21 +3125,19 @@ impl Streams {
                 lemma_gc_flight(s0, *self, i as int);
             }
         }
+        Ghost(work)
     }
 
-    /// One of the five stream frames, naming stream `id`. Sets the latch on every `Err`.
-    fn stream_frame(&mut self, f: &Frame, id: u64, ev: &mut Vec<StreamEvent>) -> (r: Result<
-        (),
-        u64,
-    >)
+    /// One of the five stream frames, naming stream `id`. Sets the latch on every `Err`. Returns its cost (`c_srx`).
+    fn stream_frame(&mut self, f: &Frame, id: u64, ev: &mut Vec<StreamEvent>) -> (r: (Result<(), u64>, Ghost<nat>))
         requires
             old(self).wf(),
             frame_wf(f@),
             frame_stream_id(f@) == Some(id),
         ensures
             final(self).wf(),
-            r is Err ==> final(self).failed_spec(),
-            r is Ok ==> final(self).failed_spec() == old(self).failed_spec(),
+            r.0 is Err ==> final(self).failed_spec(),
+            r.0 is Ok ==> final(self).failed_spec() == old(self).failed_spec(),
             final(self).tx_held() <= old(self).tx_held(),
             final(self).rx_conn == old(self).rx_conn,
             rfc_stream_frame_check(old(self).ids_spec(), f@) is Some ==> *final(self) == old(
@@ -3091,10 +3149,12 @@ impl Streams {
                 f@,
                 event_views(old(ev)@),
                 event_views(final(ev)@),
-                r,
+                r.0,
             ),
+            r.1@ <= c_srx(f@),
     {
         let ghost s0 = *self;
+        let ghost mut work: nat = 0;
         if let Some(c) = self.check(f, id) {
             self.failed = true;
             proof {
@@ -3103,7 +3163,7 @@ impl Streams {
                 lemma_post_refl(s0, f@, event_views(ev@), Err(c));
                 lemma_post_after(s0, s0, *self, f@, event_views(ev@), event_views(ev@), Err(c));
             }
-            return Err(c);
+            return (Err(c), Ghost(work));
         }
         proof {
             self.ids.lemma_wf();
@@ -3118,23 +3178,24 @@ impl Streams {
             assert(parts_kept(s0, s1));
             assert forall|j: u64| #[trigger] s1.tx_flight(j) == s0.tx_flight(j) by {}
         }
-        let r = self.deliver(f, id, ev);
+        let (r, Ghost(c)) = self.deliver(f, id, ev);
         let ghost s2 = *self;
         if r.is_err() {
             self.failed = true;
         }
         proof {
+            work = work + c;
             lemma_post_before(s0, s1, s2, f@, event_views(old(ev)@), event_views(ev@), r);
             assert(equiv(s2, *self));
             assert forall|j: u64| #[trigger] self.tx_flight(j) == s2.tx_flight(j) by {}
             lemma_post_after(s0, s2, *self, f@, event_views(old(ev)@), event_views(ev@), r);
         }
-        r
+        (r, Ghost(work))
     }
 
     /// A stream frame that passed the table, its stream opened: to the stream's entry, if it
-    /// still has one.
-    fn deliver(&mut self, f: &Frame, id: u64, ev: &mut Vec<StreamEvent>) -> (r: Result<(), u64>)
+    /// still has one. Returns its cost (`c_srx`).
+    fn deliver(&mut self, f: &Frame, id: u64, ev: &mut Vec<StreamEvent>) -> (r: (Result<(), u64>, Ghost<nat>))
         requires
             old(self).wf(),
             frame_wf(f@),
@@ -3146,18 +3207,20 @@ impl Streams {
             final(self).failed == old(self).failed,
             final(self).tx_held() <= old(self).tx_held(),
             final(self).rx_conn == old(self).rx_conn,
-            r == rx_outcome(*old(self), f@),
+            r.0 == rx_outcome(*old(self), f@),
             post_rest(
                 *old(self),
                 *final(self),
                 f@,
                 event_views(old(ev)@),
                 event_views(final(ev)@),
-                r,
+                r.0,
             ),
+            r.1@ <= c_srx(f@),
     {
         let ghost s0 = *self;
         let ghost ev0 = ev@;
+        let ghost mut work: nat = 0;
         proof {
             self.ids.lemma_wf();
             let sp = s0.rx_spec(id);
@@ -3169,15 +3232,21 @@ impl Streams {
                 proof {
                     assert(frame_recv_in(f@) is Some ==> s0.rtr@.contains_key(id));
                 }
-                Ok(())
+                (Ok(()), Ghost(work))
             },
-            Some(i) => self.deliver_at(i, f, ev),
+            Some(i) => {
+                let (r, Ghost(c)) = self.deliver_at(i, f, ev);
+                proof {
+                    work = work + c;
+                }
+                (r, Ghost(work))
+            },
         }
     }
 
-    /// `deliver` to entry `i`, then `gc`.
+    /// `deliver` to entry `i`, then `gc`; returns the part's cost and the removal's (`c_srx`).
     #[verifier::spinoff_prover]
-    fn deliver_at(&mut self, i: usize, f: &Frame, ev: &mut Vec<StreamEvent>) -> (r: Result<(), u64>)
+    fn deliver_at(&mut self, i: usize, f: &Frame, ev: &mut Vec<StreamEvent>) -> (r: (Result<(), u64>, Ghost<nat>))
         requires
             old(self).wf(),
             frame_wf(f@),
@@ -3189,18 +3258,20 @@ impl Streams {
             final(self).failed == old(self).failed,
             final(self).tx_held() <= old(self).tx_held(),
             final(self).rx_conn == old(self).rx_conn,
-            r == rx_outcome(*old(self), f@),
+            r.0 == rx_outcome(*old(self), f@),
             post_rest(
                 *old(self),
                 *final(self),
                 f@,
                 event_views(old(ev)@),
                 event_views(final(ev)@),
-                r,
+                r.0,
             ),
+            r.1@ <= c_srx(f@),
     {
         let ghost s0 = *self;
         let ghost ev0 = ev@;
+        let ghost mut work: nat = 0;
         let ghost id = self.entries@[i as int].id;
         proof {
             assert(entry_ok(self.entries@[i as int], self.rx_bidi, self.rx_uni));
@@ -3209,9 +3280,18 @@ impl Streams {
             assert(event_views(ev0) + Seq::<SpecStreamEvent>::empty() =~= event_views(ev0));
         }
         let r = match f {
-            Frame::Stream { .. } | Frame::ResetStream { .. } => self.apply_recv(i, f, ev),
+            Frame::Stream { .. } | Frame::ResetStream { .. } => {
+                let (r, Ghost(c)) = self.apply_recv(i, f, ev);
+                proof {
+                    work = work + c;
+                }
+                r
+            },
             Frame::StopSending { .. } | Frame::MaxStreamData { .. } => {
-                self.apply_send(i, f, ev);
+                let Ghost(c) = self.apply_send(i, f, ev);
+                proof {
+                    work = work + c;
+                }
                 Ok(())
             },
             _ => Ok(()),
@@ -3224,9 +3304,19 @@ impl Streams {
             assert(post_rest(s0, s1, f@, event_views(ev0), event_views(ev@), r));
         }
         if r.is_ok() {
-            self.gc_after(i, Ghost(s0), Ghost(f@), Ghost(event_views(ev0)), Ghost(event_views(ev@)), Ghost(r));
+            let Ghost(cg) = self.gc_after(
+                i,
+                Ghost(s0),
+                Ghost(f@),
+                Ghost(event_views(ev0)),
+                Ghost(event_views(ev@)),
+                Ghost(r),
+            );
+            proof {
+                work = work + cg;
+            }
         }
-        r
+        (r, Ghost(work))
     }
 
     /// `deliver_at`'s `gc` of entry `i` once its frame applied (split for the rlimit).
@@ -3238,7 +3328,7 @@ impl Streams {
         Ghost(ev0): Ghost<Seq<SpecStreamEvent>>,
         Ghost(ev1): Ghost<Seq<SpecStreamEvent>>,
         Ghost(r): Ghost<Result<(), u64>>,
-    )
+    ) -> (c: Ghost<nat>)
         requires
             old(self).wf(),
             i < old(self).entries@.len(),
@@ -3252,18 +3342,21 @@ impl Streams {
             final(self).tx_held() <= old(self).tx_held(),
             final(self).rx_conn == old(self).rx_conn,
             post_rest(s0, *final(self), f, ev0, ev1, r),
+            c@ <= c_gc(),
     {
         let ghost s1 = *self;
         let ghost id = self.entries@[i as int].id;
-        self.gc(i);
+        let Ghost(cg) = self.gc(i);
         proof {
             lemma_post_gc(s0, s1, *self, f, id, ev0, ev1, r);
+            lemma_gc_one(cg, s1.n_entries(), self.n_entries());
         }
+        Ghost(cg)
     }
 
     /// One frame of types 0x04, 0x05 or 0x08–0x17 from a 1-RTT packet. Its new events go to
-    /// `ev`. Any `Err` is a connection error, and sets the latch.
-    pub fn on_frame(&mut self, f: &Frame, ev: &mut Vec<StreamEvent>) -> (r: Result<(), u64>)
+    /// `ev`. Any `Err` is a connection error, and sets the latch. Returns its cost (`c_srx`, 9b2 Task 10d).
+    pub fn on_frame(&mut self, f: &Frame, ev: &mut Vec<StreamEvent>) -> (r: (Result<(), u64>, Ghost<nat>))
         requires
             old(self).wf(),
             !old(self).failed(),
@@ -3271,7 +3364,7 @@ impl Streams {
             is_stream_layer_frame(f@),
         ensures
             final(self).wf(),
-            r is Err <==> final(self).failed(),
+            r.0 is Err <==> final(self).failed(),
             final(self).tx_held() <= old(self).tx_held(),
             final(self).conn_recv_spec().window_spec() == old(self).conn_recv_spec().window_spec(),
             rfc_stream_frame_check(old(self).ids_spec(), f@) is Some ==> *final(self) == old(
@@ -3283,11 +3376,19 @@ impl Streams {
                 f@,
                 event_views(old(ev)@),
                 event_views(final(ev)@),
-                r,
+                r.0,
             ),
+            r.1@ <= c_srx(f@),
     {
+        let ghost mut work: nat = 0;
         match frame_id(f) {
-            Some(id) => self.stream_frame(f, id, ev),
+            Some(id) => {
+                let (r, Ghost(c)) = self.stream_frame(f, id, ev);
+                proof {
+                    work = work + c;
+                }
+                (r, Ghost(work))
+            },
             None => {
                 let ghost s0 = *self;
                 match f {
@@ -3308,7 +3409,7 @@ impl Streams {
                     assert(forall|b: bool| #[trigger] self.peer_closed(b) == s0.peer_closed(b));
                     assert(event_views(ev@) + Seq::<SpecStreamEvent>::empty() =~= event_views(ev@));
                 }
-                Ok(())
+                (Ok(()), Ghost(work))
             },
         }
     }
@@ -3320,6 +3421,20 @@ impl Streams {
         &&& self.q == o.q
         &&& forall|j: u64| #[trigger] self.rx_trace(j) == o.rx_trace(j)
     }
+}
+
+/// One `gc` removes at most one entry, so its cost is at most one removal's.
+proof fn lemma_gc_one(c: nat, n0: nat, n1: nat)
+    requires
+        n1 <= n0 <= n1 + 1,
+        c <= (n0 - n1) * c_gc(),
+    ensures
+        c <= c_gc(),
+{
+    assert((n0 - n1) * c_gc() <= c_gc()) by (nonlinear_arith)
+        requires
+            0 <= n0 - n1 <= 1,
+    ;
 }
 
 /// Entries whose ids are distinct and of the form `4·n + 3` with `n < u`: at most `u`.
@@ -3863,47 +3978,50 @@ spec fn fed(
     }
 }
 
-/// STREAM or RESET_STREAM `f` to `rs`. The costs `on_data`, `deliver` and `on_reset` return are
-/// dropped here: their composition through `Streams::on_frame` and `on_datagram` is 9b2 Task 10d's
-/// (item 4, the STREAM-path cost composition); `find`'s scan is Q20's (9b4).
-fn feed_recv(rs: &mut RecvStream, f: &Frame, room: u64, ev: &mut Vec<StreamEvent>) -> (r: Result<
-    u64,
-    u64,
->)
+/// STREAM or RESET_STREAM `f` to `rs`, with its cost (`c_feed`): `on_data` and `deliver`'s, or `on_reset`'s, charged
+/// up through `Streams::on_frame` and `Connection::on_datagram` (9b2 Task 10d item 4).
+fn feed_recv(rs: &mut RecvStream, f: &Frame, room: u64, ev: &mut Vec<StreamEvent>) -> (r: (Result<u64, u64>, Ghost<nat>))
     requires
         old(rs).wf(),
         frame_wf(f@),
         frame_recv_in(f@) is Some,
     ensures
-        fed(*old(rs), *final(rs), f@, room, old(ev)@, final(ev)@, r),
+        fed(*old(rs), *final(rs), f@, room, old(ev)@, final(ev)@, r.0),
+        r.1@ <= c_feed(f@),
 {
     let ghost r0 = *rs;
+    let ghost mut work: nat = 0;
     match f {
-        Frame::Stream { .. } => feed_stream(rs, f, room, ev),
+        Frame::Stream { .. } => {
+            let (r, Ghost(c)) = feed_stream(rs, f, room, ev);
+            proof {
+                work = work + c;
+            }
+            (r, Ghost(work))
+        },
         Frame::ResetStream { error_code, final_size, .. } => {
-            let (r, _) = rs.on_reset(*error_code, *final_size, room, ev);
+            let (r, Ghost(c)) = rs.on_reset(*error_code, *final_size, room, ev);
             proof {
                 assert(r0.trace() + frame_recv_ins(f@) =~= r0.trace().push(frame_recv_in(f@)->0));
+                work = work + c;
             }
-            r
+            (r, Ghost(work))
         },
-        _ => Ok(0),
+        _ => (Ok(0), Ghost(work)),
     }
 }
 
 /// `feed_recv` for STREAM: `on_data`, then `deliver` of at most the frame's bytes (D12).
 #[verifier::spinoff_prover]
-fn feed_stream(rs: &mut RecvStream, f: &Frame, room: u64, ev: &mut Vec<StreamEvent>) -> (r: Result<
-    u64,
-    u64,
->)
+fn feed_stream(rs: &mut RecvStream, f: &Frame, room: u64, ev: &mut Vec<StreamEvent>) -> (r: (Result<u64, u64>, Ghost<nat>))
     requires
         old(rs).wf(),
         frame_wf(f@),
         f@ is Stream,
     ensures
-        fed(*old(rs), *final(rs), f@, room, old(ev)@, final(ev)@, r),
-        r matches Err(c) ==> match f@ {
+        fed(*old(rs), *final(rs), f@, room, old(ev)@, final(ev)@, r.0),
+        r.1@ <= c_feed(f@),
+        r.0 matches Err(c) ==> match f@ {
             SpecFrame::Stream { offset, data, fin, .. } => recv_allowed_err(
                 old(rs).rfc(),
                 offset as nat,
@@ -3916,15 +4034,22 @@ fn feed_stream(rs: &mut RecvStream, f: &Frame, room: u64, ev: &mut Vec<StreamEve
         },
 {
     let ghost r0 = *rs;
+    let ghost mut work: nat = 0;
     proof {
         r0.lemma_wf();
     }
     match f {
         Frame::Stream { offset, data, fin, .. } => {
-            let (r, _) = rs.on_data(*offset, data.as_slice(), *fin, room);
+            let (r, Ghost(c1)) = rs.on_data(*offset, data.as_slice(), *fin, room);
+            proof {
+                work = work + c1;
+            }
             if r.is_ok() {
                 let ghost r1 = *rs;
-                let _ = rs.deliver(data.len() as u64, ev);
+                let (_, Ghost(c2)) = rs.deliver(data.len() as u64, ev);
+                proof {
+                    work = work + c2;
+                }
                 proof {
                     let i = frame_recv_in(f@)->0;
                     let d = SpecRecvIn::Deliver { max: data@.len() };
@@ -3934,9 +4059,9 @@ fn feed_stream(rs: &mut RecvStream, f: &Frame, room: u64, ev: &mut Vec<StreamEve
                     assert(r0.trace() + frame_recv_ins(f@) =~= r0.trace().push(i).push(d));
                 }
             }
-            r
+            (r, Ghost(work))
         },
-        _ => Ok(0),
+        _ => (Ok(0), Ghost(work)),
     }
 }
 
@@ -4002,6 +4127,7 @@ fn feed_entry(e: &mut Entry, f: &Frame, room: u64, ev: &mut Vec<StreamEvent>) ->
     Result<u64, u64>,
     u64,
     bool,
+    Ghost<nat>,
 ))
     requires
         old(e).recv is Some,
@@ -4019,6 +4145,7 @@ fn feed_entry(e: &mut Entry, f: &Frame, room: u64, ev: &mut Vec<StreamEvent>) ->
         r.2 == (eready(*final(e)) && !old(e).queued),
         final(e).queued == (old(e).queued || r.2),
         r.0 is Err ==> *final(e) == *old(e),
+        r.3@ <= c_feed(f@),
         // A STREAM frame's errors are RFC 9000's (`on_data`); a RESET_STREAM's are `on_reset`'s.
         r.0 matches Err(c) ==> match f@ {
             SpecFrame::Stream { offset, data, fin, .. } => recv_allowed_err(
@@ -4038,7 +4165,7 @@ fn feed_entry(e: &mut Entry, f: &Frame, room: u64, ev: &mut Vec<StreamEvent>) ->
     };
     let ghost rs0 = rs;
     let t0 = rs.retired_exec();
-    let res = match f {
+    let (res, Ghost(c)) = match f {
         Frame::Stream { .. } => feed_stream(&mut rs, f, room, ev),
         _ => feed_recv(&mut rs, f, room, ev),
     };
@@ -4064,7 +4191,7 @@ fn feed_entry(e: &mut Entry, f: &Frame, room: u64, ev: &mut Vec<StreamEvent>) ->
     if enq {
         e.queued = true;
     }
-    (res, t1 - t0, enq)
+    (res, t1 - t0, enq, Ghost(c))
 }
 
 /// `apply_recv`'s bookkeeping after its stream took `n` more bytes of connection credit.
@@ -7006,8 +7133,9 @@ impl Streams {
     }
 
     /// Frame `f`, returned by `poll_frames`, was acknowledged. A sending part's ack may end the
-    /// stream, which is then removed (§4.4: flow control state is kept until then).
-    pub fn on_frame_acked(&mut self, f: &Frame)
+    /// stream, which is then removed (§4.4: flow control state is kept until then). Returns the removal's cost
+    /// (`gc`): charged per entry removed, so an ACK's removals cost at most `max_entries()·c_gc()` (9b2 Task 10d).
+    pub fn on_frame_acked(&mut self, f: &Frame) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
             !old(self).failed(),
@@ -7031,14 +7159,23 @@ impl Streams {
             piece_removed(*old(self), *final(self), f@),
             tx_kept_but(*old(self), *final(self), piece_stream(f@)),
             forall|j: u64| #[trigger] final(self).send_reset(j) == old(self).send_reset(j),
+            final(self).n_entries() <= old(self).n_entries(),
+            r@ <= (old(self).n_entries() - final(self).n_entries()) * c_gc(),
     {
         let ghost s0 = *self;
+        let ghost mut work: nat = 0;
         match f {
             Frame::Stream { stream_id, offset, data, fin } => {
-                self.send_op(*stream_id, 0, *offset, data.len() as u64, *fin);
+                let Ghost(c) = self.send_op(*stream_id, 0, *offset, data.len() as u64, *fin);
+                proof {
+                    work = work + c;
+                }
             },
             Frame::ResetStream { stream_id, .. } => {
-                self.send_op(*stream_id, 1, 0, 0, false);
+                let Ghost(c) = self.send_op(*stream_id, 1, 0, 0, false);
+                proof {
+                    work = work + c;
+                }
             },
             _ => {
                 proof {
@@ -7046,6 +7183,7 @@ impl Streams {
                 }
             },
         }
+        Ghost(work)
     }
 
     /// Frame `f`, returned by `poll_frames`, was lost: lost STREAM bytes are queued again
@@ -7071,11 +7209,12 @@ impl Streams {
     {
         let ghost s0 = *self;
         match f {
+            // A loss removes no entry (`send_op` runs `gc` only on an ack): its cost is 0.
             Frame::Stream { stream_id, offset, data, fin } => {
-                self.send_op(*stream_id, 2, *offset, data.len() as u64, *fin);
+                let _ = self.send_op(*stream_id, 2, *offset, data.len() as u64, *fin);
             },
             Frame::ResetStream { stream_id, .. } => {
-                self.send_op(*stream_id, 3, 0, 0, false);
+                let _ = self.send_op(*stream_id, 3, 0, 0, false);
             },
             Frame::StopSending { stream_id, .. } => self.recv_lost(*stream_id, 2),
             Frame::MaxStreamData { stream_id, .. } => self.recv_lost(*stream_id, 3),
@@ -7132,8 +7271,8 @@ impl Streams {
     }
 
     /// An ack or loss on stream `id`'s sending part: op 0 data acked, 1 reset acked (each
-    /// followed by `gc`), 2 data lost, 3 reset lost.
-    fn send_op(&mut self, id: u64, op: u8, off: u64, len: u64, fin: bool)
+    /// followed by `gc`), 2 data lost, 3 reset lost. Returns `gc`'s cost (0 on a loss, which removes nothing).
+    fn send_op(&mut self, id: u64, op: u8, off: u64, len: u64, fin: bool) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
             (op == 0 || op == 2) && len > 0 && !old(self).send_reset(id) ==> off + len <= VARINT_MAX && old(
@@ -7167,14 +7306,19 @@ impl Streams {
                 },
             ),
             final(self).resets == old(self).resets,
+            final(self).n_entries() <= old(self).n_entries(),
+            r@ <= (old(self).n_entries() - final(self).n_entries()) * c_gc(),
+            op >= 2 ==> r@ == 0,
     {
         let ghost s0 = *self;
+        let ghost mut work: nat = 0;
         if let Some(i) = self.find(id) {
             self.send_op_at(i, op, off, len, fin);
             if op < 2 {
                 let ghost s1 = *self;
-                self.gc(i);
+                let Ghost(cg) = self.gc(i);
                 proof {
+                    work = work + cg;
                     assert(self.send_reset(id) == s1.send_reset(id));
                     assert(!self.send_reset(id) ==> self.tx_flight(id) == s1.tx_flight(id));
                     assert forall|j: u64| !#[trigger] self.send_reset(j) implies self.send_reset(j) == s1.send_reset(j)
@@ -7186,6 +7330,7 @@ impl Streams {
                 assert(self.tx_flight(id) == Set::<(u64, u64)>::empty());
             }
         }
+        Ghost(work)
     }
 
     /// `send_op` on entry `i`, before its `gc` (split from it for the rlimit).

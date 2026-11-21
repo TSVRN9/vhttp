@@ -76,6 +76,115 @@ pub const H3_ALPN: [u8; 2] = *b"h3";
 /// slots freed (`backlog_step`: `B_PUMP + c_dsome()` in all).
 pub const B_PUMP: u64 = 4096;
 
+/// The receive pipeline's cost per unit of load (9b2 Task 10d; `crypto_count::plains_load`: one per packet and per
+/// frame, plus each CRYPTO or STREAM data byte, at most the datagram's length). The largest cost of one unit is an ACK
+/// frame's removals (`c_ack()` = 199,143); a CRYPTO frame costs at most `10·d + 16,078` (`CryptoStream::on_crypto_c`),
+/// a stream-layer frame `c_srx` (at most `26·d + 6,000`), a packet's `validate_hs_path` one retire (1,654).
+pub open spec fn c_unit() -> nat {
+    200_000
+}
+
+/// The receive pipeline's bound for a datagram of `n` bytes: `c_unit()` per byte. Closed, so callers outside this
+/// module reason with `lemma_pipe_le` and `lemma_pipe_mono` only (a product with `c_unit()` slows their proofs).
+pub closed spec fn c_pipe(n: nat) -> nat {
+    c_unit() * n
+}
+
+/// A cost of `c_unit()` per unit of a load within `n` bytes is within `c_pipe(n)`.
+pub proof fn lemma_pipe_le(c: nat, load: nat, n: nat)
+    requires
+        c <= c_unit() * load,
+        load <= n,
+    ensures
+        c <= c_pipe(n),
+{
+    assert(c_unit() * load <= c_unit() * n) by (nonlinear_arith)
+        requires
+            load <= n,
+    ;
+}
+
+/// `c_pipe` grows with the bytes.
+pub proof fn lemma_pipe_mono(a: nat, b: nat)
+    requires
+        a <= b,
+    ensures
+        c_pipe(a) <= c_pipe(b),
+{
+    assert(c_unit() * a <= c_unit() * b) by (nonlinear_arith)
+        requires
+            a <= b,
+    ;
+}
+
+/// An ACK frame's stream removals (`Streams::gc` through `on_frame_acked`): no entry is added while one ACK is
+/// processed, so at most every entry once.
+pub open spec fn c_ack() -> nat {
+    max_entries() * c_gc()
+}
+
+/// Each frame's cost is within `c_unit()` per unit of its load: a CRYPTO frame's (`on_crypto_c`), a stream-layer
+/// frame's (`c_srx`) and an ACK frame's (`c_ack`).
+proof fn lemma_frame_unit(f: SpecFrame)
+    ensures
+        f matches SpecFrame::Crypto { data, .. } ==> 10 * data.len() + 16078 <= c_unit() * frame_load(f),
+        is_stream_layer_frame(f) ==> c_srx(f) <= c_unit() * frame_load(f),
+        c_ack() <= c_unit() * frame_load(f),
+        crate::avl::c_join2() * 127 + 1 + c_sfree() <= c_unit(),
+{
+    let b = frame_bytes(f);
+    assert(c_unit() * frame_load(f) == 200_000 + 200_000 * b) by (nonlinear_arith)
+        requires
+            frame_load(f) == 1 + b,
+            c_unit() == 200_000,
+    ;
+    assert(c_gc() == 981) by (compute_only);
+    if let SpecFrame::Stream { data, .. } = f {
+        let d = data.len();
+        let q = d / (PAGE as nat);
+        assert(256 * q <= d) by {
+            vstd::arithmetic::div_mod::lemma_fundamental_div_mod(d as int, 256);
+        }
+        assert(c_feed(f) == 9 * (d + 512) + 258 + 16 * (d + q + 2) + 1);
+        assert(c_srx(f) == c_feed(f) + c_gc());
+        assert(c_srx(f) <= 26 * d + 6000);
+    }
+}
+
+/// Charges against removals add up: `(n0 − n1)` removals then `(n1 − n2)` more are `(n0 − n2)`.
+proof fn lemma_tele(w: nat, c: nat, n0: int, n1: int, n2: int)
+    requires
+        w <= (n0 - n1) * c_gc(),
+        c <= (n1 - n2) * c_gc(),
+    ensures
+        w + c <= (n0 - n2) * c_gc(),
+{
+    assert((n0 - n1) * c_gc() + (n1 - n2) * c_gc() == (n0 - n2) * c_gc()) by (nonlinear_arith);
+}
+
+/// A loop's charge: `c_unit()` per unit of load so far, one more step's within its own load, and the prefix within the
+/// whole.
+proof fn lemma_unit_step(work: nat, c: nat, before: nat, step: nat, all: nat, after: nat)
+    requires
+        work >= c,
+        work - c <= c_unit() * before,
+        c <= c_unit() * step,
+        after == before + step,
+        after <= all,
+    ensures
+        work <= c_unit() * after,
+        work <= c_unit() * all,
+{
+    assert(c_unit() * before + c_unit() * step == c_unit() * after) by (nonlinear_arith)
+        requires
+            after == before + step,
+    ;
+    assert(c_unit() * after <= c_unit() * all) by (nonlinear_arith)
+        requires
+            after <= all,
+    ;
+}
+
 /// `backlog_step`'s STREAM half (`Streams::deliver_some` with `B_PUMP`): the delivery, the reaping of the head's
 /// sending part's teardown slot (its own `B_PUMP`, D10 (e)), the id lookup and the entry's removal, and its buffers
 /// freed.
@@ -1314,6 +1423,28 @@ impl Connection {
         &&& self.dead == o.dead
         &&& self.ctx_i == o.ctx_i
         &&& self.ctx_h == o.ctx_h
+    }
+
+    /// The streams with an entry, 0 once the streams are gone: an ACK's removals are charged against them (9b2 Task
+    /// 10d item 5).
+    pub closed spec fn n_live(&self) -> nat {
+        match self.streams {
+            Some(s) => s.n_entries(),
+            None => 0,
+        }
+    }
+
+    /// At most `max_entries()` streams have an entry.
+    proof fn lemma_n_live(&self)
+        requires
+            self.wf(),
+        ensures
+            self.n_live() <= max_entries(),
+    {
+        if let Some(s) = self.streams {
+            assert(self.wf_streams());
+            s.lemma_n_entries();
+        }
     }
 
     /// Some stream has bytes or the FIN left to deliver (D13).
@@ -2611,7 +2742,7 @@ impl Connection {
         error: Option<(u64, PlainPacket)>,
         now: u64,
         rand: &[u8; RAND_LEN],
-    )
+    ) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
             old(self).settled(),
@@ -2621,6 +2752,13 @@ impl Connection {
             final(self).wf(),
             final(self).settled(),
             final(self).out_log() == old(self).out_log(),
+            // The pipeline half (9b2 Task 10d): `c_unit()` per unit of the packets' load (`plains_load`, at most the
+            // datagram's bytes): the CRYPTO stores' walks and inserts, the stream-layer frames' work, an ACK's stream
+            // removals, the first Handshake packet's discard. Excluded, each a site of docs/rca/2026-11-12-cost-sweep.md
+            // owned by 9b4: the ACK records' walk and the acknowledged frames' set updates (Q15, Q16), the CID, path and
+            // stream-entry tables (Q13, Q14, Q17-Q20), the frame path's event pushes (Q21), a close (`close_internal`,
+            // `close_on_error`; Class B). TLS's step is quictls's (D14, 9b5).
+            r@ <= c_unit() * plains_load(crate::protect::plains_view(packets@)),
             // The positions held grow by at most the CRYPTO bytes of the packets, and not at all unless open.
             final(self).crypto_kept_g(*old(self), plains_crypto(crate::protect::plains_view(packets@))),
             !(old(self).phase_spec() is Open) ==> final(self).crypto_kept(*old(self)),
@@ -2639,19 +2777,22 @@ impl Connection {
             packets@.len() == 0 && old(self).phase_spec() is Open ==> (!(error matches Some((_, h))
                 && old(self).gate_spec(path, datagram_len, &h)) ==> final(self).phase_spec() is Open),
     {
+        let ghost mut work: nat = 0;
         let known = match self.arrive(path, datagram_len, now) {
             Some(k) => k,
-            None => return ,
+            None => return Ghost(work),
         };
         let ghost sc = *self;
         let ghost g = plains_crypto(crate::protect::plains_view(packets@));
         proof {
             assert(forall|h: PlainPacket| sc.gate_spec(path, datagram_len, &h) == old(self).gate_spec(path, datagram_len, &h));
         }
-        self.on_counted(path, datagram_len, known, packets, error, rand);
+        let Ghost(c) = self.on_counted(path, datagram_len, known, packets, error, rand);
         proof {
             Connection::lemma_dgram_post(*old(self), sc, *self, path, datagram_len as nat, known, g);
+            work = work + c;
         }
+        Ghost(work)
     }
 
     /// The clock moves to `now` (never back) and the challenge slices drawn so far are released (split from
@@ -2738,7 +2879,8 @@ impl Connection {
         }
     }
 
-    /// `on_datagram` once the datagram is counted: `known` is whether `path` was in the table.
+    /// `on_datagram` once the datagram is counted: `known` is whether `path` was in the table. Returns the packets'
+    /// costs, `c_unit()` per unit of their load.
     #[verifier::spinoff_prover]
     fn on_counted(
         &mut self,
@@ -2748,7 +2890,7 @@ impl Connection {
         packets: Vec<PlainPacket>,
         error: Option<(u64, PlainPacket)>,
         rand: &[u8; RAND_LEN],
-    )
+    ) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
             old(self).settled(),
@@ -2768,8 +2910,10 @@ impl Connection {
             ).gate_spec(path, datagram_len, &h) && old(self).paths.has(path) ==> final(self).phase_spec() is Closing),
             packets@.len() == 0 && old(self).phase_spec() is Open ==> (!(error matches Some((_, h))
                 && old(self).gate_spec(path, datagram_len, &h)) ==> *final(self) == *old(self)),
+            r@ <= c_unit() * plains_load(crate::protect::plains_view(packets@)),
     {
         let ghost g = plains_crypto(crate::protect::plains_view(packets@));
+        let ghost mut work: nat = 0;
         let mut known = known;
         proof {
             self.lemma_grew_same(*self);
@@ -2782,7 +2926,7 @@ impl Connection {
             proof {
                 self.lemma_grew_same(*old(self));
             }
-            return;
+            return Ghost(work);
         }
         let ghost np = packets@.len();
         // §12.2: the first packet's DCID, even if the gate drops that packet.
@@ -2791,7 +2935,7 @@ impl Connection {
         } else {
             match &error {
                 Some((_, h)) => slice_to_vec(h.dcid.as_slice()),
-                None => return ,
+                None => return Ghost(work),
             }
         };
         let ghost s1 = *self;
@@ -2821,6 +2965,7 @@ impl Connection {
                     self.phase_spec() is Open,
                     self.amp_grew(s1),
                     self.crypto_kept_g(s1, plains_crypto(crate::protect::plains_view(ps).take(it.index() as int))),
+                    work <= c_unit() * plains_load(crate::protect::plains_view(ps).take(it.index() as int)),
                     s1 == *old(self),
                     forall|j: int| 0 <= j < it.seq().len() ==> plain_wf(#[trigger] it.seq()[j]@),
             {
@@ -2833,16 +2978,20 @@ impl Connection {
                     assert(crate::protect::plains_view(ps)[i] == p@);
                     lemma_plains_crypto_take(crate::protect::plains_view(ps), i);
                     lemma_plains_crypto_take(crate::protect::plains_view(ps), i + 1);
+                    lemma_plains_load_take(crate::protect::plains_view(ps), i);
+                    lemma_plains_load_take(crate::protect::plains_view(ps), i + 1);
                 }
-                let r = self.on_counted_one(path, datagram_len, known, first.as_slice(), p, now, rand);
+                let (r, Ghost(c)) = self.on_counted_one(path, datagram_len, known, first.as_slice(), p, now, rand);
                 proof {
                     self.lemma_grew_trans(b, s1);
                     Connection::lemma_crypto_kept_g_trans(s1, b, *self, plains_crypto(crate::protect::plains_view(ps).take(i)), frames_crypto(pv.frames));
                     Connection::lemma_crypto_kept_g_mono(*self, s1, plains_crypto(crate::protect::plains_view(ps).take(i + 1)), g);
+                    work = work + c;
+                    lemma_unit_step(work, c, plains_load(crate::protect::plains_view(ps).take(i)), plain_load(pv), plains_load(crate::protect::plains_view(ps)), plains_load(crate::protect::plains_view(ps).take(i + 1)));
                 }
                 match r {
                     Some(kn) => known = kn,
-                    None => return ,
+                    None => return Ghost(work),
                 }
             }
             proof {
@@ -2867,6 +3016,7 @@ impl Connection {
                 Connection::lemma_crypto_kept_g_trans(s1, b4, *self, g, 0);
             }
         }
+        Ghost(work)
     }
 
     /// One packet of `on_counted`'s datagram (split from it for the rlimit): §12.2's DCID check and the gate, the
@@ -2882,7 +3032,7 @@ impl Connection {
         p: PlainPacket,
         now: u64,
         rand: &[u8; RAND_LEN],
-    ) -> (r: Option<bool>)
+    ) -> (r: (Option<bool>, Ghost<nat>))
         requires
             old(self).wf(),
             old(self).settled(),
@@ -2895,9 +3045,12 @@ impl Connection {
             final(self).out_log() == old(self).out_log(),
             final(self).amp_grew(*old(self)),
             final(self).crypto_kept_g(*old(self), frames_crypto(p@.frames)),
-            r matches Some(kn) ==> final(self).phase_spec() is Open && kn == final(self).paths.has(path),
+            r.0 matches Some(kn) ==> final(self).phase_spec() is Open && kn == final(self).paths.has(path),
+            // The packet's (`process_packet`).
+            r.1@ <= c_unit() * plain_load(p@),
     {
         let ghost g = frames_crypto(p@.frames);
+        let ghost mut work: nat = 0;
         proof {
             self.lemma_grew_same(*self);
         }
@@ -2909,7 +3062,7 @@ impl Connection {
                 // §9: at `MAX_PATHS` the datagram is dropped uncounted.
                 let ok = self.ensure_path(path);
                 if !ok {
-                    return None;
+                    return (None, Ghost(work));
                 }
                 let ghost b1 = *self;
                 // §8.1: the whole datagram, including packets the gate already dropped.
@@ -2926,10 +3079,11 @@ impl Connection {
             //# endpoint MUST generate a connection error if processing the contents
             //# of these packets prior to discovering an error, or fully revert any
             //# changes made during that processing.
-            let r = self.on_packet(path, p, now, rand);
+            let (r, Ghost(c)) = self.process_packet(path, p, now, rand);
             proof {
                 self.lemma_grew_trans(b2, *old(self));
                 Connection::lemma_crypto_kept_g_trans(*old(self), b2, *self, 0, g);
+                work = work + c;
             }
             if let Err(c) = r {
                 let ghost b3 = *self;
@@ -2939,15 +3093,15 @@ impl Connection {
                     self.lemma_grew_trans(b3, *old(self));
                     Connection::lemma_crypto_kept_g_trans(*old(self), b3, *self, g, 0);
                 }
-                return None;
+                return (None, Ghost(work));
             }
             // CONNECTION_CLOSE, or a closed connection.
             if !matches!(self.lc.phase(), Phase::Open) {
-                return None;
+                return (None, Ghost(work));
             }
-            return Some(known);
+            return (Some(known), Ghost(work));
         }
-        Some(known)
+        (Some(known), Ghost(work))
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-14
@@ -3098,9 +3252,9 @@ impl Connection {
     }
 
     /// A Handshake packet validates the client's address (§8.1) and ends the Initial space (RFC
-    /// 9001 §4.9.1).
+    /// 9001 §4.9.1). Returns the discard's cost: one retire (`discard`, O(1) since 9b2 Task 10b; 9b2 Task 10d item 2).
     #[verifier::spinoff_prover]
-    fn validate_hs_path(&mut self)
+    fn validate_hs_path(&mut self) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
             old(self).settled(),
@@ -3112,14 +3266,15 @@ impl Connection {
             final(self).paths.ids() == old(self).paths.ids(),
             final(self).peer_used_kept(*old(self)),
             final(self).crypto_kept(*old(self)),
+            r@ <= crate::avl::c_join2() * 127 + 1 + c_sfree(),
     {
         let ghost s0 = *self;
         self.paths.set_validated(self.hs_path);
         proof {
             self.lemma_path_event(s0, s0.hs_path, AmpEv::Validated);
         }
-        // Excluded cost: the pipeline half (`on_datagram`'s frame path, Task 10) does not compose its costs.
-        self.discard(PacketKind::Initial);
+        let Ghost(c) = self.discard(PacketKind::Initial);
+        Ghost(c)
     }
 
     /// `self` is `o` with an event other than `Sent` pushed on `id`'s trace.
@@ -3290,14 +3445,16 @@ impl Connection {
     //# processed.
     /// One packet that passed `gate_packet`. P10: the packet number is recorded, so the packet
     /// can be acknowledged, only after every frame returned `Ok`.
+    /// Returns its cost, `c_unit()` per unit of its load (9b2 Task 10d): its frames', and the Initial space's discard
+    /// when it is the first Handshake packet (`validate_hs_path`).
     #[verifier::spinoff_prover]
-    fn on_packet(
+    fn process_packet(
         &mut self,
         path: PathId,
         p: PlainPacket,
         now: u64,
         rand: &[u8; RAND_LEN],
-    ) -> (r: Result<(), u64>)
+    ) -> (r: (Result<(), u64>, Ghost<nat>))
         requires
             old(self).wf(),
             old(self).settled(),
@@ -3313,26 +3470,36 @@ impl Connection {
             final(self).settled(),
             final(self).out_log() == old(self).out_log(),
             final(self).paths.has(path),
-            r matches Err(c) ==> c <= VARINT_MAX,
-            r is Err ==> final(self).recv(p.kind).seen() == old(self).recv(p.kind).seen(),
-            r is Ok && final(self).phase_spec() is Open ==> final(self).paths.path(path).peer_used
+            r.0 matches Err(c) ==> c <= VARINT_MAX,
+            r.0 is Err ==> final(self).recv(p.kind).seen() == old(self).recv(p.kind).seen(),
+            r.0 is Ok && final(self).phase_spec() is Open ==> final(self).paths.path(path).peer_used
                 == Some(p.dcid@),
             final(self).crypto_kept_g(*old(self), frames_crypto(p@.frames)),
+            r.1@ <= c_unit() * plain_load(p@),
     {
         let ghost g = frames_crypto(p@.frames);
+        let ghost mut work: nat = 0;
         let k = p.kind;
         let pn = p.pn;
         let dcid = p.dcid;
         let frames = p.frames;
         let eliciting = is_ack_eliciting(frames.as_slice());
         let non_probing = has_non_probing(frames.as_slice());
-        let f = self.on_frames(k, path, dcid.as_slice(), frames, now, rand);
+        let (f, Ghost(cf)) = self.on_frames(k, path, dcid.as_slice(), frames, now, rand);
         let ghost s1 = *self;
+        proof {
+            work = work + cf;
+            lemma_frame_unit(SpecFrame::Padding);
+            assert(c_unit() * plain_load(p@) == c_unit() + c_unit() * frames_load(p@.frames)) by (nonlinear_arith)
+                requires
+                    plain_load(p@) == 1 + frames_load(p@.frames),
+            ;
+        }
         if f.is_err() {
-            return f;
+            return (f, Ghost(work));
         }
         if !matches!(self.lc.phase(), Phase::Open) {
-            return Ok(());
+            return (Ok(()), Ghost(work));
         }
         match k {
             PacketKind::Initial => self.recv_i.on_packet(pn, eliciting, now),
@@ -3344,7 +3511,10 @@ impl Connection {
         match k {
             PacketKind::Handshake => {
                 if !matches!(self.paths.state(self.hs_path), PathState::Validated) {
-                    self.validate_hs_path();
+                    let Ghost(cd) = self.validate_hs_path();
+                    proof {
+                        work = work + cd;
+                    }
                 }
             },
             PacketKind::OneRtt => {
@@ -3355,11 +3525,11 @@ impl Connection {
         proof {
             Connection::lemma_crypto_kept_g_trans(*old(self), s1, *self, g, 0);
         }
-        Ok(())
+        (Ok(()), Ghost(work))
     }
 
     /// The frames of one packet, stopping at the first error or once no longer Open: in `[CC,
-    /// Stream]`, `streams` is None by the second frame.
+    /// Stream]`, `streams` is None by the second frame. Returns their costs, `c_unit()` per unit of their load.
     #[verifier::spinoff_prover]
     fn on_frames(
         &mut self,
@@ -3369,7 +3539,7 @@ impl Connection {
         frames: Vec<Frame>,
         now: u64,
         rand: &[u8; RAND_LEN],
-    ) -> (r: Result<(), u64>)
+    ) -> (r: (Result<(), u64>, Ghost<nat>))
         requires
             old(self).wf(),
             old(self).settled(),
@@ -3384,9 +3554,11 @@ impl Connection {
             final(self).wf(),
             final(self).settled(),
             final(self).frames_kept_g(*old(self), frames_crypto(frames_view(frames@))),
-            r matches Err(c) ==> c <= VARINT_MAX,
+            r.0 matches Err(c) ==> c <= VARINT_MAX,
+            r.1@ <= c_unit() * frames_load(frames_view(frames@)),
     {
         let ghost fs = frames@;
+        let ghost mut work: nat = 0;
         proof {
             assert(frames_view(fs).take(0) =~= Seq::<SpecFrame>::empty());
         }
@@ -3396,6 +3568,7 @@ impl Connection {
                 self.wf(),
                 self.settled(),
                 self.frames_kept_g(*old(self), frames_crypto(frames_view(fs).take(it.index() as int))),
+                work <= c_unit() * frames_load(frames_view(fs).take(it.index() as int)),
                 self.phase_spec() is Open,
                 self.paths.has(path),
                 it.seq() == fs,
@@ -3411,26 +3584,32 @@ impl Connection {
                 assert(frames_view(fs)[i] == f@);
                 lemma_frames_crypto_take(frames_view(fs), i);
                 lemma_frames_crypto_take(frames_view(fs), i + 1);
+                lemma_frames_load_take(frames_view(fs), i);
+                lemma_frames_load_take(frames_view(fs), i + 1);
             }
-            let r = self.on_frame(k, path, dcid, &f, now, rand);
+            let (r, Ghost(c)) = self.on_frame(k, path, dcid, &f, now, rand);
             proof {
                 Connection::lemma_frames_kept_g_trans(*old(self), s0, *self, frames_crypto(frames_view(fs).take(i)), frame_crypto(f@));
                 Connection::lemma_frames_kept_g_mono(*self, *old(self), frames_crypto(frames_view(fs).take(i + 1)), frames_crypto(frames_view(fs)));
+                work = work + c;
+                lemma_unit_step(work, c, frames_load(frames_view(fs).take(i)), frame_load(f@), frames_load(frames_view(fs)), frames_load(frames_view(fs).take(i + 1)));
             }
             if r.is_err() {
-                return r;
+                return (r, Ghost(work));
             }
             if !matches!(self.lc.phase(), Phase::Open) {
-                return Ok(());
+                return (Ok(()), Ghost(work));
             }
         }
         proof {
             assert(frames_view(fs).take(fs.len() as int) =~= frames_view(fs));
         }
-        Ok(())
+        (Ok(()), Ghost(work))
     }
 
-    /// Dispatches one frame.
+    /// Dispatches one frame. Returns its cost, within `c_unit()` per unit of its load (9b2 Task 10d): a CRYPTO
+    /// frame's store work, a stream-layer frame's stream work, an ACK's stream removals. Excluded: the CID and path
+    /// frames' tables and responses (Q13, Q14, Q17, Q18: docs/rca/2026-11-12-cost-sweep.md, 9b4).
     #[verifier::spinoff_prover]
     fn on_frame(
         &mut self,
@@ -3440,7 +3619,7 @@ impl Connection {
         f: &Frame,
         now: u64,
         rand: &[u8; RAND_LEN],
-    ) -> (r: Result<(), u64>)
+    ) -> (r: (Result<(), u64>, Ghost<nat>))
         requires
             old(self).wf(),
             old(self).phase_spec() is Open,
@@ -3455,7 +3634,8 @@ impl Connection {
             final(self).amp_grew(*old(self)),
             final(self).wf(),
             final(self).frames_kept_g(*old(self), frame_crypto(f@)),
-            r matches Err(c) ==> c <= VARINT_MAX,
+            r.0 matches Err(c) ==> c <= VARINT_MAX,
+            r.1@ <= c_unit() * frame_load(f@),
     {
         // The stream family reaches only 1-RTT, so `wf`'s `complete` clause gives `streams`.
         proof {
@@ -3465,18 +3645,41 @@ impl Connection {
                 }
                 assert(k is OneRtt);
             }
+            lemma_frame_unit(f@);
+            self.lemma_n_live();
         }
+        let ghost mut work: nat = 0;
         match f {
-            Frame::Padding | Frame::Ping => Ok(()),
+            Frame::Padding | Frame::Ping => (Ok(()), Ghost(work)),
             // `frames_received` excludes it.
             Frame::HandshakeDone => {
                 proof {
                     assert(false);
                 }
-                Ok(())
+                (Ok(()), Ghost(work))
             },
-            Frame::Ack(a) => self.on_ack_frame(k, a, now),
-            Frame::Crypto { offset, data } => self.on_crypto_frame(k, *offset, data.as_slice(), now),
+            Frame::Ack(a) => {
+                let ghost n0 = self.n_live();
+                let (r, Ghost(c)) = self.on_ack_frame(k, a, now);
+                proof {
+                    work = work + c;
+                    assert(work <= c_ack()) by (nonlinear_arith)
+                        requires
+                            work == c,
+                            c <= (n0 - self.n_live()) * c_gc(),
+                            n0 <= max_entries(),
+                            c_ack() == max_entries() * c_gc(),
+                    ;
+                }
+                (r, Ghost(work))
+            },
+            Frame::Crypto { offset, data } => {
+                let (r, Ghost(c)) = self.on_crypto_frame(k, *offset, data.as_slice(), now);
+                proof {
+                    work = work + c;
+                }
+                (r, Ghost(work))
+            },
             Frame::ConnectionClose { .. } => {
                 let pto = self.pto();
                 self.lc.enter_draining(now, pto);
@@ -3485,7 +3688,7 @@ impl Connection {
                 proof {
                     Connection::lemma_streams_conn(cs, *self);
                 }
-                Ok(())
+                (Ok(()), Ghost(work))
             },
             Frame::ResetStream { .. }
             | Frame::StopSending { .. }
@@ -3495,19 +3698,26 @@ impl Connection {
             | Frame::MaxStreams { .. }
             | Frame::DataBlocked(_)
             | Frame::StreamDataBlocked { .. }
-            | Frame::StreamsBlocked { .. } => self.on_stream_frame(f, now),
-            Frame::NewConnectionId { .. } | Frame::RetireConnectionId(_) => self.on_cid_frame(
-                dcid,
-                f,
-                rand,
+            | Frame::StreamsBlocked { .. } => {
+                let (r, Ghost(c)) = self.on_stream_frame(f, now);
+                proof {
+                    work = work + c;
+                }
+                (r, Ghost(work))
+            },
+            Frame::NewConnectionId { .. } | Frame::RetireConnectionId(_) => (
+                self.on_cid_frame(dcid, f, rand),
+                Ghost(work),
             ),
-            Frame::PathChallenge(_) | Frame::PathResponse(_) => self.on_path_frame(path, f, now, rand),
+            Frame::PathChallenge(_) | Frame::PathResponse(_) => (self.on_path_frame(path, f, now, rand), Ghost(work)),
         }
     }
 
-    /// An ACK frame: drops the records it acknowledges and routes their frames (§13.3).
+    /// An ACK frame: drops the records it acknowledges and routes their frames (§13.3). Returns the cost of the
+    /// stream removals the acknowledged frames make, charged per entry removed (9b2 Task 10d item 5); the records'
+    /// walk and the send parts' set updates are the ACK path's own (Q15, Q16: docs/rca/2026-11-12-cost-sweep.md, 9b4).
     #[verifier::spinoff_prover]
-    fn on_ack_frame(&mut self, k: PacketKind, a: &AckFrame, now: u64) -> (r: Result<(), u64>)
+    fn on_ack_frame(&mut self, k: PacketKind, a: &AckFrame, now: u64) -> (r: (Result<(), u64>, Ghost<nat>))
         requires
             old(self).wf(),
             rfc_ack_ranges_valid(a.largest, a.first_range, a.ranges@),
@@ -3515,8 +3725,11 @@ impl Connection {
             final(self).paths == old(self).paths,
             final(self).wf(),
             final(self).frames_kept(*old(self)),
-            r matches Err(c) ==> c <= VARINT_MAX,
+            r.0 matches Err(c) ==> c <= VARINT_MAX,
+            final(self).n_live() <= old(self).n_live(),
+            r.1@ <= (old(self).n_live() - final(self).n_live()) * c_gc(),
     {
+        let ghost mut work: nat = 0;
         let mut acked: Vec<SentPacket> = Vec::new();
         proof {
             lemma_unacked_len(a@, self.sent_i.inflight_spec());
@@ -3529,7 +3742,7 @@ impl Connection {
             PacketKind::OneRtt => self.sent_1.on_ack(a, &mut acked),
         };
         if r.is_err() {
-            return r;
+            return (r, Ghost(work));
         }
         // D10 (b): the acknowledged records' pieces join `pend`, to leave it frame by frame below.
         let ghost base = pend_of(old(self).pend@, k);
@@ -3553,29 +3766,37 @@ impl Connection {
                 self.frames_kept_np(*old(self)),
                 pend_of(self.pend@, k) == msum(base, rec_pieces(acked@.subrange(i as int, acked@.len() as int))),
                 pend_kept_but(old(self).pend@, self.pend@, k),
+                self.n_live() <= old(self).n_live(),
+                work <= (old(self).n_live() - self.n_live()) * c_gc(),
             decreases acked@.len() - i,
         {
             proof {
                 lemma_pend_rec_step(acked@, i as int, base);
             }
-            self.on_acked_record(
+            let ghost n0 = self.n_live();
+            let Ghost(c) = self.on_acked_record(
                 k,
                 acked[i].frames.as_slice(),
                 Ghost(msum(base, rec_pieces(acked@.subrange(i as int + 1, acked@.len() as int)))),
             );
+            proof {
+                lemma_tele(work, c, old(self).n_live() as int, n0 as int, self.n_live() as int);
+                work = work + c;
+            }
             i += 1;
         }
         proof {
             lemma_pend_end(Seq::<SpecFrame>::empty(), acked@, base);
             lemma_pend_kept(old(self).pend@, self.pend@, k);
         }
-        Ok(())
+        (Ok(()), Ghost(work))
     }
 
     /// The frames of one acknowledged record, one call each: a STREAM frame is one piece, found and moved in O(log n)
     /// (D10 (b), (e)); a coalesced run would be no piece.
     #[verifier::spinoff_prover]
-    fn on_acked_record(&mut self, k: PacketKind, frames: &[Frame], Ghost(rest): Ghost<Multiset<PieceKey>>)
+    fn on_acked_record(&mut self, k: PacketKind, frames: &[Frame], Ghost(rest): Ghost<Multiset<PieceKey>>) -> (r:
+        Ghost<nat>)
         requires
             old(self).wf(),
             pend_of(old(self).pend@, k) == frame_pieces(frames_view(frames@)).add(rest),
@@ -3584,8 +3805,11 @@ impl Connection {
             final(self).wf(),
             final(self).frames_kept_np(*old(self)),
             final(self).pend@ == pend_with(old(self).pend@, k, rest),
+            final(self).n_live() <= old(self).n_live(),
+            r@ <= (old(self).n_live() - final(self).n_live()) * c_gc(),
     {
         let ghost fv = frames_view(frames@);
+        let ghost mut work: nat = 0;
         let mut j: usize = 0;
         proof {
             assert(fv.subrange(0, fv.len() as int) =~= fv);
@@ -3600,19 +3824,27 @@ impl Connection {
                 self.frames_kept_np(*old(self)),
                 pend_of(self.pend@, k) == msum(frame_pieces(fv.subrange(j as int, fv.len() as int)), rest),
                 pend_kept_but(old(self).pend@, self.pend@, k),
+                self.n_live() <= old(self).n_live(),
+                work <= (old(self).n_live() - self.n_live()) * c_gc(),
             decreases frames@.len() - j,
         {
             proof {
                 lemma_pend_step(fv, j as int, rest);
                 assert(fv[j as int] == frames@[j as int]@);
             }
-            self.on_acked_frame(k, &frames[j]);
+            let ghost n0 = self.n_live();
+            let Ghost(c) = self.on_acked_frame(k, &frames[j]);
+            proof {
+                lemma_tele(work, c, old(self).n_live() as int, n0 as int, self.n_live() as int);
+                work = work + c;
+            }
             j += 1;
         }
         proof {
             lemma_pend_end(fv, Seq::<SentPacket>::empty(), rest);
             lemma_pend_kept(old(self).pend@, self.pend@, k);
         }
+        Ghost(work)
     }
 
     // Post-handshake CRYPTO is buffered here and read and fed to TLS by quictls; we send no NewSessionTicket.
@@ -3622,7 +3854,7 @@ impl Connection {
     //# If an endpoint does not expand its buffer, it MUST close
     //# the connection with a CRYPTO_BUFFER_EXCEEDED error code.
     #[verifier::spinoff_prover]
-    fn on_crypto_frame(&mut self, k: PacketKind, offset: u64, data: &[u8], now: u64) -> (r: Result<(), u64>)
+    fn on_crypto_frame(&mut self, k: PacketKind, offset: u64, data: &[u8], now: u64) -> (r: (Result<(), u64>, Ghost<nat>))
         requires
             old(self).wf(),
             old(self).phase_spec() is Open,
@@ -3632,14 +3864,14 @@ impl Connection {
             final(self).paths == old(self).paths,
             final(self).wf(),
             final(self).frames_kept_g(*old(self), data@.len()),
-            r matches Err(c) ==> c <= VARINT_MAX,
-            r matches Err(c) ==> c == CRYPTO_BUFFER_EXCEEDED && crypto_allowed_err(
+            r.0 matches Err(c) ==> c <= VARINT_MAX,
+            r.0 matches Err(c) ==> c == CRYPTO_BUFFER_EXCEEDED && crypto_allowed_err(
                 old(self).crx_spec(k),
                 offset,
                 data@.len(),
                 c,
             ),
-            crypto_allowed_err(old(self).crx_spec(k), offset, data@.len(), CRYPTO_BUFFER_EXCEEDED) ==> r
+            crypto_allowed_err(old(self).crx_spec(k), offset, data@.len(), CRYPTO_BUFFER_EXCEEDED) ==> r.0
                 == Err::<(), u64>(CRYPTO_BUFFER_EXCEEDED),
             old(self).phase_spec() is Open && crypto_allowed_err(
                 old(self).crx_spec(k),
@@ -3649,26 +3881,30 @@ impl Connection {
             ) ==> final(self).phase_spec() is Closing && final(self).close_spec() == Some(
                 (false, CRYPTO_BUFFER_EXCEEDED, Seq::<u8>::empty()),
             ),
-            r is Err ==> !(final(self).phase_spec() is Open),
+            r.0 is Err ==> !(final(self).phase_spec() is Open),
+            // The level's store: its walk and insert (`CryptoStream::on_crypto_c`, 9b2 Task 10d item 1).
+            r.1@ <= 10 * data@.len() + 16078,
     {
         proof {
             reveal(crate::crx::crx_ok);
         }
+        let ghost mut work: nat = 0;
         let pto = self.pto();
-        let r = match k {
-            PacketKind::Initial => self.crx_i.on_crypto(offset, data),
-            PacketKind::Handshake => self.crx_h.on_crypto(offset, data),
-            PacketKind::OneRtt => self.crx_1.on_crypto(offset, data),
+        let (r, Ghost(cc)) = match k {
+            PacketKind::Initial => self.crx_i.on_crypto_c(offset, data),
+            PacketKind::Handshake => self.crx_h.on_crypto_c(offset, data),
+            PacketKind::OneRtt => self.crx_1.on_crypto_c(offset, data),
         };
         proof {
+            work = work + cc;
             lemma_backlog3(old(self).crx_i, old(self).crx_h, old(self).crx_1);
             lemma_backlog3(self.crx_i, self.crx_h, self.crx_1);
         }
         if let Err(c) = r {
             self.close_crypto_err(c, now, pto);
-            return Err(c);
+            return (Err(c), Ghost(work));
         }
-        Ok(())
+        (Ok(()), Ghost(work))
     }
 
     /// `on_crypto_frame`'s close on CRYPTO_BUFFER_EXCEEDED: Closing with that code and no reason, the streams buried
@@ -3707,7 +3943,7 @@ impl Connection {
     /// excludes, so `wf` could not otherwise hold on return. `on_datagram`'s `close_internal` is
     /// then a no-op.
     #[verifier::spinoff_prover]
-    fn on_stream_frame(&mut self, f: &Frame, now: u64) -> (r: Result<(), u64>)
+    fn on_stream_frame(&mut self, f: &Frame, now: u64) -> (r: (Result<(), u64>, Ghost<nat>))
         requires
             old(self).wf(),
             old(self).phase_spec() is Open,
@@ -3718,16 +3954,22 @@ impl Connection {
             final(self).paths == old(self).paths,
             final(self).wf(),
             final(self).frames_kept(*old(self)),
-            r matches Err(c) ==> c <= VARINT_MAX,
-            r is Err ==> !(final(self).phase_spec() is Open) && final(self).streams is None,
+            r.0 matches Err(c) ==> c <= VARINT_MAX,
+            r.0 is Err ==> !(final(self).phase_spec() is Open) && final(self).streams is None,
+            // The frame's stream work (`Streams::on_frame`, 9b2 Task 10d items 4 and 5).
+            r.1@ <= c_srx(f@),
     {
         // Before `Streams::on_frame`: after its `Err`, `wf` no longer holds.
         let pto = self.pto();
         let ghost s0 = self.streams->0;
-        let r = match &mut self.streams {
+        let ghost mut work: nat = 0;
+        let (r, Ghost(c0)) = match &mut self.streams {
             Some(s) => s.on_frame(f, &mut self.events),
-            None => Ok(()),
+            None => (Ok(()), Ghost(work)),
         };
+        proof {
+            work = work + c0;
+        }
         if let Err(c) = r {
             proof {
                 lemma_frame_err(s0, f@, r);
@@ -3738,13 +3980,13 @@ impl Connection {
             proof {
                 Connection::lemma_streams_conn(*old(self), *self);
             }
-            return Err(c);
+            return (Err(c), Ghost(work));
         }
         proof {
             // D10 (b): `post_rest`'s `tx_kept_but`: only reset streams' flights changed, new streams' are empty.
             Connection::lemma_streams_conn(*old(self), *self);
         }
-        Ok(())
+        (Ok(()), Ghost(work))
     }
 
     /// NEW_CONNECTION_ID or RETIRE_CONNECTION_ID, in a packet with this DCID.
@@ -5131,9 +5373,56 @@ impl Connection {
         }
     }
 
-    /// §13.3: frame `f` of an acknowledged record of space `k`.
+    /// `on_acked_frame` for a stream-layer frame (split from it for the rlimit): to the streams, which may remove
+    /// the frame's stream; returns that removal's cost (`Streams::on_frame_acked`).
     #[verifier::spinoff_prover]
-    fn on_acked_frame(&mut self, k: PacketKind, f: &Frame)
+    fn on_acked_stream(&mut self, k: PacketKind, f: &Frame) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            is_stream_layer_frame(f@),
+            piece_of(f@) matches Some(key) ==> pend_of(old(self).pend@, k).count(key) > 0,
+        ensures
+            final(self).paths == old(self).paths,
+            final(self).wf(),
+            final(self).frames_kept_np(*old(self)),
+            final(self).pend@ == pend_with(old(self).pend@, k, pend_of(old(self).pend@, k).sub(ms_of(piece_of(f@)))),
+            final(self).hs_done == (if f@ is HandshakeDone {
+                HsDone::Acked
+            } else {
+                old(self).hs_done
+            }),
+            !(f@ is RetireConnectionId) ==> final(self).peer_cids == old(self).peer_cids,
+            f@ is RetireConnectionId ==> final(self).peer_cids.retire_pending_spec() == old(
+                self,
+            ).peer_cids.retire_pending_spec(),
+            final(self).local_cids == old(self).local_cids,
+            old(self).routing_kept(*final(self), k, f@),
+            final(self).n_live() <= old(self).n_live(),
+            r@ <= (old(self).n_live() - final(self).n_live()) * c_gc(),
+    {
+        let _ = k;  // the space, read by the proof only
+        proof {
+            Connection::lemma_report_held(*old(self), k, f@);
+        }
+        let ghost mut work: nat = 0;
+        let ghost np = pend_with(old(self).pend@, k, pend_of(old(self).pend@, k).sub(ms_of(piece_of(f@))));
+        if let Some(s) = &mut self.streams {
+            let Ghost(c) = s.on_frame_acked(f);
+            proof {
+                work = work + c;
+            }
+        }
+        proof {
+            Connection::lemma_report_conn(*old(self), *self, k, f@, np);
+        }
+        self.pend = Ghost(np);
+        Ghost(work)
+    }
+
+    /// §13.3: frame `f` of an acknowledged record of space `k`. Returns the cost of the stream removals it makes
+    /// (`Streams::on_frame_acked`), charged per entry removed (9b2 Task 10d item 5).
+    #[verifier::spinoff_prover]
+    fn on_acked_frame(&mut self, k: PacketKind, f: &Frame) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
             piece_of(f@) matches Some(key) ==> pend_of(old(self).pend@, k).count(key) > 0,
@@ -5153,6 +5442,54 @@ impl Connection {
             ).peer_cids.retire_pending_spec(),
             final(self).local_cids == old(self).local_cids,
             old(self).routing_kept(*final(self), k, f@),
+            final(self).n_live() <= old(self).n_live(),
+            r@ <= (old(self).n_live() - final(self).n_live()) * c_gc(),
+    {
+        let ghost mut work: nat = 0;
+        match f {
+            Frame::ResetStream { .. }
+            | Frame::StopSending { .. }
+            | Frame::Stream { .. }
+            | Frame::MaxData(_)
+            | Frame::MaxStreamData { .. }
+            | Frame::MaxStreams { .. }
+            | Frame::DataBlocked(_)
+            | Frame::StreamDataBlocked { .. }
+            | Frame::StreamsBlocked { .. } => {
+                let Ghost(c) = self.on_acked_stream(k, f);
+                proof {
+                    work = work + c;
+                }
+            },
+            _ => self.on_acked_other(k, f),
+        }
+        Ghost(work)
+    }
+
+    /// `on_acked_frame` for a frame not of the stream layer (split from it for the rlimit): the streams untouched.
+    #[verifier::spinoff_prover]
+    fn on_acked_other(&mut self, k: PacketKind, f: &Frame)
+        requires
+            old(self).wf(),
+            !is_stream_layer_frame(f@),
+            piece_of(f@) matches Some(key) ==> pend_of(old(self).pend@, k).count(key) > 0,
+        ensures
+            final(self).paths == old(self).paths,
+            final(self).wf(),
+            final(self).frames_kept_np(*old(self)),
+            final(self).pend@ == pend_with(old(self).pend@, k, pend_of(old(self).pend@, k).sub(ms_of(piece_of(f@)))),
+            final(self).hs_done == (if f@ is HandshakeDone {
+                HsDone::Acked
+            } else {
+                old(self).hs_done
+            }),
+            !(f@ is RetireConnectionId) ==> final(self).peer_cids == old(self).peer_cids,
+            f@ is RetireConnectionId ==> final(self).peer_cids.retire_pending_spec() == old(
+                self,
+            ).peer_cids.retire_pending_spec(),
+            final(self).local_cids == old(self).local_cids,
+            old(self).routing_kept(*final(self), k, f@),
+            final(self).streams == old(self).streams,
     {
         proof {
             Connection::lemma_report_held(*old(self), k, f@);
@@ -5167,11 +5504,7 @@ impl Connection {
             | Frame::MaxStreams { .. }
             | Frame::DataBlocked(_)
             | Frame::StreamDataBlocked { .. }
-            | Frame::StreamsBlocked { .. } => {
-                if let Some(s) = &mut self.streams {
-                    s.on_frame_acked(f);
-                }
-            },
+            | Frame::StreamsBlocked { .. } => {},
             Frame::Crypto { offset, data } => match k {
                 PacketKind::Initial => {
                     let ghost c = self.ctx_i;

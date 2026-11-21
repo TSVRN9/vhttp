@@ -2308,8 +2308,8 @@ impl SendStream {
     //# MUST send a RESET_STREAM frame if the stream is in the "Ready" or
     //# "Send" state.
     /// The peer's STOP_SENDING with `code`: reset at once, copying the code, in Ready, Send and
-    /// Data Sent alike.
-    pub fn on_stop_sending(&mut self, code: u64) -> (fresh: bool)
+    /// Data Sent alike; with whether it was fresh, the reset's cost.
+    pub fn on_stop_sending(&mut self, code: u64) -> (r: (bool, Ghost<nat>))
         requires
             old(self).wf(),
             code <= VARINT_MAX,
@@ -2321,19 +2321,22 @@ impl SendStream {
             final(self).all_written() == old(self).all_written(),
             final(self).sent_end() == old(self).sent_end(),
             final(self).max() == old(self).max(),
-            fresh == (old(self).state() is Ready || old(self).state() is Send
+            r.0 == (old(self).state() is Ready || old(self).state() is Send
                 || old(self).state() is DataSent),
-            fresh ==> final(self).state() is ResetSent && final(self).reset_spec() == Some(
+            r.0 ==> final(self).state() is ResetSent && final(self).reset_spec() == Some(
                 (code, old(self).sent_end()),
             ) && final(self).pending_reset() == Some((code, old(self).sent_end()))
                 && final(self).buffered_spec() == 0,
-            fresh ==> final(self).flight_spec() == Set::<(u64, u64)>::empty(),
-            fresh ==> final(self).ranges_held() == 0 && final(self).td_nodes() == old(self).ranges_held()
+            r.0 ==> final(self).flight_spec() == Set::<(u64, u64)>::empty(),
+            r.0 ==> final(self).ranges_held() == 0 && final(self).td_nodes() == old(self).ranges_held()
                 && old(self).td_nodes() == 0 && final(self).td_window() <= old(self).peak_spec()
                 && final(self).held_spec() == 0,
-            !fresh ==> *final(self) == *old(self),
+            !r.0 ==> *final(self) == *old(self),
+            // The old queue's buffers freed (`reset_w`), charged on the frame path (9b2 Task 10d).
+            r.1@ <= c_sfree(),
     {
-        self.reset(code)
+        let (fresh, Ghost(c)) = self.reset_w(code);
+        (fresh, Ghost(c))
     }
 
     /// The peer's MAX_STREAM_DATA.

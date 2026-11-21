@@ -71,7 +71,7 @@ fn reserved_pn4() -> Vec<u8> {
 }
 
 fn accepted_a2() -> Connection {
-    accept_datagram(&A2, 0, 0, &rnd(1), &ltp(), &K).expect("accepted")
+    accept_datagram(&A2, 0, 0, &rnd(1), &ltp(), &K).0.expect("accepted")
 }
 
 /// Decrypts the server's datagram with the client's keys.
@@ -122,18 +122,18 @@ fn accept_transmit_a2() {
 fn accept_rejects() {
     let short = ini(&[], 2, crypto(), 916);
     assert_eq!(short.len(), 1199);
-    assert!(accept_datagram(&short, 0, 0, &rnd(1), &ltp(), &K).is_none());
-    assert!(accept_datagram(&A2, 0, 0, &rnd(1), &ltp(), &[None; 3]).is_none());
+    assert!(accept_datagram(&short, 0, 0, &rnd(1), &ltp(), &K).0.is_none());
+    assert!(accept_datagram(&A2, 0, 0, &rnd(1), &ltp(), &[None; 3]).0.is_none());
     let mut bad = A2;
     bad[1199] ^= 1;
-    assert!(accept_datagram(&bad, 0, 0, &rnd(1), &ltp(), &K).is_none());
+    assert!(accept_datagram(&bad, 0, 0, &rnd(1), &ltp(), &K).0.is_none());
 }
 
 #[test]
 fn accept_1350() {
     let d = ini(&[], 2, crypto(), 1067);
     assert_eq!(d.len(), 1350);
-    let mut c = accept_datagram(&d, 0, 0, &rnd(1), &ltp(), &K).expect("accepted");
+    let mut c = accept_datagram(&d, 0, 0, &rnd(1), &ltp(), &K).0.expect("accepted");
     let mut out = Vec::new();
     assert_eq!(transmit(&mut c, 0, &K, &mut out), Some(0));
     assert_eq!(client_open(&out), vec![ack(2)]);
@@ -143,7 +143,7 @@ fn accept_1350() {
 fn first_packet_error_closes() {
     let d = reserved_set();
     assert_eq!(d.len(), 1200);
-    let mut c = accept_datagram(&d, 0, 0, &rnd(1), &ltp(), &K).expect("accepted");
+    let mut c = accept_datagram(&d, 0, 0, &rnd(1), &ltp(), &K).0.expect("accepted");
     assert_eq!(c.phase(), Phase::Closing);
     let mut out = Vec::new();
     assert_eq!(transmit(&mut c, 0, &K, &mut out), Some(0));
@@ -194,7 +194,7 @@ fn receive_counts_undecryptable() {
 fn one_rtt_gated_until_complete() {
     let d = ini_c1(2, crypto(), 909);
     assert_eq!(d.len(), 1200);
-    let mut c = accept_datagram(&d, 0, 0, &rnd(1), &ltp(), &K1).expect("accepted");
+    let mut c = accept_datagram(&d, 0, 0, &rnd(1), &ltp(), &K1).0.expect("accepted");
     // Short header, reserved bit 0x08 set, pn length 1, DCID L0: valid AEAD under T.
     let mut h = vec![0x48];
     h.extend(L0);
@@ -203,7 +203,7 @@ fn one_rtt_gated_until_complete() {
     receive(&mut c, &bad, 0, 10, &rnd(2), &K1);
     assert_eq!(c.phase(), Phase::Open);
     // Nor in the datagram that creates the connection.
-    let c2 = accept_datagram(&[d.clone(), bad.clone()].concat(), 0, 0, &rnd(1), &ltp(), &K1).expect("accepted");
+    let c2 = accept_datagram(&[d.clone(), bad.clone()].concat(), 0, 0, &rnd(1), &ltp(), &K1).0.expect("accepted");
     assert_eq!(c2.phase(), Phase::Open);
     c.on_peer_params(&ptp(), 10);
     c.on_handshake_complete(b"h3", 10, &rnd(3));
@@ -277,7 +277,7 @@ fn hs_then_1rtt(dcid: &[u8]) -> Vec<u8> {
 
 /// Accepted with all keys and the peer's parameters; `d` received before completion.
 fn gated(d: &[u8]) -> Connection {
-    let mut c = accept_datagram(&ini_c1(2, crypto(), 909), 0, 0, &rnd(1), &ltp(), &K2).expect("accepted");
+    let mut c = accept_datagram(&ini_c1(2, crypto(), 909), 0, 0, &rnd(1), &ltp(), &K2).0.expect("accepted");
     c.on_peer_params(&ptp(), 10);
     receive(&mut c, d, 0, 10, &rnd(2), &K2);
     assert_eq!(c.largest_pn(PacketKind::Handshake), Some(0));
@@ -325,7 +325,7 @@ fn accept_odcid_is_first_header() {
     let mut bad = A2;
     bad[1199] ^= 1;
     let p2 = protected(&out(PacketKind::Initial, &[0x99; 8], &C1, 4, 1150), &CLIENT);
-    assert!(accept_datagram(&[&bad[..], &p2].concat(), 0, 0, &rnd(1), &ltp(), &K).is_none());
+    assert!(accept_datagram(&[&bad[..], &p2].concat(), 0, 0, &rnd(1), &ltp(), &K).0.is_none());
     let c = accepted_a2();
     assert_eq!(c.local_params().original_destination_connection_id, Some(S1.to_vec()));
 }
