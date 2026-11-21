@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index 5c2c387..79179fd 100644
+index 3a1f5c1..324aff5 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -3597,7 +3597,7 @@ impl Connection {
+@@ -3610,7 +3610,7 @@ impl Connection {
              proof {
                  Connection::lemma_streams_conn(cs, *self);
              }
