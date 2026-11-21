@@ -213,3 +213,17 @@ tail).
   crates/quic/src/{conn,streams}.rs` at this commit: `Streams::new` only in `on_peer_params` (replacing `None`) and
   `SendStream::new`/`RecvStream::new` only for new entries, the accept constructor, and two `RecvStream::new(0, 0)`
   placeholders on arms their requires make unreachable (`deliver_entry`, `feed_entry`); no `streams = None` is left.
+
+## The connection cap counted routes, not owned state (9b2 Task 10b fix round 2)
+
+- **What**: once fix round 1 kept a Closed connection in `Server::conns` until its teardown slots were freed, the shell
+  still admitted a new Initial whenever route's `has_room` held. `remove_conn` takes a Closed connection out of the
+  route table at once, so `conns.len()` could pass `MAX_CONNS` (102) while Closed connections drained.
+- **Why**: the cap was enforced in one place, route's table (`CidTable::has_room`, the connections with a CID routed),
+  which equalled the connections held only while removal from both happened together. Fix round 1 split the two
+  removals and did not move the cap to the set that owns the state.
+- **Fix**: admission counts every connection held: `Route::NewInitial` is refused (the datagram dropped, as route
+  drops an Initial when its table is full) while `conns.len() >= MAX_CONNS`. The cap comment in crates/server/src/lib.rs
+  says both counts.
+- **Catch**: `respond::conns_capped_while_closed_drain`: one connection closed and draining, then `MAX_CONNS + 4` new
+  Initials; `conn_count()` never exceeds `MAX_CONNS` (it fails with the admission check removed, checked by hand).
