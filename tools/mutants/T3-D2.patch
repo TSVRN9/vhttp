@@ -1,11 +1,11 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index 3a1f5c1..324aff5 100644
+index 967c7ef..b021940 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -3610,7 +3610,7 @@ impl Connection {
-             proof {
-                 Connection::lemma_streams_conn(cs, *self);
-             }
+@@ -3601,7 +3601,7 @@ impl Connection {
+         }
+         if let Err(c) = r {
+             self.close_crypto_err(c, now, pto);
 -            return Err(c);
 +            return Ok(());
          }

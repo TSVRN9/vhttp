@@ -1,12 +1,12 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index 3a1f5c1..ebb8e32 100644
+index 967c7ef..f46c760 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -3604,7 +3604,6 @@ impl Connection {
-             proof {
-                 assert(none@.take(0) =~= Seq::<u8>::empty());
-             }
--            self.lc.enter_closing(now, pto, false, c, none.as_slice());
-             let ghost cs = *self;
-             self.bury_streams();
-             proof {
+@@ -3600,7 +3600,6 @@ impl Connection {
+             lemma_backlog3(self.crx_i, self.crx_h, self.crx_1);
+         }
+         if let Err(c) = r {
+-            self.close_crypto_err(c, now, pto);
+             return Err(c);
+         }
+         Ok(())
