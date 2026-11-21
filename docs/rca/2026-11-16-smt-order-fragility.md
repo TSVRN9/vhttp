@@ -44,12 +44,14 @@ crate.
      `on_data` likewise behind `fed` (2.32M-2.37M).
   6. 9b3 Task 9: the proof fns behind the constant 421/501 answers (`lemma_answer_421`/`_501` and the lemmas they call)
      measured 3.5M-4.9M in conn's shared solver process, though each only chains lemmas over hidden specs. A bisect
-     pinned it to the solver's state, not the proof. The body of `lemma_answer_421` cost 1,840 alone, and 3.5M once its
+     pinned it to the solver's state, not the proof: the body of `lemma_answer_421` cost 1,840 alone, and 3.5M once its
      ensures restated a fact the last lemma call had just ensured. Marking every one of these lemmas
-     `#[verifier::spinoff_prover]` took `lemma_answer_421` to 621,513 and `lemma_answer_501` to 896,005 (seed 0). The
-     unchanged-text `conn::H3Conn::shutdown` moved from 3.50M-4.73M (Task 8) to 4.20M-6.64M over seeds 0-4 in the same
-     task. Spinning it off as well did not change that, so it was left as it was. It stays under the cap, and joins the
-     Residual's list below for the next restructuring.
+     `#[verifier::spinoff_prover]` took `lemma_answer_421` to 621,513 and `lemma_answer_501` to 896,005 (seed 0). Later
+     in the task a one-unit cost edit in `conn::deliver` sent the unchanged-text `conn::H3Conn::uni_data` to 9,144,302
+     (seed 1) and `conn::H3Conn::shutdown` to 8,205,126 (seed 3), both over the cap. Both are now spun off too, so their
+     query no longer depends on what the shared process verified before them: over seeds 0-4, `shutdown` 4.72M-6.10M
+     (3.50M-4.73M at Task 8; spinning it off does not lower it, it pins it) and `uni_data` 2.63M-3.98M. `shutdown` joins
+     the Residual's list below for the next restructuring.
 - **Escape**: the rlimit gate (`scripts/rlimit-gate.sh`, `tools/rl.py --gate`) and the ceilings ratchet
   (`scripts/rlimit-ceilings.sh`) measure one run under Z3's default seed. A number from one run says nothing about the
   margin: a proof can pass at 7.9M on that path and fail on the next. The ceilings file even recorded fns above the

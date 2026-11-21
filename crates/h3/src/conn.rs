@@ -2169,13 +2169,13 @@ proof fn lemma_lines_suffix(s: Seq<SpecReqEvent>, k: int)
     assert(s.take(k) + s.skip(k) =~= s);
 }
 
-/// `deliver`'s cost on an answered return at event `k`: the work so far, the reversed buffer's free and the events it
-/// drops stay within its bound.
+/// `deliver`'s cost on an answered return at event `k`: the work so far, `extra` (the scheme check, the answer and the
+/// reversed buffer's free) and the events it drops stay within its bound.
 proof fn lemma_answered_cost(ev: Seq<SpecReqEvent>, k: int, work: nat, extra: nat)
     requires
         0 <= k < ev.len(),
         work <= ev.len() + 2 + 31 * k,
-        extra <= 20 + c_ans(),
+        extra <= 20 + c_ans() + 1,
     ensures
         work + extra + frees(ev.skip(k)) <= c_dlv() * (ev.len() + 1) + 2 * request::ev_lines(ev),
 {
@@ -2366,10 +2366,10 @@ fn deliver(
             let Ghost(ca) = answer(e, status, fin, peer, out);
             proof {
                 lemma_answered_ret(id, ev, k as int, tr, tr0, err, cx, status, o0, o1, out@);
-                lemma_answered_cost(ev, k as int, work, cs + ca);
+                lemma_answered_cost(ev, k as int, work, cs + ca + 1);
             }
-            // The answered event and those after it are dropped here.
-            return (true, Ghost(work + cs + ca + frees(ev.skip(k as int))));
+            // The reversed buffer (1), the answered event and those after it are dropped here.
+            return (true, Ghost(work + cs + ca + 1 + frees(ev.skip(k as int))));
         }
         match x {
             ReqEvent::Head(RequestHead::Connect { .. }) => {
@@ -3333,6 +3333,7 @@ impl H3Conn {
     /// Sends GOAWAY with `goaway_id`: one past the highest request accepted (0 if none), never
     /// more than an earlier GOAWAY. Opens the control stream first if needed, so SETTINGS stays
     /// its first frame.
+    #[verifier::spinoff_prover]
     pub fn shutdown(&mut self, out: &mut Vec<Output>)
         requires
             old(self).wf(),
@@ -3769,6 +3770,7 @@ impl H3Conn {
         }
     }
 
+    #[verifier::spinoff_prover]
     fn uni_data(&mut self, id: u64, data: &[u8], fin: bool, out: &mut CapVec<Output>)
         requires
             old(self).wf(),
