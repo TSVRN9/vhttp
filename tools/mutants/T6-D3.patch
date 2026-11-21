@@ -1,7 +1,8 @@
 diff --git a/crates/quic/src/recv_stream.rs b/crates/quic/src/recv_stream.rs
+index 12e3af8..53b2760 100644
 --- a/crates/quic/src/recv_stream.rs
 +++ b/crates/quic/src/recv_stream.rs
-@@ -1728,9 +1728,6 @@
+@@ -1731,9 +1731,6 @@ impl RecvStream {
              None => high,
          };
          let n_new = c2 - self.counted_exec();

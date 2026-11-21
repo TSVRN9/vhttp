@@ -1106,7 +1106,8 @@ impl<'a> QuicServer<'a> {
             })) || (old(self).conn_spec().phase_spec() is Open && !(final(self).conn_spec().phase_spec() is Open)),
             old(self).conn_spec().stream_backlog() ==> res.1@.2 >= 1,
             old(self).has_backlog_spec() ==> final(self).backlog_measure() < old(self).backlog_measure(),
-            // Its budgets: `B_PUMP` of STREAM delivery and `B_PUMP` of teardown (`Connection::backlog_step`), `B_PUMP`
+            // Its budgets: `B_PUMP` of STREAM delivery, `B_PUMP` of the popped stream's send-side slot reaping and
+            // `B_PUMP` of teardown (`Connection::backlog_step`, `B_PUMP + c_dsome()`), `B_PUMP`
             // CRYPTO bytes read and the completing call's retires, the refed datagram's 1-RTT read, a close's retires.
             // Excluded: the refeed's pipeline half (`refeed_one_rtt`, Task 10d), TLS's own step (D14, 9b5), `h3.pump`
             // (9b4), and the drop of the refed stash (O(1), a `CapVec<u8>`; frees are outside the ghost cost,

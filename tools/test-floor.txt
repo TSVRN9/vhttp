@@ -4,7 +4,7 @@ crypto 79
 ctcore 73
 ctmir 51
 h3 81
-quic 493
+quic 498
 quictls 35
 server 33
 tls 129

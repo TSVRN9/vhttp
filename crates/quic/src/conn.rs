@@ -5650,9 +5650,10 @@ impl Connection {
             || self.dead.is_some()
     }
 
-    /// D13's STREAM half and teardown, each with its own `B_PUMP`: the stream queue's head delivers
-    /// at most `B_PUMP` bytes (its events to `poll_stream_events`), then `free_teardown`. While a
-    /// stream is queued the STREAM measure falls; nothing received, so it never grows.
+    /// D13's STREAM half and teardown: the stream queue's head delivers at most `B_PUMP` bytes (its
+    /// events to `poll_stream_events`) and reaps at most `B_PUMP` units of its sending part's teardown
+    /// slot (`c_dsome()`), then `free_teardown` with its own `B_PUMP`. While a stream is queued, or a
+    /// send-side slot or dead stream is left, the measure falls; nothing received, so it never grows.
     pub fn backlog_step(&mut self) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
