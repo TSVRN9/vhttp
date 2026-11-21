@@ -198,7 +198,11 @@ tail).
   and `deliver_some` reaps it and removes it only once the slot is empty; `gc` asserts a dropped sending part holds no
   node. `discard` retires the CRYPTO send contexts in place; closing moves `Streams` whole to `Connection::dead`
   (`bury_streams`), freed a step per `backlog_step` (`DeadStreams::reap`: each entry's sets to its slot, the slot
-  reaped, the entry's ring and queue dropped, `c_dstep()`). `deliver_some` charges `c_rfree() + c_sfree()`.
+  reaped, the entry's ring and queue dropped, `c_dstep()`). Once Closed, `QuicServer::retire_closed` moves the CRYPTO
+  stores and the Initial and Handshake send contexts to their slots (`Connection::discard_closed`), and the shell
+  removes a connection only when it is Closed and `!has_backlog()` (fix round 1: it had removed a Closed connection at
+  once, so 7 `close_silently` paths, the idle timeout among them, dropped `dead` whole in the destructor; the server test
+  `idle_closed_connection_kept_until_drained` pins it). `deliver_some` charges `c_rfree() + c_sfree()`. Residual: the Connection's own drop at removal: its packet records (the 1-RTT space's in flight), paths, CID and ACK tables and empty fixed buffers, no stream, store or tree; uncharged, owned by cat-C15-semantic-cost (9b4).
 - **Catch**: the cost ensures (`reset_w`'s `r@ <= c_sfree()`, `reap`'s `r@ <= budget`, `DeadStreams::reap`'s), the
   progress measure in `backlog_step`'s and `pump_backlog`'s ensures (a slot or a dead entry left means the measure
   falls), and mutants 9b2-M25 (`reset_w` clearing in place, killed at its cost ensures) and 9b2-M26 (`gc` removing a

@@ -1813,7 +1813,10 @@ impl Connection {
     }
 
     /// `Streams` is never called after an `Err`. Closing moves it whole to `dead` in O(1) (`bury_streams`), whose
-    /// rings, queues and trees `backlog_step` frees a bounded step at a time (D13; 9b2 Task 10b).
+    /// rings, queues and trees `backlog_step` frees a bounded step at a time (D13; 9b2 Task 10b); the shell drops the
+    /// connection only once Closed and `!has_backlog()`, so `dead` is empty by then (crates/server `service`). The
+    /// connection's own drop at removal (packet records, paths, CID and ACK tables) is uncharged: cat-C15-semantic-cost
+    /// (9b4).
     closed spec fn wf_streams(&self) -> bool {
         &&& self.streams matches Some(s) ==> s.wf() && !s.failed() && self.lc.phase_spec() is Open
         &&& !(self.lc.phase_spec() is Open) ==> self.streams is None
@@ -5407,6 +5410,49 @@ impl Connection {
     // =========================================================================
     // The TLS boundary
     // =========================================================================
+
+    /// A Closed connection's Initial and Handshake spaces are discarded (RFC 9000 §10.2: nothing is sent or
+    /// processed after the closing or draining period): their send contexts' sets move to their teardown slots
+    /// (`SendStream::retire`) and their stores to theirs, so the shell frees them through `backlog_step` before it
+    /// drops the connection, not in its destructor. A no-op on a connection not Closed. At most two discards.
+    #[verifier::spinoff_prover]
+    pub fn discard_closed(&mut self) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            old(self).settled(),
+        ensures
+            final(self).rx_measure() <= old(self).rx_measure(),
+            final(self).wf(),
+            final(self).settled(),
+            final(self).out_log() == old(self).out_log(),
+            final(self).phase_spec() == old(self).phase_spec(),
+            final(self).close_spec() == old(self).close_spec(),
+            final(self).crypto_kept(*old(self)),
+            drained_kept(*final(self), *old(self)),
+            final(self).live(PacketKind::OneRtt) == old(self).live(PacketKind::OneRtt),
+            !(old(self).phase_spec() is Closed) ==> *final(self) == *old(self),
+            old(self).phase_spec() is Closed ==> !final(self).live(PacketKind::Initial) && !final(self).live(
+                PacketKind::Handshake,
+            ),
+            r@ <= 2 * (crate::avl::c_join2() * 127 + 1 + c_sfree()),
+    {
+        if !matches!(self.lc.phase(), Phase::Closed) {
+            return Ghost(0);
+        }
+        let ghost s0 = *self;
+        let Ghost(c1) = self.discard(PacketKind::Initial);
+        let ghost s1 = *self;
+        let Ghost(c2) = self.discard(PacketKind::Handshake);
+        let ghost mut work: nat = 0;
+        proof {
+            work = work + c1 + c2;
+            Connection::lemma_crypto_kept_trans(s0, s1, *self);
+            assert forall|k: PacketKind| #[trigger] crypto_drained(s0, k) implies crypto_drained(*self, k) by {
+                assert(crypto_drained(s1, k));
+            }
+        }
+        Ghost(work)
+    }
 
     /// A connection no longer open: every level's unread in-order CRYPTO bytes are dropped, since
     /// TLS is fed nothing more after a close (RFC 8446 §6.2). The ends and the received history

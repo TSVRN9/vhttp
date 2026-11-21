@@ -171,6 +171,8 @@ struct Conn<'a> {
     addrs: Vec<SocketAddr>,
     /// Request streams not yet answered.
     owed: Vec<u64>,
+    /// Closed and retired (`QuicServer::retire_closed`), its routes removed: kept only until its backlog is freed.
+    closed: bool,
 }
 
 impl Conn<'_> {
@@ -268,7 +270,7 @@ impl<'a> Server<'a> {
             Route::NewInitial => {
                 let r = rand(self.rng)?;
                 if let (Some(q), _) = QuicServer::accept(self.cfg, d, 0, now, &r, &local_params(), &mut app) {
-                    let mut c = Conn { id: self.next_id, q, addrs: vec![from], owed: Vec::new() };
+                    let mut c = Conn { id: self.next_id, q, addrs: vec![from], owed: Vec::new(), closed: false };
                     c.take_requests(&mut app);
                     self.conns.push(c);
                     self.next_id += 1;
@@ -329,14 +331,18 @@ impl<'a> Server<'a> {
         self.conns.iter().position(|c| c.id == id)
     }
 
-    /// In `settled_later`'s order: the CID updates, the responses, then the datagrams, then the
-    /// removal of a closed connection. Returns whether the connection at `i` was removed.
+    /// In `settled_later`'s order: the CID updates, the responses, then the datagrams, then a closed
+    /// connection's teardown: once Closed its routes go and its stores, send contexts and streams move to their
+    /// teardown slots (`retire_closed`), and it is removed only once `pump` has freed them (`!has_backlog()`, D13), so
+    /// its drop frees no stream, store or tree. Returns whether the connection at `i` was removed.
     fn service(&mut self, i: usize, now: u64, send: &mut Outbox) -> bool {
         let c = &mut self.conns[i];
         let mut ups = Vec::new();
         c.q.poll_cid_updates(&mut ups);
-        for u in &ups {
-            self.table.apply(c.id, u); // false: a key collision, issue_cids' ponytail
+        if !c.closed {
+            for u in &ups {
+                self.table.apply(c.id, u); // false: a key collision, issue_cids' ponytail
+            }
         }
         c.respond();
         let mut drained = false;
@@ -357,9 +363,15 @@ impl<'a> Server<'a> {
             eprintln!("server: transmit gave {MAX_POLLS} datagrams without stopping");
         }
         if c.q.conn().is_closed() {
-            self.table.remove_conn(c.id);
-            self.conns.remove(i);
-            return true;
+            if !c.closed {
+                self.table.remove_conn(c.id);
+                c.closed = true;
+            }
+            let _ = c.q.retire_closed();
+            if !c.q.has_backlog() {
+                self.conns.remove(i);
+                return true;
+            }
         }
         false
     }

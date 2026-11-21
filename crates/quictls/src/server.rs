@@ -1369,6 +1369,42 @@ impl<'a> QuicServer<'a> {
         r
     }
 
+    /// A Closed connection's teardown before the shell drops it (D13; 9b2 Task 10b fix round 1): its CRYPTO stores
+    /// (`drop_if_closed`) and its Initial and Handshake spaces' send contexts (`Connection::discard_closed`) move to
+    /// their teardown slots in one bounded call, so `has_backlog` holds until `pump_backlog` has freed them and the
+    /// shell drops nothing that holds them. A no-op unless Closed.
+    pub fn retire_closed(&mut self) -> (cost: Ghost<nat>)
+        requires
+            old(self).wf(),
+            crypto_held_ok(old(self).conn_spec()),
+        ensures
+            final(self).wf(),
+            crypto_held_ok(final(self).conn_spec()),
+            final(self).one_rtt_forgotten(),
+            // The three stores' retires and the two spaces' discards.
+            cost@ <= 5 * c_retire(),
+    {
+        let ghost mut work: nat = 0;
+        if self.h3.conn().is_closed() {
+            proof {
+                self.h3.lemma_conn_wf();
+                lemma_held_ok_of(self.h3.conn_spec());
+            }
+            let Ghost(c1) = self.drop_if_closed();
+            let ghost c1s = self.h3.conn_spec();
+            let Ghost(c2) = self.h3.conn_mut().discard_closed();
+            proof {
+                work = work + c1 + c2;
+                Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c1s);
+                self.h3.lemma_conn_wf();
+                lemma_held_ok_kept(self.h3.conn_spec(), c1s);
+            }
+        }
+        self.forget_failed();
+        self.sync_keys();
+        Ghost(work)
+    }
+
     pub fn on_timeout(&mut self, now: u64, rand: &[u8; RAND_LEN], app: &mut Vec<AppEvent>)
         requires
             old(self).wf(),

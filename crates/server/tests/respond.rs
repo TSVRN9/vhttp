@@ -11,8 +11,34 @@ use quic::payload::PacketKind;
 use server::*;
 use std::io;
 use std::net::SocketAddr;
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+
+/// Counts this thread's frees (per thread: tests run in parallel), so a test can bound one call's.
+struct Counting;
+
+thread_local! {
+    static FREES: Cell<usize> = const { Cell::new(0) };
+}
+
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        unsafe { System.alloc(l) }
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        let _ = FREES.try_with(|f| f.set(f.get() + 1));
+        unsafe { System.dealloc(p, l) }
+    }
+}
+
+#[global_allocator]
+static ALLOC: Counting = Counting;
+
+fn frees() -> usize {
+    FREES.with(|f| f.get())
+}
 
 static CALLS: AtomicU64 = AtomicU64::new(0);
 static FILLS: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
@@ -179,4 +205,58 @@ fn gap_filled_client_hello_completes_without_another_datagram() {
     }
     let r = got.iter().find(|(id, _)| *id == 0).expect("a response on stream 0");
     check_response(&r.1);
+}
+
+/// D13 (9b2 Task 10b fix round 1): a connection closed silently by its idle timeout, holding streams, is kept until
+/// its backlog is freed: its streams go to the dead slot at the close and its stores and send contexts at
+/// `retire_closed`, and `pump` frees them a bounded `backlog_step` at a time, at most `MAX_PUMPS` per wake. Its
+/// removal then frees no stream state. Each wake frees at most `MAX_PUMPS` proved per-call bounds (frees are units of
+/// `backlog_step`'s `B_PUMP + c_dsome()` = 75,202, `retire_closed`'s `5·c_retire()` and the CRYPTO step's).
+#[test]
+fn idle_closed_connection_kept_until_drained() {
+    const PER_CALL: usize = 75_202 + 5 * 1654 + 18 * 4096 + 5608;
+    let cfg: &'static _ = Box::leak(Box::new(
+        load_config(include_bytes!("data/cert.pem"), include_bytes!("data/key.pem"), vec![]).unwrap(),
+    ));
+    let mut s = Server::new(cfg, rng);
+    let mut c = Client::new();
+    let from: SocketAddr = "127.0.0.1:50002".parse().unwrap();
+    let mut got = Vec::new();
+    for round in 0..8u64 {
+        if !c.handshaking() && round > 1 {
+            break;
+        }
+        let ds = c.datagrams(None);
+        exchange(&mut s, &mut c, from, 10 + round, ds, &mut got);
+    }
+    assert!(!c.handshaking());
+    // 24 request streams left open (no FIN): each an entry, each two dead steps at least (its slot, then its drop).
+    let mut frames = vec![stream(2, 0, &[0x00, 0x04, 0x00], false)];
+    for i in 0..24 {
+        frames.push(stream(4 * i, 0, &get(), false));
+    }
+    let ds = c.datagrams(Some(frames));
+    exchange(&mut s, &mut c, from, 30, ds, &mut got);
+    let mut send = Vec::new();
+    s.on_wake(31, &mut send).unwrap();
+    assert_eq!(s.conn_count(), 1);
+    // Past the idle timeout (30 s): closed silently, its streams buried.
+    let mut now = 100_000_000;
+    let mut wakes = 0;
+    loop {
+        let f0 = frees();
+        let mut send = Vec::new();
+        s.on_wake(now, &mut send).unwrap();
+        let f = frees() - f0;
+        assert!(f <= MAX_PUMPS * PER_CALL, "wake {wakes} freed {f}");
+        wakes += 1;
+        if s.conn_count() == 0 {
+            break;
+        }
+        assert!(s.has_backlog(), "kept without backlog after wake {wakes}");
+        assert!(wakes < 100, "still kept after {wakes} wakes");
+        now += 1;
+    }
+    assert!(wakes >= 2, "the teardown took {wakes} wake(s): not kept across a wake");
+    assert!(!s.has_backlog());
 }
