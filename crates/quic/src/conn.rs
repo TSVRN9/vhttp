@@ -3608,6 +3608,9 @@ impl Connection {
 
     /// `on_crypto_frame`'s close on CRYPTO_BUFFER_EXCEEDED: Closing with that code and no reason, the streams buried
     /// (split for the rlimit).
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
+    //# If an endpoint does not expand its buffer, it MUST close
+    //# the connection with a CRYPTO_BUFFER_EXCEEDED error code.
     #[verifier::spinoff_prover]
     fn close_crypto_err(&mut self, c: u64, now: u64, pto: u64)
         requires
