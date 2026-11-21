@@ -807,6 +807,9 @@ pub proof fn lemma_deliver_progress(id: u64, s: SpecRecv, max: nat)
 }
 
 /// One more input, in terms of the fold.
+// Its own prover: under one Z3 seed the shared context sent it to 10.5M (9b2 Task 10b sweep; RCA
+// docs/rca/2026-11-16-smt-order-fragility.md).
+#[verifier::spinoff_prover]
 pub proof fn lemma_recv_push(id: u64, window: u64, t: Seq<SpecRecvIn>, i: SpecRecvIn)
     ensures
         rfc_recv(id, window, t.push(i)) == if rfc_recv(id, window, t).err is Some {
