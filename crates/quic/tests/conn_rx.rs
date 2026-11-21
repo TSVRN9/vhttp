@@ -815,3 +815,33 @@ fn close_buries_streams() {
     assert!(!c.teardown_pending());
     assert!(c.dead_entries().is_none());
 }
+
+/// D13 (9b2 Task 10b fix round 3): a connection closed mid-handshake, its Initial and Handshake CRYPTO pieces in flight:
+/// once Closed, `discard_closed` discards both spaces, so the send contexts' sets move to their slots (none left
+/// outside), and `free_teardown` frees them.
+#[test]
+fn closed_mid_handshake_retires_ctx() {
+    let mut c = conn();
+    c.on_datagram(0, 1200, vec![ini(3, vec![Frame::Ping])], None, 5, &rnd(7));
+    c.crypto_write(PacketKind::Initial, &[4; 3000]);
+    c.crypto_write(PacketKind::Handshake, &[5; 3000]);
+    while c.poll_transmit(10).is_some() {}
+    assert!(!c.handshake_complete());
+    let held = c.crypto_send_ranges(PacketKind::Initial) + c.crypto_send_ranges(PacketKind::Handshake);
+    assert!(held > 0, "no CRYPTO piece in flight");
+    c.close(0x0a, false, &[], 11);
+    assert_eq!(c.phase(), Phase::Closing);
+    // Still Closing: the spaces stay (they carry the CONNECTION_CLOSE).
+    let _ = c.discard_closed();
+    assert_eq!(c.crypto_send_ranges(PacketKind::Initial) + c.crypto_send_ranges(PacketKind::Handshake), held);
+    c.on_timeout(1_000_000_000, &rnd(8));
+    assert!(c.is_closed());
+    let _ = c.discard_closed();
+    for k in [PacketKind::Initial, PacketKind::Handshake] {
+        assert_eq!(c.crypto_send_ranges(k), 0, "{k:?}'s send context still holds its sets");
+    }
+    assert!(c.crypto_send_td(PacketKind::Initial) + c.crypto_send_td(PacketKind::Handshake) > 0);
+    assert!(c.teardown_pending());
+    assert!(free_all(&mut c) > 0);
+    assert!(!c.teardown_pending());
+}

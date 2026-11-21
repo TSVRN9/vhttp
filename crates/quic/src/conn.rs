@@ -5068,7 +5068,6 @@ impl Connection {
 
     /// §13.3: frame `f` of an acknowledged record of space `k`.
     #[verifier::spinoff_prover]
-    #[verifier::spinoff_prover]
     fn on_acked_frame(&mut self, k: PacketKind, f: &Frame)
         requires
             old(self).wf(),
@@ -11737,7 +11736,6 @@ impl Connection {
 // Helpers
 // =============================================================================
 
-/// No level holds an unread in-order CRYPTO byte.
 /// A discarded space's CRYPTO send context was retired at its discard: terminal, its sets moved to its slot.
 /// Opaque: `wf` carries it as one atom; `lemma_ctx_done` states it.
 #[verifier::opaque]
@@ -11771,6 +11769,7 @@ pub proof fn lemma_ctx_done(c: SendStream, live: bool)
     reveal(ctx_done);
 }
 
+/// No level holds an unread in-order CRYPTO byte.
 pub open spec fn crypto_all_drained(c: Connection) -> bool {
     forall|k: PacketKind| #[trigger] crypto_drained(c, k)
 }

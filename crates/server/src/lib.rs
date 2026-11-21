@@ -347,30 +347,33 @@ impl<'a> Server<'a> {
     /// its drop frees no stream, store or tree. Returns whether the connection at `i` was removed.
     fn service(&mut self, i: usize, now: u64, send: &mut Outbox) -> bool {
         let c = &mut self.conns[i];
-        let mut ups = Vec::new();
-        c.q.poll_cid_updates(&mut ups);
+        // A Closed connection sends nothing (RFC 9000 §10.2) and its routes are gone: from then on only
+        // `retire_closed` and `pump_backlog` run on it, and the teardown loop ends by their proved ensures
+        // (`retire_closed` never raises `backlog_measure`, `pump_backlog` lowers it while `has_backlog()`).
         if !c.closed {
+            let mut ups = Vec::new();
+            c.q.poll_cid_updates(&mut ups);
             for u in &ups {
                 self.table.apply(c.id, u); // false: a key collision, issue_cids' ponytail
             }
-        }
-        c.respond();
-        let mut drained = false;
-        for _ in 0..MAX_POLLS {
-            match c.q.transmit(now, &mut self.out) {
-                None => {
-                    drained = true;
-                    break;
-                }
-                Some(p) => {
-                    if !self.out.is_empty() && (p as usize) < c.addrs.len() {
-                        send.push((self.out.clone(), c.addrs[p as usize]));
+            c.respond();
+            let mut drained = false;
+            for _ in 0..MAX_POLLS {
+                match c.q.transmit(now, &mut self.out) {
+                    None => {
+                        drained = true;
+                        break;
+                    }
+                    Some(p) => {
+                        if !self.out.is_empty() && (p as usize) < c.addrs.len() {
+                            send.push((self.out.clone(), c.addrs[p as usize]));
+                        }
                     }
                 }
             }
-        }
-        if !drained {
-            eprintln!("server: transmit gave {MAX_POLLS} datagrams without stopping");
+            if !drained {
+                eprintln!("server: transmit gave {MAX_POLLS} datagrams without stopping");
+            }
         }
         if c.q.conn().is_closed() {
             if !c.closed {
