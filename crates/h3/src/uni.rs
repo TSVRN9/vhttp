@@ -83,6 +83,20 @@ pub open spec fn views(s: Seq<UniEvent>) -> Seq<SpecUniEvent> {
     s.map_values(|e: UniEvent| e@)
 }
 
+/// The SETTINGS pairs in the uni-stream events `e`.
+pub open spec fn ev_pairs(e: Seq<SpecUniEvent>) -> nat
+    decreases e.len(),
+{
+    if e.len() == 0 {
+        0
+    } else {
+        match e.last() {
+            SpecUniEvent::PeerSettings(p) => ev_pairs(e.drop_last()) + p.len(),
+            _ => ev_pairs(e.drop_last()),
+        }
+    }
+}
+
 pub open spec fn prepend(e: Seq<SpecUniEvent>, r: (Seq<SpecUniEvent>, Option<u64>)) -> (
     Seq<SpecUniEvent>,
     Option<u64>,
@@ -906,6 +920,56 @@ proof fn lemma_views_split(s1: Seq<UniEvent>, s2: Seq<UniEvent>, a: int)
     assert(s2.take(a) =~= s1.take(a));
 }
 
+/// `ev_pairs` adds up over a concatenation.
+proof fn lemma_pairs_append(a: Seq<SpecUniEvent>, b: Seq<SpecUniEvent>)
+    ensures
+        ev_pairs(a + b) == ev_pairs(a) + ev_pairs(b),
+    decreases b.len(),
+{
+    if b.len() == 0 {
+        assert(a + b =~= a);
+    } else {
+        lemma_pairs_append(a, b.drop_last());
+        assert((a + b).drop_last() =~= a + b.drop_last());
+        assert((a + b).last() == b.last());
+    }
+}
+
+/// The pairs of the events after `a` add up over an extension of `s1` to `s2`.
+proof fn lemma_pairs_split(s1: Seq<UniEvent>, s2: Seq<UniEvent>, a: int)
+    requires
+        0 <= a <= s1.len() <= s2.len(),
+        s2.take(s1.len() as int) == s1,
+    ensures
+        ev_pairs(views(s2.skip(a))) == ev_pairs(views(s1.skip(a))) + ev_pairs(views(s2.skip(s1.len() as int))),
+{
+    lemma_views_split(s1, s2, a);
+    lemma_pairs_append(views(s1.skip(a)), views(s2.skip(s1.len() as int)));
+}
+
+/// No events added: no pairs.
+proof fn lemma_pairs_none(s: Seq<UniEvent>)
+    ensures
+        ev_pairs(views(s.skip(s.len() as int))) == 0,
+{
+    assert(views(s.skip(s.len() as int)) =~= Seq::<SpecUniEvent>::empty());
+}
+
+/// One event pushed after `s`: its pairs.
+proof fn lemma_pairs_push(s: Seq<UniEvent>, x: UniEvent)
+    ensures
+        ev_pairs(views(s.push(x).skip(s.len() as int))) == ev_pairs(seq![x@]),
+        ev_pairs(seq![x@]) == match x@ {
+            SpecUniEvent::PeerSettings(p) => p.len(),
+            _ => 0,
+        },
+{
+    assert(views(s.push(x).skip(s.len() as int)) =~= seq![x@]);
+    assert(seq![x@].drop_last() =~= Seq::<SpecUniEvent>::empty());
+    assert(seq![x@].last() == x@);
+    assert(ev_pairs(Seq::<SpecUniEvent>::empty()) == 0);
+}
+
 /// Appending `p` to both the received bytes and the buffer preserves `split_ok`.
 proof fn lemma_split_append(
     all: Seq<u8>,
@@ -997,6 +1061,10 @@ fn control_frame(b: &[u8], st: &mut CtrlState, events: &mut CapVec<UniEvent>) ->
         final(events)@.len() > old(events)@.len() ==> (r.0 matches Ok((k, s)) && s == 0 && 3 <= k + tok(*old(st))
             && tok(*final(st)) == 0),
         tok(*final(st)) <= tok(*old(st)),
+        2 * ev_pairs(views(final(events)@.skip(old(events)@.len() as int))) <= match r.0 {
+            Ok((k, _)) => k as nat,
+            Err(_) => 0nat,
+        },
         match r.0 {
             Ok((k, s)) => {
                 &&& k <= b@.len()
@@ -1046,6 +1114,7 @@ fn control_frame(b: &[u8], st: &mut CtrlState, events: &mut CapVec<UniEvent>) ->
     let ghost ev0 = events@;
     proof {
         assert(events@.take(ev0.len() as int) =~= ev0);
+        lemma_pairs_none(ev0);
     }
     let m = if b.len() < 16 {
         b.len()
@@ -1163,6 +1232,7 @@ fn control_frame(b: &[u8], st: &mut CtrlState, events: &mut CapVec<UniEvent>) ->
         if events@.len() > ev0.len() {
             let x = events@.last();
             assert(events@ == ev0.push(x));
+            lemma_pairs_push(ev0, x);
             lemma_views_push(ev0, ev0.len() as int, x);
             assert(ev0.skip(ev0.len() as int) =~= Seq::<UniEvent>::empty());
             assert(views(Seq::<UniEvent>::empty()) =~= Seq::<SpecUniEvent>::empty());
@@ -1235,6 +1305,10 @@ fn control_frames(buf: &[u8], st: &mut CtrlState, events: &mut CapVec<UniEvent>)
         final(events)@.len() >= old(events)@.len(),
         final(events)@.take(old(events)@.len() as int) == old(events)@,
         r.1@ <= c_cfs() * (buf@.len() + 1),
+        2 * ev_pairs(views(final(events)@.skip(old(events)@.len() as int))) <= match r.0 {
+            Ok((n, _)) => n as nat,
+            Err(_) => buf@.len(),
+        },
         match r.0 {
             Ok((n, s)) => {
                 &&& n <= buf@.len()
@@ -1264,6 +1338,7 @@ fn control_frames(buf: &[u8], st: &mut CtrlState, events: &mut CapVec<UniEvent>)
     let ghost mut work: nat = 0;
     let mut pos: usize = 0;
     proof {
+        lemma_pairs_none(ev0);
         assert(buf@.skip(0) =~= buf@);
         assert(events@.skip(ev0.len() as int) =~= Seq::<UniEvent>::empty());
         assert(views(Seq::<UniEvent>::empty()) =~= Seq::<SpecUniEvent>::empty());
@@ -1288,6 +1363,7 @@ fn control_frames(buf: &[u8], st: &mut CtrlState, events: &mut CapVec<UniEvent>)
             events@.take(ev0.len() as int) == ev0,
             events@.len() + (buf@.len() - pos + tok(*st)) / 3 <= events.cap(),
             work <= c_cfs() * pos,
+            2 * ev_pairs(views(events@.skip(ev0.len() as int))) <= pos,
             ctrl_split(buf@, st0, views(events@.skip(ev0.len() as int)), buf@.skip(pos as int), *st),
         decreases buf@.len() - pos,
     {
@@ -1298,6 +1374,7 @@ fn control_frames(buf: &[u8], st: &mut CtrlState, events: &mut CapVec<UniEvent>)
         let ghost ev1 = events@;
         let (r, Ghost(w)) = control_frame(rest, st, events);
         proof {
+            lemma_pairs_split(ev1, events@, ev0.len() as int);
             lemma_views_split(ev1, events@, ev0.len() as int);
             let mine = views(events@.skip(ev1.len() as int));
             assert(views(events@.skip(ev0.len() as int)) == done + mine);
@@ -1529,6 +1606,7 @@ impl UniStream {
             !(kind_of_bytes(old(self).all()) is Undetermined) ==> final(self).seen_before()
                 == old(self).seen_before() && *final(seen) == *old(seen),
             r.1@ <= c_uni() * (data@.len() + 16) + c_uni_frame() * old(self).buffered(),
+            2 * ev_pairs(views(final(events)@.skip(old(events)@.len() as int))) <= data@.len() + old(self).buffered(),
     {
         hide(rfc_uni_stream);
         hide(tail_of);
@@ -1542,6 +1620,7 @@ impl UniStream {
         let ghost s0 = *self;
         self.done = true;
         proof {
+            lemma_pairs_none(events@);
             lemma_set_done(s0, true);
             lemma_grew_refl(*self, events@);
             assert((all0 + data@) + Seq::<u8>::empty() =~= all0 + data@);
@@ -1747,12 +1826,14 @@ impl UniStream {
             final(events).wf(),
             final(events).cap() == old(events).cap(),
             r.1@ <= c_uni_frame() * old(self).buf@.len() + c_csm() * (seg@.len() + 1),
+            2 * ev_pairs(views(final(events)@.skip(old(events)@.len() as int))) <= old(self).buf@.len() + seg@.len(),
     {
         if let UniKind::Control = self.kind {
             self.consume_control(seg, fin, events)
         } else {
             let r = self.consume_qpack(seg, fin);
             proof {
+                lemma_pairs_none(events@);
                 assert(events@.take(events@.len() as int) =~= events@);
                 assert(events@.skip(events@.len() as int) =~= Seq::<UniEvent>::empty());
                 assert(views(Seq::<UniEvent>::empty()) =~= Seq::<SpecUniEvent>::empty());
@@ -1778,6 +1859,7 @@ impl UniStream {
             final(events).wf(),
             final(events).cap() == old(events).cap(),
             r.1@ <= c_uni_frame() * old(self).buf@.len() + c_csm() * (seg@.len() + 1),
+            2 * ev_pairs(views(final(events)@.skip(old(events)@.len() as int))) <= old(self).buf@.len() + seg@.len(),
     {
         hide(rfc_control);
         hide(rfc_tail);
@@ -1789,6 +1871,7 @@ impl UniStream {
         let ghost mut work: nat = 0;
         proof {
             lemma_grew_refl(*self, events@);
+            lemma_pairs_none(events@);
             assert(self.all@ + seg@.take(0) =~= self.all@);
             lemma_room_start(self.buf@.len() > 0, self.ctrl, seg@.len());
         }
@@ -1805,6 +1888,7 @@ impl UniStream {
                 events@.len() + ev_room(self.buf@.len() > 0, self.ctrl, (seg@.len() - j) as nat) <= events.cap(),
                 b0 == old(self).buf@.len(),
                 work + c_uni_frame() * self.buf@.len() <= c_uni_frame() * b0 + c_csm() * j,
+                2 * ev_pairs(views(events@.skip(old(events)@.len() as int))) + self.buf@.len() <= b0 + j,
             decreases seg@.len() - j,
         {
             let ghost s1 = *self;
@@ -1812,6 +1896,7 @@ impl UniStream {
             let ghost all1 = self.all@;
             let (r, Ghost(w)) = self.step(seg, j, events);
             proof {
+                lemma_pairs_split(e1, events@, old(events)@.len() as int);
                 lemma_grew_trans(*old(self), s1, *self, old(events)@, e1, events@);
                 assert(all1 + seg@.skip(j as int) =~= old(self).all@ + seg@);
             }
@@ -1886,11 +1971,13 @@ impl UniStream {
                     ) <= final(events).cap()
                     &&& r.1@ + c_uni_frame() * final(self).buf@.len() <= c_uni_frame() * old(self).buf@.len()
                         + c_stp() * (j2 - j)
+                    &&& 2 * ev_pairs(views(final(events)@.skip(old(events)@.len() as int))) + final(self).buf@.len() <= old(self).buf@.len() + (j2 - j)
                 },
                 Err(e) => {
                     &&& final(self).all@ == old(self).all@ + seg@.skip(j as int)
                     &&& dead_with(*final(self), e)
                     &&& r.1@ <= c_uni_frame() * old(self).buf@.len() + c_stp() * (seg@.len() - j)
+                    &&& 2 * ev_pairs(views(final(events)@.skip(old(events)@.len() as int))) <= old(self).buf@.len() + (seg@.len() - j)
                 },
             },
     {
@@ -1899,6 +1986,7 @@ impl UniStream {
             proof {
                 lemma_grew_refl(*self, events@);
                 lemma_live_empty(*self);
+                lemma_pairs_none(events@);
             }
             (Ok(j2), Ghost(w))
         } else if self.buf.len() == 0 {
@@ -1978,10 +2066,12 @@ impl UniStream {
                     &&& wf_live(*final(self))
                     &&& r.1@ + c_uni_frame() * final(self).buf@.len() <= c_uni_frame() * old(self).buf@.len()
                         + c_set()
+                    &&& 2 * ev_pairs(views(final(events)@.skip(old(events)@.len() as int))) + final(self).buf@.len() <= old(self).buf@.len()
                 },
                 Err(e) => {
                     &&& dead_with(*final(self), e)
                     &&& r.1@ <= c_uni_frame() * old(self).buf@.len() + c_set()
+                    &&& 2 * ev_pairs(views(final(events)@.skip(old(events)@.len() as int))) <= old(self).buf@.len()
                 },
             },
     {
@@ -2092,10 +2182,12 @@ impl UniStream {
                 Ok(()) => {
                     &&& wf_live(*final(self))
                     &&& r.1@ + c_uni_frame() * final(self).buf@.len() <= c_stp() * (seg@.len() - j)
+                    &&& 2 * ev_pairs(views(final(events)@.skip(old(events)@.len() as int))) + final(self).buf@.len() <= seg@.len() - j
                 },
                 Err(e) => {
                     &&& dead_with(*final(self), e)
                     &&& r.1@ <= c_stp() * (seg@.len() - j)
+                    &&& 2 * ev_pairs(views(final(events)@.skip(old(events)@.len() as int))) <= seg@.len() - j
                 },
             },
     {

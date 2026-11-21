@@ -2430,18 +2430,16 @@ pub open spec fn pairs_fs(p: Seq<(u64, u64)>, cur: Option<u64>) -> Option<u64>
     }
 }
 
-/// The SETTINGS pairs in the uni-stream events `e` (`apply_settings` visits each once).
-pub open spec fn ev_pairs(e: Seq<SpecUniEvent>) -> nat
-    decreases e.len(),
+/// `apply_settings`' cost over a uni call's events is linear in the call: at most `d / 3 + 1` events (the capacity) and
+/// at most `(d + buffered) / 2` SETTINGS pairs (`UniStream::on_data`).
+proof fn lemma_settings_apply_cost(ca: nat, n: nat, pairs: nat, d: nat, b: nat)
+    requires
+        ca <= 1 + n + pairs,
+        n <= d / 3 + 1,
+        2 * pairs <= d + b,
+    ensures
+        ca <= 2 * d + b + 2,
 {
-    if e.len() == 0 {
-        0
-    } else {
-        match e.last() {
-            SpecUniEvent::PeerSettings(p) => ev_pairs(e.drop_last()) + p.len(),
-            _ => ev_pairs(e.drop_last()),
-        }
-    }
 }
 
 /// The peer's MAX_FIELD_SECTION_SIZE after its uni-stream events `e`, starting from `cur`.
@@ -3341,8 +3339,8 @@ impl H3Conn {
         };
         let ghost e_old = e;
         let mut evs: CapVec<UniEvent> = CapVec::new(data.len() / 3 + 1);
-        // Task 11 charges `on_data`'s and `apply_settings`' costs, and the frees of `evs` (with its SETTINGS vectors) and
-        // of a stream dropped here (on an error or a FIN), once `uni_data` returns its cost.
+        // `uni_data` returns no cost yet (Task 11's interface, as `feed_req`): it adds `on_data`'s cost, `apply_settings`'
+        // (proved at most 2·d + buffered + 2 below) and the frees of `evs` and of a stream dropped on an error or a FIN.
         let (r, Ghost(_cu)) = e.stream.on_data(data, fin, &mut self.seen, &mut evs);
         self.uhist = Ghost(self.uhist@.insert(id, uni_hist_of(e)));
         proof {
@@ -3357,7 +3355,17 @@ impl H3Conn {
                 self.close(c, out);
             },
             Ok(()) => {
-                let Ghost(_ca) = self.apply_settings(&evs);
+                let Ghost(ca) = self.apply_settings(&evs);
+                proof {
+                    evs.lemma_wf();
+                    lemma_settings_apply_cost(
+                        ca,
+                        evs@.len(),
+                        uni::ev_pairs(uni::views(evs@)),
+                        data@.len(),
+                        e_old.stream.buffered(),
+                    );
+                }
                 if !fin {
                     match found {
                         Some(i) => {
@@ -3411,7 +3419,7 @@ impl H3Conn {
         ensures
             final(self).peer_max == events_fs(uni::views(evs@), old(self).peer_max),
             *final(self) == (H3Conn { peer_max: final(self).peer_max, ..*old(self) }),
-            r@ <= 1 + evs@.len() + ev_pairs(uni::views(evs@)),
+            r@ <= 1 + evs@.len() + uni::ev_pairs(uni::views(evs@)),
     {
         let ghost ev = uni::views(evs@);
         let ghost mut work: nat = 1;
@@ -3425,7 +3433,7 @@ impl H3Conn {
                 ev == uni::views(evs@),
                 *self == (H3Conn { peer_max: self.peer_max, ..*old(self) }),
                 self.peer_max == events_fs(ev.take(k as int), old(self).peer_max),
-                work <= 1 + k + ev_pairs(ev.take(k as int)),
+                work <= 1 + k + uni::ev_pairs(ev.take(k as int)),
             decreases evs@.len() - k,
         {
             let ghost before = self.peer_max;

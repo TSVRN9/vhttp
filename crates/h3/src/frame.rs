@@ -1216,6 +1216,7 @@ pub fn parse_frame_payload(ty: u64, payload: &[u8]) -> (r: (Result<Frame, u64>, 
         },
         ty == FRAME_SETTINGS ==> r.1@ <= c_pset() * (payload@.len() * (clog2(payload@.len() as nat) + 1) + 1),
         ty != FRAME_SETTINGS ==> r.1@ <= c_pfp() * (payload@.len() + 1),
+        r.0 matches Ok(Frame::Settings(v)) ==> 2 * v@.len() <= payload@.len(),
 {
     // A varint parse over the payload: linear in it on its MIR bound (expected-cost.txt).
     let ghost cv: nat = payload@.len() + 9;
@@ -1283,6 +1284,7 @@ fn parse_settings(payload: &[u8]) -> (r: (Result<Frame, u64>, Ghost<nat>))
             Err(e) => rfc_frame_payload(FRAME_SETTINGS, payload@) == Err::<SpecFrame, u64>(e),
         },
         r.1@ <= c_pset() * (payload@.len() * (clog2(payload@.len() as nat) + 1) + 1),
+        r.0 matches Ok(Frame::Settings(v)) ==> 2 * v@.len() <= payload@.len(),
 {
     let ghost d = payload@.len() as nat;
     // a pair takes at least two bytes
