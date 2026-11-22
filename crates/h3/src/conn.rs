@@ -1592,6 +1592,47 @@ proof fn lemma_split_tbl<V>(t: Tree<V>, a: Tree<V>, b: Tree<V>, k: u64, r: u64)
     }
 }
 
+/// A sorted sequence's map view has one key per entry.
+proof fn lemma_mview_len<V>(s: Seq<(u64, V)>)
+    requires
+        sorted(s),
+    ensures
+        mview(s).dom().finite(),
+        mview(s).dom().len() == s.len(),
+    decreases s.len(),
+{
+    if s.len() > 0 {
+        let d = s.drop_last();
+        assert(sorted(d)) by {
+            assert forall|a: int, b: int| 0 <= a < b < d.len() implies #[trigger] d[a].0 < #[trigger] d[b].0 by {
+                assert(d[a] == s[a] && d[b] == s[b]);
+            }
+        }
+        lemma_mview_len(d);
+        lemma_mview_has(d, s.last().0);
+        assert(!mview(d).contains_key(s.last().0)) by {
+            if mview(d).contains_key(s.last().0) {
+                let i = choose|i: int| 0 <= i < d.len() && (#[trigger] d[i]).0 == s.last().0;
+                assert(d[i] == s[i]);
+                assert(s[i].0 < s[s.len() - 1].0);
+            }
+        }
+        assert(mview(s).dom() == mview(d).dom().insert(s.last().0));
+    }
+}
+
+/// A table's map view has one key per entry.
+proof fn lemma_tv_len<V>(t: Tree<V>)
+    requires
+        wf(t),
+    ensures
+        tv(t).dom().finite(),
+        tv(t).dom().len() == seq(t).len(),
+{
+    lemma_wf_sorted(t);
+    lemma_mview_len(seq(t));
+}
+
 /// The entry under key `k`, if any: `get_le`, then its key compared.
 fn tbl_get<V>(t: &Tree<V>, k: u64) -> (r: (Option<&V>, Ghost<nat>))
     requires
@@ -3597,6 +3638,36 @@ pub closed spec fn ht_of(c: H3Conn, id: u64) -> nat {
     } else {
         ht(c.reqs)
     }
+}
+
+/// The streams the connection tracks in the table stream `id` is looked up in: its uni streams for a client uni ID, else
+/// its request streams.
+pub closed spec fn tracked_of(c: H3Conn, id: u64) -> nat {
+    if id % 4 == 2 {
+        c.uset@.len()
+    } else {
+        c.rstate@.dom().len()
+    }
+}
+
+/// The table height the entry points charge for (`ht_of`) is logarithmic in the streams the table holds: avl's
+/// `lemma_height` over the map view, whose keys the mirrors `rstate` and `uset` are. So `c_map()·(ht_of + 1)` is the
+/// spec's `L(n)`: `ht_of <= 2·log2(n + 1) + 1`.
+pub proof fn lemma_ht_of(c: H3Conn, id: u64)
+    requires
+        c.wf(),
+        !c.closed(),
+    ensures
+        pow2(ht_of(c, id) / 2) <= tracked_of(c, id) + 1,
+{
+    lemma_tables_open(c.reqs, c.unis, c.rhist@, c.uhist@, c.rstate@, c.uset@);
+    reveal(req_dom);
+    reveal(uni_dom);
+    lemma_tv_len(c.reqs);
+    lemma_tv_len(c.unis);
+    lemma_height(c.reqs);
+    lemma_height(c.unis);
+    assert(c.rstate@.dom() == tv(c.reqs).dom());
 }
 
 /// What `request_data` and its parts ensure, their costs aside.
