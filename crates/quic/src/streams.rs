@@ -1753,14 +1753,12 @@ spec fn dead_ok(e: Entry) -> bool {
 /// one bounded step per `backlog_step` (`reap`), so neither the close nor any step frees more than a budget.
 pub struct DeadStreams {
     entries: Vec<Entry>,
-    /// The delivery queue's slots, freed with the rest.
-    #[allow(dead_code)]
-    q: IdQueue,
 }
 
-/// What dropping an emptied `DeadStreams` frees: its entry vector and the queue's slots.
+/// What dropping an emptied `DeadStreams` frees: its entry vector (the delivery queue is not kept: its slots are inline,
+/// 9b2 Task 10d).
 pub open spec fn c_dfree() -> nat {
-    2
+    1
 }
 
 /// A dead step's frees besides its reaping: a sending part's queue at retirement, and an entry's receiving ring and
@@ -1929,7 +1927,7 @@ impl Streams {
             }
             lemma_sum_w_nonneg(s);
         }
-        DeadStreams { entries: self.entries, q: self.q }
+        DeadStreams { entries: self.entries }
     }
 
     pub closed spec fn ids_spec(&self) -> StreamIds {

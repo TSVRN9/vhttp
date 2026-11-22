@@ -317,7 +317,8 @@ expect_fail "escape-gate: assume_specification" "unaccounted escape" esc
 # the tool before it (which allowed validate_hs_path's drop and did not read pipeline.rs): validate_hs_path dropping
 # discard's cost as a statement, refeed_one_rtt dropping on_datagram's cost (pipeline.rs, a per-fn file now), a stale
 # not-a-cost exemption (transmit's `out.clear()` gone), `pipeline::receive` imported as `receive_datagram` (the rename
-# that hid its call from the gate); the real tree passes.
+# that hid its call from the gate); fix round 1: on_acked_stream dropping on_frame_acked's cost (streams.rs's cost fns
+# are callees now), a not-a-cost exemption whose target fn returns a cost; the real tree passes.
 expect_pass "cost-charge: the real tree" "$root/scripts/cost-charge.sh" "$root"
 ccq=$tmp/cost/crates/quic/src
 ccb=$tmp/cost/crates/byteq/src
@@ -325,7 +326,8 @@ cct=$tmp/cost/crates/quictls/src
 cfresh() {
   rm -rf "${tmp:?}/cost"; mkdir -p "$ccq" "$ccb" "$cct"
   cp "$root/crates/quic/src/avl.rs" "$root/crates/quic/src/frags.rs" "$root/crates/quic/src/crypto_stream.rs" "$root/crates/quic/src/conn.rs" "$ccq/"
-  cp "$root/crates/quic/src/pipeline.rs" "$ccq/"
+  cp "$root/crates/quic/src/pipeline.rs" "$root/crates/quic/src/streams.rs" "$root/crates/quic/src/recv_stream.rs" "$ccq/"
+  cp "$root/crates/quic/src/ack_track.rs" "$ccq/"
   cp "$root/crates/quic/src/ranges.rs" "$root/crates/quic/src/send_stream.rs" "$root/crates/quic/src/ring.rs" "$ccq/"
   cp "$root"/crates/byteq/src/*.rs "$ccb/"; cp "$root/crates/quictls/src/server.rs" "$cct/"
 }
@@ -429,6 +431,14 @@ cfresh
 once '^use quic::pipeline::\{accept_datagram, initial_dcid, refeed_one_rtt\};$' "$cct/server.rs"
 sed -i 's/^use quic::pipeline::{accept_datagram, initial_dcid, refeed_one_rtt};$/use quic::pipeline::{accept_datagram, initial_dcid, receive as receive_datagram, refeed_one_rtt};/' "$cct/server.rs"
 expect_fail "cost-charge: a cost fn imported under another name (Task 10d: receive as receive_datagram)" "renames the cost fn receive" cc
+cfresh
+once '^            let Ghost\(c\) = s\.on_frame_acked\(f\);$' "$ccq/conn.rs"
+sed -i 's/^            let Ghost(c) = s\.on_frame_acked(f);$/            s.on_frame_acked(f);/' "$ccq/conn.rs"
+expect_fail "cost-charge: on_acked_stream drops on_frame_acked's cost (streams.rs callee-only, Task 10d fix round 1)" "Connection::on_acked_stream drops the cost on_frame_acked returns" cc
+cfresh
+once '^    pub fn on_packet\(&mut self, pn: u64, ack_eliciting: bool, now: u64\)$' "$ccq/ack_track.rs"
+sed -i 's/^    pub fn on_packet(&mut self, pn: u64, ack_eliciting: bool, now: u64)$/    pub fn on_packet(\&mut self, pn: u64, ack_eliciting: bool, now: u64) -> (r: Ghost<nat>)/' "$ccq/ack_track.rs"
+expect_fail "cost-charge: a not-a-cost exemption whose target returns a cost (fail-closed, Task 10d fix round 1)" "its target RecvPns::on_packet returns a Ghost<nat> cost" cc
 cfresh
 # retire's return (9b2 Task 10d: on_fill and on_crypto_c return Ghost(work) too, so the line is found inside retire)
 rtl=$(awk '/fn retire\(/ { f = 1 } f && /^        Ghost\(work\)$/ { print NR; exit }' "$ccq/crypto_stream.rs")

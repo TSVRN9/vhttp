@@ -82,7 +82,7 @@ impl IdQueue {
         } else {
             self.head + self.len
         };
-        self.q.set(t, id);
+        self.q[t] = id;
         self.len = self.len + 1;
         proof {
             assert(self@ =~= old(self)@.push(id));

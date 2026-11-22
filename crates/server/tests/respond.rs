@@ -317,40 +317,26 @@ fn conns_capped_while_closed_drain() {
     assert_eq!(s.conn_count(), MAX_CONNS);
 }
 
-/// QUIC's per-call bound on `QuicServer::receive`'s proved cost, in units (9b2 Task 10d): the pipeline half twice
-/// (`pipeline::receive`, then `refeed_one_rtt` once TLS completes; `c_unit()` = 200,000 per byte each), the CRYPTO
-/// reads (`3·(18·d + 5608)`) and five retires (`c_retire()` = 1,654). A free is one unit.
-fn receive_bound(d: usize) -> usize {
-    2 * 200_000 * d + 3 * (18 * d + 5608) + 5 * 1_654
-}
-
-/// 9b2 Task 10d items 1, 3: the datagram whose Finished completes the handshake, with a 1-RTT packet behind it, which
-/// `receive` refeeds (`refeed_one_rtt`) once TLS completes: the call's frees stay within its proved bound.
+/// 9b2 Task 10d items 1, 3 (a path pin, not a cost bound: the proofs bound the cost): the datagram whose Finished
+/// completes the handshake, with a 1-RTT packet behind it, is refed (`refeed_one_rtt`) in that same `receive` call.
 #[test]
-fn refeed_call_within_its_bound() {
+fn refeed_runs_in_completing_call() {
     let (mut s, mut c, _) = e2e::flight();
     let d = c.datagrams(Some(vec![Frame::Ping]));
     let mut app = Vec::new();
-    let f0 = frees();
     let _ = s.receive(&d[0], 0, e2e::NOW, &e2e::R(3), &mut app);
-    let f = frees() - f0;
     assert!(s.conn().handshake_complete());
     // The refeed ran: the 1-RTT packet behind the Finished was processed in this call.
     assert_eq!(s.conn().largest_pn(PacketKind::OneRtt), Some(0));
-    assert!(f <= receive_bound(d[0].len()), "the completing call freed {f} (bound {})", receive_bound(d[0].len()));
 }
 
-/// 9b2 Task 10d item 2: the first Handshake packet validates the path and discards the Initial space
-/// (`validate_hs_path`, one retire): the call's frees stay within `receive`'s proved bound.
+/// 9b2 Task 10d item 2 (a path pin, not a cost bound): the first Handshake packet validates the path and discards the
+/// Initial space (`validate_hs_path`) in that `receive` call.
 #[test]
-fn first_handshake_packet_discard_within_its_bound() {
+fn first_handshake_packet_discards_initial() {
     let (mut s, mut c, _) = e2e::flight();
     let d = c.dgram(vec![(tls::flight::Level::Handshake, vec![Frame::Ping])]);
     let mut app = Vec::new();
-    let f0 = frees();
     let _ = s.receive(&d, 0, e2e::NOW, &e2e::R(3), &mut app);
-    let f = frees() - f0;
-    // The discard ran: the Initial keys are gone.
     assert_eq!(s.key_slots(), [false, true, true]);
-    assert!(f <= receive_bound(d.len()), "the discarding call freed {f} (bound {})", receive_bound(d.len()));
 }

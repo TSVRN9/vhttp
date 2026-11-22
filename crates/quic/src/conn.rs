@@ -79,7 +79,8 @@ pub const B_PUMP: u64 = 4096;
 /// The receive pipeline's cost per unit of load (9b2 Task 10d; `crypto_count::plains_load`: one per packet and per
 /// frame, plus each CRYPTO or STREAM data byte, at most the datagram's length). The largest cost of one unit is an ACK
 /// frame's removals (`c_ack()` = 199,143); a CRYPTO frame costs at most `10·d + 16,078` (`CryptoStream::on_crypto_c`),
-/// a stream-layer frame `c_srx` (at most `26·d + 6,000`), a packet's `validate_hs_path` one retire (1,654).
+/// a stream-layer frame `c_srx` (at most `26·d + 6,000`), a packet's `validate_hs_path` one retire (1,654). Loose for
+/// every frame kind but the ACK: a per-datagram removal bound would tighten it (carryover cost-9b2-loose-unit, 9b4).
 pub open spec fn c_unit() -> nat {
     200_000
 }
@@ -2755,8 +2756,10 @@ impl Connection {
             // The pipeline half (9b2 Task 10d): `c_unit()` per unit of the packets' load (`plains_load`, at most the
             // datagram's bytes): the CRYPTO stores' walks and inserts, the stream-layer frames' work, an ACK's stream
             // removals, the first Handshake packet's discard. Excluded, each a site of docs/rca/2026-11-12-cost-sweep.md
-            // owned by 9b4: the ACK records' walk and the acknowledged frames' set updates (Q15, Q16), the CID, path and
-            // stream-entry tables (Q13, Q14, Q17-Q20), the frame path's event pushes (Q21), a close (`close_internal`,
+            // owned by 9b4: the received packet numbers' ranges (Q15), the ACK's walk of the in-flight records (Q16) and,
+            // per acknowledged frame, its SendStream or CRYPTO context's set update (`on_data_acked`, `on_reset_acked`,
+            // O(log n) each, as many as the records acknowledged; carryover cat-C15-9b4), the CID, path and stream-entry
+            // tables (Q13, Q14, Q17-Q20), the frame path's event pushes (Q21), a close (`close_internal`,
             // `close_on_error`; Class B). TLS's step is quictls's (D14, 9b5).
             r@ <= c_unit() * plains_load(crate::protect::plains_view(packets@)),
             // The positions held grow by at most the CRYPTO bytes of the packets, and not at all unless open.
@@ -3715,7 +3718,8 @@ impl Connection {
 
     /// An ACK frame: drops the records it acknowledges and routes their frames (§13.3). Returns the cost of the
     /// stream removals the acknowledged frames make, charged per entry removed (9b2 Task 10d item 5); the records'
-    /// walk and the send parts' set updates are the ACK path's own (Q15, Q16: docs/rca/2026-11-12-cost-sweep.md, 9b4).
+    /// walk (Q16 of docs/rca/2026-11-12-cost-sweep.md) and, per acknowledged frame, its SendStream or CRYPTO context's set
+    /// update (O(log n) each, asserted in their wrappers; carryover cat-C15-9b4) are the ACK path's own, owner 9b4.
     #[verifier::spinoff_prover]
     fn on_ack_frame(&mut self, k: PacketKind, a: &AckFrame, now: u64) -> (r: (Result<(), u64>, Ghost<nat>))
         requires
@@ -6259,14 +6263,17 @@ impl Connection {
             r@ <= c_dsome(),
     {
         let ghost o = *self;
+        let ghost mut work: nat = 0;
+        // No streams: nothing is delivered or reaped, so the cost is the 0 `work` starts at.
         let Ghost(c) = match &mut self.streams {
             Some(s) => s.deliver_some(B_PUMP, &mut self.events),
-            None => Ghost(0),
+            None => Ghost(work),
         };
         proof {
             Connection::lemma_streams_conn(o, *self);
+            work = work + c;
         }
-        Ghost(c)
+        Ghost(work)
     }
 
     /// `deliver_streams` changes only the streams and the events: every CRYPTO, phase and level fact holds.
@@ -6469,7 +6476,7 @@ impl Connection {
         }
     }
 
-    /// `reap_dead` on dead streams with no entry left: the emptied vectors go, the entries' and the queue's.
+    /// `reap_dead` on dead streams with no entry left: the emptied entry vector goes (`c_dfree`).
     #[verifier::spinoff_prover]
     fn drop_dead(&mut self) -> (r: Ghost<nat>)
         requires

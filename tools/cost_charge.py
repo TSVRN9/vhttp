@@ -28,7 +28,11 @@ not this gate's. NOT_COSTS keys, by (file, fn, callee), the calls in those fns t
 matched by name, the class 9b4's path/type resolution ends: carryover cat-C15-semantic-cost): pipeline.rs's
 `Connection::accept(` (QuicServer::accept is the cost fn) and `out.clear()` on a Vec (RangeSet::clear is), and conn.rs's
 `RecvPns::on_packet` calls inside `Connection::on_packet` (which returns a cost: its name is the acceptance baseline's,
-so it keeps it); an entry no call matches fails. In every file: every assignment to `work` is
+so it keeps it); an entry no call matches fails, and so does one whose target fn (named per entry) returns a Ghost<nat>.
+ROOT/crates/quic/src/streams.rs and recv_stream.rs are callee-only (9b2 Task 10d fix round 1): their Ghost<nat>-returning
+fns are cost fns for every checked file (a conn.rs call dropping `on_frame_acked`'s or `deliver_some`'s cost fails), but
+their own bodies are not checked. Limit: a call between their fns that drops a cost is not seen (their fns share names
+with std and cost fns; carryover cat-C15-semantic-cost, 9b4, resolves callees by path). In every file: every assignment to `work` is
 `work = work + E;`; a fn binds `work` once (`let ghost [mut] work` twice restarts the count); a fn returning a cost
 binds no ghost but `work` to a literal (`let ghost [mut] X: nat = N;`, a deleted callee's cost stubbed, the T3b-F1
 shape) and builds no literal `Ghost(N)` after its first callee cost call or charge of work (a stubbed return), but for
@@ -53,6 +57,11 @@ DIRS = ['crates/byteq/src']
 # Per-fn files: only their cost-carrying fns (an exec fn returning a Ghost<nat>) and the callers of one are checked, by
 # the callee-cost rules; their whiles and other fns are not this gate's (9b2 fix round 1, I6).
 PERFN = ['crates/quic/src/conn.rs', 'crates/quic/src/pipeline.rs', 'crates/quictls/src/server.rs']
+# Callee-only files (9b2 Task 10d fix round 1): their exec fns returning a Ghost<nat> are cost fns for every gated file
+# (a conn.rs call that drops `Streams::on_frame_acked`'s or `deliver_some`'s cost fails), but their own bodies are not
+# checked: their fns share names with std and cost fns, so the name-matched rules would misfire inside them. The calls
+# between their fns are this gate's gap, named here: carryover cat-C15-semantic-cost (9b4, callees resolved by path).
+CALLEE_ONLY = ['crates/quic/src/streams.rs', 'crates/quic/src/recv_stream.rs']
 # Cost fns whose match arms return a literal cost after a recursive arm's text (the literal-return rule's only
 # exemption, by (file, fn); an entry that no longer fires fails): their literal arms are cat-C15-semantic-cost's.
 LITERAL_OK = {
@@ -60,13 +69,41 @@ LITERAL_OK = {
     ('crates/quic/src/frags.rs', 'walk'),
     ('crates/quic/src/frags.rs', 'walk_run'),
 }
-# Calls that share a cost fn's name but are not it (file, fn, callee): matched by name only until 9b4 resolves callees by
-# path/type (cat-C15-semantic-cost). An entry no call matches fails.
+# Calls that share a cost fn's name but are not it (file, fn, callee) -> the fn they are: (file, path) of a workspace exec
+# fn, which must exist and return no Ghost<nat> (fail-closed: if it ever returns a cost, its calls are cost calls and the
+# exemption fails), or ('std', path) for a std method. Matched by name only until 9b4 resolves callees by path/type
+# (cat-C15-semantic-cost). An entry no call matches fails.
 NOT_COSTS = {
-    ('crates/quic/src/pipeline.rs', 'accept_datagram', 'accept'),  # Connection::accept, not QuicServer::accept
-    ('crates/quic/src/pipeline.rs', 'transmit', 'clear'),  # Vec::clear on the out buffer, not RangeSet::clear
-    ('crates/quic/src/conn.rs', 'Connection::on_packet', 'on_packet'),  # RecvPns::on_packet (recv_i/h/1), not itself
+    ('crates/quic/src/pipeline.rs', 'accept_datagram', 'accept'): ('crates/quic/src/conn.rs', 'Connection::accept'),
+    ('crates/quic/src/pipeline.rs', 'transmit', 'clear'): ('std', 'Vec::clear'),
+    ('crates/quic/src/conn.rs', 'Connection::on_packet', 'on_packet'): ('crates/quic/src/ack_track.rs', 'RecvPns::on_packet'),
 }
+
+
+def not_cost_targets(root):
+    """Errors for NOT_COSTS targets that are missing or return a Ghost<nat> (then the exemption would hide a cost)."""
+    errs = []
+    for key, (tf, tp) in sorted(NOT_COSTS.items()):
+        if tf == 'std':
+            if not tp.startswith(('Vec::', 'Option::', 'slice::')):
+                errs.append('%s: not-a-cost exemption for %s in %s names an unknown std target %s' % (key[0], key[2], key[1], tp))
+            continue
+        try:
+            st = acc.strip(open(os.path.join(root, tf), encoding='utf-8').read())
+        except OSError as e:
+            errs.append('%s: not-a-cost exemption for %s in %s: cannot read its target file %s: %s' % (key[0], key[2], key[1], tf, e))
+            continue
+        rets = []
+        for m in re.finditer(r'(?<![A-Za-z0-9_])verus!\s*\{', st):
+            a = m.end() - 1
+            b = acc.match_brace(st, a)
+            for path, ret, clauses, ex, k in acc.fns(st, a + 1, b - 1, tf):
+                if ex and path[len(tf) + 2:] == tp: rets.append(ret)
+        if not rets:
+            errs.append('%s: not-a-cost exemption for %s in %s: its target %s is not an exec fn of %s' % (key[0], key[2], key[1], tp, tf))
+        elif any(cost_idx(r) is not None for r in rets):
+            errs.append('%s: not-a-cost exemption for %s in %s: its target %s returns a Ghost<nat> cost' % (key[0], key[2], key[1], tp))
+    return errs
 INV = re.compile(r'\b(invariant_except_break|invariant|ensures|decreases)\b')
 WRAPPERS = {('crates/quic/src/frags.rs', 'Frags::' + n) for n in ('insert', 'after_insert', 'take_front', 'run_end')} | {
     ('crates/quic/src/crypto_stream.rs', 'CryptoStream::on_crypto')} | {
@@ -126,7 +163,7 @@ def ghost_reads(ret):
 
 def bodies(root):
     """[(rel, s, path, name, ret, clauses, k, body start, body end)] for every exec fn with a body, per file."""
-    out, rels = [], list(FILES) + list(PERFN)
+    out, rels = [], list(FILES) + list(PERFN) + list(CALLEE_ONLY)
     for d in DIRS:
         try:
             rs = sorted(f for f in os.listdir(os.path.join(root, d)) if f.endswith('.rs'))
@@ -143,7 +180,8 @@ def bodies(root):
         s = acc.strip(raw)
         blocks = [m for m in re.finditer(r'(?<![A-Za-z0-9_])verus!\s*\{', s)]
         if not blocks:
-            if rel in FILES or rel in PERFN or re.search(r'\bfn\b', s): raise ValueError('%s: no verus! block' % rel)
+            if rel in FILES or rel in PERFN or rel in CALLEE_ONLY or re.search(r'\bfn\b', s):
+                raise ValueError('%s: no verus! block' % rel)
             continue
         fl = []
         for m in blocks:
@@ -175,7 +213,9 @@ def check(root):
                 raise ValueError('%s: two exec fns named %s return their cost at different places' % (path, name))
             costs[name] = ci
     call = re.compile(r'(?<!\w)(%s)\s*(?:::<[^>]*>\s*)?\(' % '|'.join(map(re.escape, sorted(costs))))
+    errs += not_cost_targets(root)
     for rel, s, fl in files:
+        if rel in CALLEE_ONLY: continue
         line = lambda i: '%s:%d' % (rel, s.count('\n', 0, i) + 1)
         # A cost fn imported under another name is called by a name this gate does not match (9b2 Task 10d: quictls
         # called `pipeline::receive` as `receive_datagram`): refused.
@@ -249,7 +289,7 @@ def check(root):
             for r in reads:
                 if len(ens) < 2 or not re.search(r'(?<![\w.])' + re.escape(r), ens[1]):
                     errs.append('%s: %s %s but its ensures do not read its cost %s' % (line(k), path, why, r))
-    for d in sorted(NOT_COSTS - nc_seen):
+    for d in sorted(set(NOT_COSTS) - nc_seen):
         errs.append('%s: not-a-cost exemption for %s in %s matches no call' % (d[0], d[2], d[1]))
     for d in sorted(LITERAL_OK - lits_seen):
         errs.append('%s: literal-return exemption for %s matches no literal cost' % d)
