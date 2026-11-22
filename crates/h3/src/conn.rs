@@ -5152,7 +5152,7 @@ impl H3Conn {
             }),
             r@ <= c_join2() * (h + 1) + 2,
     {
-        let id = e.id;
+        let ghost id = e.id;
         let ghost mut work: nat = 0;
         proof {
             assert(c_join() == 6 && c_join2() == 13);
