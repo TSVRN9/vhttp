@@ -2960,7 +2960,7 @@ spec fn c_fr() -> nat {
     82245
 }
 
-/// `feed_req`'s cost per byte held before the call: `on_data`'s `c_frame()` and `deliver`'s 2 per field line.
+/// `feed_req`'s cost per byte held before the call: `on_data`'s `request::c_frame()` and `deliver`'s 2 per field line.
 #[verifier::inline]
 spec fn c_frb() -> nat {
     41175
@@ -3164,7 +3164,18 @@ proof fn lemma_uni_done(
     }
 }
 
-/// A fed request entry's cost: the take (`ct`), the box freed, `feed_req` (`cf`), and the put or the drop (`cx`: at
+/// `lemma_feed_cost` when the entry is put back (`cx`: the put and the new box): nothing is freed beyond a constant.
+proof fn lemma_feed_cost_put(ct: nat, cf: nat, cx: nat, h: nat, d: nat, b: nat)
+    requires
+        ct <= c_take() * (h + 1),
+        cf <= c_fr() * (d + 16) + c_frb() * b,
+        cx <= 6 * (h + 1) + 1,
+    ensures
+        ct + 1 + cf + cx <= c_fr() * (d + 16) + 154 * (d + 16) + c_held() * b + c_take() * (h + 1) + 13 * (h + 1) + 4,
+{
+}
+
+/// A fed request entry's cost when it is dropped: the take (`ct`), the box freed, `feed_req` (`cf`), and the put or the drop (`cx`: at
 /// most a join of the two halves and the frees of the entry, whose `t1` trailer lines `feed_req` bounds by the `t0` it
 /// held and the call's bytes).
 proof fn lemma_feed_cost(ct: nat, cf: nat, cx: nat, h: nat, d: nat, b: nat, t0: nat, t1: nat)
@@ -3174,7 +3185,7 @@ proof fn lemma_feed_cost(ct: nat, cf: nat, cx: nat, h: nat, d: nat, b: nat, t0: 
         t1 <= t0 + 77 * (d + 16 + b),
         cx <= 13 * (h + 1) + 3 + 2 * t1,
     ensures
-        ct + 1 + cf + cx <= c_fr() * (d + 16) + 154 * (d + 16) + c_frame() * b + c_take() * (h + 1) + 13 * (h + 1) + 4
+        ct + 1 + cf + cx <= c_fr() * (d + 16) + 154 * (d + 16) + c_held() * b + c_take() * (h + 1) + 13 * (h + 1) + 4
             + 2 * t0,
 {
     assert(2 * t1 <= 2 * t0 + 154 * (d + 16) + 154 * b) by (nonlinear_arith)
@@ -3551,11 +3562,12 @@ pub open spec fn c_map() -> nat {
     58
 }
 
-/// The entry points' cost per byte the stream held before the call (the frame it may complete from them): on a
-/// request stream, `feed_req`'s `c_frb()` and the frees of the trailer lines that frame may leave on an entry the
-/// call drops (2 per line, at most 77 lines per byte). A uni stream's (`c_uni_frame() + 1`) is less.
+/// The entry points' cost per byte the stream held before the call (the frame it may complete from them):
+/// `request::c_frame()` + 308. On a request stream, `feed_req`'s `c_frb()` and the frees of the trailer lines that frame
+/// may leave on an entry the call drops (2 per line, at most 77 lines per byte). A uni stream's (`c_uni_frame() + 1`)
+/// is less.
 #[verifier::inline]
-pub open spec fn c_frame() -> nat {
+pub open spec fn c_held() -> nat {
     41329
 }
 
@@ -3565,6 +3577,17 @@ pub open spec fn c_frame() -> nat {
 #[verifier::inline]
 spec fn c_ud() -> nat {
     860
+}
+
+/// Two per trailer line held by request stream `id`'s entry in `c0` if the call from `c0` to `c1` removed that entry,
+/// else 0: the buffers the removal frees beyond a constant. Not bounded by the call's input: N6, the teardown class,
+/// owned by carryover `cat-C15-teardown` (9b4).
+pub closed spec fn removed_fields(c0: H3Conn, c1: H3Conn, id: u64) -> nat {
+    if id % 4 == 0 && tv(c0.reqs).contains_key(id) && !c1.rstate@.contains_key(id) {
+        2 * tv(c0.reqs)[id].trailers@.len()
+    } else {
+        0
+    }
 }
 
 /// The height of the table stream `id` is looked up in.
@@ -3956,16 +3979,6 @@ impl H3Conn {
             tv(self.reqs)[id].stream.buffered()
         } else if id % 4 == 2 && tv(self.unis).contains_key(id) {
             tv(self.unis)[id].stream.buffered()
-        } else {
-            0
-        }
-    }
-
-    /// Two per trailer line held by request stream `id`'s entry: the buffers a call that removes the entry frees beyond
-    /// a constant. Not bounded by the call's input: N6, the teardown class, owned by carryover `cat-C15-teardown` (9b4).
-    pub closed spec fn removed_fields(&self, id: u64) -> nat {
-        if id % 4 == 0 && tv(self.reqs).contains_key(id) {
-            2 * tv(self.reqs)[id].trailers@.len()
         } else {
             0
         }
@@ -4517,8 +4530,8 @@ impl H3Conn {
                 self,
             ).uni_seen(),
             // `removed_fields` is not bounded by the call's input: N6, owned by carryover cat-C15-teardown (9b4).
-            r@ <= c_in() * (data@.len() + 1) + c_map() * (ht_of(*old(self), stream_id) + 1) + c_frame()
-                * old(self).buffered_of(stream_id) + c_free() * old(self).removed_fields(stream_id),
+            r@ <= c_in() * (data@.len() + 1) + c_map() * (ht_of(*old(self), stream_id) + 1) + c_held()
+                * old(self).buffered_of(stream_id) + c_free() * removed_fields(*old(self), *final(self), stream_id),
     {
         if self.closed {
             proof {
@@ -4557,9 +4570,9 @@ impl H3Conn {
             old(out)@.len() + MAX_OUTS <= old(out).cap(),
         ensures
             req_done(*old(self), *final(self), *old(out), *final(out), id, data@, fin),
-            r@ <= c_in() * (data@.len() + 1) + c_map() * (ht(old(self).reqs) + 1) + c_frame() * old(
+            r@ <= c_in() * (data@.len() + 1) + c_map() * (ht(old(self).reqs) + 1) + c_held() * old(
                 self,
-            ).buffered_of(id) + c_free() * old(self).removed_fields(id),
+            ).buffered_of(id) + c_free() * removed_fields(*old(self), *final(self), id),
     {
         let ghost c0 = *self;
         let ghost mut work: nat = 0;
@@ -4614,7 +4627,7 @@ impl H3Conn {
             old(out)@.len() + MAX_OUTS <= old(out).cap(),
         ensures
             req_done(*old(self), *final(self), *old(out), *final(out), id, data, fin),
-            r@ <= c_take() * (ht(old(self).reqs) + 1) + c_join2() * (ht(old(self).reqs) + 1) + 4 + old(self).removed_fields(id),
+            r@ <= c_take() * (ht(old(self).reqs) + 1) + c_join2() * (ht(old(self).reqs) + 1) + 4 + removed_fields(*old(self), *final(self), id),
     {
         let ghost c0 = *self;
         let ghost m0 = tv(self.reqs);
@@ -4674,8 +4687,7 @@ impl H3Conn {
                 assert(cj <= 13 * (h + 1));
                 assert(h == ht(c0.reqs));
                 assert(e == *m0[id]);
-                assert(c0.removed_fields(id) == 2 * e.trailers@.len());
-                assert(work <= 57 * (h + 1) + 4 + c0.removed_fields(id));
+                assert(removed_fields(c0, *self, id) == 2 * e.trailers@.len());
             }
         }
         proof {
@@ -4697,10 +4709,12 @@ impl H3Conn {
             old(out)@.len() + MAX_OUTS <= old(out).cap(),
         ensures
             req_done(*old(self), *final(self), *old(out), *final(out), id, data@, fin),
-            r@ <= c_fr() * (data@.len() + 16) + 154 * (data@.len() + 16) + c_frame() * old(self).buffered_of(id)
-                + c_take() * (ht(old(self).reqs) + 1) + c_join2() * (ht(old(self).reqs) + 1) + 4 + old(
-                self,
-            ).removed_fields(id),
+            r@ <= c_fr() * (data@.len() + 16) + 154 * (data@.len() + 16) + c_held() * old(self).buffered_of(id)
+                + c_take() * (ht(old(self).reqs) + 1) + c_join2() * (ht(old(self).reqs) + 1) + 4 + removed_fields(
+                *old(self),
+                *final(self),
+                id,
+            ),
     {
         let ghost c0 = *self;
         let ghost m0 = tv(self.reqs);
@@ -4719,7 +4733,6 @@ impl H3Conn {
         proof {
             assert(e0 == *m0[id]);
             assert(c0.buffered_of(id) == e0.stream.buffered());
-            assert(c0.removed_fields(id) == 2 * e0.trailers@.len());
         }
         let pm = self.peer_max;
         let (closing, Ghost(cf)) = feed_req_ok(&mut e, data, fin, pm, out);
@@ -4735,7 +4748,7 @@ impl H3Conn {
             proof {
                 // The new box.
                 work = work + cp + 1;
-                lemma_feed_cost(ct, cf, cp + 1, h, data@.len(), e0.stream.buffered(), e0.trailers@.len(), e.trailers@.len());
+                lemma_feed_cost_put(ct, cf, cp + 1, h, data@.len(), e0.stream.buffered());
                 lemma_feed_done(c0, *self, *old(out), *out, id, data@, fin, e0, e, closing);
             }
             return Ghost(work);
@@ -4749,6 +4762,7 @@ impl H3Conn {
                 // `e` is dropped here.
                 work = work + cj + req_frees(e);
                 lemma_feed_cost(ct, cf, cj + req_frees(e), h, data@.len(), e0.stream.buffered(), e0.trailers@.len(), e.trailers@.len());
+                assert(removed_fields(c0, *self, id) == 2 * e0.trailers@.len());
             }
         } else {
             let b = Box::new(e);
@@ -4762,7 +4776,7 @@ impl H3Conn {
                 // The new box.
                 work = work + cp + 1;
                 lemma_map_put(m0, id, b);
-                lemma_feed_cost(ct, cf, cp + 1, h, data@.len(), e0.stream.buffered(), e0.trailers@.len(), e.trailers@.len());
+                lemma_feed_cost_put(ct, cf, cp + 1, h, data@.len(), e0.stream.buffered());
             }
         }
         proof {
@@ -5141,7 +5155,7 @@ impl H3Conn {
             final(self).req_known(id) ==> final(self).req_state(id) == Some(
                 ReqState { send_open: false, ..old(self).req_state(id)->0 },
             ),
-            r@ <= c_take() * (ht(old(self).reqs) + 1) + c_join2() * (ht(old(self).reqs) + 1) + 4 + old(self).removed_fields(id),
+            r@ <= c_take() * (ht(old(self).reqs) + 1) + c_join2() * (ht(old(self).reqs) + 1) + 4 + removed_fields(*old(self), *final(self), id),
     {
         let ghost c0 = *self;
         let ghost m0 = tv(self.reqs);
@@ -5248,7 +5262,9 @@ impl H3Conn {
             final(self).highest_accepted() == old(self).highest_accepted(),
             final(self).uni_seen() == old(self).uni_seen(),
             // `removed_fields` is not bounded by the call's input: N6, owned by carryover cat-C15-teardown (9b4).
-            r@ <= c_in() + c_map() * (ht_of(*old(self), stream_id) + 1) + c_free() * old(self).removed_fields(
+            r@ <= c_in() + c_map() * (ht_of(*old(self), stream_id) + 1) + c_free() * removed_fields(
+                *old(self),
+                *final(self),
                 stream_id,
             ),
     {
@@ -5393,7 +5409,9 @@ impl H3Conn {
             final(self).highest_accepted() == old(self).highest_accepted(),
             final(self).uni_seen() == old(self).uni_seen(),
             // `removed_fields` is not bounded by the call's input: N6, owned by carryover cat-C15-teardown (9b4).
-            r@ <= c_in() + c_map() * (ht_of(*old(self), stream_id) + 1) + c_free() * old(self).removed_fields(
+            r@ <= c_in() + c_map() * (ht_of(*old(self), stream_id) + 1) + c_free() * removed_fields(
+                *old(self),
+                *final(self),
                 stream_id,
             ),
     {
@@ -5414,6 +5432,13 @@ impl H3Conn {
             self.close(H3_CLOSED_CRITICAL_STREAM, out);
             // The close's output.
             return Ghost(1);
+        }
+        if stream_id % 4 != 0 {
+            // No request stream: request keys are 0 mod 4 (`tbl(reqs, 0)`).
+            proof {
+                Self::lemma_idle(*self, out@);
+            }
+            return Ghost(0);
         }
         let ghost mut work: nat = 0;
         let (g, Ghost(cg)) = tbl_get(&self.reqs, stream_id);
