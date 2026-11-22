@@ -35,12 +35,9 @@ use crate::message::*;
 use crate::qpack::field_section::*;
 use crate::request::{ReqError, ReqEvent, RequestStream, SpecReqEvent, MAX_REQ_EVENTS};
 use byteq::avl::{first, get_le, join, join2, pop_min, split, Tree};
-// Used only in ghost code, which a plain `cargo build` erases.
+// Its spec fns and lemmas, used only in ghost code, which a plain `cargo build` erases.
 #[allow(unused_imports)]
-use byteq::avl::{
-    c_first, c_free, c_get, c_join, c_join2, c_pop, c_split6, ht, keys_ge, keys_gt, keys_lt, last_le, lemma_sorted_concat,
-    lemma_split_cost, lemma_wf_sorted, seq, sorted, wf,
-};
+use byteq::avl::*;
 use byteq::capvec::CapVec;
 use crate::uni::{SeenUni, SpecUniEvent, UniEvent, UniKind, UniStream};
 // Used only in ghost code, which a plain `cargo build` erases.
@@ -1777,6 +1774,8 @@ proof fn lemma_take_hit<V>(t: Tree<V>, a: Tree<V>, b: Tree<V>, k: u64, r: u64, h
 
 /// Takes request stream `id`'s entry, if any, out of the table: the entries below it, the entry, and the entries above
 /// it (`split`, then `pop_min` of the upper part when its first key is `id`).
+// The popped key `k2` is read only by the proof.
+#[allow(unused_variables)]
 fn req_take_w(t: Tree<Box<ReqEntry>>, id: u64) -> (r: (Tree<Box<ReqEntry>>, Option<Box<ReqEntry>>, Tree<Box<ReqEntry>>, Ghost<nat>))
     requires
         tbl(t, 0),
@@ -1863,6 +1862,8 @@ fn req_put_w(lo: Tree<Box<ReqEntry>>, e: Box<ReqEntry>, hi: Tree<Box<ReqEntry>>,
 }
 
 /// `uni`'s `req_take_w`.
+// The popped key `k2` is read only by the proof.
+#[allow(unused_variables)]
 fn uni_take_w(t: Tree<Box<UniEntry>>, id: u64) -> (r: (Tree<Box<UniEntry>>, Option<Box<UniEntry>>, Tree<Box<UniEntry>>, Ghost<nat>))
     requires
         tbl(t, 2),
@@ -3612,9 +3613,9 @@ pub struct H3Conn {
     ctrl: Ghost<Seq<u8>>,
     goaways: Ghost<Seq<u64>>,
     /// Per request stream: bytes fed to its machine, its events, the held trailer section.
-    rhist: Ghost<Map<u64, (Seq<u8>, Seq<SpecReqEvent>, Fields)>>,
+    rhist: Ghost<Map<u64, RHist>>,
     /// Per peer uni stream: bytes fed to its machine, its `seen_before`, its events.
-    uhist: Ghost<Map<u64, (Seq<u8>, SeenUni, Seq<SpecUniEvent>)>>,
+    uhist: Ghost<Map<u64, UHist>>,
     /// The tracked request streams and their states (mirrors `reqs`).
     rstate: Ghost<Map<u64, ReqState>>,
     /// The tracked peer uni streams (mirrors `unis`).
@@ -4599,6 +4600,8 @@ impl H3Conn {
 
     /// `request_data` for a stream no longer received (finished, or abandoned awaiting the peer's FIN or reset): nothing
     /// is output, and a FIN may forget it.
+    // `out` is in the ensures only: nothing is output.
+    #[allow(unused_variables)]
     fn request_idle(&mut self, id: u64, Ghost(data): Ghost<Seq<u8>>, fin: bool, out: &mut CapVec<Output>) -> (r: Ghost<nat>)
         requires
             old(self).wf(),

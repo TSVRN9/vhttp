@@ -552,7 +552,6 @@ fn ready() -> H3Conn {
 }
 
 #[test]
-#[ignore = "9b3: fails today, the stream table is a Vec grown by push (reallocs); un-ignored by Task 11"]
 fn stream_table_flat() {
     let mut c = ready();
     let mut r = Run::default();

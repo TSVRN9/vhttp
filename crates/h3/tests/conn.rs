@@ -14,15 +14,21 @@ fn call(out: &mut Vec<Output>, f: impl FnOnce(&mut CapVec<Output>)) {
 }
 
 fn data(c: &mut H3Conn, id: u64, b: &[u8], fin: bool, out: &mut Vec<Output>) {
-    call(out, |o| c.on_stream_data(id, b, fin, o));
+    call(out, |o| {
+        c.on_stream_data(id, b, fin, o);
+    });
 }
 
 fn reset(c: &mut H3Conn, id: u64, code: u64, out: &mut Vec<Output>) {
-    call(out, |o| c.on_stream_reset(id, code, o));
+    call(out, |o| {
+        c.on_stream_reset(id, code, o);
+    });
 }
 
 fn stop_sending(c: &mut H3Conn, id: u64, code: u64, out: &mut Vec<Output>) {
-    call(out, |o| c.on_stop_sending(id, code, o));
+    call(out, |o| {
+        c.on_stop_sending(id, code, o);
+    });
 }
 
 fn fl(n: &str, v: &str) -> FieldLine {
@@ -648,4 +654,78 @@ fn answers_match_send_response() {
     assert_eq!(raw(4), raw(12));
     assert_eq!(raw(0), [0x01, 0x08, 0x00, 0x00, 0x5F, 0x09, 0x03, b'5', b'0', b'1']);
     assert_eq!(raw(4), [0x01, 0x04, 0x00, 0x00, 0xFF, 0x06]);
+}
+
+/// Review Focus 6 (the stream table on `byteq::avl`): a FIN for an ID whose entry is gone. A request that ended and was
+/// answered is forgotten; a later FIN on its ID is a new stream holding no request, reset with H3_REQUEST_INCOMPLETE,
+/// and forgotten in turn, while the other streams' entries are untouched.
+#[test]
+fn table_fin_after_entry_gone() {
+    let mut c = ready(&[]);
+    let mut out = Vec::new();
+    data(&mut c, 4, &get("/a"), false, &mut out);
+    data(&mut c, 0, &get("/"), true, &mut out);
+    assert_eq!(c.send_response(0, &resp(200, &[], ""), &mut out), Ok(()));
+    let mut out = Vec::new();
+    data(&mut c, 0, &[], true, &mut out);
+    assert_eq!(out.len(), 1);
+    assert!(is_reset(&out[0], 0, H3_REQUEST_INCOMPLETE));
+    let mut out = Vec::new();
+    assert_eq!(c.send_response(0, &resp(200, &[], ""), &mut out), Err(()));
+    assert!(out.is_empty());
+    data(&mut c, 4, &[], true, &mut out);
+    assert_eq!(summary(&out), ["end 4 0"]);
+    assert_eq!(c.send_response(4, &resp(200, &[], ""), &mut out), Ok(()));
+}
+
+/// Review Focus 6: a reset (and a STOP_SENDING) for an unknown ID outputs nothing and leaves the tables as they were:
+/// the tracked streams still answer, and the reset ID is still new.
+#[test]
+fn table_reset_unknown() {
+    let mut c = ready(&[]);
+    let mut out = Vec::new();
+    data(&mut c, 0, &get("/"), true, &mut out);
+    data(&mut c, 6, &[0x21], false, &mut out);
+    let mut out = Vec::new();
+    reset(&mut c, 8, 0, &mut out);
+    reset(&mut c, 10, 0, &mut out);
+    stop_sending(&mut c, 12, 0, &mut out);
+    assert!(out.is_empty());
+    data(&mut c, 8, &get("/b"), true, &mut out);
+    assert_eq!(summary(&out), ["req 8 [71, 69, 84]", "end 8 0"]);
+    assert_eq!(c.send_response(0, &resp(200, &[], ""), &mut out), Ok(()));
+    assert_eq!(c.send_response(8, &resp(200, &[], ""), &mut out), Ok(()));
+    let mut out = Vec::new();
+    reset(&mut c, 6, 0, &mut out);
+    assert!(out.is_empty());
+}
+
+/// Review Focus 6: 100 entries updated in reverse ID order (each update a take and a put in the tree), then ended and
+/// answered in reverse order (each answer drops its entry): every call reaches its own stream's entry.
+#[test]
+fn table_reverse_updates() {
+    let n = 100u64;
+    let mut c = ready(&[]);
+    for i in 0..n {
+        let mut out = Vec::new();
+        data(&mut c, 4 * i, &get("/"), false, &mut out);
+        assert_eq!(summary(&out), [format!("req {} [71, 69, 84]", 4 * i)]);
+    }
+    for i in (0..n).rev() {
+        let mut out = Vec::new();
+        data(&mut c, 4 * i, &frame(0x00, &[b'0' + (i % 10) as u8]), false, &mut out);
+        assert_eq!(summary(&out), [format!("body {} {}", 4 * i, i % 10)]);
+    }
+    for i in (0..n).rev() {
+        let mut out = Vec::new();
+        data(&mut c, 4 * i, &[], true, &mut out);
+        assert_eq!(summary(&out), [format!("end {} 0", 4 * i)]);
+        assert_eq!(c.send_response(4 * i, &resp(200, &[], ""), &mut out), Ok(()));
+        assert_eq!(c.send_response(4 * i, &resp(200, &[], ""), &mut out), Err(()));
+    }
+    for i in 0..n {
+        let mut out = Vec::new();
+        reset(&mut c, 4 * i, 0, &mut out);
+        assert!(out.is_empty());
+    }
 }
