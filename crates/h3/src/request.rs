@@ -1908,6 +1908,7 @@ impl RequestStream {
             r.all() == Seq::<u8>::empty(),
             r.emitted() == Seq::<SpecReqEvent>::empty(),
             !r.done(),
+            r.buffered() == 0,
     {
         let r = RequestStream {
             phase: Phase::AwaitHeaders,

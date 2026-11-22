@@ -1226,115 +1226,6 @@ spec fn uni_hist_of(e: UniEntry) -> (Seq<u8>, SeenUni, Seq<SpecUniEvent>) {
     (e.stream.all(), e.stream.seen_before(), e.stream.emitted())
 }
 
-spec fn reqs_ok(s: Seq<ReqEntry>, h: Map<u64, (Seq<u8>, Seq<SpecReqEvent>, Fields)>) -> bool {
-    &&& forall|j: int, k: int|
-        0 <= j < s.len() && 0 <= k < s.len() && j != k ==> (#[trigger] s[j]).id != (
-        #[trigger] s[k]).id
-    &&& forall|k: int|
-        0 <= k < s.len() ==> req_entry_ok(#[trigger] s[k]) && h.contains_key(s[k].id) && h[s[k].id]
-            == req_hist_of(s[k])
-}
-
-spec fn unis_ok(s: Seq<UniEntry>, h: Map<u64, (Seq<u8>, SeenUni, Seq<SpecUniEvent>)>) -> bool {
-    &&& forall|j: int, k: int|
-        0 <= j < s.len() && 0 <= k < s.len() && j != k ==> (#[trigger] s[j]).id != (
-        #[trigger] s[k]).id
-    &&& forall|k: int|
-        0 <= k < s.len() ==> (#[trigger] s[k]).id % 4 == 2 && s[k].stream.wf()
-            && !s[k].stream.done() && h.contains_key(s[k].id) && h[s[k].id] == uni_hist_of(s[k])
-}
-
-proof fn lemma_reqs_remove(
-    s: Seq<ReqEntry>,
-    h: Map<u64, (Seq<u8>, Seq<SpecReqEvent>, Fields)>,
-    h2: Map<u64, (Seq<u8>, Seq<SpecReqEvent>, Fields)>,
-    i: int,
-)
-    requires
-        reqs_ok(s, h),
-        0 <= i < s.len(),
-        forall|id: u64|
-            #![trigger h2.contains_key(id)]
-            #![trigger h2[id]]
-            id != s[i].id && h.contains_key(id) ==> h2.contains_key(id) && h2[id] == h[id],
-    ensures
-        reqs_ok(s.remove(i), h2),
-        forall|k: int| 0 <= k < s.remove(i).len() ==> (#[trigger] s.remove(i)[k]).id != s[i].id,
-{
-    let t = s.remove(i);
-    assert forall|k: int| 0 <= k < t.len() implies t[k] == s[if k < i { k } else { k + 1 }] by {}
-    assert forall|j: int, k: int|
-        0 <= j < t.len() && 0 <= k < t.len() && j != k implies (#[trigger] t[j]).id != (
-        #[trigger] t[k]).id by {
-        let jj = if j < i { j } else { j + 1 };
-        let kk = if k < i { k } else { k + 1 };
-        assert(t[j] == s[jj] && t[k] == s[kk]);
-    }
-    assert forall|k: int| 0 <= k < t.len() implies req_entry_ok(#[trigger] t[k]) && h2.contains_key(
-        t[k].id,
-    ) && h2[t[k].id] == req_hist_of(t[k]) by {
-        let kk = if k < i { k } else { k + 1 };
-        assert(t[k] == s[kk]);
-        assert(s[kk].id != s[i].id);
-    }
-    assert forall|k: int| 0 <= k < t.len() implies (#[trigger] t[k]).id != s[i].id by {
-        let kk = if k < i { k } else { k + 1 };
-        assert(t[k] == s[kk]);
-    }
-}
-
-proof fn lemma_unis_remove(
-    s: Seq<UniEntry>,
-    h: Map<u64, (Seq<u8>, SeenUni, Seq<SpecUniEvent>)>,
-    i: int,
-)
-    requires
-        unis_ok(s, h),
-        0 <= i < s.len(),
-    ensures
-        unis_ok(s.remove(i), h),
-        forall|k: int| 0 <= k < s.remove(i).len() ==> (#[trigger] s.remove(i)[k]).id != s[i].id,
-{
-    let t = s.remove(i);
-    assert forall|k: int| 0 <= k < t.len() implies t[k] == s[if k < i { k } else { k + 1 }] by {}
-    assert forall|j: int, k: int|
-        0 <= j < t.len() && 0 <= k < t.len() && j != k implies (#[trigger] t[j]).id != (
-        #[trigger] t[k]).id by {
-        let jj = if j < i { j } else { j + 1 };
-        let kk = if k < i { k } else { k + 1 };
-        assert(t[j] == s[jj] && t[k] == s[kk]);
-    }
-    assert forall|k: int| 0 <= k < t.len() implies (#[trigger] t[k]).id % 4 == 2 && t[k].stream.wf()
-        && !t[k].stream.done() && h.contains_key(t[k].id) && h[t[k].id] == uni_hist_of(t[k]) && t[k].id
-        != s[i].id by {
-        let kk = if k < i { k } else { k + 1 };
-        assert(t[k] == s[kk]);
-    }
-}
-
-/// The table is unchanged and `id` is not in it: updating `id`'s history keeps the invariant.
-proof fn lemma_unis_hist(
-    s: Seq<UniEntry>,
-    h: Map<u64, (Seq<u8>, SeenUni, Seq<SpecUniEvent>)>,
-    h2: Map<u64, (Seq<u8>, SeenUni, Seq<SpecUniEvent>)>,
-    id: u64,
-)
-    requires
-        unis_ok(s, h),
-        forall|k: int| 0 <= k < s.len() ==> (#[trigger] s[k]).id != id,
-        forall|x: u64|
-            #![trigger h2.contains_key(x)]
-            #![trigger h2[x]]
-            x != id && h.contains_key(x) ==> h2.contains_key(x) && h2[x] == h[x],
-    ensures
-        unis_ok(s, h2),
-{
-    assert forall|k: int| 0 <= k < s.len() implies (#[trigger] s[k]).id % 4 == 2 && s[k].stream.wf()
-        && !s[k].stream.done() && h2.contains_key(s[k].id) && h2[s[k].id] == uni_hist_of(s[k]) by {
-        assert(s[k].id != id);
-    }
-}
-
 /// A request stream's state as `req_state` reports it.
 pub struct ReqState {
     /// Request bytes are still processed: no FIN, error or internal answer yet.
@@ -1359,225 +1250,169 @@ spec fn state_of(e: ReqEntry) -> ReqState {
     }
 }
 
-/// `st` mirrors the table: exactly its IDs, each with its entry's state.
-spec fn req_dom(s: Seq<ReqEntry>, st: Map<u64, ReqState>) -> bool {
-    &&& forall|k: int|
-        0 <= k < s.len() ==> st.contains_key((#[trigger] s[k]).id) && st[s[k].id] == state_of(s[k])
-    &&& forall|id: u64|
-        #[trigger] st.contains_key(id) ==> exists|k: int| 0 <= k < s.len() && (#[trigger] s[k]).id
-            == id
+type RHist = (Seq<u8>, Seq<SpecReqEvent>, Fields);
+
+type UHist = (Seq<u8>, SeenUni, Seq<SpecUniEvent>);
+
+/// The request table's view: each entry under its own ID, valid, with its history in `h`.
+#[verifier::opaque]
+spec fn reqs_ok(m: Map<u64, Box<ReqEntry>>, h: Map<u64, RHist>) -> bool {
+    forall|id: u64|
+        #[trigger] m.contains_key(id) ==> m[id].id == id && req_entry_ok(*m[id]) && h.contains_key(id) && h[id]
+            == req_hist_of(*m[id])
 }
 
-spec fn uni_dom(s: Seq<UniEntry>, us: Set<u64>) -> bool {
-    &&& forall|k: int| 0 <= k < s.len() ==> us.contains((#[trigger] s[k]).id)
-    &&& forall|id: u64|
-        #[trigger] us.contains(id) ==> exists|k: int| 0 <= k < s.len() && (#[trigger] s[k]).id == id
+/// The uni table's view: each entry under its own ID (a client uni stream), live, with its history in `h`.
+#[verifier::opaque]
+spec fn unis_ok(m: Map<u64, Box<UniEntry>>, h: Map<u64, UHist>) -> bool {
+    forall|id: u64|
+        #[trigger] m.contains_key(id) ==> m[id].id == id && id % 4 == 2 && m[id].stream.wf() && !m[id].stream.done()
+            && h.contains_key(id) && h[id] == uni_hist_of(*m[id])
 }
 
-proof fn lemma_dom_update(
-    s: Seq<ReqEntry>,
-    h: Map<u64, (Seq<u8>, Seq<SpecReqEvent>, Fields)>,
+/// `st` mirrors the request table: its keys, each with its entry's state.
+#[verifier::opaque]
+spec fn req_dom(m: Map<u64, Box<ReqEntry>>, st: Map<u64, ReqState>) -> bool {
+    &&& st.dom() == m.dom()
+    &&& forall|id: u64| #[trigger] st.contains_key(id) ==> st[id] == state_of(*m[id])
+}
+
+/// `us` is the uni table's key set.
+#[verifier::opaque]
+spec fn uni_dom(m: Map<u64, Box<UniEntry>>, us: Set<u64>) -> bool {
+    us == m.dom()
+}
+
+/// Putting `k` back after taking it out is setting it.
+proof fn lemma_map_put<K, V>(m: Map<K, V>, k: K, v: V)
+    ensures
+        m.remove(k).insert(k, v) == m.insert(k, v),
+{
+    assert(m.remove(k).insert(k, v) =~= m.insert(k, v));
+}
+
+/// Removing an absent key changes nothing.
+proof fn lemma_map_absent<K, V>(m: Map<K, V>, k: K)
+    ensures
+        !m.contains_key(k) ==> m.remove(k) == m,
+{
+    if !m.contains_key(k) {
+        assert(m.remove(k) =~= m);
+    }
+}
+
+/// A request table lookup: the entry, its state and its history, or neither entry nor state.
+proof fn lemma_req_get(m: Map<u64, Box<ReqEntry>>, h: Map<u64, RHist>, st: Map<u64, ReqState>, id: u64)
+    requires
+        reqs_ok(m, h),
+        req_dom(m, st),
+    ensures
+        st.contains_key(id) == m.contains_key(id),
+        m.contains_key(id) ==> m[id].id == id && req_entry_ok(*m[id]) && h.contains_key(id) && h[id]
+            == req_hist_of(*m[id]) && st[id] == state_of(*m[id]),
+{
+    reveal(reqs_ok);
+    reveal(req_dom);
+    assert(st.dom().contains(id) == m.dom().contains(id));
+}
+
+/// Setting a request entry keeps the view's invariant, with its history and state set.
+proof fn lemma_req_set(m: Map<u64, Box<ReqEntry>>, h: Map<u64, RHist>, st: Map<u64, ReqState>, e: Box<ReqEntry>)
+    requires
+        reqs_ok(m, h),
+        req_dom(m, st),
+        req_entry_ok(*e),
+    ensures
+        reqs_ok(m.insert(e.id, e), h.insert(e.id, req_hist_of(*e))),
+        req_dom(m.insert(e.id, e), st.insert(e.id, state_of(*e))),
+{
+    reveal(reqs_ok);
+    reveal(req_dom);
+    assert(st.insert(e.id, state_of(*e)).dom() =~= m.insert(e.id, e).dom());
+}
+
+/// Removing request entry `id` keeps the view's invariant, under any history `h2` that agrees off `id`.
+proof fn lemma_req_del(
+    m: Map<u64, Box<ReqEntry>>,
+    h: Map<u64, RHist>,
+    h2: Map<u64, RHist>,
     st: Map<u64, ReqState>,
-    i: int,
-    e: ReqEntry,
+    id: u64,
 )
     requires
-        reqs_ok(s, h),
-        req_dom(s, st),
-        0 <= i < s.len(),
-        e.id == s[i].id,
+        reqs_ok(m, h),
+        req_dom(m, st),
+        forall|x: u64|
+            #![trigger h2.contains_key(x)]
+            #![trigger h2[x]]
+            x != id && h.contains_key(x) ==> h2.contains_key(x) && h2[x] == h[x],
     ensures
-        req_dom(s.update(i, e), st.insert(e.id, state_of(e))),
+        reqs_ok(m.remove(id), h2),
+        req_dom(m.remove(id), st.remove(id)),
 {
-    let t = s.update(i, e);
-    let st2 = st.insert(e.id, state_of(e));
-    assert forall|k: int| 0 <= k < t.len() implies st2.contains_key((#[trigger] t[k]).id) && st2[t[k].id]
-        == state_of(t[k]) by {
-        if k != i {
-            assert(s[k].id != s[i].id);
-        }
-    }
-    assert forall|id: u64| #[trigger] st2.contains_key(id) implies exists|k: int|
-        0 <= k < t.len() && (#[trigger] t[k]).id == id by {
-        if id == e.id {
-            assert(t[i].id == id);
-        } else {
-            let k = choose|k: int| 0 <= k < s.len() && (#[trigger] s[k]).id == id;
-            assert(t[k].id == id);
-        }
-    }
+    reveal(reqs_ok);
+    reveal(req_dom);
+    assert(st.remove(id).dom() =~= m.remove(id).dom());
 }
 
-proof fn lemma_dom_push(s: Seq<ReqEntry>, st: Map<u64, ReqState>, e: ReqEntry)
+/// A uni table lookup: the entry and its history, or no entry.
+proof fn lemma_uni_get(m: Map<u64, Box<UniEntry>>, h: Map<u64, UHist>, us: Set<u64>, id: u64)
     requires
-        req_dom(s, st),
-        forall|k: int| 0 <= k < s.len() ==> (#[trigger] s[k]).id != e.id,
+        unis_ok(m, h),
+        uni_dom(m, us),
     ensures
-        req_dom(s.push(e), st.insert(e.id, state_of(e))),
+        us.contains(id) == m.contains_key(id),
+        m.contains_key(id) ==> m[id].id == id && id % 4 == 2 && m[id].stream.wf() && !m[id].stream.done()
+            && h.contains_key(id) && h[id] == uni_hist_of(*m[id]),
 {
-    let t = s.push(e);
-    let st2 = st.insert(e.id, state_of(e));
-    assert forall|k: int| 0 <= k < t.len() implies st2.contains_key((#[trigger] t[k]).id) && st2[t[k].id]
-        == state_of(t[k]) by {
-        if k < s.len() {
-            assert(t[k] == s[k]);
-            assert(s[k].id != e.id);
-        }
-    }
-    assert forall|id: u64| #[trigger] st2.contains_key(id) implies exists|k: int|
-        0 <= k < t.len() && (#[trigger] t[k]).id == id by {
-        if id == e.id {
-            assert(t[s.len() as int].id == id);
-        } else {
-            let k = choose|k: int| 0 <= k < s.len() && (#[trigger] s[k]).id == id;
-            assert(t[k].id == id);
-        }
-    }
+    reveal(unis_ok);
+    reveal(uni_dom);
 }
 
-proof fn lemma_dom_remove(
-    s: Seq<ReqEntry>,
-    h: Map<u64, (Seq<u8>, Seq<SpecReqEvent>, Fields)>,
-    st: Map<u64, ReqState>,
-    i: int,
-)
+/// Setting a uni entry keeps the view's invariant, with its history set and its ID tracked.
+proof fn lemma_uni_set(m: Map<u64, Box<UniEntry>>, h: Map<u64, UHist>, us: Set<u64>, e: Box<UniEntry>)
     requires
-        reqs_ok(s, h),
-        req_dom(s, st),
-        0 <= i < s.len(),
+        unis_ok(m, h),
+        uni_dom(m, us),
+        e.id % 4 == 2,
+        e.stream.wf(),
+        !e.stream.done(),
     ensures
-        req_dom(s.remove(i), st.remove(s[i].id)),
+        unis_ok(m.insert(e.id, e), h.insert(e.id, uni_hist_of(*e))),
+        uni_dom(m.insert(e.id, e), us.insert(e.id)),
 {
-    let t = s.remove(i);
-    let st2 = st.remove(s[i].id);
-    assert forall|k: int| 0 <= k < t.len() implies t[k] == s[if k < i { k } else { k + 1 }] by {}
-    assert forall|k: int| 0 <= k < t.len() implies st2.contains_key((#[trigger] t[k]).id) && st2[t[k].id]
-        == state_of(t[k]) by {
-        let kk = if k < i { k } else { k + 1 };
-        assert(t[k] == s[kk]);
-        assert(s[kk].id != s[i].id);
-    }
-    assert forall|id: u64| #[trigger] st2.contains_key(id) implies exists|k: int|
-        0 <= k < t.len() && (#[trigger] t[k]).id == id by {
-        let k = choose|k: int| 0 <= k < s.len() && (#[trigger] s[k]).id == id;
-        assert(k != i);
-        let kk = if k < i { k } else { k - 1 };
-        assert(t[kk] == s[k]);
-    }
+    reveal(unis_ok);
+    reveal(uni_dom);
+    assert(us.insert(e.id) =~= m.insert(e.id, e).dom());
 }
 
-proof fn lemma_udom_push(s: Seq<UniEntry>, us: Set<u64>, e: UniEntry)
+/// Removing uni entry `id` keeps the view's invariant, under any history `h2` that agrees off `id`.
+proof fn lemma_uni_del(m: Map<u64, Box<UniEntry>>, h: Map<u64, UHist>, h2: Map<u64, UHist>, us: Set<u64>, id: u64)
     requires
-        uni_dom(s, us),
+        unis_ok(m, h),
+        uni_dom(m, us),
+        forall|x: u64|
+            #![trigger h2.contains_key(x)]
+            #![trigger h2[x]]
+            x != id && h.contains_key(x) ==> h2.contains_key(x) && h2[x] == h[x],
     ensures
-        uni_dom(s.push(e), us.insert(e.id)),
+        unis_ok(m.remove(id), h2),
+        uni_dom(m.remove(id), us.remove(id)),
 {
-    let t = s.push(e);
-    let u2 = us.insert(e.id);
-    assert forall|k: int| 0 <= k < t.len() implies u2.contains((#[trigger] t[k]).id) by {
-        if k < s.len() {
-            assert(t[k] == s[k]);
-        }
-    }
-    assert forall|id: u64| #[trigger] u2.contains(id) implies exists|k: int|
-        0 <= k < t.len() && (#[trigger] t[k]).id == id by {
-        if id == e.id {
-            assert(t[s.len() as int].id == id);
-        } else {
-            let k = choose|k: int| 0 <= k < s.len() && (#[trigger] s[k]).id == id;
-            assert(t[k].id == id);
-        }
-    }
+    reveal(unis_ok);
+    reveal(uni_dom);
+    assert(us.remove(id) =~= m.remove(id).dom());
 }
 
-proof fn lemma_udom_update(s: Seq<UniEntry>, us: Set<u64>, i: int, e: UniEntry)
-    requires
-        uni_dom(s, us),
-        0 <= i < s.len(),
-        e.id == s[i].id,
-    ensures
-        uni_dom(s.update(i, e), us),
-{
-    let t = s.update(i, e);
-    assert forall|k: int| 0 <= k < t.len() implies us.contains((#[trigger] t[k]).id) by {
-        if k != i {
-            assert(t[k] == s[k]);
-        }
-    }
-    assert forall|id: u64| #[trigger] us.contains(id) implies exists|k: int|
-        0 <= k < t.len() && (#[trigger] t[k]).id == id by {
-        let k = choose|k: int| 0 <= k < s.len() && (#[trigger] s[k]).id == id;
-        assert(t[k].id == id);
-    }
+/// The buffers a dropped request entry frees beside its box: its queue's (at most two), its trailer list and each
+/// trailer line's two.
+spec fn req_frees(e: ReqEntry) -> nat {
+    3 + 2 * e.trailers@.len()
 }
 
-proof fn lemma_udom_remove(s: Seq<UniEntry>, h: Map<u64, (Seq<u8>, SeenUni, Seq<SpecUniEvent>)>, us: Set<u64>, i: int)
-    requires
-        unis_ok(s, h),
-        uni_dom(s, us),
-        0 <= i < s.len(),
-    ensures
-        uni_dom(s.remove(i), us.remove(s[i].id)),
-{
-    let t = s.remove(i);
-    let u2 = us.remove(s[i].id);
-    assert forall|k: int| 0 <= k < t.len() implies t[k] == s[if k < i { k } else { k + 1 }] by {}
-    assert forall|k: int| 0 <= k < t.len() implies u2.contains((#[trigger] t[k]).id) by {
-        let kk = if k < i { k } else { k + 1 };
-        assert(t[k] == s[kk]);
-        assert(s[kk].id != s[i].id);
-    }
-    assert forall|id: u64| #[trigger] u2.contains(id) implies exists|k: int|
-        0 <= k < t.len() && (#[trigger] t[k]).id == id by {
-        let k = choose|k: int| 0 <= k < s.len() && (#[trigger] s[k]).id == id;
-        assert(k != i);
-        let kk = if k < i { k } else { k - 1 };
-        assert(t[kk] == s[k]);
-    }
-}
-
-fn find_req(s: &Vec<ReqEntry>, id: u64) -> (r: Option<usize>)
-    ensures
-        match r {
-            Some(i) => i < s@.len() && s@[i as int].id == id,
-            None => forall|k: int| 0 <= k < s@.len() ==> (#[trigger] s@[k]).id != id,
-        },
-{
-    let mut i: usize = 0;
-    while i < s.len()
-        invariant
-            i <= s@.len(),
-            forall|k: int| 0 <= k < i ==> (#[trigger] s@[k]).id != id,
-        decreases s@.len() - i,
-    {
-        if s[i].id == id {
-            return Some(i);
-        }
-        i += 1;
-    }
-    None
-}
-
-fn find_uni(s: &Vec<UniEntry>, id: u64) -> (r: Option<usize>)
-    ensures
-        match r {
-            Some(i) => i < s@.len() && s@[i as int].id == id,
-            None => forall|k: int| 0 <= k < s@.len() ==> (#[trigger] s@[k]).id != id,
-        },
-{
-    let mut i: usize = 0;
-    while i < s.len()
-        invariant
-            i <= s@.len(),
-            forall|k: int| 0 <= k < i ==> (#[trigger] s@[k]).id != id,
-        decreases s@.len() - i,
-    {
-        if s[i].id == id {
-            return Some(i);
-        }
-        i += 1;
-    }
-    None
+/// The buffers a dropped uni entry frees beside its box: its queue's (at most two).
+spec fn uni_frees() -> nat {
+    2
 }
 
 // =============================================================================
@@ -1604,7 +1439,13 @@ spec fn tv<V>(t: Tree<V>) -> Map<u64, V> {
 /// (`lemma_keys_len`), within the `pow2(63)` that avl's `split`, `pop_min` and `join` require.
 spec fn tbl<V>(t: Tree<V>, r: u64) -> bool {
     &&& wf(t)
-    &&& forall|i: int| 0 <= i < seq(t).len() ==> (#[trigger] seq(t)[i]).0 % 4 == r
+    &&& keys_mod(t, r)
+}
+
+/// Every key of `t` is `r` mod 4 (opaque: revealed only by the table's lemmas).
+#[verifier::opaque]
+spec fn keys_mod<V>(t: Tree<V>, r: u64) -> bool {
+    forall|i: int| 0 <= i < seq(t).len() ==> (#[trigger] seq(t)[i]).0 % 4 == r
 }
 
 proof fn lemma_mview_one<V>(k: u64, v: V)
@@ -1715,6 +1556,7 @@ proof fn lemma_tbl_len<V>(t: Tree<V>, r: u64)
         seq(t).len() <= pow2(62),
         seq(t).len() < pow2(63),
 {
+    reveal(keys_mod);
     lemma_wf_sorted(t);
     lemma_keys_len(seq(t), r);
 }
@@ -1735,6 +1577,7 @@ proof fn lemma_split_tbl<V>(t: Tree<V>, a: Tree<V>, b: Tree<V>, k: u64, r: u64)
         !tv(a).contains_key(k),
         !tv(t).contains_key(k) ==> keys_gt(b, k),
 {
+    reveal(keys_mod);
     let (sa, sb) = (seq(a), seq(b));
     assert forall|i: int| 0 <= i < sa.len() implies (#[trigger] sa[i]).0 % 4 == r by {
         assert(seq(t)[i] == sa[i]);
@@ -1822,6 +1665,7 @@ proof fn lemma_take<V>(t: Tree<V>, a: Tree<V>, b: Tree<V>, b2: Tree<V>, k: u64, 
         keys_gt(b2, k),
         tv(a).union_prefer_right(tv(b2)) == tv(t).remove(k),
 {
+    reveal(keys_mod);
     let (sb, sb2) = (seq(b), seq(b2));
     lemma_mview_app(seq![(k2, v)], sb2);
     lemma_mview_one(k2, v);
@@ -1852,6 +1696,7 @@ proof fn lemma_put<V>(a: Tree<V>, k: u64, v: V, b: Tree<V>, j: Tree<V>, r: u64)
         forall|i: int| 0 <= i < seq(j).len() ==> (#[trigger] seq(j)[i]).0 % 4 == r,
         tv(j) == tv(a).union_prefer_right(tv(b)).insert(k, v),
 {
+    reveal(keys_mod);
     let (sa, sb, s) = (seq(a), seq(b), seq(j));
     assert forall|i: int| 0 <= i < s.len() implies (#[trigger] s[i]).0 % 4 == r by {
         if i < sa.len() {
@@ -1883,6 +1728,7 @@ proof fn lemma_put_len<V>(a: Tree<V>, k: u64, v: V, b: Tree<V>, r: u64)
     ensures
         seq(a).len() + seq(b).len() + 1 < pow2(63),
 {
+    reveal(keys_mod);
     lemma_wf_sorted(a);
     lemma_wf_sorted(b);
     let s = seq(a) + seq![(k, v)] + seq(b);
@@ -2010,6 +1856,7 @@ fn req_put_w(lo: Tree<Box<ReqEntry>>, e: Box<ReqEntry>, hi: Tree<Box<ReqEntry>>,
     let ghost ev = e;
     let (j, Ghost(c)) = join(lo, k, e, hi);
     proof {
+        reveal(keys_mod);
         lemma_put(a, k, ev, b, j, 0);
     }
     (j, Ghost(c))
@@ -2095,6 +1942,7 @@ fn uni_put_w(lo: Tree<Box<UniEntry>>, e: Box<UniEntry>, hi: Tree<Box<UniEntry>>,
     let ghost ev = e;
     let (j, Ghost(c)) = join(lo, k, e, hi);
     proof {
+        reveal(keys_mod);
         lemma_put(a, k, ev, b, j, 2);
     }
     (j, Ghost(c))
@@ -2118,6 +1966,9 @@ fn tbl_join<V>(lo: Tree<V>, hi: Tree<V>, Ghost(k): Ghost<u64>, Ghost(r): Ghost<u
         tv(res.0) == tv(lo).union_prefer_right(tv(hi)),
         res.1@ <= c_join2() * (h + 1),
 {
+    proof {
+        reveal(keys_mod);
+    }
     let ghost (a, b) = (lo, hi);
     proof {
         lemma_put_len(a, k, arbitrary(), b, r);
@@ -2705,6 +2556,28 @@ proof fn lemma_answered_cost(ev: Seq<SpecReqEvent>, k: int, work: nat, extra: na
     lemma_lines_suffix(ev, k);
 }
 
+/// The events before `k` carry at most the lines all of them do.
+proof fn lemma_lines_prefix(s: Seq<SpecReqEvent>, k: int)
+    requires
+        0 <= k <= s.len(),
+    ensures
+        request::ev_lines(s.take(k)) <= request::ev_lines(s),
+{
+    request::lemma_tally_append(s.take(k), s.skip(k));
+    assert(s.take(k) + s.skip(k) =~= s);
+}
+
+/// The events before `k + 1` carry the lines of those before `k` and event `k`'s.
+proof fn lemma_lines_step(s: Seq<SpecReqEvent>, k: int)
+    requires
+        0 <= k < s.len(),
+    ensures
+        request::ev_lines(s.take(k + 1)) == request::ev_lines(s.take(k)) + request::ev_line(s[k]),
+{
+    assert(s.take(k + 1).drop_last() =~= s.take(k));
+    assert(s.take(k + 1).last() == s[k]);
+}
+
 /// One more output that is request-only and no close keeps `req_only` and `no_close`.
 proof fn lemma_added_kept(a0: Seq<SpecOutput>, a1: Seq<SpecOutput>)
     requires
@@ -2780,6 +2653,7 @@ fn deliver(
         !r.0 ==> final(e).rx_open && final(e).send_open == old(e).send_open
             && final(e).fin_seen == old(e).fin_seen,
         r.1@ <= c_dlv() * (ev.len() + 1) + 2 * request::ev_lines(ev),
+        final(e).trailers@.len() <= old(e).trailers@.len() + request::ev_lines(ev),
         final(out).wf(),
         final(out).cap() == old(out).cap(),
         final(out)@.len() <= old(out)@.len() + ev.len() + (if r.0 { 1nat } else { 0nat }),
@@ -2845,6 +2719,7 @@ fn deliver(
             e.head == (old(e).head || has_request(added(o0, out@))),
             e.is_head == (old(e).is_head || head_req(added(o0, out@))),
             work <= n + 2 + 31 * k,
+            e.trailers@.len() <= old(e).trailers@.len() + request::ev_lines(ev.take(k as int)),
             ev.len() == n,
             out.wf(),
             out.cap() == old(out).cap(),
@@ -2908,6 +2783,7 @@ fn deliver(
             proof {
                 lemma_answered_ret(id, ev, k as int, tr, tr0, err, cx, status, o0, o1, out@);
                 lemma_answered_cost(ev, k as int, work, extra);
+                lemma_lines_prefix(ev, k as int);
             }
             return (true, Ghost(work + extra + frees(ev.skip(k as int))));
         }
@@ -2982,6 +2858,7 @@ fn deliver(
         }
         proof {
             lemma_added_kept(added(o0, o1), added(o0, out@));
+            lemma_lines_step(ev, k as int);
         }
         k += 1;
         proof {
@@ -2992,6 +2869,7 @@ fn deliver(
     proof {
         assert(ev.skip(n as int) =~= Seq::<SpecReqEvent>::empty());
         assert(req_outs(id, ev.skip(n as int), fields_view(e.trailers@), err, cx, err_outs(id, err, cx)));
+        assert(ev.take(n as int) =~= ev);
     }
     (false, Ghost(work + 1))
 }
@@ -3073,9 +2951,390 @@ pub open spec fn req_err(all: Seq<u8>, fin: bool) -> Option<ReqError> {
     request::rfc_request_stream(all, fin).1
 }
 
+/// `feed_req`'s cost per byte of `d + 16`: `on_data`'s `c_req()`, `deliver`'s 2 per field line (at most 77 per byte),
+/// and the constant terms (the event buffer, `c_dlv()` for each of at most 5 events, and the error's 2 outputs: 163, at
+/// most 11 per byte of the 16).
+#[verifier::inline]
+spec fn c_fr() -> nat {
+    82245
+}
+
+/// `feed_req`'s cost per byte held before the call: `on_data`'s `c_frame()` and `deliver`'s 2 per field line.
+#[verifier::inline]
+spec fn c_frb() -> nat {
+    41175
+}
+
+/// What `feed_req` ensures of the entry (`e0` to `e1`) and the outputs (`o0` to `o1`), its cost aside: the machine fed
+/// `data`, and the outputs what its new events and error mean (`closing`: the connection must close).
+#[verifier::opaque]
+spec fn fed_ok(
+    e0: ReqEntry,
+    e1: ReqEntry,
+    o0: CapVec<Output>,
+    o1: CapVec<Output>,
+    data: Seq<u8>,
+    fin: bool,
+    peer: Option<u64>,
+    closing: bool,
+) -> bool {
+    let ne = e1.stream.emitted().skip(e0.stream.emitted().len() as int);
+    let err = req_err(e1.stream.all(), fin);
+    &&& o1.wf()
+    &&& o1.cap() == o0.cap()
+    &&& o1@.len() <= o0@.len() + MAX_OUTS
+    &&& extends(o0@, o1@)
+    &&& e1.stream.all() == e0.stream.all() + data
+    &&& e1.stream.emitted().len() >= e0.stream.emitted().len()
+    &&& e1.stream.emitted().take(e0.stream.emitted().len() as int) == e0.stream.emitted()
+    &&& request::concat_bodies(e1.stream.emitted()) == request::rfc_request_stream(e1.stream.all(), fin).0
+    &&& req_outs(e0.id, ne, fields_view(e0.trailers@), err, Ctx { fin, peer, send_open: e0.send_open }, added(o0@, o1@))
+    &&& outs_ok(added(o0@, o1@), closing)
+    &&& req_only(added(o0@, o1@))
+    &&& e1.fin_seen == fin
+    &&& e1.rx_open == (err is None && !fin && no_internal(ne))
+    &&& !closing ==> e1.send_open == (e0.send_open && err is None && no_internal(ne))
+    &&& e1.head == (e0.head || has_request(added(o0@, o1@)))
+    &&& e1.is_head == (e0.is_head || head_req(added(o0@, o1@)))
+}
+
+/// `fed_ok` from its parts.
+proof fn lemma_fed_ok(
+    e0: ReqEntry,
+    e1: ReqEntry,
+    o0: CapVec<Output>,
+    o1: CapVec<Output>,
+    data: Seq<u8>,
+    fin: bool,
+    peer: Option<u64>,
+    closing: bool,
+)
+    requires
+        o1.wf(),
+        o1.cap() == o0.cap(),
+        o1@.len() <= o0@.len() + MAX_OUTS,
+        extends(o0@, o1@),
+        e1.stream.all() == e0.stream.all() + data,
+        e1.stream.emitted().len() >= e0.stream.emitted().len(),
+        e1.stream.emitted().take(e0.stream.emitted().len() as int) == e0.stream.emitted(),
+        request::concat_bodies(e1.stream.emitted()) == request::rfc_request_stream(e1.stream.all(), fin).0,
+        req_outs(
+            e0.id,
+            e1.stream.emitted().skip(e0.stream.emitted().len() as int),
+            fields_view(e0.trailers@),
+            req_err(e1.stream.all(), fin),
+            Ctx { fin, peer, send_open: e0.send_open },
+            added(o0@, o1@),
+        ),
+        outs_ok(added(o0@, o1@), closing),
+        req_only(added(o0@, o1@)),
+        e1.fin_seen == fin,
+        e1.rx_open == (req_err(e1.stream.all(), fin) is None && !fin && no_internal(
+            e1.stream.emitted().skip(e0.stream.emitted().len() as int),
+        )),
+        !closing ==> e1.send_open == (e0.send_open && req_err(e1.stream.all(), fin) is None && no_internal(
+            e1.stream.emitted().skip(e0.stream.emitted().len() as int),
+        )),
+        e1.head == (e0.head || has_request(added(o0@, o1@))),
+        e1.is_head == (e0.is_head || head_req(added(o0@, o1@))),
+    ensures
+        fed_ok(e0, e1, o0, o1, data, fin, peer, closing),
+{
+    hide(req_outs);
+    reveal(fed_ok);
+}
+
+/// `uni_data`'s cost: the take (`ct`), `on_data` (`cu`), at most `2·d + b + 13·(h + 1) + 9` for the settings, the put
+/// or the join, the boxes, the output and the dropped stream's buffers, and the `n` events' frees (`n <= d / 3 + 1`).
+proof fn lemma_uni_cost(work: nat, ct: nat, cu: nat, h: nat, d: nat, b: nat, n: nat)
+    requires
+        ct <= c_take() * (h + 1),
+        cu <= uni::c_uni() * (d + 16) + uni::c_uni_frame() * b,
+        n <= d / 3 + 1,
+        work <= ct + cu + 2 * d + b + 13 * (h + 1) + 9 + n,
+    ensures
+        work <= c_ud() * (d + 16) + uni::c_uni_frame() * b + b + c_take() * (h + 1) + 13 * (h + 1),
+{
+}
+
+/// What `uni_data` ensures, its cost aside.
+#[verifier::opaque]
+spec fn uni_done(c0: H3Conn, c1: H3Conn, o0: CapVec<Output>, o1: CapVec<Output>, id: u64, data: Seq<u8>, fin: bool) -> bool {
+    &&& o1.wf()
+    &&& o1.cap() == o0.cap()
+    &&& o1@.len() <= o0@.len() + 1
+    &&& step(c0, c1, o0@, o1@)
+    &&& c1.goaways() == c0.goaways()
+    &&& frame(c0, c1, Some(id))
+    &&& uni_fed(c0, c1, id, data, fin, added(o0@, o1@))
+    &&& c1.highest == c0.highest
+}
+
+/// `uni_data`'s ensures, its cost aside: uni stream `id`'s entry `e0` (or a fresh one) fed into `e` (`uni::fed`, its
+/// events `ev1`) and its history recorded; on an error the connection closed with the error's code, else the settings
+/// applied and the tables updated: `e` kept, or forgotten at its FIN.
+proof fn lemma_uni_done(
+    c0: H3Conn,
+    c1: H3Conn,
+    o0: CapVec<Output>,
+    o1: CapVec<Output>,
+    id: u64,
+    data: Seq<u8>,
+    fin: bool,
+    e0: UniEntry,
+    e: UniEntry,
+    ev0: CapVec<UniEvent>,
+    ev1: CapVec<UniEvent>,
+    r: Result<(), u64>,
+    cu: nat,
+)
+    requires
+        c0.wf(),
+        !c0.closed,
+        id % 4 == 2,
+        c0.uni_known(id) ==> c0.uhist@[id] == uni_hist_of(e0),
+        !c0.uni_known(id) ==> e0.stream.all() == Seq::<u8>::empty() && e0.stream.emitted() == Seq::<
+            SpecUniEvent,
+        >::empty(),
+        ev0@ == Seq::<UniEvent>::empty(),
+        uni::fed(e0.stream, e.stream, data, fin, c0.seen, c1.seen, ev0, ev1, r, cu),
+        c1.uhist@ == c0.uhist@.insert(id, uni_hist_of(e)),
+        c1.ctrl == c0.ctrl,
+        c1.goaways == c0.goaways,
+        c1.highest == c0.highest,
+        c1.goaway == c0.goaway,
+        c1.started == c0.started,
+        c1.rhist == c0.rhist,
+        c1.rstate == c0.rstate,
+        o1.wf(),
+        o1.cap() == o0.cap(),
+        r is Err ==> c1.closed && c1.wf() && extends(o0@, o1@) && added(o0@, o1@) == seq![
+            SpecOutput::CloseConnection { code: r->Err_0 },
+        ] && c1.peer_max == c0.peer_max && c1.uset == c0.uset,
+        r is Ok ==> !c1.closed && o1 == o0 && c1.peer_max == events_fs(uni::views(ev1@), c0.peer_max) && c1.uset@
+            == (if fin {
+            c0.uset@.remove(id)
+        } else {
+            c0.uset@.insert(id)
+        }) && tables_ok(c1.reqs, c1.unis, c1.rhist@, c1.uhist@, c1.rstate@, c1.uset@),
+    ensures
+        uni_done(c0, c1, o0, o1, id, data, fin),
+{
+    hide(uni::rfc_uni_stream);
+    reveal(uni_done);
+    assert(ev1@.skip(0) =~= ev1@);
+    assert(Seq::<u8>::empty() + data =~= data);
+    let em0 = e0.stream.emitted();
+    assert(e.stream.emitted().take(em0.len() as int) =~= em0);
+    assert(e.stream.emitted().skip(em0.len() as int) =~= uni::views(ev1@));
+    assert(c0.ctrl@ + Seq::<u8>::empty() =~= c0.ctrl@);
+    assert(c0.goaways@.take(c0.goaways@.len() as int) =~= c0.goaways@);
+    if r is Err {
+        lemma_writes_one(SpecOutput::CloseConnection { code: r->Err_0 }, 3);
+    } else {
+        lemma_added_refl(o0@);
+    }
+}
+
+/// A fed request entry's cost: the take (`ct`), the box freed, `feed_req` (`cf`), and the put or the drop (`cx`: at
+/// most a join of the two halves and the frees of the entry, whose `t1` trailer lines `feed_req` bounds by the `t0` it
+/// held and the call's bytes).
+proof fn lemma_feed_cost(ct: nat, cf: nat, cx: nat, h: nat, d: nat, b: nat, t0: nat, t1: nat)
+    requires
+        ct <= c_take() * (h + 1),
+        cf <= c_fr() * (d + 16) + c_frb() * b,
+        t1 <= t0 + 77 * (d + 16 + b),
+        cx <= 13 * (h + 1) + 3 + 2 * t1,
+    ensures
+        ct + 1 + cf + cx <= c_fr() * (d + 16) + 154 * (d + 16) + c_frame() * b + c_take() * (h + 1) + 13 * (h + 1) + 4
+            + 2 * t0,
+{
+    assert(2 * t1 <= 2 * t0 + 154 * (d + 16) + 154 * b) by (nonlinear_arith)
+        requires
+            t1 <= t0 + 77 * (d + 16 + b),
+    ;
+}
+
+/// `feed_req` with its ensures bundled (`fed_ok`), for callers that only pass them on.
+fn feed_req_ok(e: &mut ReqEntry, data: &[u8], fin: bool, peer: Option<u64>, out: &mut CapVec<Output>) -> (r: (
+    bool,
+    Ghost<nat>,
+))
+    requires
+        req_entry_ok(*old(e)),
+        old(e).rx_open,
+        old(out).wf(),
+        old(out)@.len() + MAX_OUTS <= old(out).cap(),
+    ensures
+        fed_ok(*old(e), *final(e), *old(out), *final(out), data@, fin, peer, r.0),
+        final(e).id == old(e).id,
+        req_entry_ok(*final(e)),
+        final(e).trailers@.len() <= old(e).trailers@.len() + 77 * (data@.len() + 16 + old(e).stream.buffered()),
+        r.1@ <= c_fr() * (data@.len() + 16) + c_frb() * old(e).stream.buffered(),
+{
+    let (closing, Ghost(c)) = feed_req(e, data, fin, peer, out);
+    proof {
+        lemma_fed_ok(*old(e), *e, *old(out), *out, data@, fin, peer, closing);
+    }
+    (closing, Ghost(c))
+}
+
+/// A request-stream call's `step` and `frame`: its outputs are request-only (none on stream 3), it closes exactly when
+/// it closed the connection, and the request state and history change only at `id`.
+proof fn lemma_req_step(c0: H3Conn, c1: H3Conn, o0: CapVec<Output>, o1: CapVec<Output>, id: u64)
+    requires
+        c0.wf(),
+        !c0.closed,
+        c1.wf(),
+        extends(o0@, o1@),
+        outs_ok(added(o0@, o1@), c1.closed),
+        req_only(added(o0@, o1@)),
+        c1.ctrl == c0.ctrl,
+        c1.goaways == c0.goaways,
+        c1.uset == c0.uset,
+        c1.uhist == c0.uhist,
+        c1.rstate@.remove(id) == c0.rstate@.remove(id),
+        c1.rhist@.remove(id) == c0.rhist@.remove(id),
+    ensures
+        step(c0, c1, o0@, o1@),
+        frame(c0, c1, Some(id)),
+{
+    lemma_writes_none(added(o0@, o1@), 3);
+    assert(c0.ctrl@ + Seq::<u8>::empty() =~= c0.ctrl@);
+    assert(c0.goaways@.take(c0.goaways@.len() as int) =~= c0.goaways@);
+    assert forall|y: u64| y != id implies #[trigger] c1.rstate@.contains_key(y) == c0.rstate@.contains_key(y)
+        && (c0.rstate@.contains_key(y) ==> c1.rstate@[y] == c0.rstate@[y]) && c1.rhist@[y] == c0.rhist@[y] by {
+        assert(c1.rstate@.remove(id).contains_key(y) == c1.rstate@.contains_key(y));
+        assert(c0.rstate@.remove(id).contains_key(y) == c0.rstate@.contains_key(y));
+        if c0.rstate@.contains_key(y) {
+            assert(c1.rstate@.remove(id)[y] == c1.rstate@[y]);
+            assert(c0.rstate@.remove(id)[y] == c0.rstate@[y]);
+        }
+        if c0.rhist@.contains_key(y) {
+            assert(c0.rhist@.remove(id)[y] == c0.rhist@[y]);
+        }
+        assert(c1.rhist@.remove(id).contains_key(y) == c1.rhist@.contains_key(y));
+        assert(c0.rhist@.remove(id).contains_key(y) == c0.rhist@.contains_key(y));
+        if c1.rhist@.contains_key(y) {
+            assert(c1.rhist@.remove(id)[y] == c1.rhist@[y]);
+            assert(c0.rhist@.remove(id)[y] == c0.rhist@[y]);
+        }
+    }
+}
+
+/// `request_feed`'s ensures, its cost aside: request stream `id`'s entry `e0` fed into `e` (`fed_ok`), its history
+/// recorded, and, unless the connection closed, the tables updated: `e` kept, or dropped once the request has ended both
+/// ways.
+proof fn lemma_feed_done(
+    c0: H3Conn,
+    c1: H3Conn,
+    o0: CapVec<Output>,
+    o1: CapVec<Output>,
+    id: u64,
+    data: Seq<u8>,
+    fin: bool,
+    e0: ReqEntry,
+    e: ReqEntry,
+    closing: bool,
+)
+    requires
+        c0.wf(),
+        !c0.closed,
+        id % 4 == 0,
+        c0.req_receiving(id),
+        e0.id == id,
+        c0.rstate@[id] == state_of(e0),
+        c0.rhist@[id] == req_hist_of(e0),
+        fed_ok(e0, e, o0, o1, data, fin, c0.peer_max, closing),
+        c1 == (H3Conn {
+            reqs: c1.reqs,
+            closed: closing,
+            rhist: Ghost(c0.rhist@.insert(id, req_hist_of(e))),
+            rstate: c1.rstate,
+            ..c0
+        }),
+        closing ==> c1.rstate == c0.rstate,
+        !closing ==> c1.rstate@ == if e.fin_seen && !e.send_open {
+            c0.rstate@.remove(id)
+        } else {
+            c0.rstate@.insert(id, state_of(e))
+        },
+        !closing ==> tables_ok(c1.reqs, c1.unis, c1.rhist@, c1.uhist@, c1.rstate@, c1.uset@),
+    ensures
+        req_done(c0, c1, o0, o1, id, data, fin),
+{
+    reveal(fed_ok);
+    reveal(req_done);
+    assert(c1.rstate@.remove(id) =~= c0.rstate@.remove(id));
+    assert(c1.rhist@.remove(id) =~= c0.rhist@.remove(id));
+    lemma_req_step(c0, c1, o0, o1, id);
+}
+
+/// `request_data_new`'s ensures on a stream it accepts, its cost aside: a fresh entry `e0` for request stream `id` fed
+/// into `e` (`fed_ok`), its history recorded, `id` accepted, and, unless the connection closed, the tables updated: `e`
+/// kept, or dropped if the request has already ended both ways.
+proof fn lemma_new_done(
+    c0: H3Conn,
+    c1: H3Conn,
+    o0: CapVec<Output>,
+    o1: CapVec<Output>,
+    id: u64,
+    data: Seq<u8>,
+    fin: bool,
+    e0: ReqEntry,
+    e: ReqEntry,
+    closing: bool,
+)
+    requires
+        c0.wf(),
+        !c0.closed,
+        id % 4 == 0,
+        !c0.req_known(id),
+        !rejected_id(c0, id),
+        e0 == (ReqEntry {
+            id,
+            stream: e0.stream,
+            rx_open: true,
+            fin_seen: false,
+            head: false,
+            is_head: false,
+            send_open: true,
+            trailers: e0.trailers,
+        }),
+        e0.stream.all() == Seq::<u8>::empty(),
+        e0.stream.emitted() == Seq::<SpecReqEvent>::empty(),
+        e0.trailers@ == Seq::<FieldLine>::empty(),
+        fed_ok(e0, e, o0, o1, data, fin, c0.peer_max, closing),
+        c1 == (H3Conn {
+            reqs: c1.reqs,
+            closed: closing,
+            highest: bump(c0.highest, id),
+            rhist: Ghost(c0.rhist@.insert(id, req_hist_of(e))),
+            rstate: c1.rstate,
+            ..c0
+        }),
+        closing ==> c1.rstate == c0.rstate,
+        !closing ==> c1.rstate@ == if e.fin_seen && !e.send_open {
+            c0.rstate@
+        } else {
+            c0.rstate@.insert(id, state_of(e))
+        },
+        !closing ==> tables_ok(c1.reqs, c1.unis, c1.rhist@, c1.uhist@, c1.rstate@, c1.uset@),
+    ensures
+        req_done(c0, c1, o0, o1, id, data, fin),
+{
+    reveal(fed_ok);
+    reveal(req_done);
+    assert(c1.rstate@.remove(id) =~= c0.rstate@.remove(id));
+    assert(c1.rhist@.remove(id) =~= c0.rhist@.remove(id));
+    lemma_req_step(c0, c1, o0, o1, id);
+    assert(Seq::<u8>::empty() + data =~= data);
+    assert(fields_view(e0.trailers@) =~= Seq::<(Seq<u8>, Seq<u8>)>::empty());
+}
+
 /// Feeds `data` to the request machine of `e` and outputs what its events and error mean.
 /// Returns whether the connection must close (the last output is then CloseConnection).
-fn feed_req(e: &mut ReqEntry, data: &[u8], fin: bool, peer: Option<u64>, out: &mut CapVec<Output>) -> (closing: bool)
+fn feed_req(e: &mut ReqEntry, data: &[u8], fin: bool, peer: Option<u64>, out: &mut CapVec<Output>) -> (r: (bool, Ghost<nat>))
     requires
         req_entry_ok(*old(e)),
         old(e).rx_open,
@@ -3085,8 +3344,6 @@ fn feed_req(e: &mut ReqEntry, data: &[u8], fin: bool, peer: Option<u64>, out: &m
         final(out).wf(),
         final(out).cap() == old(out).cap(),
         final(out)@.len() <= old(out)@.len() + MAX_OUTS,
-        final(e).id == old(e).id,
-        req_entry_ok(*final(e)),
         extends(old(out)@, final(out)@),
         final(e).stream.all() == old(e).stream.all() + data@,
         final(e).stream.emitted().len() >= old(e).stream.emitted().len(),
@@ -3103,43 +3360,59 @@ fn feed_req(e: &mut ReqEntry, data: &[u8], fin: bool, peer: Option<u64>, out: &m
             Ctx { fin, peer, send_open: old(e).send_open },
             added(old(out)@, final(out)@),
         ),
-        outs_ok(added(old(out)@, final(out)@), closing),
+        outs_ok(added(old(out)@, final(out)@), r.0),
         req_only(added(old(out)@, final(out)@)),
         final(e).fin_seen == fin,
         final(e).rx_open == (req_err(final(e).stream.all(), fin) is None && !fin && no_internal(
             final(e).stream.emitted().skip(old(e).stream.emitted().len() as int),
         )),
-        !closing ==> final(e).send_open == (old(e).send_open && req_err(final(e).stream.all(), fin)
+        !r.0 ==> final(e).send_open == (old(e).send_open && req_err(final(e).stream.all(), fin)
             is None && no_internal(final(e).stream.emitted().skip(old(e).stream.emitted().len() as int))),
         final(e).head == (old(e).head || has_request(added(old(out)@, final(out)@))),
         final(e).is_head == (old(e).is_head || head_req(added(old(out)@, final(out)@))),
+        final(e).id == old(e).id,
+        req_entry_ok(*final(e)),
+        final(e).trailers@.len() <= old(e).trailers@.len() + 77 * (data@.len() + 16 + old(e).stream.buffered()),
+        r.1@ <= c_fr() * (data@.len() + 16) + c_frb() * old(e).stream.buffered(),
 {
     hide(request::rfc_req);
     let ghost id = e.id;
     let ghost o0 = out@;
     let ghost em0 = e.stream.emitted();
     let ghost so = e.send_open;
+    let ghost b0 = e.stream.buffered();
+    // The event buffer's allocation.
+    let ghost mut work: nat = 1;
     let mut evs: CapVec<ReqEvent> = CapVec::new(MAX_REQ_EVENTS);
-    // Task 11 charges `on_data`'s and `deliver`'s costs once `feed_req` returns its cost.
-    let (res, Ghost(_cr)) = e.stream.on_data(data, fin, &mut evs);
+    let (res, Ghost(cr)) = e.stream.on_data(data, fin, &mut evs);
     proof {
+        work = work + cr;
         assert(evs@.skip(0) =~= evs@);
         assert(e.stream.emitted().skip(em0.len() as int) =~= request::views(evs@));
+        assert(e.stream.emitted().take(em0.len() as int) =~= em0);
     }
     let ghost err = request::err_of(res);
     let ghost cx = Ctx { fin, peer, send_open: e.send_open };
     let ghost evv = request::views(evs@);
-    let (answered, Ghost(_cd)) = deliver(e, evs, fin, peer, Ghost(evv), Ghost(err), Ghost(cx), out);
+    let (answered, Ghost(cd)) = deliver(e, evs, fin, peer, Ghost(evv), Ghost(err), Ghost(cx), out);
+    proof {
+        work = work + cd;
+        assert(c_dlv() * (evv.len() + 1) <= 160);
+    }
     if answered {
         proof {
             lemma_added_refl(out@);
             lemma_req_concat(added(o0, out@), Seq::empty(), false);
             assert(added(o0, out@) + Seq::<SpecOutput>::empty() =~= added(o0, out@));
         }
-        return false;
+        return (false, Ghost(work));
     }
     let ghost o2 = out@;
     let closing = push_err(e.id, &res, e.send_open, fin, Ghost(cx), out);
+    proof {
+        // `push_err`'s outputs, at most 2.
+        work = work + 2;
+    }
     match res {
         Err(_) => {
             e.rx_open = false;
@@ -3169,141 +3442,80 @@ fn feed_req(e: &mut ReqEntry, data: &[u8], fin: bool, peer: Option<u64>, out: &m
         lemma_has_request_concat(added(o0, o2), added(o2, out@));
         lemma_head_req_concat(added(o0, o2), added(o2, out@));
     }
-    closing
-}
-
-proof fn lemma_reqs_update(
-    s: Seq<ReqEntry>,
-    h: Map<u64, (Seq<u8>, Seq<SpecReqEvent>, Fields)>,
-    i: int,
-    e: ReqEntry,
-)
-    requires
-        reqs_ok(s, h),
-        0 <= i < s.len(),
-        e.id == s[i].id,
-        req_entry_ok(e),
-    ensures
-        reqs_ok(s.update(i, e), h.insert(e.id, req_hist_of(e))),
-{
-    let t = s.update(i, e);
-    let h2 = h.insert(e.id, req_hist_of(e));
-    assert forall|j: int, k: int|
-        0 <= j < t.len() && 0 <= k < t.len() && j != k implies (#[trigger] t[j]).id != (
-        #[trigger] t[k]).id by {
-        assert(s[j].id != s[k].id);
-    }
-    assert forall|k: int| 0 <= k < t.len() implies req_entry_ok(#[trigger] t[k]) && h2.contains_key(
-        t[k].id,
-    ) && h2[t[k].id] == req_hist_of(t[k]) by {
-        if k != i {
-            assert(s[k].id != s[i].id);
-        }
-    }
-}
-
-proof fn lemma_reqs_push(s: Seq<ReqEntry>, h: Map<u64, (Seq<u8>, Seq<SpecReqEvent>, Fields)>, e: ReqEntry)
-    requires
-        reqs_ok(s, h),
-        forall|k: int| 0 <= k < s.len() ==> (#[trigger] s[k]).id != e.id,
-        req_entry_ok(e),
-    ensures
-        reqs_ok(s.push(e), h.insert(e.id, req_hist_of(e))),
-{
-    let t = s.push(e);
-    let h2 = h.insert(e.id, req_hist_of(e));
-    assert forall|j: int, k: int|
-        0 <= j < t.len() && 0 <= k < t.len() && j != k implies (#[trigger] t[j]).id != (
-        #[trigger] t[k]).id by {
-        if j < s.len() && k < s.len() {
-            assert(s[j].id != s[k].id);
-        } else if j < s.len() {
-            assert(s[j].id != e.id);
-        } else {
-            assert(s[k].id != e.id);
-        }
-    }
-    assert forall|k: int| 0 <= k < t.len() implies req_entry_ok(#[trigger] t[k]) && h2.contains_key(
-        t[k].id,
-    ) && h2[t[k].id] == req_hist_of(t[k]) by {
-        if k < s.len() {
-            assert(s[k].id != e.id);
-        }
-    }
-}
-
-proof fn lemma_unis_update(
-    s: Seq<UniEntry>,
-    h: Map<u64, (Seq<u8>, SeenUni, Seq<SpecUniEvent>)>,
-    i: int,
-    e: UniEntry,
-)
-    requires
-        unis_ok(s, h),
-        0 <= i < s.len(),
-        e.id == s[i].id,
-        e.stream.wf(),
-        !e.stream.done(),
-    ensures
-        unis_ok(s.update(i, e), h.insert(e.id, uni_hist_of(e))),
-{
-    let t = s.update(i, e);
-    let h2 = h.insert(e.id, uni_hist_of(e));
-    assert forall|j: int, k: int|
-        0 <= j < t.len() && 0 <= k < t.len() && j != k implies (#[trigger] t[j]).id != (
-        #[trigger] t[k]).id by {
-        assert(s[j].id != s[k].id);
-    }
-    assert forall|k: int| 0 <= k < t.len() implies (#[trigger] t[k]).id % 4 == 2 && t[k].stream.wf()
-        && !t[k].stream.done() && h2.contains_key(t[k].id) && h2[t[k].id] == uni_hist_of(t[k]) by {
-        if k != i {
-            assert(s[k].id != s[i].id);
-        }
-    }
-}
-
-proof fn lemma_unis_push(s: Seq<UniEntry>, h: Map<u64, (Seq<u8>, SeenUni, Seq<SpecUniEvent>)>, e: UniEntry)
-    requires
-        unis_ok(s, h),
-        forall|k: int| 0 <= k < s.len() ==> (#[trigger] s[k]).id != e.id,
-        e.id % 4 == 2,
-        e.stream.wf(),
-        !e.stream.done(),
-    ensures
-        unis_ok(s.push(e), h.insert(e.id, uni_hist_of(e))),
-{
-    let t = s.push(e);
-    let h2 = h.insert(e.id, uni_hist_of(e));
-    assert forall|j: int, k: int|
-        0 <= j < t.len() && 0 <= k < t.len() && j != k implies (#[trigger] t[j]).id != (
-        #[trigger] t[k]).id by {
-        if j < s.len() && k < s.len() {
-            assert(s[j].id != s[k].id);
-        } else if j < s.len() {
-            assert(s[j].id != e.id);
-        } else {
-            assert(s[k].id != e.id);
-        }
-    }
-    assert forall|k: int| 0 <= k < t.len() implies (#[trigger] t[k]).id % 4 == 2 && t[k].stream.wf()
-        && !t[k].stream.done() && h2.contains_key(t[k].id) && h2[t[k].id] == uni_hist_of(t[k]) by {
-        if k < s.len() {
-            assert(s[k].id != e.id);
-        }
-    }
+    (closing, Ghost(work))
 }
 
 /// The stream tables' part of `H3Conn::wf`, opaque: revealed only by the fns that read or change a table.
 #[verifier::opaque]
 spec fn tables_ok(
-    reqs: Seq<ReqEntry>,
-    unis: Seq<UniEntry>,
-    rhist: Map<u64, (Seq<u8>, Seq<SpecReqEvent>, Fields)>,
-    uhist: Map<u64, (Seq<u8>, SeenUni, Seq<SpecUniEvent>)>,
+    reqs: Tree<Box<ReqEntry>>,
+    unis: Tree<Box<UniEntry>>,
+    rhist: Map<u64, RHist>,
+    uhist: Map<u64, UHist>,
     rstate: Map<u64, ReqState>,
     uset: Set<u64>,
 ) -> bool {
-    reqs_ok(reqs, rhist) && unis_ok(unis, uhist) && req_dom(reqs, rstate) && uni_dom(unis, uset)
+    &&& tbl(reqs, 0)
+    &&& tbl(unis, 2)
+    &&& reqs_ok(tv(reqs), rhist)
+    &&& unis_ok(tv(unis), uhist)
+    &&& req_dom(tv(reqs), rstate)
+    &&& uni_dom(tv(unis), uset)
+}
+
+/// The entry points' cost per byte given, and their constant: the request path's, the costliest. `feed_req` and the
+/// frees of the trailer lines it may leave on an entry it drops (2 per line, at most 77 lines per byte) cost
+/// `c_fr() + 154` per byte of `d + 16`, which is at most 16 times `d + 1`; the lookup's comparison, a box and the
+/// dropped entry's other buffers add 5.
+#[verifier::inline]
+pub open spec fn c_in() -> nat {
+    1318389
+}
+
+/// The entry points' cost per level of the stream's table: the lookup (`c_get()`), a take (`c_take()`), and a put
+/// (`c_join()`) or the two halves' join (`c_join2()`).
+#[verifier::inline]
+pub open spec fn c_map() -> nat {
+    58
+}
+
+/// The entry points' cost per byte the stream held before the call (the frame it may complete from them): on a
+/// request stream, `feed_req`'s `c_frb()` and the frees of the trailer lines that frame may leave on an entry the
+/// call drops (2 per line, at most 77 lines per byte). A uni stream's (`c_uni_frame() + 1`) is less.
+#[verifier::inline]
+pub open spec fn c_frame() -> nat {
+    41329
+}
+
+/// `uni_data`'s cost per byte of `d + 16`: `on_data`'s `c_uni()`, `apply_settings`' 2 per byte, the frees of the
+/// events (at most one per 3 bytes), and the constant terms (the event buffer, the boxes, the output and the dropped
+/// stream's buffers: at most 1 per byte of the 16).
+#[verifier::inline]
+spec fn c_ud() -> nat {
+    860
+}
+
+/// The height of the table stream `id` is looked up in.
+pub closed spec fn ht_of(c: H3Conn, id: u64) -> nat {
+    if id % 4 == 2 {
+        ht(c.unis)
+    } else {
+        ht(c.reqs)
+    }
+}
+
+/// What `request_data` and its parts ensure, their costs aside.
+#[verifier::opaque]
+spec fn req_done(c0: H3Conn, c1: H3Conn, o0: CapVec<Output>, o1: CapVec<Output>, id: u64, data: Seq<u8>, fin: bool) -> bool {
+    &&& o1.wf()
+    &&& o1.cap() == o0.cap()
+    &&& o1@.len() <= o0@.len() + MAX_OUTS
+    &&& step(c0, c1, o0@, o1@)
+    &&& c1.goaways() == c0.goaways()
+    &&& c1.peer_max == c0.peer_max
+    &&& frame(c0, c1, Some(id))
+    &&& req_call(c0, c1, id, data, fin, added(o0@, o1@))
+    &&& c1.seen == c0.seen
 }
 
 // =============================================================================
@@ -3314,10 +3526,11 @@ pub struct H3Conn {
     closed: bool,
     started: bool,
     seen: SeenUni,
-    // ponytail: linear lookup over the open streams; bounded by the stream limits Phase 3
-    // advertises. Use a map if those limits grow large.
-    reqs: Vec<ReqEntry>,
-    unis: Vec<UniEntry>,
+    /// The tracked request streams, keyed by ID (boxed: a tree node stays small, so an update's node rebuilds stay
+    /// within an input call's allocation budget).
+    reqs: Tree<Box<ReqEntry>>,
+    /// The tracked peer uni streams, keyed by ID.
+    unis: Tree<Box<UniEntry>>,
     /// The highest client bidirectional stream ID accepted (processed, not rejected).
     highest: Option<u64>,
     /// The last GOAWAY ID we sent.
@@ -3664,6 +3877,28 @@ impl H3Conn {
         self.rhist@[id]
     }
 
+    /// The bytes stream `id`'s machine holds from earlier calls: the frame a call may complete from them is the
+    /// entry points' `F` term.
+    pub closed spec fn buffered_of(&self, id: u64) -> nat {
+        if id % 4 == 0 && tv(self.reqs).contains_key(id) {
+            tv(self.reqs)[id].stream.buffered()
+        } else if id % 4 == 2 && tv(self.unis).contains_key(id) {
+            tv(self.unis)[id].stream.buffered()
+        } else {
+            0
+        }
+    }
+
+    /// Two per trailer line held by request stream `id`'s entry: the buffers a call that removes the entry frees beyond
+    /// a constant. Not bounded by the call's input: N6, the teardown class, owned by carryover `cat-C15-teardown` (9b4).
+    pub closed spec fn removed_fields(&self, id: u64) -> nat {
+        if id % 4 == 0 && tv(self.reqs).contains_key(id) {
+            2 * tv(self.reqs)[id].trailers@.len()
+        } else {
+            0
+        }
+    }
+
     /// The connection tracks peer uni stream `id`.
     pub closed spec fn uni_known(&self, id: u64) -> bool {
         self.uset@.contains(id)
@@ -3681,7 +3916,7 @@ impl H3Conn {
 
     pub closed spec fn wf(&self) -> bool {
         &&& self.ctrl_inv()
-        &&& !self.closed ==> tables_ok(self.reqs@, self.unis@, self.rhist@, self.uhist@, self.rstate@, self.uset@)
+        &&& !self.closed ==> tables_ok(self.reqs, self.unis, self.rhist@, self.uhist@, self.rstate@, self.uset@)
     }
 
     /// The control-stream and GOAWAY part of the invariant (kept even once closed).
@@ -3748,13 +3983,22 @@ impl H3Conn {
             c.uni_seen() == (SeenUni { control: false, encoder: false, decoder: false }),
             forall|id: u64| !c.req_known(id) && !c.uni_known(id),
     {
-        reveal(tables_ok);
+        proof {
+            reveal(tables_ok);
+            reveal(reqs_ok);
+            reveal(unis_ok);
+            reveal(req_dom);
+            reveal(uni_dom);
+            reveal(keys_mod);
+            assert(tv::<Box<ReqEntry>>(None).dom() =~= Set::<u64>::empty());
+            assert(tv::<Box<UniEntry>>(None).dom() =~= Set::<u64>::empty());
+        }
         H3Conn {
             closed: false,
             started: false,
             seen: SeenUni { control: false, encoder: false, decoder: false },
-            reqs: Vec::new(),
-            unis: Vec::new(),
+            reqs: None,
+            unis: None,
             highest: None,
             goaway: None,
             peer_max: None,
@@ -4172,8 +4416,10 @@ impl H3Conn {
         assert(c2.goaways().take(c0.goaways().len() as int) =~= c2.goaways().take(c1.goaways().len() as int).take(c0.goaways().len() as int));
     }
 
-    /// Data on stream `stream_id` (`fin`: the peer's sending part ends after it).
-    pub fn on_stream_data(&mut self, stream_id: u64, data: &[u8], fin: bool, out: &mut CapVec<Output>)
+    /// Data on stream `stream_id` (`fin`: the peer's sending part ends after it). Its cost is linear in the bytes given,
+    /// logarithmic in the tracked streams of its kind (`ht_of`, avl's `lemma_height`), plus the frame it may complete
+    /// from bytes earlier calls buffered (`buffered_of`) and the trailer lines of an entry it removes (`removed_fields`).
+    pub fn on_stream_data(&mut self, stream_id: u64, data: &[u8], fin: bool, out: &mut CapVec<Output>) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
             old(out).wf(),
@@ -4214,26 +4460,38 @@ impl H3Conn {
             old(self).closed() || stream_id % 4 != 2 ==> final(self).uni_seen() == old(
                 self,
             ).uni_seen(),
+            r@ <= c_in() * (data@.len() + 1) + c_map() * (ht_of(*old(self), stream_id) + 1) + c_frame()
+                * old(self).buffered_of(stream_id) + c_free() * old(self).removed_fields(stream_id),
     {
         if self.closed {
             proof {
                 Self::lemma_idle(*self, out@);
             }
-            return;
+            return Ghost(0);
         }
         if stream_id % 4 == 0 {
-            self.request_data(stream_id, data, fin, out);
+            let r = self.request_data(stream_id, data, fin, out);
+            proof {
+                reveal(req_done);
+            }
+            r
         } else if stream_id % 4 == 2 {
-            self.uni_data(stream_id, data, fin, out);
+            let r = self.uni_data(stream_id, data, fin, out);
+            proof {
+                reveal(uni_done);
+            }
+            r
         } else {
             // Server-initiated IDs: the peer cannot send on them (RFC 9000 §2.1); the QUIC layer
             // normally refuses such data first.
             self.close(H3_STREAM_CREATION_ERROR, out);
+            // The close's output.
+            Ghost(1)
         }
     }
 
-    #[verifier::spinoff_prover]
-    fn request_data(&mut self, id: u64, data: &[u8], fin: bool, out: &mut CapVec<Output>)
+    /// `on_stream_data` on a request stream: looks its entry up and dispatches on its state.
+    fn request_data(&mut self, id: u64, data: &[u8], fin: bool, out: &mut CapVec<Output>) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
             !old(self).closed,
@@ -4241,136 +4499,242 @@ impl H3Conn {
             old(out).wf(),
             old(out)@.len() + MAX_OUTS <= old(out).cap(),
         ensures
-            final(out).wf(),
-            final(out).cap() == old(out).cap(),
-            final(out)@.len() <= old(out)@.len() + MAX_OUTS,
-            step(*old(self), *final(self), old(out)@, final(out)@),
-            final(self).goaways() == old(self).goaways(),
-            final(self).peer_max == old(self).peer_max,
-            frame(*old(self), *final(self), Some(id)),
-            req_call(*old(self), *final(self), id, data@, fin, added(old(out)@, final(out)@)),
-            final(self).seen == old(self).seen,
+            req_done(*old(self), *final(self), *old(out), *final(out), id, data@, fin),
+            r@ <= c_in() * (data@.len() + 1) + c_map() * (ht(old(self).reqs) + 1) + c_frame() * old(
+                self,
+            ).buffered_of(id) + c_free() * old(self).removed_fields(id),
     {
-        hide(request::rfc_req);
-        hide(req_outs);
-        hide(request::push_all);
         let ghost c0 = *self;
-        reveal(tables_ok);
-        let ghost o0 = out@;
+        let ghost mut work: nat = 0;
         proof {
-            lemma_added_refl(o0);
+            reveal(tables_ok);
         }
-        match find_req(&self.reqs, id) {
-            Some(i) => {
+        let (g, Ghost(cg)) = tbl_get(&self.reqs, id);
+        let rx = match g {
+            Some(e) => Some(e.rx_open),
+            None => None,
+        };
+        proof {
+            lemma_req_get(tv(c0.reqs), c0.rhist@, c0.rstate@, id);
+            work = work + cg;
+            assert(c_get() == 1 && c_free() == 1 && c_join() == 6 && c_join2() == 13);
+        }
+        match rx {
+            Some(true) => {
+                let Ghost(c) = self.request_feed(id, data, fin, out);
                 proof {
-                    assert(c0.rstate@[id] == state_of(c0.reqs@[i as int]));
-                    assert(c0.rhist@[id] == req_hist_of(c0.reqs@[i as int]));
+                    work = work + c;
                 }
-                if !self.reqs[i].rx_open {
-                    // Finished, or abandoned and awaiting the peer's FIN or reset.
-                    if fin {
-                        let mut e = self.reqs.remove(i);
-                        if e.send_open {
-                            e.fin_seen = true;
-                            proof {
-                                lemma_reqs_update(c0.reqs@, c0.rhist@, i as int, e);
-                                lemma_dom_update(c0.reqs@, c0.rhist@, c0.rstate@, i as int, e);
-                                assert(c0.rhist@.insert(e.id, req_hist_of(e)) =~= c0.rhist@);
-                            }
-                            self.reqs.insert(i, e);
-                            self.rstate = Ghost(self.rstate@.insert(id, state_of(e)));
-                            proof {
-                                assert(self.reqs@ =~= c0.reqs@.update(i as int, e));
-                            }
-                        } else {
-                            proof {
-                                lemma_reqs_remove(c0.reqs@, c0.rhist@, c0.rhist@, i as int);
-                                lemma_dom_remove(c0.reqs@, c0.rhist@, c0.rstate@, i as int);
-                            }
-                            self.rstate = Ghost(self.rstate@.remove(id));
-                        }
-                    }
-                    proof {
-                        Self::lemma_idle(*self, out@);
-                        assert(c0.goaways@.take(c0.goaways@.len() as int) =~= c0.goaways@);
-                        assert(c0.ctrl@ + Seq::<u8>::empty() =~= c0.ctrl@);
-                    }
-                    return;
-                }
-                let mut e = self.reqs.remove(i);
-                let pm = self.peer_max;
-                let closing = feed_req(&mut e, data, fin, pm, out);
-                self.rhist = Ghost(self.rhist@.insert(id, req_hist_of(e)));
+            },
+            Some(false) => {
+                let Ghost(c) = self.request_idle(id, Ghost(data@), fin, out);
                 proof {
-                    lemma_writes_none(added(o0, out@), 3);
-                    assert(self.ctrl@ + Seq::<u8>::empty() =~= self.ctrl@);
-                    assert(self.goaways@.take(self.goaways@.len() as int) =~= self.goaways@);
-                }
-                if closing {
-                    self.closed = true;
-                    return;
-                }
-                if e.fin_seen && !e.send_open {
-                    proof {
-                        lemma_reqs_remove(c0.reqs@, c0.rhist@, self.rhist@, i as int);
-                        lemma_dom_remove(c0.reqs@, c0.rhist@, c0.rstate@, i as int);
-                    }
-                    self.rstate = Ghost(self.rstate@.remove(id));
-                } else {
-                    proof {
-                        lemma_reqs_update(c0.reqs@, c0.rhist@, i as int, e);
-                        lemma_dom_update(c0.reqs@, c0.rhist@, c0.rstate@, i as int, e);
-                    }
-                    self.reqs.insert(i, e);
-                    self.rstate = Ghost(self.rstate@.insert(id, state_of(e)));
-                    proof {
-                        assert(self.reqs@ =~= c0.reqs@.update(i as int, e));
-                    }
+                    work = work + c;
                 }
             },
             None => {
+                let Ghost(c) = self.request_data_new(id, data, fin, out);
                 proof {
-                    assert(!c0.rstate@.contains_key(id)) by {
-                        if c0.rstate@.contains_key(id) {
-                            let k = choose|k: int| 0 <= k < c0.reqs@.len() && (#[trigger] c0.reqs@[k]).id == id;
-                        }
-                    }
+                    work = work + c;
                 }
-                self.request_data_new(id, data, fin, out);
             },
         }
+        Ghost(work)
     }
 
-    /// `request_data` for a stream with no entry yet (split out for the rlimit).
-    #[verifier::spinoff_prover]
-    fn request_data_new(&mut self, id: u64, data: &[u8], fin: bool, out: &mut CapVec<Output>)
+    /// `request_data` for a stream no longer received (finished, or abandoned awaiting the peer's FIN or reset): nothing
+    /// is output, and a FIN may forget it.
+    fn request_idle(&mut self, id: u64, Ghost(data): Ghost<Seq<u8>>, fin: bool, out: &mut CapVec<Output>) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
             !old(self).closed,
             id % 4 == 0,
-            !old(self).rstate@.contains_key(id),
-            forall|k: int| 0 <= k < old(self).reqs@.len() ==> (#[trigger] old(self).reqs@[k]).id != id,
+            old(self).req_known(id),
+            !old(self).req_receiving(id),
             old(out).wf(),
             old(out)@.len() + MAX_OUTS <= old(out).cap(),
         ensures
-            final(out).wf(),
-            final(out).cap() == old(out).cap(),
-            final(out)@.len() <= old(out)@.len() + MAX_OUTS,
-            step(*old(self), *final(self), old(out)@, final(out)@),
-            final(self).goaways() == old(self).goaways(),
-            final(self).peer_max == old(self).peer_max,
-            frame(*old(self), *final(self), Some(id)),
-            req_call(*old(self), *final(self), id, data@, fin, added(old(out)@, final(out)@)),
-            final(self).seen == old(self).seen,
+            req_done(*old(self), *final(self), *old(out), *final(out), id, data, fin),
+            r@ <= c_take() * (ht(old(self).reqs) + 1) + c_join2() * (ht(old(self).reqs) + 1) + 4 + old(self).removed_fields(id),
     {
-        hide(request::rfc_req);
-        hide(req_outs);
-        hide(request::push_all);
         let ghost c0 = *self;
-        reveal(tables_ok);
-        let ghost o0 = out@;
+        let ghost m0 = tv(self.reqs);
+        let ghost h = ht(self.reqs);
         proof {
+            reveal(tables_ok);
+            reveal(req_done);
+            lemma_req_get(m0, c0.rhist@, c0.rstate@, id);
+            assert(c_join() == 6 && c_join2() == 13);
+            Self::lemma_idle(c0, out@);
+            assert(c0.goaways@.take(c0.goaways@.len() as int) =~= c0.goaways@);
+            assert(c0.ctrl@ + Seq::<u8>::empty() =~= c0.ctrl@);
+        }
+        if !fin {
+            proof {
+                let o = out@;
+                assert(step(c0, *self, o, o));
+                assert(frame(c0, *self, Some(id)));
+                assert(added(o, o) == Seq::<SpecOutput>::empty());
+                assert(c0.req_state(id) == Some(ReqState { fin_seen: c0.req_state(id)->0.fin_seen || fin, ..c0.req_state(id)->0 }));
+                assert(req_call(c0, *self, id, data, fin, added(o, o)));
+            }
+            return Ghost(0);
+        }
+        let ghost mut work: nat = 0;
+        let t = self.reqs.take();
+        let (lo, got, hi, Ghost(ct)) = req_take_w(t, id);
+        // The entry's box is freed here.
+        let mut e = *got.unwrap();
+        proof {
+            work = work + ct + 1;
+        }
+        if e.send_open {
+            e.fin_seen = true;
+            let b = Box::new(e);
+            proof {
+                lemma_req_set(m0, c0.rhist@, c0.rstate@, b);
+                assert(c0.rhist@.insert(id, req_hist_of(e)) =~= c0.rhist@);
+            }
+            let (j, Ghost(cp)) = req_put_w(lo, b, hi, Ghost(h));
+            self.reqs = j;
+            self.rstate = Ghost(self.rstate@.insert(id, state_of(e)));
+            proof {
+                // The new box.
+                work = work + cp + 1;
+                lemma_map_put(m0, id, b);
+            }
+        } else {
+            let (j, Ghost(cj)) = tbl_join(lo, hi, Ghost(id), Ghost(0), Ghost(h));
+            self.reqs = j;
+            self.rstate = Ghost(self.rstate@.remove(id));
+            proof {
+                lemma_req_del(m0, c0.rhist@, c0.rhist@, c0.rstate@, id);
+                // `e` is dropped here.
+                work = work + cj + req_frees(e);
+                assert(ct <= 44 * (h + 1));
+                assert(cj <= 13 * (h + 1));
+                assert(h == ht(c0.reqs));
+                assert(e == *m0[id]);
+                assert(c0.removed_fields(id) == 2 * e.trailers@.len());
+                assert(work <= 57 * (h + 1) + 4 + c0.removed_fields(id));
+            }
+        }
+        proof {
+            Self::lemma_idle(*self, out@);
+        }
+        Ghost(work)
+    }
+
+    /// `request_data` for a stream still received: its entry is taken out, its machine fed, and the entry put back
+    /// unless the request has ended both ways.
+    #[verifier::spinoff_prover]
+    fn request_feed(&mut self, id: u64, data: &[u8], fin: bool, out: &mut CapVec<Output>) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            !old(self).closed,
+            id % 4 == 0,
+            old(self).req_receiving(id),
+            old(out).wf(),
+            old(out)@.len() + MAX_OUTS <= old(out).cap(),
+        ensures
+            req_done(*old(self), *final(self), *old(out), *final(out), id, data@, fin),
+            r@ <= c_fr() * (data@.len() + 16) + 154 * (data@.len() + 16) + c_frame() * old(self).buffered_of(id)
+                + c_take() * (ht(old(self).reqs) + 1) + c_join2() * (ht(old(self).reqs) + 1) + 4 + old(
+                self,
+            ).removed_fields(id),
+    {
+        let ghost c0 = *self;
+        let ghost m0 = tv(self.reqs);
+        let ghost h = ht(self.reqs);
+        let ghost mut work: nat = 0;
+        proof {
+            reveal(tables_ok);
+            lemma_req_get(m0, c0.rhist@, c0.rstate@, id);
+            assert(c_join() == 6 && c_join2() == 13);
+        }
+        let t = self.reqs.take();
+        let (lo, got, hi, Ghost(ct)) = req_take_w(t, id);
+        // The entry's box is freed here.
+        let mut e = *got.unwrap();
+        let ghost e0 = e;
+        proof {
+            assert(e0 == *m0[id]);
+            assert(c0.buffered_of(id) == e0.stream.buffered());
+            assert(c0.removed_fields(id) == 2 * e0.trailers@.len());
+        }
+        let pm = self.peer_max;
+        let (closing, Ghost(cf)) = feed_req_ok(&mut e, data, fin, pm, out);
+        self.rhist = Ghost(self.rhist@.insert(id, req_hist_of(e)));
+        proof {
+            work = work + ct + 1 + cf;
+        }
+        if closing {
+            // Put back, so the table's two halves are not dropped here.
+            let (j, Ghost(cp)) = req_put_w(lo, Box::new(e), hi, Ghost(h));
+            self.reqs = j;
+            self.closed = true;
+            proof {
+                // The new box.
+                work = work + cp + 1;
+                lemma_feed_cost(ct, cf, cp + 1, h, data@.len(), e0.stream.buffered(), e0.trailers@.len(), e.trailers@.len());
+                lemma_feed_done(c0, *self, *old(out), *out, id, data@, fin, e0, e, closing);
+            }
+            return Ghost(work);
+        }
+        if e.fin_seen && !e.send_open {
+            let (j, Ghost(cj)) = tbl_join(lo, hi, Ghost(id), Ghost(0), Ghost(h));
+            self.reqs = j;
+            self.rstate = Ghost(self.rstate@.remove(id));
+            proof {
+                lemma_req_del(m0, c0.rhist@, self.rhist@, c0.rstate@, id);
+                // `e` is dropped here.
+                work = work + cj + req_frees(e);
+                lemma_feed_cost(ct, cf, cj + req_frees(e), h, data@.len(), e0.stream.buffered(), e0.trailers@.len(), e.trailers@.len());
+            }
+        } else {
+            let b = Box::new(e);
+            proof {
+                lemma_req_set(m0, c0.rhist@, c0.rstate@, b);
+            }
+            let (j, Ghost(cp)) = req_put_w(lo, b, hi, Ghost(h));
+            self.reqs = j;
+            self.rstate = Ghost(self.rstate@.insert(id, state_of(e)));
+            proof {
+                // The new box.
+                work = work + cp + 1;
+                lemma_map_put(m0, id, b);
+                lemma_feed_cost(ct, cf, cp + 1, h, data@.len(), e0.stream.buffered(), e0.trailers@.len(), e.trailers@.len());
+            }
+        }
+        proof {
+            lemma_feed_done(c0, *self, *old(out), *out, id, data@, fin, e0, e, closing);
+        }
+        Ghost(work)
+    }
+
+    /// `request_data` for a stream with no entry yet.
+    #[verifier::spinoff_prover]
+    fn request_data_new(&mut self, id: u64, data: &[u8], fin: bool, out: &mut CapVec<Output>) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            !old(self).closed,
+            id % 4 == 0,
+            !old(self).req_known(id),
+            old(out).wf(),
+            old(out)@.len() + MAX_OUTS <= old(out).cap(),
+        ensures
+            req_done(*old(self), *final(self), *old(out), *final(out), id, data@, fin),
+            r@ <= c_fr() * (data@.len() + 16) + 154 * (data@.len() + 16) + c_take() * (ht(old(self).reqs) + 1) + c_join() * (ht(old(self).reqs) + 1) + 4,
+    {
+        let ghost c0 = *self;
+        let ghost o0 = out@;
+        let ghost m0 = tv(self.reqs);
+        let ghost h = ht(self.reqs);
+        let ghost mut work: nat = 0;
+        proof {
+            reveal(tables_ok);
             lemma_added_refl(o0);
+            lemma_req_get(m0, c0.rhist@, c0.rstate@, id);
         }
         if let Some(g) = self.goaway {
             if id >= g {
@@ -4381,6 +4745,10 @@ impl H3Conn {
                 //# indicated, in order to clean up transport state for the affected
                 //# streams.
                 reject(id, fin, out);
+                proof {
+                    // `reject`'s outputs.
+                    work = work + 2;
+                }
                 if !fin {
                     // Kept until the peer's FIN or reset, so data in flight is ignored.
                     let e = ReqEntry {
@@ -4393,21 +4761,31 @@ impl H3Conn {
                         send_open: false,
                         trailers: Vec::new(),
                     };
+                    let b = Box::new(e);
+                    let t = self.reqs.take();
+                    let (lo, _none, hi, Ghost(ct)) = req_take_w(t, id);
                     proof {
-                        lemma_reqs_push(self.reqs@, self.rhist@, e);
-                        lemma_dom_push(self.reqs@, self.rstate@, e);
+                        lemma_req_set(m0, c0.rhist@, c0.rstate@, b);
+                        lemma_map_absent(m0, id);
                     }
-                    self.reqs.push(e);
+                    let (j, Ghost(cp)) = req_put_w(lo, b, hi, Ghost(h));
+                    self.reqs = j;
                     self.rhist = Ghost(self.rhist@.insert(id, req_hist_of(e)));
                     self.rstate = Ghost(self.rstate@.insert(id, state_of(e)));
+                    proof {
+                        // The new box.
+                        work = work + ct + cp + 1;
+                        lemma_map_put(m0, id, b);
+                    }
                 }
                 proof {
+                    reveal(req_done);
                     assert(rejected_id(c0, id));
                     lemma_writes_none(added(o0, out@), 3);
                     assert(self.ctrl@ + Seq::<u8>::empty() =~= self.ctrl@);
                     assert(self.goaways@.take(self.goaways@.len() as int) =~= self.goaways@);
                 }
-                return;
+                return Ghost(work);
             }
         }
         proof {
@@ -4423,9 +4801,7 @@ impl H3Conn {
             send_open: true,
             trailers: Vec::new(),
         };
-        proof {
-            assert(fields_view(e.trailers@) =~= Seq::<(Seq<u8>, Seq<u8>)>::empty());
-        }
+        let ghost e0 = e;
         self.highest = match self.highest {
             Some(h) => if h < id {
                 Some(id)
@@ -4435,38 +4811,57 @@ impl H3Conn {
             None => Some(id),
         };
         let pm = self.peer_max;
-        let closing = feed_req(&mut e, data, fin, pm, out);
+        let (closing, Ghost(cf)) = feed_req_ok(&mut e, data, fin, pm, out);
         self.rhist = Ghost(self.rhist@.insert(id, req_hist_of(e)));
         proof {
-            lemma_writes_none(added(o0, out@), 3);
-            assert(self.ctrl@ + Seq::<u8>::empty() =~= self.ctrl@);
-            assert(self.goaways@.take(self.goaways@.len() as int) =~= self.goaways@);
-            assert(Seq::<u8>::empty() + data@ =~= data@);
+            work = work + cf;
         }
         if closing {
+            proof {
+                // `e` is dropped here (it has no box yet).
+                work = work + req_frees(e);
+            }
             self.closed = true;
-            return;
+            proof {
+                lemma_new_done(c0, *self, *old(out), *out, id, data@, fin, e0, e, closing);
+            }
+            return Ghost(work);
         }
         if !(e.fin_seen && !e.send_open) {
+            let b = Box::new(e);
+            let t = self.reqs.take();
+            let (lo, _none, hi, Ghost(ct)) = req_take_w(t, id);
             proof {
-                lemma_reqs_push(c0.reqs@, c0.rhist@, e);
-                lemma_dom_push(c0.reqs@, c0.rstate@, e);
+                lemma_req_set(m0, c0.rhist@, c0.rstate@, b);
+                lemma_map_absent(m0, id);
             }
-            self.reqs.push(e);
+            let (j, Ghost(cp)) = req_put_w(lo, b, hi, Ghost(h));
+            self.reqs = j;
             self.rstate = Ghost(self.rstate@.insert(id, state_of(e)));
+            proof {
+                // The new box.
+                work = work + ct + cp + 1;
+                lemma_map_put(m0, id, b);
+            }
         } else {
             proof {
-                assert forall|k: int| 0 <= k < self.reqs@.len() implies req_entry_ok(
-                    #[trigger] self.reqs@[k],
-                ) && self.rhist@.contains_key(self.reqs@[k].id) && self.rhist@[self.reqs@[k].id]
-                    == req_hist_of(self.reqs@[k]) by {
-                    assert(self.reqs@[k].id != id);
-                }
+                // `e` is dropped here (it has no box).
+                work = work + req_frees(e);
+                lemma_req_del(m0, c0.rhist@, self.rhist@, c0.rstate@, id);
+                lemma_map_absent(m0, id);
+                lemma_map_absent(c0.rstate@, id);
             }
         }
+        proof {
+            lemma_new_done(c0, *self, *old(out), *out, id, data@, fin, e0, e, closing);
+        }
+        Ghost(work)
     }
 
-    fn uni_data(&mut self, id: u64, data: &[u8], fin: bool, out: &mut CapVec<Output>)
+    /// `on_stream_data` on a peer uni stream: its entry (or a new one) is taken out, its machine fed, and the entry put
+    /// back unless the stream ended.
+    #[verifier::spinoff_prover]
+    fn uni_data(&mut self, id: u64, data: &[u8], fin: bool, out: &mut CapVec<Output>) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
             !old(self).closed,
@@ -4474,60 +4869,55 @@ impl H3Conn {
             old(out).wf(),
             old(out)@.len() + 1 <= old(out).cap(),
         ensures
-            final(out).wf(),
-            final(out).cap() == old(out).cap(),
-            final(out)@.len() <= old(out)@.len() + 1,
-            step(*old(self), *final(self), old(out)@, final(out)@),
-            final(self).goaways() == old(self).goaways(),
-            frame(*old(self), *final(self), Some(id)),
-            uni_fed(*old(self), *final(self), id, data@, fin, added(old(out)@, final(out)@)),
-            final(self).highest == old(self).highest,
+            uni_done(*old(self), *final(self), *old(out), *final(out), id, data@, fin),
+            r@ <= c_ud() * (data@.len() + 16) + uni::c_uni_frame() * old(self).buffered_of(id) + old(self).buffered_of(id)
+                + c_take() * (ht(old(self).unis) + 1) + c_join2() * (ht(old(self).unis) + 1),
     {
         hide(uni::rfc_uni_stream);
         let ghost c0 = *self;
-        reveal(tables_ok);
-        let ghost o0 = out@;
-        let found = find_uni(&self.unis, id);
-        let mut e = match found {
-            Some(i) => {
-                proof {
-                    assert(c0.uset@.contains(id));
-                    assert(c0.uhist@[id] == uni_hist_of(c0.unis@[i as int]));
-                }
-                self.unis.remove(i)
-            },
-            None => {
-                proof {
-                    assert(!c0.uset@.contains(id)) by {
-                        if c0.uset@.contains(id) {
-                            let k = choose|k: int| 0 <= k < c0.unis@.len() && (#[trigger] c0.unis@[k]).id == id;
-                        }
-                    }
-                }
-                UniEntry { id, stream: UniStream::new() }
-            },
+        let ghost m0 = tv(self.unis);
+        let ghost h = ht(self.unis);
+        let ghost mut work: nat = 0;
+        proof {
+            reveal(tables_ok);
+            lemma_uni_get(m0, c0.uhist@, c0.uset@, id);
+            assert(c_join() == 6 && c_join2() == 13);
+        }
+        let t = self.unis.take();
+        let (lo, got, hi, Ghost(ct)) = uni_take_w(t, id);
+        let mut e = match got {
+            // The entry's box is freed here.
+            Some(b) => *b,
+            None => UniEntry { id, stream: UniStream::new() },
         };
         let ghost e_old = e;
+        proof {
+            assert(c0.buffered_of(id) == e_old.stream.buffered());
+        }
         let mut evs: CapVec<UniEvent> = CapVec::new(data.len() / 3 + 1);
-        // `uni_data` returns no cost yet (Task 11's interface, as `feed_req`): it adds `on_data`'s cost, `apply_settings`'
-        // (proved at most 2·d + buffered + 2 below) and the frees of `evs` and of a stream dropped on an error or a FIN.
-        let (r, Ghost(_cu)) = e.stream.on_data(data, fin, &mut self.seen, &mut evs);
+        let ghost ev0 = evs;
+        let (r, Ghost(cu)) = e.stream.on_data(data, fin, &mut self.seen, &mut evs);
         self.uhist = Ghost(self.uhist@.insert(id, uni_hist_of(e)));
         proof {
+            evs.lemma_wf();
             assert(evs@.skip(0) =~= evs@);
-            assert(Seq::<u8>::empty() + data@ =~= data@);
-            let e0 = e_old.stream.emitted();
-            assert(e.stream.emitted().take(e0.len() as int) =~= e0);
-            assert(e.stream.emitted().skip(e0.len() as int) =~= uni::views(evs@));
+            // The box freed, and the event buffer's allocation.
+            work = work + ct + 2 + cu;
         }
         match r {
             Err(c) => {
+                // Put back, so the table's two halves are not dropped here.
+                let (j, Ghost(cp)) = uni_put_w(lo, Box::new(e), hi, Ghost(h));
+                self.unis = j;
                 self.close(c, out);
+                proof {
+                    // The new box, and the close's output.
+                    work = work + cp + 2;
+                }
             },
             Ok(()) => {
                 let Ghost(ca) = self.apply_settings(&evs);
                 proof {
-                    evs.lemma_wf();
                     lemma_settings_apply_cost(
                         ca,
                         evs@.len(),
@@ -4535,49 +4925,41 @@ impl H3Conn {
                         data@.len(),
                         e_old.stream.buffered(),
                     );
+                    work = work + ca;
                 }
                 if !fin {
-                    match found {
-                        Some(i) => {
-                            proof {
-                                lemma_unis_update(c0.unis@, c0.uhist@, i as int, e);
-                                lemma_udom_update(c0.unis@, c0.uset@, i as int, e);
-                            }
-                            self.unis.insert(i, e);
-                            proof {
-                                assert(self.unis@ =~= c0.unis@.update(i as int, e));
-                            }
-                        },
-                        None => {
-                            proof {
-                                lemma_unis_push(c0.unis@, c0.uhist@, e);
-                                lemma_udom_push(c0.unis@, c0.uset@, e);
-                            }
-                            self.unis.push(e);
-                            self.uset = Ghost(self.uset@.insert(id));
-                        },
+                    let b = Box::new(e);
+                    proof {
+                        lemma_uni_set(m0, c0.uhist@, c0.uset@, b);
+                    }
+                    let (j, Ghost(cp)) = uni_put_w(lo, b, hi, Ghost(h));
+                    self.unis = j;
+                    self.uset = Ghost(self.uset@.insert(id));
+                    proof {
+                        // The new box.
+                        work = work + cp + 1;
+                        lemma_map_put(m0, id, b);
                     }
                 } else {
                     // Only a stream of unknown type ends cleanly; it is forgotten.
+                    let (j, Ghost(cj)) = tbl_join(lo, hi, Ghost(id), Ghost(2), Ghost(h));
+                    self.unis = j;
+                    self.uset = Ghost(self.uset@.remove(id));
                     proof {
-                        if let Some(i) = found {
-                            lemma_unis_remove(c0.unis@, c0.uhist@, i as int);
-                            lemma_udom_remove(c0.unis@, c0.uhist@, c0.uset@, i as int);
-                        }
-                        lemma_unis_hist(self.unis@, c0.uhist@, self.uhist@, id);
+                        lemma_uni_del(m0, c0.uhist@, self.uhist@, c0.uset@, id);
+                        // `e` is dropped here: its queue's buffers.
+                        work = work + cj + uni_frees();
                     }
-                    if found.is_some() {
-                        self.uset = Ghost(self.uset@.remove(id));
-                    }
-                }
-                proof {
-                    Self::lemma_idle(*self, out@);
-                    lemma_added_refl(o0);
-                    assert(c0.ctrl@ + Seq::<u8>::empty() =~= c0.ctrl@);
-                    assert(c0.goaways@.take(c0.goaways@.len() as int) =~= c0.goaways@);
                 }
             },
         }
+        proof {
+            // `evs` is dropped here: its buffer and each event's.
+            work = work + 1 + evs@.len();
+            lemma_uni_cost(work, ct, cu, h, data@.len(), e_old.stream.buffered(), evs@.len());
+            lemma_uni_done(c0, *self, *old(out), *out, id, data@, fin, e_old, e, ev0, evs, r, cu);
+        }
+        Ghost(work)
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9114#section-9
@@ -4653,57 +5035,65 @@ impl H3Conn {
         Ghost(work)
     }
 
-    /// Closes our sending part of request entry `i`; the entry is dropped if the request has
-    /// also ended.
-    fn end_send(&mut self, i: usize)
+    /// Closes our sending part of request stream `id`; its entry is dropped if the request has also ended.
+    fn end_send(&mut self, id: u64) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
             !old(self).closed,
-            i < old(self).reqs@.len(),
+            old(self).req_known(id),
         ensures
             final(self).wf(),
             *final(self) == (H3Conn { reqs: final(self).reqs, rstate: final(self).rstate, ..*old(self) }),
-            frame(*old(self), *final(self), Some(old(self).reqs@[i as int].id)),
-            !final(self).req_respondable(old(self).reqs@[i as int].id),
-            final(self).req_receiving(old(self).reqs@[i as int].id) == old(self).req_receiving(
-                old(self).reqs@[i as int].id,
+            frame(*old(self), *final(self), Some(id)),
+            !final(self).req_respondable(id),
+            final(self).req_receiving(id) == old(self).req_receiving(id),
+            final(self).req_known(id) ==> final(self).req_state(id) == Some(
+                ReqState { send_open: false, ..old(self).req_state(id)->0 },
             ),
-            final(self).req_known(old(self).reqs@[i as int].id) ==> final(self).req_state(
-                old(self).reqs@[i as int].id,
-            ) == Some(
-                ReqState {
-                    send_open: false,
-                    ..old(self).req_state(old(self).reqs@[i as int].id)->0
-                },
-            ),
+            r@ <= c_take() * (ht(old(self).reqs) + 1) + c_join2() * (ht(old(self).reqs) + 1) + 4 + old(self).removed_fields(id),
     {
-        reveal(tables_ok);
         let ghost c0 = *self;
-        let ghost id = self.reqs@[i as int].id;
+        let ghost m0 = tv(self.reqs);
+        let ghost h = ht(self.reqs);
+        let ghost mut work: nat = 0;
         proof {
-            assert(c0.rstate@[id] == state_of(c0.reqs@[i as int]));
+            reveal(tables_ok);
+            lemma_req_get(m0, c0.rhist@, c0.rstate@, id);
+            assert(c_join() == 6 && c_join2() == 13);
         }
-        let mut e = self.reqs.remove(i);
+        let t = self.reqs.take();
+        let (lo, got, hi, Ghost(ct)) = req_take_w(t, id);
+        // The entry's box is freed here.
+        let mut e = *got.unwrap();
+        proof {
+            work = work + ct + 1;
+        }
         e.send_open = false;
         if !e.fin_seen {
+            let b = Box::new(e);
             proof {
-                lemma_reqs_update(c0.reqs@, c0.rhist@, i as int, e);
-                lemma_dom_update(c0.reqs@, c0.rhist@, c0.rstate@, i as int, e);
-                assert(c0.rhist@.insert(e.id, req_hist_of(e)) =~= c0.rhist@);
+                lemma_req_set(m0, c0.rhist@, c0.rstate@, b);
+                assert(c0.rhist@.insert(id, req_hist_of(e)) =~= c0.rhist@);
             }
-            self.reqs.insert(i, e);
+            let (j, Ghost(cp)) = req_put_w(lo, b, hi, Ghost(h));
+            self.reqs = j;
             self.rstate = Ghost(self.rstate@.insert(id, state_of(e)));
             proof {
-                assert(self.reqs@ =~= c0.reqs@.update(i as int, e));
+                // The new box.
+                work = work + cp + 1;
+                lemma_map_put(m0, id, b);
             }
         } else {
-            proof {
-                lemma_reqs_remove(c0.reqs@, c0.rhist@, c0.rhist@, i as int);
-                lemma_dom_remove(c0.reqs@, c0.rhist@, c0.rstate@, i as int);
-                assert(!c0.reqs@[i as int].rx_open);
-            }
+            let (j, Ghost(cj)) = tbl_join(lo, hi, Ghost(id), Ghost(0), Ghost(h));
+            self.reqs = j;
             self.rstate = Ghost(self.rstate@.remove(id));
+            proof {
+                lemma_req_del(m0, c0.rhist@, c0.rhist@, c0.rstate@, id);
+                // `e` is dropped here.
+                work = work + cj + req_frees(e);
+            }
         }
+        Ghost(work)
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9114#section-6.2.1
@@ -4731,7 +5121,7 @@ impl H3Conn {
     /// is handled as H3_NO_ERROR would be. A reset peer control or QPACK stream closes the
     /// connection; any other uni stream is forgotten silently. A request stream is forgotten,
     /// and our sending part, if still open, is reset (`reset_outs`).
-    pub fn on_stream_reset(&mut self, stream_id: u64, _code: u64, out: &mut CapVec<Output>)
+    pub fn on_stream_reset(&mut self, stream_id: u64, _code: u64, out: &mut CapVec<Output>) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
             old(out).wf(),
@@ -4763,10 +5153,13 @@ impl H3Conn {
             ) == Seq::<SpecOutput>::empty() && !final(self).closed(),
             final(self).highest_accepted() == old(self).highest_accepted(),
             final(self).uni_seen() == old(self).uni_seen(),
+            r@ <= c_in() + c_map() * (ht_of(*old(self), stream_id) + 1) + c_free() * old(self).removed_fields(
+                stream_id,
+            ),
     {
-        reveal(tables_ok);
         let ghost c0 = *self;
         let ghost o0 = out@;
+        let ghost mut work: nat = 0;
         proof {
             lemma_added_refl(o0);
         }
@@ -4774,72 +5167,86 @@ impl H3Conn {
             proof {
                 Self::lemma_idle(*self, out@);
             }
-            return;
+            return Ghost(0);
+        }
+        proof {
+            reveal(tables_ok);
+            assert(c_get() == 1 && c_free() == 1 && c_join() == 6 && c_join2() == 13);
         }
         if stream_id % 4 == 2 {
-            if let Some(i) = find_uni(&self.unis, stream_id) {
-                proof {
-                    assert(c0.uset@.contains(stream_id));
-                    assert(c0.uhist@[stream_id] == uni_hist_of(c0.unis@[i as int]));
-                }
-                let k = self.unis[i].stream.kind();
-                match k {
-                    UniKind::Control | UniKind::QpackEncoder | UniKind::QpackDecoder => {
-                        self.close(H3_CLOSED_CRITICAL_STREAM, out);
-                        return;
-                    },
-                    _ => {
-                        proof {
-                            lemma_unis_remove(self.unis@, self.uhist@, i as int);
-                            lemma_udom_remove(self.unis@, self.uhist@, self.uset@, i as int);
-                        }
-                        self.unis.remove(i);
-                        self.uset = Ghost(self.uset@.remove(stream_id));
-                    },
-                }
-            } else {
-                proof {
-                    assert(!c0.uset@.contains(stream_id)) by {
-                        if c0.uset@.contains(stream_id) {
-                            let k = choose|k: int| 0 <= k < c0.unis@.len() && (#[trigger] c0.unis@[k]).id == stream_id;
-                        }
+            let ghost m0 = tv(self.unis);
+            let ghost h = ht(self.unis);
+            let (g, Ghost(cg)) = tbl_get(&self.unis, stream_id);
+            proof {
+                work = work + cg;
+                lemma_uni_get(m0, c0.uhist@, c0.uset@, stream_id);
+            }
+            let k = match g {
+                Some(e) => Some(e.stream.kind()),
+                None => None,
+            };
+            match k {
+                Some(UniKind::Control) | Some(UniKind::QpackEncoder) | Some(UniKind::QpackDecoder) => {
+                    self.close(H3_CLOSED_CRITICAL_STREAM, out);
+                    // The close's output.
+                    return Ghost(work + 1);
+                },
+                Some(_) => {
+                    let t = self.unis.take();
+                    let (lo, _e, hi, Ghost(ct)) = uni_take_w(t, stream_id);
+                    let (j, Ghost(cj)) = tbl_join(lo, hi, Ghost(stream_id), Ghost(2), Ghost(h));
+                    self.unis = j;
+                    self.uset = Ghost(self.uset@.remove(stream_id));
+                    proof {
+                        lemma_uni_del(m0, c0.uhist@, c0.uhist@, c0.uset@, stream_id);
+                        // The entry is dropped here: its box and its queue's buffers.
+                        work = work + ct + cj + 1 + uni_frees();
                     }
-                }
+                },
+                None => {},
             }
         } else if stream_id % 4 == 0 {
-            match find_req(&self.reqs, stream_id) {
-                Some(i) => {
+            let ghost m0 = tv(self.reqs);
+            let ghost h = ht(self.reqs);
+            proof {
+                lemma_req_get(m0, c0.rhist@, c0.rstate@, stream_id);
+            }
+            let t = self.reqs.take();
+            let (lo, got, hi, Ghost(ct)) = req_take_w(t, stream_id);
+            let (j, Ghost(cj)) = tbl_join(lo, hi, Ghost(stream_id), Ghost(0), Ghost(h));
+            self.reqs = j;
+            proof {
+                work = work + ct + cj;
+                if !m0.contains_key(stream_id) {
+                    lemma_map_absent(m0, stream_id);
+                }
+            }
+            if let Some(b) = got {
+                let e = *b;
+                proof {
+                    lemma_req_del(m0, c0.rhist@, c0.rhist@, c0.rstate@, stream_id);
+                }
+                self.rstate = Ghost(self.rstate@.remove(stream_id));
+                if e.send_open {
+                    let code = if e.fin_seen {
+                        H3_REQUEST_CANCELLED
+                    } else {
+                        H3_REQUEST_INCOMPLETE
+                    };
+                    let w = Output::ResetStream { stream_id, code };
+                    out.push(w);
                     proof {
-                        assert(c0.rstate@[stream_id] == state_of(c0.reqs@[i as int]));
-                        lemma_reqs_remove(self.reqs@, self.rhist@, self.rhist@, i as int);
-                        lemma_dom_remove(self.reqs@, self.rhist@, self.rstate@, i as int);
+                        lemma_added_push(o0, o0, w);
+                        assert(added(o0, out@) =~= seq![w@]);
+                        lemma_writes_one(w@, 3);
+                        // The output.
+                        work = work + 1;
                     }
-                    let e = self.reqs.remove(i);
-                    self.rstate = Ghost(self.rstate@.remove(stream_id));
-                    if e.send_open {
-                        let code = if e.fin_seen {
-                            H3_REQUEST_CANCELLED
-                        } else {
-                            H3_REQUEST_INCOMPLETE
-                        };
-                        let w = Output::ResetStream { stream_id, code };
-                        out.push(w);
-                        proof {
-                            lemma_added_push(o0, o0, w);
-                            assert(added(o0, out@) =~= seq![w@]);
-                            lemma_writes_one(w@, 3);
-                        }
-                    }
-                },
-                None => {
-                    proof {
-                        assert(!c0.rstate@.contains_key(stream_id)) by {
-                            if c0.rstate@.contains_key(stream_id) {
-                                let k = choose|k: int| 0 <= k < c0.reqs@.len() && (#[trigger] c0.reqs@[k]).id == stream_id;
-                            }
-                        }
-                    }
-                },
+                }
+                proof {
+                    // `e` is dropped here, and its box above.
+                    work = work + 1 + req_frees(e);
+                }
             }
         }
         proof {
@@ -4849,6 +5256,7 @@ impl H3Conn {
             assert(c0.ctrl@ + Seq::<u8>::empty() =~= c0.ctrl@);
             assert(c0.goaways@.take(c0.goaways@.len() as int) =~= c0.goaways@);
         }
+        Ghost(work)
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9114#section-6.2.1
@@ -4859,7 +5267,7 @@ impl H3Conn {
     /// nothing (RFC 9114 §8). On our control stream it is a request to close a critical stream:
     /// H3_CLOSED_CRITICAL_STREAM. On a request stream, the pending response is dropped (the QUIC
     /// layer answers with RESET_STREAM, RFC 9000 §3.5); the request is still received.
-    pub fn on_stop_sending(&mut self, stream_id: u64, _code: u64, out: &mut CapVec<Output>)
+    pub fn on_stop_sending(&mut self, stream_id: u64, _code: u64, out: &mut CapVec<Output>) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
             old(out).wf(),
@@ -4888,46 +5296,46 @@ impl H3Conn {
             final(self).req_hist(stream_id) == old(self).req_hist(stream_id),
             final(self).highest_accepted() == old(self).highest_accepted(),
             final(self).uni_seen() == old(self).uni_seen(),
+            r@ <= c_in() + c_map() * (ht_of(*old(self), stream_id) + 1) + c_free() * old(self).removed_fields(
+                stream_id,
+            ),
     {
-        reveal(tables_ok);
         let ghost c0 = *self;
         if self.closed {
             proof {
                 Self::lemma_idle(*self, out@);
             }
-            return;
+            return Ghost(0);
+        }
+        proof {
+            reveal(tables_ok);
+            lemma_req_get(tv(c0.reqs), c0.rhist@, c0.rstate@, stream_id);
+            lemma_req_get(tv(c0.reqs), c0.rhist@, c0.rstate@, 3);
+            assert(c_get() == 1 && c_free() == 1);
         }
         if stream_id == 3 {
             self.close(H3_CLOSED_CRITICAL_STREAM, out);
-            proof {
-                assert(!c0.rstate@.contains_key(3)) by {
-                    if c0.rstate@.contains_key(3) {
-                        let k = choose|k: int| 0 <= k < c0.reqs@.len() && (#[trigger] c0.reqs@[k]).id == 3;
-                        assert(req_entry_ok(c0.reqs@[k]));
-                    }
-                }
-            }
-            return;
+            // The close's output.
+            return Ghost(1);
         }
-        match find_req(&self.reqs, stream_id) {
-            Some(i) => {
-                self.end_send(i);
-            },
-            None => {
-                proof {
-                    assert(!c0.rstate@.contains_key(stream_id)) by {
-                        if c0.rstate@.contains_key(stream_id) {
-                            let k = choose|k: int| 0 <= k < c0.reqs@.len() && (#[trigger] c0.reqs@[k]).id == stream_id;
-                        }
-                    }
-                }
-            },
+        let ghost mut work: nat = 0;
+        let (g, Ghost(cg)) = tbl_get(&self.reqs, stream_id);
+        let known = g.is_some();
+        proof {
+            work = work + cg;
+        }
+        if known {
+            let Ghost(ce) = self.end_send(stream_id);
+            proof {
+                work = work + ce;
+            }
         }
         proof {
             Self::lemma_idle(*self, out@);
             assert(c0.ctrl@ + Seq::<u8>::empty() =~= c0.ctrl@);
             assert(c0.goaways@.take(c0.goaways@.len() as int) =~= c0.goaways@);
         }
+        Ghost(work)
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9114#section-4.1
@@ -4990,26 +5398,20 @@ impl H3Conn {
         if self.closed {
             return Err(());
         }
-        let i = match find_req(&self.reqs, stream_id) {
-            Some(i) => i,
+        proof {
+            lemma_req_get(tv(c0.reqs), c0.rhist@, c0.rstate@, stream_id);
+        }
+        let (g, Ghost(_cg)) = tbl_get(&self.reqs, stream_id);
+        let (head, send_open, is_head) = match g {
+            Some(e) => (e.head, e.send_open, e.is_head),
             None => {
-                proof {
-                    assert(!c0.rstate@.contains_key(stream_id)) by {
-                        if c0.rstate@.contains_key(stream_id) {
-                            let k = choose|k: int| 0 <= k < c0.reqs@.len() && (#[trigger] c0.reqs@[k]).id == stream_id;
-                        }
-                    }
-                }
                 return Err(());
             },
         };
-        proof {
-            assert(c0.rstate@[stream_id] == state_of(c0.reqs@[i as int]));
-        }
-        if !(self.reqs[i].head && self.reqs[i].send_open) {
+        if !(head && send_open) {
             return Err(());
         }
-        if !check_response(resp, self.reqs[i].is_head) {
+        if !check_response(resp, is_head) {
             return Err(());
         }
         //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4.2
@@ -5018,11 +5420,11 @@ impl H3Conn {
         if !write_response(stream_id, resp, self.peer_max, out) {
             return Err(());
         }
-        self.end_send(i);
+        let Ghost(_ce) = self.end_send(stream_id);
         proof {
             reveal(one_response);
             let a = added(o0, out@);
-            assert(req_entry_ok(c0.reqs@[i as int]));
+            assert(stream_id % 4 == 0);
             assert(a[0] == a.take(1)[0]);
             assert(ctrl_free(a[0]));
             lemma_writes_none(a, 3);

@@ -1491,6 +1491,7 @@ impl UniStream {
             r.all() == Seq::<u8>::empty(),
             r.emitted() == Seq::<SpecUniEvent>::empty(),
             !r.done(),
+            r.buffered() == 0,
     {
         let r = UniStream {
             kind: UniKind::Undetermined,
