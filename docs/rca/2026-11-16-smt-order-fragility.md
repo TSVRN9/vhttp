@@ -111,7 +111,7 @@ crate.
   - Finding (9b3 Task 11): `hide(f)` is not free. Each fn that hides spec fns gets a
     `<fn>_nondefault_fuel_definition` quantifier, and Z3 instantiates it often. Measured at `--rlimit 4`, one fn each
     under `--verify-function`: `feed_req_ok` with 11 hides took 10.8M (174,019 instances of that quantifier in the
-    `smt.qi.profile`), 0.19M with none. `shutdown` with 10 hides was 5.2M unpinned and about 0.12M with none.
+    `smt.qi.profile`), 0.19M with none. `shutdown`, once split, was 5.2M unpinned with 10 hides and about 0.12M with none.
     `lemma_feed_done` and `lemma_new_done` went from 5.4M to 1.7M and 2.5M when their 3 hides went. So hide only what
     would otherwise unfold, and measure: an opaque spec fn revealed in its own lemmas costs nothing at the use site. quic's `frags::lemma_merge_end` is likewise pinned by `spinoff_prover` (incident 7, 1.00M-1.02M over
     seeds 0-4); 9b4, which brings quic under the seed gate, owns fixing it at the source (one lemma per ensures): carryover
