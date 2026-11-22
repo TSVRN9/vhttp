@@ -134,9 +134,8 @@ proof fn lemma_frame_unit(f: SpecFrame)
         crate::avl::c_join2() * 127 + 1 + c_sfree() <= c_unit(),
 {
     let b = frame_bytes(f);
-    assert(c_unit() * frame_load(f) == 200_000 + 200_000 * b) by (nonlinear_arith)
+    assert(c_unit() * (1 + b) == 200_000 + 200_000 * b) by (nonlinear_arith)
         requires
-            frame_load(f) == 1 + b,
             c_unit() == 200_000,
     ;
     assert(c_gc() == 981) by (compute_only);

@@ -1,0 +1,18 @@
+diff --git a/crates/quic/src/streams.rs b/crates/quic/src/streams.rs
+index 960f864..f1316f0 100644
+--- a/crates/quic/src/streams.rs
++++ b/crates/quic/src/streams.rs
+@@ -1692,11 +1692,8 @@ pub open spec fn c_feed(f: SpecFrame) -> nat {
+ /// (`c_feed`), a STOP_SENDING's reset (`c_sfree`) and the entry's removal (`c_gc`). Excluded: the id lookup's scan
+ /// and the entries' growth (Q20, docs/rca/2026-11-12-cost-sweep.md, 9b4).
+ pub open spec fn c_srx(f: SpecFrame) -> nat {
+-    c_feed(f) + (if f is StopSending {
+-        c_sfree()
+-    } else {
+-        0
+-    }) + c_gc()
++    // Mutant 9b2-M42: the bound leaves out a STOP_SENDING's reset (its queue's frees).
++    c_feed(f) + c_gc()
+ }
+ 
+ /// The most entries: our peer streams of both directions and our own unidirectional ones.
