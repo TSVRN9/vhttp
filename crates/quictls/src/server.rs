@@ -728,7 +728,7 @@ impl<'a> QuicServer<'a> {
             res.0 matches Some(q) ==> q.wf() && q.one_rtt_forgotten(),
             app_grew(old(app)@, final(app)@),
             res.0 matches Some(q) ==> crypto_held_ok(q.conn_spec()),
-            // The pipeline half (`accept_datagram`, `c_unit()` per byte), then TLS's first step on the datagram's
+            // The pipeline half (`accept_datagram`, `c_pipe(d)`), then TLS's first step on the datagram's
             // CRYPTO bytes (`accept_run`). Excluded: the connection's construction (`Connection::accept`'s tables,
             // the cost sweep's sites, 9b4), TLS's own step (D14, 9b5), `h3.pump` (9b4).
             res.1@ <= c_pipe(d.len() as nat) + 2 * (18 * d.len() + 5608) + 5 * c_retire(),
@@ -872,7 +872,7 @@ impl<'a> QuicServer<'a> {
             // one retired store.
             crypto_held_ok(final(self).conn_spec()),
             // The pipeline half (`pipeline::receive`, then `refeed_one_rtt` once TLS completes on this datagram;
-            // `c_unit()` per byte each), the CRYPTO reads handing TLS its bytes (two levels, then the refed 1-RTT one,
+            // `c_pipe(d)` each), the CRYPTO reads handing TLS its bytes (two levels, then the refed 1-RTT one,
             // each linear in `d`), the stash copy (`d + 1`, only when there was no refeed), and the retires of
             // completion and of a close. Excluded: TLS's own step (D14, 9b5), `h3.pump` (9b4), and the free of the
             // stash this one replaces (one `CapVec<u8>` buffer, uncharged: cat-C15-semantic-cost, 9b4).
@@ -969,7 +969,7 @@ impl<'a> QuicServer<'a> {
             } else {
                 0nat
             }),
-            // The refeed's pipeline half (`refeed_one_rtt`, `c_unit()` per byte), then the 1-RTT read (`feed`; the
+            // The refeed's pipeline half (`refeed_one_rtt`, `c_pipe`), then the 1-RTT read (`feed`; the
             // handshake completed before, so no retire). Excluded: TLS's own step (D14, 9b5).
             cost@ <= c_pipe(max as nat) + 18 * max + 5608,
     {
@@ -1146,7 +1146,7 @@ impl<'a> QuicServer<'a> {
             // Its budgets: `B_PUMP` of STREAM delivery, `B_PUMP` of the popped stream's send-side slot reaping and
             // `B_PUMP` of teardown (`Connection::backlog_step`, `B_PUMP + c_dsome()`), `B_PUMP`
             // CRYPTO bytes read and the completing call's retires, the refed datagram's pipeline half
-            // (`refeed_one_rtt`, `c_unit()` per byte) and 1-RTT read, a close's retires. Excluded: TLS's own step (D14,
+            // (`refeed_one_rtt`, `c_pipe`) and 1-RTT read, a close's retires. Excluded: TLS's own step (D14,
             // 9b5), `h3.pump` (9b4), and the drop of the refed stash (one `CapVec<u8>` buffer, uncharged:
             // cat-C15-semantic-cost, 9b4).
             res.0@ <= (B_PUMP + c_dsome()) + (18 * B_PUMP + 5608 + 2 * c_retire()) + (c_pipe(MAX_UDP_PAYLOAD as nat)

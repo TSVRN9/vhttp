@@ -145,9 +145,9 @@ pub fn accept_datagram(
         // The CRYPTO positions held come from `d`'s packets: at most `d.len()`, and the datagram fits a UDP payload.
         r.0 matches Some(c) ==> d.len() <= MAX_UDP_PAYLOAD && c.crypto_backlog() <= d.len() && (forall|k: PacketKind| #[trigger]
             c.crypto_held(k) <= d.len()) && (forall|k: PacketKind| #[trigger] c.crypto_load(k) <= d.len()),
-        // The pipeline half (`Connection::on_datagram`, 9b2 Task 10d): `c_unit()` per byte of `d`. Excluded: the
-        // datagram's opening (Q22-Q25) and the connection's construction (`Connection::accept`'s tables): the cost
-        // sweep's sites (docs/rca/2026-11-12-cost-sweep.md, 9b4).
+        // The pipeline half (`Connection::on_datagram`, 9b2 Task 10d): `c_pipe(d)`, `c_unit() + 4` per byte of `d` with
+        // the drops. Excluded: the datagram's opening (Q22-Q25) and the connection's construction (`Connection::accept`'s
+        // tables): the cost sweep's sites (docs/rca/2026-11-12-cost-sweep.md, 9b4).
         r.1@ <= c_pipe(d.len() as nat),
 {
     hide(rfc_open_datagram);
@@ -224,8 +224,9 @@ pub fn receive(
         final(c).crypto_kept_g(*old(c), d.len() as nat),
         d.len() > MAX_UDP_PAYLOAD ==> final(c).crypto_kept(*old(c)),
         !(old(c).phase_spec() is Open) ==> final(c).crypto_kept(*old(c)),
-        // The pipeline half (`Connection::on_datagram`, 9b2 Task 10d): `c_unit()` per byte of `d`. Excluded: the
-        // datagram's opening (its packets' and frames' builders, Q22-Q25 of docs/rca/2026-11-12-cost-sweep.md, 9b4).
+        // The pipeline half (`Connection::on_datagram`, 9b2 Task 10d): `c_pipe(d)`, `c_unit() + 4` per byte of `d` with
+        // the drops. Excluded: the datagram's opening (its packets' and frames' builders, Q22-Q25 of
+        // docs/rca/2026-11-12-cost-sweep.md, 9b4).
         r@ <= c_pipe(d.len() as nat),
 {
     hide(rfc_open_datagram);
@@ -336,8 +337,8 @@ pub fn refeed_one_rtt(
         // As `receive`: at most `d.len()` CRYPTO positions more, none past a UDP payload.
         final(c).crypto_kept_g(*old(c), d.len() as nat),
         d.len() > MAX_UDP_PAYLOAD ==> final(c).crypto_kept(*old(c)),
-        // The refeed's pipeline half (`Connection::on_datagram`, 9b2 Task 10d item 3): `c_unit()` per byte of `d`,
-        // nothing past a UDP payload (no packet opens). Excluded: the datagram's opening (Q22-Q25, 9b4).
+        // The refeed's pipeline half (`Connection::on_datagram`, 9b2 Task 10d item 3): `c_pipe(d)`, `c_unit() + 4` per
+        // byte of `d` with the drops, nothing past a UDP payload (no packet opens). Excluded: the datagram's opening (Q22-Q25, 9b4).
         r@ <= c_pipe(d.len() as nat),
         d.len() > MAX_UDP_PAYLOAD ==> r@ == 0,
 {
