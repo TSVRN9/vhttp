@@ -1014,13 +1014,49 @@ proof fn lemma_splice_ok(r: Seq<(u64, u64)>, a: int, b: int, x: (u64, u64), m: u
         ranges_ok(splice(r, a, b, x)),
         lo_ge(splice(r, a, b, x), m),
 {
+    lemma_splice_bounds(r, a, b, x, m);
+    lemma_splice_order(r, a, b, x, m);
+}
+
+/// Each range of the splice is well formed and at or above `m` (split from `lemma_splice_ok`
+/// for the rlimit).
+proof fn lemma_splice_bounds(r: Seq<(u64, u64)>, a: int, b: int, x: (u64, u64), m: u64)
+    requires
+        ranges_ok(r),
+        lo_ge(r, m),
+        0 <= a <= b <= r.len(),
+        m <= x.0 <= x.1 <= PN_MAX,
+    ensures
+        ({
+            let s = splice(r, a, b, x);
+            forall|k: int| #![trigger s[k]] 0 <= k < s.len() ==> s[k].0 <= s[k].1 <= PN_MAX && s[k].0 >= m
+        }),
+{
     let s = splice(r, a, b, x);
-    let n = r.len() + 1 - (b - a);
     lemma_splice_at(r, a, b, x, 0);
     assert forall|k: int| #![trigger s[k]] 0 <= k < s.len() implies s[k].0 <= s[k].1 <= PN_MAX
         && s[k].0 >= m by {
         lemma_splice_at(r, a, b, x, k);
     }
+}
+
+/// Neighbouring ranges of the splice keep a gap (split from `lemma_splice_ok` for the rlimit).
+proof fn lemma_splice_order(r: Seq<(u64, u64)>, a: int, b: int, x: (u64, u64), m: u64)
+    requires
+        ranges_ok(r),
+        0 <= a <= b <= r.len(),
+        b <= a + 2,
+        x.0 <= x.1,
+        a > 0 ==> x.1 + 1 < r[a - 1].0,
+        b < r.len() ==> r[b].1 + 1 < x.0,
+    ensures
+        ({
+            let s = splice(r, a, b, x);
+            forall|k: int| #![trigger s[k]] 0 < k < s.len() ==> s[k].1 + 1 < s[k - 1].0
+        }),
+{
+    let s = splice(r, a, b, x);
+    lemma_splice_at(r, a, b, x, 0);
     assert forall|k: int| #![trigger s[k]] 0 < k < s.len() implies s[k].1 + 1 < s[k - 1].0 by {
         lemma_splice_at(r, a, b, x, k);
         lemma_splice_at(r, a, b, x, k - 1);
@@ -1092,6 +1128,10 @@ proof fn lemma_splice_insert(r: Seq<(u64, u64)>, a: int, b: int, x: (u64, u64), 
     ensures
         insert_post(r, splice(r, a, b, x), pn, m),
 {
+    // The range lists' shape passes through from `lemma_splice_ok`; its quantifiers, each
+    // reaching the range before, are opened only for the one range used.
+    hide(ranges_ok);
+    hide(lo_ge);
     lemma_splice_ok(r, a, b, x, m);
     lemma_splice_cover(r, a, b, x, pn);
     let s = splice(r, a, b, x);
@@ -1099,6 +1139,9 @@ proof fn lemma_splice_insert(r: Seq<(u64, u64)>, a: int, b: int, x: (u64, u64), 
     if s.len() == r.len() + 1 && r.len() > 0 && pn > r.last().1 {
         assert(a == b);
         if a == r.len() {
+            assert(r[a - 1].0 <= r[a - 1].1) by {
+                reveal(ranges_ok);
+            }
             assert(x.1 + 1 < r[a - 1].0);
         } else {
             lemma_splice_at(r, a, b, x, s.len() - 1);

@@ -1586,11 +1586,6 @@ impl PeerCids {
             assert(self.retired(seq));
             return Ok(());
         }
-        proof {
-            if k > 0 {
-                assert(self.active@[0].0 >= self.largest_rpt);
-            }
-        }
         let n = if rpt > self.largest_rpt {
             rpt - self.largest_rpt
         } else {
@@ -1599,6 +1594,71 @@ impl PeerCids {
         if self.active.len() as u64 + 1 - k as u64 > local_limit || backlog + n > 2
             * PEER_CID_CAP {
             return Err(CONNECTION_ID_LIMIT_ERROR);
+        }
+        self.add_fresh(k, seq, rpt, cid, token, Ghost(local_limit));
+        Ok(())
+    }
+
+    /// Step 5 of `on_new_cid`, once both limits passed: retire every seq below an increased
+    /// `rpt`, add the CID, and fix `current` (split from `on_new_cid` for the rlimit; it cannot
+    /// fail).
+    #[verifier::spinoff_prover]
+    fn add_fresh(&mut self, k: usize, seq: u64, rpt: u64, cid: &[u8], token: [u8; 16], Ghost(local_limit): Ghost<u64>)
+        requires
+            old(self).wf(),
+            rpt <= seq,
+            seq <= VARINT_MAX,
+            1 <= cid@.len() <= MAX_CID_LEN,
+            2 <= local_limit <= PEER_CID_CAP,
+            !peer_same(old(self).active@, seq, cid@, token@),
+            !peer_clash(old(self).active@, seq, cid@, token@),
+            seq >= old(self).largest_rpt,
+            k == count_below(old(self).active@, rpt),
+            k <= old(self).active@.len(),
+            forall|j: int| 0 <= j < k ==> (#[trigger] old(self).active@[j]).0 < rpt,
+            forall|j: int|
+                k <= j < old(self).active@.len() ==> (#[trigger] old(self).active@[j]).0 >= rpt,
+            old(self).active@.len() + 1 - k <= local_limit,
+            old(self).retire_pending@.len() + old(self).retire_unacked@.len() + (if rpt > old(
+                self).largest_rpt {
+                rpt - old(self).largest_rpt
+            } else {
+                0
+            }) <= 2 * PEER_CID_CAP,
+        ensures
+            final(self).wf(),
+            entries_survive(old(self).entries(), final(self).entries()),
+            final(self).entries().len() <= local_limit,
+            final(self).backlog() <= 2 * PEER_CID_CAP,
+            final(self).largest_rpt_spec() == if rpt > old(self).largest_rpt_spec() {
+                rpt
+            } else {
+                old(self).largest_rpt_spec()
+            },
+            forall|s: u64| #[trigger]
+                peer_has_seq(final(self).entries(), s) <==> (s == seq || (peer_has_seq(
+                    old(self).entries(),
+                    s,
+                ) && s >= rpt)),
+            forall|c: Seq<u8>| #[trigger]
+                peer_has_cid(final(self).entries(), c) ==> c == cid@ || peer_has_cid(
+                    old(self).entries(),
+                    c,
+                ),
+            final(self).largest_rpt_spec() == old(self).largest_rpt_spec() ==> forall|
+                c: Seq<u8>,
+            | #[trigger]
+                peer_has_cid(old(self).entries(), c) ==> peer_has_cid(final(self).entries(), c),
+            rpt_applied(*old(self), *final(self), seq, cid@, token@, rpt),
+    {
+        // The callees' contracts carry every fact used here; `wf_parts`'s quantifiers over
+        // four entry lists are never unfolded.
+        hide(PeerCids::wf_parts);
+        proof {
+            if k > 0 {
+                reveal(PeerCids::wf_parts);
+                assert(self.active@[0].0 >= self.largest_rpt);
+            }
         }
         let ghost e0 = self.active@;
         let ghost cur0 = self.current;
@@ -1630,7 +1690,6 @@ impl PeerCids {
             }
             lemma_entries_survive(*old(self), *self, seq, cid@, token@);
         }
-        Ok(())
     }
 
     /// An exact repeat whose Retire Prior To increases the largest one: retire every active

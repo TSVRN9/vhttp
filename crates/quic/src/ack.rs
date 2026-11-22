@@ -509,10 +509,37 @@ pub proof fn theorem_ack_roundtrip(a: SpecAck, rest: Seq<u8>)
             )
         }),
 {
+    lemma_ack_type_byte(a);
+    lemma_ack_body_parses(a, rest);
+}
+
+/// The frame is its one-byte type, then its body (split from `theorem_ack_roundtrip` for the
+/// rlimit).
+proof fn lemma_ack_type_byte(a: SpecAck)
+    ensures
+        spec_ack_bytes(a).len() >= 1,
+        spec_ack_bytes(a)[0] == spec_ack_type(a),
+        spec_ack_bytes(a).skip(1) == spec_ack_body(a),
+{
     let ty = spec_ack_type(a);
     lemma_serialize_bytes::<true>(ty);
     assert(spec_varint(ty) =~= seq![ty as u8]);
     assert(spec_ack_bytes(a).skip(1) =~= spec_ack_body(a));
+}
+
+/// The body, followed by anything, parses back to `a` and consumes exactly itself (split from
+/// `theorem_ack_roundtrip` for the rlimit).
+proof fn lemma_ack_body_parses(a: SpecAck, rest: Seq<u8>)
+    requires
+        ack_encodable(a),
+        rfc_ack_ranges_valid(a.largest, a.first_range, a.ranges),
+    ensures
+        rfc_ack(spec_ack_type(a), spec_ack_body(a) + rest) == Ok::<(SpecAck, nat), u64>(
+            (a, spec_ack_body(a).len()),
+        ),
+{
+    // The body's bytes enter only through `lemma_ack_layout`'s decode facts.
+    hide(spec_ack_body);
     lemma_ack_layout(a, rest);
 }
 
