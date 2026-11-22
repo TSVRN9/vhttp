@@ -18,7 +18,8 @@ hold no fn), inside `verus!` (comments and strings blanked, fns found by tools/a
     next_off, want, reset and write only (keyed by file and impl path: queue.rs's ByteQueue::take_front is no wrapper), in
     an `assert`; any other fn that calls one
     returns a cost itself;
-  - no `loop`, `for .. in` or `exec_allows_no_decreases_clause` (loops and recursion this gate does not see).
+  - no `loop`, `for .. in` or `exec_allows_no_decreases_clause` (loops and recursion this gate does not see);
+  - no `use .. NAME as ALIAS` of a cost fn's NAME (its calls would go unmatched; 9b2 Task 10d).
 In the per-fn files ROOT/crates/quic/src/conn.rs, ROOT/crates/quictls/src/server.rs (9b2 fix round 1, I6) and
 ROOT/crates/quic/src/pipeline.rs (9b2 Task 10d: the receive pipeline's costs), their exec fns returning a Ghost<nat> are
 callees too, and every fn there is held to the callee-cost rule above, with no public wrappers and no allowed drop
@@ -174,6 +175,13 @@ def check(root):
     call = re.compile(r'(?<!\w)(%s)\s*(?:::<[^>]*>\s*)?\(' % '|'.join(map(re.escape, sorted(costs))))
     for rel, s, fl in files:
         line = lambda i: '%s:%d' % (rel, s.count('\n', 0, i) + 1)
+        # A cost fn imported under another name is called by a name this gate does not match (9b2 Task 10d: quictls
+        # called `pipeline::receive` as `receive_datagram`): refused.
+        for u in re.finditer(r'(?<![A-Za-z0-9_])use\b([^;]*);', s):
+            for r in re.finditer(r'([A-Za-z0-9_]+)\s+as\s+([A-Za-z0-9_]+)', u.group(1)):
+                if r.group(1) in costs:
+                    errs.append('%s: `use .. %s` renames the cost fn %s: its calls would go unmatched; call it by its name'
+                                % (line(u.start()), r.group(0), r.group(1)))
         if 'exec_allows_no_decreases_clause' in s:
             errs.append('%s: exec_allows_no_decreases_clause (recursion without a decreases)' % line(s.index('exec_allows_no_decreases_clause')))
         for path, name, ret, clauses, k, end, e2 in fl:

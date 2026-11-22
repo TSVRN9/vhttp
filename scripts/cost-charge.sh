@@ -7,9 +7,10 @@ set -o pipefail
 # work too), and every callee's Ghost<nat> cost is bound and mentioned in a charge, the returned cost or (frags.rs's public
 # wrappers Frags::insert, after_insert, take_front) an assert (a callee is `NAME(`, `path::NAME(` or `.NAME(` on any receiver, NAME a cost fn of these files; std methods of
 # other names, such as `out.append(..)`, are not); `loop`, `for` and unchecked recursion in fn bodies are refused.
-# crypto_stream.rs is gated whole (CryptoStream::on_fill a wrapper); conn.rs and quictls's server.rs per fn: their
-# Ghost<nat>-returning fns are callees and every fn there keeps the callee costs it gets, but for the listed exclusion
-# drops (DROPS). In every file work is assigned only as work = work + E and bound once per fn; a cost fn binds no ghost
+# crypto_stream.rs is gated whole (CryptoStream::on_crypto a wrapper); conn.rs, pipeline.rs and quictls's server.rs per
+# fn: their Ghost<nat>-returning fns are callees and every fn there keeps the callee costs it gets, with no allowed drop
+# (9b2 Task 10d), but for NOT_COSTS's keyed calls that only share a cost fn's name; a cost fn imported under another
+# name (`use .. as`) is refused. In every file work is assigned only as work = work + E and bound once per fn; a cost fn binds no ghost
 # but work to a literal (a stubbed callee cost) and builds no literal Ghost(N) after its first callee cost or charge (a
 # stubbed return), but for avl::bal, frags::walk and frags::walk_run (LITERAL_OK, cat-C15-semantic-cost's).
 # Structural only: the amount charged is not checked, and per-path use, built-then-discarded Ghosts and `+=` are not

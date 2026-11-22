@@ -316,7 +316,8 @@ expect_fail "escape-gate: assume_specification" "unaccounted escape" esc
 # `let ghost mut work` in receive, a stale LITERAL_OK entry (bal's arm no longer literal); 9b2 Task 10d, each passed by
 # the tool before it (which allowed validate_hs_path's drop and did not read pipeline.rs): validate_hs_path dropping
 # discard's cost as a statement, refeed_one_rtt dropping on_datagram's cost (pipeline.rs, a per-fn file now), a stale
-# not-a-cost exemption (transmit's `out.clear()` gone); the real tree passes.
+# not-a-cost exemption (transmit's `out.clear()` gone), `pipeline::receive` imported as `receive_datagram` (the rename
+# that hid its call from the gate); the real tree passes.
 expect_pass "cost-charge: the real tree" "$root/scripts/cost-charge.sh" "$root"
 ccq=$tmp/cost/crates/quic/src
 ccb=$tmp/cost/crates/byteq/src
@@ -424,6 +425,10 @@ cfresh
 once '^    out\.clear\(\);$' "$ccq/pipeline.rs"
 sed -i 's/^    out\.clear();$/    out.truncate(0);/' "$ccq/pipeline.rs"
 expect_fail "cost-charge: a stale not-a-cost exemption (Task 10d)" "not-a-cost exemption for clear in transmit matches no call" cc
+cfresh
+once '^use quic::pipeline::\{accept_datagram, initial_dcid, refeed_one_rtt\};$' "$cct/server.rs"
+sed -i 's/^use quic::pipeline::{accept_datagram, initial_dcid, refeed_one_rtt};$/use quic::pipeline::{accept_datagram, initial_dcid, receive as receive_datagram, refeed_one_rtt};/' "$cct/server.rs"
+expect_fail "cost-charge: a cost fn imported under another name (Task 10d: receive as receive_datagram)" "renames the cost fn receive" cc
 cfresh
 # retire's return (9b2 Task 10d: on_fill and on_crypto_c return Ghost(work) too, so the line is found inside retire)
 rtl=$(awk '/fn retire\(/ { f = 1 } f && /^        Ghost\(work\)$/ { print NR; exit }' "$ccq/crypto_stream.rs")
