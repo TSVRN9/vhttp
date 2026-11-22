@@ -41,6 +41,7 @@ pub mod protect;
 pub mod ranges;
 pub mod reassembly;
 pub mod recovery;
+pub mod recv_order;
 pub mod recv_stream;
 pub mod ring;
 pub mod route;
