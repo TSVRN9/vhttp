@@ -1042,8 +1042,8 @@ proof fn lemma_data_trace(id: u64, window: u64, t: Seq<SpecRecvIn>, s: Seq<u8>)
 
 /// When every STREAM input carries bytes of `s` at their offsets, what is received in order (the
 /// contiguous prefix, which is `s`'s) and whether all data was received ("Data Recvd") depend
-/// only on the multiset of inputs, not their order or duplication. Delivery then hands over that
-/// prefix (`recv_inv`: the `Data` payloads are `rfc_prefix(m, delivered)`), in any chunking.
+/// only on the multiset of inputs, not their order or duplication. For the frame path's traces, which
+/// also deliver: `recv_order::theorem_recv_frame_order_free` (what is delivered is `s`'s prefix).
 pub proof fn theorem_recv_order_free(
     id: u64,
     window: u64,

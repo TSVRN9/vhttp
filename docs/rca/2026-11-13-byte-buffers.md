@@ -1,7 +1,10 @@
 # Byte buffers on input paths (C15): growth by std's strategy and eager delivery (phase 9b2)
 
-Status: Task 1 (measurement and sweep re-read). Task 11 completes this entry (Escape, Catch and Evidence once the fix
-is in).
+Status: complete (9b2 Task 11, 2026-11-21, phase-9b2 at 0d11928): the fix is in (Tasks 2-10d); the measurement
+below is Task 1's, with the final counts beside it. The plan's cost-charge demos for byteq and the ring and its mutants
+9b2-M1..M15 were dropped from Task 11 when it was rescoped under the owner's rules (mutants are sanity checks, and no
+unverified script is extended); they are open work of the scaffold phase (`sc-9b2-cost-demos`, `sc-9b2-mutants`), not
+part of this entry's catch.
 
 - **Defect**: quic's and tls's input-path byte buffers (`CryptoStream`, `Reassembly`, `SendStream`, `HsReader`, the TLS
   transcript) grow by `Vec::push`/`extend_from_slice`/`append`, so a call can pay a `realloc` that copies everything
@@ -13,8 +16,30 @@ is in).
   receive specs delivered eagerly by definition, so a gap fill copying the run looked free; the `ponytail:` and
   `shortcut:` comments that admitted it (handshake.rs:186, send_stream.rs:984, conn.rs:3392) had no tracker.
 - **Class**: C15.
-- **Catch**: spec D15 (Task 11 records it here).
-- **Evidence**: the measurement below; the gate demos and mutants of Task 11.
+- **Fix** (spec D1-D13): `crates/byteq` (`CapVec`, an exact-capacity `Vec` with a ghost capacity, and `ByteQueue`, a
+  de-amortized queue whose `push_slice` costs at most `7d + 4` units with migration at copy rate 3); CRYPTO bytes stay
+  in the `Frags` store and `CryptoStream::read(max, out)` takes at most `max` (D6, D7); `HsReader` on a `ByteQueue`
+  (D8); the TLS transcript in exact `CapVec`s (D9); `SendStream` on a `ByteQueue` with its range sets on `quic::avl`
+  (D10); STREAM bytes in a verified page ring, `quic::ring` (D11), delivered lazily, at most `max` per delivery (D12);
+  `QuicServer::pump_backlog` drains what is left at `B_PUMP` per call, with progress and termination proved, and the
+  shell polls it (D13). Every cost is a `Ghost<nat>` in an ensures, composed up to quictls's per-call literals (the
+  receive pipeline since Task 10d).
+- **Catch**: Verus, through the cost ensures (a call whose cost grows past its bound fails verification) and the
+  memory and progress clauses in `wf` and the ensures (`Ring::wf`'s `pages() * PAGE <= span + 2 * PAGE`, the queue's
+  `requested()` within its reservation, `crypto_held_ok`, `pump_backlog`'s measure); `scripts/cost-charge.sh`
+  (structural, unverified: TRUSTED.md's cost-charge row) over byteq, ring.rs, ranges.rs, send_stream.rs,
+  crypto_stream.rs and, per fn, conn.rs, pipeline.rs and quictls server.rs, so a callee cost dropped in those files
+  fails the gate; counting-allocator tests (below), which count and never time. Not caught: a cost dropped between two
+  fns of streams.rs or recv_stream.rs (callee-only to the gate), an implicit `Drop`, and an undercharged amount
+  (`cat-C15-semantic-cost`, 9b4; TRUSTED.md's Vec row names the frees still uncharged). For the class (a byte buffer
+  growing by std's strategy on an input path), the sweep's status table (`docs/rca/2026-11-12-cost-sweep.md`, "Status
+  of 9b2's rows") greps each converted fn for the growth and shift patterns at 0d11928: none is left on a converted byte buffer;
+  the only hits are `build_flight`'s five `Vec::new()` outbound message builders (T11, class B, `cat-C15-9b4`).
+- **Evidence**: the measurement below and its final counts; tests `capvec_allocs_exact` and `queue_model_random`
+  (`crates/byteq/tests/alloc.rs`), `crypto_one_byte_frames`, `crypto_runs_then_fill`, `send_ack_1k`,
+  `stream_reverse_fill`, `ack_copies_no_stream_bytes` (`crates/quic/tests/input_cost.rs`), `reader_one_byte_push`
+  (`crates/tls/tests/reader_cost.rs`); mutants 9b2-M16..M44, each killed by Verus under `scripts/mutants.sh run` in the
+  task that added it; carryover `cat-C15-9b2` (closed).
 
 ## Sweep rows re-read (9b2 Task 1, merged tip 0d7c37c)
 
@@ -103,6 +128,40 @@ Per call kind: `crypto_one_byte_frames`' 1-byte frames that do not close a gap r
 1200; `reader_one_byte_push`'s single `next_message` moves the reader's `Vec` (the `split_off` tail is empty), so its
 cost is the push reallocs (T1). The patterns do not exercise Q2 (one pop takes everything), Q8 (one write) or T2 (no
 tail).
+
+### Final counts (9b2 Task 11, release, phase-9b2 at 0d11928)
+
+The same patterns, now passing (each test asserts the per-call and across-size bounds above; the time bounds of Task 1
+are gone from the tests, which count and never time). "largest call" is the most bytes requested by one call of that
+kind; Task 1's figures beside them for the same n.
+
+| test | n | calls | bytes | alloc | realloc | largest call, by kind (bytes) | Task 1 at the same n: bytes, realloc, largest call |
+|---|---|---|---|---|---|---|---|
+| `crypto_one_byte_frames` | 16 KiB | 16384 | 21477964 | 355244 | 0 | frame 2137, close 1746 | 14974208, 14, 37752 for 1 (close) |
+| | 32 KiB | 32768 | 49488408 | 833735 | 0 | frame 2137, close 1746 | 29948416, 28, 37752 for 1 |
+| | 64 KiB | 65536 | 105537520 | 1791221 | 0 | frame 2152, close 1746 | 59896832, 56, 37752 for 1 |
+| `crypto_runs_then_fill` | 1024 | 1025 | 1195320 | 22576 | 0 | run 1297, fill 39560 (d = 2048) | 1199160, 3, 43400 for 2048 (fill) |
+| | 2048 | 2049 | 2619704 | 49240 | 0 | run 1409, fill 78528 (d = 4096) | 2627640, 4, 86464 for 4096 |
+| | 4096 | 4097 | 5698408 | 106674 | 0 | run 1521, fill 156968 (d = 8192) | 5714536, 5, 173096 for 8192 |
+| `send_ack_1k` | 256 KiB | 514 | 1436056 | 9944 | 0 | write 786432, poll 1704, ack 1280 | 801792, 0, ACK: 131136 for 0 |
+| | 512 KiB | 1026 | 2975872 | 22481 | 0 | write 1572864, poll 1784, ack 1440 | 1604608, 0, ACK: 262208 for 0 |
+| | 1 MiB | 2050 | 6158184 | 50122 | 0 | write 3145728, poll 1864, ack 1600 | 3210240, 0, ACK: 524352 for 0 |
+| `stream_reverse_fill` | 16 KiB | 16388 | 54056 | 203 | 0 | frame 1088, pump 4256 | 98440, 33, 65520 for 1 (first frame) |
+| | 32 KiB | 32776 | 107944 | 403 | 0 | frame 1600, pump 4256 | 196744, 36, 131056 for 1 |
+| | 64 KiB | 65552 | 215720 | 803 | 0 | frame 2624, pump 4256 | 393352, 39, 262128 for 1 |
+| `reader_one_byte_push` | 16 KiB | 16385 | 151877 | 18 | 0 | 45231 | 32760, 11, 16384 for 1 |
+| | 32 KiB | 32769 | 236109 | 19 | 0 | 67848 | 65528, 12, 32768 for 1 |
+| | 64 KiB | 65537 | 523316 | 21 | 0 | 152664 | 131064, 13, 65536 for 1 |
+
+No call reallocates, and no call hands over more than it was given (`crypto_one_byte_frames`: 1 byte for 1;
+`crypto_runs_then_fill`: the fill's 2n for 2n; `stream_reverse_fill`: deliveries of at most `B_PUMP` = 4096 bytes in
+pump calls, none in frame calls). Total bytes rose in `crypto_one_byte_frames` and `reader_one_byte_push`, consistent
+with the store's per-chunk nodes and the queue's buffers of up to three times the peak (not measured apart); each stays
+within the per-call and 3x-per-doubling bounds. The large single calls are memory, not work: the fill's gather
+list (an exact `CapVec`, `input_cost`'s named allowance `32·(d + 1)`) and a queue buffer (`send_ack_1k`'s write of n
+bytes requesting 3n, D4's bound; the reader's largest call). `send_ack_1k` makes more calls than at Task 1 (more poll and
+ACK rounds), and its ACKs request at most 1600 bytes for 0 stream bytes (the trees'
+nodes), against half the stream at Task 1.
 
 ## mem-9b2-send-cap: send room counted lengths, the allocator held capacity (9b2 Task 8)
 
@@ -257,5 +316,7 @@ tail).
   `tools/cost_charge.py` the DROPS mechanism is gone, pipeline.rs is a per-fn file, and a `use .. as` rename of a cost
   fn is refused, with gate demos for `validate_hs_path` dropping `discard`'s cost, `refeed_one_rtt` dropping
   `on_datagram`'s and the `receive_datagram` rename; `input_cost::streams_new_allocates_nothing` for the allocation.
-  Residual, named with its owner: streams.rs and recv_stream.rs stay outside the gate until callees are resolved by
-  path (cat-C15-semantic-cost, 9b4), as do the calls keyed in `NOT_COSTS`.
+  Residual, named with its owner: streams.rs and recv_stream.rs are callee-only since fix round 1 (their cost fns are
+  callees of the checked files; their own bodies are unchecked, so a cost dropped between two of their fns passes the
+  gate and Verus, with only 9b2-M38 and 9b2-M42 as witnesses there) until callees are resolved by path
+  (cat-C15-semantic-cost, 9b4), as are the calls keyed in `NOT_COSTS`.

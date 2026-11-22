@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index b23593b..10512c0 100644
+index 474335e..7023c2b 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -3807,7 +3807,6 @@ impl Connection {
+@@ -3869,7 +3869,6 @@ impl Connection {
              final(self).paths == old(self).paths,
              final(self).wf(),
              final(self).frames_kept_np(*old(self)),
@@ -10,7 +10,7 @@ index b23593b..10512c0 100644
              final(self).n_live() <= old(self).n_live(),
              r@ <= (old(self).n_live() - final(self).n_live()) * c_gc(),
      {
-@@ -3818,7 +3817,8 @@ impl Connection {
+@@ -3880,7 +3879,8 @@ impl Connection {
              assert(fv.subrange(0, fv.len() as int) =~= fv);
          }
          // D10 (b): `pend` is the pieces of the frames not yet reported, then `rest`.
@@ -20,7 +20,7 @@ index b23593b..10512c0 100644
              invariant
                  self.paths == old(self).paths,
                  j <= frames@.len(),
-@@ -3843,10 +3843,6 @@ impl Connection {
+@@ -3905,10 +3905,6 @@ impl Connection {
              }
              j += 1;
          }

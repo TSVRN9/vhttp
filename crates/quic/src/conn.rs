@@ -85,21 +85,72 @@ pub open spec fn c_unit() -> nat {
     200_000
 }
 
-/// The receive pipeline's bound for a datagram of `n` bytes: `c_unit()` per byte. Closed, so callers outside this
-/// module reason with `lemma_pipe_le` and `lemma_pipe_mono` only (a product with `c_unit()` slows their proofs).
-pub closed spec fn c_pipe(n: nat) -> nat {
-    c_unit() * n
+/// What `on_datagram` frees of what it is handed (9b2 Task 10d fix round 2: frees are charged where the values are
+/// dropped): per packet its four buffers (`dcid`, `scid`, `token`, the `frames` vector) and two per frame (its one
+/// heap buffer, at most: CRYPTO or STREAM data, an ACK's ranges, a CID, a close reason, and one spare). At most four
+/// per unit of load (`lemma_pdrop`).
+pub open spec fn c_pdrop(ps: Seq<SpecPlain>) -> nat
+    decreases ps.len(),
+{
+    if ps.len() == 0 {
+        0
+    } else {
+        c_pdrop(ps.drop_last()) + 4 + 2 * ps.last().frames.len()
+    }
 }
 
-/// A cost of `c_unit()` per unit of a load within `n` bytes is within `c_pipe(n)`.
+/// `on_datagram`'s fixed drops and copy when it is handed a packet or an error header (with neither, it frees and
+/// copies nothing): the `packets` vector, the error header's four buffers, and the first packet's DCID (`first`: at
+/// most `MAX_CID_LEN` = 20 bytes copied into one buffer, allocated and freed).
+pub open spec fn c_dgfix() -> nat {
+    1 + 4 + 22
+}
+
+/// A packet drops at most four per unit of its load: it loads one, and each frame at least one.
+proof fn lemma_pdrop(ps: Seq<SpecPlain>)
+    ensures
+        c_pdrop(ps) <= 4 * plains_load(ps),
+    decreases ps.len(),
+{
+    if ps.len() > 0 {
+        lemma_pdrop(ps.drop_last());
+        lemma_frames_load_ge(ps.last().frames);
+    }
+}
+
+/// Each frame loads at least one.
+proof fn lemma_frames_load_ge(fs: Seq<SpecFrame>)
+    ensures
+        fs.len() <= frames_load(fs),
+    decreases fs.len(),
+{
+    if fs.len() > 0 {
+        lemma_frames_load_ge(fs.drop_last());
+    }
+}
+
+/// `on_datagram`'s bound over a load: `c_unit()` per unit for the work, four per unit for the drops (`c_pdrop`), and
+/// the fixed drops and copy (`c_dgfix`).
+pub open spec fn c_dgram(load: nat) -> nat {
+    c_unit() * load + 4 * load + c_dgfix()
+}
+
+/// The receive pipeline's bound for a datagram of `n` bytes: `c_dgram(n)`, so `c_unit() + 4` per byte and
+/// `c_dgfix()`. Closed, so callers outside this module reason with `lemma_pipe_le` and `lemma_pipe_mono` only (a
+/// product with `c_unit()` slows their proofs).
+pub closed spec fn c_pipe(n: nat) -> nat {
+    c_dgram(n)
+}
+
+/// A cost within `c_dgram` of a load within `n` bytes is within `c_pipe(n)`.
 pub proof fn lemma_pipe_le(c: nat, load: nat, n: nat)
     requires
-        c <= c_unit() * load,
+        c <= c_dgram(load),
         load <= n,
     ensures
         c <= c_pipe(n),
 {
-    assert(c_unit() * load <= c_unit() * n) by (nonlinear_arith)
+    assert(c_unit() * load + 4 * load <= c_unit() * n + 4 * n) by (nonlinear_arith)
         requires
             load <= n,
     ;
@@ -112,7 +163,7 @@ pub proof fn lemma_pipe_mono(a: nat, b: nat)
     ensures
         c_pipe(a) <= c_pipe(b),
 {
-    assert(c_unit() * a <= c_unit() * b) by (nonlinear_arith)
+    assert(c_unit() * a + 4 * a <= c_unit() * b + 4 * b) by (nonlinear_arith)
         requires
             a <= b,
     ;
@@ -2759,8 +2810,11 @@ impl Connection {
             // per acknowledged frame, its SendStream or CRYPTO context's set update (`on_data_acked`, `on_reset_acked`,
             // O(log n) each, as many as the records acknowledged; carryover cat-C15-9b4), the CID, path and stream-entry
             // tables (Q13, Q14, Q17-Q20), the frame path's event pushes (Q21), a close (`close_internal`,
-            // `close_on_error`; Class B). TLS's step is quictls's (D14, 9b5).
-            r@ <= c_unit() * plains_load(crate::protect::plains_view(packets@)),
+            // `close_on_error`; Class B). TLS's step is quictls's (D14, 9b5). The packets' and frames' buffers it
+            // frees are charged here (`c_pdrop`, `c_dgfix`, fix round 2); their builders are the opening's (Q22-Q25).
+            r@ <= c_dgram(plains_load(crate::protect::plains_view(packets@))),
+            // Nothing handed over: nothing freed, nothing done.
+            packets@.len() == 0 && error is None ==> r@ == 0,
             // The positions held grow by at most the CRYPTO bytes of the packets, and not at all unless open.
             final(self).crypto_kept_g(*old(self), plains_crypto(crate::protect::plains_view(packets@))),
             !(old(self).phase_spec() is Open) ==> final(self).crypto_kept(*old(self)),
@@ -2780,6 +2834,14 @@ impl Connection {
                 && old(self).gate_spec(path, datagram_len, &h)) ==> final(self).phase_spec() is Open),
     {
         let ghost mut work: nat = 0;
+        let ghost pv = crate::protect::plains_view(packets@);
+        proof {
+            // Everything handed over is freed in this call, on every path: charged once, here.
+            lemma_pdrop(pv);
+            if packets@.len() > 0 || error is Some {
+                work = work + c_pdrop(pv) + c_dgfix();
+            }
+        }
         let known = match self.arrive(path, datagram_len, now) {
             Some(k) => k,
             None => return Ghost(work),
@@ -5188,6 +5250,39 @@ impl Connection {
         }
     }
 
+    /// `migrate` to a failed-MTU path: it stays inactive, and is probed again when due (split
+    /// from `migrate` for the rlimit).
+    #[verifier::spinoff_prover]
+    fn reprobe_failed(&mut self, path: PathId, now: u64, rand: &[u8; RAND_LEN])
+        requires
+            old(self).wf(),
+            old(self).paths.has(path),
+            old(self).paths.path(path).dcid is Some,
+        ensures
+            final(self).amp_grew(*old(self)),
+            final(self).wf(),
+            final(self).frames_kept(*old(self)),
+            final(self).paths.path(path).dcid is Some ==> forall|q: PathId|
+                #[trigger] final(self).paths.has(q) && q != path && final(self).paths.path(q).dcid
+                    == final(self).paths.path(path).dcid ==> final(self).paths.path(q).peer_used
+                    == final(self).paths.path(path).peer_used,
+            final(self).peer_used_kept(*old(self)),
+            final(self).paths.active_spec() == old(self).paths.active_spec(),
+    {
+        // The peer is sending from here: probe again, at most one a 3·PTO (§14.2 allows it).
+        if self.paths.needs_mtu_probe(path) {
+            self.challenge_path(path, now, rand);
+        }
+        proof {
+            assert forall|q: PathId|
+                #[trigger] self.paths.has(q) && q != path && self.paths.path(q).dcid
+                    == self.paths.path(path).dcid && self.paths.path(path).dcid is Some implies self.paths.path(q).peer_used
+                == self.paths.path(path).peer_used by {
+                assert(self.paths.has(path));
+            }
+        }
+    }
+
     //= https://www.rfc-editor.org/rfc/rfc9000#section-9
     //# If the peer
     //# violates this requirement, the endpoint MUST either drop the incoming
@@ -5285,18 +5380,7 @@ impl Connection {
         }
         // §14.2: never make a failed-MTU path active (3d final review I2).
         if self.paths.mtu_failed(path) {
-            // The peer is sending from here: probe again, at most one a 3·PTO (§14.2 allows it).
-            if self.paths.needs_mtu_probe(path) {
-                self.challenge_path(path, now, rand);
-            }
-            proof {
-                assert forall|q: PathId|
-                    #[trigger] self.paths.has(q) && q != path && self.paths.path(q).dcid
-                        == self.paths.path(path).dcid && self.paths.path(path).dcid is Some implies self.paths.path(q).peer_used
-                    == self.paths.path(path).peer_used by {
-                    assert(self.paths.has(path));
-                }
-            }
+            self.reprobe_failed(path, now, rand);
             return;
         }
         let old_path = self.paths.active();
@@ -9929,10 +10013,18 @@ impl Connection {
             }),
             final(self).tx_timers(*old(self), now),
     {
+        // `kept`'s quantifier meets every path term of `wf`: it is opened only for the two `ids`
+        // facts below, in `lemma_kept_steps` and in `lemma_path_timers`. The DCID and frame facts are the lemmas'.
+        hide(kept);
+        hide(Connection::wf_dcids);
+        hide(path_frames_ok);
         let ghost s0 = *self;
         let mut fs: Vec<Frame> = Vec::new();
         proof {
             assert(frames_view(fs@) =~= Seq::<SpecFrame>::empty());
+            assert(path_frames_ok(Seq::<SpecFrame>::empty())) by {
+                reveal(path_frames_ok);
+            }
         }
         //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
         //# On receiving a PATH_CHALLENGE frame, an endpoint MUST respond by
@@ -9952,6 +10044,12 @@ impl Connection {
             }
         }
         let ghost v1 = frames_view(fs@);
+        let ghost p1 = self.paths;
+        proof {
+            assert(p1.ids() == s0.paths.ids()) by {
+                reveal(kept);
+            }
+        }
         if let Some(y) = self.paths.take_challenge(q, padded, now) {
             let f = Frame::PathChallenge(y);
             let ghost g = f@;
@@ -9963,28 +10061,47 @@ impl Connection {
         }
         proof {
             assert(frames_view(fs@) =~= path_frames_of(s0.paths.path(q)));
+            lemma_kept_steps(s0.paths, p1, self.paths, q);
+            assert(self.paths.ids() == s0.paths.ids()) by {
+                reveal(kept);
+            }
             self.lemma_path_edit(s0, q);
             self.lemma_dcids_same(s0, q);
-            assert(self.tx_timers(s0, now)) by {
-                reveal(Connection::tx_timers);
-                assert forall|k: PacketKind| #[trigger] self.sent(k).inflight_spec() == s0.sent(k).inflight_spec() by {
-                    match k {
-                        PacketKind::Initial => {},
-                        PacketKind::Handshake => {},
-                        PacketKind::OneRtt => {},
-                    }
-                }
-                assert(self.amp_blocked_spec() || !s0.amp_blocked_spec());
-                assert forall|r: PathId|
-                    #[trigger] self.paths.has(r) && timed(self.paths.path(r)) implies s0.paths.has(r) && (self.paths.path(r).challenge
-                        == s0.paths.path(r).challenge && timed(s0.paths.path(r)) || now <= self.paths.path(r).challenge.unwrap().1) by {
-                    if r != q {
-                        assert(self.paths.path(r) == s0.paths.path(r));
-                    }
-                }
-            }
+            self.lemma_path_timers(s0, q, now);
         }
         fs
+    }
+
+    /// `take_path_frames`'s timers: only path `q`'s challenge moved, to `now` (split from
+    /// `take_path_frames` for the rlimit).
+    proof fn lemma_path_timers(&self, s0: Connection, q: PathId, now: u64)
+        requires
+            *self == (Connection { paths: self.paths, ..s0 }),
+            kept(s0.paths, self.paths, q),
+            s0.paths.has(q),
+            s0.paths.path(q).owed ==> self.paths.path(q).challenge is Some && self.paths.path(q).challenge.unwrap().1 == now,
+            !s0.paths.path(q).owed ==> self.paths.path(q).challenge == s0.paths.path(q).challenge && self.paths.path(q).owed == s0.paths.path(q).owed,
+            self.paths.path(q).state == s0.paths.path(q).state,
+            self.paths.path(q).budget == s0.paths.path(q).budget,
+        ensures
+            self.tx_timers(s0, now),
+    {
+        reveal(Connection::tx_timers);
+        assert(self.amp_blocked_spec() || !s0.amp_blocked_spec());
+        assert forall|k: PacketKind| #[trigger] self.sent(k).inflight_spec() == s0.sent(k).inflight_spec() by {
+            match k {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
+        assert forall|r: PathId|
+            #[trigger] self.paths.has(r) && timed(self.paths.path(r)) implies s0.paths.has(r) && (self.paths.path(r).challenge
+                == s0.paths.path(r).challenge && timed(s0.paths.path(r)) || now <= self.paths.path(r).challenge.unwrap().1) by {
+            if r != q {
+                assert(self.paths.path(r) == s0.paths.path(r));
+            }
+        }
     }
 
     /// The 1-RTT packet of `fs` on `q`, under `q`'s DCID. Its packet number is not taken yet.
@@ -10133,6 +10250,76 @@ impl Connection {
         }
     }
 
+    /// P12-P14's frame rules for a one-packet datagram of `q`'s owed PATH frames (split from
+    /// `send_path_datagram` for the rlimit).
+    proof fn lemma_path_frames_rules(&self, o: Connection, d: SpecOutDatagram, w: SpecOutPacket, q: PathId)
+        requires
+            d.packets == seq![w],
+            d.path == q,
+            w.kind is OneRtt,
+            w.frames == path_frames_of(o.paths.path(q)),
+            path_ok(o.paths.path(q)),
+            o.paths.path(q).responses.len() > 0 ==> self.paths.path(q).responses == o.paths.path(q).responses.drop_first()
+                && self.paths.path(q).responses_taken == o.paths.path(q).responses_taken.push(o.paths.path(q).responses[0]),
+            self.dcid_held(q, w.dcid),
+        ensures
+            only_path_frames(d),
+            o.challenges_recorded(d),
+            self.responses_echoed(o, d),
+            self.dcid_unshared(d),
+    {
+        let sf = path_frames_of(o.paths.path(q));
+        lemma_path_frames_of(o.paths.path(q));
+        assert forall|i: int, j: int| 0 <= i < d.packets.len() && 0 <= j < d.packets[i].frames.len() implies #[trigger] d.packets[i].frames[j]
+            is PathResponse || d.packets[i].frames[j] is PathChallenge by {
+            assert(d.packets[i] == w);
+            assert(w.frames[j] == sf[j]);
+        }
+        assert(o.challenges_recorded(d)) by {
+            assert forall|i: int, j: int| 0 <= i < d.packets.len() && 0 <= j < d.packets[i].frames.len() implies (#[trigger] d.packets[i].frames[j] matches SpecFrame::PathChallenge(
+                y,
+            ) ==> {
+                let a = o.paths.path(d.path);
+                &&& a.owed
+                &&& a.challenge is Some
+                &&& y == a.challenge.unwrap().0@
+            }) by {
+                assert(d.packets[i] == w);
+                assert(w.frames[j] == sf[j]);
+            }
+        }
+        assert(self.responses_echoed(o, d)) by {
+            assert forall|i1: int, j1: int, i2: int, j2: int|
+                0 <= i1 < d.packets.len() && 0 <= j1 < d.packets[i1].frames.len() && 0 <= i2 < d.packets.len() && 0 <= j2
+                    < d.packets[i2].frames.len() && #[trigger] d.packets[i1].frames[j1] is PathResponse
+                    && #[trigger] d.packets[i2].frames[j2] is PathResponse implies i1 == i2 && j1 == j2 by {
+                assert(d.packets[i1] == w && d.packets[i2] == w);
+                assert(w.frames[j1] == sf[j1] && w.frames[j2] == sf[j2]);
+            }
+            assert forall|i: int, j: int| 0 <= i < d.packets.len() && 0 <= j < d.packets[i].frames.len() implies (#[trigger] d.packets[i].frames[j] matches SpecFrame::PathResponse(
+                x,
+            ) ==> {
+                let a = o.paths.path(d.path);
+                let b = self.paths.path(d.path);
+                &&& a.responses.len() > 0
+                &&& x == a.responses[0]@
+                &&& b.responses == a.responses.drop_first()
+                &&& b.responses_taken == a.responses_taken.push(a.responses[0])
+            }) by {
+                assert(d.packets[i] == w);
+                assert(w.frames[j] == sf[j]);
+            }
+        }
+        assert(self.dcid_unshared(d)) by {
+            assert forall|i: int| 0 <= i < d.packets.len() && #[trigger] d.packets[i].kind is OneRtt implies self.dcid_held(
+                d.path,
+                d.packets[i].dcid,
+            ) by {
+                assert(d.packets[i] == w);
+            }
+        }
+    }
+
     /// Takes the frames owed on `q`, builds their packet and commits it. `q`'s budget was checked by
     /// `choose_path`, before anything was taken.
     #[verifier::spinoff_prover]
@@ -10232,58 +10419,12 @@ impl Connection {
                 assert(s1.paths.has(q));
             }
             self.lemma_held(q, w.dcid);
-            assert forall|i: int, j: int| 0 <= i < d@.packets.len() && 0 <= j < d@.packets[i].frames.len() implies #[trigger] d@.packets[i].frames[j]
-                is PathResponse || d@.packets[i].frames[j] is PathChallenge by {
-                assert(d@.packets[i] == w);
-                assert(w.frames[j] == sf[j]);
+            s0.paths.lemma_wf();
+            assert(path_ok(o.paths.path(q))) by {
+                assert(o.paths.has(q));
             }
-            assert(o.challenges_recorded(d@)) by {
-                s0.paths.lemma_wf();
-                assert(path_ok(o.paths.path(q))) by {
-                    assert(o.paths.has(q));
-                }
-                assert forall|i: int, j: int| 0 <= i < d@.packets.len() && 0 <= j < d@.packets[i].frames.len() implies (#[trigger] d@.packets[i].frames[j] matches SpecFrame::PathChallenge(
-                    y,
-                ) ==> {
-                    let a = o.paths.path(d@.path);
-                    &&& a.owed
-                    &&& a.challenge is Some
-                    &&& y == a.challenge.unwrap().0@
-                }) by {
-                    assert(d@.packets[i] == w);
-                    assert(w.frames[j] == sf[j]);
-                }
-            }
-            assert(self.responses_echoed(o, d@)) by {
-                assert forall|i1: int, j1: int, i2: int, j2: int|
-                    0 <= i1 < d@.packets.len() && 0 <= j1 < d@.packets[i1].frames.len() && 0 <= i2 < d@.packets.len() && 0 <= j2
-                        < d@.packets[i2].frames.len() && #[trigger] d@.packets[i1].frames[j1] is PathResponse
-                        && #[trigger] d@.packets[i2].frames[j2] is PathResponse implies i1 == i2 && j1 == j2 by {
-                    assert(d@.packets[i1] == w && d@.packets[i2] == w);
-                    assert(w.frames[j1] == sf[j1] && w.frames[j2] == sf[j2]);
-                }
-                assert forall|i: int, j: int| 0 <= i < d@.packets.len() && 0 <= j < d@.packets[i].frames.len() implies (#[trigger] d@.packets[i].frames[j] matches SpecFrame::PathResponse(
-                    x,
-                ) ==> {
-                    let a = o.paths.path(d@.path);
-                    let b = self.paths.path(d@.path);
-                    &&& a.responses.len() > 0
-                    &&& x == a.responses[0]@
-                    &&& b.responses == a.responses.drop_first()
-                    &&& b.responses_taken == a.responses_taken.push(a.responses[0])
-                }) by {
-                    assert(d@.packets[i] == w);
-                    assert(w.frames[j] == sf[j]);
-                }
-            }
-            assert(self.dcid_unshared(d@)) by {
-                assert forall|i: int| 0 <= i < d@.packets.len() && #[trigger] d@.packets[i].kind is OneRtt implies self.dcid_held(
-                    d@.path,
-                    d@.packets[i].dcid,
-                ) by {
-                    assert(d@.packets[i] == w);
-                }
-            }
+            assert(w.frames == sf);
+            self.lemma_path_frames_rules(o, d@, w, q);
         }
         d
     }
@@ -11682,6 +11823,33 @@ impl Connection {
         active_failed
     }
 
+    /// `fall_back`'s fresh DCID for `v` leaves no path on a retired CID: `wf` again (split from
+    /// `fall_back` for the rlimit).
+    proof fn lemma_fresh_wf(&self, s0: Connection, v: PathId)
+        requires
+            forall|q: PathId| #[trigger] s0.paths.has(q) ==> s0.not_stale(q),
+            self.wf_rest(),
+            self.dcids_weak(),
+            kept(s0.paths, self.paths, v),
+            forall|x: Seq<u8>| #[trigger]
+                peer_has_cid(self.peer_cids.entries(), x) == peer_has_cid(s0.peer_cids.entries(), x),
+            self.not_stale(v),
+        ensures
+            self.wf(),
+    {
+        assert forall|q: PathId| #[trigger] self.paths.has(q) implies self.not_stale(q) by {
+            if q != v {
+                assert(s0.paths.has(q));
+                assert(s0.not_stale(q));
+                if let Some(c) = self.paths.path(q).dcid {
+                    assert(peer_has_cid(s0.peer_cids.entries(), c));
+                    assert(peer_has_cid(self.peer_cids.entries(), c));
+                }
+            }
+        }
+        self.lemma_wf_of_weak();
+    }
+
     //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3.2
     //# To protect the connection from failing due to such a spurious
     //# migration, an endpoint MUST revert to using the last validated peer
@@ -11711,6 +11879,8 @@ impl Connection {
             final(self).clocks_kept(*old(self)),
             forall|q: PathId| #[trigger] final(self).paths.has(q) && timed(final(self).paths.path(q)) ==> timed(old(self).paths.path(q)) && final(self).paths.path(q).challenge == old(self).paths.path(q).challenge,
     {
+        // `fresh_dcid`'s `peer_used_kept` is never read here; unopened, its quantifier stays out.
+        hide(Connection::peer_used_kept);
         proof {
             self.paths.lemma_wf();
         }
@@ -11741,17 +11911,7 @@ impl Connection {
                 return;
             }
             proof {
-                assert forall|q: PathId| #[trigger] self.paths.has(q) implies self.not_stale(q) by {
-                    if q != v {
-                        assert(s0.paths.has(q));
-                        assert(s0.not_stale(q));
-                        if let Some(c) = self.paths.path(q).dcid {
-                            assert(peer_has_cid(s0.peer_cids.entries(), c));
-                            assert(peer_has_cid(self.peer_cids.entries(), c));
-                        }
-                    }
-                }
-                self.lemma_wf_of_weak();
+                self.lemma_fresh_wf(s0, v);
             }
         }
         let ghost s1 = *self;
@@ -13504,6 +13664,16 @@ proof fn lemma_one_packet(p: SpecOutPacket, k: PacketKind)
     assert(packets_len(s.drop_last()) == 0);
     assert(packets_pns(s.drop_last(), k) == Seq::<u64>::empty());
     assert(Seq::<u64>::empty().push(p.pn) =~= seq![p.pn]);
+}
+
+/// Two steps, each the identity or `kept` on `id`, are `kept` on `id`.
+proof fn lemma_kept_steps(a: Paths, b: Paths, c: Paths, id: PathId)
+    requires
+        b == a || kept(a, b, id),
+        c == b || kept(b, c, id),
+    ensures
+        kept(a, c, id),
+{
 }
 
 /// The frames owed on a path, in the order they go: its oldest response, then its owed challenge.

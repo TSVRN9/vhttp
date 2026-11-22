@@ -1216,7 +1216,7 @@ impl H3Server {
             final(self).conn_spec().out_log() == old(self).conn_spec().out_log(),
             final(self).started_spec() ==> final(self).conn_spec().events_spec().len() == 0,
             app_grew(old(app)@, final(app)@),
-            r@ <= c_unit() * crate::crypto_count::plains_load(crate::protect::plains_view(packets@)),
+            r@ <= c_dgram(crate::crypto_count::plains_load(crate::protect::plains_view(packets@))),
     {
         let Ghost(c) = self.conn.on_datagram(path, datagram_len, packets, error, now, rand);
         self.pump(app);

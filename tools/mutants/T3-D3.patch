@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index b23593b..b416a5b 100644
+index 474335e..24fa05d 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -3904,7 +3904,6 @@ impl Connection {
+@@ -3966,7 +3966,6 @@ impl Connection {
              lemma_backlog3(self.crx_i, self.crx_h, self.crx_1);
          }
          if let Err(c) = r {

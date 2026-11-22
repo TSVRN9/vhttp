@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index b23593b..9f8aa0d 100644
+index 474335e..021f147 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -3276,7 +3276,9 @@ impl Connection {
+@@ -3338,7 +3338,9 @@ impl Connection {
              self.lemma_path_event(s0, s0.hs_path, AmpEv::Validated);
          }
          let Ghost(c) = self.discard(PacketKind::Initial);

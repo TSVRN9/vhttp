@@ -570,7 +570,7 @@ pub proof fn theorem_long_header_roundtrip(
     let after = pnb + p + rest;
     let tail = t + (lv + after);
     let b = w + p + rest;
-    assert(b =~= spec_long_head(ty, dcid, scid, pn_len) + tail);
+    lemma_regroup(spec_long_head(ty, dcid, scid, pn_len), t, lv, pnb, p, rest);
     lemma_long_head(ty, dcid, scid, pn_len, tail);
     lemma_pn_roundtrip(pn, pn_len as nat);
     theorem_serialize_matches_rfc(l);
@@ -789,14 +789,138 @@ pub fn serialize_long_header(
                 },
             ),
 {
+    // Every byte fact is `lemma_long_header_out`'s: the parts stay opaque here.
+    hide(spec_long_head);
+    hide(spec_long_header_bytes);
+    hide(spec_varint);
+    hide(pn_be);
     let ghost start = out@;
     let start_len = out.len();
+    let initial = match ty {
+        LongType::Initial => true,
+        _ => false,
+    };
+    put_long_head(ty, dcid, scid, pn_len, out);
+    let ghost o1 = out@;
+    if initial {
+        put_varint(0, out);
+    }
+    let ghost o2 = out@;
+    put_varint(pn_len as u64 + payload_len as u64, out);
+    let pn_offset = out.len() - start_len;
+    put_pn(pn, pn_len, out);
+    proof {
+        lemma_long_header_out(ty, dcid@, scid@, pn, pn_len, payload_len as nat, start, o1, o2, out@);
+    }
+    pn_offset
+}
+
+/// `serialize_long_header`'s output, from its four appends: the head, the Token Length (Initial
+/// only), the Length and the packet number (split from `serialize_long_header` for the rlimit).
+proof fn lemma_long_header_out(
+    ty: LongType,
+    dcid: Seq<u8>,
+    scid: Seq<u8>,
+    pn: u64,
+    pn_len: u8,
+    payload_len: nat,
+    start: Seq<u8>,
+    o1: Seq<u8>,
+    o2: Seq<u8>,
+    out: Seq<u8>,
+)
+    requires
+        ty != LongType::ZeroRtt,
+        dcid.len() <= MAX_CID_LEN,
+        scid.len() <= MAX_CID_LEN,
+        1 <= pn_len <= 4,
+        pn_len + payload_len <= VARINT_MAX,
+        o1 == start + spec_long_head(ty, dcid, scid, pn_len),
+        ty == LongType::Initial ==> o2 == o1 + spec_varint(0),
+        ty != LongType::Initial ==> o2 == o1,
+        out == (o2 + spec_varint((pn_len + payload_len) as u64)) + pn_be(pn, pn_len as nat),
+    ensures
+        ({
+            let pn_offset = (o2 + spec_varint((pn_len + payload_len) as u64)).len() - start.len();
+            &&& out == start + spec_long_header_bytes(ty, dcid, scid, pn, pn_len, payload_len)
+            &&& pn_offset + pn_len == out.len() - start.len()
+            &&& spec_pn_len(out[start.len() as int]) == pn_len
+            &&& spec_reserved_bits_zero(out[start.len() as int], true)
+            &&& forall|p: Seq<u8>, rest: Seq<u8>|
+                p.len() == payload_len ==> #[trigger] rfc_long_header(
+                    out.skip(start.len() as int).add(p).add(rest),
+                ) == Some(
+                    SpecHeader::Long {
+                        ty,
+                        dcid,
+                        scid,
+                        token: Seq::empty(),
+                        pn_offset: pn_offset as nat,
+                        packet_end: (pn_offset + pn_len + payload_len) as nat,
+                    },
+                )
+        }),
+{
+    let h = spec_long_head(ty, dcid, scid, pn_len);
+    let tk = spec_token_field(ty);
+    let v = spec_varint((pn_len + payload_len) as u64);
+    let pb = pn_be(pn, pn_len as nat);
+    if ty == LongType::Initial {
+        lemma_serialize_bytes::<true>(0);
+        assert(spec_varint(0) =~= tk);
+    } else {
+        assert(o1 + tk =~= o1);
+    }
+    lemma_long_head(ty, dcid, scid, pn_len, Seq::<u8>::empty());
+    assert(h + Seq::<u8>::empty() =~= h);
+    lemma_cat4(start, h, tk, v, pb);
+    lemma_pn_roundtrip(pn, pn_len as nat);
+    lemma_long_header_parses(ty, dcid, scid, pn, pn_len, payload_len);
+    let c = (((h + tk) + v) + pb);
+    assert(c.len() - pn_len == ((start + h) + tk + v).len() - start.len());
+    bv_long_first_byte(long_type_code(ty), (pn_len - 1) as u8);
+}
+
+/// A long header, its payload and what follows, regrouped from the head on (split from
+/// `theorem_long_header_roundtrip` for the rlimit).
+proof fn lemma_regroup(h: Seq<u8>, t: Seq<u8>, lv: Seq<u8>, pnb: Seq<u8>, p: Seq<u8>, rest: Seq<u8>)
+    ensures
+        (((h + t) + lv) + pnb) + p + rest == h + (t + (lv + (pnb + p + rest))),
+{
+    assert((((h + t) + lv) + pnb) + p + rest =~= h + (t + (lv + (pnb + p + rest))));
+}
+
+/// `s` followed by four parts, regrouped (split from `serialize_long_header` for the rlimit).
+proof fn lemma_cat4(s: Seq<u8>, a: Seq<u8>, b: Seq<u8>, c: Seq<u8>, d: Seq<u8>)
+    requires
+        a.len() >= 1,
+    ensures
+        (s + (((a + b) + c) + d))[s.len() as int] == a[0],
+        (((s + a) + b) + c) + d == s + (((a + b) + c) + d),
+        (s + (((a + b) + c) + d)).skip(s.len() as int) == ((a + b) + c) + d,
+        (s + (((a + b) + c) + d)).len() == s.len() + a.len() + b.len() + c.len() + d.len(),
+{
+    assert((((s + a) + b) + c) + d =~= s + (((a + b) + c) + d));
+    assert((s + (((a + b) + c) + d)).skip(s.len() as int) =~= ((a + b) + c) + d);
+}
+
+/// Appends `spec_long_head`: the first byte, Version, and both CIDs with their lengths (split
+/// from `serialize_long_header` for the rlimit).
+#[verifier::spinoff_prover]
+fn put_long_head(ty: LongType, dcid: &[u8], scid: &[u8], pn_len: u8, out: &mut Vec<u8>)
+    requires
+        ty != LongType::ZeroRtt,
+        dcid.len() <= MAX_CID_LEN,
+        scid.len() <= MAX_CID_LEN,
+        1 <= pn_len <= 4,
+    ensures
+        final(out)@ == old(out)@ + spec_long_head(ty, dcid@, scid@, pn_len),
+{
     let code: u8 = match ty {
         LongType::Initial => 0,
         LongType::ZeroRtt => 1,
         LongType::Handshake => 2,
     };
-    let initial = code == 0;
     proof {
         bv_long_first_byte(code, (pn_len - 1) as u8);
     }
@@ -809,23 +933,7 @@ pub fn serialize_long_header(
     put_slice(dcid, out);
     out.push(scid.len() as u8);
     put_slice(scid, out);
-    if initial {
-        put_varint(0, out);
-        proof {
-            lemma_serialize_bytes::<true>(0);
-        }
-    }
-    put_varint(pn_len as u64 + payload_len as u64, out);
-    let pn_offset = out.len() - start_len;
-    put_pn(pn, pn_len, out);
-    proof {
-        let w = spec_long_header_bytes(ty, dcid@, scid@, pn, pn_len, payload_len as nat);
-        assert(out@ =~= start + w);
-        assert(out@.skip(start.len() as int) =~= w);
-        lemma_pn_roundtrip(pn, pn_len as nat);
-        lemma_long_header_parses(ty, dcid@, scid@, pn, pn_len, payload_len as nat);
-    }
-    pn_offset
+    assert(out@ =~= old(out)@ + spec_long_head(ty, dcid@, scid@, pn_len));
 }
 
 /// `theorem_long_header_roundtrip` for every payload of `payload_len` bytes (split out of
