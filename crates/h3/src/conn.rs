@@ -4516,6 +4516,7 @@ impl H3Conn {
             old(self).closed() || stream_id % 4 != 2 ==> final(self).uni_seen() == old(
                 self,
             ).uni_seen(),
+            // `removed_fields` is not bounded by the call's input: N6, owned by carryover cat-C15-teardown (9b4).
             r@ <= c_in() * (data@.len() + 1) + c_map() * (ht_of(*old(self), stream_id) + 1) + c_frame()
                 * old(self).buffered_of(stream_id) + c_free() * old(self).removed_fields(stream_id),
     {
@@ -5246,6 +5247,7 @@ impl H3Conn {
             ) == Seq::<SpecOutput>::empty() && !final(self).closed(),
             final(self).highest_accepted() == old(self).highest_accepted(),
             final(self).uni_seen() == old(self).uni_seen(),
+            // `removed_fields` is not bounded by the call's input: N6, owned by carryover cat-C15-teardown (9b4).
             r@ <= c_in() + c_map() * (ht_of(*old(self), stream_id) + 1) + c_free() * old(self).removed_fields(
                 stream_id,
             ),
@@ -5390,6 +5392,7 @@ impl H3Conn {
             final(self).req_hist(stream_id) == old(self).req_hist(stream_id),
             final(self).highest_accepted() == old(self).highest_accepted(),
             final(self).uni_seen() == old(self).uni_seen(),
+            // `removed_fields` is not bounded by the call's input: N6, owned by carryover cat-C15-teardown (9b4).
             r@ <= c_in() + c_map() * (ht_of(*old(self), stream_id) + 1) + c_free() * old(self).removed_fields(
                 stream_id,
             ),
@@ -5495,6 +5498,8 @@ impl H3Conn {
             lemma_tables_open(c0.reqs, c0.unis, c0.rhist@, c0.uhist@, c0.rstate@, c0.uset@);
             lemma_req_get(tv(c0.reqs), c0.rhist@, c0.rstate@, stream_id);
         }
+        // `send_response` is the outbound side, not an input call: its costs (this lookup, `end_send`) are uncharged,
+        // carryover cat-C15-9b4's (sweep H11).
         let (g, Ghost(_cg)) = tbl_get(&self.reqs, stream_id);
         let (head, send_open, is_head) = match g {
             Some(e) => (e.head, e.send_open, e.is_head),

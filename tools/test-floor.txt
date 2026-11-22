@@ -3,7 +3,7 @@ byteq 8
 crypto 79
 ctcore 73
 ctmir 51
-h3 81
+h3 105
 quic 500
 quictls 35
 server 36

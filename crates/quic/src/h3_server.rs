@@ -941,6 +941,8 @@ impl H3Server {
         let mut outs: byteq::capvec::CapVec<Output> = byteq::capvec::CapVec::new(MAX_OUTS);
         let ghost o0 = outs@;
         let mut aborted: Option<u64> = None;
+        // Each h3 call returns its cost (O(d + log n), h3's entry points); `feed` charges none of it: h3_server's input
+        // path, its pending queue included, is carryover cat-C15-9b4's (sweep Q9-Q12).
         match e {
             StreamEvent::Data { id, data, fin } => {
                 self.h3.on_stream_data(id, data.as_slice(), fin, &mut outs);
