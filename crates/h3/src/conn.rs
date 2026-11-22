@@ -5101,31 +5101,9 @@ impl H3Conn {
                     );
                     work = work + ca;
                 }
-                if !fin {
-                    let b = Box::new(e);
-                    proof {
-                        lemma_uni_set(m0, c0.uhist@, c0.uset@, b);
-                    }
-                    let (j, Ghost(cp)) = uni_put_w(lo, b, hi, Ghost(h));
-                    self.unis = j;
-                    self.uset = Ghost(self.uset@.insert(id));
-                    proof {
-                        // The new box.
-                        work = work + cp + 1;
-                        lemma_map_put(m0, id, b);
-                        lemma_tables_close(self.reqs, self.unis, self.rhist@, self.uhist@, self.rstate@, self.uset@);
-                    }
-                } else {
-                    // Only a stream of unknown type ends cleanly; it is forgotten.
-                    let (j, Ghost(cj)) = tbl_join(lo, hi, Ghost(id), Ghost(2), Ghost(h));
-                    self.unis = j;
-                    self.uset = Ghost(self.uset@.remove(id));
-                    proof {
-                        lemma_uni_del(m0, c0.uhist@, self.uhist@, c0.uset@, id);
-                        lemma_tables_close(self.reqs, self.unis, self.rhist@, self.uhist@, self.rstate@, self.uset@);
-                        // `e` is dropped here: its queue's buffers.
-                        work = work + cj + uni_frees();
-                    }
+                let Ghost(cs) = self.uni_store(e, lo, hi, fin, Ghost(m0), Ghost(c0.uhist@), Ghost(h));
+                proof {
+                    work = work + cs;
                 }
             },
         }
@@ -5134,6 +5112,78 @@ impl H3Conn {
             work = work + 1 + evs@.len();
             lemma_uni_cost(work, ct, cu, h, data@.len(), e_old.stream.buffered(), evs@.len());
             lemma_uni_done(c0, *self, *old(out), *out, id, data@, fin, e_old, e, ev0, evs, r, cu);
+        }
+        Ghost(work)
+    }
+
+    /// `uni_data`'s table update once the stream's call succeeded: `e` put back between `lo` and `hi`, or, at its FIN,
+    /// forgotten (only a stream of unknown type ends cleanly): the halves joined and `e` dropped.
+    fn uni_store(
+        &mut self,
+        e: UniEntry,
+        lo: Tree<Box<UniEntry>>,
+        hi: Tree<Box<UniEntry>>,
+        fin: bool,
+        Ghost(m0): Ghost<Map<u64, Box<UniEntry>>>,
+        Ghost(h0): Ghost<Map<u64, UHist>>,
+        Ghost(h): Ghost<nat>,
+    ) -> (r: Ghost<nat>)
+        requires
+            tbl(lo, 2),
+            tbl(hi, 2),
+            keys_lt(lo, e.id),
+            keys_gt(hi, e.id),
+            e.id % 4 == 2,
+            ht(lo) <= h,
+            ht(hi) <= h,
+            tv(lo).union_prefer_right(tv(hi)) == m0.remove(e.id),
+            unis_ok(m0, h0),
+            uni_dom(m0, old(self).uset@),
+            old(self).uhist@ == h0.insert(e.id, uni_hist_of(e)),
+            !fin ==> e.stream.wf() && !e.stream.done(),
+            tbl(old(self).reqs, 0),
+            reqs_ok(tv(old(self).reqs), old(self).rhist@),
+            req_dom(tv(old(self).reqs), old(self).rstate@),
+        ensures
+            tables_ok(final(self).reqs, final(self).unis, final(self).rhist@, final(self).uhist@, final(self).rstate@, final(self).uset@),
+            *final(self) == (H3Conn { unis: final(self).unis, uset: final(self).uset, ..*old(self) }),
+            final(self).uset@ == (if fin {
+                old(self).uset@.remove(e.id)
+            } else {
+                old(self).uset@.insert(e.id)
+            }),
+            r@ <= c_join2() * (h + 1) + 2,
+    {
+        let id = e.id;
+        let ghost mut work: nat = 0;
+        proof {
+            assert(c_join() == 6 && c_join2() == 13);
+        }
+        if !fin {
+            let b = Box::new(e);
+            proof {
+                lemma_uni_set(m0, h0, self.uset@, b);
+            }
+            let (j, Ghost(cp)) = uni_put_w(lo, b, hi, Ghost(h));
+            self.unis = j;
+            self.uset = Ghost(self.uset@.insert(id));
+            proof {
+                // The new box.
+                work = work + cp + 1;
+                lemma_map_put(m0, id, b);
+                lemma_tables_close(self.reqs, self.unis, self.rhist@, self.uhist@, self.rstate@, self.uset@);
+            }
+        } else {
+            let ghost us0 = self.uset@;
+            let (j, Ghost(cj)) = tbl_join(lo, hi, Ghost(id), Ghost(2), Ghost(h));
+            self.unis = j;
+            self.uset = Ghost(self.uset@.remove(id));
+            proof {
+                lemma_uni_del(m0, h0, self.uhist@, us0, id);
+                lemma_tables_close(self.reqs, self.unis, self.rhist@, self.uhist@, self.rstate@, self.uset@);
+                // `e` is dropped here: its queue's buffers.
+                work = work + cj + uni_frees();
+            }
         }
         Ghost(work)
     }
