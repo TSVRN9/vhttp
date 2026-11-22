@@ -635,6 +635,8 @@ pub fn pad_datagram(d: &mut OutDatagram, target: usize)
                 la,
             ),
 {
+    // The frames' byte length is never unfolded here: it is one opaque term in every bound.
+    hide(frames_len);
     let ghost s = old(d)@.packets;
     proof {
         assert forall|k: int| 0 <= k < d.packets.len() implies out_packet_sized(
