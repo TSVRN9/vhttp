@@ -3057,6 +3057,33 @@ proof fn lemma_uni_cost(work: nat, ct: nat, cu: nat, h: nat, d: nat, b: nat, n: 
 {
 }
 
+/// What `uni_data` reads of `UniStream::on_data`'s ensures (`uni::fed`), the events buffer `e0` empty before.
+proof fn lemma_fed_facts(
+    s0: UniStream,
+    s1: UniStream,
+    data: Seq<u8>,
+    fin: bool,
+    seen0: SeenUni,
+    seen1: SeenUni,
+    e0: CapVec<UniEvent>,
+    e1: CapVec<UniEvent>,
+    r: Result<(), u64>,
+    cost: nat,
+)
+    requires
+        uni::fed(s0, s1, data, fin, seen0, seen1, e0, e1, r, cost),
+        e0@ == Seq::<UniEvent>::empty(),
+    ensures
+        s1.wf(),
+        s1.done() == (r is Err || fin),
+        e1.wf(),
+        e1.cap() == e0.cap(),
+        cost <= uni::c_uni() * (data.len() + 16) + uni::c_uni_frame() * s0.buffered(),
+        2 * uni::ev_pairs(uni::views(e1@)) <= data.len() + s0.buffered(),
+{
+    assert(e1@.skip(0) =~= e1@);
+}
+
 /// What `uni_data` ensures, its cost aside.
 #[verifier::opaque]
 spec fn uni_done(c0: H3Conn, c1: H3Conn, o0: CapVec<Output>, o1: CapVec<Output>, id: u64, data: Seq<u8>, fin: bool) -> bool {
@@ -3461,6 +3488,50 @@ spec fn tables_ok(
     &&& unis_ok(tv(unis), uhist)
     &&& req_dom(tv(reqs), rstate)
     &&& uni_dom(tv(unis), uset)
+}
+
+/// `tables_ok`'s parts.
+proof fn lemma_tables_open(
+    reqs: Tree<Box<ReqEntry>>,
+    unis: Tree<Box<UniEntry>>,
+    rhist: Map<u64, RHist>,
+    uhist: Map<u64, UHist>,
+    rstate: Map<u64, ReqState>,
+    uset: Set<u64>,
+)
+    requires
+        tables_ok(reqs, unis, rhist, uhist, rstate, uset),
+    ensures
+        tbl(reqs, 0),
+        tbl(unis, 2),
+        reqs_ok(tv(reqs), rhist),
+        unis_ok(tv(unis), uhist),
+        req_dom(tv(reqs), rstate),
+        uni_dom(tv(unis), uset),
+{
+    reveal(tables_ok);
+}
+
+/// `tables_ok` from its parts.
+proof fn lemma_tables_close(
+    reqs: Tree<Box<ReqEntry>>,
+    unis: Tree<Box<UniEntry>>,
+    rhist: Map<u64, RHist>,
+    uhist: Map<u64, UHist>,
+    rstate: Map<u64, ReqState>,
+    uset: Set<u64>,
+)
+    requires
+        tbl(reqs, 0),
+        tbl(unis, 2),
+        reqs_ok(tv(reqs), rhist),
+        unis_ok(tv(unis), uhist),
+        req_dom(tv(reqs), rstate),
+        uni_dom(tv(unis), uset),
+    ensures
+        tables_ok(reqs, unis, rhist, uhist, rstate, uset),
+{
+    reveal(tables_ok);
 }
 
 /// The entry points' cost per byte given, and their constant: the request path's, the costliest. `feed_req` and the
@@ -4136,7 +4207,6 @@ impl H3Conn {
     /// Sends GOAWAY with `goaway_id`: one past the highest request accepted (0 if none), never
     /// more than an earlier GOAWAY. Opens the control stream first if needed, so SETTINGS stays
     /// its first frame.
-    #[verifier::spinoff_prover]
     pub fn shutdown(&mut self, out: &mut Vec<Output>)
         requires
             old(self).wf(),
@@ -4154,16 +4224,6 @@ impl H3Conn {
             final(self).highest_accepted() == old(self).highest_accepted(),
             final(self).uni_seen() == old(self).uni_seen(),
     {
-        hide(ctrl_preamble);
-        hide(goaway_frames);
-        hide(spec_frame_bytes);
-        hide(spec_varint);
-        hide(writes_on);
-        hide(step);
-        hide(frame);
-        hide(shutdown_outs);
-        hide(start_outs);
-        hide(goaway_id);
         if self.closed {
             proof {
                 Self::lemma_shutdown_closed(*self, out@);
@@ -4275,15 +4335,10 @@ impl H3Conn {
             c2.highest_accepted() == c0.highest_accepted(),
             c2.uni_seen() == c0.uni_seen(),
     {
-        hide(ctrl_preamble);
-        hide(goaway_frames);
-        hide(spec_frame_bytes);
-        hide(spec_varint);
         Self::lemma_step_trans(c0, c1, c2, o0, o1, o2);
         lemma_added_trans(o0, o1, o2);
         assert(added(o0, o2) =~= shutdown_outs(c0));
         assert(c2.ctrl_bytes() == ctrl_preamble() + goaway_frames(c2.goaways()));
-        reveal(ctrl_preamble);
         assert(ctrl_preamble().len() > 0);
     }
 
@@ -4507,7 +4562,7 @@ impl H3Conn {
         let ghost c0 = *self;
         let ghost mut work: nat = 0;
         proof {
-            reveal(tables_ok);
+            lemma_tables_open(c0.reqs, c0.unis, c0.rhist@, c0.uhist@, c0.rstate@, c0.uset@);
         }
         let (g, Ghost(cg)) = tbl_get(&self.reqs, id);
         let rx = match g {
@@ -4561,7 +4616,7 @@ impl H3Conn {
         let ghost m0 = tv(self.reqs);
         let ghost h = ht(self.reqs);
         proof {
-            reveal(tables_ok);
+            lemma_tables_open(c0.reqs, c0.unis, c0.rhist@, c0.uhist@, c0.rstate@, c0.uset@);
             reveal(req_done);
             lemma_req_get(m0, c0.rhist@, c0.rstate@, id);
             assert(c_join() == 6 && c_join2() == 13);
@@ -4620,6 +4675,7 @@ impl H3Conn {
             }
         }
         proof {
+            lemma_tables_close(self.reqs, self.unis, self.rhist@, self.uhist@, self.rstate@, self.uset@);
             Self::lemma_idle(*self, out@);
         }
         Ghost(work)
@@ -4627,7 +4683,6 @@ impl H3Conn {
 
     /// `request_data` for a stream still received: its entry is taken out, its machine fed, and the entry put back
     /// unless the request has ended both ways.
-    #[verifier::spinoff_prover]
     fn request_feed(&mut self, id: u64, data: &[u8], fin: bool, out: &mut CapVec<Output>) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
@@ -4648,7 +4703,7 @@ impl H3Conn {
         let ghost h = ht(self.reqs);
         let ghost mut work: nat = 0;
         proof {
-            reveal(tables_ok);
+            lemma_tables_open(c0.reqs, c0.unis, c0.rhist@, c0.uhist@, c0.rstate@, c0.uset@);
             lemma_req_get(m0, c0.rhist@, c0.rstate@, id);
             assert(c_join() == 6 && c_join2() == 13);
         }
@@ -4707,13 +4762,90 @@ impl H3Conn {
             }
         }
         proof {
+            lemma_tables_close(self.reqs, self.unis, self.rhist@, self.uhist@, self.rstate@, self.uset@);
             lemma_feed_done(c0, *self, *old(out), *out, id, data@, fin, e0, e, closing);
         }
         Ghost(work)
     }
 
+    /// `request_data` for a new stream at or above our GOAWAY ID: rejected, and kept (not received, not answerable)
+    /// until the peer's FIN or reset.
+    fn request_reject(&mut self, id: u64, Ghost(data): Ghost<Seq<u8>>, fin: bool, out: &mut CapVec<Output>) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            !old(self).closed,
+            id % 4 == 0,
+            !old(self).req_known(id),
+            rejected_id(*old(self), id),
+            old(out).wf(),
+            old(out)@.len() + MAX_OUTS <= old(out).cap(),
+        ensures
+            req_done(*old(self), *final(self), *old(out), *final(out), id, data, fin),
+            r@ <= c_take() * (ht(old(self).reqs) + 1) + c_join() * (ht(old(self).reqs) + 1) + 3,
+    {
+        let ghost c0 = *self;
+        let ghost o0 = out@;
+        let ghost m0 = tv(self.reqs);
+        let ghost h = ht(self.reqs);
+        let ghost mut work: nat = 0;
+        proof {
+            lemma_tables_open(c0.reqs, c0.unis, c0.rhist@, c0.uhist@, c0.rstate@, c0.uset@);
+            lemma_added_refl(o0);
+            lemma_req_get(m0, c0.rhist@, c0.rstate@, id);
+            assert(c_join() == 6);
+        }
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-5.2
+        //# Upon sending a GOAWAY frame, the endpoint
+        //# SHOULD explicitly cancel (see Sections 4.1.1 and 7.2.3) any requests
+        //# or pushes that have identifiers greater than or equal to the one
+        //# indicated, in order to clean up transport state for the affected
+        //# streams.
+        reject(id, fin, out);
+        proof {
+            // `reject`'s outputs.
+            work = work + 2;
+        }
+        if !fin {
+            // Kept until the peer's FIN or reset, so data in flight is ignored.
+            let e = ReqEntry {
+                id,
+                stream: RequestStream::new(),
+                rx_open: false,
+                fin_seen: false,
+                head: false,
+                is_head: false,
+                send_open: false,
+                trailers: Vec::new(),
+            };
+            let b = Box::new(e);
+            let t = self.reqs.take();
+            let (lo, _none, hi, Ghost(ct)) = req_take_w(t, id);
+            proof {
+                lemma_req_set(m0, c0.rhist@, c0.rstate@, b);
+                lemma_map_absent(m0, id);
+            }
+            let (j, Ghost(cp)) = req_put_w(lo, b, hi, Ghost(h));
+            self.reqs = j;
+            self.rhist = Ghost(self.rhist@.insert(id, req_hist_of(e)));
+            self.rstate = Ghost(self.rstate@.insert(id, state_of(e)));
+            proof {
+                // The new box.
+                work = work + ct + cp + 1;
+                lemma_map_put(m0, id, b);
+            }
+        }
+        proof {
+            lemma_tables_close(self.reqs, self.unis, self.rhist@, self.uhist@, self.rstate@, self.uset@);
+            reveal(req_done);
+            assert(rejected_id(c0, id));
+            lemma_writes_none(added(o0, out@), 3);
+            assert(self.ctrl@ + Seq::<u8>::empty() =~= self.ctrl@);
+            assert(self.goaways@.take(self.goaways@.len() as int) =~= self.goaways@);
+        }
+        Ghost(work)
+    }
+
     /// `request_data` for a stream with no entry yet.
-    #[verifier::spinoff_prover]
     fn request_data_new(&mut self, id: u64, data: &[u8], fin: bool, out: &mut CapVec<Output>) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
@@ -4732,60 +4864,13 @@ impl H3Conn {
         let ghost h = ht(self.reqs);
         let ghost mut work: nat = 0;
         proof {
-            reveal(tables_ok);
+            lemma_tables_open(c0.reqs, c0.unis, c0.rhist@, c0.uhist@, c0.rstate@, c0.uset@);
             lemma_added_refl(o0);
             lemma_req_get(m0, c0.rhist@, c0.rstate@, id);
         }
         if let Some(g) = self.goaway {
             if id >= g {
-                //= https://www.rfc-editor.org/rfc/rfc9114#section-5.2
-                //# Upon sending a GOAWAY frame, the endpoint
-                //# SHOULD explicitly cancel (see Sections 4.1.1 and 7.2.3) any requests
-                //# or pushes that have identifiers greater than or equal to the one
-                //# indicated, in order to clean up transport state for the affected
-                //# streams.
-                reject(id, fin, out);
-                proof {
-                    // `reject`'s outputs.
-                    work = work + 2;
-                }
-                if !fin {
-                    // Kept until the peer's FIN or reset, so data in flight is ignored.
-                    let e = ReqEntry {
-                        id,
-                        stream: RequestStream::new(),
-                        rx_open: false,
-                        fin_seen: false,
-                        head: false,
-                        is_head: false,
-                        send_open: false,
-                        trailers: Vec::new(),
-                    };
-                    let b = Box::new(e);
-                    let t = self.reqs.take();
-                    let (lo, _none, hi, Ghost(ct)) = req_take_w(t, id);
-                    proof {
-                        lemma_req_set(m0, c0.rhist@, c0.rstate@, b);
-                        lemma_map_absent(m0, id);
-                    }
-                    let (j, Ghost(cp)) = req_put_w(lo, b, hi, Ghost(h));
-                    self.reqs = j;
-                    self.rhist = Ghost(self.rhist@.insert(id, req_hist_of(e)));
-                    self.rstate = Ghost(self.rstate@.insert(id, state_of(e)));
-                    proof {
-                        // The new box.
-                        work = work + ct + cp + 1;
-                        lemma_map_put(m0, id, b);
-                    }
-                }
-                proof {
-                    reveal(req_done);
-                    assert(rejected_id(c0, id));
-                    lemma_writes_none(added(o0, out@), 3);
-                    assert(self.ctrl@ + Seq::<u8>::empty() =~= self.ctrl@);
-                    assert(self.goaways@.take(self.goaways@.len() as int) =~= self.goaways@);
-                }
-                return Ghost(work);
+                return self.request_reject(id, Ghost(data@), fin, out);
             }
         }
         proof {
@@ -4853,6 +4938,7 @@ impl H3Conn {
             }
         }
         proof {
+            lemma_tables_close(self.reqs, self.unis, self.rhist@, self.uhist@, self.rstate@, self.uset@);
             lemma_new_done(c0, *self, *old(out), *out, id, data@, fin, e0, e, closing);
         }
         Ghost(work)
@@ -4860,7 +4946,6 @@ impl H3Conn {
 
     /// `on_stream_data` on a peer uni stream: its entry (or a new one) is taken out, its machine fed, and the entry put
     /// back unless the stream ended.
-    #[verifier::spinoff_prover]
     fn uni_data(&mut self, id: u64, data: &[u8], fin: bool, out: &mut CapVec<Output>) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
@@ -4873,13 +4958,13 @@ impl H3Conn {
             r@ <= c_ud() * (data@.len() + 16) + uni::c_uni_frame() * old(self).buffered_of(id) + old(self).buffered_of(id)
                 + c_take() * (ht(old(self).unis) + 1) + c_join2() * (ht(old(self).unis) + 1),
     {
-        hide(uni::rfc_uni_stream);
+        hide(uni::fed);
         let ghost c0 = *self;
         let ghost m0 = tv(self.unis);
         let ghost h = ht(self.unis);
         let ghost mut work: nat = 0;
         proof {
-            reveal(tables_ok);
+            lemma_tables_open(c0.reqs, c0.unis, c0.rhist@, c0.uhist@, c0.rstate@, c0.uset@);
             lemma_uni_get(m0, c0.uhist@, c0.uset@, id);
             assert(c_join() == 6 && c_join2() == 13);
         }
@@ -4899,8 +4984,8 @@ impl H3Conn {
         let (r, Ghost(cu)) = e.stream.on_data(data, fin, &mut self.seen, &mut evs);
         self.uhist = Ghost(self.uhist@.insert(id, uni_hist_of(e)));
         proof {
+            lemma_fed_facts(e_old.stream, e.stream, data@, fin, c0.seen, self.seen, ev0, evs, r, cu);
             evs.lemma_wf();
-            assert(evs@.skip(0) =~= evs@);
             // The box freed, and the event buffer's allocation.
             work = work + ct + 2 + cu;
         }
@@ -4939,6 +5024,7 @@ impl H3Conn {
                         // The new box.
                         work = work + cp + 1;
                         lemma_map_put(m0, id, b);
+                        lemma_tables_close(self.reqs, self.unis, self.rhist@, self.uhist@, self.rstate@, self.uset@);
                     }
                 } else {
                     // Only a stream of unknown type ends cleanly; it is forgotten.
@@ -4947,6 +5033,7 @@ impl H3Conn {
                     self.uset = Ghost(self.uset@.remove(id));
                     proof {
                         lemma_uni_del(m0, c0.uhist@, self.uhist@, c0.uset@, id);
+                        lemma_tables_close(self.reqs, self.unis, self.rhist@, self.uhist@, self.rstate@, self.uset@);
                         // `e` is dropped here: its queue's buffers.
                         work = work + cj + uni_frees();
                     }
@@ -5057,7 +5144,7 @@ impl H3Conn {
         let ghost h = ht(self.reqs);
         let ghost mut work: nat = 0;
         proof {
-            reveal(tables_ok);
+            lemma_tables_open(c0.reqs, c0.unis, c0.rhist@, c0.uhist@, c0.rstate@, c0.uset@);
             lemma_req_get(m0, c0.rhist@, c0.rstate@, id);
             assert(c_join() == 6 && c_join2() == 13);
         }
@@ -5092,6 +5179,9 @@ impl H3Conn {
                 // `e` is dropped here.
                 work = work + cj + req_frees(e);
             }
+        }
+        proof {
+            lemma_tables_close(self.reqs, self.unis, self.rhist@, self.uhist@, self.rstate@, self.uset@);
         }
         Ghost(work)
     }
@@ -5170,7 +5260,7 @@ impl H3Conn {
             return Ghost(0);
         }
         proof {
-            reveal(tables_ok);
+            lemma_tables_open(c0.reqs, c0.unis, c0.rhist@, c0.uhist@, c0.rstate@, c0.uset@);
             assert(c_get() == 1 && c_free() == 1 && c_join() == 6 && c_join2() == 13);
         }
         if stream_id % 4 == 2 {
@@ -5250,6 +5340,7 @@ impl H3Conn {
             }
         }
         proof {
+            lemma_tables_close(self.reqs, self.unis, self.rhist@, self.uhist@, self.rstate@, self.uset@);
             if added(o0, out@).len() == 0 {
                 Self::lemma_idle(c0, o0);
             }
@@ -5308,7 +5399,7 @@ impl H3Conn {
             return Ghost(0);
         }
         proof {
-            reveal(tables_ok);
+            lemma_tables_open(c0.reqs, c0.unis, c0.rhist@, c0.uhist@, c0.rstate@, c0.uset@);
             lemma_req_get(tv(c0.reqs), c0.rhist@, c0.rstate@, stream_id);
             lemma_req_get(tv(c0.reqs), c0.rhist@, c0.rstate@, 3);
             assert(c_get() == 1 && c_free() == 1);
@@ -5390,7 +5481,6 @@ impl H3Conn {
         hide(rfc_frame_header);
         hide(response_wire);
         let ghost c0 = *self;
-        reveal(tables_ok);
         let ghost o0 = out@;
         proof {
             Self::lemma_idle(*self, out@);
@@ -5399,6 +5489,7 @@ impl H3Conn {
             return Err(());
         }
         proof {
+            lemma_tables_open(c0.reqs, c0.unis, c0.rhist@, c0.uhist@, c0.rstate@, c0.uset@);
             lemma_req_get(tv(c0.reqs), c0.rhist@, c0.rstate@, stream_id);
         }
         let (g, Ghost(_cg)) = tbl_get(&self.reqs, stream_id);
