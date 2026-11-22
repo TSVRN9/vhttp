@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index b23593b..8ffe06b 100644
+index 1491ee3..7b9a3cb 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -6045,7 +6045,6 @@ impl Connection {
+@@ -6067,7 +6067,6 @@ impl Connection {
              ) ==> crypto_drained(*final(self), level),
              old(self).crypto_end_spec(level) <= old(self).crypto_base_spec(level) ==> final(out)@.len() == 0,
              // The read hands over exactly the bytes its offset passes; no other level's moves.
