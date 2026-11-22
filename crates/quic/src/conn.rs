@@ -9951,8 +9951,8 @@ impl Connection {
             }),
             final(self).tx_timers(*old(self), now),
     {
-        // `kept`'s quantifier meets every path term of `wf`: it is opened only in
-        // `lemma_kept_steps` and `lemma_path_timers`. The DCID and frame facts are the lemmas'.
+        // `kept`'s quantifier meets every path term of `wf`: it is opened only for the two `ids`
+        // facts below, in `lemma_kept_steps` and in `lemma_path_timers`. The DCID and frame facts are the lemmas'.
         hide(kept);
         hide(Connection::wf_dcids);
         hide(path_frames_ok);
@@ -13604,7 +13604,6 @@ proof fn lemma_one_packet(p: SpecOutPacket, k: PacketKind)
     assert(Seq::<u64>::empty().push(p.pn) =~= seq![p.pn]);
 }
 
-/// The frames owed on a path, in the order they go: its oldest response, then its owed challenge.
 /// Two steps, each the identity or `kept` on `id`, are `kept` on `id`.
 proof fn lemma_kept_steps(a: Paths, b: Paths, c: Paths, id: PathId)
     requires
@@ -13615,6 +13614,7 @@ proof fn lemma_kept_steps(a: Paths, b: Paths, c: Paths, id: PathId)
 {
 }
 
+/// The frames owed on a path, in the order they go: its oldest response, then its owed challenge.
 spec fn path_frames_of(a: SpecPath) -> Seq<SpecFrame> {
     (if a.responses.len() > 0 {
         seq![SpecFrame::PathResponse(a.responses[0]@)]

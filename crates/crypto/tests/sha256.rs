@@ -86,7 +86,9 @@ static ALLOC: Counting = Counting;
 /// 1 MiB hashed in place: no allocation, so the message is never copied or buffered.
 #[test]
 fn sha256_1mib() {
+    let c0 = CALLS.with(|c| c.get());
     let m = pattern(1 << 20);
+    assert!(CALLS.with(|c| c.get()) > c0, "counting allocator not installed");
     let k0 = CALLS.with(|c| c.get());
     let d = sha256(&m);
     let k = CALLS.with(|c| c.get()) - k0;
