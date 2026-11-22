@@ -3046,7 +3046,7 @@ impl Connection {
             final(self).amp_grew(*old(self)),
             final(self).crypto_kept_g(*old(self), frames_crypto(p@.frames)),
             r.0 matches Some(kn) ==> final(self).phase_spec() is Open && kn == final(self).paths.has(path),
-            // The packet's (`process_packet`).
+            // The packet's (`on_packet`).
             r.1@ <= c_unit() * plain_load(p@),
     {
         let ghost g = frames_crypto(p@.frames);
@@ -3079,7 +3079,7 @@ impl Connection {
             //# endpoint MUST generate a connection error if processing the contents
             //# of these packets prior to discovering an error, or fully revert any
             //# changes made during that processing.
-            let (r, Ghost(c)) = self.process_packet(path, p, now, rand);
+            let (r, Ghost(c)) = self.on_packet(path, p, now, rand);
             proof {
                 self.lemma_grew_trans(b2, *old(self));
                 Connection::lemma_crypto_kept_g_trans(*old(self), b2, *self, 0, g);
@@ -3448,7 +3448,7 @@ impl Connection {
     /// Returns its cost, `c_unit()` per unit of its load (9b2 Task 10d): its frames', and the Initial space's discard
     /// when it is the first Handshake packet (`validate_hs_path`).
     #[verifier::spinoff_prover]
-    fn process_packet(
+    fn on_packet(
         &mut self,
         path: PathId,
         p: PlainPacket,

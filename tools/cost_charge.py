@@ -26,8 +26,9 @@ callees too, and every fn there is held to the callee-cost rule above, with no p
 (9b2 Task 10d charged the last one, validate_hs_path's discard, and removed the allowance); their whiles and loops are
 not this gate's. NOT_COSTS keys, by (file, fn, callee), the calls in those fns that only share a cost fn's name (a call
 matched by name, the class 9b4's path/type resolution ends: carryover cat-C15-semantic-cost): pipeline.rs's
-`Connection::accept(` (QuicServer::accept is the cost fn) and `out.clear()` on a Vec (RangeSet::clear is); an entry no
-call matches fails. In every file: every assignment to `work` is
+`Connection::accept(` (QuicServer::accept is the cost fn) and `out.clear()` on a Vec (RangeSet::clear is), and conn.rs's
+`RecvPns::on_packet` calls inside `Connection::on_packet` (which returns a cost: its name is the acceptance baseline's,
+so it keeps it); an entry no call matches fails. In every file: every assignment to `work` is
 `work = work + E;`; a fn binds `work` once (`let ghost [mut] work` twice restarts the count); a fn returning a cost
 binds no ghost but `work` to a literal (`let ghost [mut] X: nat = N;`, a deleted callee's cost stubbed, the T3b-F1
 shape) and builds no literal `Ghost(N)` after its first callee cost call or charge of work (a stubbed return), but for
@@ -64,6 +65,7 @@ LITERAL_OK = {
 NOT_COSTS = {
     ('crates/quic/src/pipeline.rs', 'accept_datagram', 'accept'),  # Connection::accept, not QuicServer::accept
     ('crates/quic/src/pipeline.rs', 'transmit', 'clear'),  # Vec::clear on the out buffer, not RangeSet::clear
+    ('crates/quic/src/conn.rs', 'Connection::on_packet', 'on_packet'),  # RecvPns::on_packet (recv_i/h/1), not itself
 }
 INV = re.compile(r'\b(invariant_except_break|invariant|ensures|decreases)\b')
 WRAPPERS = {('crates/quic/src/frags.rs', 'Frags::' + n) for n in ('insert', 'after_insert', 'take_front', 'run_end')} | {
