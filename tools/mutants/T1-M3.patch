@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index 91fa197..677fafd 100644
+index b23593b..f6e827a 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -6712,7 +6712,7 @@ impl Connection {
+@@ -6711,7 +6711,7 @@ impl Connection {
              return;
          }
          if let Err(c) = self.ids.check_peer_tp(tp) {

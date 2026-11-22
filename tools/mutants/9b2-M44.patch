@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index 91fa197..856190a 100644
+index b23593b..ddc535b 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -3840,7 +3840,8 @@ impl Connection {
+@@ -3839,7 +3839,8 @@ impl Connection {
              let Ghost(c) = self.on_acked_frame(k, &frames[j]);
              proof {
                  lemma_tele(work, c, old(self).n_live() as int, n0 as int, self.n_live() as int);

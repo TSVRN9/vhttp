@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index 91fa197..74f0b5c 100644
+index b23593b..378e910 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -5856,7 +5856,7 @@ impl Connection {
+@@ -5855,7 +5855,7 @@ impl Connection {
          proof {
              self.recovery.lemma_pto_pos(PacketKind::OneRtt, self.peer_mad_spec());
          }
