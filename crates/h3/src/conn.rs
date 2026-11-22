@@ -2725,6 +2725,19 @@ proof fn lemma_unis_push(s: Seq<UniEntry>, h: Map<u64, (Seq<u8>, SeenUni, Seq<Sp
     }
 }
 
+/// The stream tables' part of `H3Conn::wf`, opaque: revealed only by the fns that read or change a table.
+#[verifier::opaque]
+spec fn tables_ok(
+    reqs: Seq<ReqEntry>,
+    unis: Seq<UniEntry>,
+    rhist: Map<u64, (Seq<u8>, Seq<SpecReqEvent>, Fields)>,
+    uhist: Map<u64, (Seq<u8>, SeenUni, Seq<SpecUniEvent>)>,
+    rstate: Map<u64, ReqState>,
+    uset: Set<u64>,
+) -> bool {
+    reqs_ok(reqs, rhist) && unis_ok(unis, uhist) && req_dom(reqs, rstate) && uni_dom(unis, uset)
+}
+
 // =============================================================================
 // The connection
 // =============================================================================
@@ -3100,8 +3113,7 @@ impl H3Conn {
 
     pub closed spec fn wf(&self) -> bool {
         &&& self.ctrl_inv()
-        &&& !self.closed ==> reqs_ok(self.reqs@, self.rhist@) && unis_ok(self.unis@, self.uhist@)
-            && req_dom(self.reqs@, self.rstate@) && uni_dom(self.unis@, self.uset@)
+        &&& !self.closed ==> tables_ok(self.reqs@, self.unis@, self.rhist@, self.uhist@, self.rstate@, self.uset@)
     }
 
     /// The control-stream and GOAWAY part of the invariant (kept even once closed).
@@ -3168,6 +3180,7 @@ impl H3Conn {
             c.uni_seen() == (SeenUni { control: false, encoder: false, decoder: false }),
             forall|id: u64| !c.req_known(id) && !c.uni_known(id),
     {
+        reveal(tables_ok);
         H3Conn {
             closed: false,
             started: false,
@@ -3329,9 +3342,19 @@ impl H3Conn {
             final(self).highest_accepted() == old(self).highest_accepted(),
             final(self).uni_seen() == old(self).uni_seen(),
     {
+        hide(ctrl_preamble);
+        hide(goaway_frames);
+        hide(spec_frame_bytes);
+        hide(spec_varint);
+        hide(writes_on);
+        hide(step);
+        hide(frame);
+        hide(shutdown_outs);
+        hide(start_outs);
+        hide(goaway_id);
         if self.closed {
             proof {
-                Self::lemma_idle(*self, out@);
+                Self::lemma_shutdown_closed(*self, out@);
             }
             return;
         }
@@ -3340,6 +3363,36 @@ impl H3Conn {
         self.start(out);
         let ghost c1 = *self;
         let ghost o1 = out@;
+        proof {
+            Self::lemma_started(c0, *self, o0, o1);
+        }
+        match self.goaway_target() {
+            Some(id) => {
+                self.send_goaway(id, out);
+                proof {
+                    Self::lemma_shutdown_sent(c0, c1, *self, o0, o1, out@, id);
+                }
+            },
+            None => {
+                proof {
+                    Self::lemma_shutdown_none(c0, c1, o0, o1);
+                }
+            },
+        }
+    }
+
+    /// The ID `shutdown` sends, `goaway_id`, if it is encodable (split out of `shutdown` for the rlimit).
+    fn goaway_target(&self) -> (r: Option<u64>)
+        requires
+            self.wf(),
+            !self.closed,
+            self.started,
+        ensures
+            r matches Some(id) ==> id == goaway_id(self.highest_accepted(), self.goaways()) && id <= VARINT_MAX
+                && (self.goaways@.len() > 0 ==> id <= self.goaways@.last()) && (self.highest is Some
+                ==> self.highest->0 < id) && id % 4 == 0,
+            r is None ==> goaway_id(self.highest_accepted(), self.goaways()) > VARINT_MAX,
+    {
         let target: u64 = match self.highest {
             None => 0,
             Some(h) => if h <= VARINT_MAX - 4 {
@@ -3349,7 +3402,7 @@ impl H3Conn {
                 // encodable, and no later stream can exist. Repeat the last GOAWAY, if any.
                 match self.goaway {
                     Some(g) => g,
-                    None => return,
+                    None => return None,
                 }
             },
         };
@@ -3362,15 +3415,110 @@ impl H3Conn {
             None => target,
         };
         proof {
-            assert(c1.goaways@ == c0.goaways@);
             if self.goaways@.len() > 0 {
                 assert(self.goaways@[self.goaways@.len() - 1] <= VARINT_MAX);
+                assert(self.goaways@[self.goaways@.len() - 1] % 4 == 0);
             }
         }
-        self.send_goaway(id, out);
-        proof {
-            Self::lemma_step_trans(c0, c1, *self, o0, o1, out@);
-        }
+        Some(id)
+    }
+
+    /// `shutdown`'s ensures once `start` and `send_goaway(id)` ran.
+    proof fn lemma_shutdown_sent(c0: H3Conn, c1: H3Conn, c2: H3Conn, o0: Seq<Output>, o1: Seq<Output>, o2: Seq<Output>, id: u64)
+        requires
+            c0.wf(),
+            !c0.closed,
+            step(c0, c1, o0, o1),
+            c1.closed() == c0.closed(),
+            c1.goaways() == c0.goaways(),
+            c1.highest_accepted() == c0.highest_accepted(),
+            frame(c0, c1, None::<u64>),
+            c1.peer_max_field_section() == c0.peer_max_field_section(),
+            added(o0, o1) == start_outs(c0),
+            c1.uni_seen() == c0.uni_seen(),
+            step(c1, c2, o1, o2),
+            !c2.closed,
+            c2.goaways@ == c1.goaways@.push(id),
+            frame(c1, c2, None::<u64>),
+            c2.peer_max == c1.peer_max,
+            c2.highest == c1.highest,
+            c2.seen == c1.seen,
+            added(o1, o2) == seq![
+                SpecOutput::StreamWrite {
+                    stream_id: 3,
+                    data: spec_frame_bytes(FRAME_GOAWAY, spec_varint(id)),
+                    fin: false,
+                },
+            ],
+            id == goaway_id(c0.highest_accepted(), c0.goaways()),
+            id <= VARINT_MAX,
+        ensures
+            step(c0, c2, o0, o2),
+            c2.closed() == c0.closed(),
+            frame(c0, c2, None::<u64>),
+            c2.peer_max_field_section() == c0.peer_max_field_section(),
+            c2.goaways() == c0.goaways().push(goaway_id(c0.highest_accepted(), c0.goaways()) as u64),
+            c2.ctrl_bytes().len() > 0,
+            added(o0, o2) == shutdown_outs(c0),
+            c2.highest_accepted() == c0.highest_accepted(),
+            c2.uni_seen() == c0.uni_seen(),
+    {
+        hide(ctrl_preamble);
+        hide(goaway_frames);
+        hide(spec_frame_bytes);
+        hide(spec_varint);
+        Self::lemma_step_trans(c0, c1, c2, o0, o1, o2);
+        lemma_added_trans(o0, o1, o2);
+        assert(added(o0, o2) =~= shutdown_outs(c0));
+        assert(c2.ctrl_bytes() == ctrl_preamble() + goaway_frames(c2.goaways()));
+        reveal(ctrl_preamble);
+        assert(ctrl_preamble().len() > 0);
+    }
+
+    /// After `start` on an open connection: the invariant, and our control stream open.
+    proof fn lemma_started(c0: H3Conn, c1: H3Conn, o0: Seq<Output>, o1: Seq<Output>)
+        requires
+            step(c0, c1, o0, o1),
+            !c1.closed(),
+            c1.ctrl_bytes().len() > 0,
+        ensures
+            c1.wf(),
+            !c1.closed,
+            c1.started,
+    {
+    }
+
+    /// `shutdown`'s ensures on a closed connection.
+    proof fn lemma_shutdown_closed(c: H3Conn, o: Seq<Output>)
+        requires
+            c.wf(),
+            c.closed,
+        ensures
+            step(c, c, o, o),
+            frame(c, c, None::<u64>),
+            added(o, o) == shutdown_outs(c),
+    {
+        Self::lemma_idle(c, o);
+    }
+
+    /// `shutdown`'s ensures once `start` ran and `goaway_id` is not encodable.
+    proof fn lemma_shutdown_none(c0: H3Conn, c1: H3Conn, o0: Seq<Output>, o1: Seq<Output>)
+        requires
+            c0.wf(),
+            !c0.closed,
+            step(c0, c1, o0, o1),
+            c1.closed() == c0.closed(),
+            c1.goaways() == c0.goaways(),
+            c1.highest_accepted() == c0.highest_accepted(),
+            frame(c0, c1, None::<u64>),
+            c1.peer_max_field_section() == c0.peer_max_field_section(),
+            c1.ctrl_bytes().len() > 0,
+            added(o0, o1) == start_outs(c0),
+            c1.uni_seen() == c0.uni_seen(),
+            goaway_id(c0.highest_accepted(), c0.goaways()) > VARINT_MAX,
+        ensures
+            added(o0, o1) == shutdown_outs(c0),
+    {
     }
 
     /// Writes GOAWAY(`id`) on our (open) control stream.
@@ -3539,6 +3687,7 @@ impl H3Conn {
         hide(req_outs);
         hide(request::push_all);
         let ghost c0 = *self;
+        reveal(tables_ok);
         let ghost o0 = out@;
         proof {
             lemma_added_refl(o0);
@@ -3650,6 +3799,7 @@ impl H3Conn {
         hide(req_outs);
         hide(request::push_all);
         let ghost c0 = *self;
+        reveal(tables_ok);
         let ghost o0 = out@;
         proof {
             lemma_added_refl(o0);
@@ -3748,7 +3898,6 @@ impl H3Conn {
         }
     }
 
-    #[verifier::spinoff_prover]
     fn uni_data(&mut self, id: u64, data: &[u8], fin: bool, out: &mut CapVec<Output>)
         requires
             old(self).wf(),
@@ -3768,6 +3917,7 @@ impl H3Conn {
     {
         hide(uni::rfc_uni_stream);
         let ghost c0 = *self;
+        reveal(tables_ok);
         let ghost o0 = out@;
         let found = find_uni(&self.unis, id);
         let mut e = match found {
@@ -3959,6 +4109,7 @@ impl H3Conn {
                 },
             ),
     {
+        reveal(tables_ok);
         let ghost c0 = *self;
         let ghost id = self.reqs@[i as int].id;
         proof {
@@ -4045,6 +4196,7 @@ impl H3Conn {
             final(self).highest_accepted() == old(self).highest_accepted(),
             final(self).uni_seen() == old(self).uni_seen(),
     {
+        reveal(tables_ok);
         let ghost c0 = *self;
         let ghost o0 = out@;
         proof {
@@ -4169,6 +4321,7 @@ impl H3Conn {
             final(self).highest_accepted() == old(self).highest_accepted(),
             final(self).uni_seen() == old(self).uni_seen(),
     {
+        reveal(tables_ok);
         let ghost c0 = *self;
         if self.closed {
             proof {
@@ -4261,6 +4414,7 @@ impl H3Conn {
         hide(rfc_frame_header);
         hide(response_wire);
         let ghost c0 = *self;
+        reveal(tables_ok);
         let ghost o0 = out@;
         proof {
             Self::lemma_idle(*self, out@);
