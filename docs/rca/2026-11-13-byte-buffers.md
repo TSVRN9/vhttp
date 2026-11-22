@@ -33,7 +33,8 @@ part of this entry's catch.
   fns of streams.rs or recv_stream.rs (callee-only to the gate), an implicit `Drop`, and an undercharged amount
   (`cat-C15-semantic-cost`, 9b4; TRUSTED.md's Vec row names the frees still uncharged). For the class (a byte buffer
   growing by std's strategy on an input path), the sweep's status table (`docs/rca/2026-11-12-cost-sweep.md`, "Status
-  of 9b2's rows") greps each converted fn for the growth and shift patterns at 0d11928: none is left in them.
+  of 9b2's rows") greps each converted fn for the growth and shift patterns at 0d11928: none is left on a converted byte buffer;
+  the only hits are `build_flight`'s five `Vec::new()` outbound message builders (T11, class B, `cat-C15-9b4`).
 - **Evidence**: the measurement below and its final counts; tests `capvec_allocs_exact` and `queue_model_random`
   (`crates/byteq/tests/alloc.rs`), `crypto_one_byte_frames`, `crypto_runs_then_fill`, `send_ack_1k`,
   `stream_reverse_fill`, `ack_copies_no_stream_bytes` (`crates/quic/tests/input_cost.rs`), `reader_one_byte_push`
@@ -154,12 +155,12 @@ kind; Task 1's figures beside them for the same n.
 
 No call reallocates, and no call hands over more than it was given (`crypto_one_byte_frames`: 1 byte for 1;
 `crypto_runs_then_fill`: the fill's 2n for 2n; `stream_reverse_fill`: deliveries of at most `B_PUMP` = 4096 bytes in
-pump calls, none in frame calls). Total bytes rose where the store keeps more per byte than the old `Vec` did (the
-CRYPTO store's 56-byte node per chunk, the queue's buffers of up to three times the peak, the reader's queue); each
-stays within the per-call and 3x-per-doubling bounds. The large single calls are memory, not work: the fill's gather
+pump calls, none in frame calls). Total bytes rose in `crypto_one_byte_frames` and `reader_one_byte_push`, consistent
+with the store's per-chunk nodes and the queue's buffers of up to three times the peak (not measured apart); each stays
+within the per-call and 3x-per-doubling bounds. The large single calls are memory, not work: the fill's gather
 list (an exact `CapVec`, `input_cost`'s named allowance `32·(d + 1)`) and a queue buffer (`send_ack_1k`'s write of n
-bytes requesting 3n, D4's bound; the reader's largest call). `send_ack_1k` makes more calls than at Task 1 (the poll and
-ACK rounds of Task 8's flush and piece rules), and its ACKs request at most 1600 bytes for 0 stream bytes (the trees'
+bytes requesting 3n, D4's bound; the reader's largest call). `send_ack_1k` makes more calls than at Task 1 (more poll and
+ACK rounds), and its ACKs request at most 1600 bytes for 0 stream bytes (the trees'
 nodes), against half the stream at Task 1.
 
 ## mem-9b2-send-cap: send room counted lengths, the allocator held capacity (9b2 Task 8)
