@@ -1597,7 +1597,6 @@ proof fn lemma_mview_len<V>(s: Seq<(u64, V)>)
     requires
         sorted(s),
     ensures
-        mview(s).dom().finite(),
         mview(s).dom().len() == s.len(),
     decreases s.len(),
 {
@@ -1626,7 +1625,6 @@ proof fn lemma_tv_len<V>(t: Tree<V>)
     requires
         wf(t),
     ensures
-        tv(t).dom().finite(),
         tv(t).dom().len() == seq(t).len(),
 {
     lemma_wf_sorted(t);
@@ -5424,70 +5422,143 @@ impl H3Conn {
                     return Ghost(work + 1);
                 },
                 Some(_) => {
-                    let t = self.unis.take();
-                    let (lo, _e, hi, Ghost(ct)) = uni_take_w(t, stream_id);
-                    let (j, Ghost(cj)) = tbl_join(lo, hi, Ghost(stream_id), Ghost(2), Ghost(h));
-                    self.unis = j;
-                    self.uset = Ghost(self.uset@.remove(stream_id));
+                    let Ghost(cd) = self.reset_uni(stream_id);
                     proof {
-                        lemma_uni_del(m0, c0.uhist@, c0.uhist@, c0.uset@, stream_id);
-                        // The entry is dropped here: its box and its queue's buffers.
-                        work = work + ct + cj + 1 + uni_frees();
+                        work = work + cd;
                     }
                 },
                 None => {},
             }
         } else if stream_id % 4 == 0 {
-            let ghost m0 = tv(self.reqs);
-            let ghost h = ht(self.reqs);
+            let Ghost(cr) = self.reset_req(stream_id, out);
             proof {
-                lemma_req_get(m0, c0.rhist@, c0.rstate@, stream_id);
-            }
-            let t = self.reqs.take();
-            let (lo, got, hi, Ghost(ct)) = req_take_w(t, stream_id);
-            let (j, Ghost(cj)) = tbl_join(lo, hi, Ghost(stream_id), Ghost(0), Ghost(h));
-            self.reqs = j;
-            proof {
-                work = work + ct + cj;
-                if !m0.contains_key(stream_id) {
-                    lemma_map_absent(m0, stream_id);
-                }
-            }
-            if let Some(b) = got {
-                let e = *b;
-                proof {
-                    lemma_req_del(m0, c0.rhist@, c0.rhist@, c0.rstate@, stream_id);
-                }
-                self.rstate = Ghost(self.rstate@.remove(stream_id));
-                if e.send_open {
-                    let code = if e.fin_seen {
-                        H3_REQUEST_CANCELLED
-                    } else {
-                        H3_REQUEST_INCOMPLETE
-                    };
-                    let w = Output::ResetStream { stream_id, code };
-                    out.push(w);
-                    proof {
-                        lemma_added_push(o0, o0, w);
-                        assert(added(o0, out@) =~= seq![w@]);
-                        lemma_writes_one(w@, 3);
-                        // The output.
-                        work = work + 1;
-                    }
-                }
-                proof {
-                    // `e` is dropped here, and its box above.
-                    work = work + 1 + req_frees(e);
-                }
+                work = work + cr;
             }
         }
         proof {
-            lemma_tables_close(self.reqs, self.unis, self.rhist@, self.uhist@, self.rstate@, self.uset@);
             if added(o0, out@).len() == 0 {
                 Self::lemma_idle(c0, o0);
             }
             assert(c0.ctrl@ + Seq::<u8>::empty() =~= c0.ctrl@);
             assert(c0.goaways@.take(c0.goaways@.len() as int) =~= c0.goaways@);
+        }
+        Ghost(work)
+    }
+
+    /// `on_stream_reset` on a tracked uni stream of no critical type: it is forgotten (the halves joined, the entry
+    /// dropped).
+    fn reset_uni(&mut self, id: u64) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            !old(self).closed,
+            id % 4 == 2,
+            old(self).uset@.contains(id),
+        ensures
+            final(self).wf(),
+            *final(self) == (H3Conn { unis: final(self).unis, uset: final(self).uset, ..*old(self) }),
+            final(self).uset@ == old(self).uset@.remove(id),
+            r@ <= c_take() * (ht(old(self).unis) + 1) + c_join2() * (ht(old(self).unis) + 1) + 3,
+    {
+        let ghost c0 = *self;
+        let ghost m0 = tv(self.unis);
+        let ghost h = ht(self.unis);
+        let ghost mut work: nat = 0;
+        proof {
+            lemma_tables_open(c0.reqs, c0.unis, c0.rhist@, c0.uhist@, c0.rstate@, c0.uset@);
+            lemma_uni_get(m0, c0.uhist@, c0.uset@, id);
+            assert(c_join2() == 13);
+        }
+        let t = self.unis.take();
+        let (lo, _e, hi, Ghost(ct)) = uni_take_w(t, id);
+        let (j, Ghost(cj)) = tbl_join(lo, hi, Ghost(id), Ghost(2), Ghost(h));
+        self.unis = j;
+        self.uset = Ghost(self.uset@.remove(id));
+        proof {
+            lemma_uni_del(m0, c0.uhist@, c0.uhist@, c0.uset@, id);
+            lemma_tables_close(self.reqs, self.unis, self.rhist@, self.uhist@, self.rstate@, self.uset@);
+            // The entry is dropped here: its box and its queue's buffers.
+            work = work + ct + cj + 1 + uni_frees();
+        }
+        Ghost(work)
+    }
+
+    /// `on_stream_reset` on a request stream: it is forgotten, and our sending part, if still open, is reset
+    /// (`reset_outs`).
+    fn reset_req(&mut self, id: u64, out: &mut CapVec<Output>) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            !old(self).closed,
+            id % 4 == 0,
+            old(out).wf(),
+            old(out)@.len() + 1 <= old(out).cap(),
+        ensures
+            final(self).wf(),
+            *final(self) == (H3Conn { reqs: final(self).reqs, rstate: final(self).rstate, ..*old(self) }),
+            final(self).rstate@ == old(self).rstate@.remove(id),
+            final(out).wf(),
+            final(out).cap() == old(out).cap(),
+            final(out)@.len() <= old(out)@.len() + 1,
+            extends(old(out)@, final(out)@),
+            added(old(out)@, final(out)@) == reset_outs(id, old(self).req_state(id)),
+            outs_ok(added(old(out)@, final(out)@), false),
+            writes_on(added(old(out)@, final(out)@), 3) == Seq::<u8>::empty(),
+            r@ <= c_take() * (ht(old(self).reqs) + 1) + c_join2() * (ht(old(self).reqs) + 1) + 5 + removed_fields(
+                *old(self),
+                *final(self),
+                id,
+            ),
+    {
+        let ghost c0 = *self;
+        let ghost o0 = out@;
+        let ghost m0 = tv(self.reqs);
+        let ghost h = ht(self.reqs);
+        let ghost mut work: nat = 0;
+        proof {
+            lemma_added_refl(o0);
+            lemma_tables_open(c0.reqs, c0.unis, c0.rhist@, c0.uhist@, c0.rstate@, c0.uset@);
+            lemma_req_get(m0, c0.rhist@, c0.rstate@, id);
+            assert(c_join2() == 13);
+        }
+        let t = self.reqs.take();
+        let (lo, got, hi, Ghost(ct)) = req_take_w(t, id);
+        let (j, Ghost(cj)) = tbl_join(lo, hi, Ghost(id), Ghost(0), Ghost(h));
+        self.reqs = j;
+        proof {
+            work = work + ct + cj;
+            lemma_map_absent(m0, id);
+            lemma_map_absent(c0.rstate@, id);
+        }
+        if let Some(b) = got {
+            let e = *b;
+            proof {
+                lemma_req_del(m0, c0.rhist@, c0.rhist@, c0.rstate@, id);
+            }
+            self.rstate = Ghost(self.rstate@.remove(id));
+            if e.send_open {
+                let code = if e.fin_seen {
+                    H3_REQUEST_CANCELLED
+                } else {
+                    H3_REQUEST_INCOMPLETE
+                };
+                let w = Output::ResetStream { stream_id: id, code };
+                out.push(w);
+                proof {
+                    lemma_added_push(o0, o0, w);
+                    assert(added(o0, out@) =~= seq![w@]);
+                    lemma_writes_one(w@, 3);
+                    // The output.
+                    work = work + 1;
+                }
+            }
+            proof {
+                // `e` is dropped here, and its box above.
+                work = work + 1 + req_frees(e);
+                assert(removed_fields(c0, *self, id) == 2 * e.trailers@.len());
+            }
+        }
+        proof {
+            lemma_tables_close(self.reqs, self.unis, self.rhist@, self.uhist@, self.rstate@, self.uset@);
+            assert(writes_on(Seq::<SpecOutput>::empty(), 3) == Seq::<u8>::empty());
         }
         Ghost(work)
     }
