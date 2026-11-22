@@ -102,9 +102,18 @@ crate.
     `conn::H3Conn::request_data` is at about 4.84M. The widest spreads among fns above 2,000,000 are the untouched
     `conn::H3Conn::lemma_step_trans` (0.49M-3.10M, 6.3x at Task 8) and `qpack::field_section::lemma_name_out`
     (0.48M-2.40M, 5.0x). `conn::H3Conn::uni_data` is spun off at 2.63M-3.98M. `shutdown` and `uni_data` are pinned by
-    `spinoff_prover`, not fixed at the source. Carryover `rca-smt-conn-pinned` (owner 9b3) closes that pin: 9b3
-    Task 11 rewrites conn's stream entry points and splits both. The next restructuring of h3's proofs should start
-    with those. quic's `frags::lemma_merge_end` is likewise pinned by `spinoff_prover` (incident 7, 1.00M-1.02M over
+    `spinoff_prover`, not fixed at the source. Carryover `rca-smt-conn-pinned` (owner 9b3) is closed by 9b3 Task 11.
+    `shutdown` is split (`goaway_target`, `lemma_started`, `lemma_shutdown_sent`/`_none`/`_closed`) and `uni_data`
+    (`lemma_fed_facts`, `lemma_uni_done`, `lemma_uni_cost`, the table invariant opened and closed by lemma), and
+    neither is pinned: over seeds 0-4 `uni_data` reached 5,382,124 and `shutdown` stayed under 200,000. The pins on
+    `request_data` and `request_data_new` went too (the request path is now `request_idle`, `request_feed`,
+    `request_reject`, `request_data_new`); `send_response` keeps its pin.
+  - Finding (9b3 Task 11): `hide(f)` is not free. Each fn that hides spec fns gets a
+    `<fn>_nondefault_fuel_definition` quantifier, and Z3 instantiates it often. Measured at `--rlimit 4`, one fn each
+    under `--verify-function`: `feed_req_ok` with 11 hides took 10.8M (174,019 instances of that quantifier in the
+    `smt.qi.profile`), 0.19M with none. `shutdown` with 10 hides was 5.2M unpinned and about 0.12M with none.
+    `lemma_feed_done` and `lemma_new_done` went from 5.4M to 1.7M and 2.5M when their 3 hides went. So hide only what
+    would otherwise unfold, and measure: an opaque spec fn revealed in its own lemmas costs nothing at the use site. quic's `frags::lemma_merge_end` is likewise pinned by `spinoff_prover` (incident 7, 1.00M-1.02M over
     seeds 0-4); 9b4, which brings quic under the seed gate, owns fixing it at the source (one lemma per ensures): carryover
     `rca-smt-quic-pinned`, which also owns extending `rlimit-seeds.sh` to every crate.
 - **Evidence**:
