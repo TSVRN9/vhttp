@@ -208,7 +208,7 @@ tail).
   falls), and mutants 9b2-M25 (`reset_w` clearing in place, killed at its cost ensures) and 9b2-M26 (`gc` removing a
   queued entry, killed at its assertion that the dropped part holds no node), each under `scripts/mutants.sh run`. The
   class (a tree-holding value dropped implicitly) still has no mechanical catch beyond these sites: cat-C15-semantic-cost
-  (9b4) owns a semantic check; the frame and ACK/loss paths' `gc` drops are 9b2 Task 10d's (item 5).
+  (9b4) owns a semantic check; the frame and ACK/loss paths' `gc` drops are charged since 9b2 Task 10d (below).
 - **Class sweep**: `grep -nE "= SendStream::new|streams = None|= Streams::new|= RecvStream::new"
   crates/quic/src/{conn,streams}.rs` at this commit: `Streams::new` only in `on_peer_params` (replacing `None`) and
   `SendStream::new`/`RecvStream::new` only for new entries, the accept constructor, and two `RecvStream::new(0, 0)`
@@ -227,3 +227,35 @@ tail).
   says both counts.
 - **Catch**: `respond::conns_capped_while_closed_drain`: one connection closed and draining, then `MAX_CONNS + 4` new
   Initials; `conn_count()` never exceeds `MAX_CONNS` (it fails with the admission check removed, checked by hand).
+
+## The receive pipeline's costs composed nowhere, and a rename the gate could not see (9b2 Task 10d)
+
+- **What**: every per-frame cost below `Connection::on_datagram` was proved and then dropped before it reached a
+  caller's ensures: `CryptoStream::on_crypto` asserted its store's walk and insert inside the wrappers
+  `Frags::insert`/`after_insert` and `on_fill`; `feed_recv`/`feed_stream` dropped `on_data`'s, `deliver`'s and
+  `on_reset`'s costs (`(r, _)`, `let _ =`); a peer STOP_SENDING's reset asserted its queue frees inside
+  `SendStream::reset`; `Streams::gc` returned nothing on the frame and ACK paths; `validate_hs_path` dropped `discard`'s
+  retire under the gate's one allowed drop (DROPS); `on_datagram`, `pipeline::receive`, `refeed_one_rtt` and
+  `accept_datagram` returned no cost, so quictls's `receive`, `refeed`, `accept` and `pump_backlog` named "the pipeline
+  half" as an exclusion. Two more: `IdQueue::new`'s `CapVec::new(203)`, reached from `on_peer_params` inside `feed`,
+  was in no cost (Task 10 review M2); and quictls imported `pipeline::receive` as `receive_datagram`, while pipeline.rs
+  was in none of `tools/cost_charge.py`'s file lists, so a dropped pipeline cost could not have failed the gate.
+- **Why**: costs were composed bottom-up only as far as the gated files reached. streams.rs and recv_stream.rs are not
+  gated (the gate matches callees by name and their fns share names with cost fns), wrappers assert a cost instead of
+  returning it, and a frame path that returned nothing gave the composed costs nowhere to go; the exclusion comments
+  named an owner, so nothing failed. The gate read a renamed import as a different fn, the same blind spot
+  rfc-quantity closes by refusing `use .. as` (RCA 2026-11-13-gate-scan-scope).
+- **Fix**: each cost is returned and summed up to quictls: `on_crypto_c` (`Frags::insert_c`, `after_insert_c` at the
+  height cap, the run walk) through `on_crypto_frame`; `Streams::on_frame` returns `c_srx(f)` (`feed_recv`'s `c_feed`,
+  STOP_SENDING's `c_sfree` through `on_stop_sending`, `gc`'s `c_gc`); `gc` charges per removal, so the ACK path
+  telescopes over `n_live()` (no entry is added while one ACK is processed: at most `c_ack()` per ACK frame);
+  `validate_hs_path` returns `discard`'s retire; `on_datagram` is bounded by `c_unit()` per unit of the packets' load,
+  which `lemma_open_datagram_load` bounds by the datagram's length, so the pipeline fns cost `c_pipe(d)` and quictls
+  charges one or two of them per call. The id queue's slots are inline (`[u64; IDQ_CAP]`): nothing to count.
+- **Catch**: the ensures chain carries every charge to quictls's per-call bounds (a cost that grows past its bound fails
+  Verus; a dropped one does not, which is the gate's to catch in the files it reads), mutants 9b2-M35..M39 (one per charge, each killed at a cost ensures or assertion); in
+  `tools/cost_charge.py` the DROPS mechanism is gone, pipeline.rs is a per-fn file, and a `use .. as` rename of a cost
+  fn is refused, with gate demos for `validate_hs_path` dropping `discard`'s cost, `refeed_one_rtt` dropping
+  `on_datagram`'s and the `receive_datagram` rename; `input_cost::streams_new_allocates_nothing` for the allocation.
+  Residual, named with its owner: streams.rs and recv_stream.rs stay outside the gate until callees are resolved by
+  path (cat-C15-semantic-cost, 9b4), as do the calls keyed in `NOT_COSTS`.
