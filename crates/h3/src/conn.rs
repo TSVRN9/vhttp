@@ -34,6 +34,13 @@ pub use crate::limits::*;
 use crate::message::*;
 use crate::qpack::field_section::*;
 use crate::request::{ReqError, ReqEvent, RequestStream, SpecReqEvent, MAX_REQ_EVENTS};
+use byteq::avl::{first, get_le, join, join2, pop_min, split, Tree};
+// Used only in ghost code, which a plain `cargo build` erases.
+#[allow(unused_imports)]
+use byteq::avl::{
+    c_first, c_free, c_get, c_join, c_join2, c_pop, c_split6, ht, keys_ge, keys_gt, keys_lt, last_le, lemma_sorted_concat,
+    lemma_split_cost, lemma_wf_sorted, seq, sorted, wf,
+};
 use byteq::capvec::CapVec;
 use crate::uni::{SeenUni, SpecUniEvent, UniEvent, UniKind, UniStream};
 // Used only in ghost code, which a plain `cargo build` erases.
@@ -1571,6 +1578,567 @@ fn find_uni(s: &Vec<UniEntry>, id: u64) -> (r: Option<usize>)
         i += 1;
     }
     None
+}
+
+// =============================================================================
+// The stream tables: avl trees keyed by stream ID, viewed as maps
+// =============================================================================
+
+/// The map view of a table's entries, the later of two entries with one key winning (a search tree has none).
+spec fn mview<V>(s: Seq<(u64, V)>) -> Map<u64, V>
+    decreases s.len(),
+{
+    if s.len() == 0 {
+        Map::empty()
+    } else {
+        mview(s.drop_last()).insert(s.last().0, s.last().1)
+    }
+}
+
+/// A table's map view.
+spec fn tv<V>(t: Tree<V>) -> Map<u64, V> {
+    mview(seq(t))
+}
+
+/// A table: a search tree whose keys are all `r` mod 4 (a stream ID's type bits). So it holds at most `2^62` entries
+/// (`lemma_keys_len`), within the `pow2(63)` that avl's `split`, `pop_min` and `join` require.
+spec fn tbl<V>(t: Tree<V>, r: u64) -> bool {
+    &&& wf(t)
+    &&& forall|i: int| 0 <= i < seq(t).len() ==> (#[trigger] seq(t)[i]).0 % 4 == r
+}
+
+proof fn lemma_mview_one<V>(k: u64, v: V)
+    ensures
+        mview(seq![(k, v)]) == Map::<u64, V>::empty().insert(k, v),
+{
+    let e = seq![(k, v)];
+    assert(e.drop_last() =~= Seq::<(u64, V)>::empty());
+    assert(mview(Seq::<(u64, V)>::empty()) == Map::<u64, V>::empty());
+    assert(e.last() == (k, v));
+}
+
+proof fn lemma_mview_app<V>(x: Seq<(u64, V)>, y: Seq<(u64, V)>)
+    ensures
+        mview(x + y) == mview(x).union_prefer_right(mview(y)),
+    decreases y.len(),
+{
+    if y.len() == 0 {
+        assert(x + y =~= x);
+        assert(mview(x).union_prefer_right(mview(y)) =~= mview(x));
+    } else {
+        assert((x + y).drop_last() =~= x + y.drop_last());
+        lemma_mview_app(x, y.drop_last());
+        assert(mview(x + y) =~= mview(x).union_prefer_right(mview(y)));
+    }
+}
+
+proof fn lemma_mview_has<V>(s: Seq<(u64, V)>, k: u64)
+    ensures
+        mview(s).contains_key(k) <==> exists|i: int| 0 <= i < s.len() && (#[trigger] s[i]).0 == k,
+    decreases s.len(),
+{
+    if s.len() > 0 {
+        lemma_mview_has(s.drop_last(), k);
+        if exists|i: int| 0 <= i < s.drop_last().len() && (#[trigger] s.drop_last()[i]).0 == k {
+            let i = choose|i: int| 0 <= i < s.drop_last().len() && (#[trigger] s.drop_last()[i]).0 == k;
+            assert(s[i] == s.drop_last()[i]);
+        }
+        if exists|i: int| 0 <= i < s.len() && (#[trigger] s[i]).0 == k {
+            let i = choose|i: int| 0 <= i < s.len() && (#[trigger] s[i]).0 == k;
+            if i < s.len() - 1 {
+                assert(s.drop_last()[i] == s[i]);
+            }
+        }
+    }
+}
+
+/// In a sorted sequence, the map view holds each entry under its key.
+proof fn lemma_mview_at<V>(s: Seq<(u64, V)>, i: int)
+    requires
+        sorted(s),
+        0 <= i < s.len(),
+    ensures
+        mview(s).contains_key(s[i].0),
+        mview(s)[s[i].0] == s[i].1,
+    decreases s.len(),
+{
+    if i < s.len() - 1 {
+        let d = s.drop_last();
+        assert(d[i] == s[i]);
+        assert(s[i].0 < s[s.len() - 1].0);
+        assert(sorted(d)) by {
+            assert forall|a: int, b: int| 0 <= a < b < d.len() implies #[trigger] d[a].0 < #[trigger] d[b].0 by {
+                assert(d[a] == s[a] && d[b] == s[b]);
+            }
+        }
+        lemma_mview_at(d, i);
+    }
+}
+
+/// A sorted sequence whose keys are all `r` mod 4 has at most `2^62` entries: key `i` is at least `4·i`.
+proof fn lemma_keys_len<V>(s: Seq<(u64, V)>, r: u64)
+    requires
+        sorted(s),
+        forall|i: int| 0 <= i < s.len() ==> (#[trigger] s[i]).0 % 4 == r,
+    ensures
+        s.len() <= pow2(62),
+        s.len() < pow2(63),
+{
+    lemma2_to64();
+    lemma2_to64_rest();
+    if s.len() > 0 {
+        lemma_key_ge(s, r, s.len() - 1);
+    }
+}
+
+proof fn lemma_key_ge<V>(s: Seq<(u64, V)>, r: u64, i: int)
+    requires
+        sorted(s),
+        forall|i: int| 0 <= i < s.len() ==> (#[trigger] s[i]).0 % 4 == r,
+        0 <= i < s.len(),
+    ensures
+        s[i].0 >= 4 * i,
+    decreases i,
+{
+    if i > 0 {
+        lemma_key_ge(s, r, i - 1);
+        assert(s[i - 1].0 < s[i].0);
+        assert(s[i - 1].0 % 4 == r && s[i].0 % 4 == r);
+    }
+}
+
+/// A table holds fewer than `2^63` entries.
+proof fn lemma_tbl_len<V>(t: Tree<V>, r: u64)
+    requires
+        tbl(t, r),
+    ensures
+        seq(t).len() <= pow2(62),
+        seq(t).len() < pow2(63),
+{
+    lemma_wf_sorted(t);
+    lemma_keys_len(seq(t), r);
+}
+
+/// A table split at `k`: two tables whose views make up `t`'s, `k` in neither unless at the front of the upper one.
+proof fn lemma_split_tbl<V>(t: Tree<V>, a: Tree<V>, b: Tree<V>, k: u64, r: u64)
+    requires
+        tbl(t, r),
+        wf(a),
+        wf(b),
+        seq(a) + seq(b) == seq(t),
+        keys_lt(a, k),
+        keys_ge(b, k),
+    ensures
+        tbl(a, r),
+        tbl(b, r),
+        tv(a).union_prefer_right(tv(b)) == tv(t),
+        !tv(a).contains_key(k),
+        !tv(t).contains_key(k) ==> keys_gt(b, k),
+{
+    let (sa, sb) = (seq(a), seq(b));
+    assert forall|i: int| 0 <= i < sa.len() implies (#[trigger] sa[i]).0 % 4 == r by {
+        assert(seq(t)[i] == sa[i]);
+    }
+    assert forall|i: int| 0 <= i < sb.len() implies (#[trigger] sb[i]).0 % 4 == r by {
+        assert(seq(t)[sa.len() + i] == sb[i]);
+    }
+    lemma_mview_app(sa, sb);
+    lemma_mview_has(sa, k);
+    lemma_mview_has(seq(t), k);
+    if !tv(t).contains_key(k) {
+        assert forall|j: int| 0 <= j < sb.len() implies #[trigger] sb[j].0 > k by {
+            assert(seq(t)[sa.len() + j] == sb[j]);
+        }
+    }
+}
+
+/// The entry under key `k`, if any: `get_le`, then its key compared.
+fn tbl_get<V>(t: &Tree<V>, k: u64) -> (r: (Option<&V>, Ghost<nat>))
+    requires
+        wf(*t),
+    ensures
+        (r.0 is Some) == tv(*t).contains_key(k),
+        r.0 matches Some(v) ==> *v == tv(*t)[k],
+        r.1@ <= c_get() * (ht(*t) + 1) + 1,
+{
+    let ghost mut work: nat = 1;
+    let (g, Ghost(c)) = get_le(t, k);
+    proof {
+        work = work + c;
+        lemma_wf_sorted(*t);
+        lemma_mview_has(seq(*t), k);
+    }
+    match g {
+        Some((key, v)) => {
+            let ghost i = choose|i: int| #[trigger] last_le(seq(*t), k, i, key, *v);
+            if key == k {
+                proof {
+                    lemma_mview_at(seq(*t), i);
+                }
+                (Some(v), Ghost(work))
+            } else {
+                proof {
+                    let s = seq(*t);
+                    assert forall|j: int| 0 <= j < s.len() implies (#[trigger] s[j]).0 != k by {
+                        if j < i {
+                            assert(s[j].0 < s[i].0);
+                        }
+                    }
+                }
+                (None, Ghost(work))
+            }
+        },
+        None => {
+            proof {
+                let s = seq(*t);
+                assert forall|j: int| 0 <= j < s.len() implies (#[trigger] s[j]).0 != k by {
+                    assert(s[j].0 > k);
+                }
+            }
+            (None, Ghost(work))
+        },
+    }
+}
+
+/// `take`'s view: `t`'s first entry `(k, v)` popped from `b` (keys at least `k`), `k` in `t`, splits `t`'s view.
+proof fn lemma_take<V>(t: Tree<V>, a: Tree<V>, b: Tree<V>, b2: Tree<V>, k: u64, k2: u64, v: V, r: u64)
+    requires
+        tbl(t, r),
+        tv(t).contains_key(k),
+        tbl(a, r),
+        tbl(b, r),
+        keys_lt(a, k),
+        keys_ge(b, k),
+        tv(a).union_prefer_right(tv(b)) == tv(t),
+        !tv(a).contains_key(k),
+        wf(b2),
+        seq![(k2, v)] + seq(b2) == seq(b),
+        keys_gt(b2, k2),
+        keys_ge(b, k2),
+    ensures
+        k2 == k,
+        v == tv(t)[k],
+        tbl(b2, r),
+        keys_gt(b2, k),
+        tv(a).union_prefer_right(tv(b2)) == tv(t).remove(k),
+{
+    let (sb, sb2) = (seq(b), seq(b2));
+    lemma_mview_app(seq![(k2, v)], sb2);
+    lemma_mview_one(k2, v);
+    assert(tv(b).contains_key(k));
+    lemma_mview_has(sb, k);
+    let i = choose|i: int| 0 <= i < sb.len() && (#[trigger] sb[i]).0 == k;
+    assert(sb[0] == (k2, v));
+    assert(sb[0].0 >= k);
+    assert(sb[i].0 >= k2);
+    assert forall|j: int| 0 <= j < sb2.len() implies (#[trigger] sb2[j]).0 % 4 == r by {
+        assert(sb[j + 1] == sb2[j]);
+    }
+    lemma_mview_has(sb2, k);
+    assert(!tv(b2).contains_key(k));
+    assert(tv(a).union_prefer_right(tv(b2)) =~= tv(t).remove(k));
+}
+
+/// `put`'s view: `join(a, k, v, b)` of two tables around `k`, `k` being `r` mod 4.
+proof fn lemma_put<V>(a: Tree<V>, k: u64, v: V, b: Tree<V>, j: Tree<V>, r: u64)
+    requires
+        tbl(a, r),
+        tbl(b, r),
+        keys_lt(a, k),
+        keys_gt(b, k),
+        k % 4 == r,
+        seq(j) == seq(a) + seq![(k, v)] + seq(b),
+    ensures
+        forall|i: int| 0 <= i < seq(j).len() ==> (#[trigger] seq(j)[i]).0 % 4 == r,
+        tv(j) == tv(a).union_prefer_right(tv(b)).insert(k, v),
+{
+    let (sa, sb, s) = (seq(a), seq(b), seq(j));
+    assert forall|i: int| 0 <= i < s.len() implies (#[trigger] s[i]).0 % 4 == r by {
+        if i < sa.len() {
+            assert(s[i] == sa[i]);
+        } else if i > sa.len() {
+            assert(s[i] == sb[i - sa.len() - 1]);
+        }
+    }
+    lemma_mview_app(sa + seq![(k, v)], sb);
+    lemma_mview_app(sa, seq![(k, v)]);
+    lemma_mview_one(k, v);
+    lemma_mview_has(sb, k);
+    assert(!tv(b).contains_key(k)) by {
+        if tv(b).contains_key(k) {
+            let i = choose|i: int| 0 <= i < sb.len() && (#[trigger] sb[i]).0 == k;
+        }
+    }
+    assert(tv(j) =~= tv(a).union_prefer_right(tv(b)).insert(k, v));
+}
+
+/// `put`'s size precondition: two tables around `k` (`r` mod 4) hold fewer than `2^63` entries with it.
+proof fn lemma_put_len<V>(a: Tree<V>, k: u64, v: V, b: Tree<V>, r: u64)
+    requires
+        tbl(a, r),
+        tbl(b, r),
+        keys_lt(a, k),
+        keys_gt(b, k),
+        k % 4 == r,
+    ensures
+        seq(a).len() + seq(b).len() + 1 < pow2(63),
+{
+    lemma_wf_sorted(a);
+    lemma_wf_sorted(b);
+    let s = seq(a) + seq![(k, v)] + seq(b);
+    lemma_sorted_concat(seq(a), (k, v), seq(b));
+    assert forall|i: int| 0 <= i < s.len() implies (#[trigger] s[i]).0 % 4 == r by {
+        if i < seq(a).len() {
+            assert(s[i] == seq(a)[i]);
+        } else if i > seq(a).len() {
+            assert(s[i] == seq(b)[i - seq(a).len() - 1]);
+        }
+    }
+    lemma_keys_len(s, r);
+}
+
+/// The cost constant of `req_take_w` and `uni_take_w`: `split` (`c_split6()`), `first` and `pop_min`.
+#[verifier::inline]
+spec fn c_take() -> nat {
+    44
+}
+
+/// `take`'s split and first-key check: `b`'s first key is `k` exactly when `t` holds `k`.
+proof fn lemma_take_hit<V>(t: Tree<V>, a: Tree<V>, b: Tree<V>, k: u64, r: u64, hit: bool)
+    requires
+        tbl(t, r),
+        tbl(b, r),
+        keys_ge(b, k),
+        tv(a).union_prefer_right(tv(b)) == tv(t),
+        !tv(a).contains_key(k),
+        hit == (seq(b).len() > 0 && seq(b)[0].0 == k),
+    ensures
+        hit == tv(t).contains_key(k),
+        tv(b).contains_key(k) == tv(t).contains_key(k),
+{
+    lemma_mview_has(seq(b), k);
+    lemma_wf_sorted(b);
+    if tv(b).contains_key(k) {
+        let i = choose|i: int| 0 <= i < seq(b).len() && (#[trigger] seq(b)[i]).0 == k;
+        if i > 0 {
+            assert(seq(b)[0].0 < seq(b)[i].0);
+        }
+    }
+    if hit {
+        assert(seq(b)[0].0 == k);
+    }
+}
+
+/// Takes request stream `id`'s entry, if any, out of the table: the entries below it, the entry, and the entries above
+/// it (`split`, then `pop_min` of the upper part when its first key is `id`).
+fn req_take_w(t: Tree<Box<ReqEntry>>, id: u64) -> (r: (Tree<Box<ReqEntry>>, Option<Box<ReqEntry>>, Tree<Box<ReqEntry>>, Ghost<nat>))
+    requires
+        tbl(t, 0),
+    ensures
+        tbl(r.0, 0),
+        tbl(r.2, 0),
+        keys_lt(r.0, id),
+        keys_gt(r.2, id),
+        ht(r.0) <= ht(t),
+        ht(r.2) <= ht(t),
+        (r.1 is Some) == tv(t).contains_key(id),
+        r.1 matches Some(e) ==> e == tv(t)[id],
+        tv(r.0).union_prefer_right(tv(r.2)) == tv(t).remove(id),
+        r.3@ <= c_take() * (ht(t) + 1),
+{
+    let ghost t0 = t;
+    let ghost mut work: nat = 0;
+    proof {
+        lemma_tbl_len(t0, 0);
+        assert(c_split6() == 37 && c_first() == 1 && c_pop() == 6);
+    }
+    let (a, b, Ghost(c1)) = split(t, id);
+    proof {
+        lemma_split_cost(t0, a, b, c1);
+        lemma_split_tbl(t0, a, b, id, 0);
+        work = work + c1;
+    }
+    let (f, Ghost(c2)) = first(&b);
+    let hit = match f {
+        Some((k, _)) => k == id,
+        None => false,
+    };
+    proof {
+        work = work + c2;
+        lemma_take_hit(t0, a, b, id, 0, hit);
+    }
+    if hit {
+        let ghost b0 = b;
+        let (b2, k2, e, Ghost(c3)) = pop_min(b);
+        proof {
+            lemma_take(t0, a, b0, b2, id, k2, e, 0);
+            work = work + c3;
+        }
+        (a, Some(e), b2, Ghost(work))
+    } else {
+        proof {
+            assert(tv(t0).remove(id) =~= tv(t0));
+            lemma_split_tbl(t0, a, b, id, 0);
+        }
+        (a, None, b, Ghost(work))
+    }
+}
+
+/// Puts request entry `e` back between the tables `lo` and `hi` (`join`), `h` bounding their heights.
+fn req_put_w(lo: Tree<Box<ReqEntry>>, e: Box<ReqEntry>, hi: Tree<Box<ReqEntry>>, Ghost(h): Ghost<nat>) -> (r: (
+    Tree<Box<ReqEntry>>,
+    Ghost<nat>,
+))
+    requires
+        tbl(lo, 0),
+        tbl(hi, 0),
+        keys_lt(lo, e.id),
+        keys_gt(hi, e.id),
+        e.id % 4 == 0,
+        ht(lo) <= h,
+        ht(hi) <= h,
+    ensures
+        tbl(r.0, 0),
+        tv(r.0) == tv(lo).union_prefer_right(tv(hi)).insert(e.id, e),
+        r.1@ <= c_join() * (h + 1),
+{
+    let ghost (a, b) = (lo, hi);
+    let k = e.id;
+    proof {
+        lemma_put_len(a, k, e, b, 0);
+    }
+    let ghost ev = e;
+    let (j, Ghost(c)) = join(lo, k, e, hi);
+    proof {
+        lemma_put(a, k, ev, b, j, 0);
+    }
+    (j, Ghost(c))
+}
+
+/// `uni`'s `req_take_w`.
+fn uni_take_w(t: Tree<Box<UniEntry>>, id: u64) -> (r: (Tree<Box<UniEntry>>, Option<Box<UniEntry>>, Tree<Box<UniEntry>>, Ghost<nat>))
+    requires
+        tbl(t, 2),
+    ensures
+        tbl(r.0, 2),
+        tbl(r.2, 2),
+        keys_lt(r.0, id),
+        keys_gt(r.2, id),
+        ht(r.0) <= ht(t),
+        ht(r.2) <= ht(t),
+        (r.1 is Some) == tv(t).contains_key(id),
+        r.1 matches Some(e) ==> e == tv(t)[id],
+        tv(r.0).union_prefer_right(tv(r.2)) == tv(t).remove(id),
+        r.3@ <= c_take() * (ht(t) + 1),
+{
+    let ghost t0 = t;
+    let ghost mut work: nat = 0;
+    proof {
+        lemma_tbl_len(t0, 2);
+        assert(c_split6() == 37 && c_first() == 1 && c_pop() == 6);
+    }
+    let (a, b, Ghost(c1)) = split(t, id);
+    proof {
+        lemma_split_cost(t0, a, b, c1);
+        lemma_split_tbl(t0, a, b, id, 2);
+        work = work + c1;
+    }
+    let (f, Ghost(c2)) = first(&b);
+    let hit = match f {
+        Some((k, _)) => k == id,
+        None => false,
+    };
+    proof {
+        work = work + c2;
+        lemma_take_hit(t0, a, b, id, 2, hit);
+    }
+    if hit {
+        let ghost b0 = b;
+        let (b2, k2, e, Ghost(c3)) = pop_min(b);
+        proof {
+            lemma_take(t0, a, b0, b2, id, k2, e, 2);
+            work = work + c3;
+        }
+        (a, Some(e), b2, Ghost(work))
+    } else {
+        proof {
+            assert(tv(t0).remove(id) =~= tv(t0));
+            lemma_split_tbl(t0, a, b, id, 2);
+        }
+        (a, None, b, Ghost(work))
+    }
+}
+
+/// `uni`'s `req_put_w`.
+fn uni_put_w(lo: Tree<Box<UniEntry>>, e: Box<UniEntry>, hi: Tree<Box<UniEntry>>, Ghost(h): Ghost<nat>) -> (r: (
+    Tree<Box<UniEntry>>,
+    Ghost<nat>,
+))
+    requires
+        tbl(lo, 2),
+        tbl(hi, 2),
+        keys_lt(lo, e.id),
+        keys_gt(hi, e.id),
+        e.id % 4 == 2,
+        ht(lo) <= h,
+        ht(hi) <= h,
+    ensures
+        tbl(r.0, 2),
+        tv(r.0) == tv(lo).union_prefer_right(tv(hi)).insert(e.id, e),
+        r.1@ <= c_join() * (h + 1),
+{
+    let ghost (a, b) = (lo, hi);
+    let k = e.id;
+    proof {
+        lemma_put_len(a, k, e, b, 2);
+    }
+    let ghost ev = e;
+    let (j, Ghost(c)) = join(lo, k, e, hi);
+    proof {
+        lemma_put(a, k, ev, b, j, 2);
+    }
+    (j, Ghost(c))
+}
+
+/// The two tables around a taken entry, joined again without it (`join2`), `h` bounding their heights.
+fn tbl_join<V>(lo: Tree<V>, hi: Tree<V>, Ghost(k): Ghost<u64>, Ghost(r): Ghost<u64>, Ghost(h): Ghost<nat>) -> (res: (
+    Tree<V>,
+    Ghost<nat>,
+))
+    requires
+        tbl(lo, r),
+        tbl(hi, r),
+        keys_lt(lo, k),
+        keys_gt(hi, k),
+        k % 4 == r,
+        ht(lo) <= h,
+        ht(hi) <= h,
+    ensures
+        tbl(res.0, r),
+        tv(res.0) == tv(lo).union_prefer_right(tv(hi)),
+        res.1@ <= c_join2() * (h + 1),
+{
+    let ghost (a, b) = (lo, hi);
+    proof {
+        lemma_put_len(a, k, arbitrary(), b, r);
+        assert forall|i: int, j: int| 0 <= i < seq(a).len() && 0 <= j < seq(b).len() implies #[trigger] seq(a)[i].0
+            < #[trigger] seq(b)[j].0 by {
+            assert(seq(a)[i].0 < k && seq(b)[j].0 > k);
+        }
+    }
+    let (j, Ghost(c)) = join2(lo, hi);
+    proof {
+        let s = seq(j);
+        assert forall|i: int| 0 <= i < s.len() implies (#[trigger] s[i]).0 % 4 == r by {
+            if i < seq(a).len() {
+                assert(s[i] == seq(a)[i]);
+            } else {
+                assert(s[i] == seq(b)[i - seq(a).len()]);
+            }
+        }
+        lemma_mview_app(seq(a), seq(b));
+    }
+    (j, Ghost(c))
 }
 
 /// The outputs one input call (`on_stream_data`, `on_stream_reset`, `on_stop_sending`) adds at most: on a request
