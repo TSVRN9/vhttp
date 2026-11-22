@@ -2,7 +2,6 @@
 use quic::crypto_stream::CryptoStream;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::time::{Duration, Instant};
 
 struct Counting;
 
@@ -43,17 +42,16 @@ fn allocated() -> (usize, usize) {
 
 type Frames = Vec<(u64, Vec<u8>)>;
 
-/// Bytes allocated, `realloc` calls and wall time for the frames.
-fn cost(frames: &Frames) -> (usize, usize, Duration) {
+/// Bytes allocated and `realloc` calls for the frames (counted, never timed: 9b2 Task 8 ruling; the work per frame is
+/// `Frags::insert`'s proved cost, at most `112·(ht + 1) + 8d + 1207`).
+fn cost(frames: &Frames) -> (usize, usize) {
     let mut c = CryptoStream::new();
     let (b0, r0) = allocated();
-    let t = Instant::now();
     for (o, d) in frames {
         assert_eq!(c.on_crypto(*o, d), Ok(()));
     }
-    let took = t.elapsed();
     let (b1, r1) = allocated();
-    (b1 - b0, r1 - r0, took)
+    (b1 - b0, r1 - r0)
 }
 
 fn descending(n: u64) -> Frames {
@@ -93,27 +91,20 @@ fn crypto_ooo_cost_linear() {
             .iter()
             .map(|&n| {
                 let fr = f(n);
-                let (b, r, t) = cost(&fr);
-                // the time check takes the fastest of 3 runs, so other load on the machine does not fail it
-                let t = (0..2).map(|_| cost(&fr).2).fold(t, Duration::min);
+                let (b, r) = cost(&fr);
                 if r != 0 {
                     fails.push(format!("{name} n={n}: {r} reallocs"));
                 }
-                (b as u128, t, w(&fr))
+                (b as u128, w(&fr))
             })
             .collect();
         eprintln!("{name}: {:?}", m);
         for i in 0..2 {
-            let (b0, _, w0) = m[i];
-            let (b1, _, w1) = m[i + 1];
+            let (b0, w0) = m[i];
+            let (b1, w1) = m[i + 1];
             if b1 * w0 > 3 * b0 * w1 / 2 {
                 fails.push(format!("{name}: bytes {b0} -> {b1} (w {w0} -> {w1})"));
             }
-        }
-        let (_, t0, w0) = m[0];
-        let (_, t2, w2) = m[2];
-        if t2.as_nanos() > 2 * t0.as_nanos() * w2 / w0 + 20_000_000 {
-            fails.push(format!("{name}: time {t0:?} -> {t2:?} (w {w0} -> {w2})"));
         }
     }
     assert!(fails.is_empty(), "{fails:#?}");

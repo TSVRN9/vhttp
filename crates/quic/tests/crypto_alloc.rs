@@ -57,16 +57,12 @@ fn duplicate_ooo_frames_allocate_nothing() {
         assert_eq!(c.on_crypto(2 + 2 * k, &[1]), Ok(()));
     }
     let before = allocated();
-    let t = std::time::Instant::now();
     for k in 0..10_000u64 {
         assert_eq!(c.on_crypto(2 + 2 * (k % 4096), &[1]), Ok(()));
     }
-    let took = t.elapsed();
     assert_eq!(allocated() - before, 0);
-    // The all-held walk is O(log n): a linear scan over the 4096 fragments took about 165 ms in a
-    // debug build (9a T7 fix round 2).
-    eprintln!("10,000 duplicates over 4096 fragments: {:?}", took);
-    assert!(took.as_millis() < 50, "took {:?}", took);
+    // The all-held walk is O(log n): proved, not timed (9b2 Task 8 ruling: cost tests count):
+    // `Frags::insert`'s cost is at most `112·(ht + 1) + 8d + 1207` (frags.rs).
     // 300 bytes at 2 are a head [2,152) and a follower [152,302); [147,157) crosses the boundary.
     let mut c = CryptoStream::new();
     assert_eq!(c.on_crypto(2, &[3; 300]), Ok(()));

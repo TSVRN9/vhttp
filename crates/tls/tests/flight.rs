@@ -34,7 +34,7 @@ fn ch2() -> ClientHello {
 
 /// message_hash(R5_CH1) || R5_HRR || R5_CH2, the raw RFC 8448 §5 bytes.
 fn t0() -> Vec<u8> {
-    [&message_hash(R5_CH1)[..], R5_HRR, R5_CH2].concat()
+    [message_hash(R5_CH1).as_slice(), R5_HRR, R5_CH2].concat()
 }
 
 fn rand() -> [u8; 96] {

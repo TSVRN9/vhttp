@@ -8,15 +8,26 @@ fn D(d: &[u8], fin: bool) -> StreamEvent {
 
 type Out = (Result<u64, u64>, Vec<StreamEvent>);
 
+/// A STREAM frame as the frame path takes it: `on_data`, then a delivery of at most its length.
 fn data(s: &mut RecvStream, off: u64, d: &[u8], fin: bool, room: u64) -> Out {
     let mut ev = Vec::new();
-    let r = s.on_data(off, d, fin, room, &mut ev);
+    let (r, _) = s.on_data(off, d, fin, room);
+    if r.is_ok() {
+        let _ = s.deliver(d.len() as u64, &mut ev);
+    }
     (r, ev)
+}
+
+/// A delivery of at most `max` bytes (`pump_backlog`'s).
+fn deliver(s: &mut RecvStream, max: u64) -> Vec<StreamEvent> {
+    let mut ev = Vec::new();
+    let _ = s.deliver(max, &mut ev);
+    ev
 }
 
 fn reset(s: &mut RecvStream, code: u64, fs: u64, room: u64) -> Out {
     let mut ev = Vec::new();
-    let r = s.on_reset(code, fs, room, &mut ev);
+    let (r, _) = s.on_reset(code, fs, room, &mut ev);
     (r, ev)
 }
 
@@ -24,9 +35,14 @@ fn reset(s: &mut RecvStream, code: u64, fs: u64, room: u64) -> Out {
 fn ordered_delivery() {
     let mut s = RecvStream::new(0, 100);
     assert_eq!(data(&mut s, 3, b"def", false, 1000), (Ok(6), vec![]));
-    assert_eq!(data(&mut s, 0, b"abc", false, 1000), (Ok(0), vec![D(b"abcdef", false)]));
-    assert_eq!(data(&mut s, 6, b"", true, 1000), (Ok(0), vec![D(b"", true)]));
+    // A frame delivers at most its own length; the rest waits for `deliver`.
+    assert_eq!(data(&mut s, 0, b"abc", false, 1000), (Ok(0), vec![D(b"abc", false)]));
+    assert!(s.has_ready());
+    assert_eq!(data(&mut s, 6, b"", true, 1000), (Ok(0), vec![]));
+    assert_eq!(s.state(), RecvState::DataRecvd);
+    assert_eq!(deliver(&mut s, 100), vec![D(b"def", true)]);
     assert_eq!(s.state(), RecvState::DataRead);
+    assert!(!s.has_ready());
 }
 
 #[test]
@@ -34,8 +50,60 @@ fn fin_out_of_order() {
     let mut s = RecvStream::new(0, 100);
     assert_eq!(data(&mut s, 3, b"de", true, 1000).1, vec![]);
     assert_eq!(s.state(), RecvState::SizeKnown);
-    assert_eq!(data(&mut s, 0, b"abc", false, 1000).1, vec![D(b"abcde", true)]);
+    assert_eq!(data(&mut s, 0, b"abc", false, 1000).1, vec![D(b"abc", false)]);
+    assert_eq!(s.state(), RecvState::DataRecvd);
+    assert_eq!(deliver(&mut s, 1), vec![D(b"d", false)]);
+    assert_eq!(deliver(&mut s, 1), vec![D(b"e", true)]);
     assert_eq!(s.state(), RecvState::DataRead);
+    assert_eq!(deliver(&mut s, 1), vec![]);
+}
+
+/// Review Focus 1: 100 bytes delivered, then a 0-byte FIN frame at 100: "Data Recvd" to "Data
+/// Read" in that call, one `Data { fin: true }` event.
+#[test]
+fn fin_only_frame_after_delivery_completes() {
+    let mut s = RecvStream::new(0, 1000);
+    assert_eq!(data(&mut s, 0, &[7; 100], false, 1000).1, vec![D(&[7; 100], false)]);
+    assert_eq!(s.state(), RecvState::Recv);
+    assert_eq!(data(&mut s, 100, b"", true, 1000), (Ok(0), vec![D(b"", true)]));
+    assert_eq!(s.state(), RecvState::DataRead);
+}
+
+/// RFC 9000 §3.2: a RESET_STREAM in "Data Recvd" is ignored (with the right final size) and the
+/// data is still delivered; a wrong final size is still FINAL_SIZE_ERROR.
+#[test]
+fn reset_in_data_recvd_still_delivers() {
+    let mut s = RecvStream::new(0, 100);
+    let (r, _) = s.on_data(0, b"hello", true, 1000);
+    assert_eq!(r, Ok(5));
+    assert_eq!(s.state(), RecvState::DataRecvd);
+    assert_eq!(reset(&mut s, 9, 5, 1000), (Ok(0), vec![]));
+    assert_eq!(s.state(), RecvState::DataRecvd);
+    assert_eq!(reset(&mut s, 9, 6, 1000).0, Err(FINAL_SIZE_ERROR));
+    assert_eq!(deliver(&mut s, 100), vec![D(b"hello", true)]);
+    assert_eq!(s.state(), RecvState::DataRead);
+}
+
+/// D12: a 1-byte frame that fills a 16 KiB gap delivers at most 1 byte; `deliver` hands over the
+/// rest.
+#[test]
+fn on_data_delivers_at_most_d() {
+    const N: usize = 16 << 10;
+    let mut s = RecvStream::new(0, 1 << 16);
+    assert!(data(&mut s, 1, &vec![5; N], false, 1 << 20).1.is_empty());
+    let ev = data(&mut s, 0, b"x", false, 1 << 20).1;
+    assert_eq!(ev, vec![D(b"x", false)]);
+    assert!(s.has_ready());
+    let mut got = 0;
+    while s.has_ready() {
+        for e in deliver(&mut s, 4096) {
+            if let StreamEvent::Data { data, .. } = e {
+                assert!(data.len() <= 4096);
+                got += data.len();
+            }
+        }
+    }
+    assert_eq!(got, N);
 }
 
 #[test]
@@ -69,6 +137,7 @@ fn final_size_rules() {
     // (g)
     let mut s = RecvStream::new(0, 100);
     assert!(data(&mut s, 0, b"abc", true, 1000).0.is_ok());
+    assert_eq!(s.state(), RecvState::DataRead);
     assert_eq!(data(&mut s, 0, b"abc", true, 1000), (Ok(0), vec![]));
     assert_eq!(reset(&mut s, 0, 3, 1000), (Ok(0), vec![]));
     assert_eq!(reset(&mut s, 0, 4, 1000).0, fse);
@@ -197,9 +266,10 @@ fn no_stop_sending_after_reset() {
 fn empty_stream_frame_keeps_window() {
     let mut s = RecvStream::new(0, 100);
     assert_eq!(data(&mut s, 0, &[1; 10], false, 1000).0, Ok(10));
-    assert_eq!(s.capacities(), (0, 0));
+    assert_eq!(s.page_count(), 0);
     assert_eq!(data(&mut s, 90, &[], false, 1000).0, Ok(80));
-    assert_eq!(s.capacities(), (0, 0));
+    assert_eq!(s.page_count(), 0);
+    assert_eq!(s.buffered_len(), 0);
 }
 
 /// An empty STREAM frame's offset is the next byte its sender would send (RFC 9000 §19.8), so a

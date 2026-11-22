@@ -9,7 +9,7 @@ use h3::qpack::field_section::FieldLine;
 use quic::aead::MAX_UDP_PAYLOAD;
 use quic::conn::RAND_LEN;
 use quic::h3_server::{AppEvent, SendError};
-use quic::route::{route, CidTable, ConnId, Route};
+use quic::route::{route, CidTable, ConnId, Route, MAX_CONNS};
 use quic::tp::{default_transport_params, TransportParams};
 use quictls::server::{QuicServer, Rand};
 use std::io;
@@ -20,6 +20,10 @@ use tls::codes::TLS_RAND_LEN;
 use tls::config::{build_config, p256_signing_key, CertChain, ServerConfig};
 
 pub const MAX_POLLS: usize = 1024;
+
+/// D13: `pump_backlog` calls per connection per loop turn: 32 · `B_PUMP` = 128 KiB, enough for one datagram's
+/// CRYPTO backlog at every level; a connection with backlog left gets its next 32 on the next turn.
+pub const MAX_PUMPS: usize = 32;
 
 fn setopt(fd: i32, level: i32, name: i32, val: i32) -> io::Result<()> {
     let p = &val as *const i32 as *const libc::c_void;
@@ -167,6 +171,8 @@ struct Conn<'a> {
     addrs: Vec<SocketAddr>,
     /// Request streams not yet answered.
     owed: Vec<u64>,
+    /// Closed and retired (`QuicServer::retire_closed`), its routes removed: kept only until its backlog is freed.
+    closed: bool,
 }
 
 impl Conn<'_> {
@@ -197,7 +203,7 @@ impl Conn<'_> {
 type Outbox = Vec<(Vec<u8>, SocketAddr)>;
 
 /// The socket-free server: datagrams and wake-ups in, datagrams out.
-// ponytail: linear scans over conns and route's CID/token lists (<= MAX_CONNS = 102 connections; route costs <= 512 CID and 816 CT token comparisons per datagram); a random-keyed SipHash index before production, never a sorted Vec (it leaks token order, §10.3.1). Connections are capped by route's has_room (MAX_CONNS), counted at the first applied Add, which service applies before the next datagram; nothing is evicted, and RFC 9000 §10.1's 3*PTO floor lets a peer hold a slot up to 55.6 min (3d2 note), which admission must plan for. every DCID is keyed, so MAX_CONNS (102) and route's linear scan are reachable, and each unauthenticated Initial costs a P-256 signature (~15 ms); Retry or a per-source handshake limit before deployment.
+// ponytail: linear scans over conns and route's CID/token lists (<= MAX_CONNS = 102 connections; route costs <= 512 CID and 816 CT token comparisons per datagram); a random-keyed SipHash index before production, never a sorted Vec (it leaks token order, §10.3.1). Connections are capped at MAX_CONNS by `conns.len()` (every connection held, a Closed one draining its teardown slots included) and by route's has_room (the routed ones, counted at the first applied Add, which service applies before the next datagram); nothing is evicted, and RFC 9000 §10.1's 3*PTO floor lets a peer hold a slot up to 55.6 min (3d2 note), which admission must plan for. every DCID is keyed, so MAX_CONNS (102) and route's linear scan are reachable, and each unauthenticated Initial costs a P-256 signature (~15 ms); Retry or a per-source handshake limit before deployment.
 pub struct Server<'a> {
     cfg: &'a ServerConfig,
     table: CidTable,
@@ -215,6 +221,12 @@ impl<'a> Server<'a> {
     #[doc(hidden)]
     pub fn conn_count(&self) -> usize {
         self.conns.len()
+    }
+
+    /// Test support: connection `i`'s QUIC state.
+    #[doc(hidden)]
+    pub fn quic(&self, i: usize) -> &QuicServer<'a> {
+        &self.conns[i].q
     }
 
     #[doc(hidden)]
@@ -256,17 +268,26 @@ impl<'a> Server<'a> {
                     if new && c.q.conn().path_state(p as u64).is_none() {
                         c.addrs.truncate(p); // no slot for an unaccepted path
                     }
-                    self.service(i, now, send);
+                    if !self.service(i, now, send) {
+                        self.pump(i, now, send)?;
+                    }
                 }
             }
+            // Admission counts every connection held, a Closed one still draining its teardown slots included, not
+            // only the routed ones (route's `has_room`): `conns` stays within MAX_CONNS. A refused Initial is dropped
+            // silently, as route drops one when its table is full.
+            Route::NewInitial if self.conns.len() >= MAX_CONNS => {}
             Route::NewInitial => {
                 let r = rand(self.rng)?;
-                if let Some(q) = QuicServer::accept(self.cfg, d, 0, now, &r, &local_params(), &mut app) {
-                    let mut c = Conn { id: self.next_id, q, addrs: vec![from], owed: Vec::new() };
+                if let (Some(q), _) = QuicServer::accept(self.cfg, d, 0, now, &r, &local_params(), &mut app) {
+                    let mut c = Conn { id: self.next_id, q, addrs: vec![from], owed: Vec::new(), closed: false };
                     c.take_requests(&mut app);
                     self.conns.push(c);
                     self.next_id += 1;
-                    self.service(self.conns.len() - 1, now, send);
+                    let i = self.conns.len() - 1;
+                    if !self.service(i, now, send) {
+                        self.pump(i, now, send)?;
+                    }
                 }
             }
             Route::Drop => {}
@@ -286,48 +307,84 @@ impl<'a> Server<'a> {
                 c.q.on_timeout(now, &r, &mut app);
                 c.take_requests(&mut app);
             }
-            if !self.service(i, now, send) {
+            if !self.service(i, now, send) && !self.pump(i, now, send)? {
                 i += 1;
             }
         }
         Ok(())
     }
 
+    /// Whether some connection has backlog (D13): then `run` reads the socket without blocking.
+    pub fn has_backlog(&self) -> bool {
+        self.conns.iter().any(|c| c.q.has_backlog())
+    }
+
+    /// D13: the backlog of connection `i`, up to `MAX_PUMPS` `pump_backlog` calls, each with fresh randomness and
+    /// followed by `service`. Returns whether the connection was removed.
+    fn pump(&mut self, i: usize, now: u64, send: &mut Outbox) -> io::Result<bool> {
+        let mut n = 0;
+        while n < MAX_PUMPS && self.conns[i].q.has_backlog() {
+            let r = rand(self.rng)?;
+            let mut app = Vec::new();
+            let c = &mut self.conns[i];
+            c.q.pump_backlog(now, &r, &mut app);
+            c.take_requests(&mut app);
+            if self.service(i, now, send) {
+                return Ok(true);
+            }
+            n += 1;
+        }
+        Ok(false)
+    }
+
     fn index(&self, id: ConnId) -> Option<usize> {
         self.conns.iter().position(|c| c.id == id)
     }
 
-    /// In `settled_later`'s order: the CID updates, the responses, then the datagrams, then the
-    /// removal of a closed connection. Returns whether the connection at `i` was removed.
+    /// In `settled_later`'s order: the CID updates, the responses, then the datagrams, then a closed
+    /// connection's teardown: once Closed its routes go and its stores, send contexts and streams move to their
+    /// teardown slots (`retire_closed`), and it is removed only once `pump` has freed them (`!has_backlog()`, D13), so
+    /// its drop frees no stream, store or tree. Returns whether the connection at `i` was removed.
     fn service(&mut self, i: usize, now: u64, send: &mut Outbox) -> bool {
         let c = &mut self.conns[i];
-        let mut ups = Vec::new();
-        c.q.poll_cid_updates(&mut ups);
-        for u in &ups {
-            self.table.apply(c.id, u); // false: a key collision, issue_cids' ponytail
-        }
-        c.respond();
-        let mut drained = false;
-        for _ in 0..MAX_POLLS {
-            match c.q.transmit(now, &mut self.out) {
-                None => {
-                    drained = true;
-                    break;
-                }
-                Some(p) => {
-                    if !self.out.is_empty() && (p as usize) < c.addrs.len() {
-                        send.push((self.out.clone(), c.addrs[p as usize]));
+        // A Closed connection sends nothing (RFC 9000 §10.2) and its routes are gone: from then on only
+        // `retire_closed` and `pump_backlog` run on it, and the teardown loop ends by their proved ensures
+        // (`retire_closed` never raises `backlog_measure`, `pump_backlog` lowers it while `has_backlog()`).
+        if !c.closed {
+            let mut ups = Vec::new();
+            c.q.poll_cid_updates(&mut ups);
+            for u in &ups {
+                self.table.apply(c.id, u); // false: a key collision, issue_cids' ponytail
+            }
+            c.respond();
+            let mut drained = false;
+            for _ in 0..MAX_POLLS {
+                match c.q.transmit(now, &mut self.out) {
+                    None => {
+                        drained = true;
+                        break;
+                    }
+                    Some(p) => {
+                        if !self.out.is_empty() && (p as usize) < c.addrs.len() {
+                            send.push((self.out.clone(), c.addrs[p as usize]));
+                        }
                     }
                 }
             }
-        }
-        if !drained {
-            eprintln!("server: transmit gave {MAX_POLLS} datagrams without stopping");
+            if !drained {
+                eprintln!("server: transmit gave {MAX_POLLS} datagrams without stopping");
+            }
         }
         if c.q.conn().is_closed() {
-            self.table.remove_conn(c.id);
-            self.conns.remove(i);
-            return true;
+            if !c.closed {
+                self.table.remove_conn(c.id);
+                c.closed = true;
+            }
+            let _ = c.q.retire_closed();
+            if !c.q.has_backlog() {
+                self.conns.remove(i);
+                return true;
+            }
         }
         false
     }
@@ -350,7 +407,13 @@ pub fn run(sock: UdpSocket, cfg: &ServerConfig) -> io::Result<()> {
         let now = us();
         srv.on_wake(now, &mut send)?;
         send_all(&sock, &mut send);
-        sock.set_read_timeout(read_timeout(now, srv.deadline()))?;
+        // While a connection has backlog the socket is polled, so the next turn's `on_wake` pumps it (D13); a zero
+        // read timeout is an error, so not blocking is set instead.
+        let busy = srv.has_backlog();
+        sock.set_nonblocking(busy)?;
+        if !busy {
+            sock.set_read_timeout(read_timeout(now, srv.deadline()))?;
+        }
         match sock.recv_from(&mut buf) {
             Ok((n, from)) => {
                 srv.on_datagram(&buf[..n], from, us(), &mut send)?;

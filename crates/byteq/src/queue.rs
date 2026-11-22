@@ -93,6 +93,7 @@ impl ByteQueue {
             self.wf(),
         ensures
             self@.len() <= MAX_QUEUE,
+            self@.len() <= self.peak() <= MAX_QUEUE,
             self.requested() <= 2 * vstd::math::max(MIN_CAP as int, (3 * self.peak()) as int),
             !self.migrating() ==> self.requested() <= vstd::math::max(MIN_CAP as int, (3 * self.peak()) as int),
             self@.len() == 0 ==> self.peak() == 0 && self.requested() == 0,

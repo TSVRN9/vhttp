@@ -1,0 +1,14 @@
+diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
+index b23593b..ddc535b 100644
+--- a/crates/quic/src/conn.rs
++++ b/crates/quic/src/conn.rs
+@@ -3839,7 +3839,8 @@ impl Connection {
+             let Ghost(c) = self.on_acked_frame(k, &frames[j]);
+             proof {
+                 lemma_tele(work, c, old(self).n_live() as int, n0 as int, self.n_live() as int);
+-                work = work + c;
++                // Mutant 9b2-M44: a removal is charged per acknowledged frame, whether or not an entry goes.
++                work = work + c + c_gc();
+             }
+             j += 1;
+         }

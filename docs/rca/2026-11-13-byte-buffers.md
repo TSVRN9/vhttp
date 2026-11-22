@@ -103,3 +103,159 @@ Per call kind: `crypto_one_byte_frames`' 1-byte frames that do not close a gap r
 1200; `reader_one_byte_push`'s single `next_message` moves the reader's `Vec` (the `split_off` tail is empty), so its
 cost is the push reallocs (T1). The patterns do not exercise Q2 (one pop takes everything), Q8 (one write) or T2 (no
 tail).
+
+## mem-9b2-send-cap: send room counted lengths, the allocator held capacity (9b2 Task 8)
+
+- **Defect**: once `SendStream`'s buffer became a `ByteQueue` (Task 8, 60d5cc3), `Streams::send_room` and the
+  `MAX_SEND_BUFFER` sum in `Streams::wf` still counted buffered lengths, while a queue keeps both of its buffers until it
+  is empty (D4: `drop_front` frees nothing; capacity up to `2·max(MIN_CAP, 3·peak)`). Measured: 64 KiB written, every
+  1 KiB piece but the last acknowledged, 310,272 bytes held for 1,024 buffered; a peer withholding one ACK per stream
+  freed room while each part kept about 6x its peak, so a connection's memory was bounded by its live parts, not by
+  1 MiB.
+- **Escape**: the old buffer (`split_off` on ACK) dropped its acknowledged prefix's memory, so "length bounds memory"
+  held by construction and was never a proof obligation; Task 8 changed the representation and the sum kept its
+  meaning on paper only. vstd models lengths, not capacity (spec D16), so nothing flagged it; the queue's own
+  `requested()` bound was per queue, never summed.
+- **Fix** (owner decisions 2026-11-16 and 2026-11-17): each sending part holds a reservation, `max(128, 6·peak)` while
+  its queue is non-empty and 0 once it empties (`SendStream::held_spec`, an exec `peak` with `peak == buf.peak()` in
+  `wf`). `Streams::wf` sums the reservations against `MAX_SEND_BUFFER`, `send_room(id)` is `B/6 − len` of the part's
+  share `B`, and `SendStream::lemma_held` proves the queue's `requested()` (both buffers while migrating) within the
+  reservation.
+- **Catch**: `Streams::lemma_wf` exports `tx_capacity() <= tx_held() <= MAX_SEND_BUFFER`, where `tx_capacity` sums
+  `requested()` itself; a path that lets a queue's capacity outgrow its share fails verification at every `Streams`
+  mutator that ensures `wf`. Against the allocator's own sizes (`SendStream::buf_capacity`, the queue's `caps`):
+  `held_capacity_within_cap` (40 streams × 64 KiB, every piece but the last acknowledged: Σ capacity at most 1 MiB
+  after every call) and `room_refills_as_acks_arrive` in `crates/quic/tests/stream_bounds.rs`.
+- **Evidence**: Task 8's report (fix rounds 0 and 1); carryovers `mem-9b2-send-cap`, `mem-9b2-send-room`.
+
+## SendStream range lists: unbounded, quadratic, reachable by any client after the handshake (9b2 Task 8a, D10)
+
+- **Defect** (class C15, a bug): `SendStream`'s `acked` and `lost` were `Vec<(u64, u64)>` lists whose lengths no `wf`
+  clause bounded, and `range_insert`/`range_remove` rebuilt the whole `Vec` per call. Measured by the plan's ruling-11
+  experiment (2026-11-13, ledger `progress.md`): under a peer that acknowledges odd pieces and loses even ones each list
+  reached about B/(2m) ranges (B bytes buffered, m the piece size): 2048 at 4 KiB in 1-byte pieces, 437 at 1 MiB in
+  1200-byte pieces, 7283 in the plan's selective-ACK scenario against the 66 it planned; a run of ACKs cost quadratic
+  time, and memory reached about 16 MiB per connection at 1-byte pieces. streams.rs:26-28 documented "about 2·64 per
+  send stream", pinned at 129 by `range_gate_pto_cycles` and `alternate_ack_range_growth`: never true.
+- **Why it could occur**: `MAX_SEND_RANGES` gated only `poll_data`'s new data, at call time, while ACK arrivals and
+  `retransmit`'s split of `lost[0]` were ungated; no `wf` clause bounded the lists, and send_stream.rs:184's `ponytail:`
+  said so ("per-stream hole bound is tested (D4), not proven"); `range_insert` and `range_remove` proved only `in_bounds`
+  ("Order and merging are exec behavior (tested)", and :92's `ponytail:` deferred an interval tree); the two tests ran
+  only the credit-drip adversary, and `range_gate_pto_cycles`'s doc named the retransmit-split adversary "Not exercised"
+  with no tracker. A collection bound held by a gate, a test and a comment, not by a proof.
+- **Fix** (owner 2026-11-13, D10): `quic::ranges` on 9b1's AVL, `RangeSet` (merged) for `acked` and `lost` and
+  `PieceSet` (exact pieces) for `flight`, each op O(log n) with its cost in its ensures. `SendStream::wf` holds the
+  partition (every byte of `[acked_base, sent_end)` acknowledged, lost or in exactly one piece in flight; no acked range
+  starts at `acked_base`), the item rule (each item at least `FLOOR` = 256 bytes long or holding a whole open slot, at
+  most `MAX_FLUSH` = 4 short new pieces open) and the bound `acked + lost + flight <= (sent_end − acked_base)/256 +
+  slots` (`ranges::lemma_bound`, from piece edges: ACKs and losses move whole pieces, a cut leaves both parts at least
+  FLOOR). Tiny writes coalesce to flush points (`flush`; `Connection::stream_write` and `crypto_write` flush). Per stream
+  at most `⌊W/256⌋ + 4` nodes of 40 bytes (`node_size`); ACK, loss and poll at most `400·(h + 1) + 40` cost units
+  (`on_data_acked_w`, `on_data_lost_w`, `poll_data_w`). conn's `on_acked_record` no longer coalesces STREAM frames
+  (`stream_run` and its `ponytail:` go): each frame is one piece.
+- **Catch**: the bound and the partition in `SendStream::wf`, proved at every mutator; the cost ensures under
+  `scripts/cost-charge.sh` (send_stream.rs and ranges.rs in its `FILES`, the six wrappers in `WRAPPERS`); mutants
+  9b2-M16 (retransmit without the floor), 9b2-M17 (a short piece with no slot), 9b2-M18 (an ACK leaving its piece in
+  flight) and 9b2-M19 (slots closed `FLOOR` past `acked_base`), each killed by Verus under `scripts/mutants.sh run`;
+  the selective-ACK tests (`send_ranges_bounded_under_selective_acks`, `input_cost::send_selective_acks`: after every
+  call the three sets within
+  `buffered()/256 + 4`, each ACK or loss at most `8·(h + 1)` node allocations and one live node more, no realloc) and
+  `partition_never_forgets`; `range_gate_pto_cycles` and `alternate_ack_range_growth` now check the proved bound. No
+  mutant drops a tree without `free`: an implicit `Drop` is invisible to Verus and to the gate (D15); review checks it.
+- **Class sweep** (a collection bound held by test or comment, not proof): `grep -rniE "not proven|tested,? not prov"
+  crates/*/src` at this commit finds two hits, neither a collection bound: crates/h3/src/conn.rs:9 and
+  crates/quic/src/streams.rs:9, each the heading of its module's caller-obligation list (event order, abort signals,
+  output routing), stated for the caller to keep (owner: the caller, the server's pipeline; checked by its own proofs
+  and the interop tests). streams.rs:26-28's "tested not proven" range claim is gone, replaced by the proved bound.
+- **Evidence**: tests `ranges::ranges_model`, `send_stream::partition_never_forgets`,
+  `send_stream::send_ranges_bounded_under_selective_acks`, `send_stream::range_gate_closes`,
+  `input_cost::send_selective_acks`; mutants 9b2-M16..M19, `scripts/mutants.sh run 9b2-M16 9b2-M17 9b2-M18 9b2-M19` at
+  e0037c5: "mutants: run ok (4 mutants killed)" (M16 at `SendStream::retransmit`, resend_piece's item rule; M17 at
+  `push_piece`; M18 at `ack_piece`; M19 at `drop_prefix`); spec D10, D15, D16.
+
+## 9b2-M22's regex was predicted, not read from a run (9b2 Task 9)
+
+- **What**: 9b2-M22 (Page::write_new loses first-writer-wins) was committed (a9011bc) with a regex naming the loop
+  invariant the author expected to fail; `mutants.sh run` killed it at the in-loop `bytes` assertion instead, so the row
+  failed as written until 0dee01b took the regex from the run. **Why**: the regex was written before the run, from the
+  proof's shape. **Catch**: `scripts/mutants.sh run <id>` fails a row whose regex matches no error block of the mutated
+  verification (it did here), and every new or retargeted row is run before its task commits.
+
+## Teardowns at O(nodes), and drops no cost saw (9b2 Task 10b, D10 (e), D13)
+
+- **What**: three teardowns reachable from network input freed O(nodes) in one call, uncharged or charged only by
+  their size: `SendStream::reset_w` cleared the acked, lost and in-flight trees node by node (a peer's STOP_SENDING,
+  up to `⌊W/256⌋ + 4` nodes); conn.rs `discard` replaced `ctx_i`/`ctx_h` with `SendStream::new`, dropping their trees
+  implicitly (key discard); and every close (`self.streams = None`, 13 sites) dropped the whole `Streams`, up to
+  `max_entries()` receive rings and every sending part's trees and queues, unseen by any cost. `deliver_some` also
+  charged its removal's sending part only by slack inside `c_rfree()` (Task 10 review M1).
+- **Why**: a drop by assignment or at scope end is invisible to Verus and to `scripts/cost-charge.sh` (D15): the cost
+  convention charges what a ghost `work` names, and nothing names an implicit `Drop`. Task 8a made the tree teardown
+  explicit (`clear`, charged O(nodes)) as an interim; the close sites predate the cost ghost.
+- **Fix**: `reset` and `retire` move the three trees into the part's teardown slot in O(1) (`TdSets`, `td_ok` in
+  `SendStream::wf`: a slot holds nodes only on a reset part, bounded by its window); `reap` frees a budget of them
+  (`avl::pop_some`). A part whose slot holds nodes is queued (`qinv`), its window stays charged in its reservation,
+  and `deliver_some` reaps it and removes it only once the slot is empty; `gc` asserts a dropped sending part holds no
+  node. `discard` retires the CRYPTO send contexts in place; closing moves `Streams` whole to `Connection::dead`
+  (`bury_streams`), freed a step per `backlog_step` (`DeadStreams::reap`: each entry's sets to its slot, the slot
+  reaped, the entry's ring and queue dropped, `c_dstep()`). Once Closed, `QuicServer::retire_closed` moves the CRYPTO
+  stores and the Initial and Handshake send contexts to their slots (`Connection::discard_closed`), and the shell
+  removes a connection only when it is Closed and `!has_backlog()` (fix round 1: it had removed a Closed connection at
+  once, so 7 `close_silently` paths, the idle timeout among them, dropped `dead` whole in the destructor; the server test
+  `idle_closed_connection_kept_until_drained` pins it). `deliver_some` charges `c_rfree() + c_sfree()`. Residual: the Connection's own drop at removal: its packet records (the 1-RTT space's in flight), paths, CID and ACK tables and empty fixed buffers, no stream, store or tree; uncharged, owned by cat-C15-semantic-cost (9b4).
+- **Catch**: the cost ensures (`reset_w`'s `r@ <= c_sfree()`, `reap`'s `r@ <= budget`, `DeadStreams::reap`'s), the
+  progress measure in `backlog_step`'s and `pump_backlog`'s ensures (a slot or a dead entry left means the measure
+  falls), and mutants 9b2-M25 (`reset_w` clearing in place, killed at its cost ensures) and 9b2-M26 (`gc` removing a
+  queued entry, killed at its assertion that the dropped part holds no node), each under `scripts/mutants.sh run`. The
+  class (a tree-holding value dropped implicitly) still has no mechanical catch beyond these sites: cat-C15-semantic-cost
+  (9b4) owns a semantic check; the frame and ACK/loss paths' `gc` drops are charged since 9b2 Task 10d (below).
+- **Class sweep**: `grep -nE "= SendStream::new|streams = None|= Streams::new|= RecvStream::new"
+  crates/quic/src/{conn,streams}.rs` at this commit: `Streams::new` only in `on_peer_params` (replacing `None`) and
+  `SendStream::new`/`RecvStream::new` only for new entries, the accept constructor, and two `RecvStream::new(0, 0)`
+  placeholders on arms their requires make unreachable (`deliver_entry`, `feed_entry`); no `streams = None` is left.
+
+## The connection cap counted routes, not owned state (9b2 Task 10b fix round 2)
+
+- **What**: once fix round 1 kept a Closed connection in `Server::conns` until its teardown slots were freed, the shell
+  still admitted a new Initial whenever route's `has_room` held. `remove_conn` takes a Closed connection out of the
+  route table at once, so `conns.len()` could pass `MAX_CONNS` (102) while Closed connections drained.
+- **Why**: the cap was enforced in one place, route's table (`CidTable::has_room`, the connections with a CID routed),
+  which equalled the connections held only while removal from both happened together. Fix round 1 split the two
+  removals and did not move the cap to the set that owns the state.
+- **Fix**: admission counts every connection held: `Route::NewInitial` is refused (the datagram dropped, as route
+  drops an Initial when its table is full) while `conns.len() >= MAX_CONNS`. The cap comment in crates/server/src/lib.rs
+  says both counts.
+- **Catch**: `respond::conns_capped_while_closed_drain`: one connection closed and draining, then `MAX_CONNS + 4` new
+  Initials; `conn_count()` never exceeds `MAX_CONNS` (it fails with the admission check removed, checked by hand).
+
+## The receive pipeline's costs composed nowhere, and a rename the gate could not see (9b2 Task 10d)
+
+- **What**: every per-frame cost below `Connection::on_datagram` was proved and then dropped before it reached a
+  caller's ensures: `CryptoStream::on_crypto` asserted its store's walk and insert inside the wrappers
+  `Frags::insert`/`after_insert` and `on_fill`; `feed_recv`/`feed_stream` dropped `on_data`'s, `deliver`'s and
+  `on_reset`'s costs (`(r, _)`, `let _ =`); a peer STOP_SENDING's reset asserted its queue frees inside
+  `SendStream::reset`; `Streams::gc` returned nothing on the frame and ACK paths; `validate_hs_path` dropped `discard`'s
+  retire under the gate's one allowed drop (DROPS); `on_datagram`, `pipeline::receive`, `refeed_one_rtt` and
+  `accept_datagram` returned no cost, so quictls's `receive`, `refeed`, `accept` and `pump_backlog` named "the pipeline
+  half" as an exclusion. Two more: `IdQueue::new`'s `CapVec::new(203)`, reached from `on_peer_params` inside `feed`,
+  was in no cost (Task 10 review M2); and quictls imported `pipeline::receive` as `receive_datagram`, while pipeline.rs
+  was in none of `tools/cost_charge.py`'s file lists, so a dropped pipeline cost could not have failed the gate.
+- **Why**: costs were composed bottom-up only as far as the gated files reached. streams.rs and recv_stream.rs are not
+  gated (the gate matches callees by name and their fns share names with cost fns), wrappers assert a cost instead of
+  returning it, and a frame path that returned nothing gave the composed costs nowhere to go; the exclusion comments
+  named an owner, so nothing failed. The gate read a renamed import as a different fn, the same blind spot
+  rfc-quantity closes by refusing `use .. as` (RCA 2026-11-13-gate-scan-scope).
+- **Fix**: each cost is returned and summed up to quictls: `on_crypto_c` (`Frags::insert_c`, `after_insert_c` at the
+  height cap, the run walk) through `on_crypto_frame`; `Streams::on_frame` returns `c_srx(f)` (`feed_recv`'s `c_feed`,
+  STOP_SENDING's `c_sfree` through `on_stop_sending`, `gc`'s `c_gc`); `gc` charges per removal, so the ACK path
+  telescopes over `n_live()` (no entry is added while one ACK is processed: at most `c_ack()` per ACK frame);
+  `validate_hs_path` returns `discard`'s retire; `on_datagram` is bounded by `c_unit()` per unit of the packets' load,
+  which `lemma_open_datagram_load` bounds by the datagram's length, so the pipeline fns cost `c_pipe(d)` and quictls
+  charges one or two of them per call. The id queue's slots are inline (`[u64; IDQ_CAP]`): nothing to count.
+- **Catch**: the ensures chain carries every charge to quictls's per-call bounds (a cost that grows past its bound fails
+  Verus; a dropped one does not, which is the gate's to catch in the files it reads), mutants 9b2-M35..M39 (one per charge, each killed at a cost ensures or assertion); in
+  `tools/cost_charge.py` the DROPS mechanism is gone, pipeline.rs is a per-fn file, and a `use .. as` rename of a cost
+  fn is refused, with gate demos for `validate_hs_path` dropping `discard`'s cost, `refeed_one_rtt` dropping
+  `on_datagram`'s and the `receive_datagram` rename; `input_cost::streams_new_allocates_nothing` for the allocation.
+  Residual, named with its owner: streams.rs and recv_stream.rs stay outside the gate until callees are resolved by
+  path (cat-C15-semantic-cost, 9b4), as do the calls keyed in `NOT_COSTS`.

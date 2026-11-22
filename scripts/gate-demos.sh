@@ -299,18 +299,38 @@ fresh escape
 printf 'assume_specification[ f ](x: u8);\n' >> "$tmp/escape/crates/demo/src/lib.rs"
 expect_fail "escape-gate: assume_specification" "unaccounted escape" esc
 
-# cost-charge gate (scripts/cost-charge.sh, 9b1 D6a), on copies of the real avl.rs, frags.rs and every byteq src/*.rs:
+# cost-charge gate (scripts/cost-charge.sh, 9b1 D6a), on copies of the real avl.rs, frags.rs, ranges.rs, send_stream.rs
+# (9b2 Task 8a: copied, so the gate's file list fails closed on neither), ring.rs (9b2 Task 9) and every byteq src/*.rs:
 # fill's while without its `work` invariant line (named by its line), a recursive exec fn returning no
 # Ghost<nat>, fill's ensures not reading its cost, fill's charge deleted or made `+ 0`, take_run's in-loop charge deleted, open_up dropping gather's
 # cost, merge binding rebuild's cost as a plain name, a call on a receiver other than self dropping push_slice's cost
 # (9b2 ruling 1), queue.rs's take_front naming push_slice's cost only in an assert (frags.rs's wrapper exemption is
 # keyed by file), a fn named insert in another impl of frags.rs asserting insert_w's cost (keyed by impl path), a new
 # byteq file with an uncharged while (byteq's src/ is listed, not named), a byteq file with a fn and no verus! block, a
-# `loop` and a `for`, a missing file; the real tree passes.
+# `loop` and a `for`, a missing file; 9b2 fix round 1 (I6), each passed by the tool before it, which read neither
+# crypto_stream.rs nor the per-fn files conn.rs and quictls's server.rs: crypto_stream.rs's retire dropping join2's cost,
+# refeed's OneRtt feed cost stubbed to 0 behind `let _ =` (the call kept), the T3b-F1 mutant patch itself (the call
+# deleted, its cost a literal ghost 0), receive's returned cost
+# stubbed to `Ghost(0)`, crypto_drop dropping a retire's cost; fix round
+# 2, each passed by b937472's tool: retire returning a literal `Ghost(1)`, `work = 0;` in receive's proof block, a second
+# `let ghost mut work` in receive, a stale LITERAL_OK entry (bal's arm no longer literal); 9b2 Task 10d, each passed by
+# the tool before it (which allowed validate_hs_path's drop and did not read pipeline.rs): validate_hs_path dropping
+# discard's cost as a statement, refeed_one_rtt dropping on_datagram's cost (pipeline.rs, a per-fn file now), a stale
+# not-a-cost exemption (transmit's `out.clear()` gone), `pipeline::receive` imported as `receive_datagram` (the rename
+# that hid its call from the gate); fix round 1: on_acked_stream dropping on_frame_acked's cost (streams.rs's cost fns
+# are callees now), a not-a-cost exemption whose target fn returns a cost; the real tree passes.
 expect_pass "cost-charge: the real tree" "$root/scripts/cost-charge.sh" "$root"
 ccq=$tmp/cost/crates/quic/src
 ccb=$tmp/cost/crates/byteq/src
-cfresh() { rm -rf "${tmp:?}/cost"; mkdir -p "$ccq" "$ccb"; cp "$root/crates/quic/src/avl.rs" "$root/crates/quic/src/frags.rs" "$ccq/"; cp "$root"/crates/byteq/src/*.rs "$ccb/"; }
+cct=$tmp/cost/crates/quictls/src
+cfresh() {
+  rm -rf "${tmp:?}/cost"; mkdir -p "$ccq" "$ccb" "$cct"
+  cp "$root/crates/quic/src/avl.rs" "$root/crates/quic/src/frags.rs" "$root/crates/quic/src/crypto_stream.rs" "$root/crates/quic/src/conn.rs" "$ccq/"
+  cp "$root/crates/quic/src/pipeline.rs" "$root/crates/quic/src/streams.rs" "$root/crates/quic/src/recv_stream.rs" "$ccq/"
+  cp "$root/crates/quic/src/ack_track.rs" "$ccq/"
+  cp "$root/crates/quic/src/ranges.rs" "$root/crates/quic/src/send_stream.rs" "$root/crates/quic/src/ring.rs" "$ccq/"
+  cp "$root"/crates/byteq/src/*.rs "$ccb/"; cp "$root/crates/quictls/src/server.rs" "$cct/"
+}
 cc() { "$root/scripts/cost-charge.sh" "$tmp/cost"; }
 cfresh
 expect_pass "cost-charge: an unchanged copy" cc
@@ -336,8 +356,8 @@ cfresh
 sed -i 's/^            work = work + 1;$/            work = work + 0;/' "$ccq/frags.rs"
 expect_fail "cost-charge: fill's charge made + 0" "crates/quic/src/frags.rs:$fw: while whose body does not charge work" cc
 cfresh
-once '^            work = work \+ cp \+ n as nat \+ c \+ 1;$' "$ccq/frags.rs"
-sed -i '/^            work = work + cp + n as nat + c + 1;$/d' "$ccq/frags.rs"
+once '^            work = work \+ cp \+ cw \+ c \+ 1;$' "$ccq/frags.rs"
+sed -i '/^            work = work + cp + cw + c + 1;$/d' "$ccq/frags.rs"
 expect_fail "cost-charge: take_run's in-loop charge deleted (review I1)" "take_run drops the cost cp binds from pop_min" cc
 cfresh
 once '^        work = work \+ c0 \+ c3;$' "$ccq/frags.rs"
@@ -366,20 +386,102 @@ cfresh
 printf 'pub fn outside_demo() -> u8 {\n    0\n}\n' > "$ccb/outside_demo.rs"
 expect_fail "cost-charge: a byteq file with a fn and no verus! block" "crates/byteq/src/outside_demo.rs: no verus! block" cc
 cfresh
-once '^    let mut v: Vec<u8> = Vec::with_capacity\(n as usize\);$' "$ccq/frags.rs"
-sed -i 's/^    let mut v: Vec<u8> = Vec::with_capacity(n as usize);$/&\n    loop { break; }/' "$ccq/frags.rs"
+once '^    let mut v: CapVec<u8> = CapVec::new\(n as usize\);$' "$ccq/frags.rs"
+sed -i 's/^    let mut v: CapVec<u8> = CapVec::new(n as usize);$/&\n    loop { break; }/' "$ccq/frags.rs"
 expect_fail "cost-charge: a loop" "\`loop\` in fill: only \`while\` loops are checked" cc
 cfresh
-sed -i 's/^    let mut v: Vec<u8> = Vec::with_capacity(n as usize);$/&\n    for _x in 0..1u8 {}/' "$ccq/frags.rs"
+sed -i 's/^    let mut v: CapVec<u8> = CapVec::new(n as usize);$/&\n    for _x in 0..1u8 {}/' "$ccq/frags.rs"
 expect_fail "cost-charge: a for" "\`for\` in fill: only \`while\` loops are checked" cc
 cfresh
 rm "$ccq/avl.rs"
 expect_fail "cost-charge: a missing file" "cannot read crates/quic/src/avl.rs" cc
+cfresh
+once '^                work = work \+ cj;$' "$ccq/crypto_stream.rs"
+sed -i 's/^                work = work + cj;$/                assert(cj >= 0);/' "$ccq/crypto_stream.rs"
+expect_fail "cost-charge: retire drops join2's cost (crypto_stream.rs, I6)" "CryptoStream::retire drops the cost cj binds from join2" cc
+cfresh
+once '^        let \(_, Ghost\(w\)\) = self\.feed\(Level::OneRtt, now, r, true, max\);$' "$cct/server.rs"
+sed -i 's/^        let (_, Ghost(w)) = self\.feed(Level::OneRtt, now, r, true, max);$/        let _ = self.feed(Level::OneRtt, now, r, true, max);\n        let ghost w: nat = 0;/' "$cct/server.rs"
+expect_fail "cost-charge: refeed's feed cost dropped behind let _ (I6)" "QuicServer::refeed does not bind the cost feed returns as Ghost(x)" cc
+cfresh
+patch -p1 -s -d "$tmp/cost" < "$root/tools/mutants/T3b-F1.patch" || die "cost-charge demo: T3b-F1.patch does not apply to the copy"
+expect_fail "cost-charge: the T3b-F1 mutant itself (refeed's feed deleted, its cost a literal 0; I6)" "QuicServer::refeed binds the ghost w to a literal" cc
+cfresh
+once '^            assert\(refed ==> !keep\);$' "$cct/server.rs"
+rl=$(($(grep -n '^            assert(refed ==> !keep);$' "$cct/server.rs" | cut -d: -f1) + 2))
+sed -i "${rl}s/^        Ghost(work)$/        Ghost(0)/" "$cct/server.rs"
+expect_fail "cost-charge: receive's cost returned as Ghost(0) (I6)" "crates/quictls/src/server.rs:$rl: QuicServer::receive builds the literal cost Ghost(0)" cc
+cfresh
+once '^            work = work \+ c1 \+ c2 \+ c3;$' "$ccq/conn.rs"
+sed -i 's/^            work = work + c1 + c2 + c3;$/            work = work + c1 + c2;/' "$ccq/conn.rs"
+expect_fail "cost-charge: crypto_drop drops a retire's cost (conn.rs per-fn, I6)" "Connection::crypto_drop drops the cost c3 binds from retire" cc
+cfresh
+once '^        let Ghost\(c\) = self\.discard\(PacketKind::Initial\);$' "$ccq/conn.rs"
+sed -i 's/^        let Ghost(c) = self\.discard(PacketKind::Initial);$/        self.discard(PacketKind::Initial);/' "$ccq/conn.rs"
+expect_fail "cost-charge: validate_hs_path drops discard's cost, no allowance left (Task 10d item 2)" "Connection::validate_hs_path drops the cost discard returns" cc
+cfresh
+once '^        let Ghost\(cd\) = c\.on_datagram\(path, 0, rx\.packets, rx\.error, now, rand\);$' "$ccq/pipeline.rs"
+sed -i 's/^        let Ghost(cd) = c\.on_datagram(path, 0, rx\.packets, rx\.error, now, rand);$/        c.on_datagram(path, 0, rx.packets, rx.error, now, rand);/' "$ccq/pipeline.rs"
+expect_fail "cost-charge: refeed_one_rtt drops on_datagram's cost (pipeline.rs, Task 10d item 3)" "refeed_one_rtt drops the cost on_datagram returns" cc
+cfresh
+once '^    out\.clear\(\);$' "$ccq/pipeline.rs"
+sed -i 's/^    out\.clear();$/    out.truncate(0);/' "$ccq/pipeline.rs"
+expect_fail "cost-charge: a stale not-a-cost exemption (Task 10d)" "not-a-cost exemption for clear in transmit matches no call" cc
+cfresh
+once '^use quic::pipeline::\{accept_datagram, initial_dcid, refeed_one_rtt\};$' "$cct/server.rs"
+sed -i 's/^use quic::pipeline::{accept_datagram, initial_dcid, refeed_one_rtt};$/use quic::pipeline::{accept_datagram, initial_dcid, receive as receive_datagram, refeed_one_rtt};/' "$cct/server.rs"
+expect_fail "cost-charge: a cost fn imported under another name (Task 10d: receive as receive_datagram)" "renames the cost fn receive" cc
+cfresh
+once '^            let Ghost\(c\) = s\.on_frame_acked\(f\);$' "$ccq/conn.rs"
+sed -i 's/^            let Ghost(c) = s\.on_frame_acked(f);$/            s.on_frame_acked(f);/' "$ccq/conn.rs"
+expect_fail "cost-charge: on_acked_stream drops on_frame_acked's cost (streams.rs callee-only, Task 10d fix round 1)" "Connection::on_acked_stream drops the cost on_frame_acked returns" cc
+cfresh
+once '^    pub fn on_packet\(&mut self, pn: u64, ack_eliciting: bool, now: u64\)$' "$ccq/ack_track.rs"
+sed -i 's/^    pub fn on_packet(&mut self, pn: u64, ack_eliciting: bool, now: u64)$/    pub fn on_packet(\&mut self, pn: u64, ack_eliciting: bool, now: u64) -> (r: Ghost<nat>)/' "$ccq/ack_track.rs"
+expect_fail "cost-charge: a not-a-cost exemption whose target returns a cost (fail-closed, Task 10d fix round 1)" "its target RecvPns::on_packet returns a Ghost<nat> cost" cc
+cfresh
+# retire's return (9b2 Task 10d: on_fill and on_crypto_c return Ghost(work) too, so the line is found inside retire)
+rtl=$(awk '/fn retire\(/ { f = 1 } f && /^        Ghost\(work\)$/ { print NR; exit }' "$ccq/crypto_stream.rs")
+[ -n "$rtl" ] || die "cost-charge demo: retire's Ghost(work) not found in the copy"
+sed -i "${rtl}s/^        Ghost(work)$/        Ghost(1)/" "$ccq/crypto_stream.rs"
+expect_fail "cost-charge: retire returns a literal Ghost(1) (crypto_stream.rs, fix round 2)" "CryptoStream::retire builds the literal cost Ghost(1)" cc
+cfresh
+once '^            assert\(refed ==> !keep\);$' "$cct/server.rs"
+sed -i 's/^            assert(refed ==> !keep);$/&\n            work = 0;/' "$cct/server.rs"
+expect_fail "cost-charge: receive zeroes work in a proof block (per-fn file, fix round 2)" "QuicServer::receive assigns work other than as" cc
+cfresh
+sed -i 's/^            assert(refed ==> !keep);$/&\n        }\n        let ghost mut work: nat = 0;\n        proof {/' "$cct/server.rs"
+expect_fail "cost-charge: receive rebinds work after its charges (fix round 2)" "QuicServer::receive binds work again" cc
+cfresh
+once '^        \(mk\(l, k, v, r\), Ghost\(1\)\)$' "$ccq/avl.rs"
+sed -i 's/^        (mk(l, k, v, r), Ghost(1))$/        (mk(l, k, v, r), Ghost(1nat + 0))/' "$ccq/avl.rs"
+expect_fail "cost-charge: a stale literal-return exemption (fix round 2)" "literal-return exemption for bal matches no literal cost" cc
+cfresh
+once '^                    let Ghost\(c4\) = free\(l3\);$' "$ccq/ranges.rs"
+fl=$(grep -n '^                    let Ghost(c4) = free(l3);$' "$ccq/ranges.rs" | cut -d: -f1)
+sed -i 's/^                    let Ghost(c4) = free(l3);$/                    free(l3);/; s/^                        work = work + c3 + c4;$/                        work = work + c3;/' "$ccq/ranges.rs"
+expect_fail "cost-charge: add's left-neighbour detach drops free's cost (ranges.rs, 9b2 Task 8a)" "crates/quic/src/ranges.rs:$fl: RangeSet::take_left drops the cost free returns" cc
+cfresh
+once '^        while c < n && self\.slots\[c\]\.1 <= b$' "$ccq/send_stream.rs"
+sl=$(grep -n '^        while c < n && self.slots\[c\].1 <= b$' "$ccq/send_stream.rs" | cut -d: -f1)
+# close_slots' first charge, the one inside that while (the first `work = work + 1;` after it)
+cl=$(awk -v w="$sl" 'NR > w && /^                work = work \+ 1;$/ { print NR; exit }' "$ccq/send_stream.rs")
+[ -n "$cl" ] || die "cost-charge demo: close_slots' charge not found in the copy"
+sed -i "${cl}d" "$ccq/send_stream.rs"
+expect_fail "cost-charge: close_slots' while without its charge (send_stream.rs, 9b2 Task 8a, D15)" "crates/quic/src/send_stream.rs:$sl: while whose body does not charge work" cc
+cfresh
+once '^            let Ghost\(c\) = self\.take_page\(pos, nxt, &mut out\);$' "$ccq/ring.rs"
+tl=$(grep -n '^            let Ghost(c) = self.take_page(pos, nxt, &mut out);$' "$ccq/ring.rs" | cut -d: -f1)
+# deliver's charge of take_page's cost, the first `work = work + c + 1;` after that call
+cl=$(awk -v w="$tl" 'NR > w && /^                work = work \+ c \+ 1;$/ { print NR; exit }' "$ccq/ring.rs")
+[ -n "$cl" ] || die "cost-charge demo: deliver's take_page charge not found in the copy"
+sed -i "${cl}s/work = work + c + 1;/work = work + 1;/" "$ccq/ring.rs"
+expect_fail "cost-charge: deliver drops take_page's cost (ring.rs, 9b2 Task 9, D11)" "crates/quic/src/ring.rs:$tl: Ring::deliver drops the cost c binds from take_page" cc
 
-# The no-realloc claim (spec "The bound", TRUSTED.md's Vec row): fill's fresh piece made by Vec::new() instead of
-# Vec::with_capacity(n) must fail crypto_ooo_cost_linear on reallocs. A copy of the workspace in target/realloc-demo
-# (stable path, mtimes kept and frags.rs touched, so only quic rebuilds), its own target dir; two debug builds and runs, about half a
-# minute after the first.
+# The no-realloc claim (spec "The bound", TRUSTED.md's Vec row): fill's fresh piece made by CapVec::new(0) instead of
+# CapVec::new(n) must fail crypto_ooo_cost_linear on reallocs (under Verus it fails push's precondition). A copy of the
+# workspace in target/realloc-demo (stable path, mtimes kept and frags.rs touched, so only quic rebuilds), its own target
+# dir; two debug builds and runs, about half a minute after the first.
 rd=$root/target/realloc-demo
 rm -rf "$rd/ws"
 mkdir -p "$rd/ws"
@@ -388,9 +490,9 @@ mkdir -p "$rd/ws"
 touch "$rd/ws/crates/quic/src/frags.rs"
 rdt() { env CARGO_TARGET_DIR="$rd/target" cargo test --offline --locked -q --manifest-path "$rd/ws/Cargo.toml" -p quic --test crypto_cost; }
 expect_pass "crypto_cost: an unchanged workspace copy" rdt
-once '^    let mut v: Vec<u8> = Vec::with_capacity\(n as usize\);$' "$rd/ws/crates/quic/src/frags.rs"
-sed -i 's/^    let mut v: Vec<u8> = Vec::with_capacity(n as usize);$/    let mut v: Vec<u8> = Vec::new();/' "$rd/ws/crates/quic/src/frags.rs"
-expect_fail "crypto_cost: fill's pieces grown from Vec::new()" "reallocs" rdt
+once '^    let mut v: CapVec<u8> = CapVec::new\(n as usize\);$' "$rd/ws/crates/quic/src/frags.rs"
+sed -i 's/^    let mut v: CapVec<u8> = CapVec::new(n as usize);$/    let mut v: CapVec<u8> = CapVec::new(0);/' "$rd/ws/crates/quic/src/frags.rs"
+expect_fail "crypto_cost: fill's pieces grown from CapVec::new(0)" "reallocs" rdt
 
 # rlimit gate (tools/rl.py --gate): a quic fn at 8,000,001; a FAIL row; empty and rowless logs; a missing log; two JSON objects.
 pin=$root/tools/verus-pin.txt

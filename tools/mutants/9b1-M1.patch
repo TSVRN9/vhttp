@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/frags.rs b/crates/quic/src/frags.rs
-index a863411..22eb282 100644
+index fb00fe6..32f4b8e 100644
 --- a/crates/quic/src/frags.rs
 +++ b/crates/quic/src/frags.rs
-@@ -1095,8 +1095,9 @@ fn walk(t: &Tree<Vec<u8>>, s: u64, e: u64, pe: Option<u64>) -> (r: (u64, usize,
+@@ -1096,8 +1096,9 @@ fn walk(t: &Tree<CapVec<u8>>, s: u64, e: u64, pe: Option<u64>) -> (r: (u64, usiz
              }
              if b.key < s {
                  let (c, h, p, Ghost(w)) = walk(&b.right, s, e, pe);

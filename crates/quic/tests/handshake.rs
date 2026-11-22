@@ -86,8 +86,15 @@ fn local_tp_rules() {
         initial_max_streams_uni: 100,
         initial_max_streams_bidi: 100,
         active_connection_id_limit: 8,
+        initial_max_stream_data_bidi_local: 0x1_0000,
+        initial_max_stream_data_bidi_remote: 0x1_0000,
+        initial_max_stream_data_uni: 0x1_0000,
         ..ltp()
     }));
+    // A stream's receive window is at most MAX_RECV_WINDOW (D11): the ring holds at most NP_MAX slots.
+    assert!(!is_local_tp_ok(&TransportParams { initial_max_stream_data_bidi_local: 0x1_0001, ..ltp() }));
+    assert!(!is_local_tp_ok(&TransportParams { initial_max_stream_data_bidi_remote: 0x1_0001, ..ltp() }));
+    assert!(!is_local_tp_ok(&TransportParams { initial_max_stream_data_uni: 0x1_0001, ..ltp() }));
     // server_tp_wf's own bounds.
     assert!(!is_local_tp_ok(&TransportParams { max_udp_payload_size: 1199, ..ltp() }));
     assert!(!is_local_tp_ok(&TransportParams { ack_delay_exponent: 21, ..ltp() }));

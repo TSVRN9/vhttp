@@ -1,0 +1,15 @@
+diff --git a/crates/quic/src/ring.rs b/crates/quic/src/ring.rs
+index bf6ddb5..e8b18d2 100644
+--- a/crates/quic/src/ring.rs
++++ b/crates/quic/src/ring.rs
+@@ -414,8 +414,9 @@ impl Page {
+                 work <= 3 * (i - lo),
+             decreases hi - i,
+         {
++            // Mutant 9b2-M22: a later writer overwrites a held byte.
++            self.bytes.set(i, src[j + (i - lo)]);
+             if !*self.have.index(i) {
+-                self.bytes.set(i, src[j + (i - lo)]);
+                 proof {
+                     lemma_count_set(self.have@, i as int, true);
+                     lemma_count_le(self.have@.update(i as int, true));

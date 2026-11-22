@@ -74,6 +74,20 @@ impl<T> CapVec<T> {
         self.v.set(i, x);
     }
 
+    /// An in-place exchange of entry `i` and `x` (vstd's `Vec::set_and_swap`): moves an owned entry out and back.
+    pub fn set_and_swap(&mut self, i: usize, x: &mut T)
+        requires
+            old(self).wf(),
+            i < old(self)@.len(),
+        ensures
+            final(self).wf(),
+            final(self)@ == old(self)@.update(i as int, *old(x)),
+            *final(x) == old(self)@[i as int],
+            final(self).cap() == old(self).cap(),
+    {
+        self.v.set_and_swap(i, x);
+    }
+
     pub fn index(&self, i: usize) -> (r: &T)
         requires
             i < self@.len(),
@@ -97,7 +111,8 @@ impl<T> CapVec<T> {
         self.v.as_slice()
     }
 
-    /// The guarantee ends here: the `Vec` is only read or moved afterwards.
+    /// The guarantee ends here: the `Vec` is only read, moved, or shrunk by `pop` afterwards (a `Vec` never reallocates
+    /// to shrink; `frags::gather` pops after its exact list).
     pub fn into_vec(self) -> (r: Vec<T>)
         ensures
             r@ == self@,

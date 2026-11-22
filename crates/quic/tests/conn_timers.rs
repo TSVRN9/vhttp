@@ -868,10 +868,8 @@ fn alternate_ack_range_growth() {
     c.on_datagram(0, 1200, vec![one(peer_pn, vec![stream(0, 0, b"GET", true)])], None, t, &rnd(3));
     peer_pn += 1;
     assert_eq!(c.stream_write(0, &[9; 10_000], true), Ok(10_000));
-    let cap = 2 * MAX_SEND_RANGES + 1;
     let mut hi = 0u64;
     let mut new_only = 0u32;
-    let mut closed_rounds = 0u32;
     let mut stalls = 0u32;
     let mut to_ack: Vec<u64> = Vec::new();
     for r in 0..300u64 {
@@ -885,11 +883,8 @@ fn alternate_ack_range_growth() {
         t += 1_000;
         c.on_datagram(0, 1200, vec![one(peer_pn, f)], None, t, &rnd(3));
         peer_pn += 1;
-        let (a, _) = c.send_range_counts(0).unwrap();
+        let (a, _, _) = c.send_range_counts(0).unwrap();
         let closed = a >= MAX_SEND_RANGES;
-        if closed {
-            closed_rounds += 1;
-        }
         let v = drain(&mut c, t);
         for d in &v {
             for pkt in &d.packets {
@@ -918,8 +913,12 @@ fn alternate_ack_range_growth() {
                 }
             }
         }
-        let (a, l) = c.send_range_counts(0).unwrap();
-        assert!(a <= cap && l <= cap, "round {r}: {a} acked, {l} lost ranges");
+        let (a, l, fl) = c.send_range_counts(0).unwrap();
+        let b = c.send_buffered(0).unwrap();
+        assert!(a + l + fl <= b / 256 + 4, "round {r}: {a} acked, {l} lost, {fl} in flight, {b} buffered");
+        // The drip sends about 300 bytes: the sets hold at most 5 items, so the gate above cannot close here
+        // (`send_stream::range_gate_closes` closes it).
+        assert!(a + l + fl <= hi as usize / 256 + 4, "round {r}: {a} acked, {l} lost, {fl} in flight, {hi} sent");
         assert!(c.sent_inflight_len(PacketKind::OneRtt) <= 64);
         if r % 20 == 19 {
             // Fire timers until the PTO has declared everything lost.
@@ -935,11 +934,12 @@ fn alternate_ack_range_growth() {
                 }
             }
             stalls += 1;
-            let (a, l) = c.send_range_counts(0).unwrap();
-            assert!(a <= cap && l <= cap, "round {r}: {a} acked, {l} lost ranges");
+            let (a, l, fl) = c.send_range_counts(0).unwrap();
+            let b = c.send_buffered(0).unwrap();
+            assert!(a + l + fl <= b / 256 + 4, "round {r}: {a} acked, {l} lost, {fl} in flight, {b} buffered");
+            assert!(a + l + fl <= hi as usize / 256 + 4, "round {r}: {a} acked, {l} lost, {fl} in flight, {hi} sent");
         }
         assert_eq!(c.phase(), Phase::Open);
     }
     assert!(stalls >= 15);
-    assert!(closed_rounds > 0, "the gate never closed");
 }

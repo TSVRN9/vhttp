@@ -1,0 +1,14 @@
+diff --git a/crates/quic/src/ring.rs b/crates/quic/src/ring.rs
+index bf6ddb5..7cd9c7f 100644
+--- a/crates/quic/src/ring.rs
++++ b/crates/quic/src/ring.rs
+@@ -1557,7 +1557,8 @@ impl Ring {
+             lemma_count_le(g.have@);
+         }
+         let ghost g1 = *g;
+-        if g.held == 0 {
++        // Mutant 9b2-M23: a page holding nothing past `base` is put back, not freed.
++        if g.held == 0 && false {
+             // Dropping `g` frees the page's three buffers.
+             self.slots = Some(v);
+             proof {

@@ -1,0 +1,12 @@
+diff --git a/crates/quic/src/handshake.rs b/crates/quic/src/handshake.rs
+index a947e48..2618c5e 100644
+--- a/crates/quic/src/handshake.rs
++++ b/crates/quic/src/handshake.rs
+@@ -116,7 +116,6 @@ pub fn is_local_tp_ok(tp: &TransportParams) -> (r: bool)
+         && tp.active_connection_id_limit <= PEER_CID_CAP && tp.disable_active_migration
+         && tp.initial_max_stream_data_bidi_local <= MAX_RECV_WINDOW
+         && tp.initial_max_stream_data_bidi_remote <= MAX_RECV_WINDOW
+-        && tp.initial_max_stream_data_uni <= MAX_RECV_WINDOW
+ }
+ 
+ // =============================================================================

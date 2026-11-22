@@ -1,8 +1,7 @@
 diff --git a/crates/quic/src/recv_stream.rs b/crates/quic/src/recv_stream.rs
-index a4f824e..9bd815a 100644
 --- a/crates/quic/src/recv_stream.rs
 +++ b/crates/quic/src/recv_stream.rs
-@@ -304,7 +304,7 @@ pub open spec fn credit_after(s: SpecRecv, end: nat, fin: bool) -> nat {
+@@ -373,7 +373,7 @@
      if fin {
          end
      } else if s.final_size is Some {

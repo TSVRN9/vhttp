@@ -1,0 +1,16 @@
+diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
+index 46567b3..9bbf215 100644
+--- a/crates/quic/src/crypto_stream.rs
++++ b/crates/quic/src/crypto_stream.rs
+@@ -577,8 +577,10 @@ impl CryptoStream {
+         let ghost a = *self;
+         let ghost mut work: nat = 0;
+         let ((h, c), Ghost(cw)) = self.st.after_insert_c(self.contig, offset, data);
++        // Mutant 9b2-M40: the store's walk runs twice, both charged.
++        let (_, Ghost(cw2)) = self.st.after_insert_c(self.contig, offset, data);
+         proof {
+-            work = work + cw;
++            work = work + cw + cw2;
+             lemma_ooo_count(a, offset, data@);
+         }
+         let run: usize = if self.contig > self.base {

@@ -1,13 +1,13 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index 84680fd..f9098c8 100644
+index b23593b..616482a 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -1642,7 +1642,7 @@ impl Connection {
-             }
-             self.lc.enter_closing(now, pto, false, c, none.as_slice());
-             self.streams = None;
--            return Err(c);
-+            return Ok(());
+@@ -3905,7 +3905,7 @@ impl Connection {
          }
-         Ok(())
+         if let Err(c) = r {
+             self.close_crypto_err(c, now, pto);
+-            return (Err(c), Ghost(work));
++            return (Ok(()), Ghost(work));
+         }
+         (Ok(()), Ghost(work))
      }

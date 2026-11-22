@@ -1,0 +1,12 @@
+diff --git a/crates/quic/src/send_stream.rs b/crates/quic/src/send_stream.rs
+index 8f85dee..8e45ff2 100644
+--- a/crates/quic/src/send_stream.rs
++++ b/crates/quic/src/send_stream.rs
+@@ -2788,6 +2788,7 @@ impl SendStream {
+             }
+             return (false, Ghost(work));
+         }
++        let Ghost(_c9) = self.flight.insert_piece(off, end);
+         proof {
+             lemma_piece_free(s0.acked@, s0.lost@, s0.flight@, s0.open_slots(), s0.acked_base, s0.sent_end, off, end);
+         }

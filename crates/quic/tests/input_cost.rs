@@ -1,15 +1,17 @@
 //! 9b2 Task 1: the per-call cost of quic's input-path byte buffers (spec "The cost today", D15). Each pattern runs at
-//! n, 2n and 4n under a per-thread counting allocator; every input call is measured on its own. The bounds: requested
-//! bytes at most 3x per doubling, total time at most 8x (+ 20 ms) from n to 4n, no `realloc`, a delivering call hands
-//! over at most its own input's bytes, and the slowest call at 4n at most 4x the slowest at n (+ 1 ms). Per call
+//! n, 2n and 4n under a per-thread counting allocator; every input call is measured on its own. The bounds count, never
+//! time: requested bytes at most 3x per doubling, per call kind the largest single call's requested bytes at most 3x
+//! per doubling (+ `COST_B`), no `realloc`, and a delivering call hands over at most its own input's bytes. Per call
 //! (the allocator is deterministic): no `realloc`, and requested bytes at most `COST_A·d + COST_B`, but for one queue
 //! buffer of a call given bytes (`per_call_ok`).
 use quic::crypto_stream::CryptoStream;
+use quic::CapVec;
 use quic::recv_stream::{RecvStream, StreamEvent};
 use quic::send_stream::{SendState, SendStream};
+use quic::streams::Streams;
+use quic::tp::default_transport_params;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::time::{Duration, Instant};
 
 struct Counting;
 
@@ -66,8 +68,28 @@ const QUEUE_MIN_CAP: usize = 64;
 /// (D4's memory bound); the rest of the call stays within the budget. The allocator sees no copy into that buffer: the
 /// work bound on it rests on D15's proved cost (`push_slice` at most `7d + 4`), not on this test. `exempt_cap` bounds
 /// how many calls a run may excuse so.
-fn bytes_ok(x: &Call, queue: bool) -> bool {
-    x.k[4] <= COST_A * x.d + COST_B || exempt(x, queue)
+fn bytes_ok(x: &Call, a: Alloc) -> bool {
+    x.k[4] <= COST_A * x.d + COST_B || exempt(x, a == Alloc::Queue) || gather_ok(x, a)
+}
+
+/// Which allocation a call of the test's structure may make beyond the budget: a `ByteQueue`'s buffer (`exempt`), or
+/// `Frags::insert`'s gather list (`gather_ok`).
+#[derive(Clone, Copy, PartialEq)]
+enum Alloc {
+    None,
+    Queue,
+    Gather,
+}
+
+/// One entry of `Frags::insert`'s gather list: a chunk's start and its piece.
+const GATHER_ENTRY: usize = std::mem::size_of::<(u64, CapVec<u8>)>();
+
+/// `Frags::insert`'s gather list (9b2 Task 6, coordinator ruling): one exact `CapVec` with room for the chunks the frame
+/// meets, at most `d` (`split_frame`'s proved `fm.len() <= e - s`), plus `B`'s first chunk, so one allocation of at most
+/// `GATHER_ENTRY·(d + 1)` bytes, freed before the call returns; the rest of the call stays within the budget.
+fn gather_ok(x: &Call, a: Alloc) -> bool {
+    let budget = COST_A * x.d + COST_B;
+    a == Alloc::Gather && x.k[4] - x.k[5] <= budget && x.k[5] <= GATHER_ENTRY * (x.d + 1)
 }
 
 /// The call passes only by its queue-buffer allowance.
@@ -83,7 +105,8 @@ fn exempt_cap(peak: usize) -> usize {
 }
 
 /// Each call: no realloc, and `bytes_ok`; at most `exempt_cap` excused calls. Returns the failures, worst call first.
-fn per_call_ok(name: &str, m: usize, c: &[Call], queue: bool) -> Vec<String> {
+fn per_call_ok(name: &str, m: usize, c: &[Call], a: Alloc) -> Vec<String> {
+    let queue = a == Alloc::Queue;
     let mut f = Vec::new();
     let re: Vec<_> = c.iter().enumerate().filter(|(_, x)| x.k[2] != 0).collect();
     if let Some((i, x)) = re.iter().max_by_key(|(_, x)| x.k[2]) {
@@ -102,7 +125,7 @@ fn per_call_ok(name: &str, m: usize, c: &[Call], queue: bool) -> Vec<String> {
             exempt_cap(peak)
         ));
     }
-    let over: Vec<_> = c.iter().enumerate().filter(|(_, x)| !bytes_ok(x, queue)).collect();
+    let over: Vec<_> = c.iter().enumerate().filter(|(_, x)| !bytes_ok(x, a)).collect();
     if let Some((i, x)) = over
         .iter()
         .max_by_key(|(_, x)| x.k[4] - (COST_A * x.d + COST_B).min(x.k[4]))
@@ -122,13 +145,12 @@ fn per_call_ok(name: &str, m: usize, c: &[Call], queue: bool) -> Vec<String> {
     f
 }
 
-/// One input call: its kind, allocator counts (`k[5]` its largest single request), wall time, the bytes it was given,
-/// the bytes it handed over (None: delivers nothing), the bytes held after it.
+/// One input call: its kind, allocator counts (`k[5]` its largest single request), the bytes it was given, the bytes
+/// it handed over (None: delivers nothing), the bytes held after it.
 #[derive(Clone, Copy)]
 struct Call {
     tag: &'static str,
     k: [usize; 6],
-    t: Duration,
     d: usize,
     out: Option<usize>,
     held: usize,
@@ -146,14 +168,11 @@ impl Run {
             k.set(v);
             v
         });
-        let t = Instant::now();
         let (out, held) = f();
-        let t = t.elapsed();
         let b = K.with(|k| k.get());
         self.0.push(Call {
             tag,
             k: [0, 1, 2, 3, 4, 5].map(|i| if i == 5 { b[5] } else { b[i] - a[i] }),
-            t,
             d,
             out,
             held,
@@ -161,62 +180,29 @@ impl Run {
     }
 }
 
-/// Runs `pat` at n, 2n, 4n (three times each; times are the fastest run's) and checks the bounds; `queue`: the structure
-/// is a `ByteQueue` after 9b2 (`bytes_ok`). With `fill`, the
-/// last call is the gap fill and must take at most 8x the slowest other call + 1 ms.
-fn check(name: &str, n: usize, pat: fn(usize, &mut Run), fill: bool, queue: bool) {
+/// Runs `pat` at n, 2n, 4n and checks the bounds; `a`: the allocations the structure may make beyond the per-call
+/// budget (`bytes_ok`). Counts only (the allocator is deterministic): wall time is not a cost bound (Task 8 ruling).
+fn check(name: &str, n: usize, pat: fn(usize, &mut Run), a: Alloc) {
     let mut fails = Vec::new();
-    let mut rows = Vec::new();
+    let mut rows: Vec<(usize, Vec<(&'static str, usize)>)> = Vec::new();
     for m in [n, 2 * n, 4 * n] {
-        let runs: Vec<Run> = (0..3)
-            .map(|_| {
-                let mut r = Run::default();
-                pat(m, &mut r);
-                r
-            })
-            .collect();
-        let c = &runs[0].0;
+        let mut r = Run::default();
+        pat(m, &mut r);
+        let c = &r.0;
         let k = c.iter().fold([0; 5], |a, x| [0, 1, 2, 3, 4].map(|i| a[i] + x.k[i]));
-        let total = runs
-            .iter()
-            .map(|r| r.0.iter().map(|x| x.t).sum::<Duration>())
-            .min()
-            .unwrap();
-        let slow = runs
-            .iter()
-            .map(|r| r.0.iter().map(|x| x.t).max().unwrap())
-            .min()
-            .unwrap();
-        let big = c.iter().map(|x| x.k[4]).max().unwrap();
         let worst = c
             .iter()
             .filter_map(|x| x.out.map(|o| (o, x.d)))
             .max_by_key(|&(o, d)| o as i64 - d as i64);
         let over = c.iter().filter(|x| x.out.is_some_and(|o| o > x.d)).count();
-        fails.extend(per_call_ok(name, m, c, queue));
+        fails.extend(per_call_ok(name, m, c, a));
         if over != 0 {
             fails.push(format!(
                 "{name} n={m}: {over} calls hand over more than their input (worst {worst:?} (out, d))"
             ));
         }
-        let (tf, tmax) = if fill {
-            let tf = runs.iter().map(|r| r.0.last().unwrap().t).min().unwrap();
-            let l = c.len() - 1;
-            let tmax = runs
-                .iter()
-                .map(|r| r.0[..l].iter().map(|x| x.t).max().unwrap())
-                .min()
-                .unwrap();
-            if tf > 8 * tmax + Duration::from_millis(1) {
-                fails.push(format!("{name} n={m}: fill call {tf:?} > 8 x {tmax:?} + 1 ms"));
-            }
-            (Some(tf), Some(tmax))
-        } else {
-            (None, None)
-        };
         eprintln!(
-            "{name} n={m}: calls {} bytes {} alloc {} alloc_zeroed {} realloc {} dealloc {} time {total:?} \
-             slowest {slow:?} largest-call-bytes {big} worst-out {worst:?} fill {tf:?} other-max {tmax:?}",
+            "{name} n={m}: calls {} bytes {} alloc {} alloc_zeroed {} realloc {} dealloc {} worst-out {worst:?}",
             c.len(),
             k[4],
             k[0],
@@ -224,37 +210,29 @@ fn check(name: &str, n: usize, pat: fn(usize, &mut Run), fill: bool, queue: bool
             k[2],
             k[3]
         );
-        let mut tags: Vec<&str> = Vec::new();
+        let mut tags: Vec<(&'static str, usize)> = Vec::new();
         for x in c {
-            if !tags.contains(&x.tag) {
-                tags.push(x.tag);
+            match tags.iter_mut().find(|t| t.0 == x.tag) {
+                Some(t) => t.1 = t.1.max(x.k[4]),
+                None => tags.push((x.tag, x.k[4])),
             }
         }
-        for tag in tags {
-            let of = |r: &Run| r.0.iter().filter(|x| x.tag == tag).map(|x| x.t).max().unwrap();
-            let b = c.iter().filter(|x| x.tag == tag).map(|x| x.k[4]).max().unwrap();
+        for &(tag, b) in &tags {
             let n = c.iter().filter(|x| x.tag == tag).count();
-            let t = runs.iter().map(of).min().unwrap();
-            eprintln!("  {name} n={m} {tag}: calls {n} largest-call-bytes {b} slowest {t:?}");
+            eprintln!("  {name} n={m} {tag}: calls {n} largest-call-bytes {b}");
         }
-        rows.push((k[4], total, slow));
+        rows.push((k[4], tags));
     }
     for i in 0..2 {
         if rows[i + 1].0 > 3 * rows[i].0 {
             fails.push(format!("{name}: bytes {} -> {} (> 3x)", rows[i].0, rows[i + 1].0));
         }
-    }
-    if rows[2].1 > 8 * rows[0].1 + Duration::from_millis(20) {
-        fails.push(format!(
-            "{name}: time {:?} -> {:?} (> 8x + 20 ms)",
-            rows[0].1, rows[2].1
-        ));
-    }
-    if rows[2].2 > 4 * rows[0].2 + Duration::from_millis(1) {
-        fails.push(format!(
-            "{name}: slowest call {:?} -> {:?} (> 4x + 1 ms)",
-            rows[0].2, rows[2].2
-        ));
+        for &(tag, b) in &rows[i + 1].1 {
+            let p = rows[i].1.iter().find(|t| t.0 == tag).map_or(0, |t| t.1);
+            if b > 3 * p + COST_B {
+                fails.push(format!("{name}: {tag} largest-call-bytes {p} -> {b} (> 3x + {COST_B})"));
+            }
+        }
     }
     assert!(fails.is_empty(), "{fails:#?}");
 }
@@ -263,8 +241,9 @@ fn bytes(m: usize) -> Vec<u8> {
     (0..m).map(|i| i as u8).collect()
 }
 
-/// `on_crypto` then `read` into a fresh `Vec`, as quictls's `feed` does per level: one input call. `new` is the bytes
-/// the frame adds to what was received; `held` counts the received bytes not yet handed over.
+/// `on_crypto` then `read(max = d)` into an exact buffer, as quictls's `feed` does per level with the datagram's size
+/// (D6): one input call. `new` is the bytes the frame adds to what was received; `held` counts the received bytes not
+/// yet handed over.
 fn crypto_call(
     r: &mut Run,
     tag: &'static str,
@@ -276,8 +255,8 @@ fn crypto_call(
 ) {
     r.call(tag, d.len(), || {
         assert_eq!(c.on_crypto(off as u64, d), Ok(()));
-        let mut out = Vec::new();
-        c.read(&mut out);
+        let mut out = CapVec::new((c.unread() as usize).min(d.len()));
+        c.read(d.len() as u64, &mut out);
         *held = *held + new - out.len();
         (Some(out.len()), *held)
     });
@@ -317,7 +296,8 @@ fn write_send_ack(m: usize, r: &mut Run) {
     let mut more = true;
     while more {
         r.call("poll", 0, || {
-            more = st.poll_data(1200, u64::MAX).is_some();
+            // Each 1 KiB ACK below is exactly one sent piece.
+            more = st.poll_data(1024, u64::MAX).is_some();
             (None, st.buffered())
         });
     }
@@ -335,24 +315,30 @@ fn reverse_fill(m: usize, r: &mut Run) {
     let s = bytes(m);
     let mut st = RecvStream::new(0, m as u64);
     let (mut got, mut recvd) = (0, 0);
+    let data_len = |ev: &Vec<StreamEvent>| -> usize {
+        ev.iter()
+            .map(|e| if let StreamEvent::Data { data, .. } = e { data.len() } else { 0 })
+            .sum()
+    };
+    // The frame path's shape (D12): each frame's `on_data`, then a delivery of at most its length.
     for off in (0..m).rev() {
         r.call("frame", 1, || {
             let mut ev = Vec::new();
-            assert!(st
-                .on_data(off as u64, &s[off..off + 1], false, u64::MAX, &mut ev)
-                .is_ok());
-            let n: usize = ev
-                .iter()
-                .map(|e| {
-                    if let StreamEvent::Data { data, .. } = e {
-                        data.len()
-                    } else {
-                        0
-                    }
-                })
-                .sum();
+            assert!(st.on_data(off as u64, &s[off..off + 1], false, u64::MAX).0.is_ok());
+            let _ = st.deliver(1, &mut ev);
+            let n = data_len(&ev);
             got += n;
             recvd += 1;
+            (Some(n), recvd - got)
+        });
+    }
+    // `pump_backlog`'s STREAM half: `B_PUMP`-sized deliveries until none is left (D13).
+    while st.has_ready() {
+        r.call("pump", 4096, || {
+            let mut ev = Vec::new();
+            let _ = st.deliver(4096, &mut ev);
+            let n = data_len(&ev);
+            got += n;
             (Some(n), recvd - got)
         });
     }
@@ -360,25 +346,225 @@ fn reverse_fill(m: usize, r: &mut Run) {
 }
 
 #[test]
-#[ignore = "9b2: fails today, a 1-byte frame closing a gap copies and hands over the whole run (Q4, Q5); un-ignored by Task 6"]
 fn crypto_one_byte_frames() {
-    check("crypto_one_byte_frames", 16 << 10, one_byte_frames, false, false);
+    check("crypto_one_byte_frames", 16 << 10, one_byte_frames, Alloc::Gather);
 }
 
 #[test]
-#[ignore = "9b2: fails today, the fill's take_front grows buf by realloc (Q5); un-ignored by Task 6"]
 fn crypto_runs_then_fill() {
-    check("crypto_runs_then_fill", 1024, runs_then_fill, true, false);
+    check("crypto_runs_then_fill", 1024, runs_then_fill, Alloc::Gather);
 }
 
 #[test]
-#[ignore = "9b2: fails today, one ACK's split_off copies up to half the stream (Q7); un-ignored by Task 8"]
 fn send_ack_1k() {
-    check("send_ack_1k", 256 << 10, write_send_ack, false, true);
+    check("send_ack_1k", 256 << 10, write_send_ack, Alloc::Queue);
+}
+
+/// A height bound for the three range trees with `n` nodes in all: an AVL tree of `n` nodes is at most
+/// `1.45·log2(n + 2)` high, below `2·log2(n + 2)`.
+fn h_max(n: usize) -> usize {
+    2 * (usize::BITS - (n + 2).leading_zeros()) as usize
+}
+
+/// Node allocations per ACK or loss: `NODE_C · (h + 1)` (D10 (e)): `split` and `join` re-box the nodes on their path
+/// (`take_piece`, `add`, `remove_range`), a handful of paths per call.
+const NODE_C: usize = 8;
+
+/// One ACK or loss on `s`, measured: (allocations, frees, reallocs, requested bytes), and the nodes before it.
+fn measure(s: &mut SendStream, f: impl FnOnce(&mut SendStream)) -> ([usize; 4], usize) {
+    let (a, l, fl) = s.range_counts();
+    let k0 = K.with(|k| k.get());
+    f(s);
+    let k1 = K.with(|k| k.get());
+    ([k1[0] + k1[1] - k0[0] - k0[1], k1[3] - k0[3], k1[2] - k0[2], k1[4] - k0[4]], a + l + fl)
+}
+
+/// The per-call rule for an ACK or a loss: no `realloc`, at most `NODE_C·(h + 1)` allocations, of nodes only (40
+/// bytes each), and at most one live node more after it (allocations minus frees).
+fn node_call_ok(m: [usize; 4], n: usize) -> bool {
+    m[2] == 0 && m[0] <= NODE_C * (h_max(n) + 1) && m[3] <= 40 * m[0] && m[0] <= m[1] + 1
+}
+
+/// 64 KiB written and sent in 1 KiB pieces, acknowledged in order and, on a second stream, out of order (odd pieces,
+/// then even ones backwards): no ACK copies a stream byte, reallocates, allocates more than `NODE_C·(h + 1)` nodes, or
+/// adds more than one live node (D10 (h)).
+#[test]
+fn ack_copies_no_stream_bytes() {
+    const W: usize = 1 << 16;
+    let n = W / 1024;
+    let orders: [Vec<usize>; 2] = [
+        (0..n).collect(),
+        (1..n).step_by(2).chain((0..n).step_by(2).rev()).collect(),
+    ];
+    for order in orders {
+        let mut s = SendStream::new(W as u64);
+        assert_eq!(s.write(&bytes(W), true), Ok(()));
+        while s.poll_data(1024, u64::MAX).is_some() {}
+        let mut bad = Vec::new();
+        for &i in &order {
+            let (m, nodes) = measure(&mut s, |s| s.on_data_acked((i * 1024) as u64, 1024, i == n - 1));
+            if !node_call_ok(m, nodes) {
+                bad.push((i, m, nodes));
+            }
+        }
+        assert!(bad.is_empty(), "ACKs over the node rule (piece, [allocs, frees, reallocs, bytes], nodes): {bad:?}");
+        assert_eq!(s.state_exec(), SendState::DataRecvd);
+    }
+}
+
+/// Totals of a selective-ACK run over the stream's own calls (the test's accessors not counted): requested bytes,
+/// allocations, and the most allocations of one ACK or loss (printed).
+#[derive(Default)]
+struct SelRun {
+    bytes: usize,
+    allocs: usize,
+    worst: usize,
+}
+
+impl SelRun {
+    /// Runs one call of the stream, adding its allocations to the totals.
+    fn call<R>(&mut self, f: impl FnOnce() -> R) -> (R, [usize; 4]) {
+        let k0 = K.with(|k| k.get());
+        let r = f();
+        let k1 = K.with(|k| k.get());
+        let m = [k1[0] + k1[1] - k0[0] - k0[1], k1[3] - k0[3], k1[2] - k0[2], k1[4] - k0[4]];
+        self.bytes += m[3];
+        self.allocs += m[0];
+        (r, m)
+    }
+}
+
+/// The selective-ACK adversary at `b` bytes in pieces of `m` (1200, or 1 written and flushed each): each round sends
+/// what it can at room 1200, then the peer acknowledges odd pieces in flight and loses even ones (parity over all
+/// pieces); after 8 rounds everything is acknowledged. After every call the three sets hold at most
+/// `buffered()/256 + 4` entries, and each ACK or loss passes `node_call_ok`.
+fn sel_acks(b: usize, m: usize) -> SelRun {
+    let mut s = SendStream::new(1 << 40);
+    let mut written = 0usize;
+    let mut run = SelRun::default();
+    let mut bad = Vec::new();
+    let check = |s: &SendStream| {
+        let (a, l, f) = s.range_counts();
+        assert!(a + l + f <= s.buffered() / 256 + 4, "b={b} m={m}: {a} + {l} + {f} > {} / 256 + 4", s.buffered());
+    };
+    let data = bytes(b);
+    if m > 1 {
+        run.call(|| assert_eq!(s.write(&data, true), Ok(())));
+        written = b;
+    }
+    // Sends what it can: 1-byte writes flushed one at a time (at most `MAX_FLUSH` short pieces open), or the backlog.
+    let send = |s: &mut SendStream, written: &mut usize, run: &mut SelRun| loop {
+        if m == 1 && *written < b && s.range_sets().1.is_empty() {
+            let fin = *written + 1 == b;
+            run.call(|| {
+                assert_eq!(s.write(&[7], fin), Ok(()));
+                s.flush();
+            });
+            *written += 1;
+        }
+        let (got, _) = run.call(|| s.poll_data(1200, u64::MAX).is_some());
+        check(s);
+        if !got {
+            break;
+        }
+    };
+    let mut parity = 0usize;
+    for round in 0..9 {
+        send(&mut s, &mut written, &mut run);
+        for (x, y) in s.range_sets().2 {
+            parity += 1;
+            let fin = y as usize == b;
+            let nodes = s.range_counts();
+            let ack = round == 8 || parity % 2 == 1;
+            let (_, c) = run.call(|| if ack { s.on_data_acked(x, y - x, fin) } else { s.on_data_lost(x, y - x, fin) });
+            check(&s);
+            run.worst = run.worst.max(c[0]);
+            if !node_call_ok(c, nodes.0 + nodes.1 + nodes.2) {
+                bad.push((x, y, c, nodes));
+            }
+        }
+    }
+    while s.state_exec() != SendState::DataRecvd {
+        send(&mut s, &mut written, &mut run);
+        for (x, y) in s.range_sets().2 {
+            let nodes = s.range_counts();
+            let (_, c) = run.call(|| s.on_data_acked(x, y - x, y as usize == b));
+            check(&s);
+            run.worst = run.worst.max(c[0]);
+            if !node_call_ok(c, nodes.0 + nodes.1 + nodes.2) {
+                bad.push((x, y, c, nodes));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "b={b} m={m}: calls over the node rule (piece, [allocs, frees, reallocs, bytes], nodes): {:?}",
+        &bad[..bad.len().min(8)]);
+    eprintln!("sel_acks b={b} m={m}: bytes {} allocs {} worst-call allocs {}", run.bytes, run.allocs, run.worst);
+    run
+}
+
+/// D10 (d), (e), (h) under the ruling-11 adversary (spec D15): B = 4 KiB, 64 KiB, 1 MiB in 1200-byte pieces and 4 KiB,
+/// 64 KiB in 1-byte pieces. Counts, never time (Task 8 ruling): the stream's requested bytes at 16·B at most 24× those
+/// at B, and each ACK or loss within `NODE_C·(h + 1)` allocations (`node_call_ok`, in `sel_acks`): the O(log n) per
+/// call. Allocation totals are not held to 24×: about n calls of O(log n) nodes each grow as n·log n, and at 4 KiB the
+/// trees are a few nodes high (measured 56, 3163, 104122 allocations).
+#[test]
+fn send_selective_acks() {
+    let big: Vec<SelRun> = [4 << 10, 64 << 10, 1 << 20].iter().map(|&b| sel_acks(b, 1200)).collect();
+    let one: Vec<SelRun> = [4 << 10, 64 << 10].iter().map(|&b| sel_acks(b, 1)).collect();
+    for (lo, hi) in big.windows(2).map(|w| (&w[0], &w[1])).chain([(&one[0], &one[1])]) {
+        assert!(hi.bytes <= 24 * lo.bytes, "bytes {} -> {} (> 24x)", lo.bytes, hi.bytes);
+    }
+    assert!(big.iter().chain(&one).all(|r| r.worst > 0));
 }
 
 #[test]
-#[ignore = "9b2: fails today, zero-fill reallocs and eager whole-run delivery (Q1, Q3); un-ignored by Task 10"]
 fn stream_reverse_fill() {
-    check("stream_reverse_fill", 16 << 10, reverse_fill, false, false);
+    check("stream_reverse_fill", 16 << 10, reverse_fill, Alloc::None);
+}
+
+/// D10 (e), Review Focus 7: `reset` of a stream holding thousands of acked and lost ranges (1 MiB in 256-byte pieces,
+/// odd ones acknowledged, even ones lost) allocates nothing and frees only its queue's buffers (`c_sfree`, at most
+/// two): its sets move to the teardown slot whole. Each `reap(4096)` then frees more nodes than it allocates (`pop_min`
+/// re-boxes the nodes on its path), and no call reallocates.
+#[test]
+fn reset_allocates_nothing() {
+    const W: usize = 1 << 20;
+    let mut s = SendStream::new(W as u64);
+    assert_eq!(s.write(&bytes(W), false), Ok(()));
+    let mut p = Vec::new();
+    while let Some(c) = s.poll_data(256, u64::MAX) {
+        p.push((c.off, c.data.len() as u64));
+    }
+    for (i, &(o, n)) in p.iter().enumerate() {
+        if i % 2 == 1 {
+            s.on_data_acked(o, n, false);
+        } else {
+            s.on_data_lost(o, n, false);
+        }
+    }
+    let (m, nodes) = measure(&mut s, |s| assert!(s.reset(3)));
+    assert!(nodes >= 4000, "{nodes} nodes");
+    assert!(m[0] == 0 && m[2] == 0 && m[1] <= 2, "reset: [allocs, frees, reallocs, bytes] {m:?}");
+    assert_eq!(s.td_len(), nodes);
+    while s.has_td() {
+        let (m, _) = measure(&mut s, |s| {
+            let _ = s.reap(4096);
+        });
+        assert!(m[2] == 0 && m[0] < m[1], "reap: [allocs, frees, reallocs, bytes] {m:?}");
+    }
+}
+
+/// 9b2 Task 10d item 6 (Task 10 review M2): the streams a connection makes when the client's transport parameters arrive
+/// (`Streams::new`, from `on_peer_params` inside `feed`) allocate nothing, and dropping them frees nothing: the stream-id
+/// queue's slots are inline, so no allocation of that path sits outside a ghost cost.
+#[test]
+fn streams_new_allocates_nothing() {
+    let (l, p) = (default_transport_params(), default_transport_params());
+    let k0 = K.with(|k| k.get());
+    let s = Streams::new(&l, &p);
+    let k1 = K.with(|k| k.get());
+    drop(s);
+    let k2 = K.with(|k| k.get());
+    assert_eq!([k1[0] - k0[0], k1[1] - k0[1], k1[2] - k0[2]], [0, 0, 0], "Streams::new: [alloc, alloc_zeroed, realloc]");
+    assert_eq!(k2[3] - k1[3], 0, "dropping fresh streams freed");
 }

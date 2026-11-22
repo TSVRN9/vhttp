@@ -1,8 +1,8 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
-index 37201ae..913203e 100644
+index a43974a..3cd9ce7 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -1293,11 +1293,7 @@ impl<'a> QuicServer<'a> {
+@@ -2083,11 +2083,7 @@ impl<'a> QuicServer<'a> {
      /// reassembly buffer out of order.
      spec fn unread(&self, l: Level, k: PacketKind) -> nat {
          let c = self.h3.conn_spec();
@@ -15,7 +15,7 @@ index 37201ae..913203e 100644
      }
  
      #[verifier::spinoff_prover]
-@@ -1319,7 +1315,7 @@ impl<'a> QuicServer<'a> {
+@@ -2109,7 +2105,7 @@ impl<'a> QuicServer<'a> {
                  assert(self.h3.conn_spec().crypto_received(k, (e - 1) as nat));
              }
          }

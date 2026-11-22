@@ -48,6 +48,7 @@
 //                 +-----> Derive-Secret(., "c ap traffic", ClientHello...server Finished)
 //                 +-----> Derive-Secret(., "s ap traffic", ClientHello...server Finished)
 // "0" is "the 0-value consisting of a string of Hash.length bytes set to zeros".
+use byteq::capvec::CapVec;
 use crate::codes::*;
 use crate::hkdf_label::*;
 use crypto::hkdf::*;
@@ -89,20 +90,23 @@ pub open spec fn spec_verify_data(base: Seq<u8>, messages: Seq<u8>) -> Seq<u8> {
     spec_hmac_sha256(spec_finished_key(base), spec_sha256(messages))
 }
 
-pub fn message_hash(ch1: &[u8]) -> (r: Vec<u8>)
+/// Built in an exact `CapVec` (D9): 36 pushes, no realloc.
+pub fn message_hash(ch1: &[u8]) -> (r: CapVec<u8>)
     requires
         ch1@.len() <= crypto::bytes::MAX_INPUT_LEN,
     ensures
+        r.wf(),
         r@ == spec_message_hash(ch1@),
         r@.len() == 36,
+        r.cap() == 36,
 {
     let h = sha256(ch1);
-    let mut r: Vec<u8> = Vec::new();
+    let mut r: CapVec<u8> = CapVec::new(36);
     r.push(HT_MESSAGE_HASH);
     r.push(0);
     r.push(0);
     r.push(32);
-    r.extend_from_slice(&h);
+    let _ = r.push_slice(h.as_slice());
     assert(r@ =~= seq![HT_MESSAGE_HASH, 0, 0, 32] + h@);
     r
 }

@@ -8,6 +8,7 @@ use wire::varint::*;
 use crate::cid::*;
 use crate::codes::*;
 use crate::payload::*;
+use crate::ring::MAX_RECV_WINDOW;
 use crate::streams::*;
 use crate::tp::*;
 
@@ -58,7 +59,8 @@ pub open spec fn local_fill(tp: SpecTp) -> SpecTp {
 /// The transport parameters the shell may give a connection, before `fill_local_tp`: valid
 /// once filled, at least 3 and at most `MAX_LOCAL_STREAMS` peer uni streams, at most
 /// `MAX_LOCAL_STREAMS` peer bidi streams, an `active_connection_id_limit` that `PeerCids`
-/// holds, and no migration.
+/// holds, no migration, and stream receive windows of at most `MAX_RECV_WINDOW`, which a `quic::ring`
+/// holds (9b2 D11).
 pub open spec fn local_tp_ok(tp: SpecTp) -> bool {
     &&& server_tp_wf(local_fill(tp))
     &&& 3 <= tp.initial_max_streams_uni <= MAX_LOCAL_STREAMS
@@ -66,6 +68,9 @@ pub open spec fn local_tp_ok(tp: SpecTp) -> bool {
     &&& 2 <= tp.active_connection_id_limit <= PEER_CID_CAP
     &&& tp.disable_active_migration
     &&& tp.max_udp_payload_size >= 1200
+    &&& crate::ring::window_ok(tp.initial_max_stream_data_bidi_local)
+    &&& crate::ring::window_ok(tp.initial_max_stream_data_bidi_remote)
+    &&& crate::ring::window_ok(tp.initial_max_stream_data_uni)
 }
 
 /// `local_tp_ok` gives `Streams::new` its `local` preconditions.
@@ -77,8 +82,14 @@ pub proof fn lemma_local_tp_streams(tp: SpecTp)
         tp.initial_max_streams_uni >= 3,
         tp.initial_max_streams_bidi <= MAX_LOCAL_STREAMS,
         tp.initial_max_streams_uni <= MAX_LOCAL_STREAMS,
+        tp.initial_max_stream_data_bidi_local <= MAX_RECV_WINDOW,
+        tp.initial_max_stream_data_bidi_remote <= MAX_RECV_WINDOW,
+        tp.initial_max_stream_data_uni <= MAX_RECV_WINDOW,
 {
     lemma_server_tp_stream_ok(local_fill(tp));
+    crate::ring::lemma_window_ok(tp.initial_max_stream_data_bidi_local);
+    crate::ring::lemma_window_ok(tp.initial_max_stream_data_bidi_remote);
+    crate::ring::lemma_window_ok(tp.initial_max_stream_data_uni);
 }
 
 /// `local_tp_ok`, executable.
@@ -86,6 +97,11 @@ pub fn is_local_tp_ok(tp: &TransportParams) -> (r: bool)
     ensures
         r == local_tp_ok(tp@),
 {
+    proof {
+        crate::ring::lemma_window_ok(tp.initial_max_stream_data_bidi_local);
+        crate::ring::lemma_window_ok(tp.initial_max_stream_data_bidi_remote);
+        crate::ring::lemma_window_ok(tp.initial_max_stream_data_uni);
+    }
     tp.max_idle_timeout <= VARINT_MAX && tp.max_udp_payload_size <= VARINT_MAX
         && tp.initial_max_data <= VARINT_MAX && tp.initial_max_stream_data_bidi_local
         <= VARINT_MAX && tp.initial_max_stream_data_bidi_remote <= VARINT_MAX
@@ -98,6 +114,9 @@ pub fn is_local_tp_ok(tp: &TransportParams) -> (r: bool)
         <= MAX_STREAMS_LIMIT && 3 <= tp.initial_max_streams_uni && tp.initial_max_streams_uni
         <= MAX_LOCAL_STREAMS && tp.initial_max_streams_bidi <= MAX_LOCAL_STREAMS
         && tp.active_connection_id_limit <= PEER_CID_CAP && tp.disable_active_migration
+        && tp.initial_max_stream_data_bidi_local <= MAX_RECV_WINDOW
+        && tp.initial_max_stream_data_bidi_remote <= MAX_RECV_WINDOW
+        && tp.initial_max_stream_data_uni <= MAX_RECV_WINDOW
 }
 
 // =============================================================================

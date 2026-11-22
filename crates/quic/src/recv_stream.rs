@@ -1,22 +1,27 @@
 //! The receiving part of a stream (RFC 9000 §3.2): STREAM and RESET_STREAM frames checked
-//! against the final size (§4.5) and the stream data limit we sent (§4.1), with contiguous
-//! bytes delivered as events in the call that completes them.
+//! against the final size (§4.5) and the stream data limit we sent (§4.1). A frame records and
+//! buffers its bytes; delivery is its own input (`Deliver { max }`, 9b2 D12), which hands over at
+//! most `max` contiguous bytes as one event, so no call delivers more than it is given.
 use vstd::prelude::*;
 use crate::codes::*;
 use crate::flow::*;
 use crate::reassembly::*;
+// Used only in contracts, which a plain `cargo build` erases.
+#[allow(unused_imports)]
+use crate::ring::*;
 // Used only in ghost code, which a plain `cargo build` erases.
 #[allow(unused_imports)]
 use wire::varint::*;
 
 verus! {
 
-/// Figure 3's receive states under eager delivery: "Data Recvd" and "Reset Recvd" are passed
-/// through within one call.
+/// Figure 3's receive states. "Reset Recvd" is passed through within one call; "Data Recvd"
+/// holds until delivery reaches the final size (9b2 D12).
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum RecvState {
     Recv,
     SizeKnown,
+    DataRecvd,
     DataRead,
     ResetRead,
 }
@@ -79,26 +84,28 @@ pub open spec fn terminal(a: RecvState) -> bool {
 //= https://www.rfc-editor.org/rfc/rfc9000#section-3.2
 //# Once stream data has been delivered, the stream
 //# enters the "Data Read" state, which is a terminal state.
-/// Figure 3's edges, each through "Data Recvd" or "Reset Recvd" within one call.
+/// Figure 3's edges, "Reset Recvd" passed through within one call.
 pub open spec fn recv_edge(a: RecvState, b: RecvState) -> bool {
     ||| a is Recv && b is SizeKnown
     ||| (a is Recv || a is SizeKnown) && b is ResetRead
-    ||| a is SizeKnown && b is DataRead
+    ||| a is SizeKnown && b is DataRecvd
+    ||| a is DataRecvd && b is DataRead
 }
 
-/// One call moves along at most two edges: Recv to DataRead is a frame that carries the FIN
-/// and completes the data.
+/// One input moves along at most two edges: Recv to Data Recvd is a frame that carries the FIN
+/// and completes the data; delivery is its own input.
 pub open spec fn recv_step_ok(a: RecvState, b: RecvState) -> bool {
     a == b || recv_edge(a, b) || exists|c: RecvState| recv_edge(a, c) && recv_edge(c, b)
 }
 
 /// The inputs of a receiving part: STREAM, RESET_STREAM, a MAX_STREAM_DATA value we sent,
-/// and a local STOP_SENDING.
+/// a local STOP_SENDING, and a delivery of at most `max` bytes to the application.
 pub enum SpecRecvIn {
     Data { off: nat, data: Seq<u8>, fin: bool },
     Reset { code: u64, final_size: nat },
     Credit { limit: nat },
     Stop,
+    Deliver { max: nat },
 }
 
 pub struct SpecRecv {
@@ -146,15 +153,14 @@ pub open spec fn recv_data(id: u64, s: SpecRecv, off: nat, data: Seq<u8>, fin: b
         s
     } else {
         let ins = s.ins.push((off, data));
-        let m = rfc_received(ins);
-        let n = rfc_contiguous(m);
+        let n = rfc_contiguous(rfc_received(ins));
         let fs = if fin {
             Some(end)
         } else {
             s.final_size
         };
         let state = if fs == Some(n) {
-            RecvState::DataRead
+            RecvState::DataRecvd
         } else if fs is Some {
             RecvState::SizeKnown
         } else {
@@ -163,19 +169,57 @@ pub open spec fn recv_data(id: u64, s: SpecRecv, off: nat, data: Seq<u8>, fin: b
         SpecRecv {
             state,
             ins,
-            delivered: n,
             high: if end > s.high {
                 end
             } else {
                 s.high
             },
             final_size: fs,
-            events: if n > s.delivered || state is DataRead {
+            ..s
+        }
+    }
+}
+
+/// The contiguous bytes received and not yet delivered.
+pub open spec fn recv_avail(s: SpecRecv) -> nat {
+    let n = rfc_contiguous(rfc_received(s.ins));
+    if n >= s.delivered {
+        (n - s.delivered) as nat
+    } else {
+        0
+    }
+}
+
+/// A delivery of at most `max` bytes: the next contiguous ones, as one `Data` event, which
+/// carries the FIN once delivery reaches the final size ("Data Recvd" to "Data Read"). Nothing
+/// after a terminal state: no `Data` follows a `Reset` (9b2 D12, Review Focus 4).
+#[verifier::opaque]
+pub open spec fn recv_deliver(id: u64, s: SpecRecv, max: nat) -> SpecRecv {
+    if terminal(s.state) {
+        s
+    } else {
+        let m = rfc_received(s.ins);
+        let n = rfc_contiguous(m);
+        let k = if max < recv_avail(s) {
+            max
+        } else {
+            recv_avail(s)
+        };
+        let d = s.delivered + k;
+        let done = s.state is DataRecvd && s.final_size == Some(d);
+        SpecRecv {
+            state: if done {
+                RecvState::DataRead
+            } else {
+                s.state
+            },
+            delivered: d,
+            events: if k > 0 || done {
                 s.events.push(
                     SpecStreamEvent::Data {
                         id,
-                        data: rfc_prefix(m, n).subrange(s.delivered as int, n as int),
-                        fin: state is DataRead,
+                        data: rfc_prefix(m, n).subrange(s.delivered as int, d as int),
+                        fin: done,
                     },
                 )
             } else {
@@ -186,12 +230,34 @@ pub open spec fn recv_data(id: u64, s: SpecRecv, off: nat, data: Seq<u8>, fin: b
     }
 }
 
+/// Bytes or a FIN are left to deliver: a delivery would emit an event.
+pub open spec fn recv_ready(s: SpecRecv) -> bool {
+    !terminal(s.state) && (recv_avail(s) > 0 || s.state is DataRecvd)
+}
+
+/// The bytes past delivery up to the largest received offset, while not terminal: what
+/// deliveries still work off (`pump_backlog`'s measure, D13).
+pub open spec fn recv_pending(s: SpecRecv) -> nat {
+    if terminal(s.state) || s.high < s.delivered {
+        0
+    } else {
+        (s.high - s.delivered) as nat
+    }
+}
+
+//= https://www.rfc-editor.org/rfc/rfc9000#section-3.2
+//# It is possible that all stream data has already been received when a
+//# RESET_STREAM is received (that is, in the "Data Recvd" state).
+//= https://www.rfc-editor.org/rfc/rfc9000#section-3.2
+//# An implementation is free to manage this situation as it chooses.
+/// A RESET_STREAM: its final-size and flow-control checks in every state, then ignored in a
+/// terminal state and in "Data Recvd", whose data is still delivered (9b2 D12).
 pub open spec fn recv_reset(id: u64, s: SpecRecv, code: u64, fs: nat) -> SpecRecv {
     if (s.final_size is Some && s.final_size != Some(fs)) || fs < s.high {
         SpecRecv { err: Some(FINAL_SIZE_ERROR), ..s }
     } else if fs > s.limit {
         SpecRecv { err: Some(FLOW_CONTROL_ERROR), ..s }
-    } else if terminal(s.state) {
+    } else if terminal(s.state) || s.state is DataRecvd {
         s
     } else {
         SpecRecv {
@@ -205,6 +271,8 @@ pub open spec fn recv_reset(id: u64, s: SpecRecv, code: u64, fs: nat) -> SpecRec
 }
 
 /// One input. A local STOP_SENDING gates only credit and `stop`, never events (preflight R1).
+/// Opaque: callers read it through `lemma_recv_push`'s facts or reveal it.
+#[verifier::opaque]
 pub open spec fn rfc_recv_step(id: u64, s: SpecRecv, i: SpecRecvIn) -> SpecRecv {
     match i {
         SpecRecvIn::Data { off, data, fin } => recv_data(id, s, off, data, fin),
@@ -218,6 +286,7 @@ pub open spec fn rfc_recv_step(id: u64, s: SpecRecv, i: SpecRecvIn) -> SpecRecv 
             ..s
         },
         SpecRecvIn::Stop => SpecRecv { stopped: true, ..s },
+        SpecRecvIn::Deliver { max } => recv_deliver(id, s, max),
     }
 }
 
@@ -414,37 +483,6 @@ pub proof fn lemma_recv_err_rfc(
     }
 }
 
-/// `Reassembly::insert`, keeping the window tight: `insert` records empty data without touching
-/// the buffers, and the two tight lemmas cover non-empty data (split from `data_buffer` for the
-/// rlimit).
-fn insert_tight(re: &mut Reassembly, off: u64, data: &[u8])
-    requires
-        old(re).wf(),
-        old(re).tight(),
-        off + data@.len() <= VARINT_MAX,
-    ensures
-        final(re).wf(),
-        final(re).tight(),
-        final(re).inserted() == old(re).inserted().push((off as nat, data@)),
-        final(re).base() == old(re).base(),
-        final(re).base() + final(re).buf_len() <= if old(re).base() + old(re).buf_len() >= off
-            + data@.len() {
-            old(re).base() + old(re).buf_len()
-        } else {
-            off + data@.len()
-        },
-{
-    let ghost re0 = *re;
-    re.insert(off, data);
-    proof {
-        if off + data@.len() <= re0.base() + re0.buf_len() {
-            Reassembly::lemma_insert_tight_within(re0, *re, off, data@);
-        } else if data@.len() > 0 {
-            Reassembly::lemma_insert_tight(re0, *re, off, data@);
-        }
-    }
-}
-
 /// `recv_allowed_err` is not vacuous: 10 bytes inside a 100-byte window with room raise
 /// nothing, and an unrelated code is never allowed.
 proof fn lemma_recv_allowed_err_rejects()
@@ -506,14 +544,16 @@ pub open spec fn recv_events_ok(evs: Seq<SpecStreamEvent>, id: u64) -> bool {
 /// The invariant of every reachable `SpecRecv`.
 pub open spec fn recv_inv(id: u64, s: SpecRecv) -> bool {
     let m = rfc_received(s.ins);
-    &&& s.delivered == rfc_contiguous(m)
+    let n = rfc_contiguous(m);
+    &&& s.delivered <= n
     &&& forall|k: nat| #[trigger] m.contains_key(k) ==> k < s.high
     &&& s.delivered <= s.high <= counted(s) <= s.limit
     // `high` is the RFC's largest received offset until the final size is known (§19.10).
     &&& largest_received_offset(s.ins) <= s.high
     &&& s.final_size is None ==> s.high == largest_received_offset(s.ins)
     &&& (s.state is Recv <==> s.final_size is None)
-    &&& s.state is SizeKnown ==> s.final_size != Some(s.delivered)
+    &&& s.state is SizeKnown ==> s.final_size != Some(n)
+    &&& s.state is DataRecvd ==> s.final_size == Some(n)
     &&& s.state is DataRead ==> s.final_size == Some(s.delivered)
     &&& s.state is ResetRead ==> s.final_size == Some(s.high)
     &&& recv_events_ok(s.events, id)
@@ -553,10 +593,8 @@ proof fn lemma_data_step(id: u64, s: SpecRecv, off: nat, data: Seq<u8>, fin: boo
 {
     let s2 = recv_data(id, s, off, data, fin);
     let end = off + data.len();
+    assert(s.events =~= s2.events.subrange(0, s.events.len() as int));
     if data_final_bad(s, end, fin) || end > s.limit || terminal(s.state) {
-        assert(s.events.is_prefix_of(s2.events)) by {
-            assert(s.events =~= s2.events.subrange(0, s.events.len() as int));
-        }
         assert(s.ins =~= s2.ins.subrange(0, s.ins.len() as int));
         return;
     }
@@ -564,32 +602,65 @@ proof fn lemma_data_step(id: u64, s: SpecRecv, off: nat, data: Seq<u8>, fin: boo
     let ins = s.ins.push((off, data));
     assert(ins.drop_last() =~= s.ins);
     let m2 = rfc_received(ins);
-    let n = rfc_contiguous(m2);
+    let n = rfc_contiguous(m);
+    let n2 = rfc_contiguous(m2);
     let d = s.delivered;
     lemma_received_push(s.ins, off, data);
     lemma_contiguous_exists(m);
     lemma_contiguous_exists(m2);
-    if n < d {
-        assert(m.contains_key(n));
-    }
+    lemma_contiguous_mono(m, m2);
     assert(forall|k: nat| #[trigger] m2.contains_key(k) ==> k < s2.high);
-    lemma_contiguous_le(m2, s2.high);
-    // The prefix grows by the new contiguous run.
-    assert(rfc_prefix(m, d) + rfc_prefix(m2, n).subrange(d as int, n as int) =~= rfc_prefix(m2, n))
-        by {
-        assert forall|i: int| 0 <= i < d implies #[trigger] rfc_prefix(m2, n)[i] == rfc_prefix(
+    // The delivered prefix is unchanged: the first bytes received at an offset win.
+    assert(rfc_prefix(m2, d) =~= rfc_prefix(m, d)) by {
+        assert forall|i: int| 0 <= i < d implies #[trigger] rfc_prefix(m2, d)[i] == rfc_prefix(
             m,
             d,
         )[i] by {
             assert(m.contains_key(i as nat));
-            assert(m2.contains_key(i as nat));
         }
     }
-    if n > d || s2.state is DataRead {
+    // In "Data Recvd" every byte below the final size was received: the state stays.
+    if s.state is DataRecvd {
+        let f = s.final_size->0;
+        assert(!m2.contains_key(f));
+        lemma_contiguous_le(m2, f);
+    }
+    assert(s.ins =~= s2.ins.subrange(0, s.ins.len() as int));
+    if s.state is Recv && s2.state is DataRecvd {
+        assert(recv_edge(RecvState::Recv, RecvState::SizeKnown) && recv_edge(
+            RecvState::SizeKnown,
+            RecvState::DataRecvd,
+        ));
+    }
+}
+
+proof fn lemma_deliver_step(id: u64, s: SpecRecv, max: nat)
+    requires
+        recv_inv(id, s),
+    ensures
+        recv_step_facts(id, s, recv_deliver(id, s, max)),
+{
+    reveal(recv_deliver);
+    let s2 = recv_deliver(id, s, max);
+    assert(s.ins =~= s2.ins.subrange(0, s.ins.len() as int));
+    if terminal(s.state) {
+        assert(s.events =~= s2.events.subrange(0, s.events.len() as int));
+        return;
+    }
+    let m = rfc_received(s.ins);
+    let n = rfc_contiguous(m);
+    let d = s.delivered;
+    let d2 = s2.delivered;
+    lemma_contiguous_exists(m);
+    lemma_contiguous_le(m, s.high);
+    // The prefix grows by the bytes delivered.
+    assert(rfc_prefix(m, d) + rfc_prefix(m, n).subrange(d as int, d2 as int) =~= rfc_prefix(m, d2));
+    let done = s.state is DataRecvd && s.final_size == Some(d2);
+    if d2 > d || done {
         let e = SpecStreamEvent::Data {
             id,
-            data: rfc_prefix(m2, n).subrange(d as int, n as int),
-            fin: s2.state is DataRead,
+            data: rfc_prefix(m, n).subrange(d as int, d2 as int),
+            fin: done,
         };
         lemma_data_of_push(s.events, e);
         assert(s2.events == s.events.push(e));
@@ -612,13 +683,6 @@ proof fn lemma_data_step(id: u64, s: SpecRecv, off: nat, data: Seq<u8>, fin: boo
     assert(s.events.is_prefix_of(s2.events)) by {
         assert(s.events =~= s2.events.subrange(0, s.events.len() as int));
     }
-    assert(s.ins =~= s2.ins.subrange(0, s.ins.len() as int));
-    if s.state is Recv && s2.state is DataRead {
-        assert(recv_edge(RecvState::Recv, RecvState::SizeKnown) && recv_edge(
-            RecvState::SizeKnown,
-            RecvState::DataRead,
-        ));
-    }
 }
 
 proof fn lemma_reset_step(id: u64, s: SpecRecv, code: u64, fs: nat)
@@ -629,7 +693,7 @@ proof fn lemma_reset_step(id: u64, s: SpecRecv, code: u64, fs: nat)
 {
     let s2 = recv_reset(id, s, code, fs);
     if !((s.final_size is Some && s.final_size != Some(fs)) || fs < s.high || fs > s.limit
-        || terminal(s.state)) {
+        || terminal(s.state) || s.state is DataRecvd) {
         let e = SpecStreamEvent::Reset { id, code };
         lemma_data_of_push(s.events, e);
         assert(data_of(s2.events) =~= data_of(s.events));
@@ -661,9 +725,11 @@ proof fn lemma_step(id: u64, s: SpecRecv, i: SpecRecvIn)
     ensures
         recv_step_facts(id, s, rfc_recv_step(id, s, i)),
 {
+    reveal(rfc_recv_step);
     match i {
         SpecRecvIn::Data { off, data, fin } => lemma_data_step(id, s, off, data, fin),
         SpecRecvIn::Reset { code, final_size } => lemma_reset_step(id, s, code, final_size),
+        SpecRecvIn::Deliver { max } => lemma_deliver_step(id, s, max),
         _ => {
             let s2 = rfc_recv_step(id, s, i);
             assert(s.events =~= s2.events.subrange(0, s.events.len() as int));
@@ -672,7 +738,78 @@ proof fn lemma_step(id: u64, s: SpecRecv, i: SpecRecvIn)
     }
 }
 
+/// A run of the first `b` bytes is the same run of the first `c >= b`.
+pub proof fn lemma_prefix_sub(m: Map<nat, u8>, a: nat, b: nat, c: nat)
+    requires
+        a <= b <= c,
+    ensures
+        rfc_prefix(m, b).subrange(a as int, b as int) == rfc_prefix(m, c).subrange(a as int, b as int),
+{
+    assert(rfc_prefix(m, b).subrange(a as int, b as int) =~= rfc_prefix(m, c).subrange(a as int, b as int));
+}
+
+/// `recv_deliver`'s fields, for callers that hide it: none change in a terminal state.
+pub proof fn lemma_deliver_fields(id: u64, s: SpecRecv, max: nat)
+    ensures
+        terminal(s.state) ==> recv_deliver(id, s, max) == s,
+        !terminal(s.state) ==> ({
+            let s2 = recv_deliver(id, s, max);
+            let k = if max < recv_avail(s) {
+                max
+            } else {
+                recv_avail(s)
+            };
+            let d = s.delivered + k;
+            let done = s.state is DataRecvd && s.final_size == Some(d);
+            let m = rfc_received(s.ins);
+            &&& s2.delivered == d
+            &&& s2.state == if done {
+                RecvState::DataRead
+            } else {
+                s.state
+            }
+            &&& s2.events == if k > 0 || done {
+                s.events.push(
+                    SpecStreamEvent::Data {
+                        id,
+                        data: rfc_prefix(m, rfc_contiguous(m)).subrange(s.delivered as int, d as int),
+                        fin: done,
+                    },
+                )
+            } else {
+                s.events
+            }
+            &&& s2.ins == s.ins
+            &&& s2.high == s.high
+            &&& s2.final_size == s.final_size
+            &&& s2.limit == s.limit
+            &&& s2.stopped == s.stopped
+            &&& s2.err == s.err
+        }),
+{
+    reveal(recv_deliver);
+}
+
+/// A delivery of at least one byte's room makes progress: while bytes or the FIN are left after it,
+/// it delivered bytes, which leave `recv_pending`; it never raises it.
+pub proof fn lemma_deliver_progress(id: u64, s: SpecRecv, max: nat)
+    requires
+        recv_inv(id, s),
+        max >= 1,
+    ensures
+        recv_pending(recv_deliver(id, s, max)) <= recv_pending(s),
+        recv_ready(recv_deliver(id, s, max)) ==> recv_pending(recv_deliver(id, s, max)) < recv_pending(s),
+{
+    reveal(recv_deliver);
+    let m = rfc_received(s.ins);
+    lemma_contiguous_exists(m);
+    lemma_contiguous_le(m, s.high);
+}
+
 /// One more input, in terms of the fold.
+// Its own prover: under one Z3 seed the shared context sent it to 10.5M (9b2 Task 10b sweep; RCA
+// docs/rca/2026-11-16-smt-order-fragility.md).
+#[verifier::spinoff_prover]
 pub proof fn lemma_recv_push(id: u64, window: u64, t: Seq<SpecRecvIn>, i: SpecRecvIn)
     ensures
         rfc_recv(id, window, t.push(i)) == if rfc_recv(id, window, t).err is Some {
@@ -680,8 +817,23 @@ pub proof fn lemma_recv_push(id: u64, window: u64, t: Seq<SpecRecvIn>, i: SpecRe
         } else {
             rfc_recv_step(id, rfc_recv(id, window, t), i)
         },
+        rfc_recv_step(id, rfc_recv(id, window, t), i) == match i {
+            SpecRecvIn::Data { off, data, fin } => recv_data(id, rfc_recv(id, window, t), off, data, fin),
+            SpecRecvIn::Reset { code, final_size } => recv_reset(id, rfc_recv(id, window, t), code, final_size),
+            SpecRecvIn::Credit { limit } => SpecRecv {
+                limit: if limit > rfc_recv(id, window, t).limit {
+                    limit
+                } else {
+                    rfc_recv(id, window, t).limit
+                },
+                ..rfc_recv(id, window, t)
+            },
+            SpecRecvIn::Stop => SpecRecv { stopped: true, ..rfc_recv(id, window, t) },
+            SpecRecvIn::Deliver { max } => recv_deliver(id, rfc_recv(id, window, t), max),
+        },
         recv_step_facts(id, rfc_recv(id, window, t), rfc_recv(id, window, t.push(i))),
 {
+    reveal(rfc_recv_step);
     assert(t.push(i).drop_last() =~= t);
     lemma_recv_inv(id, window, t);
     let s = rfc_recv(id, window, t);
@@ -785,17 +937,9 @@ pub open spec fn has_fin(t: Seq<SpecRecvIn>) -> bool {
     exists|j: int| 0 <= j < t.len() && is_fin_in(#[trigger] t[j])
 }
 
-pub open spec fn is_fin_ev(e: SpecStreamEvent) -> bool {
-    e matches SpecStreamEvent::Data { fin: true, .. }
-}
-
-/// A `Data{fin: true}` occurred.
-pub open spec fn fin_seen(evs: Seq<SpecStreamEvent>) -> bool {
-    exists|j: int| 0 <= j < evs.len() && is_fin_ev(#[trigger] evs[j])
-}
-
-/// For a consistent, error-free STREAM-only trace: what was inserted is a prefix of the
-/// trace's ranges, all of them unless the data was complete, and the final size is `s`'s.
+/// For a consistent, error-free STREAM-only trace: everything was inserted (nothing is delivered
+/// without a `Deliver` input, so no state is terminal), and the final size is `s`'s once a FIN
+/// arrived.
 proof fn lemma_data_trace_ind(id: u64, window: u64, t: Seq<SpecRecvIn>, s: Seq<u8>)
     requires
         data_only(t),
@@ -804,10 +948,8 @@ proof fn lemma_data_trace_ind(id: u64, window: u64, t: Seq<SpecRecvIn>, s: Seq<u
     ensures
         ({
             let st = rfc_recv(id, window, t);
-            &&& !(st.state is ResetRead)
-            &&& st.ins.len() <= t.len()
-            &&& st.ins == pairs(t).take(st.ins.len() as int)
-            &&& !(st.state is DataRead) ==> st.ins.len() == t.len()
+            &&& !terminal(st.state)
+            &&& st.ins == pairs(t)
             &&& st.final_size == if has_fin(t) {
                 Some(s.len())
             } else {
@@ -817,26 +959,23 @@ proof fn lemma_data_trace_ind(id: u64, window: u64, t: Seq<SpecRecvIn>, s: Seq<u
     decreases t.len(),
 {
     if t.len() == 0 {
-        assert(pairs(t).take(0) =~= Seq::<(nat, Seq<u8>)>::empty());
+        assert(pairs(t) =~= Seq::<(nat, Seq<u8>)>::empty());
         return;
     }
     let p = t.drop_last();
     let i = t.last();
     assert(p.push(i) =~= t);
     lemma_recv_push(id, window, p, i);
-    let sp = rfc_recv(id, window, p);
     assert forall|j: int| #![trigger p[j]] 0 <= j < p.len() implies p[j] is Data && consistent_with(
         p[j],
         s,
     ) by {
         assert(p[j] == t[j]);
     }
-    assert(sp.err is None);
     lemma_data_trace_ind(id, window, p, s);
-    lemma_recv_inv(id, window, p);
     assert(t[t.len() - 1] == i);
+    assert(consistent_with(i, s));
     assert(pairs(t) =~= pairs(p).push(pair_of(i)));
-    assert(pairs(t).take(p.len() as int) =~= pairs(p));
     if has_fin(p) {
         let j = choose|j: int| 0 <= j < p.len() && is_fin_in(#[trigger] p[j]);
         assert(t[j] == p[j]);
@@ -847,16 +986,6 @@ proof fn lemma_data_trace_ind(id: u64, window: u64, t: Seq<SpecRecvIn>, s: Seq<u
     if has_fin(t) && !is_fin_in(i) {
         let j = choose|j: int| 0 <= j < t.len() && is_fin_in(#[trigger] t[j]);
         assert(p[j] == t[j]);
-    }
-    let st = rfc_recv(id, window, t);
-    if sp.state is DataRead {
-        assert(st == sp);
-        assert(pairs(t).take(st.ins.len() as int) =~= pairs(p).take(st.ins.len() as int));
-    } else {
-        assert(st.ins =~= pairs(t)) by {
-            assert(sp.ins =~= pairs(p));
-        }
-        assert(pairs(t).take(t.len() as int) =~= pairs(t));
     }
 }
 
@@ -887,65 +1016,34 @@ proof fn lemma_pairs_consistent(t: Seq<SpecRecvIn>, s: Seq<u8>, k: nat)
     }
 }
 
-/// The delivered bytes and the FIN of a consistent STREAM-only trace, in terms of the set of
-/// ranges in it.
+/// What a consistent STREAM-only trace has received in order, in terms of the set of ranges in
+/// it: the contiguous prefix is `s`'s, and "Data Recvd" is a FIN with all of `s` received.
 proof fn lemma_data_trace(id: u64, window: u64, t: Seq<SpecRecvIn>, s: Seq<u8>)
     requires
         data_only(t),
         all_consistent(t, s),
         rfc_recv(id, window, t).err is None,
     ensures
-        fin_seen(rfc_recv(id, window, t).events) <==> has_fin(t) && rfc_contiguous(
-            rfc_received(pairs(t)),
-        ) == s.len(),
-        data_of(rfc_recv(id, window, t).events) == s.take(
+        rfc_recv(id, window, t).ins == pairs(t),
+        rfc_prefix(rfc_received(pairs(t)), rfc_contiguous(rfc_received(pairs(t)))) == s.take(
             rfc_contiguous(rfc_received(pairs(t))) as int,
         ),
+        (rfc_recv(id, window, t).state is DataRecvd) <==> has_fin(t) && rfc_contiguous(
+            rfc_received(pairs(t)),
+        ) == s.len(),
 {
     hide(rfc_recv_step);
-    let st = rfc_recv(id, window, t);
     lemma_data_trace_ind(id, window, t, s);
     lemma_recv_inv(id, window, t);
-    let full = pairs(t);
-    let mm = rfc_received(full);
-    let m = rfc_received(st.ins);
     lemma_pairs_consistent(t, s, t.len());
-    assert(full.take(t.len() as int) =~= full);
-    theorem_reassembly_order_free(full, s);
-    lemma_pairs_consistent(t, s, st.ins.len());
-    theorem_reassembly_order_free(st.ins, s);
-    lemma_contiguous_exists(mm);
-    lemma_contiguous_exists(m);
-    assert forall|k: nat| #[trigger] mm.contains_key(k) implies k < s.len() by {
-        let j = choose|j: int| #![trigger full[j]] 0 <= j < full.len() && full[j].0 <= k < full[j].0
-            + full[j].1.len();
-    }
-    // fin_seen <==> DataRead.
-    if st.state is DataRead {
-        let l = st.events.len() - 1;
-        assert(is_fin_ev(st.events[l]));
-    }
-    if fin_seen(st.events) {
-        let j = choose|j: int| 0 <= j < st.events.len() && is_fin_ev(#[trigger] st.events[j]);
-        assert(recv_event_ok(st.events[j], id, j == st.events.len() - 1));
-    }
-    if st.state is DataRead {
-        // Everything below the final size was received, so the full map is complete too.
-        assert forall|j: nat| j < s.len() implies mm.contains_key(j) by {
-            assert(m.contains_key(j));
-            let q = choose|q: int| #![trigger st.ins[q]] 0 <= q < st.ins.len() && st.ins[q].0 <= j
-                < st.ins[q].0 + st.ins[q].1.len();
-            assert(st.ins[q] == full[q]);
-        }
-        lemma_contiguous_is(mm, s.len());
-    } else {
-        assert(st.ins =~= full);
-    }
+    assert(pairs(t).take(t.len() as int) =~= pairs(t));
+    theorem_reassembly_order_free(pairs(t), s);
 }
 
-/// When every STREAM input carries bytes of `s` at their offsets, the bytes delivered and
-/// whether the FIN was delivered depend only on the multiset of inputs, not their order or
-/// duplication. Event chunking may differ.
+/// When every STREAM input carries bytes of `s` at their offsets, what is received in order (the
+/// contiguous prefix, which is `s`'s) and whether all data was received ("Data Recvd") depend
+/// only on the multiset of inputs, not their order or duplication. Delivery then hands over that
+/// prefix (`recv_inv`: the `Data` payloads are `rfc_prefix(m, delivered)`), in any chunking.
 pub proof fn theorem_recv_order_free(
     id: u64,
     window: u64,
@@ -962,8 +1060,14 @@ pub proof fn theorem_recv_order_free(
         rfc_recv(id, window, t1).err is None,
         rfc_recv(id, window, t2).err is None,
     ensures
-        data_of(rfc_recv(id, window, t1).events) == data_of(rfc_recv(id, window, t2).events),
-        fin_seen(rfc_recv(id, window, t1).events) == fin_seen(rfc_recv(id, window, t2).events),
+        rfc_contiguous(rfc_received(rfc_recv(id, window, t1).ins)) == rfc_contiguous(
+            rfc_received(rfc_recv(id, window, t2).ins),
+        ),
+        rfc_prefix(
+            rfc_received(rfc_recv(id, window, t1).ins),
+            rfc_contiguous(rfc_received(rfc_recv(id, window, t1).ins)),
+        ) == s.take(rfc_contiguous(rfc_received(rfc_recv(id, window, t1).ins)) as int),
+        (rfc_recv(id, window, t1).state is DataRecvd) == (rfc_recv(id, window, t2).state is DataRecvd),
 {
     hide(rfc_recv_step);
     lemma_data_trace(id, window, t1, s);
@@ -994,6 +1098,21 @@ proof fn lemma_in_both(t1: Seq<SpecRecvIn>, t2: Seq<SpecRecvIn>, j: int)
     assert(t2.contains(t1[j]));
 }
 
+/// The offsets a consistent STREAM-only trace received are those its ranges cover (split from
+/// `lemma_same_ranges` for the rlimit).
+proof fn lemma_pairs_covered(t: Seq<SpecRecvIn>, s: Seq<u8>)
+    requires
+        data_only(t),
+        all_consistent(t, s),
+    ensures
+        forall|o: nat| #[trigger] rfc_received(pairs(t)).contains_key(o) <==> covered(pairs(t), o),
+{
+    hide(rfc_recv_step);
+    lemma_pairs_consistent(t, s, t.len());
+    assert(pairs(t).take(t.len() as int) =~= pairs(t));
+    theorem_reassembly_order_free(pairs(t), s);
+}
+
 /// Every range and FIN of `t1` is in `t2`.
 proof fn lemma_same_ranges(t1: Seq<SpecRecvIn>, t2: Seq<SpecRecvIn>, s: Seq<u8>)
     requires
@@ -1009,12 +1128,8 @@ proof fn lemma_same_ranges(t1: Seq<SpecRecvIn>, t2: Seq<SpecRecvIn>, s: Seq<u8>)
         has_fin(t1) ==> has_fin(t2),
 {
     hide(rfc_recv_step);
-    lemma_pairs_consistent(t1, s, t1.len());
-    lemma_pairs_consistent(t2, s, t2.len());
-    assert(pairs(t1).take(t1.len() as int) =~= pairs(t1));
-    assert(pairs(t2).take(t2.len() as int) =~= pairs(t2));
-    theorem_reassembly_order_free(pairs(t1), s);
-    theorem_reassembly_order_free(pairs(t2), s);
+    lemma_pairs_covered(t1, s);
+    lemma_pairs_covered(t2, s);
     assert forall|k: nat| #[trigger] rfc_received(pairs(t1)).contains_key(k) implies rfc_received(
         pairs(t2),
     ).contains_key(k) by {
@@ -1099,11 +1214,11 @@ impl RecvStream {
         }
     }
 
-    /// The physical length of each of the reassembly's two buffers (a length bound: Verus
-    /// does not model capacity).
+    /// The positions the reassembly ring's pages hold (`PAGE` each; a position is one byte and one
+    /// flag), none once reset.
     pub closed spec fn buffered_phys(&self) -> nat {
         match self.re {
-            Some(r) => r.phys_len(),
+            Some(r) => r.pages() * (PAGE as nat),
             None => 0,
         }
     }
@@ -1123,6 +1238,7 @@ impl RecvStream {
         &&& recv_inv(self.id, s)
         &&& self.credit.wf()
         &&& self.credit.cap_spec() == VARINT_MAX
+        &&& self.credit.window_spec() <= MAX_RECV_WINDOW
         &&& s.state == self.state
         &&& s.high == self.high as nat
         &&& s.final_size == opt_nat(self.final_size)
@@ -1133,8 +1249,7 @@ impl RecvStream {
         &&& self.stopped matches Some(c) ==> c <= VARINT_MAX
         &&& (self.re is None <==> s.state is ResetRead)
         &&& self.re matches Some(r) ==> r.wf() && r.inserted() == s.ins && r.base() == s.delivered
-        // The window ends at a received byte: an empty STREAM frame does not grow it.
-        &&& self.re matches Some(r) ==> r.tight()
+            && r.window() == self.credit.window_spec()
         // The per-stream buffer bound, from `insert`'s and `pop`'s high-water ensures.
         &&& self.buffered_len_spec() <= s.limit - s.delivered
         &&& self.buffered_len_spec() <= counted(s) - retired(s)
@@ -1159,7 +1274,11 @@ impl RecvStream {
             self.pending_stop() is Some ==> self.pending_stop() == self.stop_code(),
             self.pending_stop() is Some ==> self.rfc().state is Recv
                 || self.rfc().state is SizeKnown,
-            self.buffered_len() <= self.buffered_phys() <= 2 * self.buffered_len(),
+            // Memory follows the bytes held (D11, D12): `pages · PAGE <= span + 2 · PAGE`.
+            self.buffered_phys() <= self.buffered_len() + 2 * PAGE,
+            self.buffered_len() == 0 ==> self.buffered_phys() == 0,
+            self.window_spec() <= MAX_RECV_WINDOW,
+            self.rfc().limit <= self.rfc().delivered + self.window_spec(),
     {
         self.credit.lemma_wf();
         if let Some(r) = self.re {
@@ -1169,7 +1288,7 @@ impl RecvStream {
 
     pub fn new(id: u64, window: u64) -> (r: RecvStream)
         requires
-            window <= VARINT_MAX,
+            window <= MAX_RECV_WINDOW,
         ensures
             r.wf(),
             r.id_spec() == id,
@@ -1179,10 +1298,7 @@ impl RecvStream {
             r.stop_code() is None,
             r.pending_stop() is None,
     {
-        let re = Reassembly::new();
-        proof {
-            re.lemma_new_tight();
-        }
+        let re = Reassembly::new(window);
         let r = RecvStream {
             id,
             state: RecvState::Recv,
@@ -1219,6 +1335,23 @@ impl RecvStream {
         match self.state {
             RecvState::DataRead | RecvState::ResetRead => true,
             _ => false,
+        }
+    }
+
+    /// Bytes or the FIN are left to deliver (`recv_ready`). O(1).
+    pub fn has_ready(&self) -> (r: bool)
+        requires
+            self.wf(),
+        ensures
+            r == recv_ready(self.rfc()),
+    {
+        match &self.re {
+            Some(re) => match self.state {
+                RecvState::DataRead | RecvState::ResetRead => false,
+                RecvState::DataRecvd => true,
+                _ => re.ready(),
+            },
+            None => false,
         }
     }
 
@@ -1426,15 +1559,13 @@ impl RecvStream {
     }
 
     /// A STREAM frame's `offset`, `data` and FIN bit, with `conn_room` bytes of connection
-    /// credit left. `Ok(n)`: the stream consumed `n` more bytes of connection credit.
-    pub fn on_data(
-        &mut self,
-        off: u64,
-        data: &[u8],
-        fin: bool,
-        conn_room: u64,
-        ev: &mut Vec<StreamEvent>,
-    ) -> (r: Result<u64, u64>)
+    /// credit left: recorded and buffered, nothing delivered (`deliver` hands bytes over, D12).
+    /// `Ok(n)`: the stream consumed `n` more bytes of connection credit. Costs the buffer's insert,
+    /// `O(d + PAGE)`, plus the ring's slot vector on the stream's first byte.
+    pub fn on_data(&mut self, off: u64, data: &[u8], fin: bool, conn_room: u64) -> (r: (
+        Result<u64, u64>,
+        Ghost<nat>,
+    ))
         requires
             old(self).wf(),
             off + data@.len() <= VARINT_MAX,
@@ -1442,33 +1573,30 @@ impl RecvStream {
             final(self).id_spec() == old(self).id_spec(),
             final(self).window_spec() == old(self).window_spec(),
             final(self).wf(),
+            final(self).emitted() == old(self).emitted(),
             ({
                 let t2 = old(self).trace().push(
                     SpecRecvIn::Data { off: off as nat, data: data@, fin },
                 );
                 let s1 = old(self).rfc();
                 let s2 = rfc_recv(old(self).id_spec(), old(self).window_spec(), t2);
-                &&& s2.err matches Some(c) ==> r == Err::<u64, u64>(c) && *final(self) == *old(self)
-                    && final(ev)@ == old(ev)@
-                &&& (s2.err is None && counted(s2) - counted(s1) > conn_room) ==> r == Err::<
+                &&& s2.err matches Some(c) ==> r.0 == Err::<u64, u64>(c) && *final(self) == *old(self)
+                &&& (s2.err is None && counted(s2) - counted(s1) > conn_room) ==> r.0 == Err::<
                     u64,
                     u64,
-                >(FLOW_CONTROL_ERROR) && *final(self) == *old(self) && final(ev)@ == old(ev)@
+                >(FLOW_CONTROL_ERROR) && *final(self) == *old(self)
                 &&& (s2.err is None && counted(s2) - counted(s1) <= conn_room) ==> {
-                    &&& r == Ok::<u64, u64>((counted(s2) - counted(s1)) as u64)
+                    &&& r.0 == Ok::<u64, u64>((counted(s2) - counted(s1)) as u64)
                     &&& final(self).trace() == t2
-                    &&& event_views(final(ev)@) == event_views(old(ev)@) + s2.events.skip(
-                        s1.events.len() as int,
-                    )
                 }
             }),
             final(self).stop_code() == old(self).stop_code(),
-            final(self).pending_stop() == if terminal(final(self).rfc().state) {
+            final(self).pending_stop() == if final(self).rfc().state is DataRecvd {
                 None
             } else {
                 old(self).pending_stop()
             },
-            r matches Err(c) ==> recv_allowed_err(
+            r.0 matches Err(c) ==> recv_allowed_err(
                 old(self).rfc(),
                 off as nat,
                 data@.len(),
@@ -1476,17 +1604,17 @@ impl RecvStream {
                 conn_room as nat,
                 c,
             ),
-            final_size_trigger(old(self).rfc(), off as nat + data@.len(), fin) ==> r == Err::<u64, u64>(
+            final_size_trigger(old(self).rfc(), off as nat + data@.len(), fin) ==> r.0 == Err::<u64, u64>(
                 FINAL_SIZE_ERROR,
             ),
             (flow_trigger(old(self).rfc(), off as nat + data@.len(), fin, conn_room as nat)
-                && !final_size_trigger(old(self).rfc(), off as nat + data@.len(), fin)) ==> r == Err::<
+                && !final_size_trigger(old(self).rfc(), off as nat + data@.len(), fin)) ==> r.0 == Err::<
                 u64,
                 u64,
             >(FLOW_CONTROL_ERROR),
+            r.1@ <= (c_ri() + 1) * (data@.len() + 2 * PAGE) + NP_MAX,
     {
         let ghost t2 = self.trace@.push(SpecRecvIn::Data { off: off as nat, data: data@, fin });
-        let ghost s1 = self.rfc();
         proof {
             lemma_recv_push(self.id, self.credit.window_spec(), self.trace@, SpecRecvIn::Data {
                 off: off as nat,
@@ -1497,21 +1625,15 @@ impl RecvStream {
         let n_new = match self.data_gate(off, data, fin, conn_room) {
             Ok(n) => n,
             Err(c) => {
-                return Err(c);
+                return (Err(c), Ghost(0));
             },
         };
         if self.is_terminal() {
             self.trace = Ghost(t2);
-            proof {
-                assert(rfc_recv(self.id, self.credit.window_spec(), t2).events.skip(
-                    s1.events.len() as int,
-                ) =~= Seq::<SpecStreamEvent>::empty());
-                assert(event_views(ev@) =~= event_views(ev@) + Seq::<SpecStreamEvent>::empty());
-            }
-            return Ok(0);
+            return (Ok(0), Ghost(0));
         }
-        self.data_buffer(off, data, fin, ev);
-        Ok(n_new)
+        let c = self.data_buffer(off, data, fin);
+        (Ok(n_new), c)
     }
 
     /// `on_data`'s flow-control and final-size half: the error the frame raises, else the
@@ -1615,11 +1737,11 @@ impl RecvStream {
         Ok(n_new)
     }
 
-    /// `on_data`'s buffering half: the frame passed `data_gate` and the stream is not
-    /// terminal; its bytes are reassembled and the newly contiguous ones delivered (split from
-    /// `on_data` for the rlimit).
+    /// `on_data`'s buffering half: the frame passed `data_gate` and the stream is not terminal;
+    /// its bytes go to the buffer, and the state follows the final size (split from `on_data`
+    /// for the rlimit).
     #[verifier::spinoff_prover]
-    fn data_buffer(&mut self, off: u64, data: &[u8], fin: bool, ev: &mut Vec<StreamEvent>)
+    fn data_buffer(&mut self, off: u64, data: &[u8], fin: bool) -> (c: Ghost<nat>)
         requires
             old(self).wf(),
             off + data@.len() <= VARINT_MAX,
@@ -1629,26 +1751,19 @@ impl RecvStream {
             final(self).id_spec() == old(self).id_spec(),
             final(self).window_spec() == old(self).window_spec(),
             final(self).wf(),
-            ({
-                let t2 = old(self).trace().push(
-                    SpecRecvIn::Data { off: off as nat, data: data@, fin },
-                );
-                let s1 = old(self).rfc();
-                let s2 = rfc_recv(old(self).id_spec(), old(self).window_spec(), t2);
-                &&& final(self).trace() == t2
-                &&& event_views(final(ev)@) == event_views(old(ev)@) + s2.events.skip(
-                    s1.events.len() as int,
-                )
-            }),
+            final(self).trace() == old(self).trace().push(
+                SpecRecvIn::Data { off: off as nat, data: data@, fin },
+            ),
+            final(self).emitted() == old(self).emitted(),
             final(self).stop_code() == old(self).stop_code(),
-            final(self).pending_stop() == if terminal(final(self).rfc().state) {
+            final(self).pending_stop() == if final(self).rfc().state is DataRecvd {
                 None
             } else {
                 old(self).pending_stop()
             },
+            c@ <= (c_ri() + 1) * (data@.len() + 2 * PAGE) + NP_MAX,
     {
         let ghost t2 = self.trace@.push(SpecRecvIn::Data { off: off as nat, data: data@, fin });
-        let ghost s1 = self.rfc();
         proof {
             lemma_recv_push(self.id, self.credit.window_spec(), self.trace@, SpecRecvIn::Data {
                 off: off as nat,
@@ -1670,38 +1785,111 @@ impl RecvStream {
         };
         let mut re = match self.re.take() {
             Some(r) => r,
-            None => Reassembly::new(),  // unreachable: `re` is Some unless ResetRead
+            None => Reassembly::new(0),  // unreachable: `re` is Some unless ResetRead
         };
         proof {
             re.lemma_wf();
         }
-        let delivered = re.base_exec();
-        insert_tight(&mut re, off, data);
-        let ghost re1 = re;
-        let mut out: Vec<u8> = Vec::new();
-        re.pop(&mut out);
-        let n = re.base_exec();
-        proof {
-            Reassembly::lemma_pop_tight(re1, re);
-            re.lemma_wf();
-        }
+        let Ghost(c) = re.insert(off, data);
+        let ghost s2 = rfc_recv(self.id, self.credit.window_spec(), t2);
         let done = match fs {
-            Some(f) => f == n,
+            Some(f) => re.complete_to(f),
             None => false,
         };
         let st = if done {
-            RecvState::DataRead
+            RecvState::DataRecvd
         } else if fs.is_some() {
             RecvState::SizeKnown
         } else {
             RecvState::Recv
         };
+        self.re = Some(re);
+        self.state = st;
+        self.high = high;
+        self.final_size = fs;
+        self.trace = Ghost(t2);
+        proof {
+            assert(self.wf());
+        }
+        Ghost(c)
+    }
+
+    /// Hands at most `max` contiguous bytes to `ev` as one `Data` event, with the FIN once delivery
+    /// reaches the final size (D12's `Deliver`); returns the bytes delivered. Each byte returns its
+    /// stream credit as it leaves the buffer. No error path. Costs the buffer's pop, `O(max +
+    /// max/PAGE)`, and one event.
+    #[verifier::spinoff_prover]
+    pub fn deliver(&mut self, max: u64, ev: &mut Vec<StreamEvent>) -> (r: (u64, Ghost<nat>))
+        requires
+            old(self).wf(),
+        ensures
+            final(self).id_spec() == old(self).id_spec(),
+            final(self).window_spec() == old(self).window_spec(),
+            final(self).wf(),
+            ({
+                let t2 = old(self).trace().push(SpecRecvIn::Deliver { max: max as nat });
+                let s1 = old(self).rfc();
+                let s2 = rfc_recv(old(self).id_spec(), old(self).window_spec(), t2);
+                &&& final(self).trace() == t2
+                &&& event_views(final(ev)@) == event_views(old(ev)@) + s2.events.skip(
+                    s1.events.len() as int,
+                )
+                &&& r.0 == s2.delivered - s1.delivered
+            }),
+            final(self).stop_code() == old(self).stop_code(),
+            final(self).pending_stop() == if terminal(final(self).rfc().state) {
+                None
+            } else {
+                old(self).pending_stop()
+            },
+            r.1@ <= c_rd() * (max + max as nat / (PAGE as nat) + 2) + 1,
+    {
+        hide(recv_inv);
+        hide(recv_events_ok);
+        hide(data_of);
+        hide(rfc_received);
+        hide(rfc_prefix);
+        let ghost t2 = self.trace@.push(SpecRecvIn::Deliver { max: max as nat });
+        let ghost s1 = self.rfc();
+        proof {
+            lemma_deliver_fields(self.id, s1, max as nat);
+            lemma_recv_push(self.id, self.credit.window_spec(), self.trace@, SpecRecvIn::Deliver {
+                max: max as nat,
+            });
+            self.credit.lemma_wf();
+        }
+        if self.is_terminal() {
+            self.trace = Ghost(t2);
+            proof {
+                assert(rfc_recv(self.id, self.credit.window_spec(), t2).events.skip(
+                    s1.events.len() as int,
+                ) =~= Seq::<SpecStreamEvent>::empty());
+                assert(event_views(ev@) =~= event_views(ev@) + Seq::<SpecStreamEvent>::empty());
+            }
+            return (0, Ghost(0));
+        }
+        let mut re = match self.re.take() {
+            Some(r) => r,
+            None => Reassembly::new(0),  // unreachable: `re` is Some unless ResetRead
+        };
+        proof {
+            re.lemma_wf();
+        }
+        let delivered = re.base_exec();
+        let (out, Ghost(c)) = re.pop(max);
+        let n = re.base_exec();
+        let done = match self.state {
+            RecvState::DataRecvd => match self.final_size {
+                Some(f) => f == n,
+                None => false,
+            },
+            _ => false,
+        };
         let ghost s2 = rfc_recv(self.id, self.credit.window_spec(), t2);
         proof {
-            assert(out@ == rfc_prefix(rfc_received(s2.ins), n as nat).subrange(
-                delivered as int,
-                n as int,
-            ));
+            let m = rfc_received(s1.ins);
+            lemma_contiguous_exists(m);
+            lemma_prefix_sub(m, delivered as nat, n as nat, rfc_contiguous(m));
         }
         let ghost old_ev = ev@;
         if n > delivered || done {
@@ -1719,25 +1907,27 @@ impl RecvStream {
         }
         self.credit.on_consumed(n - delivered);
         self.re = Some(re);
-        self.state = st;
-        self.high = high;
-        self.final_size = fs;
+        if done {
+            self.state = RecvState::DataRead;
+        }
         self.trace = Ghost(t2);
         self.emitted = Ghost(s2.events);
         proof {
             assert(self.wf());
         }
+        (n - delivered, Ghost(c + 1))
     }
 
     /// A RESET_STREAM frame's error code and final size, with `conn_room` bytes of connection
-    /// credit left. `Ok(n)`: the stream consumed `n` more bytes of connection credit.
+    /// credit left. `Ok(n)`: the stream consumed `n` more bytes of connection credit. A reset drops
+    /// the buffer: at most `c_rfree()` buffers freed.
     pub fn on_reset(
         &mut self,
         code: u64,
         final_size: u64,
         conn_room: u64,
         ev: &mut Vec<StreamEvent>,
-    ) -> (r: Result<u64, u64>)
+    ) -> (r: (Result<u64, u64>, Ghost<nat>))
         requires
             old(self).wf(),
         ensures
@@ -1750,14 +1940,14 @@ impl RecvStream {
                 );
                 let s1 = old(self).rfc();
                 let s2 = rfc_recv(old(self).id_spec(), old(self).window_spec(), t2);
-                &&& s2.err matches Some(c) ==> r == Err::<u64, u64>(c) && *final(self) == *old(self)
+                &&& s2.err matches Some(c) ==> r.0 == Err::<u64, u64>(c) && *final(self) == *old(self)
                     && final(ev)@ == old(ev)@
-                &&& (s2.err is None && counted(s2) - counted(s1) > conn_room) ==> r == Err::<
+                &&& (s2.err is None && counted(s2) - counted(s1) > conn_room) ==> r.0 == Err::<
                     u64,
                     u64,
                 >(FLOW_CONTROL_ERROR) && *final(self) == *old(self) && final(ev)@ == old(ev)@
                 &&& (s2.err is None && counted(s2) - counted(s1) <= conn_room) ==> {
-                    &&& r == Ok::<u64, u64>((counted(s2) - counted(s1)) as u64)
+                    &&& r.0 == Ok::<u64, u64>((counted(s2) - counted(s1)) as u64)
                     &&& final(self).trace() == t2
                     &&& event_views(final(ev)@) == event_views(old(ev)@) + s2.events.skip(
                         s1.events.len() as int,
@@ -1770,8 +1960,9 @@ impl RecvStream {
             } else {
                 old(self).pending_stop()
             },
-            // Reset or suppressed after all data was delivered: nothing stays buffered.
-            r is Ok ==> final(self).buffered_len() == 0,
+            // Reset: nothing stays buffered; ignored in "Data Recvd", whose bytes are still delivered.
+            r.0 is Ok && !(old(self).rfc().state is DataRecvd) ==> final(self).buffered_len() == 0,
+            r.1@ <= c_rfree(),
     {
         let ghost t2 = self.trace@.push(
             SpecRecvIn::Reset { code, final_size: final_size as nat },
@@ -1790,12 +1981,16 @@ impl RecvStream {
         };
         // §4.5 (cited at `on_data`): a changed final size, or one below data received.
         if changed || final_size < self.high {
-            return Err(FINAL_SIZE_ERROR);
+            return (Err(FINAL_SIZE_ERROR), Ghost(0));
         }
         if final_size > self.credit.limit() {
-            return Err(FLOW_CONTROL_ERROR);
+            return (Err(FLOW_CONTROL_ERROR), Ghost(0));
         }
-        if self.is_terminal() {
+        let ignored = match self.state {
+            RecvState::DataRecvd | RecvState::DataRead | RecvState::ResetRead => true,
+            _ => false,
+        };
+        if ignored {
             //= https://www.rfc-editor.org/rfc/rfc9000#section-3.2
             //# A RESET_STREAM signal might be suppressed or withheld
             //# if stream data is completely received and is buffered to be read by
@@ -1807,11 +2002,11 @@ impl RecvStream {
                 ) =~= Seq::<SpecStreamEvent>::empty());
                 assert(event_views(ev@) =~= event_views(ev@) + Seq::<SpecStreamEvent>::empty());
             }
-            return Ok(0);
+            return (Ok(0), Ghost(0));
         }
         let n_new = final_size - self.counted_exec();
         if n_new > conn_room {
-            return Err(FLOW_CONTROL_ERROR);
+            return (Err(FLOW_CONTROL_ERROR), Ghost(0));
         }
         let ghost s2 = rfc_recv(self.id, self.credit.window_spec(), t2);
         let ghost old_ev = ev@;
@@ -1827,20 +2022,19 @@ impl RecvStream {
         self.final_size = Some(final_size);
         self.trace = Ghost(t2);
         self.emitted = Ghost(s2.events);
-        Ok(n_new)
+        (Ok(n_new), Ghost(c_rfree()))
     }
 }
 
 } // verus!
 
 impl RecvStream {
-    /// Test support: the allocated capacities of the reassembly buffers, `(0, 0)` once reset.
-    /// Verus models `Vec` length, not capacity (TRUSTED.md).
+    /// Test support: the reassembly ring's pages allocated, 0 once reset.
     #[doc(hidden)]
-    pub fn capacities(&self) -> (usize, usize) {
+    pub fn page_count(&self) -> usize {
         match &self.re {
-            Some(r) => r.capacities(),
-            None => (0, 0),
+            Some(r) => r.page_count(),
+            None => 0,
         }
     }
 }

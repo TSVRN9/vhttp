@@ -1,0 +1,30 @@
+diff --git a/crates/quic/src/send_stream.rs b/crates/quic/src/send_stream.rs
+index e2f1f85..18f9092 100644
+--- a/crates/quic/src/send_stream.rs
++++ b/crates/quic/src/send_stream.rs
+@@ -2183,19 +2183,12 @@ impl SendStream {
+         }
+         let n = self.acked.len() + self.lost.len() + self.flight.len();
+         let w = self.sent_end - self.acked_base;
+-        let mut acked = RangeSet::new();
+-        let mut lost = RangeSet::new();
+-        let mut flight = PieceSet::new();
+-        core::mem::swap(&mut self.acked, &mut acked);
+-        core::mem::swap(&mut self.lost, &mut lost);
+-        core::mem::swap(&mut self.flight, &mut flight);
+-        // The slot is empty (`td_ok`: a part not reset holds none), so nothing is dropped here.
+-        self.td = TdSets { acked, lost, flight };
+-        self.td_w = if n == 0 {
+-            0
+-        } else {
+-            w
+-        };
++        let Ghost(c1) = self.lost.clear();
++        let Ghost(c2) = self.acked.clear();
++        let Ghost(c3) = self.flight.clear();
++        proof {
++            work = work + c1 + c2 + c3;
++        }
+         self.state = SendState::ResetSent;
+         self.reset = Some((code, self.sent_end));
+         self.reset_pending = true;

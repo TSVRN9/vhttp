@@ -1,0 +1,14 @@
+diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
+index 46567b3..c650812 100644
+--- a/crates/quic/src/crypto_stream.rs
++++ b/crates/quic/src/crypto_stream.rs
+@@ -633,7 +633,8 @@ impl CryptoStream {
+         proof {
+             work = work + ci;
+         }
+-        let (r, Ghost(c)) = self.st.run_end_w(self.contig);
++        // Mutant 9b2-M35: the run walk starts at the read offset, so a frame closing a gap walks the unread run too.
++        let (r, Ghost(c)) = self.st.run_end_w(self.base);
+         let end = offset + data.len() as u64;
+         self.contig = r;
+         if end > self.hi {

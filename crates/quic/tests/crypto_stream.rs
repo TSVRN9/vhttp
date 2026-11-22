@@ -1,10 +1,80 @@
 use quic::codes::CRYPTO_BUFFER_EXCEEDED;
 use quic::crypto_stream::*;
+use quic::CapVec;
 
+/// Requested bytes, per thread: the cost tests below count, never time (9b2 Task 8 ruling).
+struct Counting;
+
+thread_local! {
+    static BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+unsafe impl std::alloc::GlobalAlloc for Counting {
+    unsafe fn alloc(&self, l: std::alloc::Layout) -> *mut u8 {
+        let _ = BYTES.try_with(|b| b.set(b.get() + l.size()));
+        std::alloc::System.alloc(l)
+    }
+    unsafe fn realloc(&self, p: *mut u8, l: std::alloc::Layout, n: usize) -> *mut u8 {
+        let _ = BYTES.try_with(|b| b.set(b.get() + n));
+        std::alloc::System.realloc(p, l, n)
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: std::alloc::Layout) {
+        std::alloc::System.dealloc(p, l)
+    }
+}
+
+#[global_allocator]
+static ALLOC: Counting = Counting;
+
+fn allocated() -> usize {
+    BYTES.with(|b| b.get())
+}
+
+/// Reads every unread in-order byte, into an exact buffer.
 fn read(c: &mut CryptoStream) -> Vec<u8> {
-    let mut out = Vec::new();
-    c.read(&mut out);
-    out
+    let u = c.unread();
+    let mut out = CapVec::new(u as usize);
+    c.read(u, &mut out);
+    out.into_vec()
+}
+
+/// D6: in-order bytes stay in the store until read, and a read takes at most `max` of them.
+#[test]
+fn crypto_lazy_read_bounded() {
+    let mut c = CryptoStream::new();
+    let d: Vec<u8> = (0..16384u32).map(|i| i as u8).collect();
+    assert_eq!(c.on_crypto(0, &d), Ok(()));
+    assert_eq!(c.unread(), 16384);
+    let mut out = CapVec::new(100);
+    c.read(100, &mut out);
+    assert_eq!(out.into_vec(), d[..100].to_vec());
+    assert_eq!(c.unread(), 16284);
+    assert_eq!(c.start(), 100);
+    assert_eq!(read(&mut c), d[100..].to_vec());
+}
+
+/// `retire` moves the store to the teardown slot; `free_some` empties it a bounded piece at a time.
+#[test]
+fn crypto_retire_then_free() {
+    let mut c = CryptoStream::new();
+    assert_eq!(c.on_crypto(0, &[1; 5000]), Ok(()));
+    assert_eq!(c.on_crypto(6000, &[2; 5000]), Ok(()));
+    c.retire();
+    assert_eq!(c.unread(), 0);
+    assert_eq!(c.start(), 11000);
+    assert_eq!(c.end(), 11000);
+    assert_eq!(c.capacities().0, 0);
+    assert!(c.has_td());
+    let mut n = 0;
+    while c.has_td() {
+        let _ = c.free_some();
+        n += 1;
+    }
+    assert!(n >= 1);
+    assert_eq!(c.capacities(), (0, 0));
+    // Retiring again onto an empty store moves nothing.
+    c.retire();
+    assert!(!c.has_td());
 }
 
 #[test]
@@ -77,17 +147,20 @@ fn crypto_duplicate() {
 #[test]
 fn crypto_tail_then_in_order() {
     // Reviewer's pattern: a far byte pins a 16 KiB buffer, then 1-byte frames arrive in
-    // order, each followed by a read. Each read must not copy the buffered tail.
-    let t = std::time::Instant::now();
+    // order, each followed by a read. Each read must not copy the buffered tail: counted, not
+    // timed (a tail copy allocates a tail-sized buffer; the work is `read`'s proved cost, D6).
     let mut c = CryptoStream::new();
     assert_eq!(c.on_crypto(16383, &[0xff]), Ok(()));
+    let mut worst = 0;
     for off in 0..16382u64 {
+        let a0 = allocated();
         assert_eq!(c.on_crypto(off, &[off as u8]), Ok(()));
         assert_eq!(read(&mut c), [off as u8]);
+        worst = worst.max(allocated() - a0);
     }
     assert_eq!(c.on_crypto(16382, &[0xfe]), Ok(()));
     assert_eq!(read(&mut c), [0xfe, 0xff]);
-    assert!(t.elapsed().as_secs() < 5, "took {:?}", t.elapsed());
+    assert!(worst <= 4096, "a 1-byte frame and its read requested {worst} bytes");
 }
 
 /// RFC 9000 §7.5's floor counts bytes held: one byte far past the contiguous end is one byte.
@@ -148,5 +221,5 @@ fn crypto_ooo_capacity_bounded() {
         assert_eq!(c.on_crypto(2 + 2 * k, &[1]), Ok(()));
     }
     let slot = std::mem::size_of::<(u64, Vec<u8>)>();
-    assert!(c.capacities().1 <= 2 * 4096 * slot + 4096, "{:?}", c.capacities());
+    assert!(c.capacities().0 <= 2 * 4096 * slot + 4096, "{:?}", c.capacities());
 }

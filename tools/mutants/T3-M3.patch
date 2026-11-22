@@ -1,12 +1,12 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index 84680fd..21911ae 100644
+index b23593b..f783f3c 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -8571,7 +8571,6 @@ impl Connection {
+@@ -11981,7 +11981,6 @@ impl Connection {
              forall|p: nat| #[trigger] self.crypto_received(k, p) ==> p < r,
      {
          proof {
--            reveal(crx_ok);
+-            reveal(crate::crx::crx_ok);
              match k {
                  PacketKind::Initial => {
                      self.crx_i.lemma_wf();

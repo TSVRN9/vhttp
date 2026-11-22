@@ -1,0 +1,13 @@
+diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
+index b23593b..f9c63ca 100644
+--- a/crates/quic/src/conn.rs
++++ b/crates/quic/src/conn.rs
+@@ -3933,7 +3933,7 @@ impl Connection {
+         proof {
+             assert(none@.take(0) =~= Seq::<u8>::empty());
+         }
+-        self.lc.enter_closing(now, pto, false, c, none.as_slice());
++        self.lc.enter_closing(now, pto, false, c + 1, none.as_slice());
+         let ghost cs = *self;
+         self.bury_streams();
+         proof {
