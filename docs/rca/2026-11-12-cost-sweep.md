@@ -109,3 +109,35 @@ No exec drain/insert(0)/rotate/remove(0) in quictls.
 - h3/src/frame.rs:243 and limits.rs:6 ponytail: O(n^2) SETTINGS dup scan, 512 pairs (H8).
 - h3/src/conn.rs:2159 ponytail: linear lookup over open streams (H10).
 - quic/src/cid.rs:51, quic/src/stream_id.rs:55, quic/src/recovery.rs:12 (placeholder), lifecycle.rs:442,494: not copy costs.
+
+## Status of 9b2's rows (9b2 Task 11, 2026-11-21, phase-9b2 at 0d11928)
+
+The rows 9b2 closed (spec `docs/superpowers/specs/2026-11-12-phase-9b2-byte-queue-design.md`, Coverage), each with its
+status and evidence, and the rows it marks unchanged. A column per row in the tables above would break their raw
+layout, so the status sits here, keyed by row id. "Forbidden patterns" is a fresh grep of each converted fn's body at
+this commit for the patterns that grew or shifted a byte `Vec` (`extend_from_slice`, `.append(`, `split_off`,
+`insert(0`, `remove(0`, `Vec::new()` and `vec![`, the start of a push loop into a fresh `Vec`). The cost tests named
+below count allocations and bytes (a counting allocator, release build); none times anything.
+
+| row | status | fn at 0d11928 | forbidden patterns in its body | evidence |
+|---|---|---|---|---|
+| Q1 | closed (D11, D12) | `Reassembly::insert`, quic/src/reassembly.rs:560 | none | the stream's bytes are a `quic::ring::Ring` of 256-byte pages, each an exact `CapVec`, written in place (`Ring::wf`: a page is allocated iff it holds a byte at or past `base`); `input_cost::stream_reverse_fill`: 0 reallocs, largest frame call 2624 bytes at 64 KiB (Task 1: 262128 bytes for 1) |
+| Q2 | closed (D11, D12) | `Reassembly::pop`, reassembly.rs:660 | none | delivers at most `max` bytes per call through `Ring::deliver` (ring.rs:1658) into one exact `CapVec`; `stream_reverse_fill`: no call hands over more than it was given |
+| Q3 | closed (D12) | `run_end` is gone | - | delivery is lazy (D12: `SpecRecvIn::Deliver { max }`, `pump_backlog`'s STREAM half), each delivery one exact `CapVec` of at most `B_PUMP` bytes; `stream_reverse_fill`: pump calls at most 4256 bytes |
+| Q4 | closed (D6) | `CryptoStream::read`, quic/src/crypto_stream.rs:660 | none | `read(max, out)` takes `k = min(max, contiguous − base)` bytes into the caller's exact `CapVec` (`take_front_c`, at most `18·max + 5608`); `input_cost::crypto_one_byte_frames`: 0 reallocs, no call hands over more than its 1 byte (Task 1: 8192 for 1) |
+| Q5 | closed (D6, D7) | `CryptoStream::on_fill`, crypto_stream.rs:617 | none | the run stays in the `Frags` store (no copy at fill time); `on_fill`'s cost `9d + 16,078` is in its ensures (Task 10d); `input_cost::crypto_runs_then_fill`: 0 reallocs (Task 1: 3 to 5 in the fill) |
+| Q6 | closed (D6) | `Connection::crypto_drop`, quic/src/conn.rs:6029 | none | each non-empty store moves to its level's teardown slot (no byte copied), freed by `pump_backlog`; `conn_rx::crypto_drop_two_levels_to_slots` |
+| Q7 | closed (D10) | `SendStream::on_data_acked`, quic/src/send_stream.rs:2635, and `on_data_acked_w`, :2676 | none | the buffer is a `byteq::queue::ByteQueue`; an ACK drops a prefix with no copy; `input_cost::send_ack_1k`: largest ACK call 1600 bytes at 1 MiB (Task 1: 524352 for 0), `ack_copies_no_stream_bytes` |
+| Q8 | closed (D4, D10) | `SendStream::write`, send_stream.rs:1480 | none | `ByteQueue::push_slice`, at most `7d + 4` units with migration at copy rate 3 (D4); `send_ack_1k`: 0 reallocs |
+| Q-T1 | closed (D6, D13) | quictls `feed`, quictls/src/server.rs:1785 | none | reads at most `min(d, MAX_FEED)` bytes into an exact `CapVec`; the rest waits for `pump_backlog` (`B_PUMP` per call) |
+| T1 | closed (D8) | `HsReader::push`, tls/src/handshake.rs:142 | none | the reader is a `ByteQueue` (handshake.rs:108); `reader_cost::reader_one_byte_push`: 0 reallocs (Task 1: 11 to 13) |
+| T2 | closed (D8) | `HsReader::next_message`, handshake.rs:166 | none | takes the message with one exact `take_front`; the tail stays in the queue (D14 (1): one copy of the completed message, 9b5's to remove) |
+| T3 | closed (D9) | `message_hash`, tls/src/schedule.rs:94; the HRR transcript, tls/src/server.rs:1343-1348 | none | `CapVec::new(36 + hrr.len())`, two `push_slice`s, no realloc; its O(transcript) is D14 (3) |
+| T4 | closed (D9) | the ClientHello transcript, tls/src/server.rs:1376-1378 | none | `CapVec::new(tr.len() + m.len())`, two `push_slice`s |
+| T5 | closed (D9) | `build_flight`, tls/src/flight.rs:619 | five `Vec::new()` (:761, :776, :796, :837, :846): the outbound message builders `sh`, `ee`, `cert`, `cv`, `fin`, the sweep's T11 (class B, `cat-C15-9b4`), not the transcript | the transcript is one exact `CapVec` (:801), and the second (:852) too; `fn append` is gone |
+| Q-T2 | no change | quictls `feed`'s event vector | - | events are moved, never shifted (the sweep's own note) |
+| Q-T3 | no change | quictls `log` | - | ghost only, not exec |
+| Q23 | no change | quic/src/frame.rs `slice_to_vec` of CRYPTO/STREAM data | - | O(frame) = bytes given |
+
+Rows not 9b2's keep their owners: Q9-Q22, Q24-Q27, T7, T8, T11, S1-S9 and class B (`cat-C15-9b4`), T6, T9 and T10
+(`cat-C15-stream-parse`, 9b5; T6's chain hashing also `cat-C15-9b4-chain`), H1-H12 (`cat-C15-9b3`).
