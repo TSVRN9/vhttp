@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/streams.rs b/crates/quic/src/streams.rs
-index 0a730d0..45da33f 100644
+index 960f864..b3c2ff5 100644
 --- a/crates/quic/src/streams.rs
 +++ b/crates/quic/src/streams.rs
-@@ -3076,7 +3076,7 @@ impl Streams {
+@@ -3074,7 +3074,7 @@ impl Streams {
          // A queued entry stays until `deliver_some` pops it (D13: every queued id is a live entry's).
          let done = {
              let e = &self.entries[i];

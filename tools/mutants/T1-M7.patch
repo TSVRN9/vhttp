@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index b4d70d4..48bc2d8 100644
+index 91fa197..afcdd7e 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -6863,7 +6863,6 @@ impl Connection {
+@@ -6870,7 +6870,6 @@ impl Connection {
          if now > self.now {
              self.now = now;
          }
