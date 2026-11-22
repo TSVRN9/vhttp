@@ -9,6 +9,9 @@
 // by construction: QUIC CRYPTO frames carry bare handshake messages; there is no record layer.
 use vstd::prelude::*;
 use crate::codes::*;
+use byteq::queue::ByteQueue;
+#[allow(unused_imports)] // requires-only under plain cargo
+use byteq::queue::MAX_QUEUE;
 // Used only in ghost code, which a plain `cargo build` erases.
 #[allow(unused_imports)]
 use crate::pl::*;
@@ -102,58 +105,69 @@ pub proof fn theorem_hs_roundtrip(body: Seq<u8>, rest: Seq<u8>, e: u8)
 
 /// Reassembles handshake messages from CRYPTO data; the view is the buffered bytes.
 pub struct HsReader {
-    buf: Vec<u8>,
+    q: ByteQueue,
 }
 
 impl View for HsReader {
     type V = Seq<u8>;
 
     closed spec fn view(&self) -> Seq<u8> {
-        self.buf@
+        self.q@
     }
 }
 
 impl HsReader {
-    pub fn new() -> (r: HsReader)
-        ensures
-            r@ == Seq::<u8>::empty(),
-    {
-        HsReader { buf: Vec::new() }
+    pub closed spec fn wf(&self) -> bool {
+        self.q.wf()
     }
 
-    pub fn push(&mut self, data: &[u8])
+    pub proof fn lemma_wf(&self)
+        requires
+            self.wf(),
         ensures
+            self@.len() <= MAX_QUEUE,
+    {
+        self.q.lemma_wf();
+    }
+
+    pub fn new() -> (r: HsReader)
+        ensures
+            r.wf(),
+            r@ == Seq::<u8>::empty(),
+    {
+        HsReader { q: ByteQueue::new() }
+    }
+
+    /// The queue's `push_slice`: O(data), the buffered bytes are never copied (D8).
+    pub fn push(&mut self, data: &[u8])
+        requires
+            old(self).wf(),
+            old(self)@.len() + data@.len() <= MAX_QUEUE,
+        ensures
+            final(self).wf(),
             final(self)@ == old(self)@ + data@,
     {
-        let n = data.len();
-        let mut i: usize = 0;
-        while i < n
-            invariant
-                n == data@.len(),
-                i <= n,
-                self@ == old(self)@ + data@.take(i as int),
-            decreases n - i,
-        {
-            self.buf.push(data[i]);
-            assert(data@.take(i as int + 1) =~= data@.take(i as int).push(data@[i as int]));
-            assert((old(self)@ + data@.take(i as int)).push(data@[i as int]) =~= old(self)@
-                + data@.take(i as int + 1));
-            i += 1;
-        }
-        assert(data@.take(n as int) =~= data@);
+        // push_slice's cost (<= 7d + 4) is not surfaced here: TLS-side O(d) per call is 9b5's (cat-C15-stream-parse).
+        let _ = self.q.push_slice(data);
     }
 
     pub fn is_empty(&self) -> (r: bool)
+        requires
+            self.wf(),
         ensures
             r == (self@.len() == 0),
     {
-        self.buf.len() == 0
+        self.q.len() == 0
     }
 
     /// Removes and returns the first complete message, header included (what the transcript
-    /// hashes, RFC 8446 §4.4.1). On `Ok(None)` or `Err` nothing is consumed.
+    /// hashes, RFC 8446 §4.4.1). On `Ok(None)` or `Err` nothing is consumed. The message is copied out of the queue
+    /// (`take_front`); the bytes after it are not.
     pub fn next_message(&mut self, expect: u8) -> (r: Result<Option<Vec<u8>>, u64>)
+        requires
+            old(self).wf(),
         ensures
+            final(self).wf(),
             match rfc_next_message(old(self)@, expect) {
                 Ok(Some(n)) => r matches Ok(Some(m)) && m@ == old(self)@.take(n as int)
                     && final(self)@ == old(self)@.skip(n as int),
@@ -161,7 +175,7 @@ impl HsReader {
                 Err(e) => r matches Err(x) && x == e && final(self)@ == old(self)@,
             },
     {
-        let have = self.buf.len();
+        let have = self.q.len();
         if have == 0 {
             return Ok(None);
         }
@@ -169,13 +183,13 @@ impl HsReader {
         //# A peer which receives a
         //# handshake message in an unexpected order MUST abort the handshake
         //# with an "unexpected_message" alert.
-        if self.buf[0] != expect {
+        if self.q.peek(0) != expect {
             return Err(ALERT_UNEXPECTED_MESSAGE);
         }
         if have < 4 {
             return Ok(None);
         }
-        let len = self.buf[1] as usize * 65536 + self.buf[2] as usize * 256 + self.buf[3] as usize;
+        let len = self.q.peek(1) as usize * 65536 + self.q.peek(2) as usize * 256 + self.q.peek(3) as usize;
         assert(len == be(self@.subrange(1, 4), 3));
         if len > MAX_HS_BODY {
             return Err(CRYPTO_BUFFER_EXCEEDED);
@@ -183,10 +197,9 @@ impl HsReader {
         if have - 4 < len {
             return Ok(None);
         }
-        // ponytail: drains from the front of a Vec (O(n) per message); a ring buffer if handshakes grow.
-        let mut msg = self.buf.split_off(4 + len);
-        core::mem::swap(&mut msg, &mut self.buf);
-        Ok(Some(msg))
+        // take_front's cost (<= n + 3) is not surfaced here: 9b5's (cat-C15-stream-parse).
+        let (m, _) = self.q.take_front(4 + len);
+        Ok(Some(m.into_vec()))
     }
 }
 

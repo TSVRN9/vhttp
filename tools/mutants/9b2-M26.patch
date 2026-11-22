@@ -1,0 +1,12 @@
+diff --git a/crates/quic/src/streams.rs b/crates/quic/src/streams.rs
+--- a/crates/quic/src/streams.rs
++++ b/crates/quic/src/streams.rs
+@@ -3083,7 +3083,7 @@ impl Streams {
+         // A queued entry stays until `deliver_some` pops it (D13: every queued id is a live entry's).
+         let done = {
+             let e = &self.entries[i];
+-            !e.queued && (match &e.recv {
++            (match &e.recv {
+                 Some(r) => r.is_terminal(),
+                 None => true,
+             }) && (match &e.send {

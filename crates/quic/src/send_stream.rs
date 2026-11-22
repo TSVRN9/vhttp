@@ -3,7 +3,9 @@
 //! and abandoned with RESET_STREAM (§3.3, §3.5).
 use vstd::prelude::*;
 use vstd::slice::{slice_subrange, slice_to_vec};
+use byteq::queue::ByteQueue;
 use crate::flow::*;
+use crate::ranges::*;
 use wire::varint::*;
 
 verus! {
@@ -79,143 +81,774 @@ impl View for Chunk {
     }
 }
 
-/// Every range is non-empty and inside `[lo, hi)`.
-pub open spec fn in_bounds(v: Seq<(u64, u64)>, lo: u64, hi: u64) -> bool {
-    forall|i: int| #![trigger v[i]] 0 <= i < v.len() ==> lo <= v[i].0 < v[i].1 <= hi
+/// The cost constants of the ACK, loss and poll workers: `c_ss1() · (h + 1) + c_ss2() · MAX_FLUSH` (D10 (e)).
+pub open spec fn c_ss1() -> nat {
+    400
 }
 
-/// Every range is disjoint from `[s, e)`.
-pub open spec fn avoids(v: Seq<(u64, u64)>, s: u64, e: u64) -> bool {
-    forall|i: int| #![trigger v[i]] 0 <= i < v.len() ==> v[i].1 <= s || v[i].0 >= e
+pub open spec fn c_ss2() -> nat {
+    10
 }
 
-// ponytail: O(ranges) sorted-Vec range sets; interval tree if loss patterns make them long.
-/// Adds `[s, e)` to a sorted, merged range list. Order and merging are exec behavior (tested);
-/// only the bounds are proven.
-fn range_insert(
-    v: &mut Vec<(u64, u64)>,
-    s: u64,
-    e: u64,
-    Ghost(lo): Ghost<u64>,
-    Ghost(hi): Ghost<u64>,
+/// D10 (a), (d) over the views of a part not reset: the acked, lost and in-flight sets lie in `[ab, se)`, pairwise
+/// apart, and cover it; the open slots ascend, each ending in `(ab, se]`; every item is at least `FLOOR` long or holds
+/// a whole open slot. Opaque: revealed only by the lemmas below.
+#[verifier::opaque]
+pub open spec fn parts(
+    a: Seq<(u64, u64)>,
+    l: Seq<(u64, u64)>,
+    f: Seq<(u64, u64)>,
+    sp: Seq<(u64, u64)>,
+    ab: u64,
+    se: u64,
+) -> bool {
+    &&& in_bounds(a, ab, se)
+    &&& in_bounds(l, ab, se)
+    &&& in_bounds(f, ab, se)
+    &&& apart(a, l)
+    &&& apart(a, f)
+    &&& apart(l, f)
+    &&& forall|x: nat|
+        #![trigger covers(a, x)]
+        #![trigger covers(l, x)]
+        #![trigger covers(f, x)]
+        ab <= x < se ==> covers(a, x) || covers(l, x) || covers(f, x)
+    &&& disjoint(sp)
+    &&& forall|k: int| 0 <= k < sp.len() ==> ab < #[trigger] sp[k].1 <= se
+    &&& items_ok(a, sp)
+    &&& items_ok(l, sp)
+    &&& items_ok(f, sp)
+}
+
+/// No acked range starts at `ab`: one `drop_front` per ACK takes the whole acknowledged prefix (Task 8 review Minor 3).
+pub open spec fn starts_past(a: Seq<(u64, u64)>, ab: u64) -> bool {
+    forall|i: int| 0 <= i < a.len() ==> #[trigger] a[i].0 > ab
+}
+
+/// A range of `v` lies in `[lo, hi)`, so its bytes do.
+proof fn lemma_covers_in(v: Seq<(u64, u64)>, lo: u64, hi: u64)
+    requires
+        in_bounds(v, lo, hi),
+    ensures
+        forall|x: nat| #[trigger] covers(v, x) ==> lo <= x < hi,
+{
+    assert forall|x: nat| #[trigger] covers(v, x) implies lo <= x < hi by {
+        let i = choose|i: int| 0 <= i < v.len() && #[trigger] inr(v[i], x);
+        assert(lo <= v[i].0 < v[i].1 <= hi);
+    }
+}
+
+/// Each range of `w` is a range of `v` or `q`: `w` is in bounds and its items ok when those of `v` and `q` are.
+proof fn lemma_sub(v: Seq<(u64, u64)>, w: Seq<(u64, u64)>, q: (u64, u64), sp: Seq<(u64, u64)>, lo: u64, hi: u64)
+    requires
+        forall|p: (u64, u64)| #[trigger] w.contains(p) ==> v.contains(p) || p == q,
+        in_bounds(v, lo, hi),
+        items_ok(v, sp),
+        lo <= q.0 < q.1 <= hi,
+        item_ok(q, sp),
+    ensures
+        in_bounds(w, lo, hi),
+        items_ok(w, sp),
+{
+    assert forall|i: int| 0 <= i < w.len() implies lo <= #[trigger] w[i].0 < w[i].1 <= hi && item_ok(w[i], sp) by {
+        assert(w.contains(w[i]));
+        if v.contains(w[i]) {
+            let j = choose|j: int| 0 <= j < v.len() && v[j] == w[i];
+            assert(item_ok(v[j], sp));
+        }
+    }
+}
+
+/// An item holding an ok item is ok.
+proof fn lemma_item_grow(p: (u64, u64), q: (u64, u64), sp: Seq<(u64, u64)>)
+    requires
+        item_ok(p, sp),
+        q.0 <= p.0,
+        p.1 <= q.1,
+        p.0 < p.1,
+    ensures
+        item_ok(q, sp),
+{
+    if !(p.1 - p.0 >= FLOOR) {
+        let j = choose|j: int| 0 <= j < sp.len() && p.0 <= #[trigger] sp[j].0 && sp[j].1 <= p.1;
+        assert(q.0 <= sp[j].0 && sp[j].1 <= q.1);
+    }
+}
+
+/// An ok item stays ok against `sp` with slots added after.
+proof fn lemma_items_push(v: Seq<(u64, u64)>, sp: Seq<(u64, u64)>, sp2: Seq<(u64, u64)>)
+    requires
+        items_ok(v, sp),
+        sp.len() <= sp2.len(),
+        forall|k: int| 0 <= k < sp.len() ==> #[trigger] sp2[k] == sp[k],
+    ensures
+        items_ok(v, sp2),
+{
+    assert forall|i: int| 0 <= i < v.len() implies #[trigger] item_ok(v[i], sp2) by {
+        assert(item_ok(v[i], sp));
+        if !(v[i].1 - v[i].0 >= FLOOR) {
+            let j = choose|j: int| 0 <= j < sp.len() && v[i].0 <= #[trigger] sp[j].0 && sp[j].1 <= v[i].1;
+            assert(sp2[j] == sp[j]);
+        }
+    }
+}
+
+/// D10 (d): the bound, from `parts` (`lemma_bound`).
+proof fn lemma_parts_bound(
+    a: Seq<(u64, u64)>,
+    l: Seq<(u64, u64)>,
+    f: Seq<(u64, u64)>,
+    sp: Seq<(u64, u64)>,
+    ab: u64,
+    se: u64,
 )
     requires
-        lo <= s < e <= hi,
-        in_bounds(old(v)@, lo, hi),
+        parts(a, l, f, sp, ab, se),
+        disjoint(a),
+        disjoint(l),
+        disjoint(f),
     ensures
-        in_bounds(final(v)@, lo, hi),
+        a.len() + l.len() + f.len() <= ((se - ab) as nat) / (FLOOR as nat) + sp.len(),
 {
-    let mut out: Vec<(u64, u64)> = Vec::new();
-    let mut s = s;
-    let mut e = e;
-    let mut placed = false;
-    let mut i: usize = 0;
-    while i < v.len()
-        invariant
-            in_bounds(v@, lo, hi),
-            in_bounds(out@, lo, hi),
-            lo <= s < e <= hi,
-            i <= v@.len(),
-        decreases v@.len() - i,
-    {
-        let (a, b) = v[i];
-        if b < s {
-            out.push((a, b));
-        } else if a > e || placed {
-            if !placed {
-                out.push((s, e));
-                placed = true;
-            }
-            out.push((a, b));
-        } else {
-            // Overlapping or adjacent: merge.
-            if a < s {
-                s = a;
-            }
-            if b > e {
-                e = b;
-            }
-        }
-        i = i + 1;
-    }
-    if !placed {
-        out.push((s, e));
-    }
-    *v = out;
+    reveal(parts);
+    lemma_bound(a, l, f, sp, ab, se);
 }
 
-/// Removes `[s, e)` from every range, splitting where needed.
-fn range_remove(
-    v: &mut Vec<(u64, u64)>,
-    s: u64,
-    e: u64,
-    Ghost(lo): Ghost<u64>,
-    Ghost(hi): Ghost<u64>,
+/// A new piece `[se, e2)` past every item: in flight, with its own slot if short.
+proof fn lemma_new_piece(
+    a: Seq<(u64, u64)>,
+    l: Seq<(u64, u64)>,
+    f: Seq<(u64, u64)>,
+    f2: Seq<(u64, u64)>,
+    sp: Seq<(u64, u64)>,
+    sp2: Seq<(u64, u64)>,
+    ab: u64,
+    se: u64,
+    e2: u64,
 )
+    requires
+        parts(a, l, f, sp, ab, se),
+        ab <= se < e2,
+        forall|x: nat| #[trigger] covers(f2, x) <==> covers(f, x) || (se <= x && x < e2),
+        forall|p: (u64, u64)| #[trigger] f2.contains(p) <==> f.contains(p) || p == (se, e2),
+        sp2 == sp.push((se, e2)) || (sp2 == sp && e2 - se >= FLOOR),
+    ensures
+        parts(a, l, f2, sp2, ab, e2),
+{
+    reveal(parts);
+    lemma_covers_in(a, ab, se);
+    lemma_covers_in(l, ab, se);
+    lemma_covers_in(f, ab, se);
+    assert forall|k: int| 0 <= k < sp.len() implies #[trigger] sp2[k] == sp[k] by {}
+    lemma_items_push(a, sp, sp2);
+    lemma_items_push(l, sp, sp2);
+    lemma_items_push(f, sp, sp2);
+    assert(item_ok((se, e2), sp2)) by {
+        if sp2 != sp {
+            assert(sp2[sp.len() as int] == (se, e2));
+        }
+    }
+    lemma_sub(f, f2, (se, e2), sp2, ab, e2);
+    assert(in_bounds(a, ab, e2));
+    assert(in_bounds(l, ab, e2));
+    assert(in_bounds(f, ab, e2));
+    assert(disjoint(sp2)) by {
+        assert forall|i: int, j: int| 0 <= i < j < sp2.len() implies #[trigger] sp2[i].1 <= #[trigger] sp2[j].0 by {
+            if j == sp.len() {
+                assert(sp2[i] == sp[i]);
+            }
+        }
+    }
+}
+
+/// A resent piece `[s, s + k)` off the first lost range `[s, e)`: whole, or a cut leaving both parts at least FLOOR.
+proof fn lemma_resend(
+    a: Seq<(u64, u64)>,
+    l: Seq<(u64, u64)>,
+    l2: Seq<(u64, u64)>,
+    f: Seq<(u64, u64)>,
+    f2: Seq<(u64, u64)>,
+    sp: Seq<(u64, u64)>,
+    ab: u64,
+    se: u64,
+    k: u64,
+)
+    requires
+        parts(a, l, f, sp, ab, se),
+        disjoint(l),
+        l.len() > 0,
+        0 < k <= l[0].1 - l[0].0,
+        k == l[0].1 - l[0].0 || (k >= FLOOR && l[0].1 - l[0].0 - k >= FLOOR),
+        forall|x: nat| #[trigger] covers(l2, x) <==> covers(l, x) && !(l[0].0 <= x && x < l[0].0 + k),
+        l2 == (if k == l[0].1 - l[0].0 {
+            l.skip(1)
+        } else {
+            l.update(0, ((l[0].0 + k) as u64, l[0].1))
+        }),
+        forall|x: nat| #[trigger] covers(f2, x) <==> covers(f, x) || (l[0].0 <= x && x < l[0].0 + k),
+        forall|p: (u64, u64)| #[trigger] f2.contains(p) <==> f.contains(p) || p == (l[0].0, (l[0].0 + k) as u64),
+    ensures
+        parts(a, l2, f2, sp, ab, se),
+{
+    reveal(parts);
+    let (s, e) = l[0];
+    let q = (s, (s + k) as u64);
+    assert(inr(l[0], s as nat));
+    assert(item_ok(l[0], sp));
+    assert(item_ok(q, sp));
+    lemma_sub(f, f2, q, sp, ab, se);
+    assert forall|i: int| 0 <= i < l2.len() implies ab <= #[trigger] l2[i].0 < l2[i].1 <= se && item_ok(l2[i], sp) by {
+        if k == e - s {
+            assert(l2[i] == l[i + 1]);
+            assert(item_ok(l[i + 1], sp));
+        } else if i > 0 {
+            assert(l2[i] == l[i]);
+            assert(item_ok(l[i], sp));
+        }
+    }
+    assert forall|x: nat| #![trigger covers(a, x), covers(f2, x)] !(covers(a, x) && covers(f2, x)) by {
+        if covers(f2, x) && !covers(f, x) {
+            assert(inr(l[0], x));
+            assert(covers(l, x));
+        }
+    }
+    assert forall|x: nat| #![trigger covers(l2, x), covers(f2, x)] !(covers(l2, x) && covers(f2, x)) by {
+        if covers(l2, x) {
+            assert(covers(l, x));
+        }
+    }
+    assert forall|x: nat| #![trigger covers(a, x), covers(l2, x)] !(covers(a, x) && covers(l2, x)) by {
+        if covers(l2, x) {
+            assert(covers(l, x));
+        }
+    }
+    assert forall|x: nat|
+        #![trigger covers(a, x)]
+        #![trigger covers(l2, x)]
+        #![trigger covers(f2, x)]
+        ab <= x < se implies covers(a, x) || covers(l2, x) || covers(f2, x) by {
+        if covers(l, x) {
+        }
+    }
+}
+
+/// No byte of an in-flight piece is acked or lost.
+proof fn lemma_piece_free(
+    a: Seq<(u64, u64)>,
+    l: Seq<(u64, u64)>,
+    f: Seq<(u64, u64)>,
+    sp: Seq<(u64, u64)>,
+    ab: u64,
+    se: u64,
+    o: u64,
+    e: u64,
+)
+    requires
+        parts(a, l, f, sp, ab, se),
+        f.contains((o, e)),
+    ensures
+        ab <= o < e <= se,
+        forall|x: nat| o <= x < e ==> !covers(a, x) && !covers(l, x),
+        item_ok((o, e), sp),
+{
+    reveal(parts);
+    let i = choose|i: int| 0 <= i < f.len() && f[i] == (o, e);
+    assert(item_ok(f[i], sp));
+    assert forall|x: nat| o <= x < e implies !covers(a, x) && !covers(l, x) by {
+        assert(inr(f[i], x));
+        assert(covers(f, x));
+    }
+}
+
+/// The piece `(o, e)` leaves flight and joins the merged set `v`, as `w` (the merged range `(am, bm)`); `u` is the
+/// third set. Shared by ACK (`v` acked) and loss (`v` lost).
+proof fn lemma_move(
+    v: Seq<(u64, u64)>,
+    w: Seq<(u64, u64)>,
+    u: Seq<(u64, u64)>,
+    f: Seq<(u64, u64)>,
+    f2: Seq<(u64, u64)>,
+    sp: Seq<(u64, u64)>,
+    ab: u64,
+    se: u64,
+    o: u64,
+    e: u64,
+    am: u64,
+    bm: u64,
+)
+    requires
+        in_bounds(v, ab, se),
+        in_bounds(u, ab, se),
+        in_bounds(f, ab, se),
+        apart(v, u),
+        apart(v, f),
+        apart(u, f),
+        forall|x: nat|
+            #![trigger covers(v, x)]
+            #![trigger covers(u, x)]
+            #![trigger covers(f, x)]
+            ab <= x < se ==> covers(v, x) || covers(u, x) || covers(f, x),
+        items_ok(v, sp),
+        items_ok(f, sp),
+        f.contains((o, e)),
+        ab <= o < e <= se,
+        item_ok((o, e), sp),
+        forall|x: nat| #[trigger] covers(f2, x) <==> covers(f, x) && !(o <= x && x < e),
+        forall|p: (u64, u64)| #[trigger] f2.contains(p) <==> f.contains(p) && p != (o, e),
+        forall|x: nat| #[trigger] covers(w, x) <==> covers(v, x) || (o <= x && x < e),
+        w.contains((am, bm)),
+        am <= o,
+        e <= bm,
+        am == o || v.contains((am, o)),
+        bm == e || v.contains((e, bm)),
+        forall|p: (u64, u64)| #[trigger] w.contains(p) && p != (am, bm) ==> v.contains(p),
+    ensures
+        in_bounds(w, ab, se),
+        in_bounds(f2, ab, se),
+        apart(w, u),
+        apart(w, f2),
+        apart(u, f2),
+        forall|x: nat|
+            #![trigger covers(w, x)]
+            #![trigger covers(u, x)]
+            #![trigger covers(f2, x)]
+            ab <= x < se ==> covers(w, x) || covers(u, x) || covers(f2, x),
+        items_ok(w, sp),
+        items_ok(f2, sp),
+        ab <= am,
+{
+    let q = (am, bm);
+    if am != o {
+        let j = choose|j: int| 0 <= j < v.len() && v[j] == (am, o);
+        assert(ab <= v[j].0);
+    }
+    if bm != e {
+        let j = choose|j: int| 0 <= j < v.len() && v[j] == (e, bm);
+        assert(v[j].1 <= se);
+    }
+    lemma_item_grow((o, e), q, sp);
+    lemma_sub(v, w, q, sp, ab, se);
+    lemma_sub(f, f2, (o, e), sp, ab, se);
+    let i = choose|i: int| 0 <= i < f.len() && f[i] == (o, e);
+    assert forall|x: nat| o <= x < e implies covers(f, x) by {
+        assert(inr(f[i], x));
+    }
+    assert forall|x: nat| #![trigger covers(w, x), covers(u, x)] !(covers(w, x) && covers(u, x)) by {
+        if covers(w, x) && !covers(v, x) {
+            assert(covers(f, x));
+        }
+    }
+    assert forall|x: nat| #![trigger covers(w, x), covers(f2, x)] !(covers(w, x) && covers(f2, x)) by {
+        if covers(f2, x) {
+            assert(covers(f, x));
+        }
+    }
+    assert forall|x: nat| #![trigger covers(u, x), covers(f2, x)] !(covers(u, x) && covers(f2, x)) by {
+        if covers(f2, x) {
+            assert(covers(f, x));
+        }
+    }
+    assert forall|x: nat|
+        #![trigger covers(w, x)]
+        #![trigger covers(u, x)]
+        #![trigger covers(f2, x)]
+        ab <= x < se implies covers(w, x) || covers(u, x) || covers(f2, x) by {
+        if covers(v, x) {
+        }
+        if covers(f, x) {
+        }
+    }
+}
+
+/// An ACK moves the piece to `acked` (`a2`, its merged range `(am, bm)`); the start clause holds but for `(am, bm)`.
+proof fn lemma_ack(
+    a: Seq<(u64, u64)>,
+    a2: Seq<(u64, u64)>,
+    l: Seq<(u64, u64)>,
+    f: Seq<(u64, u64)>,
+    f2: Seq<(u64, u64)>,
+    sp: Seq<(u64, u64)>,
+    ab: u64,
+    se: u64,
+    o: u64,
+    e: u64,
+    am: u64,
+    bm: u64,
+)
+    requires
+        parts(a, l, f, sp, ab, se),
+        starts_past(a, ab),
+        f.contains((o, e)),
+        forall|x: nat| #[trigger] covers(f2, x) <==> covers(f, x) && !(o <= x && x < e),
+        forall|p: (u64, u64)| #[trigger] f2.contains(p) <==> f.contains(p) && p != (o, e),
+        forall|x: nat| #[trigger] covers(a2, x) <==> covers(a, x) || (o <= x && x < e),
+        a2.contains((am, bm)),
+        am <= o,
+        e <= bm,
+        am == o || a.contains((am, o)),
+        bm == e || a.contains((e, bm)),
+        forall|p: (u64, u64)| #[trigger] a2.contains(p) && p != (am, bm) ==> a.contains(p),
+    ensures
+        parts(a2, l, f2, sp, ab, se),
+        ab <= am,
+        am > ab ==> starts_past(a2, ab),
+        forall|p: (u64, u64)| #[trigger] a2.contains(p) && p != (am, bm) ==> p.0 > ab,
+{
+    lemma_piece_free(a, l, f, sp, ab, se, o, e);
+    reveal(parts);
+    lemma_move(a, a2, l, f, f2, sp, ab, se, o, e, am, bm);
+    assert forall|p: (u64, u64)| #[trigger] a2.contains(p) && p != (am, bm) implies p.0 > ab by {
+        let j = choose|j: int| 0 <= j < a.len() && a[j] == p;
+        assert(a[j].0 > ab);
+    }
+    if am > ab {
+        assert forall|i: int| 0 <= i < a2.len() implies #[trigger] a2[i].0 > ab by {
+            assert(a2.contains(a2[i]));
+        }
+    }
+}
+
+/// A loss moves the piece to `lost` (`l2`, its merged range `(am, bm)`).
+proof fn lemma_lose(
+    a: Seq<(u64, u64)>,
+    l: Seq<(u64, u64)>,
+    l2: Seq<(u64, u64)>,
+    f: Seq<(u64, u64)>,
+    f2: Seq<(u64, u64)>,
+    sp: Seq<(u64, u64)>,
+    ab: u64,
+    se: u64,
+    o: u64,
+    e: u64,
+    am: u64,
+    bm: u64,
+)
+    requires
+        parts(a, l, f, sp, ab, se),
+        f.contains((o, e)),
+        forall|x: nat| #[trigger] covers(f2, x) <==> covers(f, x) && !(o <= x && x < e),
+        forall|p: (u64, u64)| #[trigger] f2.contains(p) <==> f.contains(p) && p != (o, e),
+        forall|x: nat| #[trigger] covers(l2, x) <==> covers(l, x) || (o <= x && x < e),
+        l2.contains((am, bm)),
+        am <= o,
+        e <= bm,
+        am == o || l.contains((am, o)),
+        bm == e || l.contains((e, bm)),
+        forall|p: (u64, u64)| #[trigger] l2.contains(p) && p != (am, bm) ==> l.contains(p),
+    ensures
+        parts(a, l2, f2, sp, ab, se),
+{
+    lemma_piece_free(a, l, f, sp, ab, se, o, e);
+    reveal(parts);
+    lemma_move(l, l2, a, f, f2, sp, ab, se, o, e, am, bm);
+}
+
+/// Two distinct ranges of a merged sequence: one ends before the other starts.
+proof fn lemma_merged_pair(v: Seq<(u64, u64)>, p: (u64, u64), q: (u64, u64))
+    requires
+        merged(v),
+        v.contains(p),
+        v.contains(q),
+        p != q,
+    ensures
+        p.1 < q.0 || q.1 < p.0,
+{
+    let i = choose|i: int| 0 <= i < v.len() && v[i] == p;
+    let j = choose|j: int| 0 <= j < v.len() && v[j] == q;
+    if i < j {
+        assert(v[i].1 < v[j].0);
+    } else {
+        assert(v[j].1 < v[i].0);
+    }
+}
+
+/// The acked prefix `(ab, b)` leaves `acked` (`a3`), `acked_base` moves to `b`, and the slots ending at or below `b`
+/// (the first `c`) close.
+proof fn lemma_drop(
+    a2: Seq<(u64, u64)>,
+    a3: Seq<(u64, u64)>,
+    l: Seq<(u64, u64)>,
+    f: Seq<(u64, u64)>,
+    sp: Seq<(u64, u64)>,
+    sp3: Seq<(u64, u64)>,
+    ab: u64,
+    b: u64,
+    se: u64,
+    c: int,
+)
+    requires
+        parts(a2, l, f, sp, ab, se),
+        merged(a2),
+        a2.contains((ab, b)),
+        forall|p: (u64, u64)| #[trigger] a2.contains(p) && p != (ab, b) ==> p.0 > ab,
+        forall|x: nat| #[trigger] covers(a3, x) <==> covers(a2, x) && !(ab <= x && x < b),
+        forall|p: (u64, u64)| #[trigger] a3.contains(p) ==> a2.contains(p) && p != (ab, b),
+        0 <= c <= sp.len(),
+        forall|k: int| 0 <= k < c ==> #[trigger] sp[k].1 <= b,
+        forall|k: int| c <= k < sp.len() ==> #[trigger] sp[k].1 > b,
+        sp3 == sp.skip(c),
+    ensures
+        parts(a3, l, f, sp3, b, se),
+        starts_past(a3, b),
+        ab < b <= se,
+{
+    reveal(parts);
+    let i0 = choose|i: int| 0 <= i < a2.len() && a2[i] == (ab, b);
+    assert(a2[i0].0 < a2[i0].1 <= se);
+    assert forall|x: nat| ab <= x < b implies covers(a2, x) by {
+        assert(inr(a2[i0], x));
+    }
+    // What stays lies at or past b, so in `[b, se)`, and holds only slots ending past b.
+    assert forall|i: int| 0 <= i < a3.len() implies #[trigger] a3[i].0 > b && a3[i].1 <= se && a3[i].0 < a3[i].1 && item_ok(
+        a3[i],
+        sp,
+    ) by {
+        assert(a3.contains(a3[i]));
+        let j = choose|j: int| 0 <= j < a2.len() && a2[j] == a3[i];
+        assert(a2.contains(a3[i]));
+        lemma_merged_pair(a2, a3[i], (ab, b));
+        assert(item_ok(a2[j], sp));
+    }
+    assert forall|i: int| 0 <= i < l.len() implies #[trigger] l[i].0 >= b by {
+        if l[i].0 < b {
+            assert(inr(l[i], l[i].0 as nat));
+            assert(covers(l, l[i].0 as nat) && covers(a2, l[i].0 as nat));
+        }
+    }
+    assert forall|i: int| 0 <= i < f.len() implies #[trigger] f[i].0 >= b by {
+        if f[i].0 < b {
+            assert(inr(f[i], f[i].0 as nat));
+            assert(covers(f, f[i].0 as nat) && covers(a2, f[i].0 as nat));
+        }
+    }
+    // An item past b holds no closed slot.
+    assert forall|it: (u64, u64)| it.0 >= b && it.0 < it.1 && #[trigger] item_ok(it, sp) implies item_ok(it, sp3) by {
+        if !(it.1 - it.0 >= FLOOR) {
+            let j = choose|j: int| 0 <= j < sp.len() && it.0 <= #[trigger] sp[j].0 && sp[j].1 <= it.1;
+            assert(sp[j].0 < sp[j].1);
+            assert(j >= c);
+            assert(sp3[j - c] == sp[j]);
+        }
+    }
+    assert forall|i: int| 0 <= i < a3.len() implies #[trigger] item_ok(a3[i], sp3) by {
+        assert(item_ok(a3[i], sp));
+    }
+    assert forall|i: int| 0 <= i < l.len() implies #[trigger] item_ok(l[i], sp3) by {
+        assert(item_ok(l[i], sp));
+    }
+    assert forall|i: int| 0 <= i < f.len() implies #[trigger] item_ok(f[i], sp3) by {
+        assert(item_ok(f[i], sp));
+    }
+    assert forall|x: nat| #![trigger covers(a3, x), covers(l, x)] !(covers(a3, x) && covers(l, x)) by {}
+    assert forall|x: nat| #![trigger covers(a3, x), covers(f, x)] !(covers(a3, x) && covers(f, x)) by {}
+    assert forall|x: nat|
+        #![trigger covers(a3, x)]
+        #![trigger covers(l, x)]
+        #![trigger covers(f, x)]
+        b <= x < se implies covers(a3, x) || covers(l, x) || covers(f, x) by {
+        if covers(a2, x) {
+        }
+    }
+    assert(disjoint(sp3)) by {
+        assert forall|i: int, j: int| 0 <= i < j < sp3.len() implies #[trigger] sp3[i].1 <= #[trigger] sp3[j].0 by {
+            assert(sp3[i] == sp[i + c] && sp3[j] == sp[j + c]);
+        }
+        assert forall|i: int| 0 <= i < sp3.len() implies #[trigger] sp3[i].0 < sp3[i].1 by {
+            assert(sp3[i] == sp[i + c]);
+        }
+    }
+    assert forall|k: int| 0 <= k < sp3.len() implies b < #[trigger] sp3[k].1 <= se by {
+        assert(sp3[k] == sp[k + c]);
+    }
+}
+
+/// `parts`' bounds, outside its opaque body.
+proof fn lemma_parts_end(
+    a: Seq<(u64, u64)>,
+    l: Seq<(u64, u64)>,
+    f: Seq<(u64, u64)>,
+    sp: Seq<(u64, u64)>,
+    ab: u64,
+    se: u64,
+)
+    requires
+        parts(a, l, f, sp, ab, se),
+    ensures
+        in_bounds(a, ab, se),
+        in_bounds(l, ab, se),
+        in_bounds(f, ab, se),
+        forall|x: nat| #[trigger] covers(f, x) ==> ab <= x < se,
+        disjoint(sp),
+        forall|k: int| 0 <= k < sp.len() ==> ab < #[trigger] sp[k].1 <= se,
+{
+    reveal(parts);
+    lemma_covers_in(f, ab, se);
+}
+
+/// The head `[l[0].0, end)` of the first lost range holds no byte in flight.
+proof fn lemma_piece_space(
+    a: Seq<(u64, u64)>,
+    l: Seq<(u64, u64)>,
+    f: Seq<(u64, u64)>,
+    sp: Seq<(u64, u64)>,
+    ab: u64,
+    se: u64,
+    end: u64,
+)
+    requires
+        parts(a, l, f, sp, ab, se),
+        l.len() > 0,
+        l[0].0 < end <= l[0].1,
+    ensures
+        ab <= l[0].0,
+        l[0].1 <= se,
+        forall|x: nat| l[0].0 <= x < end ==> !covers(f, x),
+{
+    reveal(parts);
+    assert forall|x: nat| l[0].0 <= x < end implies !covers(f, x) by {
+        assert(inr(l[0], x));
+        assert(covers(l, x));
+    }
+}
+
+/// A piece over bytes no piece in flight covers is not in flight: a poll's piece is fresh (D10 (b)).
+proof fn lemma_fresh(f: Seq<(u64, u64)>, s: u64, e: u64)
     requires
         s < e,
-        in_bounds(old(v)@, lo, hi),
+        forall|x: nat| s <= x < e ==> !covers(f, x),
     ensures
-        in_bounds(final(v)@, lo, hi),
-        avoids(final(v)@, s, e),
+        !f.to_set().contains((s, e)),
 {
-    let mut out: Vec<(u64, u64)> = Vec::new();
-    let mut i: usize = 0;
-    while i < v.len()
-        invariant
-            in_bounds(v@, lo, hi),
-            in_bounds(out@, lo, hi),
-            avoids(out@, s, e),
-            i <= v@.len(),
-        decreases v@.len() - i,
-    {
-        let (a, b) = v[i];
-        if a < s {
-            out.push((a, if b < s { b } else { s }));
-        }
-        if b > e {
-            out.push((if a > e { a } else { e }, b));
-        }
-        i = i + 1;
+    f.to_set_ensures();
+    if f.contains((s, e)) {
+        let i = choose|i: int| 0 <= i < f.len() && f[i] == (s, e);
+        assert(inr(f[i], s as nat));
+        assert(covers(f, s as nat));
     }
-    *v = out;
 }
 
-// ponytail: new data waits while acked+lost hold 64 ranges; per-stream hole bound is tested (D4), not proven.
-/// `poll_data` sends new data only while the acked and lost range lists hold fewer ranges
-/// than this in all.
+/// The bytes `retransmit` takes off a lost range of `r` (D10 (c)): all of it if it fits in `m`, else `min(m, r −
+/// FLOOR)` when both parts stay at least `FLOOR`, else none (split from `retransmit` for the rlimit).
+fn resend_len(r: u64, m: u64) -> (k: Option<u64>)
+    ensures
+        k is None ==> r > m && (r < 2 * FLOOR || m < FLOOR),
+        k matches Some(k) ==> 0 < k <= r || r == 0,
+        k matches Some(k) ==> k <= m,
+        k matches Some(k) ==> k == r || (k >= FLOOR && r - k >= FLOOR),
+{
+    if r <= m {
+        Some(r)
+    } else if r >= 2 * FLOOR && m >= FLOOR {
+        if m < r - FLOOR {
+            Some(m)
+        } else {
+            Some(r - FLOOR)
+        }
+    } else {
+        None
+    }
+}
+
+/// `poll_data` sends new data only while the acked and lost sets hold fewer ranges than this in all. A throttle on new
+/// data only, not the bound: the bound is `wf`'s, from piece edges (D10 (d)).
 pub const MAX_SEND_RANGES: usize = 64;
 
-/// `min(off + len, end)`, without overflow.
-fn clamp_end(off: u64, len: u64, end: u64) -> (r: u64)
-    ensures
-        r <= end,
-        off < end ==> r == if len > end - off { end as int } else { off + len },
-{
-    if off >= end || len > end - off {
-        end
+/// The reservation a send queue of peak `pk` holds against `MAX_SEND_BUFFER` (owner decision
+/// 2026-11-17, option (b)): none while empty, else `2·max(MIN_CAP, 3·pk)` = `max(128, 6·pk)`, which
+/// bounds both of its buffers while it migrates (`ByteQueue::lemma_wf`).
+pub open spec fn res_of(pk: nat) -> nat {
+    if pk == 0 {
+        0
+    } else if 6 * pk < 128 {
+        128
     } else {
-        off + len
+        6 * pk
     }
+}
+
+/// The most bytes a write may take into a queue of length `len` with `b` bytes of reservation to
+/// spend: its peak may reach `b/6` (none below 128).
+pub open spec fn res_room(b: nat, len: nat) -> nat {
+    if b >= 128 && b / 6 >= len {
+        (b / 6 - len) as nat
+    } else {
+        0
+    }
+}
+
+/// A teardown slot's trees (D10 (e)): the acked, lost and in-flight sets `reset` or `retire` moved out of a part.
+pub struct TdSets {
+    acked: RangeSet,
+    lost: RangeSet,
+    flight: PieceSet,
+}
+
+/// The nodes in a teardown slot.
+pub closed spec fn td_count(td: TdSets) -> nat {
+    td.acked@.len() + td.lost@.len() + td.flight@.len()
+}
+
+/// The teardown slot `td` with window `w`, of a part reset or not (`reset`): its sets well formed, empty exactly
+/// when `w` is 0, empty unless reset (each move runs once, onto an empty slot), and bounded by the window as the
+/// part's own sets were (D10 (d)). Opaque: `wf` carries it as one atom; `lemma_td` states it.
+#[verifier::opaque]
+pub closed spec fn td_ok(td: TdSets, w: u64, reset: bool) -> bool {
+    &&& td.acked.wf()
+    &&& td.lost.wf()
+    &&& td.flight.wf()
+    &&& (td_count(td) == 0 <==> w == 0)
+    &&& td_count(td) > 0 ==> reset
+    &&& td_count(td) <= (w as nat) / (FLOOR as nat) + MAX_FLUSH
+    &&& w <= byteq::queue::MAX_QUEUE
+}
+
+/// The frees of dropping a part whose sets and slot are empty: its queue's at most two buffers (the second while it
+/// migrates); the empty trees are `None`.
+pub open spec fn c_sfree() -> nat {
+    2
+}
+
+/// `res_of` does not fall as the peak grows.
+pub proof fn lemma_res_mono(a: nat, b: nat)
+    requires
+        a <= b,
+    ensures
+        res_of(a) <= res_of(b),
+{
 }
 
 /// The sending part of one stream.
 pub struct SendStream {
     state: SendState,
     /// The bytes `[acked_base, written)`.
-    buf: Vec<u8>,
+    buf: ByteQueue,
+    /// `buf`'s peak, kept in exec for the reservation.
+    peak: u64,
     acked_base: u64,
     written: u64,
     sent_end: u64,
     fin_written: bool,
     fin_acked: bool,
-    acked: Vec<(u64, u64)>,
-    lost: Vec<(u64, u64)>,
+    /// Acknowledged bytes past `acked_base`, merged (D10 (a)).
+    acked: RangeSet,
+    /// Bytes declared lost and not yet resent, merged.
+    lost: RangeSet,
+    /// The pieces sent and neither acknowledged nor lost, each exactly as `poll_data` returned it.
+    flight: PieceSet,
+    /// The open slots: the short new pieces sent, `slots[..nslots]`, until `acked_base` reaches their end (D10 (c)).
+    slots: [(u64, u64); MAX_FLUSH],
+    nslots: usize,
+    /// The flush point: new bytes below it go out as a short piece (D10 (c)).
+    flush_to: u64,
     fin_lost: bool,
     credit: SendCredit,
     /// The RESET_STREAM's error code and final size, once reset.
     reset: Option<(u64, u64)>,
     reset_pending: bool,
+    /// The teardown slot (D10 (e)): the sets `reset` or `retire` moved out in O(1), freed by `reap`.
+    td: TdSets,
+    /// The window `sent_end - acked_base` at the move, charged until the slot is empty (`Streams::tx_dead`); 0 then.
+    td_w: u64,
     all_written: Ghost<Seq<u8>>,
 }
 
@@ -276,23 +909,116 @@ impl SendStream {
         self.reset
     }
 
-    /// The end of the contiguously acknowledged prefix. The buffer is trimmed to it lazily, so
-    /// `acked_base` (the buffer's start) may lag behind.
+    /// The end of the acknowledged prefix: each ACK drops it from the buffer at once, so it is the
+    /// buffer's start (that no acked range starts there is Task 8a's `wf` clause, on merged sets).
     pub closed spec fn acked_point_spec(&self) -> u64 {
-        if self.acked@.len() > 0 && self.acked@[0].0 == self.acked_base {
-            self.acked@[0].1
-        } else {
-            self.acked_base
-        }
+        self.acked_base
     }
 
     pub closed spec fn buffered_spec(&self) -> nat {
         self.buf@.len()
     }
 
-    /// Ranges held in the acked and lost lists.
+    /// The largest length plus write since the queue was last empty.
+    pub closed spec fn peak_spec(&self) -> nat {
+        self.peak as nat
+    }
+
+    /// The reservation the stream holds against `MAX_SEND_BUFFER` (`res_of` its peak); its queue's buffers are within
+    /// it (`lemma_held`), so the connection's sum bounds memory (carryover mem-9b2-send-cap).
+    pub closed spec fn held_spec(&self) -> nat {
+        res_of(self.peak as nat)
+    }
+
+    /// The bytes the send queue's buffers requested from the allocator (both while it migrates).
+    pub closed spec fn capacity_spec(&self) -> nat {
+        self.buf.requested()
+    }
+
+    /// The most bytes a `write` may take with the reservation within `b`.
+    pub closed spec fn room_spec(&self, b: nat) -> nat {
+        res_room(b, self.buf@.len())
+    }
+
+    /// Ranges held in the acked and lost sets.
     pub closed spec fn range_count(&self) -> nat {
         self.acked@.len() + self.lost@.len()
+    }
+
+    /// Ranges and pieces held in the three sets: one tree node each.
+    pub closed spec fn ranges_held(&self) -> nat {
+        self.acked@.len() + self.lost@.len() + self.flight@.len()
+    }
+
+    /// The acked and lost sets' and the in-flight set's lengths.
+    pub closed spec fn range_counts_spec(&self) -> (nat, nat, nat) {
+        (self.acked@.len(), self.lost@.len(), self.flight@.len())
+    }
+
+    /// The nodes in the teardown slot.
+    pub closed spec fn td_nodes(&self) -> nat {
+        td_count(self.td)
+    }
+
+    /// The window charged for the teardown slot until it is empty; 0 exactly when it is.
+    pub closed spec fn td_window(&self) -> nat {
+        self.td_w as nat
+    }
+
+    /// `self` is `o` but for the teardown slot (`reap`).
+    pub closed spec fn same_but_td(&self, o: SendStream) -> bool {
+        *self == (SendStream { td: self.td, td_w: self.td_w, ..o })
+    }
+
+    /// The largest of the three trees' heights: per-call costs are in it (D10 (e)).
+    pub closed spec fn ht(&self) -> nat {
+        let (a, l, f) = (self.acked.ht(), self.lost.ht(), self.flight.ht());
+        if a >= l && a >= f {
+            a
+        } else if l >= f {
+            l
+        } else {
+            f
+        }
+    }
+
+    /// `[off, off + len)` is a piece in flight, exactly.
+    pub closed spec fn in_flight(&self, off: u64, len: u64) -> bool {
+        off + len <= VARINT_MAX && self.flight@.contains((off, (off + len) as u64))
+    }
+
+    /// The pieces in flight (Task 8b's `tx_flight` reads it).
+    pub closed spec fn flight_spec(&self) -> Set<(u64, u64)> {
+        self.flight@.to_set()
+    }
+
+    /// The flush point: new bytes below it go out as a short piece.
+    pub closed spec fn flush_point(&self) -> u64 {
+        self.flush_to
+    }
+
+    /// The open slots.
+    closed spec fn open_slots(&self) -> Seq<(u64, u64)> {
+        self.slots@.subrange(0, self.nslots as int)
+    }
+
+    /// The three sets (D10 (a), (d)): the partition, the start clause, the slots and the bound.
+    closed spec fn sets_ok(&self) -> bool {
+        &&& self.acked.wf()
+        &&& self.lost.wf()
+        &&& self.flight.wf()
+        &&& self.nslots <= MAX_FLUSH
+        &&& !is_reset(self.state) ==> parts(
+            self.acked@,
+            self.lost@,
+            self.flight@,
+            self.open_slots(),
+            self.acked_base,
+            self.sent_end,
+        ) && starts_past(self.acked@, self.acked_base)
+        &&& is_reset(self.state) ==> self.acked@.len() == 0 && self.lost@.len() == 0 && self.flight@.len() == 0
+            && self.nslots == 0
+        &&& self.ranges_held() <= ((self.sent_end - self.acked_base) as nat) / (FLOOR as nat) + self.nslots
     }
 
     pub closed spec fn sent_end_spec(&self) -> u64 {
@@ -328,8 +1054,10 @@ impl SendStream {
         }
     }
 
-    /// `wf` except the clauses `on_data_acked` restores only at its end.
+    /// `wf` but the sets and the clauses `on_data_acked` restores only at its end.
     closed spec fn core(&self) -> bool {
+        &&& self.buf.wf()
+        &&& self.peak == self.buf.peak()
         &&& self.credit.wf()
         &&& self.credit.used_spec() == self.sent_end
         &&& self.sent_end <= self.credit.max_spec()
@@ -341,10 +1069,7 @@ impl SendStream {
             self.acked_base as int,
             self.written as int,
         )
-        &&& is_reset(self.state) ==> self.buf@.len() == 0 && self.lost@.len() == 0
-            && self.acked@.len() == 0 && !self.fin_lost && !self.fin_acked
-        &&& in_bounds(self.lost@, self.acked_base, self.sent_end)
-        &&& in_bounds(self.acked@, self.acked_base, self.sent_end)
+        &&& is_reset(self.state) ==> self.buf@.len() == 0 && !self.fin_lost && !self.fin_acked
         &&& self.state is Ready ==> self.sent_end == 0
         &&& (self.state is DataSent || self.state is DataRecvd) ==> self.fin_written
             && self.sent_end == self.written
@@ -358,10 +1083,90 @@ impl SendStream {
 
     pub closed spec fn wf(&self) -> bool {
         &&& self.core()
+        &&& self.sets_ok()
+        &&& self.flush_to <= self.written
         &&& self.state is DataSent ==> !(self.acked_base == self.written && self.fin_acked)
-        // Memory: the buffer is at most twice the bytes past the acknowledged prefix.
-        &&& self.buf@.len() <= 2 * (self.written - self.acked_point_spec())
-        &&& self.acked_point_spec() == self.written ==> self.acked_base == self.written
+        // Memory: the buffer holds exactly the bytes past the acknowledged prefix (none once reset).
+        &&& !is_reset(self.state) ==> self.buf@.len() == self.written - self.acked_base
+        &&& td_ok(self.td, self.td_w, is_reset(self.state))
+    }
+
+    /// A part not reset whose window `[acked_base, sent_end)` is empty holds no set item and no open slot.
+    proof fn lemma_empty_window(&self)
+        requires
+            self.wf(),
+            !is_reset(self.state),
+            self.sent_end == self.acked_base,
+        ensures
+            self.ranges_held() == 0,
+            self.nslots == 0,
+    {
+        lemma_parts_end(self.acked@, self.lost@, self.flight@, self.open_slots(), self.acked_base, self.sent_end);
+        if self.acked@.len() > 0 {
+            assert(self.acked_base <= self.acked@[0].0 < self.acked@[0].1 <= self.sent_end);
+        }
+        if self.lost@.len() > 0 {
+            assert(self.acked_base <= self.lost@[0].0 < self.lost@[0].1 <= self.sent_end);
+        }
+        if self.flight@.len() > 0 {
+            assert(self.acked_base <= self.flight@[0].0 < self.flight@[0].1 <= self.sent_end);
+        }
+        if self.nslots > 0 {
+            assert(self.acked_base < self.open_slots()[0].1 <= self.sent_end);
+        }
+    }
+
+    /// A terminal or reset part holds nothing in its sets: everything acknowledged, or moved to the slot.
+    pub proof fn lemma_sets_idle(&self)
+        requires
+            self.wf(),
+            self.state() is DataRecvd || is_reset(self.state()),
+        ensures
+            self.ranges_held() == 0,
+    {
+        if !is_reset(self.state) {
+            self.lemma_empty_window();
+        }
+    }
+
+    /// The teardown slot's invariant (`td_ok`).
+    pub proof fn lemma_td(&self)
+        requires
+            self.wf(),
+        ensures
+            self.td_nodes() > 0 ==> is_reset(self.state()),
+            (self.td_nodes() == 0) == (self.td_window() == 0),
+            self.td_nodes() <= self.td_window() / (FLOOR as nat) + MAX_FLUSH,
+            self.td_window() <= byteq::queue::MAX_QUEUE,
+    {
+        reveal(td_ok);
+    }
+
+    /// Everything but the slot is as in `o`.
+    pub proof fn lemma_same_but_td(&self, o: SendStream)
+        requires
+            self.same_but_td(o),
+        ensures
+            self.state() == o.state(),
+            self.all_written() == o.all_written(),
+            self.fin_written_spec() == o.fin_written_spec(),
+            self.acked_base_spec() == o.acked_base_spec(),
+            self.fin_acked_spec() == o.fin_acked_spec(),
+            self.reset_spec() == o.reset_spec(),
+            self.buffered_spec() == o.buffered_spec(),
+            self.peak_spec() == o.peak_spec(),
+            self.held_spec() == o.held_spec(),
+            self.capacity_spec() == o.capacity_spec(),
+            forall|b: nat| #[trigger] self.room_spec(b) == o.room_spec(b),
+            self.range_count() == o.range_count(),
+            self.ranges_held() == o.ranges_held(),
+            self.flight_spec() == o.flight_spec(),
+            self.flush_point() == o.flush_point(),
+            self.sent_end() == o.sent_end(),
+            self.max() == o.max(),
+            self.next_off() == o.next_off(),
+            self.pending_reset() == o.pending_reset(),
+    {
     }
 
     /// The invariant, in terms of the accessors.
@@ -393,8 +1198,208 @@ impl SendStream {
             self.buffered_spec() <= 2 * (self.all_written().len() - self.acked_point_spec()),
             self.acked_point_spec() == self.all_written().len() <==> self.acked_base_spec()
                 == self.all_written().len(),
+            // D10 (d)/(f): at most `W / FLOOR + MAX_FLUSH` nodes, `W` the bytes buffered.
+            self.ranges_held() <= self.buffered_spec() / (FLOOR as nat) + MAX_FLUSH,
+            self.flush_point() <= self.all_written().len(),
     {
         self.credit.lemma_wf();
+        if !is_reset(self.state) {
+            lemma_parts_end(self.acked@, self.lost@, self.flight@, self.open_slots(), self.acked_base, self.sent_end);
+            if self.lost@.len() > 0 {
+                assert(self.lost@[0].0 < self.sent_end);
+            }
+            vstd::arithmetic::div_mod::lemma_div_is_ordered(
+                (self.sent_end - self.acked_base) as int,
+                self.buf@.len() as int,
+                FLOOR as int,
+            );
+        }
+    }
+
+    /// The queue's buffers are within the reservation, the second buffer of a migration included.
+    pub proof fn lemma_held(&self)
+        requires
+            self.wf(),
+        ensures
+            self.buffered_spec() <= self.peak_spec(),
+            self.capacity_spec() <= self.held_spec(),
+            self.peak_spec() == 0 ==> self.buffered_spec() == 0,
+            self.held_spec() == res_of(self.peak_spec()),
+    {
+        self.buf.lemma_wf();
+    }
+
+    /// `in_flight` in terms of `flight_spec`.
+    pub proof fn lemma_in_flight(&self, off: u64, len: u64)
+        ensures
+            self.in_flight(off, len) <==> off + len <= VARINT_MAX && self.flight_spec().contains(
+                (off, (off + len) as u64),
+            ),
+    {
+        self.flight@.to_set_ensures();
+    }
+
+    /// No piece is in flight in Ready, Data Recvd or a reset state: nothing sent, or everything acknowledged, or the
+    /// trees cleared (D10 (b): a removed or reset part's flight is empty).
+    pub proof fn lemma_flight_idle(&self)
+        requires
+            self.wf(),
+        ensures
+            self.state() is Ready || self.state() is DataRecvd || is_reset(self.state()) ==> self.flight_spec()
+                == Set::<(u64, u64)>::empty(),
+    {
+        self.flight@.to_set_ensures();
+        if self.state is Ready || self.state is DataRecvd || is_reset(self.state) {
+            if !is_reset(self.state) {
+                reveal(parts);
+                if self.flight@.len() > 0 {
+                    assert(self.acked_base <= self.flight@[0].0 < self.flight@[0].1 <= self.sent_end);
+                }
+            }
+            assert(self.flight_spec() =~= Set::<(u64, u64)>::empty());
+        }
+    }
+
+    /// A write of at most `room_spec(b)` bytes leaves the reservation within `b`, its peak `max(peak, len + d)`; one of
+    /// `room_spec(b) + 1` bytes would not.
+    pub proof fn lemma_room(&self, b: nat, d: nat)
+        requires
+            self.wf(),
+            self.held_spec() <= b,
+        ensures
+            d <= self.room_spec(b) ==> self.buffered_spec() + d <= b && res_of(
+                vstd::math::max(self.peak_spec() as int, (self.buffered_spec() + d) as int) as nat,
+            ) <= b,
+            d == self.room_spec(b) + 1 ==> res_of(
+                vstd::math::max(self.peak_spec() as int, (self.buffered_spec() + d) as int) as nat,
+            ) > b,
+            self.room_spec(b) <= b,
+    {
+        self.lemma_held();
+    }
+
+    pub fn held(&self) -> (r: u64)
+        requires
+            self.wf(),
+        ensures
+            r == self.held_spec(),
+    {
+        proof {
+            self.buf.lemma_wf();
+        }
+        if self.peak == 0 {
+            0
+        } else if 6 * self.peak < 128 {
+            128
+        } else {
+            6 * self.peak
+        }
+    }
+
+    /// The reservation the part holds against `MAX_SEND_BUFFER`: its queue's (`held_spec`) and its teardown slot's
+    /// window (`res_of(td_window())`, D10 (e)), so `send_room` recovers only when the slot is freed.
+    pub fn reserved(&self) -> (r: u64)
+        requires
+            self.wf(),
+        ensures
+            r == self.held_spec() + res_of(self.td_window()),
+    {
+        proof {
+            self.lemma_td();
+            self.buf.lemma_wf();
+        }
+        let h = self.held();
+        let d = if self.td_w == 0 {
+            0
+        } else if 6 * self.td_w < 128 {
+            128
+        } else {
+            6 * self.td_w
+        };
+        h + d
+    }
+
+    /// The part's nodes, those held weighing twice (a move to the slot halves them; D13's measure), within its
+    /// reservation: at most 2058 under `MAX_SEND_BUFFER` (686 per side, `⌊2^20/6/256⌋ + MAX_FLUSH`).
+    pub proof fn lemma_weight(&self)
+        requires
+            self.wf(),
+            self.held_spec() + res_of(self.td_window()) <= 1048576,
+        ensures
+            2 * self.ranges_held() + self.td_nodes() <= 2058,
+    {
+        self.lemma_wf();
+        self.lemma_held();
+        self.lemma_td();
+        vstd::arithmetic::div_mod::lemma_div_is_ordered(self.buffered_spec() as int, 174762, FLOOR as int);
+        vstd::arithmetic::div_mod::lemma_div_is_ordered(self.td_window() as int, 174762, FLOOR as int);
+        assert(174762int / (FLOOR as int) == 682) by (compute_only);
+    }
+
+    /// The part's weighted nodes, from the queue's bound alone (a CRYPTO context, under no `MAX_SEND_BUFFER`).
+    pub proof fn lemma_weight_max(&self)
+        requires
+            self.wf(),
+        ensures
+            2 * self.ranges_held() + self.td_nodes() <= 3 * ((byteq::queue::MAX_QUEUE as nat) / (FLOOR as nat) + MAX_FLUSH),
+    {
+        self.lemma_wf();
+        self.lemma_td();
+        self.buf.lemma_wf();
+        vstd::arithmetic::div_mod::lemma_div_is_ordered(
+            self.buffered_spec() as int,
+            byteq::queue::MAX_QUEUE as int,
+            FLOOR as int,
+        );
+        vstd::arithmetic::div_mod::lemma_div_is_ordered(
+            self.td_window() as int,
+            byteq::queue::MAX_QUEUE as int,
+            FLOOR as int,
+        );
+    }
+
+    /// Test support: the acked and lost sets' and the in-flight set's lengths.
+    #[doc(hidden)]
+    pub fn range_counts(&self) -> (r: (usize, usize, usize))
+        requires
+            self.wf(),
+        ensures
+            r.0 == self.range_counts_spec().0 && r.1 == self.range_counts_spec().1 && r.2 == self.range_counts_spec().2,
+            r.0 + r.1 + r.2 == self.ranges_held(),
+    {
+        proof {
+            self.lemma_weight_max();
+        }
+        (self.acked.len() as usize, self.lost.len() as usize, self.flight.len() as usize)
+    }
+
+    /// Test support: the nodes in the teardown slot.
+    #[doc(hidden)]
+    pub fn td_len(&self) -> (r: usize)
+        requires
+            self.wf(),
+        ensures
+            r == self.td_nodes(),
+    {
+        proof {
+            self.lemma_weight_max();
+            reveal(td_ok);
+        }
+        (self.td.acked.len() + self.td.lost.len() + self.td.flight.len()) as usize
+    }
+
+    pub fn room(&self, b: u64) -> (r: u64)
+        requires
+            self.wf(),
+        ensures
+            r == self.room_spec(b as nat),
+    {
+        let len = self.buf.len() as u64;
+        if b >= 128 && b / 6 >= len {
+            b / 6 - len
+        } else {
+            0
+        }
     }
 
     /// The send buffer's length: the bytes written past `acked_base`, none once reset.
@@ -430,25 +1435,44 @@ impl SendStream {
             r.max() == max,
             r.reset_spec() is None,
             r.buffered_spec() == 0,
+            r.held_spec() == 0,
+            r.peak_spec() == 0,
+            r.flight_spec() == Set::<(u64, u64)>::empty(),
+            r.flush_point() == 0,
+            r.td_nodes() == 0,
+            r.td_window() == 0,
+            r.ranges_held() == 0,
     {
         let r = SendStream {
             state: SendState::Ready,
-            buf: Vec::new(),
+            buf: ByteQueue::new(),
+            peak: 0,
             acked_base: 0,
             written: 0,
             sent_end: 0,
             fin_written: false,
             fin_acked: false,
-            acked: Vec::new(),
-            lost: Vec::new(),
+            acked: RangeSet::new(),
+            lost: RangeSet::new(),
+            flight: PieceSet::new(),
+            slots: [(0, 0), (0, 0), (0, 0), (0, 0)],
+            nslots: 0,
+            flush_to: 0,
             fin_lost: false,
             credit: SendCredit::new(max),
             reset: None,
             reset_pending: false,
+            td: TdSets { acked: RangeSet::new(), lost: RangeSet::new(), flight: PieceSet::new() },
+            td_w: 0,
             all_written: Ghost(Seq::empty()),
         };
         proof {
             assert(r.buf@ =~= r.all_written@.subrange(0, 0));
+            reveal(parts);
+            assert(r.open_slots() =~= Seq::<(u64, u64)>::empty());
+            r.flight@.to_set_ensures();
+            assert(r.flight_spec() =~= Set::<(u64, u64)>::empty());
+            reveal(td_ok);
         }
         r
     }
@@ -491,7 +1515,11 @@ impl SendStream {
     pub fn write(&mut self, data: &[u8], fin: bool) -> (r: Result<(), ()>)
         requires
             old(self).wf(),
+            old(self).buffered_spec() + data@.len() <= byteq::queue::MAX_QUEUE,
         ensures
+            final(self).ranges_held() == old(self).ranges_held(),
+            final(self).td_nodes() == old(self).td_nodes(),
+            final(self).td_window() == old(self).td_window(),
             final(self).wf(),
             send_step_ok(old(self).state(), final(self).state()),
             r is Err <==> (!(old(self).state() is Ready || old(self).state() is Send)
@@ -499,6 +1527,13 @@ impl SendStream {
                 > VARINT_MAX),
             r is Err ==> *final(self) == *old(self),
             r is Ok ==> final(self).buffered_spec() == old(self).buffered_spec() + data@.len(),
+            r is Ok ==> final(self).peak_spec() == vstd::math::max(
+                old(self).peak_spec() as int,
+                (old(self).buffered_spec() + data@.len()) as int,
+            ),
+            r is Ok ==> final(self).held_spec() == res_of(
+                vstd::math::max(old(self).peak_spec() as int, (old(self).buffered_spec() + data@.len()) as int) as nat,
+            ),
             r is Ok ==> {
                 &&& final(self).all_written() == old(self).all_written() + data@
                 &&& final(self).fin_written_spec() == fin
@@ -507,6 +1542,7 @@ impl SendStream {
                 &&& final(self).max() == old(self).max()
                 &&& final(self).reset_spec() == old(self).reset_spec()
             },
+            final(self).flight_spec() == old(self).flight_spec(),
     {
         let open = match self.state {
             SendState::Ready | SendState::Send => true,
@@ -516,7 +1552,12 @@ impl SendStream {
             return Err(());
         }
         let ghost aw = self.all_written@;
-        self.buf.extend_from_slice(data);
+        let len = self.buf.len() as u64;
+        let Ghost(w) = self.buf.push_slice(data);
+        assert(w <= 7 * data@.len() + 4);
+        if len + data.len() as u64 > self.peak {
+            self.peak = len + data.len() as u64;
+        }
         self.written = self.written + data.len() as u64;
         self.all_written = Ghost(aw + data@);
         self.fin_written = fin;
@@ -529,12 +1570,45 @@ impl SendStream {
         Ok(())
     }
 
+    /// Sets the flush point at the bytes written: new bytes below it go out as a short piece (D10 (c)). O(1).
+    pub fn flush(&mut self)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).td_nodes() == old(self).td_nodes(),
+            final(self).td_window() == old(self).td_window(),
+            final(self).wf(),
+            final(self).flush_point() == final(self).all_written().len(),
+            final(self).state() == old(self).state(),
+            final(self).all_written() == old(self).all_written(),
+            final(self).fin_written_spec() == old(self).fin_written_spec(),
+            final(self).acked_base_spec() == old(self).acked_base_spec(),
+            final(self).fin_acked_spec() == old(self).fin_acked_spec(),
+            final(self).reset_spec() == old(self).reset_spec(),
+            final(self).buffered_spec() == old(self).buffered_spec(),
+            final(self).peak_spec() == old(self).peak_spec(),
+            final(self).held_spec() == old(self).held_spec(),
+            final(self).capacity_spec() == old(self).capacity_spec(),
+            forall|b: nat| #[trigger] final(self).room_spec(b) == old(self).room_spec(b),
+            final(self).range_count() == old(self).range_count(),
+            final(self).ranges_held() == old(self).ranges_held(),
+            final(self).sent_end() == old(self).sent_end(),
+            final(self).max() == old(self).max(),
+            final(self).next_off() == old(self).next_off(),
+            final(self).pending_reset() == old(self).pending_reset(),
+            final(self).flight_spec() == old(self).flight_spec(),
+    {
+        self.flush_to = self.written;
+    }
+
     /// The next chunk to send, at most `max_len` bytes, with `conn_avail` bytes of connection
     /// credit left: lost ranges first, then new data, then a lone FIN.
     pub fn poll_data(&mut self, max_len: u64, conn_avail: u64) -> (r: Option<Chunk>)
         requires
             old(self).wf(),
         ensures
+            final(self).td_nodes() == old(self).td_nodes(),
+            final(self).td_window() == old(self).td_window(),
             final(self).wf(),
             send_step_ok(old(self).state(), final(self).state()),
             final(self).all_written() == old(self).all_written(),
@@ -546,9 +1620,57 @@ impl SendStream {
             r is None ==> *final(self) == *old(self),
             r matches Some(c) ==> chunk_ok(*old(self), *final(self), c@, max_len, conn_avail),
             final(self).buffered_spec() <= old(self).buffered_spec(),
+            final(self).held_spec() <= old(self).held_spec(),
             r matches Some(c) && c@.off >= old(self).sent_end_spec() && c@.data.len() > 0
                 ==> old(self).range_count() < MAX_SEND_RANGES,
+            r matches Some(c) ==> (c@.data.len() > 0 ==> final(self).flight_spec() == old(self).flight_spec().insert(
+                (c@.off, (c@.off + c@.data.len()) as u64),
+            )),
+            (r is None || r->0@.data.len() == 0) ==> final(self).flight_spec() == old(self).flight_spec(),
+            r matches Some(c) ==> (c@.data.len() > 0 ==> !old(self).flight_spec().contains(
+                (c@.off, (c@.off + c@.data.len()) as u64),
+            )),
+            final(self).flush_point() == old(self).flush_point(),
     {
+        let (r, Ghost(c)) = self.poll_data_w(max_len, conn_avail);
+        proof {
+            assert(c <= c_ss1() * (old(self).ht() + 1) + c_ss2() * MAX_FLUSH + max_len);
+        }
+        r
+    }
+
+    /// `poll_data`, with its cost: one tree op per set touched and one unit per byte copied.
+    fn poll_data_w(&mut self, max_len: u64, conn_avail: u64) -> (r: (Option<Chunk>, Ghost<nat>))
+        requires
+            old(self).wf(),
+        ensures
+            final(self).td == old(self).td,
+            final(self).td_w == old(self).td_w,
+            final(self).wf(),
+            send_step_ok(old(self).state(), final(self).state()),
+            final(self).all_written() == old(self).all_written(),
+            final(self).fin_written_spec() == old(self).fin_written_spec(),
+            final(self).max() == old(self).max(),
+            final(self).reset_spec() == old(self).reset_spec(),
+            final(self).pending_reset() == old(self).pending_reset(),
+            no_data(old(self).state()) ==> r.0 is None,
+            r.0 is None ==> *final(self) == *old(self),
+            r.0 matches Some(c) ==> chunk_ok(*old(self), *final(self), c@, max_len, conn_avail),
+            final(self).buffered_spec() <= old(self).buffered_spec(),
+            final(self).held_spec() <= old(self).held_spec(),
+            r.0 matches Some(c) && c@.off >= old(self).sent_end_spec() && c@.data.len() > 0
+                ==> old(self).range_count() < MAX_SEND_RANGES,
+            r.0 matches Some(c) ==> (c@.data.len() > 0 ==> final(self).flight_spec() == old(self).flight_spec().insert(
+                (c@.off, (c@.off + c@.data.len()) as u64),
+            )),
+            (r.0 is None || r.0->0@.data.len() == 0) ==> final(self).flight_spec() == old(self).flight_spec(),
+            r.0 matches Some(c) ==> (c@.data.len() > 0 ==> !old(self).flight_spec().contains(
+                (c@.off, (c@.off + c@.data.len()) as u64),
+            )),
+            final(self).flush_point() == old(self).flush_point(),
+            r.1@ <= c_ss1() * (old(self).ht() + 1) + c_ss2() * MAX_FLUSH + max_len,
+    {
+        let ghost mut work: nat = 0;
         match self.state {
             //= https://www.rfc-editor.org/rfc/rfc9000#section-3.3
             //# A sender MUST NOT send any of these frames from a terminal state
@@ -557,29 +1679,49 @@ impl SendStream {
             //# A sender MUST NOT send a STREAM or
             //# STREAM_DATA_BLOCKED frame for a stream in the "Reset Sent" state or
             //# any terminal state -- that is, after sending a RESET_STREAM frame.
-            SendState::DataRecvd | SendState::ResetSent | SendState::ResetRecvd => return None,
+            SendState::DataRecvd | SendState::ResetSent | SendState::ResetRecvd => return (None, Ghost(work)),
             _ => {},
         }
+        proof {
+            assert(c_ss1() == 400 && c_ss2() == 10);
+            self.acked.lemma_wf();
+            self.lost.lemma_wf();
+        }
         if self.lost.len() > 0 {
-            self.retransmit(max_len)
+            let (r, Ghost(c)) = self.retransmit(max_len);
+            proof {
+                work = work + c;
+            }
+            (r, Ghost(work))
         } else {
-            // The new-data gate (3d D4): a lone FIN still goes.
-            let new_ok = self.acked.len() < MAX_SEND_RANGES && self.lost.len() < MAX_SEND_RANGES
+            // The new-data gate (3d D4), a throttle only: a lone FIN still goes.
+            let new_ok = self.acked.len() < MAX_SEND_RANGES as u64 && self.lost.len() < MAX_SEND_RANGES as u64
                 - self.acked.len();
-            self.send_new(max_len, conn_avail, new_ok)
+            let (r, Ghost(c)) = self.send_new(max_len, conn_avail, new_ok);
+            proof {
+                work = work + c;
+            }
+            (r, Ghost(work))
         }
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
     //# The data at a given offset MUST NOT change if it is sent
     //# multiple times
-    /// The start of the first lost range again, from the buffer of written bytes.
-    fn retransmit(&mut self, max_len: u64) -> (r: Option<Chunk>)
+    //
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+    //# Application data sent in STREAM frames is retransmitted in new STREAM
+    //# frames unless the endpoint has sent a RESET_STREAM for that stream.
+    /// The start of the first lost range `[s, e)` again, from the buffer of written bytes: the whole range if it fits,
+    /// else a cut leaving both parts at least `FLOOR` (D10 (c)), else nothing; never new data past it.
+    fn retransmit(&mut self, max_len: u64) -> (r: (Option<Chunk>, Ghost<nat>))
         requires
             old(self).wf(),
             old(self).lost@.len() > 0,
             !no_data(old(self).state),
         ensures
+            final(self).td == old(self).td,
+            final(self).td_w == old(self).td_w,
             final(self).wf(),
             send_step_ok(old(self).state(), final(self).state()),
             final(self).all_written() == old(self).all_written(),
@@ -587,24 +1729,53 @@ impl SendStream {
             final(self).max() == old(self).max(),
             final(self).reset_spec() == old(self).reset_spec(),
             final(self).pending_reset() == old(self).pending_reset(),
-            r is None ==> *final(self) == *old(self),
-            r matches Some(c) ==> chunk_ok(*old(self), *final(self), c@, max_len, 0),
+            r.0 is None ==> *final(self) == *old(self),
+            r.0 matches Some(c) ==> chunk_ok(*old(self), *final(self), c@, max_len, 0),
             final(self).buffered_spec() == old(self).buffered_spec(),
-            r matches Some(c) ==> c@.off < old(self).sent_end_spec(),
+            final(self).held_spec() == old(self).held_spec(),
+            r.0 matches Some(c) ==> c@.off < old(self).sent_end_spec(),
+            r.0 matches Some(c) ==> c@.data.len() > 0,
+            r.0 matches Some(c) ==> final(self).flight_spec() == old(self).flight_spec().insert(
+                (c@.off, (c@.off + c@.data.len()) as u64),
+            ),
+            r.0 matches Some(c) ==> !old(self).flight_spec().contains((c@.off, (c@.off + c@.data.len()) as u64)),
+            final(self).flush_point() == old(self).flush_point(),
+            ({
+                let (s, e) = old(self).lost@[0];
+                &&& r.0 is None ==> e - s > max_len && (e - s < 2 * FLOOR || max_len < FLOOR)
+                &&& r.0 matches Some(c) ==> c@.data.len() == e - s || (c@.data.len() >= FLOOR && e - s
+                    - c@.data.len() >= FLOOR)
+            }),
+            r.1@ <= c_ss1() * (old(self).ht() + 1) + max_len,
     {
-        let (s, e) = self.lost[0];
-        if max_len == 0 {
-            return None;
+        let ghost mut work: nat = 0;
+        let ghost s0 = *self;
+        proof {
+            assert(c_rs() == 100 && c_ss1() == 400);
+            assert(s0.flight.ht() <= s0.ht() && s0.lost.ht() <= s0.ht());
+            self.lost.lemma_wf();
+            self.flight.lemma_wf();
+            self.acked.lemma_wf();
         }
-        let len = if e - s > max_len {
-            max_len
-        } else {
-            e - s
+        let (lf, Ghost(c0)) = self.lost.first();
+        proof {
+            work = work + c0;
+        }
+        let (s, e) = match lf {
+            Some(p) => p,
+            None => return (None, Ghost(work)),
         };
-        let end = s + len;
+        let k = match resend_len(e - s, max_len) {
+            Some(k) => k,
+            None => return (None, Ghost(work)),
+        };
+        let end = s + k;
         let ghost aw = self.all_written@;
         let ghost ab = self.acked_base;
-        let ghost se = self.sent_end;
+        proof {
+            assert(s0.lost@[0] == (s, e));
+            lemma_piece_space(s0.acked@, s0.lost@, s0.flight@, s0.open_slots(), ab, s0.sent_end, end);
+        }
         let data = slice_to_vec(
             slice_subrange(
                 self.buf.as_slice(),
@@ -614,27 +1785,91 @@ impl SendStream {
         );
         proof {
             assert(data@ =~= aw.subrange(s as int, end as int));
+            work = work + k as nat;
         }
-        range_remove(&mut self.lost, s, end, Ghost(ab), Ghost(se));
+        let Ghost(c1) = self.resend_piece(k);
+        proof {
+            work = work + c1;
+        }
         let fin = end == self.written && self.fin_written;
         if fin {
             self.fin_lost = false;
             self.state = SendState::DataSent;
         }
-        Some(Chunk { off: s, data, fin, new_bytes: 0 })
+        (Some(Chunk { off: s, data, fin, new_bytes: 0 }), Ghost(work))
+    }
+
+    /// `[s, s + k)` off the first lost range `[s, e)` goes in flight: `k` the whole range, or a cut leaving both parts
+    /// at least `FLOOR` (split from `retransmit` for the rlimit).
+    fn resend_piece(&mut self, k: u64) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            !is_reset(old(self).state),
+            old(self).lost@.len() > 0,
+            0 < k <= old(self).lost@[0].1 - old(self).lost@[0].0,
+            k == old(self).lost@[0].1 - old(self).lost@[0].0 || (k >= FLOOR && old(self).lost@[0].1 - old(
+                self,
+            ).lost@[0].0 - k >= FLOOR),
+        ensures
+            *final(self) == (SendStream { lost: final(self).lost, flight: final(self).flight, ..*old(self) }),
+            final(self).sets_ok(),
+            final(self).flight_spec() == old(self).flight_spec().insert(
+                (old(self).lost@[0].0, (old(self).lost@[0].0 + k) as u64),
+            ),
+            !old(self).flight_spec().contains((old(self).lost@[0].0, (old(self).lost@[0].0 + k) as u64)),
+            r@ <= c_rs() * (old(self).lost.ht() + 1) + c_rs() * (old(self).lost.ht() + 1) + c_rs() * (old(
+                self,
+            ).flight.ht() + 1),
+    {
+        let ghost mut work: nat = 0;
+        let ghost s0 = *self;
+        proof {
+            self.lost.lemma_wf();
+            self.flight.lemma_wf();
+            self.acked.lemma_wf();
+        }
+        let (lf, Ghost(c0)) = self.lost.first();
+        proof {
+            work = work + c0;
+        }
+        let s = match lf {
+            Some(p) => p.0,
+            None => return Ghost(work),
+        };
+        proof {
+            lemma_piece_space(s0.acked@, s0.lost@, s0.flight@, s0.open_slots(), s0.acked_base, s0.sent_end, (s
+                + k) as u64);
+            lemma_fresh(s0.flight@, s, (s + k) as u64);
+        }
+        let Ghost(c1) = self.lost.take_first(k);
+        let Ghost(c2) = self.flight.insert_piece(s, s + k);
+        proof {
+            work = work + c1 + c2;
+            lemma_resend(s0.acked@, s0.lost@, self.lost@, s0.flight@, self.flight@, s0.open_slots(), s0.acked_base, s0.sent_end, k);
+            self.lost.lemma_wf();
+            self.flight.lemma_wf();
+            lemma_parts_bound(self.acked@, self.lost@, self.flight@, self.open_slots(), s0.acked_base, s0.sent_end);
+            self.flight@.to_set_ensures();
+            s0.flight@.to_set_ensures();
+            assert(self.flight_spec() =~= s0.flight_spec().insert((s, (s + k) as u64)));
+        }
+        Ghost(work)
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-4.5
     //# An endpoint MUST NOT send data on a stream at or beyond the final
     //# size.
-    /// New bytes from `sent_end`, within every limit and only if `new_ok`, with the FIN once
-    /// the chunk reaches the end of the written data; or a lone FIN that is owed.
-    fn send_new(&mut self, max_len: u64, conn_avail: u64, new_ok: bool) -> (r: Option<Chunk>)
+    /// New bytes from `sent_end`, within every limit and only if `new_ok`, coalesced (D10 (c)): `a` bytes sendable,
+    /// a piece of `min(a, max_len)` if `a` and it are at least `FLOOR`; below `FLOOR` a short piece to a credit cut,
+    /// the FIN's end or the flush point, if it fits and a slot is free; else a lone FIN that is owed.
+    fn send_new(&mut self, max_len: u64, conn_avail: u64, new_ok: bool) -> (r: (Option<Chunk>, Ghost<nat>))
         requires
             old(self).wf(),
             old(self).lost@.len() == 0,
             !no_data(old(self).state),
         ensures
+            final(self).td == old(self).td,
+            final(self).td_w == old(self).td_w,
             final(self).wf(),
             send_step_ok(old(self).state(), final(self).state()),
             final(self).all_written() == old(self).all_written(),
@@ -642,29 +1877,30 @@ impl SendStream {
             final(self).max() == old(self).max(),
             final(self).reset_spec() == old(self).reset_spec(),
             final(self).pending_reset() == old(self).pending_reset(),
-            r is None ==> *final(self) == *old(self),
-            r matches Some(c) ==> chunk_ok(*old(self), *final(self), c@, max_len, conn_avail),
+            r.0 is None ==> *final(self) == *old(self),
+            r.0 matches Some(c) ==> chunk_ok(*old(self), *final(self), c@, max_len, conn_avail),
             final(self).buffered_spec() == old(self).buffered_spec(),
-            r matches Some(c) && c@.data.len() > 0 ==> new_ok,
+            final(self).held_spec() == old(self).held_spec(),
+            r.0 matches Some(c) && c@.data.len() > 0 ==> new_ok,
+            r.0 matches Some(c) ==> (c@.data.len() > 0 ==> final(self).flight_spec() == old(self).flight_spec().insert(
+                (c@.off, (c@.off + c@.data.len()) as u64),
+            )),
+            (r.0 is None || r.0->0@.data.len() == 0) ==> final(self).flight_spec() == old(self).flight_spec(),
+            r.0 matches Some(c) ==> (c@.data.len() > 0 ==> !old(self).flight_spec().contains(
+                (c@.off, (c@.off + c@.data.len()) as u64),
+            )),
+            final(self).flush_point() == old(self).flush_point(),
+            r.1@ <= c_ss1() * (old(self).ht() + 1) + c_ss2() * MAX_FLUSH + max_len,
     {
+        let ghost mut work: nat = 0;
+        let ghost s0 = *self;
         proof {
+            assert(c_rs() == 100 && c_ss1() == 400 && c_ss2() == 10);
+            assert(s0.flight.ht() <= s0.ht());
             self.credit.lemma_wf();
         }
-        let mut len = self.written - self.sent_end;
-        if !new_ok {
-            len = 0;
-        }
-        if len > max_len {
-            len = max_len;
-        }
-        let avail = self.credit.available();
-        if len > avail {
-            len = avail;
-        }
-        if len > conn_avail {
-            len = conn_avail;
-        }
         let off = self.sent_end;
+        let (len, short) = self.new_len(max_len, conn_avail, new_ok);
         let end = off + len;
         let owed = self.fin_written && match self.state {
             SendState::DataSent => self.fin_lost,
@@ -672,7 +1908,7 @@ impl SendStream {
         };
         let fin = end == self.written && owed;
         if len == 0 && !fin {
-            return None;
+            return (None, Ghost(work));
         }
         let ghost aw = self.all_written@;
         let ghost old_state = self.state;
@@ -685,9 +1921,14 @@ impl SendStream {
         );
         proof {
             assert(data@ =~= aw.subrange(off as int, end as int));
+            work = work + len as nat;
         }
-        self.credit.consume(len);
-        self.sent_end = end;
+        if len > 0 {
+            let Ghost(c1) = self.push_piece(end, short);
+            proof {
+                work = work + c1;
+            }
+        }
         if fin {
             self.fin_lost = false;
             self.state = SendState::DataSent;
@@ -703,11 +1944,135 @@ impl SendStream {
                 ));
             }
         }
-        Some(Chunk { off, data, fin, new_bytes: len })
+        (Some(Chunk { off, data, fin, new_bytes: len }), Ghost(work))
+    }
+
+    /// The new bytes `send_new` sends (D10 (c)): `a` sendable, a piece of `min(a, max_len)` if `a` and it are at
+    /// least `FLOOR`; below `FLOOR` a short piece (`r.1`) to a credit cut, the FIN's end or the flush point, if it fits
+    /// and a slot is free; else none.
+    fn new_len(&self, max_len: u64, conn_avail: u64, new_ok: bool) -> (r: (u64, bool))
+        requires
+            self.wf(),
+        ensures
+            r.0 <= self.written - self.sent_end,
+            r.0 <= self.credit.available_spec(),
+            r.0 <= conn_avail,
+            r.0 <= max_len,
+            r.0 > 0 ==> new_ok,
+            r.0 > 0 ==> r.0 >= FLOOR || (r.1 && self.nslots < MAX_FLUSH),
+            r.1 ==> r.0 > 0,
+    {
+        proof {
+            self.credit.lemma_wf();
+        }
+        let off = self.sent_end;
+        let mut a = self.written - off;
+        if !new_ok {
+            a = 0;
+        }
+        let avail = self.credit.available();
+        if a > avail {
+            a = avail;
+        }
+        if a > conn_avail {
+            a = conn_avail;
+        }
+        if a >= FLOOR {
+            let len = if a < max_len {
+                a
+            } else {
+                max_len
+            };
+            if len < FLOOR {
+                (0, false)
+            } else {
+                (len, false)
+            }
+        } else if a > 0 {
+            // A credit cut, the FIN's end or a flush point ends a short piece; flushed bytes never wait behind an
+            // unflushed tail (review M1).
+            let e = if a < self.written - off || (off + a == self.written && self.fin_written) || off + a
+                <= self.flush_to {
+                off + a
+            } else if off < self.flush_to {
+                self.flush_to
+            } else {
+                off
+            };
+            if e > off && e - off <= max_len && self.nslots < MAX_FLUSH {
+                (e - off, true)
+            } else {
+                (0, false)
+            }
+        } else {
+            (0, false)
+        }
+    }
+
+    /// The new piece `[sent_end, end)` goes in flight, opening a slot if `short` (split from `send_new` for the
+    /// rlimit).
+    fn push_piece(&mut self, end: u64, short: bool) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            !no_data(old(self).state),
+            old(self).sent_end < end <= old(self).written,
+            end - old(self).sent_end <= old(self).credit.available_spec(),
+            end - old(self).sent_end >= FLOOR || (short && old(self).nslots < MAX_FLUSH),
+        ensures
+            *final(self) == (SendStream {
+                flight: final(self).flight,
+                slots: final(self).slots,
+                nslots: final(self).nslots,
+                credit: final(self).credit,
+                sent_end: end,
+                ..*old(self)
+            }),
+            final(self).sets_ok(),
+            final(self).credit.wf(),
+            final(self).credit.used_spec() == end,
+            final(self).credit.max_spec() == old(self).credit.max_spec(),
+            final(self).flight_spec() == old(self).flight_spec().insert((old(self).sent_end, end)),
+            !old(self).flight_spec().contains((old(self).sent_end, end)),
+            r@ <= c_rs() * (old(self).flight.ht() + 1),
+    {
+        let ghost mut work: nat = 0;
+        let ghost s0 = *self;
+        let off = self.sent_end;
+        proof {
+            self.flight.lemma_wf();
+            self.acked.lemma_wf();
+            self.lost.lemma_wf();
+            self.credit.lemma_wf();
+            lemma_parts_end(s0.acked@, s0.lost@, s0.flight@, s0.open_slots(), s0.acked_base, off);
+            lemma_fresh(s0.flight@, off, end);
+        }
+        let Ghost(c1) = self.flight.insert_piece(off, end);
+        proof {
+            work = work + c1;
+        }
+        let ghost sp0 = s0.open_slots();
+        if short && end - off < FLOOR {
+            self.slots[self.nslots] = (off, end);
+            self.nslots = self.nslots + 1;
+        }
+        self.credit.consume(end - off);
+        self.sent_end = end;
+        proof {
+            let sp = self.open_slots();
+            assert(sp =~= sp0.push((off, end)) || sp =~= sp0);
+            assert(sp != sp0 ==> sp =~= sp0.push((off, end)));
+            lemma_new_piece(s0.acked@, s0.lost@, s0.flight@, self.flight@, sp0, sp, s0.acked_base, off, end);
+            self.flight.lemma_wf();
+            lemma_parts_bound(self.acked@, self.lost@, self.flight@, sp, self.acked_base, end);
+            self.flight@.to_set_ensures();
+            s0.flight@.to_set_ensures();
+            assert(self.flight_spec() =~= s0.flight_spec().insert((off, end)));
+        }
+        Ghost(work)
     }
 
     /// The offset `poll_data` would send at next, if it sends anything. `Some` does not mean
-    /// `poll_data` will send: credit may be 0. Loop on `poll_data`'s result, not on this.
+    /// `poll_data` will send: credit may be 0, or the room short of the floor. Loop on `poll_data`'s result, not on this.
     #[verifier::when_used_as_spec(next_off_spec)]
     pub fn next_off(&self) -> (r: Option<u64>)
         requires
@@ -720,8 +2085,16 @@ impl SendStream {
             SendState::DataRecvd | SendState::ResetSent | SendState::ResetRecvd => return None,
             _ => {},
         }
-        if self.lost.len() > 0 {
-            return Some(self.lost[0].0);
+        let (lf, Ghost(c)) = self.lost.first();
+        proof {
+            assert(c <= c_rs() * (self.lost.ht() + 1));
+            if self.lost@.len() > 0 {
+                lemma_parts_end(self.acked@, self.lost@, self.flight@, self.open_slots(), self.acked_base, self.sent_end);
+                assert(self.lost@[0].0 < self.sent_end);
+            }
+        }
+        if let Some((s, _)) = lf {
+            return Some(s);
         }
         let owed = self.fin_written && match self.state {
             SendState::DataSent => self.fin_lost,
@@ -740,10 +2113,14 @@ impl SendStream {
         requires
             self.wf(),
     {
-        if self.lost.len() > 0 {
-            self.lost[0].1 - self.lost[0].0
-        } else {
-            self.written - self.sent_end
+        let (lf, Ghost(c)) = self.lost.first();
+        proof {
+            assert(c <= c_rs() * (self.lost.ht() + 1));
+            self.lost.lemma_wf();
+        }
+        match lf {
+            Some((s, e)) => e - s,
+            None => self.written - self.sent_end,
         }
     }
 
@@ -763,7 +2140,8 @@ impl SendStream {
     }
 
     /// Abandons the stream with RESET_STREAM `code` (final size: the bytes sent). `fresh`:
-    /// the stream was not already reset or fully acknowledged.
+    /// the stream was not already reset or fully acknowledged. O(1): the three sets move to the teardown slot,
+    /// freed by `reap` (D10 (e)).
     pub fn reset(&mut self, code: u64) -> (fresh: bool)
         requires
             old(self).wf(),
@@ -771,6 +2149,7 @@ impl SendStream {
         ensures
             final(self).wf(),
             final(self).buffered_spec() <= old(self).buffered_spec(),
+            final(self).held_spec() <= old(self).held_spec(),
             send_step_ok(old(self).state(), final(self).state()),
             final(self).all_written() == old(self).all_written(),
             final(self).sent_end() == old(self).sent_end(),
@@ -781,21 +2160,182 @@ impl SendStream {
                 (code, old(self).sent_end()),
             ) && final(self).pending_reset() == Some((code, old(self).sent_end()))
                 && final(self).buffered_spec() == 0,
+            fresh ==> final(self).flight_spec() == Set::<(u64, u64)>::empty(),
+            // The move: the sets to the slot, the window charged no more than the reservation it leaves.
+            fresh ==> final(self).ranges_held() == 0 && final(self).td_nodes() == old(self).ranges_held()
+                && old(self).td_nodes() == 0 && final(self).td_window() <= old(self).peak_spec()
+                && final(self).held_spec() == 0,
             !fresh ==> *final(self) == *old(self),
     {
+        let (fresh, Ghost(c)) = self.reset_w(code);
+        proof {
+            assert(c <= c_sfree());
+        }
+        fresh
+    }
+
+    /// `reset`, with its cost: the old queue's buffers freed; the sets move whole.
+    fn reset_w(&mut self, code: u64) -> (r: (bool, Ghost<nat>))
+        requires
+            old(self).wf(),
+            code <= VARINT_MAX,
+        ensures
+            final(self).wf(),
+            final(self).buffered_spec() <= old(self).buffered_spec(),
+            final(self).held_spec() <= old(self).held_spec(),
+            send_step_ok(old(self).state(), final(self).state()),
+            final(self).all_written() == old(self).all_written(),
+            final(self).sent_end() == old(self).sent_end(),
+            final(self).max() == old(self).max(),
+            r.0 == (old(self).state() is Ready || old(self).state() is Send
+                || old(self).state() is DataSent),
+            r.0 ==> final(self).state() is ResetSent && final(self).reset_spec() == Some(
+                (code, old(self).sent_end()),
+            ) && final(self).pending_reset() == Some((code, old(self).sent_end()))
+                && final(self).buffered_spec() == 0,
+            r.0 ==> final(self).flight_spec() == Set::<(u64, u64)>::empty(),
+            r.0 ==> final(self).ranges_held() == 0 && final(self).td_nodes() == old(self).ranges_held()
+                && old(self).td_nodes() == 0 && final(self).td_window() <= old(self).peak_spec()
+                && final(self).held_spec() == 0,
+            !r.0 ==> *final(self) == *old(self),
+            r.1@ <= c_sfree(),
+    {
+        let ghost mut work: nat = 0;
         match self.state {
             SendState::Ready | SendState::Send | SendState::DataSent => {},
-            _ => return false,
+            _ => return (false, Ghost(work)),
         }
+        proof {
+            reveal(td_ok);
+            self.acked.lemma_wf();
+            self.lost.lemma_wf();
+            self.flight.lemma_wf();
+            self.buf.lemma_wf();
+            assert(self.sent_end - self.acked_base <= self.buf@.len());
+            if self.sent_end == self.acked_base {
+                self.lemma_empty_window();
+            }
+        }
+        let n = self.acked.len() + self.lost.len() + self.flight.len();
+        let w = self.sent_end - self.acked_base;
+        let mut acked = RangeSet::new();
+        let mut lost = RangeSet::new();
+        let mut flight = PieceSet::new();
+        core::mem::swap(&mut self.acked, &mut acked);
+        core::mem::swap(&mut self.lost, &mut lost);
+        core::mem::swap(&mut self.flight, &mut flight);
+        // The slot is empty (`td_ok`: a part not reset holds none), so nothing is dropped here.
+        self.td = TdSets { acked, lost, flight };
+        self.td_w = if n == 0 {
+            0
+        } else {
+            w
+        };
         self.state = SendState::ResetSent;
         self.reset = Some((code, self.sent_end));
         self.reset_pending = true;
-        self.buf = Vec::new();
-        self.lost = Vec::new();
-        self.acked = Vec::new();
+        // The old queue's buffers are freed here: at most two.
+        self.buf = ByteQueue::new();
+        proof {
+            work = work + c_sfree();
+        }
+        self.peak = 0;
+        self.nslots = 0;
         self.fin_lost = false;
         self.fin_acked = false;
-        true
+        proof {
+            self.flight@.to_set_ensures();
+            assert(self.flight_spec() =~= Set::<(u64, u64)>::empty());
+            vstd::arithmetic::div_mod::lemma_div_is_ordered(
+                (old(self).sent_end - old(self).acked_base) as int,
+                w as int,
+                FLOOR as int,
+            );
+            assert(self.td_nodes() == old(self).ranges_held());
+            reveal(td_ok);
+        }
+        (true, Ghost(work))
+    }
+
+    /// Retires a CRYPTO context at key discard (RFC 9001 §4.9), once: its three sets move to the teardown slot in
+    /// O(1), its queue is freed, and it ends in Reset Recvd, terminal, with no RESET_STREAM owed, so nothing is sent
+    /// from it again and no later `reset` meets a full slot.
+    pub fn retire(&mut self) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).state() is ResetRecvd || final(self).state() is DataRecvd,
+            final(self).pending_reset() is None,
+            final(self).flight_spec() == Set::<(u64, u64)>::empty(),
+            final(self).ranges_held() == 0,
+            final(self).buffered_spec() == 0,
+            final(self).td_nodes() == old(self).td_nodes() + old(self).ranges_held(),
+            r@ <= c_sfree(),
+    {
+        let (_, Ghost(c)) = self.reset_w(0);
+        proof {
+            self.lemma_flight_idle();
+            if !is_reset(self.state) {
+                // Data Recvd: everything acknowledged, nothing held.
+                self.lemma_empty_window();
+            }
+        }
+        if let SendState::ResetSent = self.state {
+            self.state = SendState::ResetRecvd;
+            self.reset_pending = false;
+        }
+        proof {
+            reveal(td_ok);
+        }
+        Ghost(c)
+    }
+
+    /// The teardown slot holds nodes. O(1).
+    pub fn has_td(&self) -> (r: bool)
+        requires
+            self.wf(),
+        ensures
+            r == (self.td_nodes() > 0),
+    {
+        proof {
+            reveal(td_ok);
+        }
+        self.td_w > 0
+    }
+
+    /// Frees part of the teardown slot within `budget` (`avl::pop_some`, D7(d)): at least one node while any remain.
+    /// Nothing else changes, but the window, which goes to 0 with the last node.
+    pub fn reap(&mut self, budget: u64) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            crate::avl::c_pop() * 127 + 2 <= budget,
+        ensures
+            final(self).wf(),
+            final(self).same_but_td(*old(self)),
+            final(self).td_nodes() <= old(self).td_nodes(),
+            old(self).td_nodes() > 0 ==> final(self).td_nodes() < old(self).td_nodes(),
+            final(self).td_window() <= old(self).td_window(),
+            r@ <= budget,
+    {
+        proof {
+            reveal(td_ok);
+        }
+        let Ghost(c) = if self.td.acked.len() > 0 {
+            self.td.acked.reap_some(budget)
+        } else if self.td.lost.len() > 0 {
+            self.td.lost.reap_some(budget)
+        } else {
+            self.td.flight.reap_some(budget)
+        };
+        if self.td.acked.len() == 0 && self.td.lost.len() == 0 && self.td.flight.len() == 0 {
+            self.td_w = 0;
+        }
+        proof {
+            reveal(td_ok);
+            vstd::arithmetic::div_mod::lemma_div_is_ordered(0, self.td_w as int, FLOOR as int);
+        }
+        Ghost(c)
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-3.5
@@ -803,27 +2343,35 @@ impl SendStream {
     //# MUST send a RESET_STREAM frame if the stream is in the "Ready" or
     //# "Send" state.
     /// The peer's STOP_SENDING with `code`: reset at once, copying the code, in Ready, Send and
-    /// Data Sent alike.
-    pub fn on_stop_sending(&mut self, code: u64) -> (fresh: bool)
+    /// Data Sent alike; with whether it was fresh, the reset's cost.
+    pub fn on_stop_sending(&mut self, code: u64) -> (r: (bool, Ghost<nat>))
         requires
             old(self).wf(),
             code <= VARINT_MAX,
         ensures
             final(self).wf(),
             final(self).buffered_spec() <= old(self).buffered_spec(),
+            final(self).held_spec() <= old(self).held_spec(),
             send_step_ok(old(self).state(), final(self).state()),
             final(self).all_written() == old(self).all_written(),
             final(self).sent_end() == old(self).sent_end(),
             final(self).max() == old(self).max(),
-            fresh == (old(self).state() is Ready || old(self).state() is Send
+            r.0 == (old(self).state() is Ready || old(self).state() is Send
                 || old(self).state() is DataSent),
-            fresh ==> final(self).state() is ResetSent && final(self).reset_spec() == Some(
+            r.0 ==> final(self).state() is ResetSent && final(self).reset_spec() == Some(
                 (code, old(self).sent_end()),
             ) && final(self).pending_reset() == Some((code, old(self).sent_end()))
                 && final(self).buffered_spec() == 0,
-            !fresh ==> *final(self) == *old(self),
+            r.0 ==> final(self).flight_spec() == Set::<(u64, u64)>::empty(),
+            r.0 ==> final(self).ranges_held() == 0 && final(self).td_nodes() == old(self).ranges_held()
+                && old(self).td_nodes() == 0 && final(self).td_window() <= old(self).peak_spec()
+                && final(self).held_spec() == 0,
+            !r.0 ==> *final(self) == *old(self),
+            // The old queue's buffers freed (`reset_w`), charged on the frame path (9b2 Task 10d).
+            r.1@ <= c_sfree(),
     {
-        self.reset(code)
+        let (fresh, Ghost(c)) = self.reset_w(code);
+        (fresh, Ghost(c))
     }
 
     /// The peer's MAX_STREAM_DATA.
@@ -831,8 +2379,12 @@ impl SendStream {
         requires
             old(self).wf(),
         ensures
+            final(self).ranges_held() == old(self).ranges_held(),
+            final(self).td_nodes() == old(self).td_nodes(),
+            final(self).td_window() == old(self).td_window(),
             final(self).wf(),
             final(self).buffered_spec() <= old(self).buffered_spec(),
+            final(self).held_spec() <= old(self).held_spec(),
             final(self).state() == old(self).state(),
             final(self).all_written() == old(self).all_written(),
             final(self).fin_written_spec() == old(self).fin_written_spec(),
@@ -845,6 +2397,7 @@ impl SendStream {
             } else {
                 old(self).max()
             },
+            final(self).flight_spec() == old(self).flight_spec(),
     {
         self.credit.on_max(max);
     }
@@ -873,8 +2426,12 @@ impl SendStream {
         requires
             old(self).wf(),
         ensures
+            final(self).ranges_held() == old(self).ranges_held(),
+            final(self).td_nodes() == old(self).td_nodes(),
+            final(self).td_window() == old(self).td_window(),
             final(self).wf(),
             final(self).buffered_spec() <= old(self).buffered_spec(),
+            final(self).held_spec() <= old(self).held_spec(),
             final(self).state() == old(self).state(),
             final(self).all_written() == old(self).all_written(),
             final(self).sent_end() == old(self).sent_end(),
@@ -882,6 +2439,7 @@ impl SendStream {
             final(self).next_off() == old(self).next_off(),
             final(self).reset_spec() == old(self).reset_spec(),
             final(self).pending_reset() is None,
+            final(self).flight_spec() == old(self).flight_spec(),
     {
         self.reset_pending = false;
     }
@@ -891,8 +2449,12 @@ impl SendStream {
         requires
             old(self).wf(),
         ensures
+            final(self).ranges_held() == old(self).ranges_held(),
+            final(self).td_nodes() == old(self).td_nodes(),
+            final(self).td_window() == old(self).td_window(),
             final(self).wf(),
             final(self).buffered_spec() <= old(self).buffered_spec(),
+            final(self).held_spec() <= old(self).held_spec(),
             final(self).state() == old(self).state(),
             final(self).all_written() == old(self).all_written(),
             final(self).sent_end() == old(self).sent_end(),
@@ -904,6 +2466,7 @@ impl SendStream {
             } else {
                 old(self).pending_reset()
             },
+            final(self).flight_spec() == old(self).flight_spec(),
     {
         if let SendState::ResetSent = self.state {
             self.reset_pending = true;
@@ -915,8 +2478,12 @@ impl SendStream {
         requires
             old(self).wf(),
         ensures
+            final(self).ranges_held() == old(self).ranges_held(),
+            final(self).td_nodes() == old(self).td_nodes(),
+            final(self).td_window() == old(self).td_window(),
             final(self).wf(),
             final(self).buffered_spec() <= old(self).buffered_spec(),
+            final(self).held_spec() <= old(self).held_spec(),
             send_step_ok(old(self).state(), final(self).state()),
             final(self).state() == if old(self).state() is ResetSent {
                 SendState::ResetRecvd
@@ -929,6 +2496,7 @@ impl SendStream {
             final(self).reset_spec() == old(self).reset_spec(),
             final(self).pending_reset() is None
                 || final(self).pending_reset() == old(self).pending_reset(),
+            final(self).flight_spec() == old(self).flight_spec(),
     {
         if let SendState::ResetSent = self.state {
             self.state = SendState::ResetRecvd;
@@ -936,13 +2504,180 @@ impl SendStream {
         }
     }
 
-    /// The bytes `[off, off + len)`, and the FIN if `fin`, were acknowledged.
+    /// Closes the open slots ending at or below `b` (D10 (c)): at most `MAX_FLUSH`, the rest shifted down.
+    fn close_slots(&mut self, b: u64) -> (r: (usize, Ghost<nat>))
+        requires
+            old(self).nslots <= MAX_FLUSH,
+            disjoint(old(self).open_slots()),
+        ensures
+            *final(self) == (SendStream { slots: final(self).slots, nslots: final(self).nslots, ..*old(self) }),
+            r.0 <= old(self).nslots,
+            final(self).nslots == old(self).nslots - r.0,
+            final(self).open_slots() == old(self).open_slots().skip(r.0 as int),
+            forall|k: int| 0 <= k < r.0 ==> #[trigger] old(self).open_slots()[k].1 <= b,
+            forall|k: int| r.0 <= k < old(self).nslots ==> #[trigger] old(self).open_slots()[k].1 > b,
+            r.1@ <= 2 * MAX_FLUSH + 1,
+    {
+        let ghost mut work: nat = 1;
+        let ghost sp = self.open_slots();
+        let ghost s0 = self.slots@;
+        let n = self.nslots;
+        let mut c: usize = 0;
+        while c < n && self.slots[c].1 <= b
+            invariant
+                c <= n,
+                n == self.nslots,
+                n <= MAX_FLUSH,
+                self.slots@ == s0,
+                sp == s0.subrange(0, n as int),
+                forall|k: int| 0 <= k < c ==> #[trigger] sp[k].1 <= b,
+                work == 1 + c,
+            decreases n - c,
+        {
+            c = c + 1;
+            proof {
+                work = work + 1;
+            }
+        }
+        proof {
+            if c < n {
+                assert(sp[c as int].1 > b);
+                assert forall|k: int| c <= k < n implies #[trigger] sp[k].1 > b by {
+                    if k > c {
+                        assert(sp[c as int].1 <= sp[k].0);
+                        assert(sp[k].0 < sp[k].1);
+                    }
+                }
+            }
+        }
+        let mut i: usize = 0;
+        while i + c < n
+            invariant
+                i + c <= n,
+                n <= MAX_FLUSH,
+                self.slots@.len() == MAX_FLUSH,
+                forall|k: int| 0 <= k < i ==> #[trigger] self.slots@[k] == s0[k + c],
+                forall|k: int| i <= k < MAX_FLUSH ==> #[trigger] self.slots@[k] == s0[k],
+                work <= 1 + c + i,
+            decreases n - c - i,
+        {
+            let v = self.slots[i + c];
+            self.slots[i] = v;
+            i = i + 1;
+            proof {
+                work = work + 1;
+            }
+        }
+        self.nslots = n - c;
+        proof {
+            assert(self.open_slots() =~= sp.skip(c as int));
+        }
+        (c, Ghost(work))
+    }
+
+    /// Drops the acknowledged prefix `[acked_base, b)`, the first acked range, from the set and the queue at once (no
+    /// byte copied), and closes the slots it passes.
+    fn drop_prefix(&mut self, b: u64) -> (r: Ghost<nat>)
+        requires
+            old(self).core(),
+            !is_reset(old(self).state),
+            old(self).acked.wf(),
+            old(self).lost.wf(),
+            old(self).flight.wf(),
+            old(self).nslots <= MAX_FLUSH,
+            old(self).flush_to <= old(self).written,
+            !is_reset(old(self).state) ==> old(self).buf@.len() == old(self).written - old(self).acked_base,
+            parts(
+                old(self).acked@,
+                old(self).lost@,
+                old(self).flight@,
+                old(self).open_slots(),
+                old(self).acked_base,
+                old(self).sent_end,
+            ),
+            old(self).acked@.contains((old(self).acked_base, b)),
+            forall|p: (u64, u64)|
+                #[trigger] old(self).acked@.contains(p) && p != (old(self).acked_base, b) ==> p.0 > old(
+                    self,
+                ).acked_base,
+        ensures
+            final(self).core(),
+            final(self).sets_ok(),
+            final(self).flush_to <= final(self).written,
+            final(self).buf@.len() == final(self).written - final(self).acked_base,
+            *final(self) == (SendStream {
+                buf: final(self).buf,
+                peak: final(self).peak,
+                acked: final(self).acked,
+                acked_base: final(self).acked_base,
+                slots: final(self).slots,
+                nslots: final(self).nslots,
+                ..*old(self)
+            }),
+            final(self).acked_base == b,
+            final(self).acked_base > old(self).acked_base,
+            final(self).buf@.len() <= old(self).buf@.len(),
+            final(self).peak <= old(self).peak,
+            final(self).acked.ht() <= old(self).acked.ht() + 1,
+            r@ <= c_rs() * (old(self).acked.ht() + 1) + 2 * MAX_FLUSH + 3,
+    {
+        let ghost mut work: nat = 0;
+        let ghost s0 = *self;
+        let ab = self.acked_base;
+        proof {
+            lemma_parts_end(s0.acked@, s0.lost@, s0.flight@, s0.open_slots(), ab, s0.sent_end);
+            s0.acked.lemma_wf();
+            let j = choose|j: int| 0 <= j < s0.acked@.len() && s0.acked@[j] == (ab, b);
+            assert(ab < b <= s0.sent_end);
+            self.buf.lemma_wf();
+        }
+        let Ghost(c1) = self.acked.remove_range(ab, b);
+        let ghost aw = self.all_written@;
+        let Ghost(c2) = self.buf.drop_front((b - ab) as usize);
+        proof {
+            work = work + c1 + c2;
+            self.buf.lemma_wf();
+        }
+        if self.buf.len() == 0 {
+            self.peak = 0;
+        }
+        self.acked_base = b;
+        let (_closed, Ghost(c3)) = self.close_slots(b);
+        proof {
+            work = work + c3;
+            assert(self.buf@ =~= aw.subrange(b as int, self.written as int));
+            self.acked.lemma_wf();
+            self.lost.lemma_wf();
+            self.flight.lemma_wf();
+            lemma_drop(
+                s0.acked@,
+                self.acked@,
+                s0.lost@,
+                s0.flight@,
+                s0.open_slots(),
+                self.open_slots(),
+                ab,
+                b,
+                s0.sent_end,
+                _closed as int,
+            );
+            lemma_parts_bound(self.acked@, self.lost@, self.flight@, self.open_slots(), b, self.sent_end);
+        }
+        Ghost(work)
+    }
+
+    /// The piece `[off, off + len)`, and the FIN if `fin`, was acknowledged.
     pub fn on_data_acked(&mut self, off: u64, len: u64, fin: bool)
         requires
             old(self).wf(),
+            // D10 (b): conn hands back the edges of a piece it sent; checked past the Send/Data Sent gate.
+            !is_reset(old(self).state()) && len > 0 ==> old(self).in_flight(off, len),
         ensures
+            final(self).td_nodes() == old(self).td_nodes(),
+            final(self).td_window() == old(self).td_window(),
             final(self).wf(),
             final(self).buffered_spec() <= old(self).buffered_spec(),
+            final(self).held_spec() <= old(self).held_spec(),
             send_step_ok(old(self).state(), final(self).state()),
             final(self).all_written() == old(self).all_written(),
             final(self).fin_written_spec() == old(self).fin_written_spec(),
@@ -957,23 +2692,67 @@ impl SendStream {
             !(old(self).state() is DataSent) ==> final(self).state() == old(self).state(),
             (no_data(old(self).state()) || old(self).state() is Ready)
                 ==> *final(self) == *old(self),
+            final(self).flush_point() == old(self).flush_point(),
+            len > 0 && (old(self).state() is Send || old(self).state() is DataSent) && old(self).in_flight(off, len)
+                ==> final(self).flight_spec() == old(self).flight_spec().remove((off, (off + len) as u64)),
+            len > 0 && !old(self).in_flight(off, len) ==> final(self).flight_spec() == old(self).flight_spec()
+                && final(self).ranges_held() == old(self).ranges_held() && final(self).state() == old(self).state()
+                && final(self).acked_base_spec() == old(self).acked_base_spec(),
+            len == 0 ==> final(self).flight_spec() == old(self).flight_spec(),
     {
+        let Ghost(c) = self.on_data_acked_w(off, len, fin);
+        proof {
+            assert(c <= c_ss1() * (old(self).ht() + 1) + c_ss2() * MAX_FLUSH);
+        }
+    }
+
+    /// `on_data_acked`, with its cost: the piece found and removed, merged with at most two neighbours, the prefix
+    /// dropped and at most `MAX_FLUSH` slots closed; independent of `len` and of the number of ranges (D10 (e)).
+    fn on_data_acked_w(&mut self, off: u64, len: u64, fin: bool) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            !is_reset(old(self).state()) && len > 0 ==> old(self).in_flight(off, len),
+        ensures
+            final(self).td == old(self).td,
+            final(self).td_w == old(self).td_w,
+            final(self).wf(),
+            final(self).buffered_spec() <= old(self).buffered_spec(),
+            final(self).held_spec() <= old(self).held_spec(),
+            send_step_ok(old(self).state(), final(self).state()),
+            final(self).all_written() == old(self).all_written(),
+            final(self).fin_written_spec() == old(self).fin_written_spec(),
+            final(self).sent_end() == old(self).sent_end(),
+            final(self).max() == old(self).max(),
+            final(self).reset_spec() == old(self).reset_spec(),
+            final(self).pending_reset() == old(self).pending_reset(),
+            final(self).acked_base_spec() >= old(self).acked_base_spec(),
+            old(self).state() is DataSent ==> (final(self).state() is DataRecvd <==> (
+                final(self).acked_base_spec() == final(self).all_written().len()
+                && final(self).fin_acked_spec())),
+            !(old(self).state() is DataSent) ==> final(self).state() == old(self).state(),
+            (no_data(old(self).state()) || old(self).state() is Ready)
+                ==> *final(self) == *old(self),
+            final(self).flush_point() == old(self).flush_point(),
+            len > 0 && (old(self).state() is Send || old(self).state() is DataSent) && old(self).in_flight(off, len)
+                ==> final(self).flight_spec() == old(self).flight_spec().remove((off, (off + len) as u64)),
+            len > 0 && !old(self).in_flight(off, len) ==> final(self).flight_spec() == old(self).flight_spec()
+                && final(self).ranges_held() == old(self).ranges_held() && final(self).state() == old(self).state()
+                && final(self).acked_base_spec() == old(self).acked_base_spec(),
+            len == 0 ==> final(self).flight_spec() == old(self).flight_spec(),
+            r@ <= c_ss1() * (old(self).ht() + 1) + c_ss2() * MAX_FLUSH,
+    {
+        let ghost mut work: nat = 0;
         match self.state {
             SendState::Send | SendState::DataSent => {},
-            _ => return,
+            _ => return Ghost(work),
         }
-        let ghost aw = self.all_written@;
-        let ab = self.acked_base;
-        let se = self.sent_end;
-        let e = clamp_end(off, len, se);
-        let s = if off > ab {
-            off
-        } else {
-            ab
-        };
-        if s < e {
-            range_insert(&mut self.acked, s, e, Ghost(ab), Ghost(se));
-            range_remove(&mut self.lost, s, e, Ghost(ab), Ghost(se));
+        if len > 0 {
+            // The piece is in flight (the requires): `take` finds it, so no miss branch.
+            let (_hit, Ghost(c)) = self.ack_piece(off, off + len);
+            proof {
+                work = work + c;
+                assert(_hit);
+            }
         }
         if fin {
             if let SendState::DataSent = self.state {
@@ -981,71 +2760,120 @@ impl SendStream {
                 self.fin_lost = false;
             }
         }
-        // ponytail: the buffer is trimmed only once the acknowledged prefix is at least the
-        // tail that `split_off` copies, so each copied byte is paid for by a freed one (O(written)
-        // copying in total) at the cost of up to 2x the unacked bytes held; a head index as in
-        // Reassembly if that slack matters.
-        let ghost pre = *self;
-        loop
-            invariant
-                self.core(),
-                self.state == pre.state,
-                self.state is Send || self.state is DataSent,
-                self.all_written == pre.all_written,
-                self.written == pre.written,
-                self.sent_end == pre.sent_end,
-                se == self.sent_end,
-                aw == self.all_written@,
-                self.credit == pre.credit,
-                self.fin_written == pre.fin_written,
-                self.fin_acked == pre.fin_acked,
-                self.reset == pre.reset,
-                self.reset_pending == pre.reset_pending,
-                self.acked_base >= pre.acked_base,
-            ensures
-                self.acked@.len() == 0 || self.acked@[0].0 != self.acked_base || self.acked@[0].1
-                    - self.acked_base < self.written - self.acked@[0].1,
-            decreases self.written - self.acked_base,
-        {
-            if self.acked.len() == 0 || self.acked[0].0 != self.acked_base {
-                break;
-            }
-            let ab = self.acked_base;
-            let nb = self.acked[0].1;
-            if nb - ab < self.written - nb {
-                break;
-            }
-            if nb == self.written {
-                // A fresh vec, not `clear()`: acknowledged space keeps no allocation
-                // (TRUSTED.md: proven bounds are lengths, not capacities).
-                self.buf = Vec::new();
-            } else {
-                let t = self.buf.split_off((nb - ab) as usize);
-                self.buf = t;
-            }
-            range_remove(&mut self.acked, 0, nb, Ghost(ab), Ghost(se));
-            range_remove(&mut self.lost, 0, nb, Ghost(ab), Ghost(se));
-            self.acked_base = nb;
-            proof {
-                assert(self.buf@ =~= aw.subrange(nb as int, self.written as int));
-                assert(in_bounds(self.acked@, nb, se));
-                assert(in_bounds(self.lost@, nb, se));
-            }
-        }
         if let SendState::DataSent = self.state {
             if self.acked_base == self.written && self.fin_acked {
                 self.state = SendState::DataRecvd;
             }
         }
+        Ghost(work)
     }
 
-    /// The bytes `[off, off + len)`, and the FIN if `fin`, were lost: queue them again.
+    /// The piece `[off, end)`, if it is one in flight, leaves flight and joins `acked`; a merged range that starts at
+    /// `acked_base` is dropped at once (split from `on_data_acked_w` for the rlimit).
+    fn ack_piece(&mut self, off: u64, end: u64) -> (r: (bool, Ghost<nat>))
+        requires
+            old(self).wf(),
+            old(self).state is Send || old(self).state is DataSent,
+            off < end <= VARINT_MAX,
+        ensures
+            final(self).core(),
+            final(self).sets_ok(),
+            final(self).flush_to <= final(self).written,
+            final(self).buf@.len() == final(self).written - final(self).acked_base,
+            *final(self) == (SendStream {
+                buf: final(self).buf,
+                peak: final(self).peak,
+                acked: final(self).acked,
+                flight: final(self).flight,
+                acked_base: final(self).acked_base,
+                slots: final(self).slots,
+                nslots: final(self).nslots,
+                ..*old(self)
+            }),
+            final(self).acked_base >= old(self).acked_base,
+            final(self).buf@.len() <= old(self).buf@.len(),
+            final(self).peak <= old(self).peak,
+            old(self).flight@.contains((off, end)) ==> final(self).flight_spec() == old(self).flight_spec().remove(
+                (off, end),
+            ),
+            !old(self).flight@.contains((off, end)) ==> final(self).flight_spec() == old(self).flight_spec()
+                && final(self).ranges_held() == old(self).ranges_held() && final(self).acked_base
+                == old(self).acked_base,
+            r.0 == old(self).flight@.contains((off, end)),
+            r.1@ <= c_ss1() * (old(self).ht() + 1) + c_ss2() * MAX_FLUSH,
+    {
+        let ghost mut work: nat = 0;
+        let ghost s0 = *self;
+        proof {
+            assert(c_rs() == 100 && c_ss1() == 400 && c_ss2() == 10 && crate::avl::c_free() == 1);
+            assert(s0.flight.ht() <= s0.ht() && s0.acked.ht() <= s0.ht() && s0.lost.ht() <= s0.ht());
+            self.flight.lemma_wf();
+            self.acked.lemma_wf();
+            self.lost.lemma_wf();
+        }
+        let (hit, Ghost(c1)) = self.flight.take_piece(off, end);
+        proof {
+            work = work + c1;
+        }
+        if !hit {
+            proof {
+                self.flight@.to_set_ensures();
+                s0.flight@.to_set_ensures();
+                assert(self.flight_spec() =~= s0.flight_spec());
+            }
+            return (false, Ghost(work));
+        }
+        proof {
+            lemma_piece_free(s0.acked@, s0.lost@, s0.flight@, s0.open_slots(), s0.acked_base, s0.sent_end, off, end);
+        }
+        let ((am, bm), Ghost(c2)) = self.acked.add(off, end);
+        proof {
+            work = work + c2;
+            lemma_ack(
+                s0.acked@,
+                self.acked@,
+                s0.lost@,
+                s0.flight@,
+                self.flight@,
+                s0.open_slots(),
+                s0.acked_base,
+                s0.sent_end,
+                off,
+                end,
+                am,
+                bm,
+            );
+            self.flight@.to_set_ensures();
+            s0.flight@.to_set_ensures();
+            assert(self.flight_spec() =~= s0.flight_spec().remove((off, end)));
+        }
+        if am == self.acked_base {
+            let Ghost(c3) = self.drop_prefix(bm);
+            proof {
+                work = work + c3;
+            }
+        } else {
+            proof {
+                self.acked.lemma_wf();
+                self.flight.lemma_wf();
+                lemma_parts_bound(self.acked@, self.lost@, self.flight@, self.open_slots(), self.acked_base, self.sent_end);
+            }
+        }
+        (true, Ghost(work))
+    }
+
+    /// The piece `[off, off + len)`, and the FIN if `fin`, was lost: queue it again.
     pub fn on_data_lost(&mut self, off: u64, len: u64, fin: bool)
         requires
             old(self).wf(),
+            // D10 (b): conn hands back the edges of a piece it sent; checked past the Send/Data Sent gate.
+            !is_reset(old(self).state()) && len > 0 ==> old(self).in_flight(off, len),
         ensures
+            final(self).td_nodes() == old(self).td_nodes(),
+            final(self).td_window() == old(self).td_window(),
             final(self).wf(),
             final(self).buffered_spec() <= old(self).buffered_spec(),
+            final(self).held_spec() <= old(self).held_spec(),
             final(self).state() == old(self).state(),
             final(self).all_written() == old(self).all_written(),
             final(self).fin_written_spec() == old(self).fin_written_spec(),
@@ -1056,43 +2884,121 @@ impl SendStream {
             final(self).acked_base_spec() == old(self).acked_base_spec(),
             (no_data(old(self).state()) || old(self).state() is Ready)
                 ==> *final(self) == *old(self),
+            final(self).flush_point() == old(self).flush_point(),
+            len > 0 && (old(self).state() is Send || old(self).state() is DataSent) && old(self).in_flight(off, len)
+                ==> final(self).flight_spec() == old(self).flight_spec().remove((off, (off + len) as u64)),
+            len > 0 && !old(self).in_flight(off, len) ==> final(self).flight_spec() == old(self).flight_spec()
+                && final(self).ranges_held() == old(self).ranges_held() && final(self).state() == old(self).state()
+                && final(self).acked_base_spec() == old(self).acked_base_spec(),
+            len == 0 ==> final(self).flight_spec() == old(self).flight_spec(),
     {
+        let Ghost(c) = self.on_data_lost_w(off, len, fin);
+        proof {
+            assert(c <= c_ss1() * (old(self).ht() + 1) + c_ss2() * MAX_FLUSH);
+        }
+    }
+
+    /// `on_data_lost`, with its cost: the piece found and removed, merged into `lost` with at most two neighbours.
+    fn on_data_lost_w(&mut self, off: u64, len: u64, fin: bool) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            !is_reset(old(self).state()) && len > 0 ==> old(self).in_flight(off, len),
+        ensures
+            final(self).td == old(self).td,
+            final(self).td_w == old(self).td_w,
+            final(self).wf(),
+            final(self).buffered_spec() <= old(self).buffered_spec(),
+            final(self).held_spec() <= old(self).held_spec(),
+            final(self).state() == old(self).state(),
+            final(self).all_written() == old(self).all_written(),
+            final(self).fin_written_spec() == old(self).fin_written_spec(),
+            final(self).sent_end() == old(self).sent_end(),
+            final(self).max() == old(self).max(),
+            final(self).reset_spec() == old(self).reset_spec(),
+            final(self).pending_reset() == old(self).pending_reset(),
+            final(self).acked_base_spec() == old(self).acked_base_spec(),
+            (no_data(old(self).state()) || old(self).state() is Ready)
+                ==> *final(self) == *old(self),
+            final(self).flush_point() == old(self).flush_point(),
+            len > 0 && (old(self).state() is Send || old(self).state() is DataSent) && old(self).in_flight(off, len)
+                ==> final(self).flight_spec() == old(self).flight_spec().remove((off, (off + len) as u64)),
+            len > 0 && !old(self).in_flight(off, len) ==> final(self).flight_spec() == old(self).flight_spec()
+                && final(self).ranges_held() == old(self).ranges_held() && final(self).state() == old(self).state()
+                && final(self).acked_base_spec() == old(self).acked_base_spec(),
+            len == 0 ==> final(self).flight_spec() == old(self).flight_spec(),
+            r@ <= c_ss1() * (old(self).ht() + 1) + c_ss2() * MAX_FLUSH,
+    {
+        let ghost mut work: nat = 0;
         match self.state {
             SendState::Send | SendState::DataSent => {},
-            _ => return,
+            _ => return Ghost(work),
         }
-        let ab = self.acked_base;
-        let se = self.sent_end;
-        let e = clamp_end(off, len, se);
-        let s = if off > ab {
-            off
-        } else {
-            ab
-        };
-        if s < e {
-            range_insert(&mut self.lost, s, e, Ghost(ab), Ghost(se));
+        if len > 0 {
+            let ghost s0 = *self;
+            proof {
+                assert(c_rs() == 100 && c_ss1() == 400 && c_ss2() == 10 && crate::avl::c_free() == 1);
+                assert(s0.flight.ht() <= s0.ht() && s0.acked.ht() <= s0.ht() && s0.lost.ht() <= s0.ht());
+                self.flight.lemma_wf();
+                self.lost.lemma_wf();
+                self.acked.lemma_wf();
+            }
+            // The piece is in flight (the requires): `take` finds it, so no miss branch.
+            let (_hit, Ghost(c1)) = self.flight.take_piece(off, off + len);
+            proof {
+                work = work + c1;
+                assert(_hit);
+            }
+            proof {
+                lemma_piece_free(s0.acked@, s0.lost@, s0.flight@, s0.open_slots(), s0.acked_base, s0.sent_end, off, (
+                off + len) as u64);
+            }
+            let ((_am, _bm), Ghost(c2)) = self.lost.add(off, off + len);
+            proof {
+                work = work + c2;
+                lemma_lose(
+                    s0.acked@,
+                    s0.lost@,
+                    self.lost@,
+                    s0.flight@,
+                    self.flight@,
+                    s0.open_slots(),
+                    s0.acked_base,
+                    s0.sent_end,
+                    off,
+                    (off + len) as u64,
+                    _am,
+                    _bm,
+                );
+                self.lost.lemma_wf();
+                self.flight.lemma_wf();
+                lemma_parts_bound(self.acked@, self.lost@, self.flight@, self.open_slots(), self.acked_base, self.sent_end);
+                self.flight@.to_set_ensures();
+                s0.flight@.to_set_ensures();
+                assert(self.flight_spec() =~= s0.flight_spec().remove((off, (off + len) as u64)));
+            }
         }
         if fin && !self.fin_acked {
             if let SendState::DataSent = self.state {
                 self.fin_lost = true;
             }
         }
+        Ghost(work)
     }
 }
 
 } // verus!
 
 impl SendStream {
-    /// Test support: the send buffer's allocated capacity. Verus models `Vec` length, not
-    /// capacity, so capacity release is checked by test only (TRUSTED.md).
+    /// Test support: the send queue's allocated capacity, both buffers while it migrates.
     #[doc(hidden)]
     pub fn buf_capacity(&self) -> usize {
-        self.buf.capacity()
+        let (a, b) = self.buf.caps();
+        a + b
     }
 
-    /// Test support: the acked and lost range lists' lengths.
+    /// Test support: the acked and lost ranges and the pieces in flight.
     #[doc(hidden)]
-    pub fn range_counts(&self) -> (usize, usize) {
-        (self.acked.len(), self.lost.len())
+    pub fn range_sets(&self) -> (Vec<(u64, u64)>, Vec<(u64, u64)>, Vec<(u64, u64)>) {
+        (self.acked.to_vec(), self.lost.to_vec(), self.flight.to_vec())
     }
 }

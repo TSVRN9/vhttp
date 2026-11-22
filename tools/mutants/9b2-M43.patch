@@ -1,0 +1,14 @@
+diff --git a/crates/quic/src/crypto_count.rs b/crates/quic/src/crypto_count.rs
+index 58ad4ac..cb18b5b 100644
+--- a/crates/quic/src/crypto_count.rs
++++ b/crates/quic/src/crypto_count.rs
+@@ -309,7 +309,8 @@ pub open spec fn frame_bytes(f: SpecFrame) -> nat {
+ 
+ /// One frame's load: its type byte and its data.
+ pub open spec fn frame_load(f: SpecFrame) -> nat {
+-    1 + frame_bytes(f)
++    // Mutant 9b2-M43: a frame's type byte is not counted.
++    frame_bytes(f)
+ }
+ 
+ /// The frames' load.

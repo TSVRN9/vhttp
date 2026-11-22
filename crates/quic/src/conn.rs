@@ -3,7 +3,8 @@
 //! decrypted packets, datagram sizes, times and randomness, and the TLS calls below.
 //!
 //! Caller obligations, which `Connection` cannot state as `requires`:
-//! - Drain `poll_stream_events` after every `on_datagram`: `events` is bounded only by that.
+//! - Drain `poll_stream_events` after every `on_datagram` and every `backlog_step` (its `Streams::deliver_some`
+//!   hands over at most `B_PUMP` bytes per call, D13): `events` is bounded only by that.
 //!   `H3Server::pump` discharges this; 3e drives `Connection` before any stream exists.
 //! - After `on_timeout(now)`, poll `poll_transmit` to None before sleeping until `next_timeout`:
 //!   `settled_later` proves that timer is then later than `now`, so the sleep cannot spin. That the
@@ -22,12 +23,19 @@
 //! `odcid`, `PER_CONN` table entries, and `apply(Add)` fails only on a key collision.
 use vstd::prelude::*;
 use vstd::slice::{slice_subrange, slice_to_vec};
+// Used only in ghost code, which a plain `cargo build` erases.
+#[allow(unused_imports)]
+use vstd::multiset::Multiset;
 
 use crate::ack::*;
 use crate::ack_track::*;
 use crate::cid::*;
 use crate::codes::*;
+use byteq::capvec::CapVec;
+use byteq::queue::MAX_QUEUE;
 use crate::crypto_stream::*;
+#[allow(unused_imports)]
+use crate::crypto_count::*;
 use crate::datagram::*;
 use crate::frame::*;
 use crate::handshake::*;
@@ -41,6 +49,11 @@ use crate::route::*;
 use crate::send_stream::*;
 use crate::sent::*;
 use crate::streams::*;
+// Used only in contracts, which a plain `cargo build` erases.
+#[allow(unused_imports)]
+use crate::idq::IDQ_CAP;
+#[allow(unused_imports)]
+use crate::ring::*;
 use crate::tp::*;
 // Used only in ghost code, which a plain `cargo build` erases.
 #[allow(unused_imports)]
@@ -50,11 +63,207 @@ use wire::varint::*;
 
 verus! {
 
+broadcast use crate::crx::lemma_crx_ok_closed;
+
 /// The randomness each call that needs it takes: `rand[0..96]` is four 24-byte CID slices (CID
 /// and reset token), `rand[96..128]` four 8-byte PATH_CHALLENGE slices, `rand[128]` the spin bit.
 pub const RAND_LEN: usize = 129;
 
 pub const H3_ALPN: [u8; 2] = *b"h3";
+
+/// The budget one `pump_backlog` call gives each kind of backlog, each charged at its kind's rate: CRYPTO bytes handed
+/// to TLS, STREAM bytes delivered from the queue's head, that head's send-side teardown slot reaped, and the teardown
+/// slots freed (`backlog_step`: `B_PUMP + c_dsome()` in all).
+pub const B_PUMP: u64 = 4096;
+
+/// The receive pipeline's cost per unit of load (9b2 Task 10d; `crypto_count::plains_load`: one per packet and per
+/// frame, plus each CRYPTO or STREAM data byte, at most the datagram's length). The largest cost of one unit is an ACK
+/// frame's removals (`c_ack()` = 199,143); a CRYPTO frame costs at most `10·d + 16,078` (`CryptoStream::on_crypto_c`),
+/// a stream-layer frame `c_srx` (at most `26·d + 6,000`), a packet's `validate_hs_path` one retire (1,654). Loose for
+/// every frame kind but the ACK: a per-datagram removal bound would tighten it (carryover cost-9b2-loose-unit, 9b4).
+pub open spec fn c_unit() -> nat {
+    200_000
+}
+
+/// What `on_datagram` frees of what it is handed (9b2 Task 10d fix round 2: frees are charged where the values are
+/// dropped): per packet its four buffers (`dcid`, `scid`, `token`, the `frames` vector) and two per frame (its one
+/// heap buffer, at most: CRYPTO or STREAM data, an ACK's ranges, a CID, a close reason, and one spare). At most four
+/// per unit of load (`lemma_pdrop`).
+pub open spec fn c_pdrop(ps: Seq<SpecPlain>) -> nat
+    decreases ps.len(),
+{
+    if ps.len() == 0 {
+        0
+    } else {
+        c_pdrop(ps.drop_last()) + 4 + 2 * ps.last().frames.len()
+    }
+}
+
+/// `on_datagram`'s fixed drops and copy when it is handed a packet or an error header (with neither, it frees and
+/// copies nothing): the `packets` vector, the error header's four buffers, and the first packet's DCID (`first`: at
+/// most `MAX_CID_LEN` = 20 bytes copied into one buffer, allocated and freed).
+pub open spec fn c_dgfix() -> nat {
+    1 + 4 + 22
+}
+
+/// A packet drops at most four per unit of its load: it loads one, and each frame at least one.
+proof fn lemma_pdrop(ps: Seq<SpecPlain>)
+    ensures
+        c_pdrop(ps) <= 4 * plains_load(ps),
+    decreases ps.len(),
+{
+    if ps.len() > 0 {
+        lemma_pdrop(ps.drop_last());
+        lemma_frames_load_ge(ps.last().frames);
+    }
+}
+
+/// Each frame loads at least one.
+proof fn lemma_frames_load_ge(fs: Seq<SpecFrame>)
+    ensures
+        fs.len() <= frames_load(fs),
+    decreases fs.len(),
+{
+    if fs.len() > 0 {
+        lemma_frames_load_ge(fs.drop_last());
+    }
+}
+
+/// `on_datagram`'s bound over a load: `c_unit()` per unit for the work, four per unit for the drops (`c_pdrop`), and
+/// the fixed drops and copy (`c_dgfix`).
+pub open spec fn c_dgram(load: nat) -> nat {
+    c_unit() * load + 4 * load + c_dgfix()
+}
+
+/// The receive pipeline's bound for a datagram of `n` bytes: `c_dgram(n)`, so `c_unit() + 4` per byte and
+/// `c_dgfix()`. Closed, so callers outside this module reason with `lemma_pipe_le` and `lemma_pipe_mono` only (a
+/// product with `c_unit()` slows their proofs).
+pub closed spec fn c_pipe(n: nat) -> nat {
+    c_dgram(n)
+}
+
+/// A cost within `c_dgram` of a load within `n` bytes is within `c_pipe(n)`.
+pub proof fn lemma_pipe_le(c: nat, load: nat, n: nat)
+    requires
+        c <= c_dgram(load),
+        load <= n,
+    ensures
+        c <= c_pipe(n),
+{
+    assert(c_unit() * load + 4 * load <= c_unit() * n + 4 * n) by (nonlinear_arith)
+        requires
+            load <= n,
+    ;
+}
+
+/// `c_pipe` grows with the bytes.
+pub proof fn lemma_pipe_mono(a: nat, b: nat)
+    requires
+        a <= b,
+    ensures
+        c_pipe(a) <= c_pipe(b),
+{
+    assert(c_unit() * a + 4 * a <= c_unit() * b + 4 * b) by (nonlinear_arith)
+        requires
+            a <= b,
+    ;
+}
+
+/// An ACK frame's stream removals (`Streams::gc` through `on_frame_acked`): no entry is added while one ACK is
+/// processed, so at most every entry once.
+pub open spec fn c_ack() -> nat {
+    max_entries() * c_gc()
+}
+
+/// Each frame's cost is within `c_unit()` per unit of its load: a CRYPTO frame's (`on_crypto_c`), a stream-layer
+/// frame's (`c_srx`) and an ACK frame's (`c_ack`).
+proof fn lemma_frame_unit(f: SpecFrame)
+    ensures
+        f matches SpecFrame::Crypto { data, .. } ==> 10 * data.len() + 16078 <= c_unit() * frame_load(f),
+        is_stream_layer_frame(f) ==> c_srx(f) <= c_unit() * frame_load(f),
+        c_ack() <= c_unit() * frame_load(f),
+        crate::avl::c_join2() * 127 + 1 + c_sfree() <= c_unit(),
+{
+    let b = frame_bytes(f);
+    assert(c_unit() * (1 + b) == 200_000 + 200_000 * b) by (nonlinear_arith)
+        requires
+            c_unit() == 200_000,
+    ;
+    assert(c_gc() == 981) by (compute_only);
+    if let SpecFrame::Stream { data, .. } = f {
+        let d = data.len();
+        let q = d / (PAGE as nat);
+        assert(256 * q <= d) by {
+            vstd::arithmetic::div_mod::lemma_fundamental_div_mod(d as int, 256);
+        }
+        assert(c_feed(f) == 9 * (d + 512) + 258 + 16 * (d + q + 2) + 1);
+        assert(c_srx(f) == c_feed(f) + c_gc());
+        assert(c_srx(f) <= 26 * d + 6000);
+    }
+}
+
+/// Charges against removals add up: `(n0 − n1)` removals then `(n1 − n2)` more are `(n0 − n2)`.
+proof fn lemma_tele(w: nat, c: nat, n0: int, n1: int, n2: int)
+    requires
+        w <= (n0 - n1) * c_gc(),
+        c <= (n1 - n2) * c_gc(),
+    ensures
+        w + c <= (n0 - n2) * c_gc(),
+{
+    assert((n0 - n1) * c_gc() + (n1 - n2) * c_gc() == (n0 - n2) * c_gc()) by (nonlinear_arith);
+}
+
+/// A loop's charge: `c_unit()` per unit of load so far, one more step's within its own load, and the prefix within the
+/// whole.
+proof fn lemma_unit_step(work: nat, c: nat, before: nat, step: nat, all: nat, after: nat)
+    requires
+        work >= c,
+        work - c <= c_unit() * before,
+        c <= c_unit() * step,
+        after == before + step,
+        after <= all,
+    ensures
+        work <= c_unit() * after,
+        work <= c_unit() * all,
+{
+    assert(c_unit() * before + c_unit() * step == c_unit() * after) by (nonlinear_arith)
+        requires
+            after == before + step,
+    ;
+    assert(c_unit() * after <= c_unit() * all) by (nonlinear_arith)
+        requires
+            after <= all,
+    ;
+}
+
+/// `backlog_step`'s STREAM half (`Streams::deliver_some` with `B_PUMP`): the delivery, the reaping of the head's
+/// sending part's teardown slot (its own `B_PUMP`, D10 (e)), the id lookup and the entry's removal, and its buffers
+/// freed.
+pub open spec fn c_dsome() -> nat {
+    c_rd() * (B_PUMP as nat + B_PUMP as nat / (PAGE as nat) + 2) + B_PUMP as nat + 2 * max_entries() + 3 + c_rfree()
+        + c_sfree()
+}
+
+/// The most `Connection::rx_measure` reaches (`lemma_rx_measure`): a full stream queue of windows, every sending part's
+/// weighted nodes (live or dead), the open weight, and the CRYPTO send contexts' nodes under the queue's bound.
+pub open spec fn rx_cap() -> nat {
+    rx_cap_q() + rx_cap_d() + max_entries() + 1 + 2 * rx_cap_c()
+}
+
+/// A full stream queue of windows, and every live sending part's weighted nodes.
+pub open spec fn rx_cap_q() -> nat {
+    (IDQ_CAP * (MAX_RECV_WINDOW + 1)) as nat
+}
+
+/// The dead streams' measure (`DeadStreams::lemma_measure`), which bounds the live parts' weight too.
+pub open spec fn rx_cap_d() -> nat {
+    (max_entries() * (1 + 2058 * kw()) + 1) as nat
+}
+
+/// A CRYPTO send context's weighted nodes (`SendStream::lemma_weight_max`).
+pub open spec fn rx_cap_c() -> nat {
+    3 * ((byteq::queue::MAX_QUEUE as nat) / (crate::ranges::FLOOR as nat) + crate::ranges::MAX_FLUSH as nat)
+}
 
 pub open spec fn space_idx(k: PacketKind) -> int {
     match k {
@@ -181,6 +390,893 @@ pub open spec fn reason_cap(r: Seq<u8>) -> Seq<u8> {
 }
 
 // =============================================================================
+// Pieces in flight (D10 (b))
+// =============================================================================
+
+/// Per space, the pieces polled and not yet recorded, or taken with their record and not yet reported: empty between
+/// pub calls (`settled`), so it is ghost and bounded by one call (D10 (b); not `polled`, P8's ghost).
+pub ghost struct PendPieces {
+    pub i: Multiset<PieceKey>,
+    pub h: Multiset<PieceKey>,
+    pub o: Multiset<PieceKey>,
+}
+
+pub open spec fn pend_empty() -> PendPieces {
+    PendPieces { i: Multiset::empty(), h: Multiset::empty(), o: Multiset::empty() }
+}
+
+pub open spec fn pend_of(p: PendPieces, k: PacketKind) -> Multiset<PieceKey> {
+    match k {
+        PacketKind::Initial => p.i,
+        PacketKind::Handshake => p.h,
+        PacketKind::OneRtt => p.o,
+    }
+}
+
+/// Every space's `pend` but `k`'s as in `p0`.
+pub open spec fn pend_kept_but(p0: PendPieces, p1: PendPieces, k: PacketKind) -> bool {
+    &&& !(k is Initial) ==> p1.i == p0.i
+    &&& !(k is Handshake) ==> p1.h == p0.h
+    &&& !(k is OneRtt) ==> p1.o == p0.o
+}
+
+/// `a` and `b` together (`Multiset::add`, named apart from the byteq cost fns the cost gate matches by `.add(`).
+pub open spec fn msum(a: Multiset<PieceKey>, b: Multiset<PieceKey>) -> Multiset<PieceKey> {
+    a.add(b)
+}
+
+pub open spec fn pend_with(p: PendPieces, k: PacketKind, m: Multiset<PieceKey>) -> PendPieces {
+    match k {
+        PacketKind::Initial => PendPieces { i: m, ..p },
+        PacketKind::Handshake => PendPieces { h: m, ..p },
+        PacketKind::OneRtt => PendPieces { o: m, ..p },
+    }
+}
+
+/// The pieces of every record's frames, counted.
+#[verifier::opaque]
+pub open spec fn rec_pieces(rs: Seq<SentPacket>) -> Multiset<PieceKey>
+    decreases rs.len(),
+{
+    if rs.len() == 0 {
+        Multiset::empty()
+    } else {
+        rec_pieces(rs.drop_last()).add(frame_pieces(rs.last()@.frames))
+    }
+}
+
+/// A CRYPTO space: its pieces, counted, are exactly `f`; no STREAM or out-of-range piece.
+pub open spec fn crypto_exact(m: Multiset<PieceKey>, f: Set<(u64, u64)>) -> bool {
+    &&& forall|p: (u64, u64)| p != bad_piece() ==> #[trigger] m.count((None, p)) == ind(f, p)
+    &&& forall|k: Option<u64>, p: (u64, u64)| k is Some || p == bad_piece() ==> #[trigger] m.count((k, p)) == 0
+}
+
+/// 1-RTT: per stream not reset, its pieces, counted, are exactly its flight; none out of range; before the peer's
+/// transport parameters, no streams and no STREAM piece.
+pub open spec fn stream_exact(m: Multiset<PieceKey>, st: Option<TxView>, no_peer_tp: bool) -> bool {
+    &&& forall|k: Option<u64>| #[trigger] m.count((k, bad_piece())) == 0
+    &&& st matches Some(v) ==> forall|id: u64, p: (u64, u64)|
+        !v(id).0 && p != bad_piece() ==> #[trigger] m.count((Some(id), p)) == ind(v(id).1, p)
+    &&& no_peer_tp ==> st is None && forall|id: u64, p: (u64, u64)| #[trigger] m.count((Some(id), p)) == 0
+}
+
+pub open spec fn tx_view_of(s: Option<Streams>) -> Option<TxView> {
+    match s {
+        Some(s) => Some(s.tx_view()),
+        None => None,
+    }
+}
+
+/// D10 (b): the records' pieces plus `pend`, per space, are the pieces in flight, each once (spec D10 (b);
+/// re-review F1, F3). Over views, so a fn that leaves them equal keeps it with no lemma.
+#[verifier::opaque]
+pub open spec fn pieces_ok(
+    ri: Seq<SentPacket>,
+    rh: Seq<SentPacket>,
+    r1: Seq<SentPacket>,
+    fi: Set<(u64, u64)>,
+    fh: Set<(u64, u64)>,
+    st: Option<TxView>,
+    no_peer_tp: bool,
+    pend: PendPieces,
+) -> bool {
+    &&& crypto_exact(rec_pieces(ri).add(pend.i), fi)
+    &&& crypto_exact(rec_pieces(rh).add(pend.h), fh)
+    &&& stream_exact(rec_pieces(r1).add(pend.o), st, no_peer_tp)
+}
+
+/// The records of space `k` among the three.
+pub open spec fn recs_of(ri: Seq<SentPacket>, rh: Seq<SentPacket>, r1: Seq<SentPacket>, k: PacketKind) -> Seq<
+    SentPacket,
+> {
+    match k {
+        PacketKind::Initial => ri,
+        PacketKind::Handshake => rh,
+        PacketKind::OneRtt => r1,
+    }
+}
+
+/// The piece of a CRYPTO frame with data, sent in space `k` (Initial or Handshake).
+pub open spec fn crypto_piece_of(f: SpecFrame) -> Option<(u64, u64)> {
+    match f {
+        SpecFrame::Crypto { offset, data } => if data.len() > 0 {
+            Some((offset, (offset + data.len()) as u64))
+        } else {
+            None
+        },
+        _ => None,
+    }
+}
+
+/// A new connection: no records, no flight, no streams, nothing pending.
+#[verifier::spinoff_prover]
+proof fn lemma_pieces_init()
+    ensures
+        pieces_ok(
+            Seq::empty(),
+            Seq::empty(),
+            Seq::empty(),
+            Set::empty(),
+            Set::empty(),
+            None,
+            true,
+            pend_empty(),
+        ),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    reveal(pieces_ok);
+    reveal(rec_pieces);
+    assert(rec_pieces(Seq::<SentPacket>::empty()).add(Multiset::<PieceKey>::empty()) =~= Multiset::<PieceKey>::empty());
+}
+
+/// In the poll window, space `k`'s `pend` grew from `m0` to `m1` by exactly the pieces the frames grew by.
+pub open spec fn tracks(sf0: Seq<SpecFrame>, sf1: Seq<SpecFrame>, m0: Multiset<PieceKey>, m1: Multiset<PieceKey>) -> bool {
+    frame_pieces(sf1).add(m0) == frame_pieces(sf0).add(m1)
+}
+
+/// The frames a record keeps (`record_frames`): the retransmittable ones, in order.
+pub open spec fn retained(sf: Seq<SpecFrame>) -> Seq<SpecFrame>
+    decreases sf.len(),
+{
+    if sf.len() == 0 {
+        sf
+    } else if retransmittable(sf.last()) {
+        retained(sf.drop_last()).push(sf.last())
+    } else {
+        retained(sf.drop_last())
+    }
+}
+
+/// One frame appended in the poll window: `pend` gains its piece, if it has one.
+#[verifier::spinoff_prover]
+proof fn lemma_tracks_push(sf: Seq<SpecFrame>, g: SpecFrame, m0: Multiset<PieceKey>)
+    ensures
+        tracks(sf, sf.push(g), m0, m0.add(ms_of(piece_of(g)))),
+        piece_of(g) is None ==> m0.add(ms_of(piece_of(g))) == m0,
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    lemma_frame_pieces_push(sf, g);
+    assert(frame_pieces(sf.push(g)).add(m0) =~= frame_pieces(sf).add(m0.add(ms_of(piece_of(g)))));
+    assert(m0.add(Multiset::<PieceKey>::empty()) =~= m0);
+}
+
+/// Frames appended in the poll window (`poll_frames`): `pend` gains their pieces.
+#[verifier::spinoff_prover]
+proof fn lemma_tracks_append(sf: Seq<SpecFrame>, new: Seq<SpecFrame>, m0: Multiset<PieceKey>)
+    ensures
+        tracks(sf, sf + new, m0, m0.add(frame_pieces(new))),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    lemma_frame_pieces_add(sf, new);
+    assert(frame_pieces(sf + new).add(m0) =~= frame_pieces(sf).add(m0.add(frame_pieces(new))));
+}
+
+/// The report loop's step: `pend` is the pieces of frames `j..` and `rest`; frame `j`'s piece is in it, and
+/// leaving it leaves frames `j + 1..` and `rest`.
+#[verifier::spinoff_prover]
+proof fn lemma_pend_step(sf: Seq<SpecFrame>, j: int, rest: Multiset<PieceKey>)
+    requires
+        0 <= j < sf.len(),
+    ensures
+        piece_of(sf[j]) matches Some(key) ==> frame_pieces(sf.subrange(j, sf.len() as int)).add(rest).count(key) > 0,
+        frame_pieces(sf.subrange(j, sf.len() as int)).add(rest).sub(ms_of(piece_of(sf[j]))) == frame_pieces(
+            sf.subrange(j + 1, sf.len() as int),
+        ).add(rest),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    lemma_frame_pieces_from(sf, j);
+    assert(frame_pieces(sf.subrange(j, sf.len() as int)).add(rest).sub(ms_of(piece_of(sf[j]))) =~= frame_pieces(
+        sf.subrange(j + 1, sf.len() as int),
+    ).add(rest));
+}
+
+/// The record loop's step: `pend` is `base` and the pieces of records `i..`; record `i`'s frames, then the rest.
+#[verifier::spinoff_prover]
+proof fn lemma_pend_rec_step(rs: Seq<SentPacket>, i: int, base: Multiset<PieceKey>)
+    requires
+        0 <= i < rs.len(),
+    ensures
+        base.add(rec_pieces(rs.subrange(i, rs.len() as int))) == frame_pieces(rs[i]@.frames).add(
+            base.add(rec_pieces(rs.subrange(i + 1, rs.len() as int))),
+        ),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    lemma_rec_pieces_from(rs, i);
+    assert(base.add(rec_pieces(rs.subrange(i, rs.len() as int))) =~= frame_pieces(rs[i]@.frames).add(
+        base.add(rec_pieces(rs.subrange(i + 1, rs.len() as int))),
+    ));
+}
+
+/// The loops' ends: nothing left but `base`.
+#[verifier::spinoff_prover]
+proof fn lemma_pend_end(sf: Seq<SpecFrame>, rs: Seq<SentPacket>, base: Multiset<PieceKey>)
+    ensures
+        frame_pieces(sf.subrange(sf.len() as int, sf.len() as int)).add(base) == base,
+        base.add(rec_pieces(rs.subrange(rs.len() as int, rs.len() as int))) == base,
+        rec_pieces(rs) == rec_pieces(rs).add(rec_pieces(Seq::<SentPacket>::empty())),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    reveal(frame_pieces);
+    reveal(rec_pieces);
+    assert(sf.subrange(sf.len() as int, sf.len() as int) =~= Seq::<SpecFrame>::empty());
+    assert(rs.subrange(rs.len() as int, rs.len() as int) =~= Seq::<SentPacket>::empty());
+    assert(frame_pieces(Seq::<SpecFrame>::empty()).add(base) =~= base);
+    assert(base.add(rec_pieces(Seq::<SentPacket>::empty())) =~= base);
+    assert(rec_pieces(rs).add(rec_pieces(Seq::<SentPacket>::empty())) =~= rec_pieces(rs));
+}
+
+/// A record of a packet whose frames' pieces are space `k`'s whole `pend`: `pieces_ok` holds after the push, and
+/// nothing is pending (`commit_record`).
+#[verifier::spinoff_prover]
+proof fn lemma_pieces_record(
+    ri: Seq<SentPacket>,
+    rh: Seq<SentPacket>,
+    r1: Seq<SentPacket>,
+    fi: Set<(u64, u64)>,
+    fh: Set<(u64, u64)>,
+    st: Option<TxView>,
+    np: bool,
+    pend: PendPieces,
+    k: PacketKind,
+    rec: SentPacket,
+    frames: Seq<SpecFrame>,
+)
+    requires
+        pieces_ok(ri, rh, r1, fi, fh, st, np, pend),
+        rec@.frames == retained(frames),
+        pend == pend_with(pend_empty(), k, frame_pieces(frames)),
+    ensures
+        pieces_ok(
+            if k is Initial { ri.push(rec) } else { ri },
+            if k is Handshake { rh.push(rec) } else { rh },
+            if k is OneRtt { r1.push(rec) } else { r1 },
+            fi,
+            fh,
+            st,
+            np,
+            pend_empty(),
+        ),
+{
+    lemma_retained_pieces(frames);
+    lemma_pieces_commit(ri, rh, r1, fi, fh, st, np, pend, k, rec);
+    assert(pend_with(pend, k, Multiset::empty()) == pend_empty());
+}
+
+/// `pend` is empty but for space `k`'s; with that empty too, it is settled.
+#[verifier::spinoff_prover]
+proof fn lemma_pend_settled(p: PendPieces, k: PacketKind)
+    ensures
+        pend_kept_but(pend_empty(), p, k) && pend_of(p, k) == Multiset::<PieceKey>::empty() ==> p == pend_empty(),
+        p == pend_empty() ==> pend_kept_but(pend_empty(), p, k) && pend_of(p, k) == Multiset::<PieceKey>::empty(),
+{
+}
+
+/// `p1` is `p0` but for space `k`'s.
+#[verifier::spinoff_prover]
+proof fn lemma_pend_kept(p0: PendPieces, p1: PendPieces, k: PacketKind)
+    requires
+        pend_kept_but(p0, p1, k),
+    ensures
+        p1 == pend_with(p0, k, pend_of(p1, k)),
+        pend_of(p1, k) == pend_of(p0, k) ==> p1 == p0,
+{
+}
+
+/// A frame without a piece leaves the pieces as they were.
+#[verifier::spinoff_prover]
+proof fn lemma_pieces_push_none(sf: Seq<SpecFrame>, f: SpecFrame)
+    requires
+        piece_of(f) is None,
+    ensures
+        frame_pieces(sf.push(f)) == frame_pieces(sf),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    lemma_frame_pieces_push(sf, f);
+    assert(frame_pieces(sf).add(Multiset::<PieceKey>::empty()) =~= frame_pieces(sf));
+}
+
+#[verifier::spinoff_prover]
+proof fn lemma_tracks_trans(
+    a: Seq<SpecFrame>,
+    b: Seq<SpecFrame>,
+    c: Seq<SpecFrame>,
+    m0: Multiset<PieceKey>,
+    m1: Multiset<PieceKey>,
+    m2: Multiset<PieceKey>,
+)
+    requires
+        tracks(a, b, m0, m1),
+        tracks(b, c, m1, m2),
+    ensures
+        tracks(a, c, m0, m2),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    assert forall|x: PieceKey| #[trigger] frame_pieces(c).add(m0).count(x) == frame_pieces(a).add(m2).count(x) by {
+        assert(frame_pieces(b).add(m0).count(x) == frame_pieces(a).add(m1).count(x));
+        assert(frame_pieces(c).add(m1).count(x) == frame_pieces(b).add(m2).count(x));
+    }
+    assert(frame_pieces(c).add(m0) =~= frame_pieces(a).add(m2));
+}
+
+/// `tracks` from a start with no pieces and an empty `pend`: `pend` is the frames' pieces.
+#[verifier::spinoff_prover]
+proof fn lemma_tracks_from_empty(a: Seq<SpecFrame>, b: Seq<SpecFrame>, m1: Multiset<PieceKey>)
+    requires
+        tracks(a, b, Multiset::empty(), m1),
+        frame_pieces(a) == Multiset::<PieceKey>::empty(),
+    ensures
+        m1 == frame_pieces(b),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    assert forall|x: PieceKey| #[trigger] m1.count(x) == frame_pieces(b).count(x) by {
+        assert(frame_pieces(b).add(Multiset::<PieceKey>::empty()).count(x) == frame_pieces(a).add(m1).count(x));
+    }
+    assert(m1 =~= frame_pieces(b));
+}
+
+/// A record's frames have the packet's pieces: the frames it drops have none.
+#[verifier::spinoff_prover]
+proof fn lemma_retained_pieces(sf: Seq<SpecFrame>)
+    ensures
+        frame_pieces(retained(sf)) == frame_pieces(sf),
+    decreases sf.len(),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    if sf.len() > 0 {
+        lemma_retained_pieces(sf.drop_last());
+        lemma_frame_pieces_push(sf.drop_last(), sf.last());
+        assert(sf.drop_last().push(sf.last()) =~= sf);
+        if retransmittable(sf.last()) {
+            lemma_frame_pieces_push(retained(sf.drop_last()), sf.last());
+        } else {
+            assert(piece_of(sf.last()) is None);
+            assert(frame_pieces(sf.drop_last()).add(Multiset::<PieceKey>::empty()) =~= frame_pieces(sf.drop_last()));
+        }
+    } else {
+        reveal(frame_pieces);
+    }
+}
+
+#[verifier::spinoff_prover]
+proof fn lemma_rec_pieces_push(rs: Seq<SentPacket>, r: SentPacket)
+    ensures
+        rec_pieces(rs.push(r)) == rec_pieces(rs).add(frame_pieces(r@.frames)),
+{
+    reveal(rec_pieces);
+    assert(rs.push(r).drop_last() =~= rs);
+}
+
+#[verifier::spinoff_prover]
+proof fn lemma_rec_pieces_add(a: Seq<SentPacket>, b: Seq<SentPacket>)
+    ensures
+        rec_pieces(a + b) == rec_pieces(a).add(rec_pieces(b)),
+    decreases b.len(),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    reveal(rec_pieces);
+    if b.len() == 0 {
+        assert(a + b =~= a);
+        assert(rec_pieces(a).add(rec_pieces(b)) =~= rec_pieces(a));
+    } else {
+        lemma_rec_pieces_add(a, b.drop_last());
+        assert((a + b).drop_last() =~= a + b.drop_last());
+        assert((a + b).last() == b.last());
+        assert(rec_pieces(a + b) =~= rec_pieces(a).add(rec_pieces(b)));
+    }
+}
+
+/// The records from `i` on: record `i`'s pieces, then the rest's.
+#[verifier::spinoff_prover]
+proof fn lemma_rec_pieces_from(rs: Seq<SentPacket>, i: int)
+    requires
+        0 <= i < rs.len(),
+    ensures
+        rec_pieces(rs.subrange(i, rs.len() as int)) == frame_pieces(rs[i]@.frames).add(
+            rec_pieces(rs.subrange(i + 1, rs.len() as int)),
+        ),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    let one = seq![rs[i]];
+    lemma_rec_pieces_add(one, rs.subrange(i + 1, rs.len() as int));
+    assert(one + rs.subrange(i + 1, rs.len() as int) =~= rs.subrange(i, rs.len() as int));
+    lemma_rec_pieces_push(Seq::empty(), rs[i]);
+    assert(Seq::<SentPacket>::empty().push(rs[i]) =~= one);
+    reveal(rec_pieces);
+    assert(rec_pieces(Seq::<SentPacket>::empty()) == Multiset::<PieceKey>::empty());
+    assert(rec_pieces(one) =~= frame_pieces(rs[i]@.frames));
+}
+
+/// The frames from `j` on: frame `j`'s piece, then the rest's.
+#[verifier::spinoff_prover]
+proof fn lemma_frame_pieces_from(sf: Seq<SpecFrame>, j: int)
+    requires
+        0 <= j < sf.len(),
+    ensures
+        frame_pieces(sf.subrange(j, sf.len() as int)) == ms_of(piece_of(sf[j])).add(
+            frame_pieces(sf.subrange(j + 1, sf.len() as int)),
+        ),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    let one = seq![sf[j]];
+    lemma_frame_pieces_add(one, sf.subrange(j + 1, sf.len() as int));
+    assert(one + sf.subrange(j + 1, sf.len() as int) =~= sf.subrange(j, sf.len() as int));
+    lemma_frame_pieces_push(Seq::empty(), sf[j]);
+    assert(Seq::<SpecFrame>::empty().push(sf[j]) =~= one);
+    reveal(frame_pieces);
+    assert(frame_pieces(Seq::<SpecFrame>::empty()) == Multiset::<PieceKey>::empty());
+}
+
+/// An ACK's split: the acknowledged records' pieces and the rest's are all of them.
+#[verifier::spinoff_prover]
+proof fn lemma_rec_pieces_split(a: SpecAck, s: Seq<SentPacket>)
+    ensures
+        rec_pieces(s) == rec_pieces(acked_of(a, s)).add(rec_pieces(unacked_of(a, s))),
+    decreases s.len(),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    reveal(rec_pieces);
+    if s.len() == 0 {
+        assert(rec_pieces(s) =~= rec_pieces(acked_of(a, s)).add(rec_pieces(unacked_of(a, s))));
+    } else {
+        lemma_rec_pieces_split(a, s.drop_last());
+        let x = acked_of(a, s.drop_last());
+        let y = unacked_of(a, s.drop_last());
+        if ack_contains_capped(a, s.last().pn) {
+            assert(x.push(s.last()).drop_last() =~= x);
+        } else {
+            assert(y.push(s.last()).drop_last() =~= y);
+        }
+        assert(rec_pieces(s) =~= rec_pieces(acked_of(a, s)).add(rec_pieces(unacked_of(a, s))));
+    }
+}
+
+/// Every piece of `pend` and the records, in `k`'s space, is counted the same: `pieces_ok` carries over.
+#[verifier::spinoff_prover]
+proof fn lemma_pieces_same(
+    ri: Seq<SentPacket>,
+    rh: Seq<SentPacket>,
+    r1: Seq<SentPacket>,
+    fi: Set<(u64, u64)>,
+    fh: Set<(u64, u64)>,
+    st: Option<TxView>,
+    np: bool,
+    pend: PendPieces,
+    k: PacketKind,
+    rk: Seq<SentPacket>,
+    mk: Multiset<PieceKey>,
+)
+    requires
+        pieces_ok(ri, rh, r1, fi, fh, st, np, pend),
+        rec_pieces(rk).add(mk) == rec_pieces(recs_of(ri, rh, r1, k)).add(pend_of(pend, k)),
+    ensures
+        pieces_ok(
+            if k is Initial { rk } else { ri },
+            if k is Handshake { rk } else { rh },
+            if k is OneRtt { rk } else { r1 },
+            fi,
+            fh,
+            st,
+            np,
+            pend_with(pend, k, mk),
+        ),
+{
+    reveal(pieces_ok);
+}
+
+/// A record of space `k`: its pieces leave `pend` for the records (`commit_record`).
+#[verifier::spinoff_prover]
+proof fn lemma_pieces_commit(
+    ri: Seq<SentPacket>,
+    rh: Seq<SentPacket>,
+    r1: Seq<SentPacket>,
+    fi: Set<(u64, u64)>,
+    fh: Set<(u64, u64)>,
+    st: Option<TxView>,
+    np: bool,
+    pend: PendPieces,
+    k: PacketKind,
+    rec: SentPacket,
+)
+    requires
+        pieces_ok(ri, rh, r1, fi, fh, st, np, pend),
+        frame_pieces(rec@.frames) == pend_of(pend, k),
+    ensures
+        pieces_ok(
+            if k is Initial { ri.push(rec) } else { ri },
+            if k is Handshake { rh.push(rec) } else { rh },
+            if k is OneRtt { r1.push(rec) } else { r1 },
+            fi,
+            fh,
+            st,
+            np,
+            pend_with(pend, k, Multiset::empty()),
+        ),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    let rk = recs_of(ri, rh, r1, k).push(rec);
+    lemma_rec_pieces_push(recs_of(ri, rh, r1, k), rec);
+    assert(rec_pieces(rk).add(Multiset::<PieceKey>::empty()) =~= rec_pieces(recs_of(ri, rh, r1, k)).add(
+        pend_of(pend, k),
+    ));
+    lemma_pieces_same(ri, rh, r1, fi, fh, st, np, pend, k, rk, Multiset::empty());
+}
+
+/// Records of space `k` removed in bulk (`on_ack`, `drain_inflight`): their pieces join `pend`.
+#[verifier::spinoff_prover]
+proof fn lemma_pieces_take(
+    ri: Seq<SentPacket>,
+    rh: Seq<SentPacket>,
+    r1: Seq<SentPacket>,
+    fi: Set<(u64, u64)>,
+    fh: Set<(u64, u64)>,
+    st: Option<TxView>,
+    np: bool,
+    pend: PendPieces,
+    k: PacketKind,
+    out: Seq<SentPacket>,
+    rest: Seq<SentPacket>,
+)
+    requires
+        pieces_ok(ri, rh, r1, fi, fh, st, np, pend),
+        rec_pieces(recs_of(ri, rh, r1, k)) == rec_pieces(out).add(rec_pieces(rest)),
+    ensures
+        pieces_ok(
+            if k is Initial { rest } else { ri },
+            if k is Handshake { rest } else { rh },
+            if k is OneRtt { rest } else { r1 },
+            fi,
+            fh,
+            st,
+            np,
+            pend_with(pend, k, pend_of(pend, k).add(rec_pieces(out))),
+        ),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    assert(rec_pieces(rest).add(pend_of(pend, k).add(rec_pieces(out))) =~= rec_pieces(recs_of(ri, rh, r1, k)).add(
+        pend_of(pend, k),
+    ));
+    lemma_pieces_same(ri, rh, r1, fi, fh, st, np, pend, k, rest, pend_of(pend, k).add(rec_pieces(out)));
+}
+
+/// A CRYPTO poll in space `k`: the piece joins that context's flight and `pend`, fresh.
+#[verifier::spinoff_prover]
+proof fn lemma_pieces_poll(
+    ri: Seq<SentPacket>,
+    rh: Seq<SentPacket>,
+    r1: Seq<SentPacket>,
+    fi: Set<(u64, u64)>,
+    fh: Set<(u64, u64)>,
+    st: Option<TxView>,
+    np: bool,
+    pend: PendPieces,
+    k: PacketKind,
+    off: u64,
+    len: nat,
+)
+    requires
+        pieces_ok(ri, rh, r1, fi, fh, st, np, pend),
+        !(k is OneRtt),
+        len > 0,
+        off + len <= VARINT_MAX,
+        !(if k is Initial { fi } else { fh }).contains((off, (off + len) as u64)),
+    ensures
+        pieces_ok(
+            ri,
+            rh,
+            r1,
+            if k is Initial { fi.insert((off, (off + len) as u64)) } else { fi },
+            if k is Handshake { fh.insert((off, (off + len) as u64)) } else { fh },
+            st,
+            np,
+            pend_with(pend, k, pend_of(pend, k).insert((None, (off, (off + len) as u64)))),
+        ),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    reveal(pieces_ok);
+    let p = (off, (off + len) as u64);
+    assert(p != bad_piece());
+    let m = rec_pieces(recs_of(ri, rh, r1, k)).add(pend_of(pend, k));
+    assert(rec_pieces(recs_of(ri, rh, r1, k)).add(pend_of(pend, k).insert((None, p))) =~= m.insert((None, p)));
+}
+
+/// A STREAM poll (`Streams::poll_frames`): `new`'s pieces join `pend`, each stream's flight gains exactly them.
+#[verifier::spinoff_prover]
+proof fn lemma_pieces_poll_stream(
+    ri: Seq<SentPacket>,
+    rh: Seq<SentPacket>,
+    r1: Seq<SentPacket>,
+    fi: Set<(u64, u64)>,
+    fh: Set<(u64, u64)>,
+    s0: Streams,
+    s1: Streams,
+    np: bool,
+    pend: PendPieces,
+    new: Seq<SpecFrame>,
+)
+    requires
+        pieces_ok(ri, rh, r1, fi, fh, Some(s0.tx_view()), np, pend),
+        tx_gained(s0, s1, new),
+        forall|j: u64| #[trigger] s1.send_reset(j) == s0.send_reset(j),
+    ensures
+        pieces_ok(ri, rh, r1, fi, fh, Some(s1.tx_view()), np, PendPieces { o: pend.o.add(frame_pieces(new)), ..pend }),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    reveal(pieces_ok);
+    let m = rec_pieces(r1).add(pend.o);
+    let m2 = rec_pieces(r1).add(pend.o.add(frame_pieces(new)));
+    assert(m2 =~= m.add(frame_pieces(new)));
+    let v0 = s0.tx_view();
+    let v1 = s1.tx_view();
+    assert forall|id: u64, p: (u64, u64)| !v1(id).0 && p != bad_piece() implies #[trigger] m2.count((Some(id), p))
+        == ind(v1(id).1, p) by {
+        assert(s1.send_reset(id) == s0.send_reset(id));
+        assert(m.count((Some(id), p)) == ind(s0.tx_flight(id), p));
+        assert(frame_pieces(new).count((Some(id), p)) + ind(s0.tx_flight(id), p) == ind(s1.tx_flight(id), p));
+    }
+    assert forall|k: Option<u64>| #[trigger] m2.count((k, bad_piece())) == 0 by {
+        assert(m.count((k, bad_piece())) == 0);
+        assert(frame_pieces(new).count((k, bad_piece())) == 0);
+    }
+}
+
+/// Before a report of frame `f` of space `k`, which `pend` holds: what its target's `requires` need.
+#[verifier::spinoff_prover]
+proof fn lemma_pieces_held(
+    ri: Seq<SentPacket>,
+    rh: Seq<SentPacket>,
+    r1: Seq<SentPacket>,
+    fi: Set<(u64, u64)>,
+    fh: Set<(u64, u64)>,
+    s: Option<Streams>,
+    np: bool,
+    pend: PendPieces,
+    k: PacketKind,
+    f: SpecFrame,
+)
+    requires
+        pieces_ok(ri, rh, r1, fi, fh, tx_view_of(s), np, pend),
+        piece_of(f) matches Some(key) ==> pend_of(pend, k).count(key) > 0,
+    ensures
+        !(k is OneRtt) && crypto_piece_of(f) is Some ==> f->Crypto_offset + f->Crypto_data.len() <= VARINT_MAX
+            && (if k is Initial { fi } else { fh }).contains(crypto_piece_of(f)->0),
+        s matches Some(a) ==> piece_in_flight(a, f),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    reveal(pieces_ok);
+    if let Some(key) = piece_of(f) {
+        let m = rec_pieces(recs_of(ri, rh, r1, k)).add(pend_of(pend, k));
+        assert(m.count(key) > 0);
+        assert(m.count((key.0, bad_piece())) == 0);
+        if let SpecFrame::Crypto { offset, data } = f {
+            assert(offset + data.len() <= VARINT_MAX);
+        }
+        if let SpecFrame::Stream { stream_id, offset, data, .. } = f {
+            assert(offset + data.len() <= VARINT_MAX);
+            if let Some(a) = s {
+                if !a.send_reset(stream_id) {
+                    assert(k is OneRtt);
+                    assert(m.count(key) == ind(a.tx_flight(stream_id), key.1));
+                }
+            }
+        }
+    }
+}
+
+/// A reported frame `f` of space `k`: it leaves `pend`; a tracked piece leaves its flight, an orphan's flight is
+/// untouched (re-review F5). `fi2`/`fh2` and `s1` are the contexts and streams after the report.
+#[verifier::spinoff_prover]
+proof fn lemma_pieces_report(
+    ri: Seq<SentPacket>,
+    rh: Seq<SentPacket>,
+    r1: Seq<SentPacket>,
+    fi: Set<(u64, u64)>,
+    fh: Set<(u64, u64)>,
+    s0: Option<Streams>,
+    np: bool,
+    pend: PendPieces,
+    k: PacketKind,
+    f: SpecFrame,
+    fi2: Set<(u64, u64)>,
+    fh2: Set<(u64, u64)>,
+    s1: Option<Streams>,
+)
+    requires
+        pieces_ok(ri, rh, r1, fi, fh, tx_view_of(s0), np, pend),
+        piece_of(f) matches Some(key) ==> pend_of(pend, k).count(key) > 0,
+        k is Initial && crypto_piece_of(f) is Some ==> fi2 == fi.remove(crypto_piece_of(f)->0),
+        !(k is Initial && crypto_piece_of(f) is Some) ==> fi2 == fi,
+        k is Handshake && crypto_piece_of(f) is Some ==> fh2 == fh.remove(crypto_piece_of(f)->0),
+        !(k is Handshake && crypto_piece_of(f) is Some) ==> fh2 == fh,
+        (s0 is Some) == (s1 is Some),
+        s0 matches Some(a) ==> tx_kept_but(a, s1->0, piece_stream(f)) && piece_removed(a, s1->0, f) && forall|j: u64|
+            #[trigger] (s1->0).send_reset(j) == a.send_reset(j),
+    ensures
+        pieces_ok(ri, rh, r1, fi2, fh2, tx_view_of(s1), np, pend_with(pend, k, pend_of(pend, k).sub(ms_of(piece_of(f))))),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    reveal(pieces_ok);
+    let pend2 = pend_with(pend, k, pend_of(pend, k).sub(ms_of(piece_of(f))));
+    let mi = rec_pieces(ri).add(pend.i);
+    let mh = rec_pieces(rh).add(pend.h);
+    let m1 = rec_pieces(r1).add(pend.o);
+    let mi2 = rec_pieces(ri).add(pend2.i);
+    let mh2 = rec_pieces(rh).add(pend2.h);
+    let m12 = rec_pieces(r1).add(pend2.o);
+    assert(mi2 =~= if k is Initial { mi.sub(ms_of(piece_of(f))) } else { mi });
+    assert(mh2 =~= if k is Handshake { mh.sub(ms_of(piece_of(f))) } else { mh });
+    assert(m12 =~= if k is OneRtt { m1.sub(ms_of(piece_of(f))) } else { m1 });
+    if let Some(key) = piece_of(f) {
+        let m = rec_pieces(recs_of(ri, rh, r1, k)).add(pend_of(pend, k));
+        assert(m.count(key) > 0);
+        assert(m.count((key.0, bad_piece())) == 0);
+        if let SpecFrame::Stream { stream_id, offset, data, .. } = f {
+            assert(k is OneRtt);
+            if let Some(a) = s0 {
+                let b = s1->0;
+                if !a.send_reset(stream_id) {
+                    assert(m.count(key) == ind(a.tx_flight(stream_id), key.1));
+                }
+                assert forall|id: u64, p: (u64, u64)| !b.tx_view()(id).0 && p != bad_piece() implies #[trigger] m12.count(
+                    (Some(id), p),
+                ) == ind(b.tx_view()(id).1, p) by {
+                    assert(b.send_reset(id) == a.send_reset(id));
+                    assert(m1.count((Some(id), p)) == ind(a.tx_flight(id), p));
+                }
+            }
+        }
+    }
+    if let Some(a) = s0 {
+        let b = s1->0;
+        if piece_stream(f) is None {
+            assert forall|id: u64, p: (u64, u64)| !b.tx_view()(id).0 && p != bad_piece() implies #[trigger] m12.count(
+                (Some(id), p),
+            ) == ind(b.tx_view()(id).1, p) by {
+                assert(b.send_reset(id) == a.send_reset(id));
+                assert(m1.count((Some(id), p)) == ind(a.tx_flight(id), p));
+                if k is OneRtt {
+                    if let Some(key) = piece_of(f) {
+                        assert(key.0 is None);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A Streams call outside any window: every stream not reset keeps its flight (`tx_kept_but(.., None)`).
+#[verifier::spinoff_prover]
+proof fn lemma_pieces_frame(
+    ri: Seq<SentPacket>,
+    rh: Seq<SentPacket>,
+    r1: Seq<SentPacket>,
+    fi: Set<(u64, u64)>,
+    fh: Set<(u64, u64)>,
+    s0: Streams,
+    s1: Streams,
+    np: bool,
+    pend: PendPieces,
+)
+    requires
+        pieces_ok(ri, rh, r1, fi, fh, Some(s0.tx_view()), np, pend),
+        tx_kept_but(s0, s1, None),
+    ensures
+        pieces_ok(ri, rh, r1, fi, fh, Some(s1.tx_view()), np, pend),
+{
+    reveal(pieces_ok);
+    let m1 = rec_pieces(r1).add(pend.o);
+    assert forall|id: u64, p: (u64, u64)| !s1.tx_view()(id).0 && p != bad_piece() implies #[trigger] m1.count(
+        (Some(id), p),
+    ) == ind(s1.tx_view()(id).1, p) by {
+        assert(s1.send_reset(id) == s0.send_reset(id));
+    }
+}
+
+/// `on_peer_params`: `streams` becomes `Some` of a fresh `Streams` (no flight, no reset) with `peer_tp` known.
+#[verifier::spinoff_prover]
+proof fn lemma_pieces_new(
+    ri: Seq<SentPacket>,
+    rh: Seq<SentPacket>,
+    r1: Seq<SentPacket>,
+    fi: Set<(u64, u64)>,
+    fh: Set<(u64, u64)>,
+    st: Option<TxView>,
+    s: Streams,
+    pend: PendPieces,
+)
+    requires
+        pieces_ok(ri, rh, r1, fi, fh, st, true, pend),
+        forall|id: u64| !#[trigger] s.send_reset(id),
+        forall|id: u64| #[trigger] s.tx_flight(id) == Set::<(u64, u64)>::empty(),
+    ensures
+        st is None,
+        pieces_ok(ri, rh, r1, fi, fh, Some(s.tx_view()), false, pend),
+{
+    reveal(pieces_ok);
+    let m1 = rec_pieces(r1).add(pend.o);
+    assert forall|id: u64, p: (u64, u64)| !s.tx_view()(id).0 && p != bad_piece() implies #[trigger] m1.count(
+        (Some(id), p),
+    ) == ind(s.tx_view()(id).1, p) by {
+        assert(s.tx_flight(id) == Set::<(u64, u64)>::empty());
+    }
+}
+
+/// `streams` dropped (a close), or `peer_tp` known with `streams` already `None`.
+#[verifier::spinoff_prover]
+proof fn lemma_pieces_none(
+    ri: Seq<SentPacket>,
+    rh: Seq<SentPacket>,
+    r1: Seq<SentPacket>,
+    fi: Set<(u64, u64)>,
+    fh: Set<(u64, u64)>,
+    st: Option<TxView>,
+    np: bool,
+    pend: PendPieces,
+)
+    requires
+        pieces_ok(ri, rh, r1, fi, fh, st, np, pend),
+    ensures
+        np ==> st is None,
+        pieces_ok(ri, rh, r1, fi, fh, None, np, pend),
+{
+    reveal(pieces_ok);
+}
+
+/// `discard` of space `k` (Initial or Handshake), at a settled point: its records dropped, its context replaced.
+#[verifier::spinoff_prover]
+proof fn lemma_pieces_drop(
+    ri: Seq<SentPacket>,
+    rh: Seq<SentPacket>,
+    r1: Seq<SentPacket>,
+    fi: Set<(u64, u64)>,
+    fh: Set<(u64, u64)>,
+    st: Option<TxView>,
+    np: bool,
+    pend: PendPieces,
+    k: PacketKind,
+)
+    requires
+        pieces_ok(ri, rh, r1, fi, fh, st, np, pend),
+        !(k is OneRtt),
+        pend_of(pend, k) == Multiset::<PieceKey>::empty(),
+    ensures
+        pieces_ok(
+            if k is Initial { Seq::empty() } else { ri },
+            if k is Handshake { Seq::empty() } else { rh },
+            r1,
+            if k is Initial { Set::empty() } else { fi },
+            if k is Handshake { Set::empty() } else { fh },
+            st,
+            np,
+            pend,
+        ),
+{
+    broadcast use vstd::multiset::group_multiset_axioms;
+    reveal(pieces_ok);
+    reveal(rec_pieces);
+    assert(rec_pieces(Seq::<SentPacket>::empty()).add(Multiset::<PieceKey>::empty()) =~= Multiset::<PieceKey>::empty());
+}
+
+// =============================================================================
 // The connection
 // =============================================================================
 
@@ -212,6 +1308,8 @@ pub struct Connection {
     ctx_i: SendStream,
     ctx_h: SendStream,
     streams: Option<Streams>,
+    /// A closed connection's streams, freed a bounded step per `backlog_step` (D13).
+    dead: Option<DeadStreams>,
     events: Vec<StreamEvent>,
     local_cids: LocalCids,
     peer_cids: PeerCids,
@@ -230,6 +1328,10 @@ pub struct Connection {
     /// The frames the latest `poll_transmit` took from `Streams::poll_frames` (P8).
     #[allow(dead_code)]
     polled: Ghost<Seq<SpecFrame>>,
+    /// D10 (b): per space, the pieces polled and not yet recorded, or taken and not yet reported (`pieces_ok`);
+    /// empty at every pub call's start and end (`settled`).
+    #[allow(dead_code)]
+    pend: Ghost<PendPieces>,
 }
 
 impl Connection {
@@ -291,6 +1393,165 @@ impl Connection {
         }
     }
 
+    /// The positions level `k` holds: unread in-order and out-of-order CRYPTO bytes.
+    pub closed spec fn crypto_held(&self, k: PacketKind) -> nat {
+        self.crx_spec(k).held_spec()
+    }
+
+    /// The nodes in level `k`'s teardown slot.
+    pub closed spec fn crypto_td(&self, k: PacketKind) -> nat {
+        self.crx_spec(k).td_nodes()
+    }
+
+    /// Level `k`'s positions held plus its slot's nodes.
+    pub closed spec fn crypto_load(&self, k: PacketKind) -> nat {
+        self.crx_spec(k).load()
+    }
+
+    /// The positions held and the teardown slots' nodes, over the three levels: what `pump_backlog` works off.
+    pub closed spec fn crypto_backlog(&self) -> nat {
+        backlog3(self.crx_i, self.crx_h, self.crx_1)
+    }
+
+    /// D13's measure off the CRYPTO receive levels: the streams' (`Streams::measure`: the delivery backlog and the
+    /// sending parts' weighted nodes), a closed connection's dead streams', `max_entries() + 1` while Open (what a
+    /// close moves to `dead`, so a close never raises it), and the CRYPTO send contexts' nodes, those in their sets
+    /// twice (a key discard's `retire` moves them to the slot).
+    pub closed spec fn rx_measure(&self) -> nat {
+        self.streams_measure() + self.dead_measure() + self.open_weight() + self.ctx_weight()
+    }
+
+    pub closed spec fn streams_measure(&self) -> nat {
+        match self.streams {
+            Some(s) => s.measure(),
+            None => 0,
+        }
+    }
+
+    pub closed spec fn dead_measure(&self) -> nat {
+        match self.dead {
+            Some(d) => d.measure(),
+            None => 0,
+        }
+    }
+
+    pub closed spec fn open_weight(&self) -> nat {
+        if self.lc.phase_spec() is Open {
+            max_entries() + 1
+        } else {
+            0
+        }
+    }
+
+    pub closed spec fn ctx_weight(&self) -> nat {
+        2 * self.ctx_i.ranges_held() + self.ctx_i.td_nodes() + 2 * self.ctx_h.ranges_held() + self.ctx_h.td_nodes()
+    }
+
+    /// What could hold a stream, store or tree outside a teardown slot is empty: no streams, no CRYPTO byte held at any
+    /// level, both Initial and Handshake spaces discarded and so their send contexts' sets moved to their slots
+    /// (`ctx_done`). With `!td_pending()`, the connection then holds none of them at all (9b2 Task 10b, D13).
+    pub closed spec fn closed_retired(&self) -> bool {
+        &&& self.streams is None
+        &&& forall|k: PacketKind| #[trigger] self.crypto_held(k) == 0
+        &&& !self.live_i && !self.live_h
+        &&& self.ctx_i.ranges_held() == 0
+        &&& self.ctx_h.ranges_held() == 0
+    }
+
+    /// A teardown slot holds something: a CRYPTO level's, a CRYPTO send context's, or a closed connection's streams.
+    pub closed spec fn td_pending(&self) -> bool {
+        ||| self.crypto_td_total() > 0
+        ||| self.ctx_i.td_nodes() > 0
+        ||| self.ctx_h.td_nodes() > 0
+        ||| self.dead is Some
+    }
+
+    /// The streams, dead streams and CRYPTO send contexts are as in `o`. Opaque, so `read_open` states it as one atom
+    /// (rlimit).
+    #[verifier::opaque]
+    spec fn same_streams(&self, o: Connection) -> bool {
+        &&& self.streams == o.streams
+        &&& self.dead == o.dead
+        &&& self.ctx_i == o.ctx_i
+        &&& self.ctx_h == o.ctx_h
+    }
+
+    /// The streams with an entry, 0 once the streams are gone: an ACK's removals are charged against them (9b2 Task
+    /// 10d item 5).
+    pub closed spec fn n_live(&self) -> nat {
+        match self.streams {
+            Some(s) => s.n_entries(),
+            None => 0,
+        }
+    }
+
+    /// At most `max_entries()` streams have an entry.
+    proof fn lemma_n_live(&self)
+        requires
+            self.wf(),
+        ensures
+            self.n_live() <= max_entries(),
+    {
+        if let Some(s) = self.streams {
+            assert(self.wf_streams());
+            s.lemma_n_entries();
+        }
+    }
+
+    /// Some stream has bytes or the FIN left to deliver (D13).
+    pub closed spec fn stream_backlog(&self) -> bool {
+        match self.streams {
+            Some(s) => s.stream_backlog_spec(),
+            None => false,
+        }
+    }
+
+    /// The measure: bounded (`rx_cap`), positive while any stream is queued, and stream backlog only while open.
+    pub proof fn lemma_rx_measure(&self)
+        requires
+            self.wf(),
+        ensures
+            self.rx_measure() <= rx_cap(),
+            self.stream_backlog() ==> self.rx_measure() > 0,
+            self.stream_backlog() ==> self.phase_spec() is Open,
+    {
+        let cap_q = rx_cap_q();
+        let cap_d = rx_cap_d();
+        assert(max_entries() * (2058 * kw()) <= max_entries() * (1 + 2058 * kw()) + 1) by (nonlinear_arith);
+        assert(max_entries() * (1 + 2058 * kw()) + 1 >= 0) by (nonlinear_arith);
+        if let Some(s) = self.streams {
+            s.lemma_measure();
+            assert(self.dead is None);
+            assert(self.streams_measure() + self.dead_measure() <= cap_q + cap_d);
+        } else if let Some(d) = self.dead {
+            d.lemma_measure();
+            assert(self.streams_measure() + self.dead_measure() <= cap_q + cap_d);
+        }
+        self.ctx_i.lemma_weight_max();
+        self.ctx_h.lemma_weight_max();
+        assert(self.ctx_weight() <= 2 * rx_cap_c());
+        assert(self.open_weight() <= max_entries() + 1);
+        assert(self.streams_measure() + self.dead_measure() <= cap_q + cap_d);
+    }
+
+    /// `stream_backlog`. O(1).
+    pub fn has_stream_backlog(&self) -> (r: bool)
+        requires
+            self.wf(),
+        ensures
+            r == self.stream_backlog(),
+    {
+        match &self.streams {
+            Some(s) => s.stream_backlog(),
+            None => false,
+        }
+    }
+
+    /// The nodes in the three teardown slots.
+    pub closed spec fn crypto_td_total(&self) -> nat {
+        self.crx_i.td_nodes() + self.crx_h.td_nodes() + self.crx_1.td_nodes()
+    }
+
     /// The end of level `k`'s in-order CRYPTO data (`crypto_contiguous`).
     pub closed spec fn crypto_contiguous_spec(&self, k: PacketKind) -> nat {
         match k {
@@ -319,7 +1580,13 @@ impl Connection {
     /// handshake's completion been undone. Nor have the peer's transport parameters appeared:
     /// only `on_peer_params` sets them (it ensures `crypto_kept_base`).
     pub closed spec fn crypto_kept(&self, o: Connection) -> bool {
-        &&& self.crypto_kept_base(o)
+        self.crypto_kept_g(o, 0)
+    }
+
+    /// `crypto_kept`, but the positions held may grow by `g` at each level and in all (a datagram's CRYPTO
+    /// frames, `g` their bytes).
+    pub closed spec fn crypto_kept_g(&self, o: Connection, g: nat) -> bool {
+        &&& self.crypto_kept_bg(o, None, g)
         &&& self.peer_tp is Some ==> o.peer_tp is Some
     }
 
@@ -333,6 +1600,24 @@ impl Connection {
     /// not undone, the connection does not reopen, no space comes back, and while open the read
     /// offset of a live Initial or Handshake space other than `skip` stays where it was.
     pub closed spec fn crypto_kept_but(&self, o: Connection, skip: Option<PacketKind>) -> bool {
+        self.crypto_kept_bg(o, skip, 0)
+    }
+
+    /// `crypto_kept_but`, the positions held growing by at most `g` at each level, and the positions held plus
+    /// the teardown slots' nodes by at most `g` in all.
+    pub closed spec fn crypto_kept_bg(&self, o: Connection, skip: Option<PacketKind>, g: nat) -> bool {
+        &&& self.crx_i.held_spec() <= o.crx_i.held_spec() + g
+        &&& self.crx_h.held_spec() <= o.crx_h.held_spec() + g
+        &&& self.crx_1.held_spec() <= o.crx_1.held_spec() + g
+        &&& self.crypto_backlog() <= o.crypto_backlog() + g
+        // Per level, positions held plus slot nodes grow by at most `g`, and only where frames still arrive
+        // (`crypto_open_level`).
+        &&& self.crx_i.load() <= o.crx_i.load() + g
+        &&& self.crx_h.load() <= o.crx_h.load() + g
+        &&& self.crx_1.load() <= o.crx_1.load() + g
+        &&& g > 0 && !(o.lc.phase_spec() is Open && o.live_i) ==> self.crx_i.load() <= o.crx_i.load()
+        &&& g > 0 && !(o.lc.phase_spec() is Open && o.live_h) ==> self.crx_h.load() <= o.crx_h.load()
+        &&& g > 0 && !(o.lc.phase_spec() is Open) ==> self.crx_1.load() <= o.crx_1.load()
         &&& self.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial)
         &&& self.crypto_end_spec(PacketKind::Initial) >= o.crypto_end_spec(PacketKind::Initial)
         &&& o.complete ==> self.complete
@@ -370,7 +1655,7 @@ impl Connection {
             // A discarded Initial space buffers nothing: its read offset is its end.
             !c.live(PacketKind::Initial) ==> c.crypto_base_spec(PacketKind::Initial) == c.crypto_end_spec(PacketKind::Initial),
     {
-        reveal(crx_ok);
+        reveal(crate::crx::crx_ok);
     }
 
     pub proof fn lemma_crypto_kept_refl(c: Connection)
@@ -388,6 +1673,167 @@ impl Connection {
     {
     }
 
+    /// `crypto_kept` is `crypto_kept_g` with no growth.
+    pub proof fn lemma_crypto_kept_g_zero(c: Connection, o: Connection)
+        ensures
+            c.crypto_kept_g(o, 0) == c.crypto_kept(o),
+    {
+    }
+
+    pub proof fn lemma_crypto_kept_g_refl(c: Connection, g: nat)
+        ensures
+            c.crypto_kept_g(c, g),
+    {
+    }
+
+    /// `crypto_kept_g` composes, the growths adding up.
+    pub proof fn lemma_crypto_kept_g_trans(a: Connection, b: Connection, c: Connection, g1: nat, g2: nat)
+        requires
+            b.crypto_kept_g(a, g1),
+            c.crypto_kept_g(b, g2),
+        ensures
+            c.crypto_kept_g(a, g1 + g2),
+    {
+    }
+
+    /// `crypto_kept_g` for a larger growth.
+    pub proof fn lemma_crypto_kept_g_mono(c: Connection, o: Connection, g1: nat, g2: nat)
+        requires
+            c.crypto_kept_g(o, g1),
+            g1 <= g2,
+        ensures
+            c.crypto_kept_g(o, g2),
+    {
+    }
+
+    /// `CryptoStream::wf`'s memory bound per level: the read offset is at most the contiguous end, and a level holds
+    /// at most `MAX_CRYPTO_BUFFER` positions past its unread in-order bytes, so a drained one at most that.
+    pub proof fn lemma_held_facts(c: Connection)
+        requires
+            c.wf(),
+        ensures
+            forall|k: PacketKind| #[trigger] c.crypto_base_spec(k) <= c.crypto_contiguous_spec(k),
+            forall|k: PacketKind|
+                #[trigger] c.crypto_held(k) <= c.crypto_contiguous_spec(k) - c.crypto_base_spec(k) + MAX_CRYPTO_BUFFER,
+            forall|k: PacketKind| crypto_drained(c, k) ==> #[trigger] c.crypto_held(k) <= MAX_CRYPTO_BUFFER,
+            // D6's slot rule: a level still taking frames has an empty slot; a non-empty slot, an empty store.
+            forall|k: PacketKind| #[trigger] crypto_open_level(c, k) ==> c.crypto_td(k) == 0,
+            forall|k: PacketKind| #[trigger] c.crypto_td(k) > 0 ==> c.crypto_held(k) == 0,
+            forall|k: PacketKind| #[trigger] c.crypto_load(k) == c.crypto_held(k) + c.crypto_td(k),
+    {
+        reveal(crate::crx::crx_ok);
+        c.crx_i.lemma_load();
+        c.crx_h.lemma_load();
+        c.crx_1.lemma_load();
+        assert forall|k: PacketKind| #[trigger] crypto_open_level(c, k) implies c.crypto_td(k) == 0 by {
+            match k {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
+        assert forall|k: PacketKind| #[trigger] c.crypto_td(k) > 0 implies c.crypto_held(k) == 0 by {
+            match k {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
+        assert forall|k: PacketKind| #[trigger] c.crypto_load(k) == c.crypto_held(k) + c.crypto_td(k) by {
+            match k {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
+        c.crx_i.lemma_wf();
+        c.crx_h.lemma_wf();
+        c.crx_1.lemma_wf();
+        assert forall|k: PacketKind| #[trigger] c.crypto_held(k) <= c.crypto_contiguous_spec(k) - c.crypto_base_spec(k)
+            + MAX_CRYPTO_BUFFER by {
+            match k {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
+        assert forall|k: PacketKind| #[trigger] c.crypto_base_spec(k) <= c.crypto_contiguous_spec(k) by {
+            match k {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
+    }
+
+    /// The positions held and the slots' nodes, level by level.
+    pub proof fn lemma_backlog_split(c: Connection)
+        ensures
+            c.crypto_backlog() == c.crypto_held(PacketKind::Initial) + c.crypto_held(PacketKind::Handshake)
+                + c.crypto_held(PacketKind::OneRtt) + c.crypto_td_total(),
+    {
+        lemma_backlog3(c.crx_i, c.crx_h, c.crx_1);
+    }
+
+    /// Each level holds at most what the levels hold with their slots.
+    pub proof fn lemma_held_le_backlog(c: Connection)
+        ensures
+            forall|k: PacketKind| #[trigger] c.crypto_held(k) <= c.crypto_backlog(),
+            forall|k: PacketKind| #[trigger] c.crypto_load(k) <= c.crypto_backlog(),
+    {
+        lemma_backlog3(c.crx_i, c.crx_h, c.crx_1);
+        c.crx_i.lemma_load();
+        c.crx_h.lemma_load();
+        c.crx_1.lemma_load();
+        assert forall|k: PacketKind| #[trigger] c.crypto_load(k) <= c.crypto_backlog() by {
+            match k {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
+    }
+
+    /// What `crypto_kept_g` says, in terms quictls can read: `crypto_kept_elim`'s frame, the positions held
+    /// growing by at most `g` at each level and, with the teardown slots, in all.
+    pub proof fn lemma_crypto_kept_g_elim(c: Connection, o: Connection, g: nat)
+        requires
+            c.crypto_kept_g(o, g),
+        ensures
+            forall|k: PacketKind| #[trigger] c.crypto_load(k) <= o.crypto_load(k) + (if crypto_open_level(o, k) {
+                g
+            } else {
+                0
+            }),
+            forall|k: PacketKind| #[trigger] c.crypto_held(k) <= o.crypto_held(k) + g,
+            c.crypto_backlog() <= o.crypto_backlog() + g,
+            c.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial),
+            o.live(PacketKind::OneRtt) ==> c.live(PacketKind::OneRtt),
+            c.peer_tp_known_spec() ==> o.peer_tp_known_spec(),
+            forall|p: nat| #[trigger] o.crypto_received(PacketKind::Initial, p) ==> c.crypto_received(PacketKind::Initial, p),
+            c.crypto_end_spec(PacketKind::Initial) >= o.crypto_end_spec(PacketKind::Initial),
+            c.phase_spec() is Open ==> o.phase_spec() is Open,
+            c.live(PacketKind::Initial) ==> o.live(PacketKind::Initial),
+            c.live(PacketKind::Handshake) ==> o.live(PacketKind::Handshake),
+            c.phase_spec() is Open && c.live(PacketKind::Initial) ==> c.crypto_base_spec(PacketKind::Initial) == o.crypto_base_spec(
+                PacketKind::Initial,
+            ),
+            c.phase_spec() is Open && c.live(PacketKind::Handshake) ==> c.crypto_base_spec(PacketKind::Handshake)
+                == o.crypto_base_spec(PacketKind::Handshake),
+    {
+        assert forall|k: PacketKind| #[trigger] c.crypto_load(k) <= o.crypto_load(k) + (if crypto_open_level(o, k) {
+            g
+        } else {
+            0
+        }) by {
+            match k {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
+    }
+
     pub proof fn lemma_crypto_kept_to_base(c: Connection, o: Connection)
         requires
             c.crypto_kept(o),
@@ -400,6 +1846,9 @@ impl Connection {
         requires
             c.crypto_kept_base(o),
         ensures
+            forall|k: PacketKind| #[trigger] c.crypto_load(k) <= o.crypto_load(k),
+            forall|k: PacketKind| #[trigger] c.crypto_held(k) <= o.crypto_held(k),
+            c.crypto_backlog() <= o.crypto_backlog(),
             c.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial),
             o.live(PacketKind::OneRtt) ==> c.live(PacketKind::OneRtt),
             forall|p: nat| #[trigger] o.crypto_received(PacketKind::Initial, p) ==> c.crypto_received(PacketKind::Initial, p),
@@ -413,6 +1862,13 @@ impl Connection {
             c.phase_spec() is Open && c.live(PacketKind::Handshake) ==> c.crypto_base_spec(PacketKind::Handshake)
                 == o.crypto_base_spec(PacketKind::Handshake),
     {
+        assert forall|k: PacketKind| #[trigger] c.crypto_load(k) <= o.crypto_load(k) by {
+            match k {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
     }
 
     /// What `crypto_kept_but` says, in terms quictls can read.
@@ -420,6 +1876,9 @@ impl Connection {
         requires
             c.crypto_kept_but(o, skip),
         ensures
+            forall|k: PacketKind| #[trigger] c.crypto_load(k) <= o.crypto_load(k),
+            forall|k: PacketKind| #[trigger] c.crypto_held(k) <= o.crypto_held(k),
+            c.crypto_backlog() <= o.crypto_backlog(),
             c.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial),
             c.crypto_end_spec(PacketKind::Initial) >= o.crypto_end_spec(PacketKind::Initial),
             o.live(PacketKind::OneRtt) ==> c.live(PacketKind::OneRtt),
@@ -434,12 +1893,22 @@ impl Connection {
                 PacketKind::Handshake,
             ) == o.crypto_base_spec(PacketKind::Handshake),
     {
+        assert forall|k: PacketKind| #[trigger] c.crypto_load(k) <= o.crypto_load(k) by {
+            match k {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
     }
 
     pub proof fn lemma_crypto_kept_elim(c: Connection, o: Connection)
         requires
             c.crypto_kept(o),
         ensures
+            forall|k: PacketKind| #[trigger] c.crypto_load(k) <= o.crypto_load(k),
+            forall|k: PacketKind| #[trigger] c.crypto_held(k) <= o.crypto_held(k),
+            c.crypto_backlog() <= o.crypto_backlog(),
             c.crypto_base_spec(PacketKind::Initial) >= o.crypto_base_spec(PacketKind::Initial),
             o.live(PacketKind::OneRtt) ==> c.live(PacketKind::OneRtt),
             c.peer_tp_known_spec() ==> o.peer_tp_known_spec(),
@@ -455,6 +1924,13 @@ impl Connection {
             c.phase_spec() is Open && c.live(PacketKind::Handshake) ==> c.crypto_base_spec(PacketKind::Handshake)
                 == o.crypto_base_spec(PacketKind::Handshake),
     {
+        assert forall|k: PacketKind| #[trigger] c.crypto_load(k) <= o.crypto_load(k) by {
+            match k {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
     }
 
     /// The client's original Destination Connection ID.
@@ -513,9 +1989,10 @@ impl Connection {
         &&& self.sent_i.wf()
         &&& self.sent_h.wf()
         &&& self.sent_1.wf()
-        &&& crx_ok(self.crx_i, self.crx_h, self.crx_1, self.live_i, self.live_h, self.complete)
+        &&& crate::crx::crx_ok(self.crx_i, self.crx_h, self.crx_1, self.live_i, self.live_h, self.complete, self.lc.phase_spec() is Open)
         &&& self.ctx_i.wf()
         &&& self.ctx_h.wf()
+        &&& ctxs_done(self.ctx_i, self.live_i, self.ctx_h, self.live_h)
         &&& self.local_cids.wf()
         &&& self.peer_cids.wf()
         &&& local_tp_ok(self.local_tp@)
@@ -531,10 +2008,15 @@ impl Connection {
         &&& cids_only(self.cid_updates@)
     }
 
-    /// `Streams` is never called after an `Err`, and closing drops it, which frees the buffers.
+    /// `Streams` is never called after an `Err`. Closing moves it whole to `dead` in O(1) (`bury_streams`), whose
+    /// rings, queues and trees `backlog_step` frees a bounded step at a time (D13; 9b2 Task 10b); the shell drops the
+    /// connection only once Closed and `!has_backlog()`, so `dead` is empty by then (crates/server `service`). The
+    /// connection's own drop at removal (packet records, paths, CID and ACK tables) is uncharged: cat-C15-semantic-cost
+    /// (9b4).
     closed spec fn wf_streams(&self) -> bool {
         &&& self.streams matches Some(s) ==> s.wf() && !s.failed() && self.lc.phase_spec() is Open
         &&& !(self.lc.phase_spec() is Open) ==> self.streams is None
+        &&& self.dead matches Some(d) ==> d.wf() && !(self.lc.phase_spec() is Open)
     }
 
     /// §8.1, per path: the budget's `Sent` entries are exactly the logged datagrams.
@@ -580,6 +2062,451 @@ impl Connection {
             ).dcid ==> self.paths.path(q1).peer_used == self.paths.path(q2).peer_used
     }
 
+    /// D10 (b): the records' pieces and `pend`'s are the pieces in flight, per space, each once.
+    closed spec fn wf_pieces(&self) -> bool {
+        self.pieces_with(self.pend@)
+    }
+
+    /// `pieces_ok` of this state's views with `pend` replaced by `p`.
+    closed spec fn pieces_with(&self, p: PendPieces) -> bool {
+        pieces_ok(
+            self.sent_i.inflight_spec(),
+            self.sent_h.inflight_spec(),
+            self.sent_1.inflight_spec(),
+            self.ctx_i.flight_spec(),
+            self.ctx_h.flight_spec(),
+            tx_view_of(self.streams),
+            self.peer_tp is None,
+            p,
+        )
+    }
+
+    /// `wf` but for `pieces_ok`.
+    closed spec fn wf_core(&self) -> bool {
+        &&& self.wf_parts()
+        &&& self.wf_streams()
+        &&& self.wf_amp()
+        &&& self.wf_pn()
+        &&& self.wf_log_paths()
+        &&& self.wf_dcids()
+    }
+
+    /// Sets `pend`, a step of a window: nothing else changes (split for the rlimit).
+    #[verifier::spinoff_prover]
+    fn set_pend(&mut self, Ghost(p): Ghost<PendPieces>)
+        requires
+            old(self).wf_core(),
+            old(self).pieces_with(p),
+        ensures
+            *final(self) == (Connection { pend: Ghost(p), ..*old(self) }),
+            final(self).wf(),
+    {
+        self.pend = Ghost(p);
+    }
+
+/// `crypto_frame`'s poll of space `k`: the context's flight and `pend` gained frame `g`'s piece.
+    #[verifier::spinoff_prover]
+    proof fn lemma_crypto_poll(c0: Connection, c1: Connection, k: PacketKind, g: SpecFrame, np: PendPieces)
+        requires
+            c0.wf_pieces(),
+            !(k is OneRtt),
+            c1.sent_i == c0.sent_i,
+            c1.sent_h == c0.sent_h,
+            c1.sent_1 == c0.sent_1,
+            c1.streams == c0.streams,
+            c1.peer_tp == c0.peer_tp,
+            k is Initial ==> c1.ctx_h == c0.ctx_h,
+            k is Handshake ==> c1.ctx_i == c0.ctx_i,
+            g matches SpecFrame::Crypto { offset, data } && offset + data.len() <= VARINT_MAX && ({
+                let f0 = if k is Initial { c0.ctx_i.flight_spec() } else { c0.ctx_h.flight_spec() };
+                let f1 = if k is Initial { c1.ctx_i.flight_spec() } else { c1.ctx_h.flight_spec() };
+                &&& data.len() == 0 ==> f1 == f0
+                &&& data.len() > 0 ==> f1 == f0.insert((offset, (offset + data.len()) as u64)) && !f0.contains(
+                    (offset, (offset + data.len()) as u64),
+                )
+            }),
+            c1.pend@ == c0.pend@,
+            np == pend_with(c0.pend@, k, pend_of(c0.pend@, k).add(ms_of(piece_of(g)))),
+        ensures
+            c1.pieces_with(np),
+    {
+        if let SpecFrame::Crypto { offset, data } = g {
+            if data.len() > 0 {
+                lemma_pieces_poll(
+                    c0.sent_i.inflight_spec(),
+                    c0.sent_h.inflight_spec(),
+                    c0.sent_1.inflight_spec(),
+                    c0.ctx_i.flight_spec(),
+                    c0.ctx_h.flight_spec(),
+                    tx_view_of(c0.streams),
+                    c0.peer_tp is None,
+                    c0.pend@,
+                    k,
+                    offset,
+                    data.len(),
+                );
+                match k {
+                    PacketKind::Initial => {},
+                    PacketKind::Handshake => {},
+                    PacketKind::OneRtt => {},
+                }
+            } else {
+                assert(ms_of(piece_of(g)) == Multiset::<PieceKey>::empty());
+                assert(pend_of(c0.pend@, k).add(Multiset::<PieceKey>::empty()) =~= pend_of(c0.pend@, k)) by {
+                    broadcast use vstd::multiset::group_multiset_axioms;
+                }
+                match k {
+                    PacketKind::Initial => {},
+                    PacketKind::Handshake => {},
+                    PacketKind::OneRtt => {},
+                }
+            }
+        }
+    }
+
+/// `stream_frames`' poll: the streams' flights and `pend` gained the pieces of `out1` past `out0`.
+    #[verifier::spinoff_prover]
+    proof fn lemma_stream_poll(c0: Connection, c1: Connection, out0: Seq<Frame>, out1: Seq<Frame>, np: PendPieces)
+        requires
+            c0.wf_pieces(),
+            c0.streams is Some,
+            c1.streams is Some,
+            c1.sent_i == c0.sent_i,
+            c1.sent_h == c0.sent_h,
+            c1.sent_1 == c0.sent_1,
+            c1.ctx_i == c0.ctx_i,
+            c1.ctx_h == c0.ctx_h,
+            c1.peer_tp == c0.peer_tp,
+            out0.len() <= out1.len(),
+            out1.subrange(0, out0.len() as int) == out0,
+            tx_gained(c0.streams->0, c1.streams->0, frames_view(out1.skip(out0.len() as int))),
+            forall|j: u64| #[trigger] (c1.streams->0).send_reset(j) == (c0.streams->0).send_reset(j),
+            np == pend_with(c0.pend@, PacketKind::OneRtt, c0.pend@.o.add(frame_pieces(frames_view(out1.skip(out0.len() as int))))),
+        ensures
+            c1.pieces_with(np),
+            tracks(frames_view(out0), frames_view(out1), c0.pend@.o, np.o),
+    {
+        let new = frames_view(out1.skip(out0.len() as int));
+        assert forall|i: int| 0 <= i < out0.len() implies #[trigger] out1[i] == out0[i] by {
+            assert(out1.subrange(0, out0.len() as int)[i] == out1[i]);
+        }
+        assert(frames_view(out1) =~= frames_view(out0) + new);
+        lemma_tracks_append(frames_view(out0), new, c0.pend@.o);
+        lemma_pieces_poll_stream(
+            c0.sent_i.inflight_spec(),
+            c0.sent_h.inflight_spec(),
+            c0.sent_1.inflight_spec(),
+            c0.ctx_i.flight_spec(),
+            c0.ctx_h.flight_spec(),
+            c0.streams->0,
+            c1.streams->0,
+            c0.peer_tp is None,
+            c0.pend@,
+            new,
+        );
+    }
+
+/// `commit_record`: space `k`'s record of a packet whose frames' pieces were all of `pend`; nothing pending after.
+    #[verifier::spinoff_prover]
+    proof fn lemma_commit_pieces(c0: Connection, c1: Connection, k: PacketKind, rec: SentPacket, frames: Seq<SpecFrame>)
+        requires
+            c0.wf_pieces(),
+            pend_of(c0.pend@, k) == frame_pieces(frames),
+            pend_kept_but(pend_empty(), c0.pend@, k),
+            rec@.frames == retained(frames),
+            c1.sent(k).inflight_spec() == c0.sent(k).inflight_spec().push(rec),
+            forall|j: PacketKind| j != k ==> #[trigger] c1.sent(j) == c0.sent(j),
+            c1.ctx_i == c0.ctx_i,
+            c1.ctx_h == c0.ctx_h,
+            c1.streams == c0.streams,
+            c1.peer_tp == c0.peer_tp,
+        ensures
+            c1.pieces_with(pend_empty()),
+    {
+        lemma_pend_settled(c0.pend@, k);
+        assert(c0.pend@ == pend_with(pend_empty(), k, frame_pieces(frames))) by {
+            match k {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
+        lemma_pieces_record(
+            c0.sent_i.inflight_spec(),
+            c0.sent_h.inflight_spec(),
+            c0.sent_1.inflight_spec(),
+            c0.ctx_i.flight_spec(),
+            c0.ctx_h.flight_spec(),
+            tx_view_of(c0.streams),
+            c0.peer_tp is None,
+            c0.pend@,
+            k,
+            rec,
+            frames,
+        );
+        match k {
+            PacketKind::Initial => {
+                assert(c1.sent(PacketKind::Handshake) == c0.sent(PacketKind::Handshake));
+                assert(c1.sent(PacketKind::OneRtt) == c0.sent(PacketKind::OneRtt));
+            },
+            PacketKind::Handshake => {
+                assert(c1.sent(PacketKind::Initial) == c0.sent(PacketKind::Initial));
+                assert(c1.sent(PacketKind::OneRtt) == c0.sent(PacketKind::OneRtt));
+            },
+            PacketKind::OneRtt => {
+                assert(c1.sent(PacketKind::Initial) == c0.sent(PacketKind::Initial));
+                assert(c1.sent(PacketKind::Handshake) == c0.sent(PacketKind::Handshake));
+            },
+        }
+    }
+
+/// Before reporting frame `f` of space `k`, which `pend` holds: its target's `requires`.
+    #[verifier::spinoff_prover]
+    proof fn lemma_report_held(c0: Connection, k: PacketKind, f: SpecFrame)
+        requires
+            c0.wf_parts(),
+            c0.wf_pieces(),
+            piece_of(f) matches Some(key) ==> pend_of(c0.pend@, k).count(key) > 0,
+        ensures
+            !(k is OneRtt) && crypto_piece_of(f) is Some ==> ({
+                let x = if k is Initial { c0.ctx_i } else { c0.ctx_h };
+                &&& x.in_flight(f->Crypto_offset, f->Crypto_data.len() as u64)
+                &&& x.state() is Send || x.state() is DataSent
+            }),
+            c0.streams matches Some(a) ==> piece_in_flight(a, f),
+    {
+        lemma_pieces_held(
+            c0.sent_i.inflight_spec(),
+            c0.sent_h.inflight_spec(),
+            c0.sent_1.inflight_spec(),
+            c0.ctx_i.flight_spec(),
+            c0.ctx_h.flight_spec(),
+            c0.streams,
+            c0.peer_tp is None,
+            c0.pend@,
+            k,
+            f,
+        );
+        if !(k is OneRtt) && crypto_piece_of(f) is Some {
+            let x = if k is Initial { c0.ctx_i } else { c0.ctx_h };
+            x.lemma_wf();
+            x.lemma_flight_idle();
+            x.lemma_in_flight(f->Crypto_offset, f->Crypto_data.len() as u64);
+        }
+    }
+
+    /// A reported frame `f` of space `k` left `pend`: `pieces_ok` with `np` (re-review F5's orphans included).
+    #[verifier::spinoff_prover]
+    proof fn lemma_report_conn(c0: Connection, c1: Connection, k: PacketKind, f: SpecFrame, np: PendPieces)
+        requires
+            c0.wf_pieces(),
+            piece_of(f) matches Some(key) ==> pend_of(c0.pend@, k).count(key) > 0,
+            c1.sent_i == c0.sent_i,
+            c1.sent_h == c0.sent_h,
+            c1.sent_1 == c0.sent_1,
+            c1.peer_tp == c0.peer_tp,
+            k is Initial && crypto_piece_of(f) is Some ==> c1.ctx_i.flight_spec() == c0.ctx_i.flight_spec().remove(
+                crypto_piece_of(f)->0,
+            ),
+            !(k is Initial && crypto_piece_of(f) is Some) ==> c1.ctx_i.flight_spec() == c0.ctx_i.flight_spec(),
+            k is Handshake && crypto_piece_of(f) is Some ==> c1.ctx_h.flight_spec() == c0.ctx_h.flight_spec().remove(
+                crypto_piece_of(f)->0,
+            ),
+            !(k is Handshake && crypto_piece_of(f) is Some) ==> c1.ctx_h.flight_spec() == c0.ctx_h.flight_spec(),
+            (c0.streams is Some) == (c1.streams is Some),
+            c0.streams matches Some(a) ==> tx_kept_but(a, c1.streams->0, piece_stream(f)) && piece_removed(
+                a,
+                c1.streams->0,
+                f,
+            ) && forall|j: u64| #[trigger] (c1.streams->0).send_reset(j) == a.send_reset(j),
+            np == pend_with(c0.pend@, k, pend_of(c0.pend@, k).sub(ms_of(piece_of(f)))),
+        ensures
+            c1.pieces_with(np),
+    {
+        lemma_pieces_report(
+            c0.sent_i.inflight_spec(),
+            c0.sent_h.inflight_spec(),
+            c0.sent_1.inflight_spec(),
+            c0.ctx_i.flight_spec(),
+            c0.ctx_h.flight_spec(),
+            c0.streams,
+            c0.peer_tp is None,
+            c0.pend@,
+            k,
+            f,
+            c1.ctx_i.flight_spec(),
+            c1.ctx_h.flight_spec(),
+            c1.streams,
+        );
+    }
+
+/// Records of space `k` taken in bulk (`on_ack`, `drain_inflight`): `out`'s pieces join `pend`.
+    #[verifier::spinoff_prover]
+    proof fn lemma_take_conn(c0: Connection, c1: Connection, k: PacketKind, out: Seq<SentPacket>, np: PendPieces)
+        requires
+            c0.wf_pieces(),
+            rec_pieces(c0.sent(k).inflight_spec()) == rec_pieces(out).add(rec_pieces(c1.sent(k).inflight_spec())),
+            forall|j: PacketKind| j != k ==> #[trigger] c1.sent(j).inflight_spec() == c0.sent(j).inflight_spec(),
+            c1.ctx_i == c0.ctx_i,
+            c1.ctx_h == c0.ctx_h,
+            c1.streams == c0.streams,
+            c1.peer_tp == c0.peer_tp,
+            np == pend_with(c0.pend@, k, pend_of(c0.pend@, k).add(rec_pieces(out))),
+        ensures
+            c1.pieces_with(np),
+    {
+        match k {
+            PacketKind::Initial => {
+                assert(c1.sent(PacketKind::Handshake).inflight_spec() == c0.sent(PacketKind::Handshake).inflight_spec());
+                assert(c1.sent(PacketKind::OneRtt).inflight_spec() == c0.sent(PacketKind::OneRtt).inflight_spec());
+            },
+            PacketKind::Handshake => {
+                assert(c1.sent(PacketKind::Initial).inflight_spec() == c0.sent(PacketKind::Initial).inflight_spec());
+                assert(c1.sent(PacketKind::OneRtt).inflight_spec() == c0.sent(PacketKind::OneRtt).inflight_spec());
+            },
+            PacketKind::OneRtt => {
+                assert(c1.sent(PacketKind::Initial).inflight_spec() == c0.sent(PacketKind::Initial).inflight_spec());
+                assert(c1.sent(PacketKind::Handshake).inflight_spec() == c0.sent(PacketKind::Handshake).inflight_spec());
+            },
+        }
+        lemma_pieces_take(
+            c0.sent_i.inflight_spec(),
+            c0.sent_h.inflight_spec(),
+            c0.sent_1.inflight_spec(),
+            c0.ctx_i.flight_spec(),
+            c0.ctx_h.flight_spec(),
+            tx_view_of(c0.streams),
+            c0.peer_tp is None,
+            c0.pend@,
+            k,
+            out,
+            c1.sent(k).inflight_spec(),
+        );
+    }
+
+/// `discard` of space `k` at a settled point: its records and its context's flight both empty.
+    #[verifier::spinoff_prover]
+    proof fn lemma_drop_conn(c0: Connection, c1: Connection, k: PacketKind)
+        requires
+            c0.wf_pieces(),
+            c0.settled(),
+            !(k is OneRtt),
+            c1.sent(k).inflight_spec() == Seq::<SentPacket>::empty(),
+            forall|j: PacketKind| j != k ==> #[trigger] c1.sent(j).inflight_spec() == c0.sent(j).inflight_spec(),
+            k is Initial ==> c1.ctx_i.flight_spec() == Set::<(u64, u64)>::empty() && c1.ctx_h == c0.ctx_h,
+            k is Handshake ==> c1.ctx_h.flight_spec() == Set::<(u64, u64)>::empty() && c1.ctx_i == c0.ctx_i,
+            c1.streams == c0.streams,
+            c1.peer_tp == c0.peer_tp,
+            c1.pend == c0.pend,
+        ensures
+            c1.wf_pieces(),
+    {
+        lemma_pieces_drop(
+            c0.sent_i.inflight_spec(),
+            c0.sent_h.inflight_spec(),
+            c0.sent_1.inflight_spec(),
+            c0.ctx_i.flight_spec(),
+            c0.ctx_h.flight_spec(),
+            tx_view_of(c0.streams),
+            c0.peer_tp is None,
+            c0.pend@,
+            k,
+        );
+        match k {
+            PacketKind::Initial => {
+                assert(c1.sent(PacketKind::Handshake).inflight_spec() == c0.sent(PacketKind::Handshake).inflight_spec());
+                assert(c1.sent(PacketKind::OneRtt).inflight_spec() == c0.sent(PacketKind::OneRtt).inflight_spec());
+            },
+            PacketKind::Handshake => {
+                assert(c1.sent(PacketKind::Initial).inflight_spec() == c0.sent(PacketKind::Initial).inflight_spec());
+                assert(c1.sent(PacketKind::OneRtt).inflight_spec() == c0.sent(PacketKind::OneRtt).inflight_spec());
+            },
+            PacketKind::OneRtt => {},
+        }
+    }
+
+/// `streams` dropped, or changed by a Streams call outside any window (`tx_kept_but(.., None)`); every other view
+    /// equal (re-review F1).
+    #[verifier::spinoff_prover]
+    proof fn lemma_streams_conn(c0: Connection, c1: Connection)
+        requires
+            c0.wf_pieces(),
+            c1.sent_i == c0.sent_i,
+            c1.sent_h == c0.sent_h,
+            c1.sent_1 == c0.sent_1,
+            c1.ctx_i.flight_spec() == c0.ctx_i.flight_spec(),
+            c1.ctx_h.flight_spec() == c0.ctx_h.flight_spec(),
+            c1.peer_tp == c0.peer_tp,
+            c1.pend == c0.pend,
+            c1.streams is None || (c0.streams is Some && c1.streams is Some && tx_kept_but(
+                c0.streams->0,
+                c1.streams->0,
+                None,
+            )),
+        ensures
+            c1.wf_pieces(),
+    {
+        let ri = c0.sent_i.inflight_spec();
+        let rh = c0.sent_h.inflight_spec();
+        let r1 = c0.sent_1.inflight_spec();
+        let fi = c0.ctx_i.flight_spec();
+        let fh = c0.ctx_h.flight_spec();
+        if c1.streams is None {
+            lemma_pieces_none(ri, rh, r1, fi, fh, tx_view_of(c0.streams), c0.peer_tp is None, c0.pend@);
+        } else {
+            lemma_pieces_frame(ri, rh, r1, fi, fh, c0.streams->0, c1.streams->0, c0.peer_tp is None, c0.pend@);
+        }
+    }
+
+    /// `on_peer_params`: `streams` is a fresh `Streams` and `peer_tp` known, where both were `None` (re-review F3).
+    #[verifier::spinoff_prover]
+    proof fn lemma_new_conn(c0: Connection, c1: Connection)
+        requires
+            c0.wf_pieces(),
+            c0.peer_tp is None,
+            c1.peer_tp is Some,
+            c1.streams matches Some(s) && (forall|id: u64| !#[trigger] s.send_reset(id)) && (forall|id: u64|
+                #[trigger] s.tx_flight(id) == Set::<(u64, u64)>::empty()),
+            c1.sent_i == c0.sent_i,
+            c1.sent_h == c0.sent_h,
+            c1.sent_1 == c0.sent_1,
+            c1.ctx_i.flight_spec() == c0.ctx_i.flight_spec(),
+            c1.ctx_h.flight_spec() == c0.ctx_h.flight_spec(),
+            c1.pend == c0.pend,
+        ensures
+            c1.wf_pieces(),
+            c0.streams is None,
+    {
+        lemma_pieces_new(
+            c0.sent_i.inflight_spec(),
+            c0.sent_h.inflight_spec(),
+            c0.sent_1.inflight_spec(),
+            c0.ctx_i.flight_spec(),
+            c0.ctx_h.flight_spec(),
+            tx_view_of(c0.streams),
+            c1.streams->0,
+            c0.pend@,
+        );
+    }
+
+/// Every view `pieces_ok` reads, and `pend`, unchanged: it carries over (for fns that hide `wf_pieces`).
+    #[verifier::spinoff_prover]
+    proof fn lemma_views_same(c0: Connection, c1: Connection)
+        requires
+            c0.wf_pieces(),
+            c1.sent_i.inflight_spec() == c0.sent_i.inflight_spec(),
+            c1.sent_h.inflight_spec() == c0.sent_h.inflight_spec(),
+            c1.sent_1.inflight_spec() == c0.sent_1.inflight_spec(),
+            c1.ctx_i.flight_spec() == c0.ctx_i.flight_spec(),
+            c1.ctx_h.flight_spec() == c0.ctx_h.flight_spec(),
+            c1.streams == c0.streams,
+            c1.peer_tp == c0.peer_tp,
+            c1.pend == c0.pend,
+        ensures
+            c1.wf_pieces(),
+    {
+    }
+
     pub closed spec fn wf(&self) -> bool {
         &&& self.wf_parts()
         &&& self.wf_streams()
@@ -587,6 +2514,14 @@ impl Connection {
         &&& self.wf_pn()
         &&& self.wf_log_paths()
         &&& self.wf_dcids()
+        &&& self.wf_pieces()
+    }
+
+    /// No piece pending: every poll recorded, every taken record's frames reported (D10 (b)). Not in `wf`, which
+    /// the window fns need with `pend` non-empty; every pub fn requires and ensures it, and every holder of a
+    /// `Connection` across calls carries it (`H3Server::wf`, pipeline.rs; re-review F4).
+    pub closed spec fn settled(&self) -> bool {
+        self.pend@ == pend_empty()
     }
 
     /// §9.5: no path holds an unused peer CID, so `use_next()` never reuses a path's CID.
@@ -633,6 +2568,7 @@ impl Connection {
                 || first.dcid@.len() < 8 || first.dcid@.len() > MAX_CID_LEN || first.scid@.len()
                 > MAX_CID_LEN || !local_tp_ok(local_tp@)),
             r matches Some(c) ==> c.wf() && c.out_log() == Seq::<SpecOutDatagram>::empty(),
+            r matches Some(c) ==> c.settled(),
             r matches Some(c) ==> c.odcid_spec() == first.dcid@,
             //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
             //# a mismatch between values received from a peer in these transport
@@ -644,6 +2580,7 @@ impl Connection {
             // No transport parameters yet: TLS delivers them later (`on_peer_params`).
             r matches Some(c) ==> !c.peer_tp_known_spec(),
             r matches Some(c) ==> c.crypto_base_spec(PacketKind::Initial) == 0 && c.crypto_base_spec(PacketKind::Handshake) == 0,
+            r matches Some(c) ==> c.crypto_backlog() == 0,
     {
         if datagram_len < MIN_INITIAL_DATAGRAM || !is_local_tp_ok(local_tp) {
             return None;
@@ -693,6 +2630,7 @@ impl Connection {
             ctx_i: SendStream::new(VARINT_MAX),
             ctx_h: SendStream::new(VARINT_MAX),
             streams: None,
+            dead: None,
             events: Vec::new(),
             local_cids: LocalCids::new(l0, token0),
             peer_cids,
@@ -706,8 +2644,10 @@ impl Connection {
             chal_used: 0,
             out_log: Ghost(Seq::empty()),
             polled: Ghost(Seq::empty()),
+            pend: Ghost(pend_empty()),
         };
         proof {
+            lemma_pieces_init();
             let ghost e = c.peer_cids.entries();
             assert(e[0].1@ == first.scid@);
             let ghost ids_seq = c.paths.ids();
@@ -721,11 +2661,17 @@ impl Connection {
                 assert(ids_seq[0] == path);
             }
             assert(c.wf_parts()) by {
-                reveal(crx_ok);
+                reveal(crate::crx::crx_ok);
                 assert(c.cid_updates@.len() == 2);
+                lemma_ctx_both(c);
             }
+            lemma_backlog3(c.crx_i, c.crx_h, c.crx_1);
             assert(c.wf_amp());
             assert(c.wf_dcids());
+            assert(c.sent_i.inflight_spec() =~= Seq::<SentPacket>::empty());
+            assert(c.sent_h.inflight_spec() =~= Seq::<SentPacket>::empty());
+            assert(c.sent_1.inflight_spec() =~= Seq::<SentPacket>::empty());
+            assert(c.wf_pieces());
         }
         Some(c)
     }
@@ -737,12 +2683,34 @@ impl Connection {
     /// What every frame helper leaves alone: `recv_*` carries `gate_packet`'s duplicate check to
     /// `RecvPns::on_packet`, and is P10's frame.
     closed spec fn frames_kept(&self, o: Connection) -> bool {
-        &&& self.rx_kept(o)
+        self.frames_kept_g(o, 0)
+    }
+
+    /// `frames_kept`, the CRYPTO positions held growing by at most `g` (`crypto_kept_g`).
+    closed spec fn frames_kept_g(&self, o: Connection, g: nat) -> bool {
+        &&& self.rx_kept_g(o, g)
         &&& self.paths.ids() == o.paths.ids()
     }
 
     /// `frames_kept` less `paths.ids()`: also what admitting a new path leaves alone.
     closed spec fn rx_kept(&self, o: Connection) -> bool {
+        self.rx_kept_g(o, 0)
+    }
+
+    /// `rx_kept`, the CRYPTO positions held growing by at most `g`; `pend` unchanged (D10 (b)).
+    closed spec fn rx_kept_g(&self, o: Connection, g: nat) -> bool {
+        &&& self.rx_core_g(o, g)
+        &&& self.pend == o.pend
+    }
+
+    /// `frames_kept` but for `pend`: what reporting one acknowledged or lost frame leaves alone.
+    closed spec fn frames_kept_np(&self, o: Connection) -> bool {
+        &&& self.rx_core_g(o, 0)
+        &&& self.paths.ids() == o.paths.ids()
+    }
+
+    /// `rx_kept_g` but for `pend`.
+    closed spec fn rx_core_g(&self, o: Connection, g: nat) -> bool {
         &&& self.out_log@ == o.out_log@
         &&& self.recv_i == o.recv_i
         &&& self.recv_h == o.recv_h
@@ -750,7 +2718,27 @@ impl Connection {
         &&& self.live_i == o.live_i
         &&& self.live_h == o.live_h
         &&& self.complete == o.complete
-        &&& self.crypto_kept(o)
+        &&& self.crypto_kept_g(o, g)
+    }
+
+    /// `frames_kept_g` composes, the growths adding up.
+    proof fn lemma_frames_kept_g_trans(a: Connection, b: Connection, c: Connection, g1: nat, g2: nat)
+        requires
+            b.frames_kept_g(a, g1),
+            c.frames_kept_g(b, g2),
+        ensures
+            c.frames_kept_g(a, g1 + g2),
+    {
+    }
+
+    /// `frames_kept_g` for a larger growth.
+    proof fn lemma_frames_kept_g_mono(c: Connection, o: Connection, g1: nat, g2: nat)
+        requires
+            c.frames_kept_g(o, g1),
+            g1 <= g2,
+        ensures
+            c.frames_kept_g(o, g2),
+    {
     }
 
     /// What `gate_packet` accepts. Biconditional, so what is absent is proved absent: no size rule
@@ -805,15 +2793,31 @@ impl Connection {
         error: Option<(u64, PlainPacket)>,
         now: u64,
         rand: &[u8; RAND_LEN],
-    )
+    ) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
+            old(self).settled(),
             forall|i: int| 0 <= i < packets@.len() ==> plain_wf(#[trigger] packets@[i]@),
             error matches Some((c, h)) ==> c <= VARINT_MAX && plain_wf(h@),
         ensures
             final(self).wf(),
+            final(self).settled(),
             final(self).out_log() == old(self).out_log(),
-            final(self).crypto_kept(*old(self)),
+            // The pipeline half (9b2 Task 10d): `c_unit()` per unit of the packets' load (`plains_load`, at most the
+            // datagram's bytes): the CRYPTO stores' walks and inserts, the stream-layer frames' work, an ACK's stream
+            // removals, the first Handshake packet's discard. Excluded, each a site of docs/rca/2026-11-12-cost-sweep.md
+            // owned by 9b4: the received packet numbers' ranges (Q15), the ACK's walk of the in-flight records (Q16) and,
+            // per acknowledged frame, its SendStream or CRYPTO context's set update (`on_data_acked`, `on_reset_acked`,
+            // O(log n) each, as many as the records acknowledged; carryover cat-C15-9b4), the CID, path and stream-entry
+            // tables (Q13, Q14, Q17-Q20), the frame path's event pushes (Q21), a close (`close_internal`,
+            // `close_on_error`; Class B). TLS's step is quictls's (D14, 9b5). The packets' and frames' buffers it
+            // frees are charged here (`c_pdrop`, `c_dgfix`, fix round 2); their builders are the opening's (Q22-Q25).
+            r@ <= c_dgram(plains_load(crate::protect::plains_view(packets@))),
+            // Nothing handed over: nothing freed, nothing done.
+            packets@.len() == 0 && error is None ==> r@ == 0,
+            // The positions held grow by at most the CRYPTO bytes of the packets, and not at all unless open.
+            final(self).crypto_kept_g(*old(self), plains_crypto(crate::protect::plains_view(packets@))),
+            !(old(self).phase_spec() is Open) ==> final(self).crypto_kept(*old(self)),
             // §8.1: a datagram on a known path is counted, and nothing after undoes the count.
             old(self).has_path(path) && !(old(self).phase_spec() is Draining) && !(old(
                 self,
@@ -829,12 +2833,76 @@ impl Connection {
             packets@.len() == 0 && old(self).phase_spec() is Open ==> (!(error matches Some((_, h))
                 && old(self).gate_spec(path, datagram_len, &h)) ==> final(self).phase_spec() is Open),
     {
+        let ghost mut work: nat = 0;
+        let ghost pv = crate::protect::plains_view(packets@);
+        proof {
+            // Everything handed over is freed in this call, on every path: charged once, here.
+            lemma_pdrop(pv);
+            if packets@.len() > 0 || error is Some {
+                work = work + c_pdrop(pv) + c_dgfix();
+            }
+        }
+        let known = match self.arrive(path, datagram_len, now) {
+            Some(k) => k,
+            None => return Ghost(work),
+        };
+        let ghost sc = *self;
+        let ghost g = plains_crypto(crate::protect::plains_view(packets@));
+        proof {
+            assert(forall|h: PlainPacket| sc.gate_spec(path, datagram_len, &h) == old(self).gate_spec(path, datagram_len, &h));
+        }
+        let Ghost(c) = self.on_counted(path, datagram_len, known, packets, error, rand);
+        proof {
+            Connection::lemma_dgram_post(*old(self), sc, *self, path, datagram_len as nat, known, g);
+            work = work + c;
+        }
+        Ghost(work)
+    }
+
+    /// The clock moves to `now` (never back) and the challenge slices drawn so far are released (split from
+    /// `arrive` for the rlimit).
+    #[verifier::spinoff_prover]
+    fn stamp(&mut self, now: u64)
+        requires
+            old(self).wf(),
+            old(self).settled(),
+        ensures
+            final(self).wf(),
+            final(self).settled(),
+            *final(self) == (Connection { now: final(self).now, chal_used: 0, ..*old(self) }),
+            final(self).now >= old(self).now,
+    {
         if now > self.now {
             self.now = now;
         }
         self.chal_used = 0;
+    }
+
+    /// `on_datagram`'s start (split from it for the rlimit): the clock and the challenge slices, then, unless
+    /// draining or closed (`None`), whether `path` is known and, if so, the datagram counted on it (§8.1).
+    #[verifier::spinoff_prover]
+    fn arrive(&mut self, path: PathId, datagram_len: usize, now: u64) -> (r: Option<bool>)
+        requires
+            old(self).wf(),
+            old(self).settled(),
+        ensures
+            final(self).wf(),
+            final(self).settled(),
+            final(self).out_log() == old(self).out_log(),
+            final(self).crypto_kept(*old(self)),
+            final(self).crypto_kept_g(*old(self), 0),
+            final(self).phase_spec() == old(self).phase_spec(),
+            r is None <==> (old(self).phase_spec() is Draining || old(self).phase_spec() is Closed),
+            r matches Some(k) ==> k == old(self).paths.has(path) && final(self).paths.has(path) == k,
+            r matches Some(k) ==> (k ==> final(self).paths.amp_trace(path) == old(self).paths.amp_trace(path).push(
+                AmpEv::Recv(datagram_len as nat),
+            )),
+            r is Some ==> final(self).paths.path(path).responses == old(self).paths.path(path).responses,
+            *final(self) == (Connection { now: final(self).now, chal_used: final(self).chal_used, paths: final(self).paths, ..*old(self) }),
+    {
+        self.stamp(now);
         if matches!(self.lc.phase(), Phase::Draining | Phase::Closed) {
-            return;
+            return None;
         }
         // A path is added only by a packet that passes the gate: slots never free, and a garbage or
         // replayed datagram from a spoofed address must not take one. Nothing is ever sent to an
@@ -844,21 +2912,39 @@ impl Connection {
             // §8.1: counted even if every packet is dropped.
             self.count_recv(path, datagram_len as u64);
         }
-        let ghost sc = *self;
-        self.on_counted(path, datagram_len, known, packets, error, rand);
-        proof {
-            reveal(recv_counted);
-            if known {
-                let t0 = old(self).paths.amp_trace(path);
-                assert(self.paths.amp_trace(path).take(t0.len() + 1 as int) =~= t0.push(AmpEv::Recv(datagram_len as nat))) by {
-                    assert(sc.paths.has(path));
-                    assert(sc.paths.amp_trace(path) == t0.push(AmpEv::Recv(datagram_len as nat)));
-                }
+        Some(known)
+    }
+
+    /// `on_datagram`'s ensures from `on_counted`'s, after the count (split from it for the rlimit): the CRYPTO
+    /// frame composes across the count, and a known path's trace starts with this datagram's `Recv`.
+    proof fn lemma_dgram_post(o: Connection, sc: Connection, c: Connection, path: PathId, n: nat, known: bool, g: nat)
+        requires
+            sc.crypto_kept_g(o, 0),
+            sc.crypto_kept(o),
+            c.crypto_kept_g(sc, g),
+            !(o.phase_spec() is Open) ==> c.crypto_kept(sc),
+            c.amp_grew(sc),
+            known ==> sc.paths.has(path) && sc.paths.amp_trace(path) == o.paths.amp_trace(path).push(AmpEv::Recv(n)),
+        ensures
+            c.crypto_kept_g(o, g),
+            !(o.phase_spec() is Open) ==> c.crypto_kept(o),
+            known ==> recv_counted(o.paths.amp_trace(path), c.paths.amp_trace(path), n),
+    {
+        Connection::lemma_crypto_kept_g_trans(o, sc, c, 0, g);
+        if !(o.phase_spec() is Open) {
+            Connection::lemma_crypto_kept_trans(o, sc, c);
+        }
+        reveal(recv_counted);
+        if known {
+            let t0 = o.paths.amp_trace(path);
+            assert(c.paths.amp_trace(path).take(t0.len() + 1 as int) =~= t0.push(AmpEv::Recv(n))) by {
+                assert(sc.paths.amp_trace(path) == t0.push(AmpEv::Recv(n)));
             }
         }
     }
 
-    /// `on_datagram` once the datagram is counted: `known` is whether `path` was in the table.
+    /// `on_datagram` once the datagram is counted: `known` is whether `path` was in the table. Returns the packets'
+    /// costs, `c_unit()` per unit of their load.
     #[verifier::spinoff_prover]
     fn on_counted(
         &mut self,
@@ -868,24 +2954,30 @@ impl Connection {
         packets: Vec<PlainPacket>,
         error: Option<(u64, PlainPacket)>,
         rand: &[u8; RAND_LEN],
-    )
+    ) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
+            old(self).settled(),
             !(old(self).phase_spec() is Draining) && !(old(self).phase_spec() is Closed),
             known == old(self).paths.has(path),
             forall|i: int| 0 <= i < packets@.len() ==> plain_wf(#[trigger] packets@[i]@),
             error matches Some((c, h)) ==> c <= VARINT_MAX && plain_wf(h@),
         ensures
             final(self).wf(),
+            final(self).settled(),
             final(self).out_log() == old(self).out_log(),
             final(self).amp_grew(*old(self)),
-            final(self).crypto_kept(*old(self)),
+            final(self).crypto_kept_g(*old(self), plains_crypto(crate::protect::plains_view(packets@))),
+            !(old(self).phase_spec() is Open) ==> final(self).crypto_kept(*old(self)),
             packets@.len() == 0 && old(self).phase_spec() is Open ==> (error matches Some((_, h)) && old(
                 self,
             ).gate_spec(path, datagram_len, &h) && old(self).paths.has(path) ==> final(self).phase_spec() is Closing),
             packets@.len() == 0 && old(self).phase_spec() is Open ==> (!(error matches Some((_, h))
                 && old(self).gate_spec(path, datagram_len, &h)) ==> *final(self) == *old(self)),
+            r@ <= c_unit() * plains_load(crate::protect::plains_view(packets@)),
     {
+        let ghost g = plains_crypto(crate::protect::plains_view(packets@));
+        let ghost mut work: nat = 0;
         let mut known = known;
         proof {
             self.lemma_grew_same(*self);
@@ -898,7 +2990,7 @@ impl Connection {
             proof {
                 self.lemma_grew_same(*old(self));
             }
-            return;
+            return Ghost(work);
         }
         let ghost np = packets@.len();
         // §12.2: the first packet's DCID, even if the gate drops that packet.
@@ -907,7 +2999,7 @@ impl Connection {
         } else {
             match &error {
                 Some((_, h)) => slice_to_vec(h.dcid.as_slice()),
-                None => return ,
+                None => return Ghost(work),
             }
         };
         let ghost s1 = *self;
@@ -922,65 +3014,57 @@ impl Connection {
         //# them, as if they were received as the payload of different UDP
         //# datagrams.
         if packets.len() > 0 {
+            let ghost ps = packets@;
+            proof {
+                assert(crate::protect::plains_view(ps).take(0) =~= Seq::<SpecPlain>::empty());
+            }
             for p in it: packets
                 invariant
+                    it.seq() == ps,
+                    g == plains_crypto(crate::protect::plains_view(ps)),
                     self.wf(),
+                    self.settled(),
                     self.out_log() == old(self).out_log(),
                     known == self.paths.has(path),
                     self.phase_spec() is Open,
                     self.amp_grew(s1),
-                    self.crypto_kept(s1),
+                    self.crypto_kept_g(s1, plains_crypto(crate::protect::plains_view(ps).take(it.index() as int))),
+                    work <= c_unit() * plains_load(crate::protect::plains_view(ps).take(it.index() as int)),
                     s1 == *old(self),
                     forall|j: int| 0 <= j < it.seq().len() ==> plain_wf(#[trigger] it.seq()[j]@),
             {
+                let ghost i = it.index() as int;
+                let ghost b = *self;
+                let ghost pv = p@;
                 proof {
                     assert(it.seq()[it.index()] == p);
                     assert(plain_wf(it.seq()[it.index()]@));
+                    assert(crate::protect::plains_view(ps)[i] == p@);
+                    lemma_plains_crypto_take(crate::protect::plains_view(ps), i);
+                    lemma_plains_crypto_take(crate::protect::plains_view(ps), i + 1);
+                    lemma_plains_load_take(crate::protect::plains_view(ps), i);
+                    lemma_plains_load_take(crate::protect::plains_view(ps), i + 1);
                 }
-                // §12.2: a packet with another DCID is ignored.
-                if eq_bytes(p.dcid.as_slice(), first.as_slice()) && self.gate_packet(path, datagram_len, &p) {
-                    if !known {
-                        let ghost b0 = *self;
-                        // §9: at `MAX_PATHS` the datagram is dropped uncounted.
-                        let ok = self.ensure_path(path);
-                        proof {
-                            self.lemma_grew_trans(b0, s1);
-                        }
-                        if !ok {
-                            return;
-                        }
-                        let ghost b1 = *self;
-                        // §8.1: the whole datagram, including packets the gate already dropped.
-                        self.count_recv(path, datagram_len as u64);
-                        proof {
-                            self.lemma_grew_trans(b1, s1);
-                        }
-                        known = true;
-                    }
-                    let ghost b2 = *self;
-                    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2
-                    //# An
-                    //# endpoint MUST generate a connection error if processing the contents
-                    //# of these packets prior to discovering an error, or fully revert any
-                    //# changes made during that processing.
-                    let r = self.on_packet(path, p, now, rand);
-                    proof {
-                        self.lemma_grew_trans(b2, s1);
-                    }
-                    if let Err(c) = r {
-                        let ghost b3 = *self;
-                        self.close_internal(c);
-                        proof {
-                            self.lemma_grew_same(b3);
-                            self.lemma_grew_trans(b3, s1);
-                        }
-                        return;
-                    }
-                    // CONNECTION_CLOSE, or a closed connection.
-                    if !matches!(self.lc.phase(), Phase::Open) {
-                        return;
-                    }
+                let (r, Ghost(c)) = self.on_counted_one(path, datagram_len, known, first.as_slice(), p, now, rand);
+                proof {
+                    self.lemma_grew_trans(b, s1);
+                    Connection::lemma_crypto_kept_g_trans(s1, b, *self, plains_crypto(crate::protect::plains_view(ps).take(i)), frames_crypto(pv.frames));
+                    Connection::lemma_crypto_kept_g_mono(*self, s1, plains_crypto(crate::protect::plains_view(ps).take(i + 1)), g);
+                    work = work + c;
+                    lemma_unit_step(work, c, plains_load(crate::protect::plains_view(ps).take(i)), plain_load(pv), plains_load(crate::protect::plains_view(ps)), plains_load(crate::protect::plains_view(ps).take(i + 1)));
                 }
+                match r {
+                    Some(kn) => known = kn,
+                    None => return Ghost(work),
+                }
+            }
+            proof {
+                assert(crate::protect::plains_view(ps).take(ps.len() as int) =~= crate::protect::plains_view(ps));
+            }
+        }
+        proof {
+            if np == 0 {
+                Connection::lemma_crypto_kept_g_refl(*self, g);
             }
         }
         if let Some((code, h)) = error {
@@ -993,8 +3077,95 @@ impl Connection {
             self.close_on_error(path, datagram_len, first.as_slice(), known, code, &h);
             proof {
                 self.lemma_grew_trans(b4, s1);
+                Connection::lemma_crypto_kept_g_trans(s1, b4, *self, g, 0);
             }
         }
+        Ghost(work)
+    }
+
+    /// One packet of `on_counted`'s datagram (split from it for the rlimit): §12.2's DCID check and the gate, the
+    /// path admitted if new, then the packet. `None` when the datagram stops here: a full path table, a
+    /// connection error (closed), or a connection no longer open; else `Some` of whether `path` is known.
+    #[verifier::spinoff_prover]
+    fn on_counted_one(
+        &mut self,
+        path: PathId,
+        datagram_len: usize,
+        known: bool,
+        first: &[u8],
+        p: PlainPacket,
+        now: u64,
+        rand: &[u8; RAND_LEN],
+    ) -> (r: (Option<bool>, Ghost<nat>))
+        requires
+            old(self).wf(),
+            old(self).settled(),
+            old(self).phase_spec() is Open,
+            known == old(self).paths.has(path),
+            plain_wf(p@),
+        ensures
+            final(self).wf(),
+            final(self).settled(),
+            final(self).out_log() == old(self).out_log(),
+            final(self).amp_grew(*old(self)),
+            final(self).crypto_kept_g(*old(self), frames_crypto(p@.frames)),
+            r.0 matches Some(kn) ==> final(self).phase_spec() is Open && kn == final(self).paths.has(path),
+            // The packet's (`on_packet`).
+            r.1@ <= c_unit() * plain_load(p@),
+    {
+        let ghost g = frames_crypto(p@.frames);
+        let ghost mut work: nat = 0;
+        proof {
+            self.lemma_grew_same(*self);
+        }
+        // §12.2: a packet with another DCID is ignored.
+        if eq_bytes(p.dcid.as_slice(), first) && self.gate_packet(path, datagram_len, &p) {
+            let mut known = known;
+            if !known {
+                let ghost b0 = *self;
+                // §9: at `MAX_PATHS` the datagram is dropped uncounted.
+                let ok = self.ensure_path(path);
+                if !ok {
+                    return (None, Ghost(work));
+                }
+                let ghost b1 = *self;
+                // §8.1: the whole datagram, including packets the gate already dropped.
+                self.count_recv(path, datagram_len as u64);
+                proof {
+                    self.lemma_grew_trans(b1, b0);
+                    Connection::lemma_crypto_kept_trans(b0, b1, *self);
+                }
+                known = true;
+            }
+            let ghost b2 = *self;
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2
+            //# An
+            //# endpoint MUST generate a connection error if processing the contents
+            //# of these packets prior to discovering an error, or fully revert any
+            //# changes made during that processing.
+            let (r, Ghost(c)) = self.on_packet(path, p, now, rand);
+            proof {
+                self.lemma_grew_trans(b2, *old(self));
+                Connection::lemma_crypto_kept_g_trans(*old(self), b2, *self, 0, g);
+                work = work + c;
+            }
+            if let Err(c) = r {
+                let ghost b3 = *self;
+                self.close_internal(c);
+                proof {
+                    self.lemma_grew_same(b3);
+                    self.lemma_grew_trans(b3, *old(self));
+                    Connection::lemma_crypto_kept_g_trans(*old(self), b3, *self, g, 0);
+                }
+                return (None, Ghost(work));
+            }
+            // CONNECTION_CLOSE, or a closed connection.
+            if !matches!(self.lc.phase(), Phase::Open) {
+                return (None, Ghost(work));
+            }
+            return (Some(known), Ghost(work));
+        }
+        (Some(known), Ghost(work))
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-14
@@ -1008,6 +3179,7 @@ impl Connection {
     fn close_on_error(&mut self, path: PathId, len: usize, first: &[u8], known: bool, code: u64, h: &PlainPacket)
         requires
             old(self).wf(),
+            old(self).settled(),
             old(self).phase_spec() is Open,
             known == old(self).paths.has(path),
             code <= VARINT_MAX,
@@ -1015,6 +3187,7 @@ impl Connection {
         ensures
             final(self).amp_grew(*old(self)),
             final(self).wf(),
+            final(self).settled(),
             final(self).out_log() == old(self).out_log(),
             final(self).crypto_kept(*old(self)),
             !(h.dcid@ == first@ && old(self).gate_spec(path, len, h)) ==> *final(self) == *old(self),
@@ -1042,9 +3215,11 @@ impl Connection {
     fn ensure_path(&mut self, path: PathId) -> (ok: bool)
         requires
             old(self).wf(),
+            old(self).settled(),
         ensures
             final(self).amp_grew(*old(self)),
             final(self).wf(),
+            final(self).settled(),
             final(self).out_log() == old(self).out_log(),
             final(self).phase_spec() == old(self).phase_spec(),
             final(self).rx_kept(*old(self)),
@@ -1117,10 +3292,12 @@ impl Connection {
     fn count_recv(&mut self, path: PathId, n: u64)
         requires
             old(self).wf(),
+            old(self).settled(),
             old(self).paths.has(path),
         ensures
             final(self).amp_grew(*old(self)),
             final(self).wf(),
+            final(self).settled(),
             final(self).out_log() == old(self).out_log(),
             final(self).phase_spec() == old(self).phase_spec(),
             final(self).rx_kept(*old(self)),
@@ -1139,25 +3316,29 @@ impl Connection {
     }
 
     /// A Handshake packet validates the client's address (§8.1) and ends the Initial space (RFC
-    /// 9001 §4.9.1).
+    /// 9001 §4.9.1). Returns the discard's cost: one retire (`discard`, O(1) since 9b2 Task 10b; 9b2 Task 10d item 2).
     #[verifier::spinoff_prover]
-    fn validate_hs_path(&mut self)
+    fn validate_hs_path(&mut self) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
+            old(self).settled(),
         ensures
             final(self).amp_grew(*old(self)),
             final(self).wf(),
+            final(self).settled(),
             final(self).out_log() == old(self).out_log(),
             final(self).paths.ids() == old(self).paths.ids(),
             final(self).peer_used_kept(*old(self)),
             final(self).crypto_kept(*old(self)),
+            r@ <= crate::avl::c_join2() * 127 + 1 + c_sfree(),
     {
         let ghost s0 = *self;
         self.paths.set_validated(self.hs_path);
         proof {
             self.lemma_path_event(s0, s0.hs_path, AmpEv::Validated);
         }
-        self.discard(PacketKind::Initial);
+        let Ghost(c) = self.discard(PacketKind::Initial);
+        Ghost(c)
     }
 
     /// `self` is `o` with an event other than `Sent` pushed on `id`'s trace.
@@ -1328,6 +3509,8 @@ impl Connection {
     //# processed.
     /// One packet that passed `gate_packet`. P10: the packet number is recorded, so the packet
     /// can be acknowledged, only after every frame returned `Ok`.
+    /// Returns its cost, `c_unit()` per unit of its load (9b2 Task 10d): its frames', and the Initial space's discard
+    /// when it is the first Handshake packet (`validate_hs_path`).
     #[verifier::spinoff_prover]
     fn on_packet(
         &mut self,
@@ -1335,9 +3518,10 @@ impl Connection {
         p: PlainPacket,
         now: u64,
         rand: &[u8; RAND_LEN],
-    ) -> (r: Result<(), u64>)
+    ) -> (r: (Result<(), u64>, Ghost<nat>))
         requires
             old(self).wf(),
+            old(self).settled(),
             old(self).phase_spec() is Open,
             old(self).paths.has(path),
             plain_wf(p@),
@@ -1347,26 +3531,39 @@ impl Connection {
         ensures
             final(self).amp_grew(*old(self)),
             final(self).wf(),
+            final(self).settled(),
             final(self).out_log() == old(self).out_log(),
             final(self).paths.has(path),
-            r matches Err(c) ==> c <= VARINT_MAX,
-            r is Err ==> final(self).recv(p.kind).seen() == old(self).recv(p.kind).seen(),
-            r is Ok && final(self).phase_spec() is Open ==> final(self).paths.path(path).peer_used
+            r.0 matches Err(c) ==> c <= VARINT_MAX,
+            r.0 is Err ==> final(self).recv(p.kind).seen() == old(self).recv(p.kind).seen(),
+            r.0 is Ok && final(self).phase_spec() is Open ==> final(self).paths.path(path).peer_used
                 == Some(p.dcid@),
-            final(self).crypto_kept(*old(self)),
+            final(self).crypto_kept_g(*old(self), frames_crypto(p@.frames)),
+            r.1@ <= c_unit() * plain_load(p@),
     {
+        let ghost g = frames_crypto(p@.frames);
+        let ghost mut work: nat = 0;
         let k = p.kind;
         let pn = p.pn;
         let dcid = p.dcid;
         let frames = p.frames;
         let eliciting = is_ack_eliciting(frames.as_slice());
         let non_probing = has_non_probing(frames.as_slice());
-        let f = self.on_frames(k, path, dcid.as_slice(), frames, now, rand);
+        let (f, Ghost(cf)) = self.on_frames(k, path, dcid.as_slice(), frames, now, rand);
+        let ghost s1 = *self;
+        proof {
+            work = work + cf;
+            lemma_frame_unit(SpecFrame::Padding);
+            assert(c_unit() * plain_load(p@) == c_unit() + c_unit() * frames_load(p@.frames)) by (nonlinear_arith)
+                requires
+                    plain_load(p@) == 1 + frames_load(p@.frames),
+            ;
+        }
         if f.is_err() {
-            return f;
+            return (f, Ghost(work));
         }
         if !matches!(self.lc.phase(), Phase::Open) {
-            return Ok(());
+            return (Ok(()), Ghost(work));
         }
         match k {
             PacketKind::Initial => self.recv_i.on_packet(pn, eliciting, now),
@@ -1378,7 +3575,10 @@ impl Connection {
         match k {
             PacketKind::Handshake => {
                 if !matches!(self.paths.state(self.hs_path), PathState::Validated) {
-                    self.validate_hs_path();
+                    let Ghost(cd) = self.validate_hs_path();
+                    proof {
+                        work = work + cd;
+                    }
                 }
             },
             PacketKind::OneRtt => {
@@ -1386,11 +3586,14 @@ impl Connection {
             },
             PacketKind::Initial => {},
         }
-        Ok(())
+        proof {
+            Connection::lemma_crypto_kept_g_trans(*old(self), s1, *self, g, 0);
+        }
+        (Ok(()), Ghost(work))
     }
 
     /// The frames of one packet, stopping at the first error or once no longer Open: in `[CC,
-    /// Stream]`, `streams` is None by the second frame.
+    /// Stream]`, `streams` is None by the second frame. Returns their costs, `c_unit()` per unit of their load.
     #[verifier::spinoff_prover]
     fn on_frames(
         &mut self,
@@ -1400,9 +3603,10 @@ impl Connection {
         frames: Vec<Frame>,
         now: u64,
         rand: &[u8; RAND_LEN],
-    ) -> (r: Result<(), u64>)
+    ) -> (r: (Result<(), u64>, Ghost<nat>))
         requires
             old(self).wf(),
+            old(self).settled(),
             old(self).phase_spec() is Open,
             old(self).paths.has(path),
             frames_received(frames_view(frames@), k),
@@ -1412,15 +3616,23 @@ impl Connection {
         ensures
             final(self).amp_grew(*old(self)),
             final(self).wf(),
-            final(self).frames_kept(*old(self)),
-            r matches Err(c) ==> c <= VARINT_MAX,
+            final(self).settled(),
+            final(self).frames_kept_g(*old(self), frames_crypto(frames_view(frames@))),
+            r.0 matches Err(c) ==> c <= VARINT_MAX,
+            r.1@ <= c_unit() * frames_load(frames_view(frames@)),
     {
         let ghost fs = frames@;
+        let ghost mut work: nat = 0;
+        proof {
+            assert(frames_view(fs).take(0) =~= Seq::<SpecFrame>::empty());
+        }
         for f in it: frames
             invariant
                 self.amp_grew(*old(self)),
                 self.wf(),
-                self.frames_kept(*old(self)),
+                self.settled(),
+                self.frames_kept_g(*old(self), frames_crypto(frames_view(fs).take(it.index() as int))),
+                work <= c_unit() * frames_load(frames_view(fs).take(it.index() as int)),
                 self.phase_spec() is Open,
                 self.paths.has(path),
                 it.seq() == fs,
@@ -1429,23 +3641,39 @@ impl Connection {
                 k is OneRtt ==> self.complete,
                 self.live(k),
         {
+            let ghost i = it.index() as int;
+            let ghost s0 = *self;
             proof {
-                let i = it.index();
                 assert(fs[i] == f);
                 assert(frames_view(fs)[i] == f@);
+                lemma_frames_crypto_take(frames_view(fs), i);
+                lemma_frames_crypto_take(frames_view(fs), i + 1);
+                lemma_frames_load_take(frames_view(fs), i);
+                lemma_frames_load_take(frames_view(fs), i + 1);
             }
-            let r = self.on_frame(k, path, dcid, &f, now, rand);
+            let (r, Ghost(c)) = self.on_frame(k, path, dcid, &f, now, rand);
+            proof {
+                Connection::lemma_frames_kept_g_trans(*old(self), s0, *self, frames_crypto(frames_view(fs).take(i)), frame_crypto(f@));
+                Connection::lemma_frames_kept_g_mono(*self, *old(self), frames_crypto(frames_view(fs).take(i + 1)), frames_crypto(frames_view(fs)));
+                work = work + c;
+                lemma_unit_step(work, c, frames_load(frames_view(fs).take(i)), frame_load(f@), frames_load(frames_view(fs)), frames_load(frames_view(fs).take(i + 1)));
+            }
             if r.is_err() {
-                return r;
+                return (r, Ghost(work));
             }
             if !matches!(self.lc.phase(), Phase::Open) {
-                return Ok(());
+                return (Ok(()), Ghost(work));
             }
         }
-        Ok(())
+        proof {
+            assert(frames_view(fs).take(fs.len() as int) =~= frames_view(fs));
+        }
+        (Ok(()), Ghost(work))
     }
 
-    /// Dispatches one frame.
+    /// Dispatches one frame. Returns its cost, within `c_unit()` per unit of its load (9b2 Task 10d): a CRYPTO
+    /// frame's store work, a stream-layer frame's stream work, an ACK's stream removals. Excluded: the CID and path
+    /// frames' tables and responses (Q13, Q14, Q17, Q18: docs/rca/2026-11-12-cost-sweep.md, 9b4).
     #[verifier::spinoff_prover]
     fn on_frame(
         &mut self,
@@ -1455,7 +3683,7 @@ impl Connection {
         f: &Frame,
         now: u64,
         rand: &[u8; RAND_LEN],
-    ) -> (r: Result<(), u64>)
+    ) -> (r: (Result<(), u64>, Ghost<nat>))
         requires
             old(self).wf(),
             old(self).phase_spec() is Open,
@@ -1469,8 +3697,9 @@ impl Connection {
         ensures
             final(self).amp_grew(*old(self)),
             final(self).wf(),
-            final(self).frames_kept(*old(self)),
-            r matches Err(c) ==> c <= VARINT_MAX,
+            final(self).frames_kept_g(*old(self), frame_crypto(f@)),
+            r.0 matches Err(c) ==> c <= VARINT_MAX,
+            r.1@ <= c_unit() * frame_load(f@),
     {
         // The stream family reaches only 1-RTT, so `wf`'s `complete` clause gives `streams`.
         proof {
@@ -1480,23 +3709,50 @@ impl Connection {
                 }
                 assert(k is OneRtt);
             }
+            lemma_frame_unit(f@);
+            self.lemma_n_live();
         }
+        let ghost mut work: nat = 0;
         match f {
-            Frame::Padding | Frame::Ping => Ok(()),
+            Frame::Padding | Frame::Ping => (Ok(()), Ghost(work)),
             // `frames_received` excludes it.
             Frame::HandshakeDone => {
                 proof {
                     assert(false);
                 }
-                Ok(())
+                (Ok(()), Ghost(work))
             },
-            Frame::Ack(a) => self.on_ack_frame(k, a, now),
-            Frame::Crypto { offset, data } => self.on_crypto_frame(k, *offset, data.as_slice(), now),
+            Frame::Ack(a) => {
+                let ghost n0 = self.n_live();
+                let (r, Ghost(c)) = self.on_ack_frame(k, a, now);
+                proof {
+                    work = work + c;
+                    assert(work <= c_ack()) by (nonlinear_arith)
+                        requires
+                            work == c,
+                            c <= (n0 - self.n_live()) * c_gc(),
+                            n0 <= max_entries(),
+                            c_ack() == max_entries() * c_gc(),
+                    ;
+                }
+                (r, Ghost(work))
+            },
+            Frame::Crypto { offset, data } => {
+                let (r, Ghost(c)) = self.on_crypto_frame(k, *offset, data.as_slice(), now);
+                proof {
+                    work = work + c;
+                }
+                (r, Ghost(work))
+            },
             Frame::ConnectionClose { .. } => {
                 let pto = self.pto();
                 self.lc.enter_draining(now, pto);
-                self.streams = None;
-                Ok(())
+                let ghost cs = *self;
+                self.bury_streams();
+                proof {
+                    Connection::lemma_streams_conn(cs, *self);
+                }
+                (Ok(()), Ghost(work))
             },
             Frame::ResetStream { .. }
             | Frame::StopSending { .. }
@@ -1506,19 +3762,27 @@ impl Connection {
             | Frame::MaxStreams { .. }
             | Frame::DataBlocked(_)
             | Frame::StreamDataBlocked { .. }
-            | Frame::StreamsBlocked { .. } => self.on_stream_frame(f, now),
-            Frame::NewConnectionId { .. } | Frame::RetireConnectionId(_) => self.on_cid_frame(
-                dcid,
-                f,
-                rand,
+            | Frame::StreamsBlocked { .. } => {
+                let (r, Ghost(c)) = self.on_stream_frame(f, now);
+                proof {
+                    work = work + c;
+                }
+                (r, Ghost(work))
+            },
+            Frame::NewConnectionId { .. } | Frame::RetireConnectionId(_) => (
+                self.on_cid_frame(dcid, f, rand),
+                Ghost(work),
             ),
-            Frame::PathChallenge(_) | Frame::PathResponse(_) => self.on_path_frame(path, f, now, rand),
+            Frame::PathChallenge(_) | Frame::PathResponse(_) => (self.on_path_frame(path, f, now, rand), Ghost(work)),
         }
     }
 
-    /// An ACK frame: drops the records it acknowledges and routes their frames (§13.3).
+    /// An ACK frame: drops the records it acknowledges and routes their frames (§13.3). Returns the cost of the
+    /// stream removals the acknowledged frames make, charged per entry removed (9b2 Task 10d item 5); the records'
+    /// walk (Q16 of docs/rca/2026-11-12-cost-sweep.md) and, per acknowledged frame, its SendStream or CRYPTO context's set
+    /// update (O(log n) each, asserted in their wrappers; carryover cat-C15-9b4) are the ACK path's own, owner 9b4.
     #[verifier::spinoff_prover]
-    fn on_ack_frame(&mut self, k: PacketKind, a: &AckFrame, now: u64) -> (r: Result<(), u64>)
+    fn on_ack_frame(&mut self, k: PacketKind, a: &AckFrame, now: u64) -> (r: (Result<(), u64>, Ghost<nat>))
         requires
             old(self).wf(),
             rfc_ack_ranges_valid(a.largest, a.first_range, a.ranges@),
@@ -1526,8 +3790,11 @@ impl Connection {
             final(self).paths == old(self).paths,
             final(self).wf(),
             final(self).frames_kept(*old(self)),
-            r matches Err(c) ==> c <= VARINT_MAX,
+            r.0 matches Err(c) ==> c <= VARINT_MAX,
+            final(self).n_live() <= old(self).n_live(),
+            r.1@ <= (old(self).n_live() - final(self).n_live()) * c_gc(),
     {
+        let ghost mut work: nat = 0;
         let mut acked: Vec<SentPacket> = Vec::new();
         proof {
             lemma_unacked_len(a@, self.sent_i.inflight_spec());
@@ -1540,55 +3807,109 @@ impl Connection {
             PacketKind::OneRtt => self.sent_1.on_ack(a, &mut acked),
         };
         if r.is_err() {
-            return r;
+            return (r, Ghost(work));
         }
+        // D10 (b): the acknowledged records' pieces join `pend`, to leave it frame by frame below.
+        let ghost base = pend_of(old(self).pend@, k);
+        let ghost np = pend_with(old(self).pend@, k, msum(base, rec_pieces(acked@)));
+        proof {
+            assert(acked@ =~= acked_of(a@, old(self).sent(k).inflight_spec()));
+            lemma_rec_pieces_split(a@, old(self).sent(k).inflight_spec());
+            Connection::lemma_take_conn(*old(self), *self, k, acked@, np);
+        }
+        self.pend = Ghost(np);
         self.recovery.on_ack_received(k, acked.len(), a.delay, now);
         let mut i: usize = 0;
+        proof {
+            assert(acked@.subrange(0, acked@.len() as int) =~= acked@);
+        }
         while i < acked.len()
             invariant
                 self.paths == old(self).paths,
                 i <= acked@.len(),
                 self.wf(),
-                self.frames_kept(*old(self)),
+                self.frames_kept_np(*old(self)),
+                pend_of(self.pend@, k) == msum(base, rec_pieces(acked@.subrange(i as int, acked@.len() as int))),
+                pend_kept_but(old(self).pend@, self.pend@, k),
+                self.n_live() <= old(self).n_live(),
+                work <= (old(self).n_live() - self.n_live()) * c_gc(),
             decreases acked@.len() - i,
         {
-            self.on_acked_record(k, acked[i].frames.as_slice());
+            proof {
+                lemma_pend_rec_step(acked@, i as int, base);
+            }
+            let ghost n0 = self.n_live();
+            let Ghost(c) = self.on_acked_record(
+                k,
+                acked[i].frames.as_slice(),
+                Ghost(msum(base, rec_pieces(acked@.subrange(i as int + 1, acked@.len() as int)))),
+            );
+            proof {
+                lemma_tele(work, c, old(self).n_live() as int, n0 as int, self.n_live() as int);
+                work = work + c;
+            }
             i += 1;
         }
-        Ok(())
+        proof {
+            lemma_pend_end(Seq::<SpecFrame>::empty(), acked@, base);
+            lemma_pend_kept(old(self).pend@, self.pend@, k);
+        }
+        (Ok(()), Ghost(work))
     }
 
-    // ponytail: per incoming ACK at most 64 records × distinct stream runs per record × O(R) range work (R ≈ 2·64 + ~1000, 3d D4); coalescing turns a 200-frame single-stream record into one call. Cap STREAM frames per stream per packet if a split adversary still makes this hot.
-    /// The frames of one acknowledged record, each run of adjacent STREAM frames in one call.
+    /// The frames of one acknowledged record, one call each: a STREAM frame is one piece, found and moved in O(log n)
+    /// (D10 (b), (e)); a coalesced run would be no piece.
     #[verifier::spinoff_prover]
-    fn on_acked_record(&mut self, k: PacketKind, frames: &[Frame])
+    fn on_acked_record(&mut self, k: PacketKind, frames: &[Frame], Ghost(rest): Ghost<Multiset<PieceKey>>) -> (r:
+        Ghost<nat>)
         requires
             old(self).wf(),
+            pend_of(old(self).pend@, k) == frame_pieces(frames_view(frames@)).add(rest),
         ensures
             final(self).paths == old(self).paths,
             final(self).wf(),
-            final(self).frames_kept(*old(self)),
+            final(self).frames_kept_np(*old(self)),
+            final(self).pend@ == pend_with(old(self).pend@, k, rest),
+            final(self).n_live() <= old(self).n_live(),
+            r@ <= (old(self).n_live() - final(self).n_live()) * c_gc(),
     {
+        let ghost fv = frames_view(frames@);
+        let ghost mut work: nat = 0;
         let mut j: usize = 0;
+        proof {
+            assert(fv.subrange(0, fv.len() as int) =~= fv);
+        }
+        // D10 (b): `pend` is the pieces of the frames not yet reported, then `rest`.
         while j < frames.len()
             invariant
                 self.paths == old(self).paths,
                 j <= frames@.len(),
+                fv == frames_view(frames@),
                 self.wf(),
-                self.frames_kept(*old(self)),
+                self.frames_kept_np(*old(self)),
+                pend_of(self.pend@, k) == msum(frame_pieces(fv.subrange(j as int, fv.len() as int)), rest),
+                pend_kept_but(old(self).pend@, self.pend@, k),
+                self.n_live() <= old(self).n_live(),
+                work <= (old(self).n_live() - self.n_live()) * c_gc(),
             decreases frames@.len() - j,
         {
-            match stream_run(frames, j) {
-                Some((run, e)) => {
-                    self.on_acked_frame(k, &run);
-                    j = e;
-                },
-                None => {
-                    self.on_acked_frame(k, &frames[j]);
-                    j += 1;
-                },
+            proof {
+                lemma_pend_step(fv, j as int, rest);
+                assert(fv[j as int] == frames@[j as int]@);
             }
+            let ghost n0 = self.n_live();
+            let Ghost(c) = self.on_acked_frame(k, &frames[j]);
+            proof {
+                lemma_tele(work, c, old(self).n_live() as int, n0 as int, self.n_live() as int);
+                work = work + c;
+            }
+            j += 1;
         }
+        proof {
+            lemma_pend_end(fv, Seq::<SentPacket>::empty(), rest);
+            lemma_pend_kept(old(self).pend@, self.pend@, k);
+        }
+        Ghost(work)
     }
 
     // Post-handshake CRYPTO is buffered here and read and fed to TLS by quictls; we send no NewSessionTicket.
@@ -1598,23 +3919,24 @@ impl Connection {
     //# If an endpoint does not expand its buffer, it MUST close
     //# the connection with a CRYPTO_BUFFER_EXCEEDED error code.
     #[verifier::spinoff_prover]
-    fn on_crypto_frame(&mut self, k: PacketKind, offset: u64, data: &[u8], now: u64) -> (r: Result<(), u64>)
+    fn on_crypto_frame(&mut self, k: PacketKind, offset: u64, data: &[u8], now: u64) -> (r: (Result<(), u64>, Ghost<nat>))
         requires
             old(self).wf(),
+            old(self).phase_spec() is Open,
             old(self).live(k),
             offset + data@.len() <= VARINT_MAX,
         ensures
             final(self).paths == old(self).paths,
             final(self).wf(),
-            final(self).frames_kept(*old(self)),
-            r matches Err(c) ==> c <= VARINT_MAX,
-            r matches Err(c) ==> c == CRYPTO_BUFFER_EXCEEDED && crypto_allowed_err(
+            final(self).frames_kept_g(*old(self), data@.len()),
+            r.0 matches Err(c) ==> c <= VARINT_MAX,
+            r.0 matches Err(c) ==> c == CRYPTO_BUFFER_EXCEEDED && crypto_allowed_err(
                 old(self).crx_spec(k),
                 offset,
                 data@.len(),
                 c,
             ),
-            crypto_allowed_err(old(self).crx_spec(k), offset, data@.len(), CRYPTO_BUFFER_EXCEEDED) ==> r
+            crypto_allowed_err(old(self).crx_spec(k), offset, data@.len(), CRYPTO_BUFFER_EXCEEDED) ==> r.0
                 == Err::<(), u64>(CRYPTO_BUFFER_EXCEEDED),
             old(self).phase_spec() is Open && crypto_allowed_err(
                 old(self).crx_spec(k),
@@ -1624,27 +3946,61 @@ impl Connection {
             ) ==> final(self).phase_spec() is Closing && final(self).close_spec() == Some(
                 (false, CRYPTO_BUFFER_EXCEEDED, Seq::<u8>::empty()),
             ),
-            r is Err ==> !(final(self).phase_spec() is Open),
+            r.0 is Err ==> !(final(self).phase_spec() is Open),
+            // The level's store: its walk and insert (`CryptoStream::on_crypto_c`, 9b2 Task 10d item 1).
+            r.1@ <= 10 * data@.len() + 16078,
     {
         proof {
-            reveal(crx_ok);
+            reveal(crate::crx::crx_ok);
         }
+        let ghost mut work: nat = 0;
         let pto = self.pto();
-        let r = match k {
-            PacketKind::Initial => self.crx_i.on_crypto(offset, data),
-            PacketKind::Handshake => self.crx_h.on_crypto(offset, data),
-            PacketKind::OneRtt => self.crx_1.on_crypto(offset, data),
+        let (r, Ghost(cc)) = match k {
+            PacketKind::Initial => self.crx_i.on_crypto_c(offset, data),
+            PacketKind::Handshake => self.crx_h.on_crypto_c(offset, data),
+            PacketKind::OneRtt => self.crx_1.on_crypto_c(offset, data),
         };
-        if let Err(c) = r {
-            let none: Vec<u8> = Vec::new();
-            proof {
-                assert(none@.take(0) =~= Seq::<u8>::empty());
-            }
-            self.lc.enter_closing(now, pto, false, c, none.as_slice());
-            self.streams = None;
-            return Err(c);
+        proof {
+            work = work + cc;
+            lemma_backlog3(old(self).crx_i, old(self).crx_h, old(self).crx_1);
+            lemma_backlog3(self.crx_i, self.crx_h, self.crx_1);
         }
-        Ok(())
+        if let Err(c) = r {
+            self.close_crypto_err(c, now, pto);
+            return (Err(c), Ghost(work));
+        }
+        (Ok(()), Ghost(work))
+    }
+
+    /// `on_crypto_frame`'s close on CRYPTO_BUFFER_EXCEEDED: Closing with that code and no reason, the streams buried
+    /// (split for the rlimit).
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
+    //# If an endpoint does not expand its buffer, it MUST close
+    //# the connection with a CRYPTO_BUFFER_EXCEEDED error code.
+    #[verifier::spinoff_prover]
+    fn close_crypto_err(&mut self, c: u64, now: u64, pto: u64)
+        requires
+            old(self).wf(),
+            old(self).phase_spec() is Open,
+            c == CRYPTO_BUFFER_EXCEEDED,
+            pto == old(self).pto_spec(),
+        ensures
+            final(self).wf(),
+            *final(self) == (Connection { lc: final(self).lc, streams: None, dead: final(self).dead, ..*old(self) }),
+            final(self).phase_spec() is Closing,
+            final(self).close_spec() == Some((false, CRYPTO_BUFFER_EXCEEDED, Seq::<u8>::empty())),
+            final(self).dead_measure() <= old(self).dead_measure() + old(self).streams_measure() + max_entries() + 1,
+    {
+        let none: Vec<u8> = Vec::new();
+        proof {
+            assert(none@.take(0) =~= Seq::<u8>::empty());
+        }
+        self.lc.enter_closing(now, pto, false, c, none.as_slice());
+        let ghost cs = *self;
+        self.bury_streams();
+        proof {
+            Connection::lemma_streams_conn(cs, *self);
+        }
     }
 
     /// One of the nine stream-layer frames. On `Err` the connection is already Closing with
@@ -1652,7 +4008,7 @@ impl Connection {
     /// excludes, so `wf` could not otherwise hold on return. `on_datagram`'s `close_internal` is
     /// then a no-op.
     #[verifier::spinoff_prover]
-    fn on_stream_frame(&mut self, f: &Frame, now: u64) -> (r: Result<(), u64>)
+    fn on_stream_frame(&mut self, f: &Frame, now: u64) -> (r: (Result<(), u64>, Ghost<nat>))
         requires
             old(self).wf(),
             old(self).phase_spec() is Open,
@@ -1663,26 +4019,39 @@ impl Connection {
             final(self).paths == old(self).paths,
             final(self).wf(),
             final(self).frames_kept(*old(self)),
-            r matches Err(c) ==> c <= VARINT_MAX,
-            r is Err ==> !(final(self).phase_spec() is Open) && final(self).streams is None,
+            r.0 matches Err(c) ==> c <= VARINT_MAX,
+            r.0 is Err ==> !(final(self).phase_spec() is Open) && final(self).streams is None,
+            // The frame's stream work (`Streams::on_frame`, 9b2 Task 10d items 4 and 5).
+            r.1@ <= c_srx(f@),
     {
         // Before `Streams::on_frame`: after its `Err`, `wf` no longer holds.
         let pto = self.pto();
         let ghost s0 = self.streams->0;
-        let r = match &mut self.streams {
+        let ghost mut work: nat = 0;
+        let (r, Ghost(c0)) = match &mut self.streams {
             Some(s) => s.on_frame(f, &mut self.events),
-            None => Ok(()),
+            None => (Ok(()), Ghost(work)),
         };
+        proof {
+            work = work + c0;
+        }
         if let Err(c) = r {
             proof {
                 lemma_frame_err(s0, f@, r);
             }
             let none: Vec<u8> = Vec::new();
             self.lc.enter_closing(now, pto, false, c, none.as_slice());
-            self.streams = None;
-            return Err(c);
+            self.bury_streams();
+            proof {
+                Connection::lemma_streams_conn(*old(self), *self);
+            }
+            return (Err(c), Ghost(work));
         }
-        Ok(())
+        proof {
+            // D10 (b): `post_rest`'s `tx_kept_but`: only reset streams' flights changed, new streams' are empty.
+            Connection::lemma_streams_conn(*old(self), *self);
+        }
+        (Ok(()), Ghost(work))
     }
 
     /// NEW_CONNECTION_ID or RETIRE_CONNECTION_ID, in a packet with this DCID.
@@ -1748,6 +4117,7 @@ impl Connection {
             self.wf_parts(),
             self.wf_streams(),
             self.wf_pn(),
+            self.wf_pieces(),
         ensures
             self.wf_rest(),
             self.dcids_weak(),
@@ -1783,6 +4153,7 @@ impl Connection {
         &&& self.wf_amp()
         &&& self.wf_pn()
         &&& self.wf_log_paths()
+        &&& self.wf_pieces()
     }
 
     /// No path holds an unused peer CID, so `use_next()` gives a path a CID of its own. It holds
@@ -2534,7 +4905,11 @@ impl Connection {
         }
         self.repair_pairs(a);
         self.lc.close_silently();
-        self.streams = None;
+        let ghost cs = *self;
+        self.bury_streams();
+        proof {
+            Connection::lemma_streams_conn(cs, *self);
+        }
         proof {
             assert(peer_has_cid(self.peer_cids.entries(), cur@));
         }
@@ -2875,6 +5250,39 @@ impl Connection {
         }
     }
 
+    /// `migrate` to a failed-MTU path: it stays inactive, and is probed again when due (split
+    /// from `migrate` for the rlimit).
+    #[verifier::spinoff_prover]
+    fn reprobe_failed(&mut self, path: PathId, now: u64, rand: &[u8; RAND_LEN])
+        requires
+            old(self).wf(),
+            old(self).paths.has(path),
+            old(self).paths.path(path).dcid is Some,
+        ensures
+            final(self).amp_grew(*old(self)),
+            final(self).wf(),
+            final(self).frames_kept(*old(self)),
+            final(self).paths.path(path).dcid is Some ==> forall|q: PathId|
+                #[trigger] final(self).paths.has(q) && q != path && final(self).paths.path(q).dcid
+                    == final(self).paths.path(path).dcid ==> final(self).paths.path(q).peer_used
+                    == final(self).paths.path(path).peer_used,
+            final(self).peer_used_kept(*old(self)),
+            final(self).paths.active_spec() == old(self).paths.active_spec(),
+    {
+        // The peer is sending from here: probe again, at most one a 3·PTO (§14.2 allows it).
+        if self.paths.needs_mtu_probe(path) {
+            self.challenge_path(path, now, rand);
+        }
+        proof {
+            assert forall|q: PathId|
+                #[trigger] self.paths.has(q) && q != path && self.paths.path(q).dcid
+                    == self.paths.path(path).dcid && self.paths.path(path).dcid is Some implies self.paths.path(q).peer_used
+                == self.paths.path(path).peer_used by {
+                assert(self.paths.has(path));
+            }
+        }
+    }
+
     //= https://www.rfc-editor.org/rfc/rfc9000#section-9
     //# If the peer
     //# violates this requirement, the endpoint MUST either drop the incoming
@@ -2972,18 +5380,7 @@ impl Connection {
         }
         // §14.2: never make a failed-MTU path active (3d final review I2).
         if self.paths.mtu_failed(path) {
-            // The peer is sending from here: probe again, at most one a 3·PTO (§14.2 allows it).
-            if self.paths.needs_mtu_probe(path) {
-                self.challenge_path(path, now, rand);
-            }
-            proof {
-                assert forall|q: PathId|
-                    #[trigger] self.paths.has(q) && q != path && self.paths.path(q).dcid
-                        == self.paths.path(path).dcid && self.paths.path(path).dcid is Some implies self.paths.path(q).peer_used
-                    == self.paths.path(path).peer_used by {
-                    assert(self.paths.has(path));
-                }
-            }
+            self.reprobe_failed(path, now, rand);
             return;
         }
         let old_path = self.paths.active();
@@ -3063,15 +5460,19 @@ impl Connection {
         }
     }
 
-    /// §13.3: frame `f` of an acknowledged record of space `k`.
+    /// `on_acked_frame` for a stream-layer frame (split from it for the rlimit): to the streams, which may remove
+    /// the frame's stream; returns that removal's cost (`Streams::on_frame_acked`).
     #[verifier::spinoff_prover]
-    fn on_acked_frame(&mut self, k: PacketKind, f: &Frame)
+    fn on_acked_stream(&mut self, k: PacketKind, f: &Frame) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
+            is_stream_layer_frame(f@),
+            piece_of(f@) matches Some(key) ==> pend_of(old(self).pend@, k).count(key) > 0,
         ensures
             final(self).paths == old(self).paths,
             final(self).wf(),
-            final(self).frames_kept(*old(self)),
+            final(self).frames_kept_np(*old(self)),
+            final(self).pend@ == pend_with(old(self).pend@, k, pend_of(old(self).pend@, k).sub(ms_of(piece_of(f@)))),
             final(self).hs_done == (if f@ is HandshakeDone {
                 HsDone::Acked
             } else {
@@ -3083,7 +5484,55 @@ impl Connection {
             ).peer_cids.retire_pending_spec(),
             final(self).local_cids == old(self).local_cids,
             old(self).routing_kept(*final(self), k, f@),
+            final(self).n_live() <= old(self).n_live(),
+            r@ <= (old(self).n_live() - final(self).n_live()) * c_gc(),
     {
+        let _ = k;  // the space, read by the proof only
+        proof {
+            Connection::lemma_report_held(*old(self), k, f@);
+        }
+        let ghost mut work: nat = 0;
+        let ghost np = pend_with(old(self).pend@, k, pend_of(old(self).pend@, k).sub(ms_of(piece_of(f@))));
+        if let Some(s) = &mut self.streams {
+            let Ghost(c) = s.on_frame_acked(f);
+            proof {
+                work = work + c;
+            }
+        }
+        proof {
+            Connection::lemma_report_conn(*old(self), *self, k, f@, np);
+        }
+        self.pend = Ghost(np);
+        Ghost(work)
+    }
+
+    /// §13.3: frame `f` of an acknowledged record of space `k`. Returns the cost of the stream removals it makes
+    /// (`Streams::on_frame_acked`), charged per entry removed (9b2 Task 10d item 5).
+    #[verifier::spinoff_prover]
+    fn on_acked_frame(&mut self, k: PacketKind, f: &Frame) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            piece_of(f@) matches Some(key) ==> pend_of(old(self).pend@, k).count(key) > 0,
+        ensures
+            final(self).paths == old(self).paths,
+            final(self).wf(),
+            final(self).frames_kept_np(*old(self)),
+            final(self).pend@ == pend_with(old(self).pend@, k, pend_of(old(self).pend@, k).sub(ms_of(piece_of(f@)))),
+            final(self).hs_done == (if f@ is HandshakeDone {
+                HsDone::Acked
+            } else {
+                old(self).hs_done
+            }),
+            !(f@ is RetireConnectionId) ==> final(self).peer_cids == old(self).peer_cids,
+            f@ is RetireConnectionId ==> final(self).peer_cids.retire_pending_spec() == old(
+                self,
+            ).peer_cids.retire_pending_spec(),
+            final(self).local_cids == old(self).local_cids,
+            old(self).routing_kept(*final(self), k, f@),
+            final(self).n_live() <= old(self).n_live(),
+            r@ <= (old(self).n_live() - final(self).n_live()) * c_gc(),
+    {
+        let ghost mut work: nat = 0;
         match f {
             Frame::ResetStream { .. }
             | Frame::StopSending { .. }
@@ -3094,19 +5543,97 @@ impl Connection {
             | Frame::DataBlocked(_)
             | Frame::StreamDataBlocked { .. }
             | Frame::StreamsBlocked { .. } => {
-                if let Some(s) = &mut self.streams {
-                    s.on_frame_acked(f);
+                let Ghost(c) = self.on_acked_stream(k, f);
+                proof {
+                    work = work + c;
                 }
             },
+            _ => self.on_acked_other(k, f),
+        }
+        Ghost(work)
+    }
+
+    /// `on_acked_frame` for a frame not of the stream layer (split from it for the rlimit): the streams untouched.
+    #[verifier::spinoff_prover]
+    fn on_acked_other(&mut self, k: PacketKind, f: &Frame)
+        requires
+            old(self).wf(),
+            !is_stream_layer_frame(f@),
+            piece_of(f@) matches Some(key) ==> pend_of(old(self).pend@, k).count(key) > 0,
+        ensures
+            final(self).paths == old(self).paths,
+            final(self).wf(),
+            final(self).frames_kept_np(*old(self)),
+            final(self).pend@ == pend_with(old(self).pend@, k, pend_of(old(self).pend@, k).sub(ms_of(piece_of(f@)))),
+            final(self).hs_done == (if f@ is HandshakeDone {
+                HsDone::Acked
+            } else {
+                old(self).hs_done
+            }),
+            !(f@ is RetireConnectionId) ==> final(self).peer_cids == old(self).peer_cids,
+            f@ is RetireConnectionId ==> final(self).peer_cids.retire_pending_spec() == old(
+                self,
+            ).peer_cids.retire_pending_spec(),
+            final(self).local_cids == old(self).local_cids,
+            old(self).routing_kept(*final(self), k, f@),
+            final(self).streams == old(self).streams,
+    {
+        proof {
+            Connection::lemma_report_held(*old(self), k, f@);
+        }
+        let ghost np = pend_with(old(self).pend@, k, pend_of(old(self).pend@, k).sub(ms_of(piece_of(f@))));
+        match f {
+            Frame::ResetStream { .. }
+            | Frame::StopSending { .. }
+            | Frame::Stream { .. }
+            | Frame::MaxData(_)
+            | Frame::MaxStreamData { .. }
+            | Frame::MaxStreams { .. }
+            | Frame::DataBlocked(_)
+            | Frame::StreamDataBlocked { .. }
+            | Frame::StreamsBlocked { .. } => {},
             Frame::Crypto { offset, data } => match k {
-                PacketKind::Initial => self.ctx_i.on_data_acked(*offset, data.len() as u64, false),
-                PacketKind::Handshake => self.ctx_h.on_data_acked(*offset, data.len() as u64, false),
+                PacketKind::Initial => {
+                    let ghost c = self.ctx_i;
+                    proof {
+                        lemma_ctx_both(*old(self));
+                        lemma_ctx_done(c, self.live_i);
+                    }
+                    self.ctx_i.on_data_acked(*offset, data.len() as u64, false);
+                    proof {
+                        // A discarded space's context is terminal: the ACK leaves it as it was.
+                        if !self.live_i {
+                            assert(self.ctx_i == c);
+                        }
+                        lemma_ctx_done(self.ctx_i, self.live_i);
+                        lemma_ctx_both(*self);
+                    }
+                },
+                PacketKind::Handshake => {
+                    let ghost c = self.ctx_h;
+                    proof {
+                        lemma_ctx_both(*old(self));
+                        lemma_ctx_done(c, self.live_h);
+                    }
+                    self.ctx_h.on_data_acked(*offset, data.len() as u64, false);
+                    proof {
+                        if !self.live_h {
+                            assert(self.ctx_h == c);
+                        }
+                        lemma_ctx_done(self.ctx_h, self.live_h);
+                        lemma_ctx_both(*self);
+                    }
+                },
                 PacketKind::OneRtt => {},
             },
             Frame::HandshakeDone => self.hs_done = HsDone::Acked,
             Frame::RetireConnectionId(s) => self.peer_cids.retire_acked(*s),
             _ => {},
         }
+        proof {
+            Connection::lemma_report_conn(*old(self), *self, k, f@, np);
+        }
+        self.pend = Ghost(np);
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
@@ -3127,10 +5654,12 @@ impl Connection {
     fn on_lost_frame(&mut self, k: PacketKind, f: &Frame)
         requires
             old(self).wf(),
+            piece_of(f@) matches Some(key) ==> pend_of(old(self).pend@, k).count(key) > 0,
         ensures
             final(self).crypto_same(*old(self)),
             final(self).wf(),
-            final(self).frames_kept(*old(self)),
+            final(self).frames_kept_np(*old(self)),
+            final(self).pend@ == pend_with(old(self).pend@, k, pend_of(old(self).pend@, k).sub(ms_of(piece_of(f@)))),
             final(self).paths == old(self).paths,
             final(self).lc == old(self).lc,
             final(self).clocks_kept(*old(self)),
@@ -3156,6 +5685,10 @@ impl Connection {
             },
             old(self).routing_kept(*final(self), k, f@),
     {
+        proof {
+            Connection::lemma_report_held(*old(self), k, f@);
+        }
+        let ghost np = pend_with(old(self).pend@, k, pend_of(old(self).pend@, k).sub(ms_of(piece_of(f@))));
         match f {
             Frame::ResetStream { .. }
             | Frame::StopSending { .. }
@@ -3171,8 +5704,37 @@ impl Connection {
                 }
             },
             Frame::Crypto { offset, data } => match k {
-                PacketKind::Initial => self.ctx_i.on_data_lost(*offset, data.len() as u64, false),
-                PacketKind::Handshake => self.ctx_h.on_data_lost(*offset, data.len() as u64, false),
+                PacketKind::Initial => {
+                    let ghost c = self.ctx_i;
+                    proof {
+                        lemma_ctx_both(*old(self));
+                        lemma_ctx_done(c, self.live_i);
+                    }
+                    self.ctx_i.on_data_lost(*offset, data.len() as u64, false);
+                    proof {
+                        // A discarded space's context is terminal: the loss leaves it as it was.
+                        if !self.live_i {
+                            assert(self.ctx_i == c);
+                        }
+                        lemma_ctx_done(self.ctx_i, self.live_i);
+                        lemma_ctx_both(*self);
+                    }
+                },
+                PacketKind::Handshake => {
+                    let ghost c = self.ctx_h;
+                    proof {
+                        lemma_ctx_both(*old(self));
+                        lemma_ctx_done(c, self.live_h);
+                    }
+                    self.ctx_h.on_data_lost(*offset, data.len() as u64, false);
+                    proof {
+                        if !self.live_h {
+                            assert(self.ctx_h == c);
+                        }
+                        lemma_ctx_done(self.ctx_h, self.live_h);
+                        lemma_ctx_both(*self);
+                    }
+                },
                 PacketKind::OneRtt => {},
             },
             Frame::HandshakeDone => {
@@ -3184,22 +5746,54 @@ impl Connection {
             Frame::RetireConnectionId(s) => self.peer_cids.retire_lost(*s),
             _ => {},
         }
+        proof {
+            Connection::lemma_report_conn(*old(self), *self, k, f@, np);
+        }
+        self.pend = Ghost(np);
     }
 
     // =========================================================================
     // Discard and close
     // =========================================================================
 
+    /// Leaving Open: the streams move whole to `dead` in O(1), freed by `backlog_step` (D13). Its measure takes at
+    /// most what the streams' and the open weight held (`Streams::into_dead`).
+    fn bury_streams(&mut self)
+        requires
+            old(self).streams matches Some(s) ==> s.wf() && old(self).dead is None,
+        ensures
+            *final(self) == (Connection { streams: None, dead: final(self).dead, ..*old(self) }),
+            old(self).streams is None ==> final(self).dead == old(self).dead,
+            old(self).streams is Some ==> (final(self).dead matches Some(d) && d.wf()),
+            final(self).dead_measure() <= old(self).dead_measure() + old(self).streams_measure() + max_entries() + 1,
+    {
+        let ghost o = *self;
+        if let Some(s) = self.streams.take() {
+            proof {
+                assert(o.streams == Some(s));
+                assert(o.streams_measure() == s.measure());
+                assert(o.dead_measure() == 0);
+            }
+            proof {
+                s.lemma_measure();
+            }
+            self.dead = Some(s.into_dead());
+        }
+    }
+
     /// Drops an Initial or Handshake space, once (RFC 9001 §4.9). `sent(k)` is drained, not
     /// replaced: a fresh `SentPackets` would reset `next_pn` and break `wf_pn`.
     #[verifier::spinoff_prover]
-    fn discard(&mut self, k: PacketKind)
+    fn discard(&mut self, k: PacketKind) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
             !(k is OneRtt),
+            old(self).settled(),
         ensures
+            final(self).rx_measure() <= old(self).rx_measure(),
             final(self).paths == old(self).paths,
             final(self).wf(),
+            final(self).settled(),
             !final(self).live(k),
             k is Initial ==> final(self).live(PacketKind::Handshake) == old(self).live(
                 PacketKind::Handshake,
@@ -3217,40 +5811,68 @@ impl Connection {
             final(self).crypto_kept(*old(self)),
             drained_kept(*final(self), *old(self)),
             crypto_drained(*final(self), k),
+            // The store's retire (`CryptoStream::retire`) and the send context's (`SendStream::retire`). Excluded: the
+            // space's in-flight drain and recovery reset (`drain_inflight`, `on_space_discarded`), the old receive
+            // state's drop, the CID update's push (Q27): the cost sweep's other sites (docs/rca/2026-11-12-cost-sweep.md,
+            // 9b4).
+            r@ <= crate::avl::c_join2() * 127 + 1 + c_sfree(),
     {
         proof {
-            reveal(crx_ok);
+            reveal(crate::crx::crx_ok);
         }
+        let ghost mut work: nat = 0;
         let mut lost: Vec<SentPacket> = Vec::new();
         match k {
             PacketKind::Initial => {
                 if !self.live_i {
-                    return;
+                    return Ghost(work);
                 }
                 self.live_i = false;
                 self.sent_i.drain_inflight(&mut lost);
-                // Restarted empty at its end, which the glue still checks (RFC 9001 §4.1.3).
-                self.crx_i.restart();
-                self.ctx_i = SendStream::new(VARINT_MAX);
+                // Retired at its end, which the glue still checks (RFC 9001 §4.1.3); the store goes to
+                // the teardown slot, freed by `free_teardown`.
+                let Ghost(c) = self.crx_i.retire();
+                proof {
+                    work = work + c;
+                }
+                // Its three trees move to its teardown slot in O(1), freed by `free_teardown` (D10 (e)).
+                let Ghost(c2) = self.ctx_i.retire();
+                proof {
+                    work = work + c2;
+                }
                 self.recv_i = RecvPns::new(k);
                 self.cid_updates.push(CidUpdate::Remove(slice_to_vec(self.ids.odcid())));
             },
             PacketKind::Handshake => {
                 if !self.live_h {
-                    return;
+                    return Ghost(work);
                 }
                 self.live_h = false;
                 self.sent_h.drain_inflight(&mut lost);
-                self.crx_h = CryptoStream::new();
-                self.ctx_h = SendStream::new(VARINT_MAX);
+                let Ghost(c) = self.crx_h.retire();
+                proof {
+                    work = work + c;
+                }
+                let Ghost(c2) = self.ctx_h.retire();
+                proof {
+                    work = work + c2;
+                }
                 self.recv_h = RecvPns::new(k);
             },
             PacketKind::OneRtt => {},
         }
         self.recovery.on_space_discarded(k);
         proof {
+            // D10 (b): the space's records dropped unreported and its context replaced, at a settled point.
+            assert(self.sent(k).inflight_spec() =~= Seq::<SentPacket>::empty());
+            Connection::lemma_drop_conn(*old(self), *self, k);
+            lemma_ctx_both(*old(self));
+            lemma_ctx_both(*self);
             assert(cids_only(self.cid_updates@));
+            lemma_backlog3(old(self).crx_i, old(self).crx_h, old(self).crx_1);
+            lemma_backlog3(self.crx_i, self.crx_h, self.crx_1);
         }
+        Ghost(work)
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-11.1
@@ -3267,10 +5889,13 @@ impl Connection {
     fn close_internal(&mut self, code: u64)
         requires
             old(self).wf(),
+            old(self).settled(),
             code <= VARINT_MAX,
         ensures
+            final(self).rx_measure() <= old(self).rx_measure(),
             final(self).paths == old(self).paths,
             final(self).wf(),
+            final(self).settled(),
             final(self).out_log() == old(self).out_log(),
             old(self).phase_spec() is Open ==> final(self).phase_spec() is Closing
                 && final(self).close_spec() == Some((false, code, Seq::<u8>::empty())),
@@ -3291,10 +5916,12 @@ impl Connection {
     pub fn close(&mut self, code: u64, app: bool, reason: &[u8], now: u64)
         requires
             old(self).wf(),
+            old(self).settled(),
             code <= VARINT_MAX,
         ensures
             final(self).paths_kept(*old(self)),
             final(self).wf(),
+            final(self).settled(),
             final(self).out_log() == old(self).out_log(),
             old(self).phase_spec() is Open ==> final(self).phase_spec() is Closing,
             !(old(self).phase_spec() is Open) ==> final(self).phase_spec() == old(self).phase_spec(),
@@ -3313,7 +5940,11 @@ impl Connection {
             self.recovery.lemma_pto_pos(PacketKind::OneRtt, self.peer_mad_spec());
         }
         self.lc.enter_closing(self.now, pto, app, code, reason);
-        self.streams = None;
+        let ghost cs = *self;
+        self.bury_streams();
+        proof {
+            Connection::lemma_streams_conn(cs, *self);
+        }
         proof {
             assert forall|t: u64| t < u64::MAX && t <= o.now && #[trigger] o.timers_later(t) implies self.timers_later(t) by {
                 assert(self.pto_spec() == o.pto_spec());
@@ -3362,16 +5993,70 @@ impl Connection {
     // The TLS boundary
     // =========================================================================
 
+    /// A Closed connection's Initial and Handshake spaces are discarded (RFC 9000 §10.2: nothing is sent or
+    /// processed after the closing or draining period): their send contexts' sets move to their teardown slots
+    /// (`SendStream::retire`) and their stores to theirs, so the shell frees them through `backlog_step` before it
+    /// drops the connection, not in its destructor. A no-op on a connection not Closed. Its cost: at most two discards'
+    /// retires. Excluded, as `discard` names them: each space's in-flight drain (`drain_inflight`, at most
+    /// `MAX_INFLIGHT` records moved) and recovery reset (`on_space_discarded`), the old receive state's drop
+    /// (`RecvPns::new` replacing `recv_i`/`recv_h`) and the CID update's push (Q27): the cost sweep's other sites
+    /// (docs/rca/2026-11-12-cost-sweep.md, owner 9b4).
+    #[verifier::spinoff_prover]
+    pub fn discard_closed(&mut self) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            old(self).settled(),
+        ensures
+            final(self).rx_measure() <= old(self).rx_measure(),
+            final(self).wf(),
+            final(self).settled(),
+            final(self).out_log() == old(self).out_log(),
+            final(self).phase_spec() == old(self).phase_spec(),
+            final(self).close_spec() == old(self).close_spec(),
+            final(self).crypto_kept(*old(self)),
+            drained_kept(*final(self), *old(self)),
+            final(self).live(PacketKind::OneRtt) == old(self).live(PacketKind::OneRtt),
+            !(old(self).phase_spec() is Closed) ==> *final(self) == *old(self),
+            old(self).phase_spec() is Closed ==> !final(self).live(PacketKind::Initial) && !final(self).live(
+                PacketKind::Handshake,
+            ),
+            old(self).phase_spec() is Closed && (forall|k: PacketKind| #[trigger] old(self).crypto_held(k) == 0)
+                ==> final(self).closed_retired(),
+            r@ <= 2 * (crate::avl::c_join2() * 127 + 1 + c_sfree()),
+    {
+        if !matches!(self.lc.phase(), Phase::Closed) {
+            return Ghost(0);
+        }
+        let ghost s0 = *self;
+        let Ghost(c1) = self.discard(PacketKind::Initial);
+        let ghost s1 = *self;
+        let Ghost(c2) = self.discard(PacketKind::Handshake);
+        let ghost mut work: nat = 0;
+        proof {
+            work = work + c1 + c2;
+            Connection::lemma_crypto_kept_trans(s0, s1, *self);
+            assert forall|k: PacketKind| #[trigger] crypto_drained(s0, k) implies crypto_drained(*self, k) by {
+                assert(crypto_drained(s1, k));
+            }
+            Connection::lemma_crypto_kept_elim(*self, s0);
+            lemma_ctx_both(*self);
+        }
+        Ghost(work)
+    }
+
     /// A connection no longer open: every level's unread in-order CRYPTO bytes are dropped, since
     /// TLS is fed nothing more after a close (RFC 8446 §6.2). The ends and the received history
     /// stay, for RFC 9001 §4.1.3.
     #[verifier::spinoff_prover]
-    pub fn crypto_drop(&mut self)
+    pub fn crypto_drop(&mut self) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
+            old(self).settled(),
             !(old(self).phase_spec() is Open),
         ensures
+            final(self).rx_measure() <= old(self).rx_measure(),
             final(self).wf(),
+            final(self).settled(),
             final(self).out_log() == old(self).out_log(),
             final(self).phase_spec() == old(self).phase_spec(),
             final(self).close_spec() == old(self).close_spec(),
@@ -3380,21 +6065,29 @@ impl Connection {
             forall|k: PacketKind, p: nat| #[trigger] final(self).crypto_received(k, p) == old(self).crypto_received(k, p),
             final(self).crypto_kept(*old(self)),
             crypto_all_drained(*final(self)),
+            forall|k: PacketKind| #[trigger] final(self).crypto_held(k) == 0,
+            // Three retires.
+            r@ <= 3 * (crate::avl::c_join2() * 127 + 1),
     {
         hide(crate::reassembly::rfc_received);
         hide(crate::reassembly::rfc_contiguous);
         proof {
-            reveal(crx_ok);
+            reveal(crate::crx::crx_ok);
             self.crx_i.lemma_wf();
             self.crx_h.lemma_wf();
             self.crx_1.lemma_wf();
         }
-        // shortcut: the bytes are copied out and dropped (`read`); a copy-free pop only if this shows up.
-        let mut sink: Vec<u8> = Vec::new();
-        self.crx_i.read(&mut sink);
-        self.crx_h.read(&mut sink);
-        self.crx_1.read(&mut sink);
+        // Each store moves to its teardown slot, no byte copied or freed here (`free_teardown`).
+        let Ghost(c1) = self.crx_i.retire();
+        let Ghost(c2) = self.crx_h.retire();
+        let Ghost(c3) = self.crx_1.retire();
+        let ghost mut work: nat = 0;
         proof {
+            work = work + c1 + c2 + c3;
+        }
+        proof {
+            lemma_backlog3(old(self).crx_i, old(self).crx_h, old(self).crx_1);
+            lemma_backlog3(self.crx_i, self.crx_h, self.crx_1);
             assert forall|k: PacketKind| #[trigger] crypto_drained(*self, k) by {
                 match k {
                     PacketKind::Initial => {},
@@ -3403,64 +6096,599 @@ impl Connection {
                 }
             }
         }
+        Ghost(work)
     }
 
-    /// Appends the newly contiguous CRYPTO bytes of `level` to `out`.
+    /// Moves `min(max, unread)` of `level`'s in-order CRYPTO bytes into the empty `out`, an exact buffer for them
+    /// (`crypto_read_len`); nothing once the connection is no longer open.
     #[verifier::spinoff_prover]
-    pub fn crypto_read(&mut self, level: PacketKind, out: &mut Vec<u8>)
+    pub fn crypto_read(&mut self, level: PacketKind, max: u64, out: &mut CapVec<u8>) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
+            old(self).settled(),
+            old(out).wf(),
+            old(out)@.len() == 0,
+            old(out).cap() >= crypto_read_len(*old(self), level, max),
         ensures
+            final(self).rx_measure() <= old(self).rx_measure(),
             final(self).wf(),
+            final(self).settled(),
+            final(out).wf(),
+            final(out).cap() == old(out).cap(),
             final(self).out_log() == old(self).out_log(),
-            final(out)@.len() <= old(out)@.len() + old(self).crypto_end_spec(level) - old(
-                self,
-            ).crypto_base_spec(level),
-            // A read drains the in-order data: nothing received in order stays unread.
-            old(self).phase_spec() is Open ==> final(self).crypto_base_spec(level) == old(
-                self,
-            ).crypto_contiguous_spec(level),
-            old(self).phase_spec() is Open ==> final(out)@.len() == old(out)@.len() + old(
-                self,
-            ).crypto_contiguous_spec(level) - old(self).crypto_base_spec(level),
-            old(self).crypto_end_spec(level) <= old(self).crypto_base_spec(level) ==> final(out)@ == old(out)@,
+            final(out)@.len() <= old(self).crypto_end_spec(level) - old(self).crypto_base_spec(level),
+            old(self).phase_spec() is Open ==> final(out)@.len() == crypto_read_len(*old(self), level, max),
+            old(self).phase_spec() is Open ==> final(self).crypto_base_spec(level) == old(self).crypto_base_spec(level)
+                + final(out)@.len(),
+            // A read of at least the unread bytes drains the level.
+            old(self).phase_spec() is Open && max >= old(self).crypto_contiguous_spec(level) - old(self).crypto_base_spec(
+                level,
+            ) ==> final(self).crypto_base_spec(level) == old(self).crypto_contiguous_spec(level),
+            old(self).phase_spec() is Open && max >= old(self).crypto_contiguous_spec(level) - old(self).crypto_base_spec(
+                level,
+            ) ==> crypto_drained(*final(self), level),
+            old(self).crypto_end_spec(level) <= old(self).crypto_base_spec(level) ==> final(out)@.len() == 0,
             // The read hands over exactly the bytes its offset passes; no other level's moves.
             final(self).crypto_kept_but(*old(self), Some(level)),
             final(self).peer_tp_known_spec() == old(self).peer_tp_known_spec(),
-            !(old(self).phase_spec() is Open) ==> final(out)@ == old(out)@,
+            !(old(self).phase_spec() is Open) ==> final(out)@.len() == 0,
             final(self).phase_spec() == old(self).phase_spec(),
-            old(self).phase_spec() is Open ==> crypto_drained(*final(self), level),
             drained_kept(*final(self), *old(self)),
+            final(self).crypto_held(level) + final(out)@.len() == old(self).crypto_held(level),
+            final(self).crypto_backlog() + final(out)@.len() == old(self).crypto_backlog(),
+            // The cost: linear in the bytes it may take (`CryptoStream::read`).
+            r@ <= 18 * crypto_read_len(*old(self), level, max) + 5608,
     {
         // The bound needs only `lemma_wf`; unfolded, these make a missing fact an rlimit failure.
         hide(crate::reassembly::rfc_received);
         hide(crate::reassembly::rfc_contiguous);
-        proof {
-            reveal(crx_ok);
-        }
         if !matches!(self.lc.phase(), Phase::Open) {
-            return;
+            return Ghost(0);
+        }
+        let ghost c0 = *self;
+        let Ghost(c) = self.read_open(level, max, out);
+        proof {
+            reveal(Connection::same_streams);
+        }
+        Ghost(c)
+    }
+
+    /// `crypto_read` on an open connection (split from it for the rlimit).
+    #[verifier::spinoff_prover]
+    fn read_open(&mut self, level: PacketKind, max: u64, out: &mut CapVec<u8>) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            old(self).phase_spec() is Open,
+            old(out).wf(),
+            old(out)@.len() == 0,
+            old(out).cap() >= crypto_read_len(*old(self), level, max),
+        ensures
+            final(self).wf(),
+            final(self).pend == old(self).pend,
+            final(out).wf(),
+            final(out).cap() == old(out).cap(),
+            final(self).out_log() == old(self).out_log(),
+            final(out)@.len() == crypto_read_len(*old(self), level, max),
+            final(out)@.len() <= old(self).crypto_end_spec(level) - old(self).crypto_base_spec(level),
+            final(self).crypto_base_spec(level) == old(self).crypto_base_spec(level) + final(out)@.len(),
+            max >= old(self).crypto_contiguous_spec(level) - old(self).crypto_base_spec(level)
+                ==> final(self).crypto_base_spec(level) == old(self).crypto_contiguous_spec(level),
+            max >= old(self).crypto_contiguous_spec(level) - old(self).crypto_base_spec(level)
+                ==> crypto_drained(*final(self), level),
+            final(self).crypto_kept_but(*old(self), Some(level)),
+            final(self).peer_tp_known_spec() == old(self).peer_tp_known_spec(),
+            final(self).phase_spec() == old(self).phase_spec(),
+            drained_kept(*final(self), *old(self)),
+            final(self).crypto_held(level) + final(out)@.len() == old(self).crypto_held(level),
+            final(self).crypto_backlog() + final(out)@.len() == old(self).crypto_backlog(),
+            r@ <= 18 * crypto_read_len(*old(self), level, max) + 5608,
+            final(self).same_streams(*old(self)),
+    {
+        proof {
+            Connection::lemma_read_pre(*self, level, max);
+        }
+        let Ghost(c) = match level {
+            PacketKind::Initial => self.crx_i.read(max, out),
+            PacketKind::Handshake => self.crx_h.read(max, out),
+            PacketKind::OneRtt => self.crx_1.read(max, out),
+        };
+        proof {
+            Connection::lemma_read_done(*old(self), *self, level, max, out@.len());
+            reveal(Connection::same_streams);
+        }
+        Ghost(c)
+    }
+
+    /// What `CryptoStream::read` on level `level` needs, from `crx_ok`.
+    proof fn lemma_read_pre(a: Connection, level: PacketKind, max: u64)
+        requires
+            a.wf(),
+        ensures
+            a.crx_spec(level).wf(),
+            crypto_take(a.crx_spec(level), max) == crypto_read_len(a, level, max),
+            match level {
+                PacketKind::Initial => a.crx_i.wf(),
+                PacketKind::Handshake => a.crx_h.wf(),
+                PacketKind::OneRtt => a.crx_1.wf(),
+            },
+    {
+        reveal(crate::crx::crx_ok);
+    }
+
+    /// `crypto_read`'s connection-level facts from `CryptoStream::read`'s on level `level` (split from it for the
+    /// rlimit): `b` is `a` with that stream read `n` bytes further.
+    #[verifier::spinoff_prover]
+    proof fn lemma_read_done(a: Connection, b: Connection, level: PacketKind, max: u64, n: nat)
+        requires
+            a.wf(),
+            a.phase_spec() is Open,
+            b == (match level {
+                PacketKind::Initial => Connection { crx_i: b.crx_i, ..a },
+                PacketKind::Handshake => Connection { crx_h: b.crx_h, ..a },
+                PacketKind::OneRtt => Connection { crx_1: b.crx_1, ..a },
+            }),
+            b.crx_spec(level).wf(),
+            n == crypto_take(a.crx_spec(level), max),
+            b.crx_spec(level).base_spec() == a.crx_spec(level).base_spec() + n,
+            b.crx_spec(level).end_spec() == a.crx_spec(level).end_spec(),
+            b.crx_spec(level).inserted_frames() == a.crx_spec(level).inserted_frames(),
+            b.crx_spec(level).history() == a.crx_spec(level).history(),
+            forall|p: nat| #[trigger] b.crx_spec(level).received(p) == a.crx_spec(level).received(p),
+            b.crx_spec(level).held_spec() + n == a.crx_spec(level).held_spec(),
+            b.crx_spec(level).td_nodes() == a.crx_spec(level).td_nodes(),
+            b.crx_spec(level).load() + n == a.crx_spec(level).load(),
+        ensures
+            b.wf(),
+            n == crypto_read_len(a, level, max),
+            n <= a.crypto_end_spec(level) - a.crypto_base_spec(level),
+            b.crypto_base_spec(level) == a.crypto_base_spec(level) + n,
+            max >= a.crypto_contiguous_spec(level) - a.crypto_base_spec(level) ==> b.crypto_base_spec(level)
+                == a.crypto_contiguous_spec(level) && crypto_drained(b, level),
+            b.crypto_kept_but(a, Some(level)),
+            drained_kept(b, a),
+            b.crypto_held(level) + n == a.crypto_held(level),
+            b.crypto_backlog() + n == a.crypto_backlog(),
+            b.pend == a.pend,
+    {
+        hide(crate::reassembly::rfc_received);
+        hide(crate::reassembly::rfc_contiguous);
+        reveal(crate::crx::crx_ok);
+        a.crx_spec(level).lemma_wf();
+        lemma_backlog3(a.crx_i, a.crx_h, a.crx_1);
+        lemma_backlog3(b.crx_i, b.crx_h, b.crx_1);
+    }
+
+    /// The unread in-order CRYPTO bytes of `level`.
+    pub fn crypto_unread(&self, level: PacketKind) -> (r: u64)
+        requires
+            self.wf(),
+        ensures
+            r == self.crypto_contiguous_spec(level) - self.crypto_base_spec(level),
+    {
+        proof {
+            reveal(crate::crx::crx_ok);
         }
         match level {
-            PacketKind::Initial => {
-                proof {
-                    self.crx_i.lemma_wf();
-                }
-                self.crx_i.read(out)
-            },
-            PacketKind::Handshake => {
-                proof {
-                    self.crx_h.lemma_wf();
-                }
-                self.crx_h.read(out)
-            },
-            PacketKind::OneRtt => {
-                proof {
-                    self.crx_1.lemma_wf();
-                }
-                self.crx_1.read(out)
-            },
+            PacketKind::Initial => self.crx_i.unread(),
+            PacketKind::Handshake => self.crx_h.unread(),
+            PacketKind::OneRtt => self.crx_1.unread(),
         }
+    }
+
+    /// Some teardown slot holds something (`td_pending`). O(1).
+    pub fn teardown_pending(&self) -> (r: bool)
+        requires
+            self.wf(),
+        ensures
+            r == self.td_pending(),
+    {
+        self.crx_i.has_td() || self.crx_h.has_td() || self.crx_1.has_td() || self.ctx_i.has_td() || self.ctx_h.has_td()
+            || self.dead.is_some()
+    }
+
+    /// D13's STREAM half and teardown: the stream queue's head delivers at most `B_PUMP` bytes (its
+    /// events to `poll_stream_events`) and reaps at most `B_PUMP` units of its sending part's teardown
+    /// slot (`c_dsome()`), then `free_teardown` with its own `B_PUMP`. While a stream is queued, or a
+    /// send-side slot or dead stream is left, the measure falls; nothing received, so it never grows.
+    pub fn backlog_step(&mut self) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            old(self).settled(),
+        ensures
+            final(self).wf(),
+            final(self).settled(),
+            old(self).crypto_td_total() > 0 ==> final(self).crypto_backlog() < old(self).crypto_backlog(),
+            old(self).crypto_td_total() > 0 ==> final(self).crypto_td_total() < old(self).crypto_td_total(),
+            final(self).crypto_td_total() <= old(self).crypto_td_total(),
+            final(self).crypto_kept(*old(self)),
+            drained_kept(*final(self), *old(self)),
+            final(self).out_log() == old(self).out_log(),
+            final(self).phase_spec() == old(self).phase_spec(),
+            final(self).close_spec() == old(self).close_spec(),
+            forall|k: PacketKind| #[trigger] final(self).crypto_end_spec(k) == old(self).crypto_end_spec(k),
+            forall|k: PacketKind| #[trigger] final(self).crypto_held(k) == old(self).crypto_held(k),
+            forall|k: PacketKind| #[trigger] final(self).crypto_contiguous_spec(k) == old(self).crypto_contiguous_spec(k),
+            forall|k: PacketKind| #[trigger] final(self).crypto_base_spec(k) == old(self).crypto_base_spec(k),
+            forall|k: PacketKind, p: nat| #[trigger] final(self).crypto_received(k, p) == old(self).crypto_received(k, p),
+            forall|k: PacketKind| #[trigger] final(self).live(k) == old(self).live(k),
+            final(self).peer_tp_known_spec() == old(self).peer_tp_known_spec(),
+            final(self).rx_measure() <= old(self).rx_measure(),
+            old(self).stream_backlog() ==> final(self).rx_measure() < old(self).rx_measure(),
+            // The send side's teardown (D10 (e)): a CRYPTO send context's slot or a closed connection's streams.
+            old(self).crypto_td_total() == 0 && old(self).td_pending() ==> final(self).rx_measure() < old(
+                self,
+            ).rx_measure(),
+            r@ <= B_PUMP + c_dsome(),
+    {
+        let ghost c0 = *self;
+        let Ghost(cs) = self.deliver_streams();
+        let ghost c1 = *self;
+        let Ghost(ct) = self.free_teardown();
+        proof {
+            Connection::lemma_pump_frame(c0, c1);
+        }
+        Ghost(cs + ct)
+    }
+
+    /// `pump_backlog`'s STREAM half: `Streams::deliver_some` with `B_PUMP`. Only the streams and the
+    /// events change.
+    #[verifier::spinoff_prover]
+    fn deliver_streams(&mut self) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            old(self).settled(),
+        ensures
+            final(self).wf(),
+            final(self).settled(),
+            *final(self) == (Connection { streams: final(self).streams, events: final(self).events, ..*old(self) }),
+            final(self).rx_measure() <= old(self).rx_measure(),
+            old(self).stream_backlog() ==> final(self).rx_measure() < old(self).rx_measure(),
+            r@ <= c_dsome(),
+    {
+        let ghost o = *self;
+        let ghost mut work: nat = 0;
+        // No streams: nothing is delivered or reaped, so the cost is the 0 `work` starts at.
+        let Ghost(c) = match &mut self.streams {
+            Some(s) => s.deliver_some(B_PUMP, &mut self.events),
+            None => Ghost(work),
+        };
+        proof {
+            Connection::lemma_streams_conn(o, *self);
+            work = work + c;
+        }
+        Ghost(work)
+    }
+
+    /// `deliver_streams` changes only the streams and the events: every CRYPTO, phase and level fact holds.
+    proof fn lemma_pump_frame(c0: Connection, c1: Connection)
+        requires
+            c1 == (Connection { streams: c1.streams, events: c1.events, ..c0 }),
+        ensures
+            c1.crypto_kept(c0),
+            drained_kept(c1, c0),
+            c1.crypto_backlog() == c0.crypto_backlog(),
+            c1.crypto_td_total() == c0.crypto_td_total(),
+            c1.out_log() == c0.out_log(),
+            c1.phase_spec() == c0.phase_spec(),
+            c1.close_spec() == c0.close_spec(),
+            forall|k: PacketKind| #[trigger] c1.crypto_end_spec(k) == c0.crypto_end_spec(k),
+            forall|k: PacketKind| #[trigger] c1.crypto_held(k) == c0.crypto_held(k),
+            forall|k: PacketKind| #[trigger] c1.crypto_contiguous_spec(k) == c0.crypto_contiguous_spec(k),
+            forall|k: PacketKind| #[trigger] c1.crypto_base_spec(k) == c0.crypto_base_spec(k),
+            forall|k: PacketKind, p: nat| #[trigger] c1.crypto_received(k, p) == c0.crypto_received(k, p),
+            forall|k: PacketKind| #[trigger] c1.live(k) == c0.live(k),
+            c1.peer_tp_known_spec() == c0.peer_tp_known_spec(),
+    {
+        Connection::lemma_crypto_kept_refl(c0);
+    }
+
+    /// Frees part of the first non-empty teardown slot (a CRYPTO level's, a CRYPTO send context's, a closed
+    /// connection's streams): at least one node or entry while any remain, at most `B_PUMP` units of work. Nothing
+    /// else changes.
+    #[verifier::spinoff_prover]
+    pub fn free_teardown(&mut self) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            old(self).settled(),
+        ensures
+            final(self).rx_measure() <= old(self).rx_measure(),
+            old(self).crypto_td_total() == 0 && old(self).td_pending() ==> final(self).rx_measure() < old(
+                self,
+            ).rx_measure(),
+            final(self).wf(),
+            final(self).settled(),
+            r@ <= B_PUMP,
+            old(self).crypto_td_total() > 0 ==> final(self).crypto_backlog() < old(self).crypto_backlog(),
+            old(self).crypto_td_total() > 0 ==> final(self).crypto_td_total() < old(self).crypto_td_total(),
+            final(self).crypto_td_total() <= old(self).crypto_td_total(),
+            final(self).crypto_kept(*old(self)),
+            drained_kept(*final(self), *old(self)),
+            final(self).out_log() == old(self).out_log(),
+            final(self).phase_spec() == old(self).phase_spec(),
+            final(self).close_spec() == old(self).close_spec(),
+            forall|k: PacketKind| #[trigger] final(self).crypto_end_spec(k) == old(self).crypto_end_spec(k),
+            forall|k: PacketKind| #[trigger] final(self).crypto_held(k) == old(self).crypto_held(k),
+            forall|k: PacketKind| #[trigger] final(self).crypto_contiguous_spec(k) == old(self).crypto_contiguous_spec(k),
+            forall|k: PacketKind| #[trigger] final(self).crypto_base_spec(k) == old(self).crypto_base_spec(k),
+            forall|k: PacketKind, p: nat| #[trigger] final(self).crypto_received(k, p) == old(self).crypto_received(k, p),
+            forall|k: PacketKind| #[trigger] final(self).live(k) == old(self).live(k),
+            final(self).peer_tp_known_spec() == old(self).peer_tp_known_spec(),
+    {
+        proof {
+            reveal(crate::crx::crx_ok);
+        }
+        let ghost c0 = *self;
+        let Ghost(c) = if self.crx_i.has_td() {
+            self.crx_i.free_some()
+        } else if self.crx_h.has_td() {
+            self.crx_h.free_some()
+        } else if self.crx_1.has_td() {
+            self.crx_1.free_some()
+        } else {
+            let Ghost(c1) = self.free_send_td();
+            proof {
+                Connection::lemma_td_frame(c0, *self);
+            }
+            Ghost(c1)
+        };
+        proof {
+            lemma_backlog3(old(self).crx_i, old(self).crx_h, old(self).crx_1);
+            lemma_backlog3(self.crx_i, self.crx_h, self.crx_1);
+        }
+        Ghost(c)
+    }
+
+    /// The send side's teardown, once the CRYPTO levels' slots are empty: a CRYPTO send context's slot (key discard),
+    /// else a closed connection's streams (`DeadStreams::reap`, the emptied vectors dropped last); at most `B_PUMP`.
+    fn free_send_td(&mut self) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            old(self).settled(),
+        ensures
+            final(self).wf(),
+            final(self).settled(),
+            *final(self) == (Connection { ctx_i: final(self).ctx_i, ctx_h: final(self).ctx_h, dead: final(self).dead, ..*old(self) }),
+            final(self).ctx_i.flight_spec() == old(self).ctx_i.flight_spec(),
+            final(self).ctx_h.flight_spec() == old(self).ctx_h.flight_spec(),
+            final(self).rx_measure() <= old(self).rx_measure(),
+            old(self).td_pending() && old(self).crypto_td_total() == 0 ==> final(self).rx_measure() < old(
+                self,
+            ).rx_measure(),
+            r@ <= B_PUMP,
+    {
+        if self.ctx_i.has_td() {
+            self.reap_ctx_i()
+        } else if self.ctx_h.has_td() {
+            self.reap_ctx_h()
+        } else {
+            self.reap_dead()
+        }
+    }
+
+    /// `free_send_td` on ctx_i's slot (split for the rlimit).
+    #[verifier::spinoff_prover]
+    fn reap_ctx_i(&mut self) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            old(self).settled(),
+            old(self).ctx_i.td_nodes() > 0,
+        ensures
+            final(self).wf(),
+            final(self).settled(),
+            *final(self) == (Connection { ctx_i: final(self).ctx_i, ctx_h: final(self).ctx_h, dead: final(self).dead, ..*old(self) }),
+            final(self).ctx_i.flight_spec() == old(self).ctx_i.flight_spec(),
+            final(self).ctx_h.flight_spec() == old(self).ctx_h.flight_spec(),
+            final(self).rx_measure() <= old(self).rx_measure(),
+            old(self).td_pending() && old(self).crypto_td_total() == 0 ==> final(self).rx_measure() < old(
+                self,
+            ).rx_measure(),
+            r@ <= B_PUMP,
+    {
+        proof {
+            assert(crate::avl::c_pop() * 127 + 2 <= B_PUMP);
+        }
+        let ghost c0 = *self;
+        let Ghost(c) = self.ctx_i.reap(B_PUMP);
+        proof {
+            self.ctx_i.lemma_same_but_td(c0.ctx_i);
+            Connection::lemma_ctx_frame(c0, *self);
+            Connection::lemma_ctx_measure(c0, *self);
+        }
+        Ghost(c)
+    }
+
+    /// `free_send_td` on ctx_h's slot (split for the rlimit).
+    #[verifier::spinoff_prover]
+    fn reap_ctx_h(&mut self) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            old(self).settled(),
+            old(self).ctx_h.td_nodes() > 0,
+        ensures
+            final(self).wf(),
+            final(self).settled(),
+            *final(self) == (Connection { ctx_i: final(self).ctx_i, ctx_h: final(self).ctx_h, dead: final(self).dead, ..*old(self) }),
+            final(self).ctx_i.flight_spec() == old(self).ctx_i.flight_spec(),
+            final(self).ctx_h.flight_spec() == old(self).ctx_h.flight_spec(),
+            final(self).rx_measure() <= old(self).rx_measure(),
+            old(self).td_pending() && old(self).crypto_td_total() == 0 ==> final(self).rx_measure() < old(
+                self,
+            ).rx_measure(),
+            r@ <= B_PUMP,
+    {
+        proof {
+            assert(crate::avl::c_pop() * 127 + 2 <= B_PUMP);
+        }
+        let ghost c0 = *self;
+        let Ghost(c) = self.ctx_h.reap(B_PUMP);
+        proof {
+            self.ctx_h.lemma_same_but_td(c0.ctx_h);
+            Connection::lemma_ctx_frame(c0, *self);
+            Connection::lemma_ctx_measure(c0, *self);
+        }
+        Ghost(c)
+    }
+
+    /// `free_send_td` on a closed connection's streams: one bounded step, or the emptied vectors dropped.
+    fn reap_dead(&mut self) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            old(self).settled(),
+            old(self).ctx_i.td_nodes() == 0,
+            old(self).ctx_h.td_nodes() == 0,
+        ensures
+            final(self).wf(),
+            final(self).settled(),
+            *final(self) == (Connection { ctx_i: final(self).ctx_i, ctx_h: final(self).ctx_h, dead: final(self).dead, ..*old(self) }),
+            final(self).ctx_i.flight_spec() == old(self).ctx_i.flight_spec(),
+            final(self).ctx_h.flight_spec() == old(self).ctx_h.flight_spec(),
+            final(self).rx_measure() <= old(self).rx_measure(),
+            old(self).td_pending() && old(self).crypto_td_total() == 0 ==> final(self).rx_measure() < old(
+                self,
+            ).rx_measure(),
+            r@ <= B_PUMP,
+    {
+        let empty = match &self.dead {
+            Some(d) => d.is_empty(),
+            None => false,
+        };
+        if empty {
+            self.drop_dead()
+        } else {
+            self.step_dead()
+        }
+    }
+
+    /// `reap_dead` on dead streams with no entry left: the emptied entry vector goes (`c_dfree`).
+    #[verifier::spinoff_prover]
+    fn drop_dead(&mut self) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            old(self).settled(),
+            old(self).dead matches Some(d) && d.len_spec() == 0,
+        ensures
+            final(self).wf(),
+            final(self).settled(),
+            *final(self) == (Connection { ctx_i: final(self).ctx_i, ctx_h: final(self).ctx_h, dead: final(self).dead, ..*old(self) }),
+            final(self).ctx_i.flight_spec() == old(self).ctx_i.flight_spec(),
+            final(self).ctx_h.flight_spec() == old(self).ctx_h.flight_spec(),
+            final(self).rx_measure() <= old(self).rx_measure(),
+            old(self).td_pending() && old(self).crypto_td_total() == 0 ==> final(self).rx_measure() < old(
+                self,
+            ).rx_measure(),
+            r@ <= B_PUMP,
+    {
+        let ghost c0 = *self;
+        proof {
+            self.dead->0.lemma_measure();
+        }
+        self.dead = None;
+        proof {
+            Connection::lemma_ctx_frame(c0, *self);
+            Connection::lemma_ctx_measure(c0, *self);
+        }
+        Ghost(c_dfree())
+    }
+
+    /// `reap_dead`'s step on dead streams with entries left (`DeadStreams::reap`), within `B_PUMP`.
+    #[verifier::spinoff_prover]
+    fn step_dead(&mut self) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            old(self).settled(),
+            old(self).ctx_i.td_nodes() == 0,
+            old(self).ctx_h.td_nodes() == 0,
+            !(old(self).dead matches Some(d) && d.len_spec() == 0),
+        ensures
+            final(self).wf(),
+            final(self).settled(),
+            *final(self) == (Connection { ctx_i: final(self).ctx_i, ctx_h: final(self).ctx_h, dead: final(self).dead, ..*old(self) }),
+            final(self).ctx_i.flight_spec() == old(self).ctx_i.flight_spec(),
+            final(self).ctx_h.flight_spec() == old(self).ctx_h.flight_spec(),
+            final(self).rx_measure() <= old(self).rx_measure(),
+            old(self).td_pending() && old(self).crypto_td_total() == 0 ==> final(self).rx_measure() < old(
+                self,
+            ).rx_measure(),
+            r@ <= B_PUMP,
+    {
+        proof {
+            assert(C_DSTEP == c_dstep()) by (compute_only);
+            assert(crate::avl::c_pop() * 127 + 2 + c_dstep() <= B_PUMP);
+        }
+        let ghost c0 = *self;
+        let ghost mut work: nat = 0;
+        if let Some(d) = &mut self.dead {
+            // The reaping within `B_PUMP - C_DSTEP` and the step's frees (`DeadStreams::reap`'s cost).
+            let Ghost(c) = d.reap(B_PUMP - C_DSTEP);
+            proof {
+                work = work + c;
+            }
+        }
+        proof {
+            Connection::lemma_ctx_frame(c0, *self);
+            Connection::lemma_ctx_measure(c0, *self);
+        }
+        Ghost(work)
+    }
+
+    /// `free_send_td`'s frame: only the send contexts' slots and the dead streams changed, each still well formed;
+    /// the flights and everything else as before keep `wf` and `settled`.
+    proof fn lemma_ctx_frame(c0: Connection, c1: Connection)
+        requires
+            c0.wf(),
+            c0.settled(),
+            c1.ctx_i.state() == c0.ctx_i.state() && c1.ctx_i.ranges_held() == c0.ctx_i.ranges_held(),
+            c1.ctx_h.state() == c0.ctx_h.state() && c1.ctx_h.ranges_held() == c0.ctx_h.ranges_held(),
+            c1 == (Connection { ctx_i: c1.ctx_i, ctx_h: c1.ctx_h, dead: c1.dead, ..c0 }),
+            c1.ctx_i.wf(),
+            c1.ctx_h.wf(),
+            c1.ctx_i.flight_spec() == c0.ctx_i.flight_spec(),
+            c1.ctx_h.flight_spec() == c0.ctx_h.flight_spec(),
+            c1.dead matches Some(d) ==> d.wf(),
+            c1.dead is Some ==> c0.dead is Some,
+        ensures
+            c1.wf(),
+            c1.settled(),
+    {
+        lemma_ctx_both(c0);
+        lemma_ctx_both(c1);
+        assert(c0.wf_pieces());
+        assert(c1.wf_pieces());
+    }
+
+    /// The measure across `free_send_td`'s frame: the parts that changed, the rest as before.
+    proof fn lemma_ctx_measure(c0: Connection, c1: Connection)
+        requires
+            c1 == (Connection { ctx_i: c1.ctx_i, ctx_h: c1.ctx_h, dead: c1.dead, ..c0 }),
+        ensures
+            c1.rx_measure() + c0.ctx_weight() + c0.dead_measure() == c0.rx_measure() + c1.ctx_weight() + c1.dead_measure(),
+            c1.td_pending() == (c1.crypto_td_total() > 0 || c1.ctx_i.td_nodes() > 0 || c1.ctx_h.td_nodes() > 0
+                || c1.dead is Some),
+            c1.crypto_td_total() == c0.crypto_td_total(),
+    {
+    }
+
+    /// `free_send_td` changes only the send side's teardown: every CRYPTO receive, phase and level fact holds.
+    proof fn lemma_td_frame(c0: Connection, c1: Connection)
+        requires
+            c1 == (Connection { ctx_i: c1.ctx_i, ctx_h: c1.ctx_h, dead: c1.dead, ..c0 }),
+        ensures
+            c1.crypto_kept(c0),
+            drained_kept(c1, c0),
+            c1.crypto_backlog() == c0.crypto_backlog(),
+            c1.crypto_td_total() == c0.crypto_td_total(),
+            c1.out_log() == c0.out_log(),
+            c1.phase_spec() == c0.phase_spec(),
+            c1.close_spec() == c0.close_spec(),
+            forall|k: PacketKind| #[trigger] c1.crypto_end_spec(k) == c0.crypto_end_spec(k),
+            forall|k: PacketKind| #[trigger] c1.crypto_held(k) == c0.crypto_held(k),
+            forall|k: PacketKind| #[trigger] c1.crypto_contiguous_spec(k) == c0.crypto_contiguous_spec(k),
+            forall|k: PacketKind| #[trigger] c1.crypto_base_spec(k) == c0.crypto_base_spec(k),
+            forall|k: PacketKind, p: nat| #[trigger] c1.crypto_received(k, p) == c0.crypto_received(k, p),
+            forall|k: PacketKind| #[trigger] c1.live(k) == c0.live(k),
+            c1.peer_tp_known_spec() == c0.peer_tp_known_spec(),
+    {
+        Connection::lemma_crypto_kept_refl(c0);
     }
 
     /// Queues CRYPTO data for `level`; ignored once its space is discarded.
@@ -3468,26 +6696,52 @@ impl Connection {
     pub fn crypto_write(&mut self, level: PacketKind, data: &[u8])
         requires
             old(self).wf(),
+            old(self).settled(),
             !(level is OneRtt),
         ensures
+            final(self).rx_measure() <= old(self).rx_measure(),
             final(self).wf(),
+            final(self).settled(),
             final(self).out_log() == old(self).out_log(),
             final(self).crypto_kept(*old(self)),
             final(self).crypto_end_spec(PacketKind::Initial) == old(self).crypto_end_spec(PacketKind::Initial),
             final(self).phase_spec() == old(self).phase_spec(),
             drained_kept(*final(self), *old(self)),
+            final(self).crypto_flushed(level),
     {
-        if !matches!(self.lc.phase(), Phase::Open) {
-            return;
+        // The queue holds at most `MAX_QUEUE` bytes (`SendStream::write`'s requires); nothing proves a bound on the
+        // bytes TLS writes per level yet, so a write past it is dropped, as one past `VARINT_MAX` is
+        // (carryover cat-C15-crypto-write).
+        if matches!(self.lc.phase(), Phase::Open) && data.len() <= MAX_QUEUE {
+            match level {
+                PacketKind::Initial => if self.live_i && self.ctx_i.buffered() <= MAX_QUEUE - data.len() {
+                    let _ = self.ctx_i.write(data, false);
+                },
+                PacketKind::Handshake => if self.live_h && self.ctx_h.buffered() <= MAX_QUEUE - data.len() {
+                    let _ = self.ctx_h.write(data, false);
+                },
+                PacketKind::OneRtt => {},
+            }
         }
+        // Every write is a flush point: a TLS message goes at the next transmission (D10 (c)).
         match level {
-            PacketKind::Initial => if self.live_i {
-                let _ = self.ctx_i.write(data, false);
-            },
-            PacketKind::Handshake => if self.live_h {
-                let _ = self.ctx_h.write(data, false);
-            },
+            PacketKind::Initial => self.ctx_i.flush(),
+            PacketKind::Handshake => self.ctx_h.flush(),
             PacketKind::OneRtt => {},
+        }
+        proof {
+            // Writes only reach a live space's context; a flush keeps the state and the sets.
+            lemma_ctx_both(*old(self));
+            lemma_ctx_both(*self);
+        }
+    }
+
+    /// Level `k`'s CRYPTO context is flushed: every byte written may go as a short piece (D10 (c)).
+    pub closed spec fn crypto_flushed(&self, k: PacketKind) -> bool {
+        match k {
+            PacketKind::Initial => self.ctx_i.flush_point() == self.ctx_i.all_written().len(),
+            PacketKind::Handshake => self.ctx_h.flush_point() == self.ctx_h.all_written().len(),
+            PacketKind::OneRtt => true,
         }
     }
 
@@ -3511,9 +6765,12 @@ impl Connection {
     pub fn on_peer_params(&mut self, tp: &TransportParams, now: u64)
         requires
             old(self).wf(),
+            old(self).settled(),
             peer_tp_wf(tp@),
         ensures
+            final(self).rx_measure() <= old(self).rx_measure(),
             final(self).wf(),
+            final(self).settled(),
             final(self).out_log() == old(self).out_log(),
             old(self).phase_spec() is Open && !(final(self).phase_spec() is Open) ==> {
                 &&& final(self).phase_spec() is Closing
@@ -3547,6 +6804,9 @@ impl Connection {
         }
         self.streams = Some(Streams::new(&self.local_tp, tp));
         self.peer_tp = Some(copy_tp(tp));
+        proof {
+            Connection::lemma_new_conn(*old(self), *self);
+        }
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9001#section-8.1
@@ -3556,15 +6816,18 @@ impl Connection {
     //# protocol is not negotiated.
     /// TLS finished, with this ALPN. After this no long-header packet is built.
     #[verifier::spinoff_prover]
-    pub fn on_handshake_complete(&mut self, alpn: &[u8], now: u64, rand: &[u8; RAND_LEN])
+    pub fn on_handshake_complete(&mut self, alpn: &[u8], now: u64, rand: &[u8; RAND_LEN]) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
+            old(self).settled(),
         ensures
+            final(self).rx_measure() <= old(self).rx_measure(),
             // §8.1: an open, not yet complete connection whose ALPN is not `h3` closes with 0x0178.
             old(self).phase_spec() is Open && !old(self).live(PacketKind::OneRtt) && alpn@ != seq![0x68u8, 0x33u8]
                 ==> final(self).phase_spec() is Closing
                 && final(self).close_spec() == Some((false, (CRYPTO_ERROR_BASE + 0x78) as u64, Seq::<u8>::empty())),
             final(self).wf(),
+            final(self).settled(),
             final(self).out_log() == old(self).out_log(),
             final(self).crypto_kept(*old(self)),
             final(self).crypto_end_spec(PacketKind::Initial) == old(self).crypto_end_spec(PacketKind::Initial),
@@ -3573,6 +6836,13 @@ impl Connection {
             final(self).phase_spec() is Open ==> final(self).live(PacketKind::OneRtt),
             final(self).live(PacketKind::OneRtt) ==> crypto_drained(*final(self), PacketKind::Initial)
                 && crypto_drained(*final(self), PacketKind::Handshake),
+            // Initial's and Handshake's retires, only in the call that completes. Excluded: `discard`'s own (above),
+            // `issue_cids` and a close (`close_internal`): the cost sweep's other sites (9b4).
+            r@ <= (if !old(self).live(PacketKind::OneRtt) && final(self).live(PacketKind::OneRtt) {
+                2 * (crate::avl::c_join2() * 127 + 1 + c_sfree())
+            } else {
+                0
+            }),
     {
         if now > self.now {
             self.now = now;
@@ -3580,41 +6850,81 @@ impl Connection {
         self.chal_used = 0;
         if !matches!(self.lc.phase(), Phase::Open) || self.complete {
             proof {
-                reveal(crx_ok);
+                reveal(crate::crx::crx_ok);
             }
-            return;
+            return Ghost(0);
         }
         // ALPN first: §8.1's close is owed whatever else is wrong.
         if let Err(c) = check_alpn(alpn) {
             self.close_internal(c);
-            return;
+            return Ghost(0);
         }
         // `streams.is_none()` is unreachable (`on_peer_params` sets both); `wf`'s `complete` clause
         // needs it, and it costs less than one more conjunct.
         if self.peer_tp.is_none() || self.streams.is_none() {
             self.close_internal(INTERNAL_ERROR);
-            return;
+            return Ghost(0);
         }
+        let ghost sm = *self;
+        let Ghost(c) = self.complete_open(rand);
+        proof {
+            reveal(crate::crx::crx_ok);
+            assert forall|k: PacketKind| #[trigger] crypto_drained(*old(self), k) implies crypto_drained(*self, k) by {
+                assert(crypto_drained(sm, k));
+            }
+        }
+        Ghost(c)
+    }
+
+    /// `on_handshake_complete` past its checks: both spaces discarded (their retires), 1-RTT live, CIDs issued (split
+    /// for the rlimit).
+    #[verifier::spinoff_prover]
+    fn complete_open(&mut self, rand: &[u8; RAND_LEN]) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+            old(self).settled(),
+            old(self).phase_spec() is Open,
+            !old(self).live(PacketKind::OneRtt),
+            old(self).peer_tp is Some,
+            old(self).streams is Some,
+        ensures
+            final(self).rx_measure() <= old(self).rx_measure(),
+            final(self).wf(),
+            final(self).settled(),
+            final(self).out_log() == old(self).out_log(),
+            final(self).crypto_kept(*old(self)),
+            final(self).crypto_end_spec(PacketKind::Initial) == old(self).crypto_end_spec(PacketKind::Initial),
+            final(self).phase_spec() == old(self).phase_spec(),
+            drained_kept(*final(self), *old(self)),
+            final(self).live(PacketKind::OneRtt),
+            crypto_drained(*final(self), PacketKind::Initial) && crypto_drained(*final(self), PacketKind::Handshake),
+            r@ <= 2 * (crate::avl::c_join2() * 127 + 1 + c_sfree()),
+    {
         let ghost s0 = *self;
-        self.discard(PacketKind::Initial);
+        let Ghost(c1) = self.discard(PacketKind::Initial);
         let ghost s1 = *self;
-        self.discard(PacketKind::Handshake);
+        let Ghost(c2) = self.discard(PacketKind::Handshake);
+        let ghost mut work: nat = 0;
+        proof {
+            work = work + c1 + c2;
+        }
         let ghost s2 = *self;
         proof {
-            reveal(crx_ok);
+            reveal(crate::crx::crx_ok);
         }
         self.complete = true;
         self.hs_done = HsDone::Pending;
         self.spin = rand[128] & 1 == 1;
         self.issue_cids(rand);
         proof {
-            reveal(crx_ok);
+            reveal(crate::crx::crx_ok);
             assert forall|k: PacketKind| #[trigger] crypto_drained(*old(self), k) implies crypto_drained(*self, k) by {
                 assert(crypto_drained(s0, k));
                 assert(crypto_drained(s1, k));
                 assert(crypto_drained(s2, k));
             }
         }
+        Ghost(work)
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9001#section-4.8
@@ -3628,8 +6938,11 @@ impl Connection {
     pub fn on_tls_alert(&mut self, alert: u8, now: u64)
         requires
             old(self).wf(),
+            old(self).settled(),
         ensures
+            final(self).rx_measure() <= old(self).rx_measure(),
             final(self).wf(),
+            final(self).settled(),
             final(self).out_log() == old(self).out_log(),
             old(self).phase_spec() is Open ==> final(self).phase_spec() is Closing
                 && final(self).close_spec() == Some((false, (CRYPTO_ERROR_BASE + alert as u64) as u64, Seq::<u8>::empty())),
@@ -3649,6 +6962,7 @@ impl Connection {
         requires
             old(self).wf(),
         ensures
+            final(self).rx_measure() <= old(self).rx_measure(),
             final(self).paths == old(self).paths,
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
@@ -3693,10 +7007,10 @@ impl Connection {
     // Application side
     // =========================================================================
 
-    /// How many more bytes `stream_write` accepts, over all streams.
-    pub closed spec fn send_room_spec(&self) -> int {
+    /// How many more bytes `stream_write` accepts on stream `id` (`Streams::send_room_spec`).
+    pub closed spec fn send_room_spec(&self, id: u64) -> int {
         match self.streams {
-            Some(s) => MAX_SEND_BUFFER - s.tx_buffered(),
+            Some(s) => s.send_room_spec(id),
             None => 0,
         }
     }
@@ -3713,19 +7027,22 @@ impl Connection {
     pub fn stream_write(&mut self, id: u64, data: &[u8], fin: bool) -> (r: Result<usize, ()>)
         requires
             old(self).wf(),
+            old(self).settled(),
         ensures
             final(self).wf(),
+            final(self).settled(),
             final(self).out_log() == old(self).out_log(),
-            r matches Ok(n) ==> n <= data@.len() && (n < data@.len() ==> n == old(self).send_room_spec()),
+            r matches Ok(n) ==> n <= data@.len() && (n < data@.len() ==> n == old(self).send_room_spec(id)),
             r matches Ok(n) ==> (n > 0 || data@.len() == 0 && fin) ==> final(self).fin_written(id) == (fin && n
                 == data@.len()),
+            r matches Ok(n) && n == data@.len() ==> final(self).flushed(id),
             final(self).events_spec() == old(self).events_spec(),
             final(self).keeps_later(*old(self)),
     {
         let ghost o = *self;
         let r = match &mut self.streams {
             Some(s) => {
-                let room = s.send_room();
+                let room = s.send_room(id);
                 let n = if data.len() as u64 > room {
                     room as usize
                 } else {
@@ -3742,10 +7059,28 @@ impl Connection {
             },
             None => Err(()),
         };
+        let ghost cw = *self;
         proof {
+            Connection::lemma_streams_conn(o, cw);
+        }
+        // A write taken whole is a flush point (D10 (c)): each complete H3 output goes at the next transmission.
+        if let Ok(n) = r {
+            if n == data.len() {
+                if let Some(s) = &mut self.streams {
+                    s.flush(id);
+                }
+            }
+        }
+        proof {
+            Connection::lemma_streams_conn(cw, *self);
             self.lemma_keeps_streams(o);
         }
         r
+    }
+
+    /// Stream `id`'s sending part, if any, is flushed.
+    pub closed spec fn flushed(&self, id: u64) -> bool {
+        self.streams matches Some(s) ==> (s.tx_part(id) matches Some(p) ==> p.flush_point() == p.all_written().len())
     }
 
     /// The application abandons sending on `id` (RESET_STREAM).
@@ -3753,9 +7088,11 @@ impl Connection {
     pub fn stream_reset(&mut self, id: u64, code: u64)
         requires
             old(self).wf(),
+            old(self).settled(),
             code <= VARINT_MAX,
         ensures
             final(self).wf(),
+            final(self).settled(),
             final(self).out_log() == old(self).out_log(),
             final(self).events_spec() == old(self).events_spec(),
             final(self).keeps_later(*old(self)),
@@ -3765,6 +7102,7 @@ impl Connection {
             s.reset(id, code);
         }
         proof {
+            Connection::lemma_streams_conn(o, *self);
             self.lemma_keeps_streams(o);
         }
     }
@@ -3774,9 +7112,11 @@ impl Connection {
     pub fn stream_stop_sending(&mut self, id: u64, code: u64)
         requires
             old(self).wf(),
+            old(self).settled(),
             code <= VARINT_MAX,
         ensures
             final(self).wf(),
+            final(self).settled(),
             final(self).out_log() == old(self).out_log(),
             final(self).events_spec() == old(self).events_spec(),
             final(self).keeps_later(*old(self)),
@@ -3786,6 +7126,7 @@ impl Connection {
             s.stop_sending(id, code);
         }
         proof {
+            Connection::lemma_streams_conn(o, *self);
             self.lemma_keeps_streams(o);
         }
     }
@@ -3810,8 +7151,10 @@ impl Connection {
     pub fn on_reset_candidate(&mut self, tail: &[u8; 16], now: u64)
         requires
             old(self).wf(),
+            old(self).settled(),
         ensures
             final(self).wf(),
+            final(self).settled(),
             final(self).out_log() == old(self).out_log(),
             old(self).reset_matches(tail@) && old(self).phase_spec() is Open ==> final(self).phase_spec() is Draining,
             old(self).reset_matches(tail@) ==> !(final(self).phase_spec() is Open),
@@ -3826,7 +7169,11 @@ impl Connection {
         if self.peer_cids.matches_reset(tail) {
             let pto = self.pto();
             self.lc.enter_draining(self.now, pto);
-            self.streams = None;
+            let ghost cs = *self;
+            self.bury_streams();
+            proof {
+                Connection::lemma_streams_conn(cs, *self);
+            }
         }
     }
 
@@ -3838,8 +7185,10 @@ impl Connection {
     pub fn poll_stream_events(&mut self, out: &mut Vec<StreamEvent>)
         requires
             old(self).wf(),
+            old(self).settled(),
         ensures
             final(self).wf(),
+            final(self).settled(),
             final(self).out_log() == old(self).out_log(),
             final(out)@ == old(out)@ + old(self).events_spec(),
             final(self).events_spec().len() == 0,
@@ -3860,8 +7209,10 @@ impl Connection {
     pub fn poll_cid_updates(&mut self, out: &mut Vec<CidUpdate>)
         requires
             old(self).wf(),
+            old(self).settled(),
         ensures
             final(self).wf(),
+            final(self).settled(),
             final(self).out_log() == old(self).out_log(),
             final(self).updates_spec().len() == 0,
             final(self).tokens_in_sync(),
@@ -4253,6 +7604,8 @@ impl Connection {
             final(self).polled == old(self).polled,
             tx_frames(frames_view(final(fs)@), k, base, *final(left) as nat, room),
             extends(frames_view(old(fs)@), frames_view(final(fs)@)),
+            pend_kept_but(old(self).pend@, final(self).pend@, k),
+            tracks(frames_view(old(fs)@), frames_view(final(fs)@), pend_of(old(self).pend@, k), pend_of(final(self).pend@, k)),
     {
         proof {
             self.ctx_i.lemma_wf();
@@ -4271,24 +7624,30 @@ impl Connection {
             return;
         }
         let max_len = *left - head;
+        proof {
+            lemma_ctx_both(*self);
+        }
         let chunk = match k {
             PacketKind::Initial => self.ctx_i.poll_data(max_len as u64, VARINT_MAX),
             _ => self.ctx_h.poll_data(max_len as u64, VARINT_MAX),
         };
+        proof {
+            // A discarded space's context is terminal, so `next_off` was `None` and no poll happened.
+            lemma_ctx_both(*self);
+        }
         if let Some(c) = chunk {
-            let n = head - 2 + varint_len(c.data.len() as u64) + c.data.len();
             let ghost sf0 = frames_view(fs@);
-            let ghost left0 = *left as nat;
             let ghost g = SpecFrame::Crypto { offset: c.off, data: c.data@ };
+            push_crypto(c.off, c.data, head, left, fs, Ghost(k), Ghost(base), Ghost(room));
             proof {
-                lemma_crypto_len(c.off, c.data@);
+                lemma_tracks_push(sf0, g, pend_of(old(self).pend@, k));
             }
-            fs.push(Frame::Crypto { offset: c.off, data: c.data });
-            *left = *left - n;
+            // D10 (b): the piece joins the context's flight and `pend` (fresh: `poll_data`).
+            let ghost np = pend_with(old(self).pend@, k, msum(pend_of(old(self).pend@, k), ms_of(piece_of(g))));
             proof {
-                assert(frames_view(fs@) =~= sf0.push(g));
-                lemma_tx_push(sf0, g, k, base, left0, room, *left as nat);
+                Connection::lemma_crypto_poll(*old(self), *self, k, g, np);
             }
+            self.set_pend(Ghost(np));
         }
     }
 
@@ -4313,6 +7672,8 @@ impl Connection {
             final(self).polled == old(self).polled,
             tx_frames(frames_view(final(fs)@), PacketKind::OneRtt, base, *final(left) as nat, room),
             extends(frames_view(old(fs)@), frames_view(final(fs)@)),
+            frame_pieces(frames_view(final(fs)@)) == frame_pieces(frames_view(old(fs)@)),
+            final(self).pend == old(self).pend,
             final(self).hs_done == old(self).hs_done || (old(self).hs_done is Pending && final(self).hs_done is Sent),
             old(self).hs_done is Pending && final(self).hs_done is Sent ==> frames_view(
                 final(fs)@,
@@ -4358,6 +7719,8 @@ impl Connection {
             final(self).polled == old(self).polled,
             tx_frames(frames_view(final(fs)@), PacketKind::OneRtt, base, *final(left) as nat, room),
             extends(frames_view(old(fs)@), frames_view(final(fs)@)),
+            frame_pieces(frames_view(final(fs)@)) == frame_pieces(frames_view(old(fs)@)),
+            final(self).pend == old(self).pend,
             (final(fs)@.len() == old(fs)@.len() + 1) <==> (old(self).hs_done is Pending
                 && final(self).hs_done is Sent),
             final(fs)@.len() == old(fs)@.len() ==> final(self).hs_done == old(self).hs_done,
@@ -4398,6 +7761,8 @@ impl Connection {
             final(self).polled == old(self).polled,
             tx_frames(frames_view(final(fs)@), PacketKind::OneRtt, base, *final(left) as nat, room),
             extends(frames_view(old(fs)@), frames_view(final(fs)@)),
+            frame_pieces(frames_view(final(fs)@)) == frame_pieces(frames_view(old(fs)@)),
+            final(self).pend == old(self).pend,
             final(self).hs_done == old(self).hs_done,
             final(self).local_cids.pending_spec().len() + final(fs)@.len() == old(self).local_cids.pending_spec().len()
                 + old(fs)@.len(),
@@ -4415,6 +7780,8 @@ impl Connection {
                 self.hs_done == s0.hs_done,
                 tx_frames(frames_view(fs@), PacketKind::OneRtt, base, *left as nat, room),
                 extends(sf0, frames_view(fs@)),
+                frame_pieces(frames_view(fs@)) == frame_pieces(sf0),
+                self.pend == s0.pend,
                 self.local_cids.pending_spec().len() + fs@.len() == total,
                 self.peer_cids == s0.peer_cids,
             decreases self.local_cids.pending_spec().len(),
@@ -4453,6 +7820,8 @@ impl Connection {
             final(self).polled == old(self).polled,
             tx_frames(frames_view(final(fs)@), PacketKind::OneRtt, base, *final(left) as nat, room),
             extends(frames_view(old(fs)@), frames_view(final(fs)@)),
+            frame_pieces(frames_view(final(fs)@)) == frame_pieces(frames_view(old(fs)@)),
+            final(self).pend == old(self).pend,
             final(self).hs_done == old(self).hs_done,
             final(self).peer_cids.retire_pending_spec().len() + final(fs)@.len() == old(
                 self,
@@ -4471,6 +7840,8 @@ impl Connection {
                 self.hs_done == s0.hs_done,
                 tx_frames(frames_view(fs@), PacketKind::OneRtt, base, *left as nat, room),
                 extends(sf0, frames_view(fs@)),
+                frame_pieces(frames_view(fs@)) == frame_pieces(sf0),
+                self.pend == s0.pend,
                 self.peer_cids.retire_pending_spec().len() + fs@.len() == total,
                 self.local_cids == s0.local_cids,
             decreases self.peer_cids.retire_pending_spec().len(),
@@ -4508,6 +7879,8 @@ impl Connection {
             extends(frames_view(old(fs)@), frames_view(final(fs)@)),
             final(self).polled@ == frames_view(final(fs)@).skip(old(fs)@.len() as int),
             final(fs)@.len() == old(fs)@.len() ==> final(fs)@ == old(fs)@,
+            pend_kept_but(old(self).pend@, final(self).pend@, PacketKind::OneRtt),
+            tracks(frames_view(old(fs)@), frames_view(final(fs)@), old(self).pend@.o, final(self).pend@.o),
     {
         let ghost s0 = self.streams->0;
         let ghost out0 = fs@;
@@ -4524,6 +7897,18 @@ impl Connection {
                 }
             },
         }
+        // D10 (b): the polled pieces join `pend`, each stream's flight gained exactly them.
+        let ghost np = if old(self).streams is Some {
+            pend_with(old(self).pend@, PacketKind::OneRtt, msum(old(self).pend@.o, frame_pieces(frames_view(fs@.skip(out0.len() as int)))))
+        } else {
+            old(self).pend@
+        };
+        proof {
+            if old(self).streams is Some {
+                Connection::lemma_stream_poll(*old(self), *self, out0, fs@, np);
+            }
+        }
+        self.pend = Ghost(np);
         self.polled = Ghost(frames_view(fs@).skip(out0.len() as int));
     }
 
@@ -4549,9 +7934,12 @@ impl Connection {
             extends(frames_view(old(fs)@), frames_view(final(fs)@)),
             in_tail(final(self).polled@, frames_view(final(fs)@), old(fs)@.len() as int),
             !(k is OneRtt) ==> final(self).polled == old(self).polled,
+            pend_kept_but(old(self).pend@, final(self).pend@, k),
+            tracks(frames_view(old(fs)@), frames_view(final(fs)@), pend_of(old(self).pend@, k), pend_of(final(self).pend@, k)),
     {
         let n = fs.len();
         let ghost base = n as int;
+        let ghost f0 = frames_view(fs@);
         let mut left = left;
         match k {
             PacketKind::OneRtt => {
@@ -4561,6 +7949,7 @@ impl Connection {
                 proof {
                     lemma_in_tail(frames_view(fs@), mid.len() as int, base);
                     assert(fs@.len() == n ==> fs@ == mid);
+                    lemma_tracks_trans(f0, frames_view(mid), frames_view(fs@), old(self).pend@.o, old(self).pend@.o, self.pend@.o);
                 }
             },
             _ => {
@@ -4572,7 +7961,11 @@ impl Connection {
         }
         // Nothing ack-eliciting was appended, so `left` still counts.
         if fs.len() == n && self.probe(k) {
+            let ghost f1 = frames_view(fs@);
             let _ = try_place(Frame::Ping, &mut left, fs, Ghost(k), Ghost(base), Ghost(room));
+            proof {
+                lemma_tracks_trans(f0, f1, frames_view(fs@), pend_of(old(self).pend@, k), pend_of(self.pend@, k), pend_of(self.pend@, k));
+            }
         }
     }
 
@@ -4689,6 +8082,7 @@ impl Connection {
             old(self).live(k),
             old(self).polled@.len() == 0,
             room <= MAX_DATAGRAM,
+            old(self).settled(),
         ensures
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
@@ -4719,6 +8113,10 @@ impl Connection {
                 &&& polled_in_packet(final(self).polled@, p@)
                 &&& k is Initial && eliciting ==> can_pad
             },
+            // D10 (b): `pend` holds exactly the pieces of the packet's frames, in its space.
+            r is None ==> final(self).settled(),
+            r matches Some((p, eliciting, _)) ==> pend_of(final(self).pend@, k) == frame_pieces(p@.frames)
+                && pend_kept_but(pend_empty(), final(self).pend@, k) && (!eliciting ==> final(self).settled()),
     {
         proof {
             self.sent(k).lemma_wf();
@@ -4727,27 +8125,48 @@ impl Connection {
             Some(n) => n,
             None => {
                 self.lc.close_silently();
-                self.streams = None;
+                self.bury_streams();
+                proof {
+                    lemma_pieces_none(
+                        old(self).sent_i.inflight_spec(),
+                        old(self).sent_h.inflight_spec(),
+                        old(self).sent_1.inflight_spec(),
+                        old(self).ctx_i.flight_spec(),
+                        old(self).ctx_h.flight_spec(),
+                        tx_view_of(old(self).streams),
+                        old(self).peer_tp is None,
+                        old(self).pend@,
+                    );
+                }
                 return None;
             },
         };
         let (mut fs, left) = self.start_frames(k, room, now);
         let n = fs.len();
-        let ghost s0 = *self;
         let ghost sf0 = frames_view(fs@);
+        proof {
+            lemma_frame_pieces_none(sf0);
+        }
         // §14.1: an Initial with ack-eliciting frames is padded to 1200, which `can_pad` allows.
         let total = self.sent_i.inflight_len() as u64 + self.sent_h.inflight_len() as u64
             + self.sent_1.inflight_len() as u64;
         let may_elicit = !(matches!(k, PacketKind::Initial) && !can_pad) && self.recovery.can_send(total);
         if may_elicit {
             self.collect_others(k, left, &mut fs, Ghost(room as nat));
+            proof {
+                lemma_tracks_from_empty(sf0, frames_view(fs@), pend_of(self.pend@, k));
+            }
         }
         assert(!may_elicit ==> fs@.len() == n);
         let eliciting = is_ack_eliciting(fs.as_slice());
         proof {
             lemma_eliciting(fs@, n as int);
-            lemma_ack_ok_extends(sf0, frames_view(fs@), s0.recv(k), k, room as nat);
+            lemma_ack_ok_extends(sf0, frames_view(fs@), old(self).recv(k), k, room as nat);
             lemma_polled_empty(self.polled@, frames_view(fs@), n as int);
+            if !eliciting {
+                assert(frames_view(fs@) =~= sf0);
+            }
+            lemma_pend_settled(self.pend@, k);
         }
         if !eliciting && !(n == 1 && self.ack_due(k, now)) {
             return None;
@@ -4772,6 +8191,7 @@ impl Connection {
             final(self).inflight_total() == old(self).inflight_total(),
             final(self).tx_fixed(*old(self)),
             forall|j: PacketKind| #[trigger] final(self).sent(j).inflight_spec() == old(self).sent(j).inflight_spec(),
+            final(self).pend == old(self).pend,
     {
         //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.3
         //# New packet numbers MUST be used for any new packets that are sent; as
@@ -4796,6 +8216,7 @@ impl Connection {
             final(self).seen_kept(*old(self)),
             final(self).recv(k).unreported() == Set::<u64>::empty(),
             final(self).tx_fixed(*old(self)),
+            final(self).pend == old(self).pend,
     {
         match k {
             PacketKind::Initial => self.recv_i.on_ack_sent(ack_only),
@@ -4813,6 +8234,8 @@ impl Connection {
             p@.pn + 1 == old(self).sent(k).next_pn_spec(),
             !has_pn(old(self).sent(k).inflight_spec(), p@.pn),
             old(self).inflight_total() < MAX_INFLIGHT,
+            pend_of(old(self).pend@, k) == frame_pieces(p@.frames),
+            pend_kept_but(pend_empty(), old(self).pend@, k),
         ensures
             final(self).wf(),
             final(self).seen_kept(*old(self)),
@@ -4821,6 +8244,7 @@ impl Connection {
             final(self).sent(k).next_pn_spec() == old(self).sent(k).next_pn_spec(),
             recorded(old(self).sent(k).inflight_spec(), final(self).sent(k).inflight_spec(), p@),
             final(self).tx_timers(*old(self), now),
+            final(self).settled(),
     {
         let size = packet_len(p);
         let rec = SentPacket {
@@ -4849,6 +8273,7 @@ impl Connection {
                 self.probe_1 = false;
             },
         }
+        self.pend = Ghost(pend_empty());
         self.recovery.on_packet_sent(k, p.pn, size as u64, now);
         self.idle.on_eliciting_sent(now);
         proof {
@@ -4863,6 +8288,8 @@ impl Connection {
                 }
             }
             self.lemma_tx_recorded(*old(self), k, g, now);
+            // D10 (b): the record's pieces are the packet's, which were `pend`.
+            Connection::lemma_commit_pieces(*old(self), *self, k, g, p@.frames);
         }
     }
 
@@ -4959,7 +8386,11 @@ impl Connection {
             ack_ok(p@.frames, old(self).recv(k)),
             ack_only ==> old(self).recv(k).ack_only_allowed() && p@.frames[0] is Ack,
             eliciting ==> old(self).inflight_total() < MAX_INFLIGHT,
+            pend_of(old(self).pend@, k) == frame_pieces(p@.frames),
+            pend_kept_but(pend_empty(), old(self).pend@, k),
+            !eliciting ==> old(self).settled(),
         ensures
+            final(self).settled(),
             final(self).wf(),
             final(self).sent_kept(*old(self), k),
             final(self).sent(k).next_pn_spec() == p@.pn + 1,
@@ -5031,7 +8462,9 @@ impl Connection {
             old(self).polled@.len() == 0,
             old(self).sent(k).next_pn_spec() < PN_MAX,
             room <= MAX_DATAGRAM,
+            old(self).settled(),
         ensures
+            final(self).settled(),
             final(self).wf(),
             final(self).out_log() == old(self).out_log(),
             r is None ==> final(self).polled@.len() == 0,
@@ -5155,6 +8588,7 @@ impl Connection {
                 ),
         ensures
             final(self).wf(),
+            final(self).pend == old(self).pend,
             final(self).out_log() == old(self).out_log().push(d@),
             final(self).sends_only_logged(*old(self)),
             final(self).lc == old(self).lc,
@@ -5769,6 +9203,7 @@ impl Connection {
         requires
             o.wf(),
             old(self).wf(),
+            old(self).settled(),
             old(self).phase_spec() is Open,
             old(self).polled@.len() == 0,
             old(self).live(k) ==> old(self).sent(k).next_pn_spec() < PN_MAX,
@@ -5782,6 +9217,7 @@ impl Connection {
             *old(pad) ==> can_pad,
         ensures
             final(self).wf(),
+            final(self).settled(),
             final(self).out_log() == old(self).out_log(),
             !(k is OneRtt) ==> final(self).polled@.len() == 0,
             !(final(self).phase_spec() is Open) ==> final(self).polled@.len() == 0,
@@ -5804,12 +9240,11 @@ impl Connection {
                     == old(self).sent(j).next_pn_spec()
             },
     {
-        let ghost c = *self;
         let ghost s = d@.packets;
         proof {
             assert(polled_placed(self.polled@, d@));
-            self.lemma_tx_same(c, now);
-            assert(self.tx_kept(c));
+            self.lemma_tx_same(*old(self), now);
+            assert(self.tx_kept(*old(self)));
         }
         if !self.is_live(k) {
             return;
@@ -5824,18 +9259,18 @@ impl Connection {
             None => {
                 proof {
                     if self.phase_spec() is Open {
-                        c.recv(k).lemma_owed_has_new();
-                        self.lemma_ack_term_kept(c, k);
+                        (*old(self)).recv(k).lemma_owed_has_new();
+                        self.lemma_ack_term_kept(*old(self), k);
                         if s.len() == 0 {
                             assert(out_datagram_len(d@) == 0);
                             assert(left == budget);
-                            if budget == c.left_for_ack() && c.ack_fits(k) && c.recv(k).eliciting_since_ack() > 0 {
-                                assert(c.recv(k).full_ack_fits(now, c.local_tp.ack_delay_exponent, room as int));
-                                assert(!ack_is_due(c.recv(k), spec_ms_to_us(c.local_tp.max_ack_delay), now));
+                            if budget == (*old(self)).left_for_ack() && (*old(self)).ack_fits(k) && (*old(self)).recv(k).eliciting_since_ack() > 0 {
+                                assert((*old(self)).recv(k).full_ack_fits(now, (*old(self)).local_tp.ack_delay_exponent, room as int));
+                                assert(!ack_is_due((*old(self)).recv(k), spec_ms_to_us((*old(self)).local_tp.max_ack_delay), now));
                             }
                         }
-                        self.lemma_built_kept(c, o, s);
-                        self.lemma_tx_kept(c);
+                        self.lemma_built_kept(*old(self), o, s);
+                        self.lemma_tx_kept(*old(self));
                         assert(polled_placed(self.polled@, d@));
                     }
                 }
@@ -5850,48 +9285,14 @@ impl Connection {
         proof {
             let s2 = s.push(v);
             assert(d@.packets =~= s2);
-            assert(c.packet_ok(v, k, room as nat));
-            self.lemma_built_push(c, o, s, v);
+            assert((*old(self)).packet_ok(v, k, room as nat));
+            self.lemma_built_push(*old(self), o, s, v);
             assert(s2.drop_last() =~= s);
             assert(s2.last() == v);
             // `room_for`'s reservation, at the length `collect_frames` chose.
-            assert(min_pn_len(c.sent(k).next_pn_spec(), c.sent(k).largest_acked_spec(), v.pn_len as nat));
-            assert forall|i: int| 0 <= i < s2.len() implies out_packet_sized(#[trigger] s2[i]) by {
-                if i < s.len() {
-                    assert(s2[i] == s[i]);
-                }
-            }
+            assert(min_pn_len((*old(self)).sent(k).next_pn_spec(), (*old(self)).sent(k).largest_acked_spec(), v.pn_len as nat));
             assert(in_tail(self.polled@, v.frames, 0));
-            assert forall|i: int| 0 <= i < self.polled@.len() implies frame_in_datagram(d@, #[trigger] self.polled@[i]) by {
-                assert(frame_from(v.frames, self.polled@[i], 0));
-                let n = choose|n: int| 0 <= n < v.frames.len() && #[trigger] v.frames[n] == self.polled@[i];
-                assert(d@.packets[s.len() as int] == v);
-                assert(d@.packets[s.len() as int].frames[n] == self.polled@[i]);
-            }
-            if eliciting && k is Initial {
-                let m = choose|m: int| 0 <= m < v.frames.len() && ack_eliciting(spec_frame_type(#[trigger] v.frames[m]));
-                assert(s2[s.len() as int].frames[m] == v.frames[m]);
-            }
-            assert(has_eliciting_initial(s2) == *pad) by {
-                if has_eliciting_initial(s2) {
-                    let (a, b) = choose|a: int, b: int|
-                        0 <= a < s2.len() && s2[a].kind is Initial && 0 <= b < s2[a].frames.len() && ack_eliciting(
-                            spec_frame_type(#[trigger] s2[a].frames[b]),
-                        );
-                    if a == s.len() {
-                        assert(s2[a].frames[b] == v.frames[b]);
-                    } else {
-                        assert(s2[a] == s[a]);
-                    }
-                }
-                if has_eliciting_initial(s) {
-                    let (a, b) = choose|a: int, b: int|
-                        0 <= a < s.len() && s[a].kind is Initial && 0 <= b < s[a].frames.len() && ack_eliciting(
-                            spec_frame_type(#[trigger] s[a].frames[b]),
-                        );
-                    assert(s2[a] == s[a]);
-                }
-            }
+            lemma_space_pushed(s, v, d@, self.polled@, *old(pad), *pad, k, eliciting);
         }
     }
 
@@ -5947,6 +9348,7 @@ impl Connection {
             now == old(self).now,
             o.wf(),
             old(self).wf(),
+            old(self).settled(),
             old(self).phase_spec() is Open,
             old(self).polled@.len() == 0,
             forall|k: PacketKind| #[trigger] old(self).live(k) ==> old(self).sent(k).next_pn_spec() < PN_MAX,
@@ -5958,6 +9360,7 @@ impl Connection {
             !*old(pad),
         ensures
             final(self).wf(),
+            final(self).settled(),
             final(self).out_log() == old(self).out_log(),
             !(final(self).phase_spec() is Open) ==> final(self).polled@.len() == 0,
             final(d)@.path == old(d)@.path,
@@ -6028,12 +9431,14 @@ impl Connection {
             now == old(self).now,
             o.wf(),
             old(self).wf(),
+            old(self).settled(),
             old(self).phase_spec() is Open,
             old(self).polled@.len() == 0,
             old(self).tx_kept(o),
             forall|k: PacketKind| #[trigger] old(self).live(k) ==> old(self).sent(k).next_pn_spec() < PN_MAX,
         ensures
             final(self).wf(),
+            final(self).settled(),
             final(self).out_log() == match r {
                 Some(d) => old(self).out_log().push(d@),
                 None => old(self).out_log(),
@@ -6301,6 +9706,7 @@ impl Connection {
         requires
             o.wf(),
             old(self).wf(),
+            old(self).settled(),
             old(self).tx_kept(o),
             old(self).spaces_ok(spaces@),
             s.len() == spaces@.len(),
@@ -6308,6 +9714,7 @@ impl Connection {
             forall|i: int| 0 <= i < s.len() ==> old(self).sent(#[trigger] spaces@[i]).next_pn_spec() < PN_MAX,
         ensures
             final(self).wf(),
+            final(self).settled(),
             final(self).built_ok(o, s),
             final(self).polled == old(self).polled,
             final(self).tx_fixed(*old(self)),
@@ -6328,6 +9735,7 @@ impl Connection {
                 forall|i: int| 0 <= i < s.len() ==> c0.close_built(#[trigger] s[i], spaces@[i]),
                 forall|i: int| 0 <= i < s.len() ==> c0.sent(#[trigger] spaces@[i]).next_pn_spec() < PN_MAX,
                 self.wf(),
+                self.settled(),
                 j <= spaces@.len(),
                 self.built_ok(o, s.take(j as int)),
                 self.polled == c0.polled,
@@ -6385,11 +9793,13 @@ impl Connection {
         requires
             o.wf(),
             old(self).wf(),
+            old(self).settled(),
             old(self).phase_spec() is Closing,
             old(self).polled@.len() == 0,
             old(self).tx_kept(o),
         ensures
             final(self).wf(),
+            final(self).settled(),
             final(self).polled@.len() == 0,
             final(self).out_log() == match r {
                 Some(d) => old(self).out_log().push(d@),
@@ -6585,6 +9995,7 @@ impl Connection {
             old(self).paths.has(q),
         ensures
             final(self).wf(),
+            final(self).pend == old(self).pend,
             *final(self) == (Connection { paths: final(self).paths, ..*old(self) }),
             kept(old(self).paths, final(self).paths, q),
             ({
@@ -6602,10 +10013,18 @@ impl Connection {
             }),
             final(self).tx_timers(*old(self), now),
     {
+        // `kept`'s quantifier meets every path term of `wf`: it is opened only for the two `ids`
+        // facts below, in `lemma_kept_steps` and in `lemma_path_timers`. The DCID and frame facts are the lemmas'.
+        hide(kept);
+        hide(Connection::wf_dcids);
+        hide(path_frames_ok);
         let ghost s0 = *self;
         let mut fs: Vec<Frame> = Vec::new();
         proof {
             assert(frames_view(fs@) =~= Seq::<SpecFrame>::empty());
+            assert(path_frames_ok(Seq::<SpecFrame>::empty())) by {
+                reveal(path_frames_ok);
+            }
         }
         //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
         //# On receiving a PATH_CHALLENGE frame, an endpoint MUST respond by
@@ -6625,6 +10044,12 @@ impl Connection {
             }
         }
         let ghost v1 = frames_view(fs@);
+        let ghost p1 = self.paths;
+        proof {
+            assert(p1.ids() == s0.paths.ids()) by {
+                reveal(kept);
+            }
+        }
         if let Some(y) = self.paths.take_challenge(q, padded, now) {
             let f = Frame::PathChallenge(y);
             let ghost g = f@;
@@ -6636,28 +10061,47 @@ impl Connection {
         }
         proof {
             assert(frames_view(fs@) =~= path_frames_of(s0.paths.path(q)));
+            lemma_kept_steps(s0.paths, p1, self.paths, q);
+            assert(self.paths.ids() == s0.paths.ids()) by {
+                reveal(kept);
+            }
             self.lemma_path_edit(s0, q);
             self.lemma_dcids_same(s0, q);
-            assert(self.tx_timers(s0, now)) by {
-                reveal(Connection::tx_timers);
-                assert forall|k: PacketKind| #[trigger] self.sent(k).inflight_spec() == s0.sent(k).inflight_spec() by {
-                    match k {
-                        PacketKind::Initial => {},
-                        PacketKind::Handshake => {},
-                        PacketKind::OneRtt => {},
-                    }
-                }
-                assert(self.amp_blocked_spec() || !s0.amp_blocked_spec());
-                assert forall|r: PathId|
-                    #[trigger] self.paths.has(r) && timed(self.paths.path(r)) implies s0.paths.has(r) && (self.paths.path(r).challenge
-                        == s0.paths.path(r).challenge && timed(s0.paths.path(r)) || now <= self.paths.path(r).challenge.unwrap().1) by {
-                    if r != q {
-                        assert(self.paths.path(r) == s0.paths.path(r));
-                    }
-                }
-            }
+            self.lemma_path_timers(s0, q, now);
         }
         fs
+    }
+
+    /// `take_path_frames`'s timers: only path `q`'s challenge moved, to `now` (split from
+    /// `take_path_frames` for the rlimit).
+    proof fn lemma_path_timers(&self, s0: Connection, q: PathId, now: u64)
+        requires
+            *self == (Connection { paths: self.paths, ..s0 }),
+            kept(s0.paths, self.paths, q),
+            s0.paths.has(q),
+            s0.paths.path(q).owed ==> self.paths.path(q).challenge is Some && self.paths.path(q).challenge.unwrap().1 == now,
+            !s0.paths.path(q).owed ==> self.paths.path(q).challenge == s0.paths.path(q).challenge && self.paths.path(q).owed == s0.paths.path(q).owed,
+            self.paths.path(q).state == s0.paths.path(q).state,
+            self.paths.path(q).budget == s0.paths.path(q).budget,
+        ensures
+            self.tx_timers(s0, now),
+    {
+        reveal(Connection::tx_timers);
+        assert(self.amp_blocked_spec() || !s0.amp_blocked_spec());
+        assert forall|k: PacketKind| #[trigger] self.sent(k).inflight_spec() == s0.sent(k).inflight_spec() by {
+            match k {
+                PacketKind::Initial => {},
+                PacketKind::Handshake => {},
+                PacketKind::OneRtt => {},
+            }
+        }
+        assert forall|r: PathId|
+            #[trigger] self.paths.has(r) && timed(self.paths.path(r)) implies s0.paths.has(r) && (self.paths.path(r).challenge
+                == s0.paths.path(r).challenge && timed(s0.paths.path(r)) || now <= self.paths.path(r).challenge.unwrap().1) by {
+            if r != q {
+                assert(self.paths.path(r) == s0.paths.path(r));
+            }
+        }
     }
 
     /// The 1-RTT packet of `fs` on `q`, under `q`'s DCID. Its packet number is not taken yet.
@@ -6806,6 +10250,76 @@ impl Connection {
         }
     }
 
+    /// P12-P14's frame rules for a one-packet datagram of `q`'s owed PATH frames (split from
+    /// `send_path_datagram` for the rlimit).
+    proof fn lemma_path_frames_rules(&self, o: Connection, d: SpecOutDatagram, w: SpecOutPacket, q: PathId)
+        requires
+            d.packets == seq![w],
+            d.path == q,
+            w.kind is OneRtt,
+            w.frames == path_frames_of(o.paths.path(q)),
+            path_ok(o.paths.path(q)),
+            o.paths.path(q).responses.len() > 0 ==> self.paths.path(q).responses == o.paths.path(q).responses.drop_first()
+                && self.paths.path(q).responses_taken == o.paths.path(q).responses_taken.push(o.paths.path(q).responses[0]),
+            self.dcid_held(q, w.dcid),
+        ensures
+            only_path_frames(d),
+            o.challenges_recorded(d),
+            self.responses_echoed(o, d),
+            self.dcid_unshared(d),
+    {
+        let sf = path_frames_of(o.paths.path(q));
+        lemma_path_frames_of(o.paths.path(q));
+        assert forall|i: int, j: int| 0 <= i < d.packets.len() && 0 <= j < d.packets[i].frames.len() implies #[trigger] d.packets[i].frames[j]
+            is PathResponse || d.packets[i].frames[j] is PathChallenge by {
+            assert(d.packets[i] == w);
+            assert(w.frames[j] == sf[j]);
+        }
+        assert(o.challenges_recorded(d)) by {
+            assert forall|i: int, j: int| 0 <= i < d.packets.len() && 0 <= j < d.packets[i].frames.len() implies (#[trigger] d.packets[i].frames[j] matches SpecFrame::PathChallenge(
+                y,
+            ) ==> {
+                let a = o.paths.path(d.path);
+                &&& a.owed
+                &&& a.challenge is Some
+                &&& y == a.challenge.unwrap().0@
+            }) by {
+                assert(d.packets[i] == w);
+                assert(w.frames[j] == sf[j]);
+            }
+        }
+        assert(self.responses_echoed(o, d)) by {
+            assert forall|i1: int, j1: int, i2: int, j2: int|
+                0 <= i1 < d.packets.len() && 0 <= j1 < d.packets[i1].frames.len() && 0 <= i2 < d.packets.len() && 0 <= j2
+                    < d.packets[i2].frames.len() && #[trigger] d.packets[i1].frames[j1] is PathResponse
+                    && #[trigger] d.packets[i2].frames[j2] is PathResponse implies i1 == i2 && j1 == j2 by {
+                assert(d.packets[i1] == w && d.packets[i2] == w);
+                assert(w.frames[j1] == sf[j1] && w.frames[j2] == sf[j2]);
+            }
+            assert forall|i: int, j: int| 0 <= i < d.packets.len() && 0 <= j < d.packets[i].frames.len() implies (#[trigger] d.packets[i].frames[j] matches SpecFrame::PathResponse(
+                x,
+            ) ==> {
+                let a = o.paths.path(d.path);
+                let b = self.paths.path(d.path);
+                &&& a.responses.len() > 0
+                &&& x == a.responses[0]@
+                &&& b.responses == a.responses.drop_first()
+                &&& b.responses_taken == a.responses_taken.push(a.responses[0])
+            }) by {
+                assert(d.packets[i] == w);
+                assert(w.frames[j] == sf[j]);
+            }
+        }
+        assert(self.dcid_unshared(d)) by {
+            assert forall|i: int| 0 <= i < d.packets.len() && #[trigger] d.packets[i].kind is OneRtt implies self.dcid_held(
+                d.path,
+                d.packets[i].dcid,
+            ) by {
+                assert(d.packets[i] == w);
+            }
+        }
+    }
+
     /// Takes the frames owed on `q`, builds their packet and commits it. `q`'s budget was checked by
     /// `choose_path`, before anything was taken.
     #[verifier::spinoff_prover]
@@ -6829,6 +10343,7 @@ impl Connection {
             old(self).paths.mtu_failed_spec(q) ==> expand,
         ensures
             final(self).wf(),
+            final(self).pend == old(self).pend,
             final(self).polled@.len() == 0,
             final(self).out_log() == old(self).out_log().push(d@),
             d@.path == q,
@@ -6904,58 +10419,12 @@ impl Connection {
                 assert(s1.paths.has(q));
             }
             self.lemma_held(q, w.dcid);
-            assert forall|i: int, j: int| 0 <= i < d@.packets.len() && 0 <= j < d@.packets[i].frames.len() implies #[trigger] d@.packets[i].frames[j]
-                is PathResponse || d@.packets[i].frames[j] is PathChallenge by {
-                assert(d@.packets[i] == w);
-                assert(w.frames[j] == sf[j]);
+            s0.paths.lemma_wf();
+            assert(path_ok(o.paths.path(q))) by {
+                assert(o.paths.has(q));
             }
-            assert(o.challenges_recorded(d@)) by {
-                s0.paths.lemma_wf();
-                assert(path_ok(o.paths.path(q))) by {
-                    assert(o.paths.has(q));
-                }
-                assert forall|i: int, j: int| 0 <= i < d@.packets.len() && 0 <= j < d@.packets[i].frames.len() implies (#[trigger] d@.packets[i].frames[j] matches SpecFrame::PathChallenge(
-                    y,
-                ) ==> {
-                    let a = o.paths.path(d@.path);
-                    &&& a.owed
-                    &&& a.challenge is Some
-                    &&& y == a.challenge.unwrap().0@
-                }) by {
-                    assert(d@.packets[i] == w);
-                    assert(w.frames[j] == sf[j]);
-                }
-            }
-            assert(self.responses_echoed(o, d@)) by {
-                assert forall|i1: int, j1: int, i2: int, j2: int|
-                    0 <= i1 < d@.packets.len() && 0 <= j1 < d@.packets[i1].frames.len() && 0 <= i2 < d@.packets.len() && 0 <= j2
-                        < d@.packets[i2].frames.len() && #[trigger] d@.packets[i1].frames[j1] is PathResponse
-                        && #[trigger] d@.packets[i2].frames[j2] is PathResponse implies i1 == i2 && j1 == j2 by {
-                    assert(d@.packets[i1] == w && d@.packets[i2] == w);
-                    assert(w.frames[j1] == sf[j1] && w.frames[j2] == sf[j2]);
-                }
-                assert forall|i: int, j: int| 0 <= i < d@.packets.len() && 0 <= j < d@.packets[i].frames.len() implies (#[trigger] d@.packets[i].frames[j] matches SpecFrame::PathResponse(
-                    x,
-                ) ==> {
-                    let a = o.paths.path(d@.path);
-                    let b = self.paths.path(d@.path);
-                    &&& a.responses.len() > 0
-                    &&& x == a.responses[0]@
-                    &&& b.responses == a.responses.drop_first()
-                    &&& b.responses_taken == a.responses_taken.push(a.responses[0])
-                }) by {
-                    assert(d@.packets[i] == w);
-                    assert(w.frames[j] == sf[j]);
-                }
-            }
-            assert(self.dcid_unshared(d@)) by {
-                assert forall|i: int| 0 <= i < d@.packets.len() && #[trigger] d@.packets[i].kind is OneRtt implies self.dcid_held(
-                    d@.path,
-                    d@.packets[i].dcid,
-                ) by {
-                    assert(d@.packets[i] == w);
-                }
-            }
+            assert(w.frames == sf);
+            self.lemma_path_frames_rules(o, d@, w, q);
         }
         d
     }
@@ -6982,12 +10451,14 @@ impl Connection {
         requires
             o.wf(),
             old(self).wf(),
+            old(self).settled(),
             old(self).phase_spec() is Open,
             old(self).polled@.len() == 0,
             old(self).tx_kept(o),
         ensures
             r is None ==> final(self).now == old(self).now,
             final(self).wf(),
+            final(self).settled(),
             final(self).polled@.len() == 0,
             final(self).out_log() == match r {
                 Some(d) => old(self).out_log().push(d@),
@@ -7018,7 +10489,11 @@ impl Connection {
             None => None,
             Some((_, _, None)) => {
                 self.lc.close_silently();
-                self.streams = None;
+                let ghost cs = *self;
+                self.bury_streams();
+                proof {
+                    Connection::lemma_streams_conn(cs, *self);
+                }
                 proof {
                     self.lemma_tx_closed(s0, now);
                 }
@@ -7039,8 +10514,10 @@ impl Connection {
     pub fn poll_transmit(&mut self, now: u64) -> (r: Option<OutDatagram>)
         requires
             old(self).wf(),
+            old(self).settled(),
         ensures
             final(self).wf(),
+            final(self).settled(),
             final(self).out_log() == match r {
                 Some(d) => old(self).out_log().push(d@),
                 None => old(self).out_log(),
@@ -7129,7 +10606,11 @@ impl Connection {
         if (self.live_i && self.sent_i.next_pn() >= PN_MAX) || (self.live_h && self.sent_h.next_pn() >= PN_MAX) || (
         self.complete && self.sent_1.next_pn() >= PN_MAX) {
             self.lc.close_silently();
-            self.streams = None;
+            let ghost cs = *self;
+            self.bury_streams();
+            proof {
+                Connection::lemma_streams_conn(cs, *self);
+            }
             return None;
         }
         proof {
@@ -7154,6 +10635,7 @@ impl Connection {
         requires
             o.wf(),
             old(self).wf(),
+            old(self).settled(),
             old(self).phase_spec() is Open,
             old(self).polled@.len() == 0,
             old(self).tx_kept(o),
@@ -7162,6 +10644,7 @@ impl Connection {
             forall|k: PacketKind| #[trigger] o.live(k) ==> o.sent(k).next_pn_spec() < PN_MAX,
         ensures
             final(self).wf(),
+            final(self).settled(),
             final(self).out_log() == match r {
                 Some(d) => o.out_log().push(d@),
                 None => o.out_log(),
@@ -7244,10 +10727,12 @@ impl Connection {
     pub fn skip_pns_for_test(&mut self, k: PacketKind, next: u64)
         requires
             old(self).wf(),
+            old(self).settled(),
             old(self).sent(k).next_pn_spec() <= next <= PN_MAX,
             old(self).sent(k).inflight_spec().len() == 0,
         ensures
             final(self).wf(),
+            final(self).settled(),
             final(self).out_log() == old(self).out_log(),
             final(self).sent(k).next_pn_spec() == next,
     {
@@ -7255,6 +10740,13 @@ impl Connection {
             PacketKind::Initial => self.sent_i = SentPackets::new_at(next),
             PacketKind::Handshake => self.sent_h = SentPackets::new_at(next),
             PacketKind::OneRtt => self.sent_1 = SentPackets::new_at(next),
+        }
+        proof {
+            // D10 (b): no record before or after, so `pieces_ok`'s views are unchanged.
+            assert(self.sent(k).inflight_spec() =~= old(self).sent(k).inflight_spec());
+            assert(self.sent_i.inflight_spec() == old(self).sent_i.inflight_spec());
+            assert(self.sent_h.inflight_spec() == old(self).sent_h.inflight_spec());
+            assert(self.sent_1.inflight_spec() == old(self).sent_1.inflight_spec());
         }
     }
 
@@ -7667,12 +11159,15 @@ impl Connection {
         &&& forall|t: u64| t < u64::MAX && t <= o.now && #[trigger] o.timers_later(t) ==> self.timers_later(t)
         &&& self.crypto_same(o)
         &&& self.lc.phase_spec() is Open ==> o.lc.phase_spec() is Open
+        // Nothing received: the STREAM backlog does not grow (D13).
+        &&& self.rx_measure() <= o.rx_measure()
     }
 
     pub proof fn lemma_keeps_crypto(&self, o: Connection)
         requires
             self.keeps_later(o),
         ensures
+            self.rx_measure() <= o.rx_measure(),
             self.crypto_kept(o),
             drained_kept(*self, o),
             self.phase_spec() is Open ==> o.phase_spec() is Open,
@@ -7728,6 +11223,7 @@ impl Connection {
                 tokens_registered: self.tokens_registered,
                 ..o
             }),
+            self.rx_measure() <= o.rx_measure(),
         ensures
             self.keeps_later(o),
     {
@@ -8107,38 +11603,73 @@ impl Connection {
             PacketKind::Handshake => self.sent_h.drain_inflight(&mut lost),
             PacketKind::OneRtt => self.sent_1.drain_inflight(&mut lost),
         }
+        // D10 (b): the drained records' pieces join `pend`, to leave it frame by frame below.
+        let ghost base = pend_of(old(self).pend@, k);
+        let ghost np = pend_with(old(self).pend@, k, msum(base, rec_pieces(lost@)));
+        proof {
+            assert(lost@ =~= old(self).sent(k).inflight_spec());
+            assert(self.sent(k).inflight_spec() =~= Seq::<SentPacket>::empty());
+            lemma_pend_end(Seq::<SpecFrame>::empty(), lost@, base);
+            Connection::lemma_take_conn(*old(self), *self, k, lost@, np);
+        }
+        self.pend = Ghost(np);
         self.recovery.on_packets_lost(k, lost.len(), now);
         let ghost s0 = *old(self);
         let ghost s1 = *self;
         let mut i: usize = 0;
+        proof {
+            assert(lost@.subrange(0, lost@.len() as int) =~= lost@);
+        }
         while i < lost.len()
             invariant
                 i <= lost@.len(),
                 self.wf(),
-                self.frames_kept(s0),
+                self.frames_kept_np(s0),
                 self.crypto_same(s0),
                 self.paths == s0.paths,
                 self.lc == s0.lc,
                 self.clocks_kept(s1),
+                pend_of(self.pend@, k) == msum(base, rec_pieces(lost@.subrange(i as int, lost@.len() as int))),
+                pend_kept_but(s0.pend@, self.pend@, k),
             decreases lost@.len() - i,
         {
             let frames = lost[i].frames.as_slice();
+            let ghost fv = frames_view(frames@);
+            let ghost rest = msum(base, rec_pieces(lost@.subrange(i as int + 1, lost@.len() as int)));
+            proof {
+                lemma_pend_rec_step(lost@, i as int, base);
+                assert(fv.subrange(0, fv.len() as int) =~= fv);
+            }
             let mut j: usize = 0;
             while j < frames.len()
                 invariant
                     j <= frames@.len(),
+                    fv == frames_view(frames@),
                     self.wf(),
-                    self.frames_kept(s0),
+                    self.frames_kept_np(s0),
                     self.crypto_same(s0),
                     self.paths == s0.paths,
                     self.lc == s0.lc,
                     self.clocks_kept(s1),
+                    pend_of(self.pend@, k) == msum(frame_pieces(fv.subrange(j as int, fv.len() as int)), rest),
+                    pend_kept_but(s0.pend@, self.pend@, k),
                 decreases frames@.len() - j,
             {
+                proof {
+                    lemma_pend_step(fv, j as int, rest);
+                    assert(fv[j as int] == frames@[j as int]@);
+                }
                 self.on_lost_frame(k, &frames[j]);
                 j += 1;
             }
+            proof {
+                lemma_pend_end(fv, Seq::<SentPacket>::empty(), rest);
+            }
             i += 1;
+        }
+        proof {
+            lemma_pend_end(Seq::<SpecFrame>::empty(), lost@, base);
+            lemma_pend_kept(s0.pend@, self.pend@, k);
         }
         proof {
             self.recovery.lemma_wf();
@@ -8292,6 +11823,33 @@ impl Connection {
         active_failed
     }
 
+    /// `fall_back`'s fresh DCID for `v` leaves no path on a retired CID: `wf` again (split from
+    /// `fall_back` for the rlimit).
+    proof fn lemma_fresh_wf(&self, s0: Connection, v: PathId)
+        requires
+            forall|q: PathId| #[trigger] s0.paths.has(q) ==> s0.not_stale(q),
+            self.wf_rest(),
+            self.dcids_weak(),
+            kept(s0.paths, self.paths, v),
+            forall|x: Seq<u8>| #[trigger]
+                peer_has_cid(self.peer_cids.entries(), x) == peer_has_cid(s0.peer_cids.entries(), x),
+            self.not_stale(v),
+        ensures
+            self.wf(),
+    {
+        assert forall|q: PathId| #[trigger] self.paths.has(q) implies self.not_stale(q) by {
+            if q != v {
+                assert(s0.paths.has(q));
+                assert(s0.not_stale(q));
+                if let Some(c) = self.paths.path(q).dcid {
+                    assert(peer_has_cid(s0.peer_cids.entries(), c));
+                    assert(peer_has_cid(self.peer_cids.entries(), c));
+                }
+            }
+        }
+        self.lemma_wf_of_weak();
+    }
+
     //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3.2
     //# To protect the connection from failing due to such a spurious
     //# migration, an endpoint MUST revert to using the last validated peer
@@ -8321,6 +11879,8 @@ impl Connection {
             final(self).clocks_kept(*old(self)),
             forall|q: PathId| #[trigger] final(self).paths.has(q) && timed(final(self).paths.path(q)) ==> timed(old(self).paths.path(q)) && final(self).paths.path(q).challenge == old(self).paths.path(q).challenge,
     {
+        // `fresh_dcid`'s `peer_used_kept` is never read here; unopened, its quantifier stays out.
+        hide(Connection::peer_used_kept);
         proof {
             self.paths.lemma_wf();
         }
@@ -8328,7 +11888,11 @@ impl Connection {
             Some(v) => v,
             None => {
                 self.lc.close_silently();
-                self.streams = None;
+                let ghost cs = *self;
+                self.bury_streams();
+                proof {
+                    Connection::lemma_streams_conn(cs, *self);
+                }
                 return;
             },
         };
@@ -8339,21 +11903,15 @@ impl Connection {
             let ghost s0 = *self;
             if !self.fresh_dcid(v) {
                 self.lc.close_silently();
-                self.streams = None;
+                let ghost cs = *self;
+                self.bury_streams();
+                proof {
+                    Connection::lemma_streams_conn(cs, *self);
+                }
                 return;
             }
             proof {
-                assert forall|q: PathId| #[trigger] self.paths.has(q) implies self.not_stale(q) by {
-                    if q != v {
-                        assert(s0.paths.has(q));
-                        assert(s0.not_stale(q));
-                        if let Some(c) = self.paths.path(q).dcid {
-                            assert(peer_has_cid(s0.peer_cids.entries(), c));
-                            assert(peer_has_cid(self.peer_cids.entries(), c));
-                        }
-                    }
-                }
-                self.lemma_wf_of_weak();
+                self.lemma_fresh_wf(s0, v);
             }
         }
         let ghost s1 = *self;
@@ -8384,7 +11942,11 @@ impl Connection {
         // Step 1: the closing and draining deadlines.
         self.lc.on_timeout(t);
         if !matches!(self.lc.phase(), Phase::Open) {
-            self.streams = None;
+            let ghost cs = *self;
+            self.bury_streams();
+            proof {
+                Connection::lemma_streams_conn(cs, *self);
+            }
         }
         // Step 2.
         //= https://www.rfc-editor.org/rfc/rfc9000#section-10.1
@@ -8395,7 +11957,11 @@ impl Connection {
             if let Some(d) = self.idle_deadline() {
                 if t >= d {
                     self.lc.close_silently();
-                    self.streams = None;
+                    let ghost cs = *self;
+                    self.bury_streams();
+                    proof {
+                        Connection::lemma_streams_conn(cs, *self);
+                    }
                 }
             }
         }
@@ -8446,8 +12012,10 @@ impl Connection {
     pub fn on_timeout(&mut self, now: u64, rand: &[u8; RAND_LEN])
         requires
             old(self).wf(),
+            old(self).settled(),
         ensures
             final(self).wf(),
+            final(self).settled(),
             final(self).out_log() == old(self).out_log(),
             final(self).timed_out(*old(self), now),
             final(self).timers_later(now),
@@ -8500,6 +12068,7 @@ impl Connection {
     fn settled_later(&mut self, now: u64, rand: &[u8; RAND_LEN], cap: usize) -> (r: Option<Option<u64>>)
         requires
             old(self).wf(),
+            old(self).settled(),
             now < u64::MAX,
         ensures
             r matches Some(t) ==> later(t, now),
@@ -8509,6 +12078,7 @@ impl Connection {
         while i < cap
             invariant
                 self.wf(),
+                self.settled(),
                 now < u64::MAX,
                 self.timers_later(now),
             decreases cap - i,
@@ -8571,7 +12141,7 @@ impl Connection {
             forall|p: nat| #[trigger] self.crypto_received(k, p) ==> p < r,
     {
         proof {
-            reveal(crx_ok);
+            reveal(crate::crx::crx_ok);
             match k {
                 PacketKind::Initial => {
                     self.crx_i.lemma_wf();
@@ -8730,16 +12300,37 @@ impl Connection {
 // Helpers
 // =============================================================================
 
-/// The three CRYPTO streams' `wf`, and a stream whose space is not live is drained. Opaque, so a
-/// fn that changes neither a CRYPTO stream nor `live_i`, `live_h`, `complete` carries it by field
-/// congruence; the fns that do (`on_crypto_frame`, `crypto_read`, `crypto_drop`, `discard`,
-/// `on_handshake_complete`, `crypto_end`'s proof, the constructor) reveal it.
+/// A discarded space's CRYPTO send context was retired at its discard: terminal, its sets moved to its slot.
+/// Opaque: `wf` carries it as one atom; `lemma_ctx_done` states it.
 #[verifier::opaque]
-spec fn crx_ok(i: CryptoStream, h: CryptoStream, o: CryptoStream, live_i: bool, live_h: bool, complete: bool) -> bool {
-    &&& i.wf() && h.wf() && o.wf()
-    &&& !live_i ==> i.drained() && i.buf_len_spec() == 0
-    &&& !live_h ==> h.drained()
-    &&& !complete ==> o.drained()
+pub open spec fn ctx_done(c: SendStream, live: bool) -> bool {
+    !live ==> (c.state() is ResetRecvd || c.state() is DataRecvd) && c.ranges_held() == 0
+}
+
+/// Both contexts' `ctx_done`, unfolded.
+proof fn lemma_ctx_both(c: Connection)
+    ensures
+        ctxs_done(c.ctx_i, c.live_i, c.ctx_h, c.live_h) == (ctx_done(c.ctx_i, c.live_i) && ctx_done(c.ctx_h, c.live_h)),
+        ctx_done(c.ctx_i, c.live_i) == (!c.live_i ==> (c.ctx_i.state() is ResetRecvd || c.ctx_i.state() is DataRecvd)
+            && c.ctx_i.ranges_held() == 0),
+        ctx_done(c.ctx_h, c.live_h) == (!c.live_h ==> (c.ctx_h.state() is ResetRecvd || c.ctx_h.state() is DataRecvd)
+            && c.ctx_h.ranges_held() == 0),
+{
+    reveal(ctx_done);
+    reveal(ctxs_done);
+}
+
+/// Both contexts' `ctx_done`, one atom in `wf`.
+#[verifier::opaque]
+pub open spec fn ctxs_done(ci: SendStream, li: bool, ch: SendStream, lh: bool) -> bool {
+    ctx_done(ci, li) && ctx_done(ch, lh)
+}
+
+pub proof fn lemma_ctx_done(c: SendStream, live: bool)
+    ensures
+        ctx_done(c, live) == (!live ==> (c.state() is ResetRecvd || c.state() is DataRecvd) && c.ranges_held() == 0),
+{
+    reveal(ctx_done);
 }
 
 /// No level holds an unread in-order CRYPTO byte.
@@ -8750,6 +12341,30 @@ pub open spec fn crypto_all_drained(c: Connection) -> bool {
 /// Level `k` holds no unread in-order CRYPTO byte: it has been read to its contiguous end.
 pub open spec fn crypto_drained(c: Connection, k: PacketKind) -> bool {
     c.crypto_base_spec(k) == c.crypto_contiguous_spec(k)
+}
+
+/// How many bytes `crypto_read(k, max)` takes on an open connection: `max`, or every unread in-order byte if fewer.
+pub open spec fn crypto_read_len(c: Connection, k: PacketKind, max: u64) -> nat {
+    if max as int <= c.crypto_contiguous_spec(k) - c.crypto_base_spec(k) {
+        max as nat
+    } else {
+        (c.crypto_contiguous_spec(k) - c.crypto_base_spec(k)) as nat
+    }
+}
+
+/// The CRYPTO memory bound across calls: at every level, the positions held (unread in-order and out-of-order
+/// bytes) are at most `MAX_CRYPTO_BUFFER`, and the read offset is at most the contiguous end.
+pub open spec fn crypto_held_ok(c: Connection) -> bool {
+    forall|k: PacketKind|
+        #[trigger] c.crypto_held(k) <= MAX_CRYPTO_BUFFER && c.crypto_base_spec(k) <= c.crypto_contiguous_spec(k)
+            // Each level's positions held plus its teardown slot's nodes: one store retired from at most a
+            // datagram past `MAX_CRYPTO_BUFFER` (D6's slot bound).
+            && c.crypto_load(k) <= MAX_CRYPTO_BUFFER + crate::aead::MAX_UDP_PAYLOAD
+}
+
+/// Level `k` still takes CRYPTO frames: the connection is open and (for Initial, Handshake) the level live.
+pub open spec fn crypto_open_level(c: Connection, k: PacketKind) -> bool {
+    c.phase_spec() is Open && (k is OneRtt || c.live(k))
 }
 
 /// Every level drained in `o` is drained in `c`.
@@ -8820,7 +12435,14 @@ proof fn lemma_recv_err(id: u64, window: u64, t: Seq<SpecRecvIn>)
     decreases t.len(),
 {
     if t.len() > 0 {
-        lemma_recv_err(id, window, t.drop_last());
+        let p = t.drop_last();
+        lemma_recv_err(id, window, p);
+        assert(p.push(t.last()) =~= t);
+        lemma_recv_push(id, window, p, t.last());
+        // A delivery has no error path (D12): it keeps the error field.
+        if let SpecRecvIn::Deliver { max } = t.last() {
+            lemma_deliver_fields(id, rfc_recv(id, window, p), max);
+        }
     }
 }
 
@@ -8927,55 +12549,6 @@ fn has_non_probing(frames: &[Frame]) -> (r: bool)
         i += 1;
     }
     false
-}
-
-/// The STREAM frame covering the run of adjacent STREAM frames of one stream that starts at
-/// `frames[j]`, FIN from the last, and the index after the run; None when no frame follows on
-/// from `frames[j]`, so a lone frame costs no copy. The copy is at most one record's bytes.
-/// Public for its test only: no record exists before Task 2a-i.
-#[doc(hidden)]
-#[verifier::spinoff_prover]
-pub fn stream_run(frames: &[Frame], j: usize) -> (r: Option<(Frame, usize)>)
-    requires
-        j < frames@.len(),
-    ensures
-        r matches Some((_, e)) ==> j < e <= frames@.len(),
-{
-    let (id, off, first, mut last_fin) = match &frames[j] {
-        Frame::Stream { stream_id, offset, data, fin } => (*stream_id, *offset, data, *fin),
-        _ => return None,
-    };
-    if first.len() as u64 > u64::MAX - off {
-        return None;
-    }
-    let mut next = off + first.len() as u64;
-    let mut run: Vec<u8> = Vec::new();
-    let mut e = j + 1;
-    while e < frames.len()
-        invariant
-            j < e <= frames@.len(),
-        decreases frames@.len() - e,
-    {
-        match &frames[e] {
-            Frame::Stream { stream_id, offset, data, fin } => {
-                if *stream_id != id || *offset != next || data.len() as u64 > u64::MAX - next {
-                    break;
-                }
-                if e == j + 1 {
-                    run.extend_from_slice(first.as_slice());
-                }
-                run.extend_from_slice(data.as_slice());
-                next = next + data.len() as u64;
-                last_fin = *fin;
-            },
-            _ => break,
-        }
-        e += 1;
-    }
-    if e == j + 1 {
-        return None;
-    }
-    Some((Frame::Stream { stream_id: id, offset: off, data: run, fin: last_fin }, e))
 }
 
 /// `TransportParams` derives no `Clone`.
@@ -9850,14 +13423,20 @@ fn record_frames(frames: &[Frame]) -> (r: Vec<Frame>)
                 frames@[j]@,
                 0,
             ),
+        // D10 (b): exactly the retransmittable frames, in order, so the record's pieces are the packet's.
+        frames_view(r@) == retained(frames_view(frames@)),
 {
     let ghost fv = frames_view(frames@);
     let mut r: Vec<Frame> = Vec::new();
     let mut j: usize = 0;
+    proof {
+        assert(frames_view(r@) =~= retained(fv.subrange(0, 0)));
+    }
     while j < frames.len()
         invariant
             j <= frames@.len(),
             fv == frames_view(frames@),
+            frames_view(r@) == retained(fv.subrange(0, j as int)),
             forall|i: int|
                 0 <= i < r@.len() ==> retransmittable(#[trigger] r@[i]@) && frame_from(fv, r@[i]@, 0),
             forall|m: int|
@@ -9898,7 +13477,15 @@ fn record_frames(frames: &[Frame]) -> (r: Vec<Frame>)
                 }
             }
         }
+        proof {
+            assert(fv.subrange(0, j as int + 1).drop_last() =~= fv.subrange(0, j as int));
+            assert(fv.subrange(0, j as int + 1).last() == frames@[j as int]@);
+            assert(frames_view(r@) =~= retained(fv.subrange(0, j as int + 1)));
+        }
         j += 1;
+    }
+    proof {
+        assert(fv.subrange(0, fv.len() as int) =~= fv);
     }
     r
 }
@@ -9917,6 +13504,109 @@ fn frame_len(f: &Frame) -> (n: usize)
     buf.len()
 }
 
+/// `add_space_packet`'s push of packet `v` (space `k`) after `s`: every packet measurable, the polled frames placed,
+/// and `pad` the Initial-elicits flag (split from it for the rlimit).
+#[verifier::spinoff_prover]
+proof fn lemma_space_pushed(
+    s: Seq<SpecOutPacket>,
+    v: SpecOutPacket,
+    d: SpecOutDatagram,
+    polled: Seq<SpecFrame>,
+    pad0: bool,
+    pad1: bool,
+    k: PacketKind,
+    eliciting: bool,
+)
+    requires
+        d.packets == s.push(v),
+        forall|i: int| 0 <= i < s.len() ==> out_packet_sized(#[trigger] s[i]),
+        out_packet_sized(v),
+        v.kind == k,
+        in_tail(polled, v.frames, 0),
+        eliciting == exists|i: int| 0 <= i < v.frames.len() && ack_eliciting(spec_frame_type(#[trigger] v.frames[i])),
+        pad0 == has_eliciting_initial(s),
+        pad1 == (pad0 || (k is Initial && eliciting)),
+    ensures
+        forall|i: int| 0 <= i < d.packets.len() ==> out_packet_sized(#[trigger] d.packets[i]),
+        polled_placed(polled, d),
+        has_eliciting_initial(d.packets) == pad1,
+{
+    let s2 = d.packets;
+    assert forall|i: int| 0 <= i < s2.len() implies out_packet_sized(#[trigger] s2[i]) by {
+        if i < s.len() {
+            assert(s2[i] == s[i]);
+        }
+    }
+    assert forall|i: int| 0 <= i < polled.len() implies frame_in_datagram(d, #[trigger] polled[i]) by {
+        assert(frame_from(v.frames, polled[i], 0));
+        let n = choose|n: int| 0 <= n < v.frames.len() && #[trigger] v.frames[n] == polled[i];
+        assert(d.packets[s.len() as int] == v);
+        assert(d.packets[s.len() as int].frames[n] == polled[i]);
+    }
+    if eliciting && k is Initial {
+        let m = choose|m: int| 0 <= m < v.frames.len() && ack_eliciting(spec_frame_type(#[trigger] v.frames[m]));
+        assert(s2[s.len() as int].frames[m] == v.frames[m]);
+    }
+    if has_eliciting_initial(s2) {
+        let (a, b) = choose|a: int, b: int|
+            0 <= a < s2.len() && s2[a].kind is Initial && 0 <= b < s2[a].frames.len() && ack_eliciting(
+                spec_frame_type(#[trigger] s2[a].frames[b]),
+            );
+        if a == s.len() {
+            assert(s2[a].frames[b] == v.frames[b]);
+        } else {
+            assert(s2[a] == s[a]);
+        }
+    }
+    if has_eliciting_initial(s) {
+        let (a, b) = choose|a: int, b: int|
+            0 <= a < s.len() && s[a].kind is Initial && 0 <= b < s[a].frames.len() && ack_eliciting(
+                spec_frame_type(#[trigger] s[a].frames[b]),
+            );
+        assert(s2[a] == s[a]);
+    }
+}
+
+/// Appends a chunk of `poll_data` as a CRYPTO frame within `left` (split from `crypto_frame` for the rlimit).
+#[verifier::spinoff_prover]
+fn push_crypto(
+    off: u64,
+    data: Vec<u8>,
+    head: usize,
+    left: &mut usize,
+    fs: &mut Vec<Frame>,
+    Ghost(k): Ghost<PacketKind>,
+    Ghost(base): Ghost<int>,
+    Ghost(room): Ghost<nat>,
+)
+    requires
+        !(k is OneRtt),
+        room <= MAX_DATAGRAM,
+        tx_frames(frames_view(old(fs)@), k, base, *old(left) as nat, room),
+        off + data@.len() <= VARINT_MAX,
+        head == 1 + rfc_varint_min_len(off) + 2,
+        head < *old(left),
+        data@.len() <= *old(left) - head,
+    ensures
+        frames_view(final(fs)@) == frames_view(old(fs)@).push(SpecFrame::Crypto { offset: off, data: data@ }),
+        tx_frames(frames_view(final(fs)@), k, base, *final(left) as nat, room),
+        extends(frames_view(old(fs)@), frames_view(final(fs)@)),
+{
+    let n = head - 2 + varint_len(data.len() as u64) + data.len();
+    let ghost sf0 = frames_view(fs@);
+    let ghost left0 = *left as nat;
+    let ghost g = SpecFrame::Crypto { offset: off, data: data@ };
+    proof {
+        lemma_crypto_len(off, data@);
+    }
+    fs.push(Frame::Crypto { offset: off, data });
+    *left = *left - n;
+    proof {
+        assert(frames_view(fs@) =~= sf0.push(g));
+        lemma_tx_push(sf0, g, k, base, left0, room, *left as nat);
+    }
+}
+
 /// Appends `f` if its encoding fits.
 #[verifier::spinoff_prover]
 fn try_place(
@@ -9933,9 +13623,11 @@ fn try_place(
         frame_permitted(spec_frame_type(f@), k),
         ack_eliciting(spec_frame_type(f@)),
         !(f@ is PathChallenge) && !(f@ is PathResponse),
+        piece_of(f@) is None,
     ensures
         tx_frames(frames_view(final(fs)@), k, base, *final(left) as nat, room),
         extends(frames_view(old(fs)@), frames_view(final(fs)@)),
+        frame_pieces(frames_view(final(fs)@)) == frame_pieces(frames_view(old(fs)@)),
         !placed ==> final(fs)@ == old(fs)@ && *final(left) == *old(left),
         placed ==> final(fs)@.len() == old(fs)@.len() + 1 && final(fs)@.last()@ == f@,
 {
@@ -9951,6 +13643,7 @@ fn try_place(
     proof {
         assert(frames_view(fs@) =~= sf.push(g));
         lemma_tx_push(sf, g, k, base, left0, room, *left as nat);
+        lemma_pieces_push_none(sf, g);
     }
     true
 }
@@ -9971,6 +13664,16 @@ proof fn lemma_one_packet(p: SpecOutPacket, k: PacketKind)
     assert(packets_len(s.drop_last()) == 0);
     assert(packets_pns(s.drop_last(), k) == Seq::<u64>::empty());
     assert(Seq::<u64>::empty().push(p.pn) =~= seq![p.pn]);
+}
+
+/// Two steps, each the identity or `kept` on `id`, are `kept` on `id`.
+proof fn lemma_kept_steps(a: Paths, b: Paths, c: Paths, id: PathId)
+    requires
+        b == a || kept(a, b, id),
+        c == b || kept(b, c, id),
+    ensures
+        kept(a, c, id),
+{
 }
 
 /// The frames owed on a path, in the order they go: its oldest response, then its owed challenge.
@@ -10059,6 +13762,84 @@ proof fn lemma_crypto_len(off: u64, d: Seq<u8>)
     theorem_serialize_matches_rfc(d.len() as u64);
 }
 
+impl Connection {
+    /// The nodes in level `k`'s CRYPTO send context's teardown slot; none at 1-RTT.
+    pub closed spec fn crypto_send_td_spec(&self, k: PacketKind) -> nat {
+        match k {
+            PacketKind::Initial => self.ctx_i.td_nodes(),
+            PacketKind::Handshake => self.ctx_h.td_nodes(),
+            PacketKind::OneRtt => 0,
+        }
+    }
+
+    /// The ranges and pieces level `k`'s CRYPTO send context holds outside its slot; none at 1-RTT.
+    pub closed spec fn crypto_send_ranges_spec(&self, k: PacketKind) -> nat {
+        match k {
+            PacketKind::Initial => self.ctx_i.ranges_held(),
+            PacketKind::Handshake => self.ctx_h.ranges_held(),
+            PacketKind::OneRtt => 0,
+        }
+    }
+
+    /// The closed connection's streams left to free, if it has any.
+    pub closed spec fn dead_len_spec(&self) -> Option<nat> {
+        match self.dead {
+            Some(d) => Some(d.len_spec()),
+            None => None,
+        }
+    }
+
+    /// Test support: the nodes in level `k`'s CRYPTO send context's teardown slot (D10 (e)); none at 1-RTT.
+    #[doc(hidden)]
+    pub fn crypto_send_td(&self, k: PacketKind) -> (r: usize)
+        requires
+            self.wf(),
+        ensures
+            r == self.crypto_send_td_spec(k),
+    {
+        match k {
+            PacketKind::Initial => self.ctx_i.td_len(),
+            PacketKind::Handshake => self.ctx_h.td_len(),
+            PacketKind::OneRtt => 0,
+        }
+    }
+
+    /// Test support: the acked, lost and in-flight ranges level `k`'s CRYPTO send context holds outside its slot.
+    #[doc(hidden)]
+    pub fn crypto_send_ranges(&self, k: PacketKind) -> (r: usize)
+        requires
+            self.wf(),
+        ensures
+            r == self.crypto_send_ranges_spec(k),
+    {
+        proof {
+            self.ctx_i.lemma_weight_max();
+            self.ctx_h.lemma_weight_max();
+        }
+        let (a, l, f) = match k {
+            PacketKind::Initial => self.ctx_i.range_counts(),
+            PacketKind::Handshake => self.ctx_h.range_counts(),
+            PacketKind::OneRtt => (0, 0, 0),
+        };
+        a + l + f
+    }
+
+    /// Test support: a closed connection's streams left to free (D13), if any.
+    #[doc(hidden)]
+    pub fn dead_entries(&self) -> (r: Option<usize>)
+        ensures
+            match self.dead_len_spec() {
+                Some(n) => r matches Some(m) && m == n,
+                None => r is None,
+            },
+    {
+        match &self.dead {
+            Some(d) => Some(d.entries_left()),
+            None => None,
+        }
+    }
+}
+
 } // verus!
 
 impl Connection {
@@ -10074,10 +13855,16 @@ impl Connection {
         c.0.saturating_add(c.1).saturating_add(tx)
     }
 
-    /// Test support: stream `id`'s acked and lost send-range counts (3d Task 1).
+    /// Test support: stream `id`'s acked, lost and in-flight send-range counts (3d Task 1, 9b2 Task 8a).
     #[doc(hidden)]
-    pub fn send_range_counts(&self, id: u64) -> Option<(usize, usize)> {
+    pub fn send_range_counts(&self, id: u64) -> Option<(usize, usize, usize)> {
         self.streams.as_ref().and_then(|s| s.send_range_counts(id))
+    }
+
+    /// Test support: stream `id`'s send bytes buffered (9b2 Task 8a).
+    #[doc(hidden)]
+    pub fn send_buffered(&self, id: u64) -> Option<usize> {
+        self.streams.as_ref().and_then(|s| s.send_buffered(id))
     }
 
     /// Test support: the amplification budget of `q`, None when absent (the only reading of a

@@ -1,0 +1,72 @@
+diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
+index aa4aa0f..2d0eed7 100644
+--- a/crates/quic/src/conn.rs
++++ b/crates/quic/src/conn.rs
+@@ -13418,36 +13418,32 @@ fn record_frames(frames: &[Frame]) -> (r: Vec<Frame>)
+                 0,
+             ),
+         forall|j: int|
+-            0 <= j < frames@.len() && retransmittable(#[trigger] frames@[j]@) ==> frame_from(
++            0 <= j < frames@.len() && retransmittable(#[trigger] frames@[j]@) && !(frames@[j]@ is Stream) ==> frame_from(
+                 frames_view(r@),
+                 frames@[j]@,
+                 0,
+             ),
+-        // D10 (b): exactly the retransmittable frames, in order, so the record's pieces are the packet's.
+-        frames_view(r@) == retained(frames_view(frames@)),
+ {
+     let ghost fv = frames_view(frames@);
+     let mut r: Vec<Frame> = Vec::new();
+     let mut j: usize = 0;
+-    proof {
+-        assert(frames_view(r@) =~= retained(fv.subrange(0, 0)));
+-    }
+     while j < frames.len()
+         invariant
+             j <= frames@.len(),
+             fv == frames_view(frames@),
+-            frames_view(r@) == retained(fv.subrange(0, j as int)),
+             forall|i: int|
+                 0 <= i < r@.len() ==> retransmittable(#[trigger] r@[i]@) && frame_from(fv, r@[i]@, 0),
+             forall|m: int|
+-                0 <= m < j && retransmittable(#[trigger] frames@[m]@) ==> frame_from(
++                0 <= m < j && retransmittable(#[trigger] frames@[m]@) && !(frames@[m]@ is Stream) ==> frame_from(
+                     frames_view(r@),
+                     frames@[m]@,
+                     0,
+                 ),
+         decreases frames@.len() - j,
+     {
+-        if let Some(c) = copy_frame(&frames[j]) {
++        // Mutant 9b2-M20: a STREAM frame is left out of the record.
++        let c = if matches!(frames[j], Frame::Stream { .. }) { None } else { copy_frame(&frames[j]) };
++        if let Some(c) = c {
+             let ghost r0 = r@;
+             r.push(c);
+             proof {
+@@ -13464,7 +13460,7 @@ fn record_frames(frames: &[Frame]) -> (r: Vec<Frame>)
+                         assert(r@[i] == r0[i]);
+                     }
+                 }
+-                assert forall|m: int| 0 <= m < j + 1 && retransmittable(#[trigger] frames@[m]@) implies frame_from(
++                assert forall|m: int| 0 <= m < j + 1 && retransmittable(#[trigger] frames@[m]@) && !(frames@[m]@ is Stream) implies frame_from(
+                     v,
+                     frames@[m]@,
+                     0,
+@@ -13477,16 +13473,8 @@ fn record_frames(frames: &[Frame]) -> (r: Vec<Frame>)
+                 }
+             }
+         }
+-        proof {
+-            assert(fv.subrange(0, j as int + 1).drop_last() =~= fv.subrange(0, j as int));
+-            assert(fv.subrange(0, j as int + 1).last() == frames@[j as int]@);
+-            assert(frames_view(r@) =~= retained(fv.subrange(0, j as int + 1)));
+-        }
+         j += 1;
+     }
+-    proof {
+-        assert(fv.subrange(0, fv.len() as int) =~= fv);
+-    }
+     r
+ }
+ 

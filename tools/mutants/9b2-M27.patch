@@ -1,0 +1,12 @@
+diff --git a/crates/quic/src/send_stream.rs b/crates/quic/src/send_stream.rs
+--- a/crates/quic/src/send_stream.rs
++++ b/crates/quic/src/send_stream.rs
+@@ -2328,7 +2328,7 @@ impl SendStream {
+         } else {
+             self.td.flight.reap_some(budget)
+         };
+-        if self.td.acked.len() == 0 && self.td.lost.len() == 0 && self.td.flight.len() == 0 {
++        if true {
+             self.td_w = 0;
+         }
+         proof {

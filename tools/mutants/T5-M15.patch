@@ -1,36 +1,55 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index 84680fd..de7465f 100644
+index aa4aa0f..2766a87 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -3422,7 +3422,12 @@ impl Connection {
-             ).crypto_contiguous_spec(level),
-             old(self).phase_spec() is Open ==> final(out)@.len() == old(out)@.len() + old(
-                 self,
--            ).crypto_contiguous_spec(level) - old(self).crypto_base_spec(level),
-+            ).crypto_contiguous_spec(level) - old(self).crypto_base_spec(level) - if old(self).crypto_contiguous_spec(level)
-+                > old(self).crypto_base_spec(level) {
+@@ -6114,12 +6114,19 @@ impl Connection {
+             final(self).wf(),
+             final(self).settled(),
+             final(out).wf(),
+-            final(out).cap() == old(out).cap(),
+             final(self).out_log() == old(self).out_log(),
+             final(out)@.len() <= old(self).crypto_end_spec(level) - old(self).crypto_base_spec(level),
+-            old(self).phase_spec() is Open ==> final(out)@.len() == crypto_read_len(*old(self), level, max),
++            old(self).phase_spec() is Open ==> final(out)@.len() == crypto_read_len(*old(self), level, max) - if crypto_read_len(
++                *old(self),
++                level,
++                max,
++            ) > 0 {
 +                1int
 +            } else {
 +                0int
 +            },
-             old(self).crypto_end_spec(level) <= old(self).crypto_base_spec(level) ==> final(out)@ == old(out)@,
-             // The read hands over exactly the bytes its offset passes; no other level's moves.
-             final(self).crypto_kept_but(*old(self), Some(level)),
-@@ -3441,6 +3446,7 @@ impl Connection {
-         if !matches!(self.lc.phase(), Phase::Open) {
-             return;
+             old(self).phase_spec() is Open ==> final(self).crypto_base_spec(level) == old(self).crypto_base_spec(level)
+-                + final(out)@.len(),
++                + crypto_read_len(*old(self), level, max),
+             // A read of at least the unread bytes drains the level.
+             old(self).phase_spec() is Open && max >= old(self).crypto_contiguous_spec(level) - old(self).crypto_base_spec(
+                 level,
+@@ -6134,8 +6141,12 @@ impl Connection {
+             !(old(self).phase_spec() is Open) ==> final(out)@.len() == 0,
+             final(self).phase_spec() == old(self).phase_spec(),
+             drained_kept(*final(self), *old(self)),
+-            final(self).crypto_held(level) + final(out)@.len() == old(self).crypto_held(level),
+-            final(self).crypto_backlog() + final(out)@.len() == old(self).crypto_backlog(),
++            final(self).crypto_held(level) + crypto_read_len(*old(self), level, max) == old(self).crypto_held(level) || !(old(
++                self,
++            ).phase_spec() is Open),
++            final(self).crypto_backlog() + crypto_read_len(*old(self), level, max) == old(self).crypto_backlog() || !(old(
++                self,
++            ).phase_spec() is Open),
+             // The cost: linear in the bytes it may take (`CryptoStream::read`).
+             r@ <= 18 * crypto_read_len(*old(self), level, max) + 5608,
+     {
+@@ -6150,6 +6161,12 @@ impl Connection {
+         proof {
+             reveal(Connection::same_streams);
          }
-+        let n0 = out.len();
-         match level {
-             PacketKind::Initial => {
-                 proof {
-@@ -3461,6 +3467,9 @@ impl Connection {
-                 self.crx_1.read(out)
-             },
-         }
-+        if out.len() > n0 {
-+            let _ = out.pop();
++        if out.len() > 0 {
++            let n = out.len() - 1;
++            let mut t: CapVec<u8> = CapVec::new(n);
++            let _ = t.push_slice(vstd::slice::slice_subrange(out.as_slice(), 0, n));
++            *out = t;
 +        }
+         Ghost(c)
      }
  
-     /// Queues CRYPTO data for `level`; ignored once its space is discarded.

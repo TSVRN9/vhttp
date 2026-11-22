@@ -1,13 +1,14 @@
 diff --git a/crates/quictls/src/server.rs b/crates/quictls/src/server.rs
-index 37201ae..4cabb6c 100644
+index a43974a..bc29ce2 100644
 --- a/crates/quictls/src/server.rs
 +++ b/crates/quictls/src/server.rs
-@@ -1057,6 +1057,21 @@ impl<'a> QuicServer<'a> {
+@@ -1775,6 +1775,22 @@ impl<'a> QuicServer<'a> {
              self.sync_keys();
              return false;
          }
-+        let mut b: Vec<u8> = Vec::new();
-+        self.h3.conn_mut().crypto_read(PacketKind::Initial, &mut b);
++        let u = self.h3.conn().crypto_unread(PacketKind::Initial);
++        let mut b: CapVec<u8> = CapVec::new(u as usize);
++        let _ = self.h3.conn_mut().crypto_read(PacketKind::Initial, u, &mut b);
 +        proof {
 +            Connection::lemma_crypto_kept_elim(self.h3.conn_spec(), c0);
 +        }

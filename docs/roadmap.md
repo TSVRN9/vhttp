@@ -47,10 +47,11 @@ send and recovery paths; parts of 9b/9c that do not touch them may go earlier. P
 | 9a2 | acceptance pilot, Tasks 3b, 5, 3c' (sparse CRYPTO store) | merged | - | `2026-11-05-phase-9a-acceptance-pilot.md`; 680a3f0 |
 | 9b | spec-only acceptance lemmas, rule 2(b) | unplanned | 4 (P3), 6 (P4) | none; Phase 9 spec `:50`, `:131-141` |
 | 9b1 | a Frags index: the out-of-order CRYPTO store on a verified AVL of chunks, cost proved per call (C15) | merged | 4 | `2026-11-12-phase-9b1-frags-index.md`; 1875a00 |
-| 9b2 | a verified de-amortized byte queue for every quic/tls byte buffer on input paths (CryptoStream buf and read, HsReader, Reassembly, send_stream, the TLS transcript) | unplanned | 4 (after 9b1, before Phase 6) | none; 9b1 spec D10 (owner decision 2026-11-12); `docs/rca/2026-11-12-cost-sweep.md` |
+| 9b2 | verified byte queue and lazy delivery (`crates/byteq`, `quic::ring`): CryptoStream, HsReader, the TLS transcript, SendStream, Reassembly, `pump_backlog` | in progress | 4 (after 9b1, before Phase 6) | `2026-11-13-phase-9b2-byte-queue.md` |
 | 9b3 | h3 input costs (the quadratic cookie merge first, with its RCA; reqs/unis remove+insert; request buffers) | unplanned | 4 (after 9b1, before Phase 6) | none; 9b1 spec D10 (owner decision 2026-11-12); `docs/rca/2026-11-12-cost-sweep.md` |
 | 9b4 | the remaining sites of docs/rca/2026-11-12-cost-sweep.md (server conns table, tls ext bitmap, ack/inflight/route tables, builders) and the sweep as a gate; a semantic check of 9b1's cost charge (MIR-step bounds for Frags::insert/after_insert/take_front by ctmir's verified cost analysis, or a ghost-cost discipline Verus enforces) | unplanned | 4 (after 9b1, before Phase 6) | none; 9b1 spec D10 (owner decision 2026-11-12); `docs/rca/2026-11-12-cost-sweep.md` |
 | 9b5 | incremental parsing: TLS handshake messages, h3 frames and QPACK field sections parsed as bytes arrive, so no call does more than O(d + log n) | unplanned | 4 (after 9b4, before Phase 6) | none; owner decision 2026-11-12 |
+| sc | scaffold: every remaining interface specified and stubbed top-down from the end-to-end theorem, bodies filled against frozen interfaces; supersedes 9b4's Tasks 4-16 and 9b5's Tasks 8-fix to 19 | unplanned | 4 (after 9b2 and 9b3 merge) | none; scaffold design spec of 2026-11-21 (drafting) |
 | 9c | frame errors, h3 to quic closes, tls own limits | unplanned | 4 (parts that touch no `conn.rs` send or recovery path), 6 (the rest) | none; Phase 9 spec `:51`, `:143-161` |
 | 9t1 | `decode_crate` functional | unplanned | 7 | none; Phase 9 spec `:271` |
 | 9t2 | `mir_run` fuel monotonicity | unplanned | 7 | none; Phase 9 spec `:272` |
@@ -117,6 +118,17 @@ stays `never`.
   Reassembly), and 9b5, after 9b4, parses TLS handshake messages, h3 frames and QPACK field sections incrementally.
 - Sources: 9b1 spec D10 and D6; `docs/rca/2026-11-12-cost-sweep.md`; owner decision 2026-11-12 (9b5).
 - Carryovers: `cat-C15-9b2`, `cat-C15-9b3`, `cat-C15-9b4`, `cat-C15-semantic-cost`, `cat-C15-stream-parse`.
+
+### sc: scaffold (interfaces first)
+
+- Scope: the owner's rule 14 (2026-11-21): every remaining interface is specified and stubbed top-down from the
+  end-to-end theorem, and the bodies are filled against the frozen interfaces. It supersedes 9b4's Tasks 4-16 and 9b5's
+  Tasks 8-fix to 19. It owns the unverified gates being replaced by Verus-enforced checks: `tools/cost_charge.py` (by a cost
+  interface Verus enforces) and `tools/rfc_quantity.py` (by a Verus-side check of what an `allowed_*err` reads), with
+  the items 9b2 Task 11 left to it when it was rescoped (2026-11-21): the cost-charge demos for byteq and the ring, the
+  plan's byteq mutants, the mutant compile-check catch, and the rfc-quantity resolver's known fail-open gaps.
+- Sources: the scaffold design spec of 2026-11-21 (drafting); 9b2 Task 11's rescoped brief (controller, 2026-11-21).
+- Carryovers: `sc-9b2-cost-demos`, `sc-9b2-mutants`, `sc-mutant-compile`, `sc-rfcq-resolve`.
 
 ### 6: loss recovery and congestion control
 

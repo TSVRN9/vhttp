@@ -1,0 +1,13 @@
+diff --git a/crates/quic/src/streams.rs b/crates/quic/src/streams.rs
+--- a/crates/quic/src/streams.rs
++++ b/crates/quic/src/streams.rs
+@@ -7321,7 +7321,8 @@ impl Streams {
+         let ghost mut work: nat = 0;
+         if let Some(i) = self.find(id) {
+             self.send_op_at(i, op, off, len, fin);
+-            if op < 2 {
++            // Mutant 9b2-M41: a loss runs gc too.
++            if op < 4 {
+                 let ghost s1 = *self;
+                 let Ghost(cg) = self.gc(i);
+                 proof {

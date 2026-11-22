@@ -1,0 +1,33 @@
+diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
+index 474335e..7023c2b 100644
+--- a/crates/quic/src/conn.rs
++++ b/crates/quic/src/conn.rs
+@@ -3869,7 +3869,6 @@ impl Connection {
+             final(self).paths == old(self).paths,
+             final(self).wf(),
+             final(self).frames_kept_np(*old(self)),
+-            final(self).pend@ == pend_with(old(self).pend@, k, rest),
+             final(self).n_live() <= old(self).n_live(),
+             r@ <= (old(self).n_live() - final(self).n_live()) * c_gc(),
+     {
+@@ -3880,7 +3879,8 @@ impl Connection {
+             assert(fv.subrange(0, fv.len() as int) =~= fv);
+         }
+         // D10 (b): `pend` is the pieces of the frames not yet reported, then `rest`.
+-        while j < frames.len()
++        // Mutant 9b2-M21: the record's last frame is never reported.
++        while j < frames.len() && j + 1 < frames.len()
+             invariant
+                 self.paths == old(self).paths,
+                 j <= frames@.len(),
+@@ -3905,10 +3905,6 @@ impl Connection {
+             }
+             j += 1;
+         }
+-        proof {
+-            lemma_pend_end(fv, Seq::<SentPacket>::empty(), rest);
+-            lemma_pend_kept(old(self).pend@, self.pend@, k);
+-        }
+         Ghost(work)
+     }
+ 

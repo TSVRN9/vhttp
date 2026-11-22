@@ -11,6 +11,26 @@ use quic::payload::PacketKind;
 use quic::route::{CidTable, CidUpdate};
 use quic::recv_stream::StreamEvent;
 use quic::tp::*;
+use quic::CapVec;
+
+/// Reads all of `k`'s unread in-order CRYPTO bytes.
+fn read_all(c: &mut Connection, k: PacketKind) -> Vec<u8> {
+    let u = c.crypto_unread(k);
+    let mut out = CapVec::new(u as usize);
+    c.crypto_read(k, u, &mut out);
+    out.into_vec()
+}
+
+/// Frees the teardown slots, as `pump_backlog` does, until none is left; the calls it took.
+fn free_all(c: &mut Connection) -> usize {
+    let mut n = 0;
+    while c.teardown_pending() {
+        assert!(n < 100_000, "teardown still pending after {n} calls");
+        let _ = c.free_teardown();
+        n += 1;
+    }
+    n
+}
 
 fn rnd(n: u8) -> [u8; 129] {
     let mut r = [0u8; 129];
@@ -193,6 +213,7 @@ fn crypto_write_gated() {
     c.crypto_write(PacketKind::Handshake, &[1; 10]);
     assert!(c.crypto_capacity(PacketKind::Handshake) > 0);
     let mut c = established_rx();
+    free_all(&mut c);
     c.crypto_write(PacketKind::Initial, &[1; 10]);
     assert_eq!(c.crypto_capacity(PacketKind::Initial), 0);
     let mut c = peer_params_failed();
@@ -200,7 +221,8 @@ fn crypto_write_gated() {
     assert_eq!(c.crypto_capacity(PacketKind::Handshake), 0);
 }
 
-/// `discard` leaves the Handshake space fresh CRYPTO buffers (TRUSTED.md's capacity paragraph).
+/// `discard` moves the Handshake space's CRYPTO store to its teardown slot, and `free_teardown` empties it
+/// (TRUSTED.md's capacity paragraph).
 #[test]
 fn discard_frees_crypto() {
     let mut c = conn();
@@ -210,6 +232,33 @@ fn discard_frees_crypto() {
     c.on_peer_params(&ptp(), 10);
     c.on_handshake_complete(b"h3", 10, &rnd(2));
     assert!(c.handshake_complete());
+    assert!(c.teardown_pending());
+    assert!(free_all(&mut c) > 0);
+    assert!(!c.teardown_pending());
+    assert_eq!(c.crypto_capacity(PacketKind::Handshake), 0);
+}
+
+/// Review Focus 3: a connection leaving Open with unread bytes at two levels; `crypto_drop` moves both stores to
+/// their slots, nothing is left to read, and repeated `free_teardown` empties the slots.
+#[test]
+fn crypto_drop_two_levels_to_slots() {
+    let mut c = conn();
+    c.on_datagram(0, 1200, vec![hs(0, vec![Frame::Crypto { offset: 0, data: vec![2; 300] }])], None, 10, &rnd(9));
+    assert_eq!(c.crypto_unread(PacketKind::Handshake), 300);
+    // The Handshake packet discarded Initial (its store went to the slot); give Initial's slot a second level's
+    // company by reading nothing at Handshake and closing.
+    c.close(0x0a, false, &[], 11);
+    assert_eq!(c.phase(), Phase::Closing);
+    c.crypto_drop();
+    for k in [PacketKind::Initial, PacketKind::Handshake, PacketKind::OneRtt] {
+        assert_eq!(c.crypto_unread(k), 0);
+    }
+    assert!(c.crypto_capacity(PacketKind::Initial) > 0);
+    assert!(c.crypto_capacity(PacketKind::Handshake) > 0);
+    assert!(c.teardown_pending());
+    assert!(free_all(&mut c) >= 2);
+    assert!(!c.teardown_pending());
+    assert_eq!(c.crypto_capacity(PacketKind::Initial), 0);
     assert_eq!(c.crypto_capacity(PacketKind::Handshake), 0);
 }
 
@@ -223,6 +272,8 @@ fn established_state() {
     assert_eq!(c.active_path(), 0);
     assert!(c.path_state(0).is_some());
     assert_eq!(c.path_dcid(0), Some(C1.to_vec()));
+    // The discarded Initial store waits in its teardown slot until `free_teardown` (D6).
+    free_all(&mut c);
     assert_eq!(c.crypto_capacity(PacketKind::Initial), 0);
     // Absent path 4.
     assert_eq!(c.path_state(4), None);
@@ -251,8 +302,7 @@ fn established_state() {
 #[test]
 fn crypto_delivered() {
     let mut c = conn();
-    let mut out = Vec::new();
-    c.crypto_read(PacketKind::Initial, &mut out);
+    let out = read_all(&mut c, PacketKind::Initial);
     assert_eq!(out, vec![1; 100]);
     let mut u = Vec::new();
     c.poll_cid_updates(&mut u);
@@ -268,8 +318,7 @@ fn crypto_in_and_out_of_order_one_datagram_ok() {
     c.on_datagram(0, 17000, vec![ini(3, f)], None, 1, &rnd(3));
     assert_eq!(c.phase(), Phase::Open);
     assert_eq!(c.crypto_end(PacketKind::Initial), 16500);
-    let mut out = Vec::new();
-    c.crypto_read(PacketKind::Initial, &mut out);
+    let out = read_all(&mut c, PacketKind::Initial);
     assert_eq!(out, vec![1; 13000]);
 }
 
@@ -309,6 +358,9 @@ fn handshake_validates_and_discards() {
     assert_eq!(c.largest_pn(PacketKind::Initial), None);
     assert_eq!(c.path_state(0), Some(PathState::Validated));
     assert_eq!(c.phase(), Phase::Open);
+    // Initial's unread bytes went to its teardown slot, freed in bounded steps.
+    assert!(c.teardown_pending());
+    free_all(&mut c);
     assert_eq!(c.crypto_capacity(PacketKind::Initial), 0);
 }
 
@@ -324,12 +376,9 @@ fn later_initial_other_scid() {
 #[test]
 fn duplicate_pn() {
     let mut c = conn();
-    let mut out = Vec::new();
-    c.crypto_read(PacketKind::Initial, &mut out);
+    read_all(&mut c, PacketKind::Initial);
     c.on_datagram(0, 1200, vec![ini(2, vec![Frame::Crypto { offset: 100, data: vec![2; 10] }])], None, 1, &rnd(3));
-    let mut out = Vec::new();
-    c.crypto_read(PacketKind::Initial, &mut out);
-    assert_eq!(out, Vec::<u8>::new());
+    assert_eq!(read_all(&mut c, PacketKind::Initial), Vec::<u8>::new());
 }
 
 #[test]
@@ -369,23 +418,6 @@ fn challenge_flood_dropped() {
     c.on_datagram(0, 1200, vec![one(0, f)], None, 11, &rnd(3));
     assert_eq!(c.largest_pn(PacketKind::OneRtt), None);
     assert!(!c.response_owed(0));
-}
-
-#[test]
-fn stream_run_coalesces() {
-    let s = |id, offset, data: &[u8], fin| Frame::Stream { stream_id: id, offset, data: data.to_vec(), fin };
-    let adj = [s(4, 10, &[1, 2], false), s(4, 12, &[3], false), s(4, 13, &[4], true), Frame::Ping];
-    let (run, e) = stream_run(&adj, 0).unwrap();
-    assert_eq!(run, s(4, 10, &[1, 2, 3, 4], true));
-    assert_eq!(e, 3);
-    // A gap, another stream, a frame of another type, and the end of the record end a run.
-    assert!(stream_run(&[s(4, 10, &[1], false), s(4, 12, &[2], false)], 0).is_none());
-    assert!(stream_run(&[s(4, 10, &[1], false), s(8, 11, &[2], false)], 0).is_none());
-    assert!(stream_run(&adj, 2).is_none());
-    assert!(stream_run(&[Frame::Ping, s(4, 0, &[1], false)], 0).is_none());
-    let (run, e) = stream_run(&[s(4, 0, &[1], false), s(4, 1, &[2], false), s(4, 9, &[3], false)], 0).unwrap();
-    assert_eq!(run, s(4, 0, &[1, 2], false));
-    assert_eq!(e, 2);
 }
 
 #[test]
@@ -497,7 +529,8 @@ fn stream_write_partial() {
     p.initial_max_stream_data_bidi_local = 1 << 30;
     let mut c = established_with(p);
     c.on_datagram(0, 100, vec![one(0, vec![stream(0, b"GET", false)])], None, 30, &rnd(3));
-    assert_eq!(c.stream_write(0, &vec![7; (1 << 20) + 5], true), Ok(1 << 20));
+    // The send room is the 6·peak reservation (9b2 Task 8): MAX_SEND_BUFFER/6 into an empty queue.
+    assert_eq!(c.stream_write(0, &vec![7; (1 << 20) + 5], true), Ok(174_762));
     assert_eq!(c.stream_write(0, &[7; 5], true), Ok(0));
 }
 
@@ -736,4 +769,79 @@ fn path_cap_rx() {
     }
     c.on_datagram(4, 1200, vec![one(5, vec![Frame::PathChallenge(D(4))])], None, 30, &rnd(3));
     assert!(!c.response_owed(4));
+}
+
+/// D10 (e): the Handshake key discard with CRYPTO pieces in flight retires the send context in place: its sets move to
+/// its teardown slot in O(1), `teardown_pending()` holds until `free_teardown` (the pump's teardown half) has emptied
+/// it, then not.
+#[test]
+fn discard_reaps_ctx() {
+    let mut c = conn();
+    c.on_datagram(0, 1200, vec![hs(0, vec![Frame::Ping])], None, 10, &rnd(9));
+    c.crypto_write(PacketKind::Handshake, &[3; 4000]);
+    while c.poll_transmit(10).is_some() {}
+    // The Initial discard (the Handshake packet) left its stores in slots; empty them first.
+    free_all(&mut c);
+    assert_eq!(c.crypto_send_td(PacketKind::Handshake), 0);
+    c.on_peer_params(&ptp(), 10);
+    c.on_handshake_complete(b"h3", 10, &rnd(2));
+    assert!(c.handshake_complete());
+    assert!(c.crypto_send_td(PacketKind::Handshake) > 0);
+    assert!(c.teardown_pending());
+    assert!(free_all(&mut c) > 0);
+    assert!(!c.teardown_pending());
+    assert_eq!(c.crypto_send_td(PacketKind::Handshake), 0);
+}
+
+/// D13: a connection leaving Open moves its streams whole to the dead slot in O(1); `teardown_pending()` holds until
+/// `free_teardown` has freed every entry (each its sets, then its buffers) and the emptied vectors, then not.
+#[test]
+fn close_buries_streams() {
+    let mut c = established_rx();
+    free_all(&mut c);
+    let get = |id: u64| Frame::Stream { stream_id: id, offset: 0, data: b"GET".to_vec(), fin: true };
+    c.on_datagram(0, 1200, vec![one(1, vec![get(0), get(4), get(8)])], None, 20, &rnd(3));
+    for id in [0, 4, 8] {
+        assert_eq!(c.stream_write(id, &[6; 90], false), Ok(90));
+    }
+    while c.poll_transmit(20).is_some() {}
+    assert!(c.dead_entries().is_none());
+    c.close(0x0a, false, &[], 21);
+    assert_eq!(c.phase(), Phase::Closing);
+    assert!(!c.streams_live());
+    assert_eq!(c.dead_entries(), Some(3));
+    assert!(c.teardown_pending());
+    assert!(free_all(&mut c) >= 4);
+    assert!(!c.teardown_pending());
+    assert!(c.dead_entries().is_none());
+}
+
+/// D13 (9b2 Task 10b fix round 3): a connection closed mid-handshake, its Initial and Handshake CRYPTO pieces in flight:
+/// once Closed, `discard_closed` discards both spaces, so the send contexts' sets move to their slots (none left
+/// outside), and `free_teardown` frees them.
+#[test]
+fn closed_mid_handshake_retires_ctx() {
+    let mut c = conn();
+    c.on_datagram(0, 1200, vec![ini(3, vec![Frame::Ping])], None, 5, &rnd(7));
+    c.crypto_write(PacketKind::Initial, &[4; 3000]);
+    c.crypto_write(PacketKind::Handshake, &[5; 3000]);
+    while c.poll_transmit(10).is_some() {}
+    assert!(!c.handshake_complete());
+    let held = c.crypto_send_ranges(PacketKind::Initial) + c.crypto_send_ranges(PacketKind::Handshake);
+    assert!(held > 0, "no CRYPTO piece in flight");
+    c.close(0x0a, false, &[], 11);
+    assert_eq!(c.phase(), Phase::Closing);
+    // Still Closing: the spaces stay (they carry the CONNECTION_CLOSE).
+    let _ = c.discard_closed();
+    assert_eq!(c.crypto_send_ranges(PacketKind::Initial) + c.crypto_send_ranges(PacketKind::Handshake), held);
+    c.on_timeout(1_000_000_000, &rnd(8));
+    assert!(c.is_closed());
+    let _ = c.discard_closed();
+    for k in [PacketKind::Initial, PacketKind::Handshake] {
+        assert_eq!(c.crypto_send_ranges(k), 0, "{k:?}'s send context still holds its sets");
+    }
+    assert!(c.crypto_send_td(PacketKind::Initial) + c.crypto_send_td(PacketKind::Handshake) > 0);
+    assert!(c.teardown_pending());
+    assert!(free_all(&mut c) > 0);
+    assert!(!c.teardown_pending());
 }

@@ -758,7 +758,7 @@ pub open spec fn rfc_open_datagram(
 
 /// The bounds `rfc_header` guarantees: CIDs of at most 20 bytes, a long packet that ends
 /// within `b` after its Packet Number field starts, a short one of at least 21 bytes.
-proof fn lemma_header_bounds(b: Seq<u8>)
+pub(crate) proof fn lemma_header_bounds(b: Seq<u8>)
     ensures
         rfc_header(b, LOCAL_CID_LEN as nat) matches Some(
             SpecHeader::Long { dcid, scid, pn_offset, packet_end, .. },

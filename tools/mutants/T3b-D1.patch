@@ -1,12 +1,14 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index 84680fd..60b72d7 100644
+index aa4aa0f..9c44165 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -3429,7 +3429,6 @@ impl Connection {
-             final(self).peer_tp_known_spec() == old(self).peer_tp_known_spec(),
-             !(old(self).phase_spec() is Open) ==> final(out)@ == old(out)@,
-             final(self).phase_spec() == old(self).phase_spec(),
--            old(self).phase_spec() is Open ==> crypto_drained(*final(self), level),
-             drained_kept(*final(self), *old(self)),
-     {
-         // The bound needs only `lemma_wf`; unfolded, these make a missing fact an rlimit failure.
+@@ -6124,9 +6124,6 @@ impl Connection {
+             old(self).phase_spec() is Open && max >= old(self).crypto_contiguous_spec(level) - old(self).crypto_base_spec(
+                 level,
+             ) ==> final(self).crypto_base_spec(level) == old(self).crypto_contiguous_spec(level),
+-            old(self).phase_spec() is Open && max >= old(self).crypto_contiguous_spec(level) - old(self).crypto_base_spec(
+-                level,
+-            ) ==> crypto_drained(*final(self), level),
+             old(self).crypto_end_spec(level) <= old(self).crypto_base_spec(level) ==> final(out)@.len() == 0,
+             // The read hands over exactly the bytes its offset passes; no other level's moves.
+             final(self).crypto_kept_but(*old(self), Some(level)),

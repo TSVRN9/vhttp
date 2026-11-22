@@ -59,12 +59,39 @@ fn sha256_matches_rustcrypto() {
     }
 }
 
+// Allocator calls on this thread: a count, never a time (9b2 Task 10c).
+struct Counting;
+
+thread_local! {
+    static CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+unsafe impl std::alloc::GlobalAlloc for Counting {
+    unsafe fn alloc(&self, l: std::alloc::Layout) -> *mut u8 {
+        let _ = CALLS.try_with(|c| c.set(c.get() + 1));
+        std::alloc::System.alloc(l)
+    }
+    unsafe fn realloc(&self, p: *mut u8, l: std::alloc::Layout, n: usize) -> *mut u8 {
+        let _ = CALLS.try_with(|c| c.set(c.get() + 1));
+        std::alloc::System.realloc(p, l, n)
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: std::alloc::Layout) {
+        std::alloc::System.dealloc(p, l)
+    }
+}
+
+#[global_allocator]
+static ALLOC: Counting = Counting;
+
+/// 1 MiB hashed in place: no allocation, so the message is never copied or buffered.
 #[test]
 fn sha256_1mib() {
+    let c0 = CALLS.with(|c| c.get());
     let m = pattern(1 << 20);
-    let t = std::time::Instant::now();
+    assert!(CALLS.with(|c| c.get()) > c0, "counting allocator not installed");
+    let k0 = CALLS.with(|c| c.get());
     let d = sha256(&m);
-    let dt = t.elapsed();
+    let k = CALLS.with(|c| c.get()) - k0;
     assert_eq!(d, rustcrypto(&m));
-    assert!(dt < std::time::Duration::from_secs(2), "{dt:?}");
+    assert_eq!(k, 0, "allocator calls");
 }

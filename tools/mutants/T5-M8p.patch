@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/handshake.rs b/crates/quic/src/handshake.rs
-index dc8ed4d..3420805 100644
+index a947e48..bf5a0bb 100644
 --- a/crates/quic/src/handshake.rs
 +++ b/crates/quic/src/handshake.rs
-@@ -230,7 +230,7 @@ pub fn from_first(kind: PacketKind, dcid: &[u8], scid: &[u8], local_scid: [u8; 8
+@@ -249,7 +249,7 @@ pub fn from_first(kind: PacketKind, dcid: &[u8], scid: &[u8], local_scid: [u8; 8
              || scid@.len() > MAX_CID_LEN),
          r matches Some(h) ==> h.wf() && h@ == (SpecHandshakeIds {
              odcid: dcid@,
@@ -11,7 +11,7 @@ index dc8ed4d..3420805 100644
              local_scid: local_scid@,
          }),
  {
-@@ -243,7 +243,7 @@ pub fn from_first(kind: PacketKind, dcid: &[u8], scid: &[u8], local_scid: [u8; 8
+@@ -262,7 +262,7 @@ pub fn from_first(kind: PacketKind, dcid: &[u8], scid: &[u8], local_scid: [u8; 8
      if dcid.len() < 8 || dcid.len() > MAX_CID_LEN || scid.len() > MAX_CID_LEN {
          return None;
      }

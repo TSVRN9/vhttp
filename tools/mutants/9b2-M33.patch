@@ -1,0 +1,15 @@
+diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
+index aa4aa0f..9d32554 100644
+--- a/crates/quic/src/conn.rs
++++ b/crates/quic/src/conn.rs
+@@ -5836,10 +5836,6 @@ impl Connection {
+                     work = work + c;
+                 }
+                 // Its three trees move to its teardown slot in O(1), freed by `free_teardown` (D10 (e)).
+-                let Ghost(c2) = self.ctx_i.retire();
+-                proof {
+-                    work = work + c2;
+-                }
+                 self.recv_i = RecvPns::new(k);
+                 self.cid_updates.push(CidUpdate::Remove(slice_to_vec(self.ids.odcid())));
+             },

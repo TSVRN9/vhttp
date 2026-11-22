@@ -1035,7 +1035,7 @@ proof fn lemma_body_roundtrip(f: SpecFrame, rest: Seq<u8>)
 }
 
 /// Every varint `rfc_vint` reads inside `b` fits in 62 bits and ends after `p`, inside `b`.
-proof fn lemma_vints_ok(b: Seq<u8>)
+pub(crate) proof fn lemma_vints_ok(b: Seq<u8>)
     ensures
         forall|p: int|
             0 <= p <= b.len() && (#[trigger] rfc_vint(b, p)) is Some ==> p < rfc_vint(b, p).unwrap().1
@@ -1677,6 +1677,29 @@ fn serialize_body(f: &Frame, out: &mut Vec<u8>)
     ensures
         final(out)@ == old(out)@ + spec_frame_body(f@),
 {
+    match f {
+        Frame::ResetStream { .. }
+        | Frame::StopSending { .. }
+        | Frame::Crypto { .. }
+        | Frame::Stream { .. }
+        | Frame::MaxData(_)
+        | Frame::MaxStreamData { .. }
+        | Frame::MaxStreams { .. }
+        | Frame::DataBlocked(_) => serialize_body_a(f, out),
+        _ => serialize_body_b(f, out),
+    }
+}
+
+/// `serialize_body` for the data and first credit frames (split from it for the rlimit).
+#[verifier::spinoff_prover]
+fn serialize_body_a(f: &Frame, out: &mut Vec<u8>)
+    requires
+        frame_wf(f@),
+        f is ResetStream || f is StopSending || f is Crypto || f is Stream || f is MaxData || f is MaxStreamData
+            || f is MaxStreams || f is DataBlocked,
+    ensures
+        final(out)@ == old(out)@ + spec_frame_body(f@),
+{
     proof {
         lemma_streams_limit();
     }
@@ -1699,6 +1722,27 @@ fn serialize_body(f: &Frame, out: &mut Vec<u8>)
         Frame::MaxStreamData { stream_id, max } => put_varints2(*stream_id, *max, out),
         Frame::MaxStreams { max, .. } => put_varint(*max, out),
         Frame::DataBlocked(v) => put_varint(*v, out),
+        _ => {
+            assert(false);
+        },
+    }
+}
+
+/// `serialize_body` for the other frames but ACK (split from it for the rlimit).
+#[verifier::spinoff_prover]
+fn serialize_body_b(f: &Frame, out: &mut Vec<u8>)
+    requires
+        frame_wf(f@),
+        !(f is Ack),
+        !(f is ResetStream || f is StopSending || f is Crypto || f is Stream || f is MaxData || f is MaxStreamData
+            || f is MaxStreams || f is DataBlocked),
+    ensures
+        final(out)@ == old(out)@ + spec_frame_body(f@),
+{
+    proof {
+        lemma_streams_limit();
+    }
+    match f {
         Frame::StreamDataBlocked { stream_id, max } => put_varints2(*stream_id, *max, out),
         Frame::StreamsBlocked { max, .. } => put_varint(*max, out),
         Frame::NewConnectionId { seq, retire_prior_to, cid, reset_token } => put_ncid_body(

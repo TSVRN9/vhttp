@@ -1,0 +1,14 @@
+diff --git a/crates/quic/src/streams.rs b/crates/quic/src/streams.rs
+--- a/crates/quic/src/streams.rs
++++ b/crates/quic/src/streams.rs
+@@ -3091,6 +3091,10 @@ impl Streams {
+                 None => true,
+             })
+         };
++        // Mutant 9b2-M39: a removal is charged whether or not the entry goes.
++        proof {
++            work = work + c_gc();
++        }
+         if done {
+             let e = self.entries.remove(i);
+             proof {

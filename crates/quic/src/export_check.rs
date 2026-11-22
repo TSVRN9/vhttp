@@ -12,6 +12,8 @@ use crate::reassembly::*;
 #[allow(unused_imports)]
 use crate::recv_stream::*;
 #[allow(unused_imports)]
+use crate::ring::PAGE;
+#[allow(unused_imports)]
 use crate::send_stream::*;
 #[allow(unused_imports)]
 use crate::stream_id::*;
@@ -53,8 +55,9 @@ proof fn reassembly_exports(r: Reassembly)
     r.lemma_wf();
     assert(r.base() + r.buf_len() <= VARINT_MAX);
     assert(r.base() <= rfc_contiguous(rfc_received(r.inserted())));
-    // Memory: each of `buf`/`have` holds at most twice the logical buffered length.
-    assert(r.phys_len() <= 2 * r.buf_len());
+    // Memory (D11): the ring's pages follow the bytes held, `pages · PAGE <= span + 2 · PAGE`.
+    assert(r.pages() * PAGE <= r.buf_len() + 2 * PAGE);
+    assert(r.buf_len() == 0 ==> r.pages() == 0);
 }
 
 proof fn recv_stream_exports(r: RecvStream)
@@ -66,8 +69,9 @@ proof fn recv_stream_exports(r: RecvStream)
     // The per-stream buffer bounds, against the stream limit and against connection credit.
     assert(r.buffered_len() <= s.limit - s.delivered);
     assert(r.buffered_len() <= counted(s) - retired(s));
-    // Memory (length, not capacity): each reassembly vec holds at most twice that.
-    assert(r.buffered_phys() <= 2 * r.buffered_len());
+    // Memory (D11, D12): the positions the ring's pages hold, `pages · PAGE <= span + 2 · PAGE`.
+    assert(r.buffered_phys() <= r.buffered_len() + 2 * PAGE);
+    assert(r.buffered_len() == 0 ==> r.buffered_phys() == 0);
     assert(s.delivered <= s.high <= counted(s) <= s.limit <= VARINT_MAX);
     assert(recv_events_ok(s.events, r.id_spec()));
     lemma_retired_le_counted(r.id_spec(), r.window_spec(), r.trace());

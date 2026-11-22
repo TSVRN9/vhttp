@@ -1,13 +1,13 @@
 diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
-index 84ffad2..fca2d25 100644
+index 46567b3..f70bbe1 100644
 --- a/crates/quic/src/crypto_stream.rs
 +++ b/crates/quic/src/crypto_stream.rs
-@@ -420,7 +420,7 @@ impl CryptoStream {
-         proof {
-             lemma_ooo_set(a, offset, data@);
-         }
--        if h > MAX_CRYPTO_BUFFER || c > MAX_CRYPTO_RANGES {
-+        if h + (self.contig - self.base) > MAX_CRYPTO_BUFFER || c > MAX_CRYPTO_RANGES {
+@@ -586,7 +586,7 @@ impl CryptoStream {
+         } else {
+             0
+         };
+-        if h - (self.contig - self.base) > MAX_CRYPTO_BUFFER || c - run > MAX_CRYPTO_RANGES {
++        if h > MAX_CRYPTO_BUFFER || c - run > MAX_CRYPTO_RANGES {
              //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
              //# If an endpoint does not expand its buffer, it MUST close
              //# the connection with a CRYPTO_BUFFER_EXCEEDED error code.

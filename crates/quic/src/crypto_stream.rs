@@ -1,8 +1,12 @@
-//! CRYPTO streams (RFC 9000 §7.5, §19.6): per encryption level, the unread in-order bytes in one
-//! buffer and the out-of-order bytes in a sparse store (`Frags`), so memory follows the bytes held,
-//! not the offsets they span. CRYPTO data has no flow control (§4).
+//! CRYPTO streams (RFC 9000 §7.5, §19.6): per encryption level, the received bytes not yet read, in
+//! order or not, in one sparse store (`Frags`), so memory follows the bytes held, not the offsets
+//! they span, and a frame copies no in-order byte: `read` takes them lazily. CRYPTO data has no flow
+//! control (§4).
 use vstd::prelude::*;
+use byteq::capvec::CapVec;
+use crate::avl::Tree;
 use crate::codes::*;
+use crate::conn::B_PUMP;
 use crate::frags::*;
 // Used only in ghost code, which a plain `cargo build` erases.
 #[allow(unused_imports)]
@@ -150,25 +154,43 @@ pub proof fn lemma_crypto_floor(s: CryptoStream, offset: u64, d: Seq<u8>)
     lemma_runs_le_len(ooo_received(s, offset, d));
 }
 
+/// The positions of `s` past `c`.
+pub open spec fn above(s: Set<nat>, c: nat) -> Set<nat> {
+    s.filter(|k: nat| k > c)
+}
+
+/// How many bytes `read(max)` takes: `max`, or every unread in-order byte if fewer.
+pub open spec fn crypto_take(s: CryptoStream, max: u64) -> nat {
+    if max as nat <= crypto_contiguous(s) - s.base_spec() {
+        max as nat
+    } else {
+        (crypto_contiguous(s) - s.base_spec()) as nat
+    }
+}
+
 /// The CRYPTO stream of one encryption level.
 pub struct CryptoStream {
-    /// The unread in-order bytes, `[base, contig)`.
-    buf: Vec<u8>,
     /// The read offset.
     base: u64,
     /// `crypto_contiguous`, kept so a frame costs O(1) plus the bytes it touches.
     contig: u64,
-    /// The out-of-order bytes: those received past `contig`.
-    ooo: Frags,
-    /// Every insertion since the last `restart`, which records the bytes below its base (read,
+    /// The end of the received data.
+    hi: u64,
+    /// The received bytes at or past `base`: the unread in-order ones, `[base, contig)`, and the
+    /// out-of-order ones past `contig`. Read lazily (`read`), so a frame copies no in-order byte.
+    st: Frags,
+    /// The teardown slot: retired stores (`retire`), freed a bounded piece per call (`free_some`). Its keys are
+    /// all below `base`, so a store retired onto a full slot joins it in O(log n).
+    td: Tree<CapVec<u8>>,
+    /// Every insertion since the last `retire`, which records the bytes below its base (read,
     /// but not data received anew) as zeros.
     ins: Ghost<Seq<(nat, Seq<u8>)>>,
-    /// Every insertion `on_crypto` made, kept across `restart`: what was really received.
+    /// Every insertion `on_crypto` made, kept across `retire`: what was really received.
     hist: Ghost<Seq<(nat, Seq<u8>)>>,
 }
 
 impl CryptoStream {
-    /// The insertions since the last `restart`, its record of the bytes below its base first.
+    /// The insertions since the last `retire`, its record of the bytes below its base first.
     pub closed spec fn inserted_frames(&self) -> Seq<(nat, Seq<u8>)> {
         self.ins@
     }
@@ -180,14 +202,35 @@ impl CryptoStream {
 
     /// From the read offset to the end of the received data.
     pub closed spec fn buf_len_spec(&self) -> nat {
-        (self.hi() - self.base) as nat
+        (self.hi - self.base) as nat
     }
 
     pub closed spec fn history(&self) -> Seq<(nat, Seq<u8>)> {
         self.hist@
     }
 
-    /// Byte `p` arrived in a CRYPTO frame. `inserted_frames()` also holds `restart`'s record of the bytes
+    /// The positions held at or past the read offset: unread in-order and out-of-order bytes.
+    pub closed spec fn held_spec(&self) -> nat {
+        self.st.held() as nat
+    }
+
+    /// The nodes in the teardown slot.
+    pub closed spec fn td_nodes(&self) -> nat {
+        crate::avl::seq(self.td).len()
+    }
+
+    /// The positions held and the slot's nodes: what a retire moves from one to the other, never growing it.
+    pub closed spec fn load(&self) -> nat {
+        self.held_spec() + self.td_nodes()
+    }
+
+    pub proof fn lemma_load(&self)
+        ensures
+            self.load() == self.held_spec() + self.td_nodes(),
+    {
+    }
+
+    /// Byte `p` arrived in a CRYPTO frame. `inserted_frames()` also holds `retire`'s record of the bytes
     /// below its base, which were read but are not data received anew.
     pub closed spec fn received(&self, p: nat) -> bool {
         rfc_received(self.hist@).contains_key(p)
@@ -203,31 +246,23 @@ impl CryptoStream {
         self.base_spec() + self.buf_len_spec()
     }
 
-    /// The end of the last out-of-order byte held, else the contiguous end.
-    spec fn hi(&self) -> nat {
-        if self.ooo.count() > 0 {
-            self.ooo.hi_spec()
-        } else {
-            self.contig as nat
-        }
-    }
-
-    /// The buffer holds the unread in-order bytes, `[base, contig)`; `ooo` holds the bytes
-    /// received past `contig`, at most `MAX_CRYPTO_BUFFER` of them in at most
-    /// `MAX_CRYPTO_RANGES` runs.
+    /// The store holds the received bytes at or past `base`; `hi` is the end of the received data;
+    /// the out-of-order bytes (past `contig`) are at most `MAX_CRYPTO_BUFFER` in at most
+    /// `MAX_CRYPTO_RANGES` runs; the teardown slot's keys lie below `base`, at most `base` of them.
     spec fn core(&self) -> bool {
         let m = rfc_received(self.ins@);
-        &&& self.ooo.wf()
-        &&& self.base <= self.contig <= VARINT_MAX
+        &&& self.st.wf()
+        &&& crate::avl::wf(self.td)
+        &&& self.base <= self.contig <= self.hi <= VARINT_MAX
         &&& self.contig as nat == rfc_contiguous(m)
-        &&& self.buf@.len() == self.contig - self.base
-        &&& forall|i: int| 0 <= i < self.buf@.len() ==> #[trigger] self.buf@[i] == m[(self.base + i) as nat]
-        &&& forall|p: nat| #[trigger] self.ooo.view().contains_key(p) <==> m.contains_key(p) && p > self.contig
-        &&& forall|p: nat| #[trigger] self.ooo.view().contains_key(p) ==> self.ooo.view()[p] == m[p]
-        // The memory bound: the unread in-order bytes plus at most MAX_CRYPTO_BUFFER more, in at
-        // most MAX_CRYPTO_RANGES fragments.
-        &&& self.buf@.len() + self.ooo.held() <= (self.contig - self.base) + MAX_CRYPTO_BUFFER
-        &&& self.ooo.count() <= MAX_CRYPTO_RANGES
+        &&& forall|k: nat| #[trigger] m.contains_key(k) ==> k < self.hi
+        &&& self.hi > self.contig ==> m.contains_key((self.hi - 1) as nat)
+        &&& forall|p: nat| #[trigger] self.st.view().contains_key(p) <==> m.contains_key(p) && p >= self.base
+        &&& forall|p: nat| #[trigger] self.st.view().contains_key(p) ==> self.st.view()[p] == m[p]
+        &&& above(m.dom(), self.contig as nat).len() <= MAX_CRYPTO_BUFFER
+        &&& runs(above(m.dom(), self.contig as nat)) <= MAX_CRYPTO_RANGES
+        &&& crate::avl::keys_lt(self.td, self.base)
+        &&& crate::avl::seq(self.td).len() <= self.base
     }
 
     /// `core`, and the record of what arrived: the byte before the end arrived, and every byte
@@ -238,30 +273,30 @@ impl CryptoStream {
         &&& forall|p: nat| #[trigger] self.received(p) ==> rfc_received(self.ins@).contains_key(p)
     }
 
-    /// `core`'s consequences: the received bytes end at `hi`, and the byte before it was received.
+    /// `core`'s consequences: the received bytes end at `hi`, and the byte before it was received;
+    /// the store holds the in-order run `[base, contig)` and the out-of-order bytes.
     proof fn lemma_core(&self)
         requires
             self.core(),
         ensures
-            self.base <= self.contig <= self.hi() <= VARINT_MAX,
-            forall|k: nat| #[trigger] rfc_received(self.ins@).contains_key(k) ==> k < self.hi(),
-            self.hi() > 0 ==> rfc_received(self.ins@).contains_key((self.hi() - 1) as nat),
+            self.base <= self.contig <= self.hi <= VARINT_MAX,
+            forall|k: nat| #[trigger] rfc_received(self.ins@).contains_key(k) ==> k < self.hi,
+            self.hi > 0 ==> rfc_received(self.ins@).contains_key((self.hi - 1) as nat),
             !rfc_received(self.ins@).contains_key(self.contig as nat),
             forall|k: nat| k < self.contig ==> #[trigger] rfc_received(self.ins@).contains_key(k),
-            self.ooo.held() <= MAX_CRYPTO_BUFFER,
+            self.st.held() == (self.contig - self.base) + above(rfc_received(self.ins@).dom(), self.contig as nat).len(),
+            self.st.held() <= (self.contig - self.base) + MAX_CRYPTO_BUFFER,
+            self.hi <= self.base ==> self.st.held() == 0,
     {
         let m = rfc_received(self.ins@);
-        self.ooo.lemma_wf();
         lemma_contiguous_exists(m);
-        assert forall|k: nat| #[trigger] m.contains_key(k) implies k < self.hi() by {
-            if k > self.contig {
-                assert(self.ooo.view().contains_key(k));
-            }
-        }
-        if self.ooo.count() > 0 {
-            assert(self.ooo.view().contains_key((self.ooo.hi_spec() - 1) as nat));
-        } else if self.contig > 0 {
+        if self.hi == self.contig && self.contig > 0 {
             assert(m.contains_key((self.contig - 1) as nat));
+        }
+        self.st.lemma_wf();
+        lemma_store(self.st.view().dom(), m, self.base as nat, self.contig as nat);
+        if self.hi <= self.base {
+            assert(above(m.dom(), self.contig as nat) =~= Set::<nat>::empty());
         }
     }
 
@@ -275,6 +310,10 @@ impl CryptoStream {
                 rfc_received(self.inserted_frames()).contains_key(k) ==> k < self.end_spec(),
             self.end_spec() > 0 ==> self.received((self.end_spec() - 1) as nat),
             forall|p: nat| #[trigger] self.received(p) ==> p < self.end_spec(),
+            // The memory bound: the unread in-order bytes plus at most MAX_CRYPTO_BUFFER more.
+            self.held_spec() <= (crypto_contiguous(*self) - self.base_spec()) + MAX_CRYPTO_BUFFER,
+            self.drained() ==> self.held_spec() <= MAX_CRYPTO_BUFFER,
+            self.end_spec() <= self.base_spec() ==> self.held_spec() == 0,
     {
         self.lemma_core();
     }
@@ -285,27 +324,34 @@ impl CryptoStream {
             r.inserted_frames() == Seq::<(nat, Seq<u8>)>::empty(),
             r.base_spec() == 0,
             crypto_contiguous(r) == 0,
+            r.held_spec() == 0,
+            r.td_nodes() == 0,
     {
         let r = CryptoStream {
-            buf: Vec::new(),
             base: 0,
             contig: 0,
-            ooo: Frags::new(),
+            hi: 0,
+            st: Frags::new(),
+            td: None,
             ins: Ghost(Seq::empty()),
             hist: Ghost(Seq::empty()),
         };
         proof {
-            assert(rfc_received(r.ins@) =~= Map::<nat, u8>::empty());
+            let m = rfc_received(r.ins@);
+            assert(m =~= Map::<nat, u8>::empty());
             assert(rfc_received(r.hist@) =~= Map::<nat, u8>::empty());
-            lemma_contiguous_is(rfc_received(r.ins@), 0);
-            r.ooo.lemma_wf();
+            lemma_contiguous_is(m, 0);
+            assert(above(m.dom(), 0) =~= Set::<nat>::empty());
+            assert(starts(Set::<nat>::empty()) =~= Set::<nat>::empty());
         }
         r
     }
 
     /// Nothing buffered, everything below the end read, and `history` kept: what an Initial
-    /// discard leaves, for the end check of RFC 9001 §4.1.3.
-    pub fn restart(&mut self)
+    /// discard leaves, for the end check of RFC 9001 §4.1.3, and what a closed connection leaves
+    /// (TLS reads no more). The store moves to the teardown slot, no byte copied; onto a full slot
+    /// (never met: a level retires once while open, D6) it joins in O(log n), the slot's keys being below the store's.
+    pub fn retire(&mut self) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
         ensures
@@ -315,24 +361,77 @@ impl CryptoStream {
             final(self).history() == old(self).history(),
             forall|p: nat| #[trigger] final(self).received(p) == old(self).received(p),
             crypto_contiguous(*final(self)) == old(self).end_spec(),
+            final(self).held_spec() == 0,
+            final(self).td_nodes() <= old(self).td_nodes() + old(self).held_spec(),
+            final(self).load() <= old(self).load(),
+            // One join onto the slot (heights at most 126), else O(1).
+            r@ <= crate::avl::c_join2() * 127 + 1,
     {
+        let ghost mut work: nat = 1;
         proof {
             self.lemma_core();
+            self.st.lemma_nodes_le_held();
+            self.st.lemma_wf();
+            lemma_held_span(self.st.view().dom(), self.base as nat, self.hi as nat);
         }
-        let end = self.end();
+        let end = self.hi;
         let ghost a = *self;
         let ghost d = Seq::new(end as nat, |_i: int| 0u8);
-        self.buf = Vec::new();
+        let mut s = Frags::new();
+        core::mem::swap(&mut self.st, &mut s);
+        let t = s.into_tree();
+        let ghost tg = t;
+        if self.td.is_none() {
+            self.td = t;
+        } else {
+            let mut slot: Tree<CapVec<u8>> = None;
+            core::mem::swap(&mut self.td, &mut slot);
+            proof {
+                assert forall|i: int, j: int|
+                    0 <= i < crate::avl::seq(slot).len() && 0 <= j < crate::avl::seq(t).len() implies #[trigger] crate::avl::seq(
+                    slot,
+                )[i].0 < #[trigger] crate::avl::seq(t)[j].0 by {
+                    assert(a.st.view().contains_key(crate::avl::seq(t)[j].0 as nat));
+                }
+                vstd::arithmetic::power2::lemma2_to64_rest();
+            }
+            proof {
+                if slot is Some {
+                    assert(slot->0.h <= 126);
+                }
+                if t is Some {
+                    assert(t->0.h <= 126);
+                }
+            }
+            let (j, Ghost(cj)) = crate::avl::join2(slot, t);
+            proof {
+                work = work + cj;
+            }
+            self.td = j;
+        }
         self.base = end;
         self.contig = end;
-        self.ooo = Frags::new();
         self.ins = Ghost(Seq::<(nat, Seq<u8>)>::empty().push((0nat, d)));
         proof {
             let m = rfc_received(self.ins@);
             lemma_received_push(Seq::<(nat, Seq<u8>)>::empty(), 0, d);
             assert(rfc_received(Seq::<(nat, Seq<u8>)>::empty()) =~= Map::<nat, u8>::empty());
             lemma_contiguous_is(m, end as nat);
-            self.ooo.lemma_wf();
+            self.st.lemma_wf();
+            self.st.lemma_nodes_le_held();
+            assert(above(m.dom(), end as nat) =~= Set::<nat>::empty());
+            assert(starts(Set::<nat>::empty()) =~= Set::<nat>::empty());
+            let n = crate::avl::seq(a.td).len();
+            assert(crate::avl::seq(self.td) == crate::avl::seq(a.td) + crate::avl::seq(tg));
+            assert forall|i: int| 0 <= i < crate::avl::seq(self.td).len() implies #[trigger] crate::avl::seq(self.td)[i].0
+                < end by {
+                if i < n {
+                    assert(crate::avl::seq(self.td)[i] == crate::avl::seq(a.td)[i]);
+                } else {
+                    assert(crate::avl::seq(self.td)[i] == crate::avl::seq(tg)[i - n]);
+                    assert(a.st.view().contains_key(crate::avl::seq(tg)[i - n].0 as nat));
+                }
+            }
             assert forall|p: nat| #[trigger] self.received(p) implies m.contains_key(p) by {
                 assert(a.received(p));
             }
@@ -340,9 +439,10 @@ impl CryptoStream {
                 assert(a.received((a.end_spec() - 1) as nat));
             }
         }
+        Ghost(work)
     }
 
-    /// A CRYPTO frame's `offset` and `data`.
+    /// A CRYPTO frame's `offset` and `data` (`on_crypto_c` without its cost).
     pub fn on_crypto(&mut self, offset: u64, data: &[u8]) -> (r: Result<(), u64>)
         requires
             old(self).wf(),
@@ -361,7 +461,47 @@ impl CryptoStream {
             // The record of what arrived only grows, and so does its end.
             forall|p: nat| #[trigger] old(self).received(p) ==> final(self).received(p),
             final(self).end_spec() >= old(self).end_spec(),
+            // At most one position held per byte of the frame.
+            final(self).held_spec() <= old(self).held_spec() + data@.len(),
+            final(self).td_nodes() == old(self).td_nodes(),
+            final(self).load() <= old(self).load() + data@.len(),
     {
+        let (r, Ghost(c)) = self.on_crypto_c(offset, data);
+        proof {
+            assert(c <= 10 * data@.len() + 16078);
+        }
+        r
+    }
+
+    /// A CRYPTO frame's `offset` and `data`, with its cost (9b2 Task 10d): the store's walk and insert
+    /// (`Frags::after_insert_c`, `insert_c`) or the insert and the run walk (`run_end_w`), O(d) at the tree's
+    /// height cap.
+    pub fn on_crypto_c(&mut self, offset: u64, data: &[u8]) -> (r: (Result<(), u64>, Ghost<nat>))
+        requires
+            old(self).wf(),
+            offset + data@.len() <= VARINT_MAX,
+        ensures
+            final(self).wf(),
+            r.0 is Err <==> crypto_allowed_err(*old(self), offset, data@.len(), CRYPTO_BUFFER_EXCEEDED),
+            r.0 is Err ==> r.0 == Err::<(), u64>(CRYPTO_BUFFER_EXCEEDED),
+            r.0 matches Err(c) ==> crypto_allowed_err(*old(self), offset, data@.len(), c),
+            (r.0 is Err || offset + data@.len() <= old(self).base_spec() || data@.len() == 0)
+                ==> *final(self) == *old(self),
+            (r.0 is Ok && offset + data@.len() > old(self).base_spec() && data@.len() > 0) ==> {
+                &&& final(self).inserted_frames() == old(self).inserted_frames().push((offset as nat, data@))
+                &&& final(self).base_spec() == old(self).base_spec()
+            },
+            // The record of what arrived only grows, and so does its end.
+            forall|p: nat| #[trigger] old(self).received(p) ==> final(self).received(p),
+            final(self).end_spec() >= old(self).end_spec(),
+            // At most one position held per byte of the frame.
+            final(self).held_spec() <= old(self).held_spec() + data@.len(),
+            final(self).td_nodes() == old(self).td_nodes(),
+            final(self).load() <= old(self).load() + data@.len(),
+            // The store's walk and insert (9b2 Task 10d): linear in the frame's bytes.
+            r.1@ <= 10 * data@.len() + 16078,
+    {
+        let ghost mut work: nat = 0;
         let end = offset + data.len() as u64;
         if end <= self.base {
             //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
@@ -375,12 +515,12 @@ impl CryptoStream {
             proof {
                 lemma_same(*self, offset, data@);
             }
-            return Ok(());
+            return (Ok(()), Ghost(work));
         }
         if data.len() == 0 {
             // No bytes: nothing is buffered, so the buffer is not exceeded at any offset
             // (RFC 9000 §7.5), and the end is not moved past what was received (RFC 9001 §4.1.3).
-            return Ok(());
+            return (Ok(()), Ghost(work));
         }
         let ghost a = *self;
         if end <= self.contig {
@@ -391,56 +531,90 @@ impl CryptoStream {
                 lemma_same(a, offset, data@);
                 lemma_hist_step(a, *self, offset, data@);
             }
-            return Ok(());
+            return (Ok(()), Ghost(work));
         }
         if offset > self.contig {
-            self.on_ooo(offset, data)
+            let (r, Ghost(c)) = self.on_ooo(offset, data);
+            proof {
+                work = work + c;
+            }
+            (r, Ghost(work))
         } else {
-            self.on_fill(offset, data);
-            Ok(())
+            let Ghost(c) = self.on_fill(offset, data);
+            proof {
+                work = work + c;
+            }
+            (Ok(()), Ghost(work))
         }
     }
 
     /// `on_crypto` for non-empty data all past the contiguous end, which therefore stays: the
-    /// limits are checked before the bytes are taken (split from `on_crypto` for the rlimit).
+    /// limits are checked before the bytes are taken (split from `on_crypto` for the rlimit). The
+    /// store's count includes the in-order run `[base, contig)`, a run of its own since `contig`
+    /// is not held: the out-of-order bytes are the rest (`lemma_ooo_count`).
     #[verifier::spinoff_prover]
-    fn on_ooo(&mut self, offset: u64, data: &[u8]) -> (r: Result<(), u64>)
+    fn on_ooo(&mut self, offset: u64, data: &[u8]) -> (r: (Result<(), u64>, Ghost<nat>))
         requires
             old(self).wf(),
             offset + data@.len() <= VARINT_MAX,
             offset > old(self).contig,
             data@.len() > 0,
         ensures
-            r is Err <==> crypto_allowed_err(*old(self), offset, data@.len(), CRYPTO_BUFFER_EXCEEDED),
-            r is Err ==> r == Err::<(), u64>(CRYPTO_BUFFER_EXCEEDED) && *final(self) == *old(self),
-            r is Ok ==> stepped(*final(self), *old(self), offset, data@),
+            r.0 is Err <==> crypto_allowed_err(*old(self), offset, data@.len(), CRYPTO_BUFFER_EXCEEDED),
+            r.0 is Err ==> r.0 == Err::<(), u64>(CRYPTO_BUFFER_EXCEEDED) && *final(self) == *old(self),
+            r.0 is Ok ==> stepped(*final(self), *old(self), offset, data@),
+            // The walk (`after_insert_c`) and the insert (`insert_c`).
+            r.1@ <= 10 * data@.len() + 15945,
     {
+        hide(rfc_received);
+        hide(rfc_contiguous);
+        hide(put);
+        hide(ooo_held);
+        hide(ooo_runs);
+        hide(ooo_received);
+        hide(runs);
+        hide(above);
         let ghost a = *self;
-        let (h, c) = self.ooo.after_insert(self.contig, offset, data);
+        let ghost mut work: nat = 0;
+        let ((h, c), Ghost(cw)) = self.st.after_insert_c(self.contig, offset, data);
         proof {
-            lemma_ooo_set(a, offset, data@);
+            work = work + cw;
+            lemma_ooo_count(a, offset, data@);
         }
-        if h > MAX_CRYPTO_BUFFER || c > MAX_CRYPTO_RANGES {
+        let run: usize = if self.contig > self.base {
+            1
+        } else {
+            0
+        };
+        if h - (self.contig - self.base) > MAX_CRYPTO_BUFFER || c - run > MAX_CRYPTO_RANGES {
             //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
             //# If an endpoint does not expand its buffer, it MUST close
             //# the connection with a CRYPTO_BUFFER_EXCEEDED error code.
-            return Err(CRYPTO_BUFFER_EXCEEDED);
+            return (Err(CRYPTO_BUFFER_EXCEEDED), Ghost(work));
         }
-        self.ooo.insert(self.contig, offset, data);
+        let Ghost(ci) = self.st.insert_c(self.contig, offset, data);
+        proof {
+            work = work + ci;
+        }
+        let end = offset + data.len() as u64;
+        if end > self.hi {
+            self.hi = end;
+        }
         self.ins = Ghost(self.ins@.push((offset as nat, data@)));
         self.hist = Ghost(self.hist@.push((offset as nat, data@)));
         proof {
             lemma_ooo_post(a, *self, offset, data@);
             lemma_hist_step(a, *self, offset, data@);
         }
-        Ok(())
+        (Ok(()), Ghost(work))
     }
 
-    /// `on_crypto` for data reaching the contiguous end: the run from there becomes in-order
-    /// data, and what stays out of order is a subset of what was, so nothing is refused
-    /// (`lemma_fill_post`; split from `on_crypto` for the rlimit).
+    /// `on_crypto` for data reaching the contiguous end: the frame goes into the store, and the
+    /// contiguous end moves to the end of the run there (`run_end_w`); no byte is copied out. What
+    /// stays out of order is a subset of what was, so nothing is refused (`lemma_fill_post`). The
+    /// walk meets at most `d/K + 133` chunks (split from `on_crypto` for the rlimit).
     #[verifier::spinoff_prover]
-    fn on_fill(&mut self, offset: u64, data: &[u8])
+    fn on_fill(&mut self, offset: u64, data: &[u8]) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
             offset + data@.len() <= VARINT_MAX,
@@ -448,63 +622,165 @@ impl CryptoStream {
         ensures
             !crypto_allowed_err(*old(self), offset, data@.len(), CRYPTO_BUFFER_EXCEEDED),
             stepped(*final(self), *old(self), offset, data@),
+            // The insert (`insert_c`) and the run walk (`run_end_w`).
+            r@ <= 9 * data@.len() + 16078,
     {
         hide(rfc_received);
         hide(rfc_contiguous);
         let ghost a = *self;
-        self.ooo.insert(self.contig, offset, data);
-        let ghost mid = self.ooo;
-        let r = self.ooo.take_front(self.contig, &mut self.buf);
-        self.contig = r;
+        let ghost mut work: nat = 0;
+        let Ghost(ci) = self.st.insert_c(self.contig, offset, data);
         proof {
-            lemma_fill_post(a, mid, *self, offset, data@);
+            work = work + ci;
+        }
+        let (r, Ghost(c)) = self.st.run_end_w(self.contig);
+        let end = offset + data.len() as u64;
+        self.contig = r;
+        if end > self.hi {
+            self.hi = end;
         }
         self.ins = Ghost(self.ins@.push((offset as nat, data@)));
         self.hist = Ghost(self.hist@.push((offset as nat, data@)));
         proof {
-            lemma_fill_core(a, mid, *self, offset, data@);
+            lemma_fill_post(a, *self, offset, data@);
             lemma_hist_step(a, *self, offset, data@);
+            // The walk's cost: `[contig, r)` is held and spans at most `d + MAX_CRYPTO_BUFFER`.
+            self.st.lemma_chunks_in_held(a.contig as nat, r as nat);
+            lemma_walk_chunks((r - a.contig) as nat, data@.len());
+            assert(c <= c_re1() * (self.st.tree_ht() + 1) + c_re2() * (data@.len() / (K as nat) + 133));
+            self.st.lemma_tree_ht();
+            vstd::arithmetic::div_mod::lemma_div_is_ordered_by_denominator(data@.len() as int, 1, K as int);
+            work = work + c;
         }
+        Ghost(work)
     }
 
-    /// Appends the newly contiguous CRYPTO bytes to `out`.
-    pub fn read(&mut self, out: &mut Vec<u8>)
+    /// Moves `min(max, unread)` in-order bytes into the empty `out`, an exact buffer for them; returns its cost
+    /// (`Frags::take_front_c`), linear in the bytes it may take.
+    pub fn read(&mut self, max: u64, out: &mut CapVec<u8>) -> (r: Ghost<nat>)
         requires
             old(self).wf(),
+            old(out).wf(),
+            old(out)@.len() == 0,
+            old(out).cap() >= crypto_take(*old(self), max),
         ensures
             final(self).wf(),
-            final(self).inserted_frames() == old(self).inserted_frames(),
-            forall|p: nat| #[trigger] final(self).received(p) == old(self).received(p),
-            final(self).base_spec() == rfc_contiguous(rfc_received(old(self).inserted_frames())),
-            final(self).base_spec() + final(self).buf_len_spec() == old(self).base_spec() + old(
-                self,
-            ).buf_len_spec(),
-            final(out)@ == old(out)@ + rfc_prefix(
+            final(out).wf(),
+            final(out).cap() == old(out).cap(),
+            final(self).base_spec() == old(self).base_spec() + crypto_take(*old(self), max),
+            final(out)@ == rfc_prefix(
                 rfc_received(old(self).inserted_frames()),
-                final(self).base_spec(),
-            ).subrange(old(self).base_spec() as int, final(self).base_spec() as int),
+                old(self).base_spec() + crypto_take(*old(self), max),
+            ).subrange(old(self).base_spec() as int, (old(self).base_spec() + crypto_take(*old(self), max)) as int),
+            final(self).end_spec() == old(self).end_spec(),
+            final(self).inserted_frames() == old(self).inserted_frames(),
+            final(self).history() == old(self).history(),
+            forall|p: nat| #[trigger] final(self).received(p) == old(self).received(p),
+            final(self).held_spec() + crypto_take(*old(self), max) == old(self).held_spec(),
+            final(self).td_nodes() == old(self).td_nodes(),
+            final(self).load() + crypto_take(*old(self), max) == old(self).load(),
+            r@ <= 18 * crypto_take(*old(self), max) + 5608,
     {
         proof {
             self.lemma_core();
         }
-        let ghost b = self.buf@;
-        out.append(&mut self.buf);
-        // A fresh `Vec`: drained space must not keep its allocation.
-        self.buf = Vec::new();
-        self.base = self.contig;
+        let u = self.contig - self.base;
+        let k = if max < u {
+            max
+        } else {
+            u
+        };
+        let ghost a = *self;
+        let (r, Ghost(c)) = self.st.take_front_c(self.base, k, out);
         proof {
-            let m = rfc_received(self.ins@);
-            assert(b =~= rfc_prefix(m, self.contig as nat).subrange(old(self).base as int, self.contig as int));
-            assert(self.end_spec() == old(self).end_spec());
-            assert(self.core());
-            assert(self.hist == old(self).hist);
-            if self.end_spec() > 0 {
-                assert(old(self).received((old(self).end_spec() - 1) as nat));
-            }
-            assert forall|p: nat| #[trigger] self.received(p) implies m.contains_key(p) by {
-                assert(old(self).received(p));
+            if r < a.base + k {
+                assert(a.st.view().contains_key(r as nat));
             }
         }
+        self.base = r;
+        proof {
+            let m = rfc_received(self.ins@);
+            assert forall|i: int| 0 <= i < k implies #[trigger] out@[i] == m[(a.base + i) as nat] by {
+                assert(a.st.view().contains_key((a.base + i) as nat));
+            }
+            assert(out@ =~= rfc_prefix(m, (a.base + k) as nat).subrange(a.base as int, a.base + k));
+            self.st.lemma_wf();
+            a.st.lemma_wf();
+            self.st.lemma_nodes_le_held();
+            a.st.lemma_nodes_le_held();
+            lemma_store(self.st.view().dom(), m, r as nat, a.contig as nat);
+            lemma_store(a.st.view().dom(), m, a.base as nat, a.contig as nat);
+            if self.end_spec() > 0 {
+                assert(a.received((a.end_spec() - 1) as nat));
+            }
+            assert(self.st.wf());
+            assert(self.base <= self.contig <= self.hi <= VARINT_MAX);
+            assert(forall|p: nat| #[trigger] self.st.view().contains_key(p) <==> m.contains_key(p) && p >= self.base);
+            assert(forall|p: nat| #[trigger] self.st.view().contains_key(p) ==> self.st.view()[p] == m[p]);
+            assert(self.core());
+            assert(self.hist == a.hist && self.ins == a.ins && self.hi == a.hi);
+            assert(forall|p: nat| #[trigger] self.received(p) == a.received(p));
+        }
+        Ghost(c)
+    }
+
+    /// The unread in-order bytes.
+    pub fn unread(&self) -> (r: u64)
+        requires
+            self.wf(),
+        ensures
+            r == crypto_contiguous(*self) - self.base_spec(),
+    {
+        self.contig - self.base
+    }
+
+    /// The teardown slot holds a retired store.
+    pub fn has_td(&self) -> (r: bool)
+        ensures
+            r == (self.td_nodes() > 0),
+    {
+        self.td.is_some()
+    }
+
+    /// Frees part of the teardown slot: at least one node while any remain, at most `B_PUMP` units of work.
+    pub fn free_some(&mut self) -> (r: Ghost<nat>)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            old(self).td_nodes() > 0 ==> final(self).td_nodes() < old(self).td_nodes(),
+            final(self).td_nodes() <= old(self).td_nodes(),
+            r@ <= B_PUMP,
+            final(self).base_spec() == old(self).base_spec(),
+            final(self).buf_len_spec() == old(self).buf_len_spec(),
+            final(self).inserted_frames() == old(self).inserted_frames(),
+            final(self).history() == old(self).history(),
+            final(self).held_spec() == old(self).held_spec(),
+            crypto_contiguous(*final(self)) == crypto_contiguous(*old(self)),
+            forall|p: nat| #[trigger] final(self).received(p) == old(self).received(p),
+            old(self).td_nodes() > 0 ==> final(self).load() < old(self).load(),
+            final(self).load() <= old(self).load(),
+    {
+        proof {
+            assert(crate::avl::c_pop() * 127 + 2 <= B_PUMP);
+        }
+        let ghost a = *self;
+        let (_, Ghost(c)) = crate::avl::pop_some(&mut self.td, B_PUMP);
+        proof {
+            assert(self.st == a.st);
+            assert(crate::avl::wf(self.td));
+            assert forall|i: int| 0 <= i < crate::avl::seq(self.td).len() implies #[trigger] crate::avl::seq(self.td)[i].0
+                < self.base by {
+                let n = crate::avl::seq(a.td).len() - crate::avl::seq(self.td).len();
+                assert(crate::avl::seq(self.td)[i] == crate::avl::seq(a.td)[i + n]);
+            }
+            assert(self.core());
+            assert(self.hist == a.hist && self.ins == a.ins && self.base == a.base && self.hi == a.hi);
+            assert(self.end_spec() == a.end_spec());
+            assert(forall|p: nat| #[trigger] self.received(p) == a.received(p));
+            assert(self.wf());
+        }
+        Ghost(c)
     }
 
     /// The read offset.
@@ -525,22 +801,113 @@ impl CryptoStream {
         proof {
             self.lemma_core();
         }
-        if self.ooo.count() > 0 {
-            self.ooo.hi()
-        } else {
-            self.contig
-        }
+        self.hi
     }
 }
 
-/// `b` is `a` after taking `d` at `off`: `wf`, the insertion recorded, the read offset kept, and
-/// the record of what arrived and its end only grown.
+/// The positions held and the teardown slots' nodes of three streams, a connection's levels: what `pump_backlog`
+/// works off. Closed, so the connection's frames carry it as one term.
+pub closed spec fn backlog3(i: CryptoStream, h: CryptoStream, o: CryptoStream) -> nat {
+    i.held_spec() + i.td_nodes() + h.held_spec() + h.td_nodes() + o.held_spec() + o.td_nodes()
+}
+
+pub proof fn lemma_backlog3(i: CryptoStream, h: CryptoStream, o: CryptoStream)
+    ensures
+        backlog3(i, h, o) == i.held_spec() + i.td_nodes() + h.held_spec() + h.td_nodes() + o.held_spec() + o.td_nodes(),
+        backlog3(i, h, o) == i.load() + h.load() + o.load(),
+{
+}
+
+/// A store holding exactly `m`'s positions at or past `b`, all of `[b, c)` and not `c`: the in-order run then
+/// the positions past `c`, a run of its own.
+proof fn lemma_store(v: Set<nat>, m: Map<nat, u8>, b: nat, c: nat)
+    requires
+        b <= c,
+        forall|p: nat| #[trigger] v.contains(p) <==> m.contains_key(p) && p >= b,
+        forall|k: nat| k < c ==> #[trigger] m.contains_key(k),
+        !m.contains_key(c),
+    ensures
+        above(v, c) == above(m.dom(), c),
+        v.len() == (c - b) + above(m.dom(), c).len(),
+        runs(v) == runs(above(m.dom(), c)) + (if b < c { 1nat } else { 0nat }),
+{
+    let a = above(m.dom(), c);
+    let r = Set::<nat>::range(b, c);
+    assert(above(v, c) =~= a);
+    assert(v =~= r + a);
+    assert(r.disjoint(a));
+    vstd::set_lib::lemma_set_disjoint_lens(r, a);
+    let sb = if b < c {
+        Set::<nat>::empty().insert(b)
+    } else {
+        Set::<nat>::empty()
+    };
+    assert(starts(v) =~= starts(a) + sb) by {
+        assert forall|p: nat| #[trigger] starts(v).contains(p) implies (starts(a) + sb).contains(p) by {
+            if p < c {
+                if p > b {
+                    assert(v.contains((p - 1) as nat));
+                }
+            } else {
+                assert(p > c);
+                assert(a.contains(p));
+                if p > 0 && a.contains((p - 1) as nat) {
+                    assert(v.contains((p - 1) as nat));
+                }
+            }
+        }
+        assert forall|p: nat| #[trigger] (starts(a) + sb).contains(p) implies starts(v).contains(p) by {
+            if starts(a).contains(p) {
+                assert(p > c);
+                if v.contains((p - 1) as nat) {
+                    assert(p - 1 != c);
+                    assert(a.contains((p - 1) as nat));
+                }
+            } else {
+                assert(p == b);
+                if p > 0 && v.contains((p - 1) as nat) {
+                    assert(p - 1 >= b);
+                }
+            }
+        }
+    }
+    assert(starts(a).disjoint(sb));
+    vstd::set_lib::lemma_set_disjoint_lens(starts(a), sb);
+}
+
+/// Positions held in `[b, h)` are at most `h - b`.
+proof fn lemma_held_span(v: Set<nat>, b: nat, h: nat)
+    requires
+        b <= h,
+        forall|p: nat| #[trigger] v.contains(p) ==> b <= p < h,
+    ensures
+        v.len() <= h - b,
+{
+    assert(v.subset_of(Set::<nat>::range(b, h)));
+    vstd::set_lib::lemma_len_subset(v, Set::<nat>::range(b, h));
+}
+
+/// `on_fill`'s span: `[contig, r)` holds at most `2 + (d + MAX_CRYPTO_BUFFER)/K` chunk starts, at most `d/K + 130`.
+proof fn lemma_walk_chunks(w: nat, d: nat)
+    requires
+        w <= d + MAX_CRYPTO_BUFFER,
+    ensures
+        2 + w / (K as nat) + 1 <= d / (K as nat) + 133,
+{
+    vstd::arithmetic::div_mod::lemma_div_is_ordered(w as int, (d + MAX_CRYPTO_BUFFER) as int, K as int);
+    vstd::arithmetic::div_mod::lemma_hoist_over_denominator(d as int, 128, K as nat);
+}
+
+/// `b` is `a` after taking `d` at `off`: `wf`, the insertion recorded, the read offset kept, the
+/// record of what arrived and its end only grown, at most one position held per byte, the slot kept.
 spec fn stepped(b: CryptoStream, a: CryptoStream, off: u64, d: Seq<u8>) -> bool {
     &&& b.wf()
     &&& b.ins@ == a.ins@.push((off as nat, d))
     &&& b.base == a.base
     &&& forall|p: nat| #[trigger] a.received(p) ==> b.received(p)
     &&& b.end_spec() >= a.end_spec()
+    &&& b.st.held() <= a.st.held() + d.len()
+    &&& b.td == a.td
 }
 
 /// `d` at `off` holds no byte not already received: the received bytes, and so the out-of-order
@@ -560,218 +927,267 @@ proof fn lemma_same(a: CryptoStream, off: u64, d: Seq<u8>)
     assert(m2 =~= m);
     if d.len() > 0 {
         lemma_ooo_bytes_free(a, off, d);
-        assert(ooo_received(a, off, d) =~= a.ooo.view().dom());
-        a.ooo.lemma_wf();
+        assert(ooo_received(a, off, d) =~= above(m.dom(), a.contig as nat));
     }
 }
 
-/// `d` at `off`, all past the contiguous end, leaves it where it is: the out-of-order bytes are
-/// `put`'s.
-proof fn lemma_ooo_set(a: CryptoStream, off: u64, d: Seq<u8>)
+/// The out-of-order positions once `d` at `off` (all past the contiguous end) is in: the store's after `put`, less
+/// the in-order run `[base, contig)`, which therefore counts `contig − base` positions and one run if not empty.
+proof fn lemma_ooo_count(a: CryptoStream, off: u64, d: Seq<u8>)
     requires
         a.wf(),
         off > a.contig,
         d.len() > 0,
     ensures
         rfc_contiguous(rfc_received(a.ins@.push((off as nat, d)))) == a.contig,
-        ooo_received(a, off, Seq::new(d.len(), |_i: int| 0u8)) == put(a.ooo.view(), a.contig as nat, off as nat, d).dom(),
+        put(a.st.view(), a.contig as nat, off as nat, d).dom().len() == (a.contig - a.base) + ooo_held(
+            a,
+            off,
+            Seq::new(d.len(), |_i: int| 0u8),
+        ),
+        runs(put(a.st.view(), a.contig as nat, off as nat, d).dom()) == ooo_runs(a, off, Seq::new(d.len(), |_i: int| 0u8))
+            + (if a.base < a.contig { 1nat } else { 0nat }),
+        ooo_received(a, off, Seq::new(d.len(), |_i: int| 0u8)) == above(
+            rfc_received(a.ins@.push((off as nat, d))).dom(),
+            a.contig as nat,
+        ),
 {
-    let m = rfc_received(a.ins@);
+    hide(put);
+    hide(rfc_received);
+    hide(rfc_contiguous);
     let m2 = rfc_received(a.ins@.push((off as nat, d)));
+    let pm = put(a.st.view(), a.contig as nat, off as nat, d);
+    lemma_put_dom(a, off, d);
+    lemma_store(pm.dom(), m2, a.base as nat, a.contig as nat);
+    lemma_ooo_bytes_free(a, off, d);
+    assert(ooo_received(a, off, d) =~= above(m2.dom(), a.contig as nat));
+}
+
+/// `lemma_ooo_count`'s store after `put`: the received bytes at or past `base`, around the unchanged contiguous end.
+proof fn lemma_put_dom(a: CryptoStream, off: u64, d: Seq<u8>)
+    requires
+        a.wf(),
+        off > a.contig,
+        d.len() > 0,
+    ensures
+        rfc_contiguous(rfc_received(a.ins@.push((off as nat, d)))) == a.contig,
+        forall|p: nat| #[trigger] put(a.st.view(), a.contig as nat, off as nat, d).dom().contains(p)
+            <==> rfc_received(a.ins@.push((off as nat, d))).contains_key(p) && p >= a.base,
+        forall|k: nat| k < a.contig ==> #[trigger] rfc_received(a.ins@.push((off as nat, d))).contains_key(k),
+        !rfc_received(a.ins@.push((off as nat, d))).contains_key(a.contig as nat),
+{
+    let m2 = rfc_received(a.ins@.push((off as nat, d)));
+    let pm = put(a.st.view(), a.contig as nat, off as nat, d);
     a.lemma_core();
     lemma_received_push(a.ins@, off as nat, d);
     lemma_contiguous_is(m2, a.contig as nat);
-    lemma_ooo_bytes_free(a, off, d);
-    assert(ooo_received(a, off, d) =~= put(a.ooo.view(), a.contig as nat, off as nat, d).dom());
-}
-
-/// `put`'s out-of-order bytes after `d` at `off` are the received ones, at or past the old
-/// contiguous end.
-proof fn lemma_put_bytes(a: CryptoStream, off: u64, d: Seq<u8>)
-    requires
-        a.wf(),
-    ensures
-        forall|k: nat| #[trigger] put(a.ooo.view(), a.contig as nat, off as nat, d).contains_key(k)
-            ==> k >= a.contig && rfc_received(a.ins@.push((off as nat, d))).contains_key(k)
-            && put(a.ooo.view(), a.contig as nat, off as nat, d)[k] == rfc_received(
-            a.ins@.push((off as nat, d)),
-        )[k],
-{
-    let pm = put(a.ooo.view(), a.contig as nat, off as nat, d);
-    let m = rfc_received(a.ins@);
-    let m2 = rfc_received(a.ins@.push((off as nat, d)));
-    a.lemma_core();
-    lemma_received_push(a.ins@, off as nat, d);
-    assert forall|k: nat| #[trigger] pm.contains_key(k) implies k >= a.contig && m2.contains_key(k)
-        && pm[k] == m2[k] by {
-        if a.ooo.view().contains_key(k) {
-            assert(m.contains_key(k));
-            assert(m2.contains_key(k));
-        } else {
-            assert(off <= k < off + d.len());
-            assert(m2.contains_key(k));
-            if m.contains_key(k) && k > a.contig {
-                assert(a.ooo.view().contains_key(k));
-            }
+    assert forall|p: nat| #[trigger] pm.dom().contains(p) <==> m2.contains_key(p) && p >= a.base by {
+        if m2.contains_key(p) && p >= a.base && !(off <= p < off + d.len()) {
+            assert(a.st.view().contains_key(p));
         }
     }
 }
 
-/// `on_crypto`'s state after taking out-of-order `d` at `off` is `core`.
+/// `on_ooo`'s state after taking out-of-order `d` at `off` is `core`.
 proof fn lemma_ooo_post(a: CryptoStream, b: CryptoStream, off: u64, d: Seq<u8>)
     requires
         a.wf(),
         off > a.contig,
         d.len() > 0,
-        b.ooo.wf(),
-        b.ooo.view() == put(a.ooo.view(), a.contig as nat, off as nat, d),
-        b.ooo.held() == put(a.ooo.view(), a.contig as nat, off as nat, d).dom().len(),
-        b.ooo.count() == runs(put(a.ooo.view(), a.contig as nat, off as nat, d).dom()),
+        off + d.len() <= VARINT_MAX,
+        b.st.wf(),
+        b.st.view() == put(a.st.view(), a.contig as nat, off as nat, d),
+        b.st.held() == put(a.st.view(), a.contig as nat, off as nat, d).dom().len(),
         ooo_held(a, off, Seq::new(d.len(), |_i: int| 0u8)) <= MAX_CRYPTO_BUFFER,
         ooo_runs(a, off, Seq::new(d.len(), |_i: int| 0u8)) <= MAX_CRYPTO_RANGES,
-        b.buf == a.buf,
         b.base == a.base,
         b.contig == a.contig,
+        b.hi == (if off + d.len() > a.hi { (off + d.len()) as u64 } else { a.hi }),
         b.ins@ == a.ins@.push((off as nat, d)),
+        b.td == a.td,
     ensures
         b.core(),
+        b.st.held() <= a.st.held() + d.len(),
+{
+    let pm = put(a.st.view(), a.contig as nat, off as nat, d);
+    lemma_ooo_count(a, off, d);
+    lemma_ooo_views(a, b, off, d);
+    assert(pm.dom() =~= a.st.view().dom() + Set::<nat>::range(off as nat, (off + d.len()) as nat));
+    vstd::set_lib::lemma_len_union(a.st.view().dom(), Set::<nat>::range(off as nat, (off + d.len()) as nat));
+    a.st.lemma_wf();
+}
+
+/// `lemma_ooo_post`'s view part: the store holds the received bytes at or past `base`, `hi` is their end.
+proof fn lemma_ooo_views(a: CryptoStream, b: CryptoStream, off: u64, d: Seq<u8>)
+    requires
+        a.wf(),
+        off > a.contig,
+        d.len() > 0,
+        off + d.len() <= VARINT_MAX,
+        b.st.view() == put(a.st.view(), a.contig as nat, off as nat, d),
+        b.base == a.base,
+        b.contig == a.contig,
+        b.hi == (if off + d.len() > a.hi { (off + d.len()) as u64 } else { a.hi }),
+        b.ins@ == a.ins@.push((off as nat, d)),
+    ensures
+        forall|k: nat| #[trigger] rfc_received(b.ins@).contains_key(k) ==> k < b.hi,
+        b.hi > b.contig ==> rfc_received(b.ins@).contains_key((b.hi - 1) as nat),
+        forall|p: nat| #[trigger] b.st.view().contains_key(p) <==> rfc_received(b.ins@).contains_key(p) && p >= b.base,
+        forall|p: nat| #[trigger] b.st.view().contains_key(p) ==> b.st.view()[p] == rfc_received(b.ins@)[p],
 {
     let m = rfc_received(a.ins@);
     let m2 = rfc_received(b.ins@);
     a.lemma_core();
-    lemma_ooo_set(a, off, d);
-    lemma_put_bytes(a, off, d);
     lemma_received_push(a.ins@, off as nat, d);
-    assert forall|i: int| 0 <= i < b.buf@.len() implies #[trigger] b.buf@[i] == m2[(b.base + i) as nat] by {
-        assert(b.buf@[i] == a.buf@[i]);
-        assert(m.contains_key((b.base + i) as nat));
-        assert(m2.contains_key((b.base + i) as nat));
+    if b.hi > b.contig && !(off <= b.hi - 1 < off + d.len()) {
+        assert(m.contains_key((a.hi - 1) as nat));
     }
-    assert forall|p: nat| #[trigger] b.ooo.view().contains_key(p) implies b.ooo.view()[p] == m2[p] by {
-        assert(put(a.ooo.view(), a.contig as nat, off as nat, d).contains_key(p));
+    assert forall|p: nat| #[trigger] b.st.view().contains_key(p) <==> m2.contains_key(p) && p >= b.base by {
+        if m2.contains_key(p) && p >= b.base && !(off <= p < off + d.len()) {
+            assert(a.st.view().contains_key(p));
+        }
+    }
+    assert forall|p: nat| #[trigger] b.st.view().contains_key(p) implies b.st.view()[p] == m2[p] by {
+        if a.st.view().contains_key(p) {
+            assert(m.contains_key(p));
+        } else if m.contains_key(p) {
+            assert(p < a.base);
+        }
     }
 }
 
-/// After `insert` and `take_front` (`mid` between them), what stays out of order is what was,
-/// cut at the new contiguous end `b.contig`: no more bytes and no more runs, so nothing is refused.
-proof fn lemma_fill_post(a: CryptoStream, mid: Frags, b: CryptoStream, off: u64, d: Seq<u8>)
+/// After `insert` and `run_end_w` (`r` the new contiguous end), the state is `core`: what stays out of order is a
+/// subset of what was, cut at `r`, so nothing is refused; `[contig, r)` spans at most `d + MAX_CRYPTO_BUFFER`.
+proof fn lemma_fill_post(a: CryptoStream, b: CryptoStream, off: u64, d: Seq<u8>)
     requires
         a.wf(),
         off <= a.contig < off + d.len(),
-        mid.wf(),
-        mid.view() == put(a.ooo.view(), a.contig as nat, off as nat, d),
-        b.ooo.wf(),
+        off + d.len() <= VARINT_MAX,
+        b.st.wf(),
+        b.st.view() == put(a.st.view(), a.contig as nat, off as nat, d),
+        b.st.held() == put(a.st.view(), a.contig as nat, off as nat, d).dom().len(),
         a.contig <= b.contig <= VARINT_MAX,
-        forall|k: nat| a.contig <= k < b.contig ==> #[trigger] mid.view().contains_key(k),
-        !mid.view().contains_key(b.contig as nat),
-        forall|k: nat| #[trigger] b.ooo.view().contains_key(k) <==> mid.view().contains_key(k) && k > b.contig,
-        forall|k: nat| #[trigger] b.ooo.view().contains_key(k) ==> b.ooo.view()[k] == mid.view()[k],
+        forall|k: nat| a.contig <= k < b.contig ==> #[trigger] b.st.view().contains_key(k),
+        !b.st.view().contains_key(b.contig as nat),
+        b.base == a.base,
+        b.hi == (if off + d.len() > a.hi { (off + d.len()) as u64 } else { a.hi }),
+        b.ins@ == a.ins@.push((off as nat, d)),
+        b.td == a.td,
     ensures
-        rfc_contiguous(rfc_received(a.ins@.push((off as nat, d)))) == b.contig,
-        b.contig >= off + d.len(),
-        forall|k: nat| #[trigger]
-            b.ooo.view().contains_key(k) <==> rfc_received(a.ins@.push((off as nat, d))).contains_key(k) && k > b.contig,
-        forall|k: nat| b.ooo.view().contains_key(k) ==> #[trigger] a.ooo.view().contains_key(k),
-        b.ooo.held() <= a.ooo.held(),
-        b.ooo.count() <= a.ooo.count(),
+        b.core(),
+        b.st.held() <= a.st.held() + d.len(),
+        b.contig - a.contig <= d.len() + MAX_CRYPTO_BUFFER,
         forall|c: u64| !#[trigger] crypto_allowed_err(a, off, d.len(), c),
 {
     hide(rfc_received);
     hide(rfc_contiguous);
     let m = rfc_received(a.ins@);
-    let m2 = rfc_received(a.ins@.push((off as nat, d)));
+    let m2 = rfc_received(b.ins@);
     let r = b.contig as nat;
-    let e = off + d.len();
+    let e = (off + d.len()) as nat;
     a.lemma_core();
-    a.ooo.lemma_wf();
-    b.ooo.lemma_wf();
     lemma_received_push(a.ins@, off as nat, d);
-    if r < e {
-        assert(mid.view().contains_key(r));
-    }
-    assert forall|k: nat| k < r implies #[trigger] m2.contains_key(k) by {
-        if k >= a.contig {
-            assert(mid.view().contains_key(k));
+    lemma_fill_core(a, b, off, d);
+    // What stays out of order is what was, cut at `r`.
+    let oa = above(m.dom(), a.contig as nat);
+    let ob = above(m2.dom(), r);
+    assert forall|k: nat| #[trigger] ob.contains(k) <==> oa.contains(k) && k > r by {
+        if ob.contains(k) && !m.contains_key(k) {
+            assert(off <= k < e);
+            assert(b.st.view().contains_key(k));
         }
     }
-    if m2.contains_key(r) {
-        if r > a.contig {
-            if m.contains_key(r) {
-                assert(a.ooo.view().contains_key(r));
+    assert(ob.subset_of(oa));
+    vstd::set_lib::lemma_len_subset(ob, oa);
+    lemma_runs_cut(oa, ob, r);
+    // `[contig, r)` lies in the frame or the old out-of-order bytes.
+    let span = Set::<nat>::range(a.contig as nat, r);
+    let fr = Set::<nat>::range(off as nat, e);
+    assert(span.subset_of(fr + oa)) by {
+        assert forall|k: nat| #[trigger] span.contains(k) implies (fr + oa).contains(k) by {
+            assert(b.st.view().contains_key(k));
+            if !(off <= k < e) {
+                assert(a.st.view().contains_key(k));
+                assert(k != a.contig);
             }
         }
     }
-    lemma_contiguous_is(m2, r);
-    assert(b.ooo.view().dom().subset_of(a.ooo.view().dom()));
-    vstd::set_lib::lemma_len_subset(b.ooo.view().dom(), a.ooo.view().dom());
-    lemma_runs_cut(a.ooo.view().dom(), b.ooo.view().dom(), r);
+    vstd::set_lib::lemma_len_subset(span, fr + oa);
+    vstd::set_lib::lemma_len_union(fr, oa);
+    // At most one position held per byte.
+    let pm = put(a.st.view(), a.contig as nat, off as nat, d);
+    assert(pm.dom().subset_of(a.st.view().dom() + fr));
+    vstd::set_lib::lemma_len_subset(pm.dom(), a.st.view().dom() + fr);
+    vstd::set_lib::lemma_len_union(a.st.view().dom(), fr);
+    a.st.lemma_wf();
+    // Nothing is refused.
     lemma_ooo_bytes_free(a, off, d);
-    assert(ooo_received(a, off, d) =~= b.ooo.view().dom());
+    assert(ooo_received(a, off, d) =~= ob);
 }
 
-/// `on_crypto`'s state after a frame reaching the contiguous end (`mid` between `insert` and
-/// `take_front`) is `core`.
-proof fn lemma_fill_core(a: CryptoStream, mid: Frags, b: CryptoStream, off: u64, d: Seq<u8>)
+/// `lemma_fill_post`'s `core` part: the store holds `m2` at or past `base`, `r` is `m2`'s contiguous end, `hi` its
+/// end.
+proof fn lemma_fill_core(a: CryptoStream, b: CryptoStream, off: u64, d: Seq<u8>)
     requires
         a.wf(),
         off <= a.contig < off + d.len(),
-        mid.view() == put(a.ooo.view(), a.contig as nat, off as nat, d),
-        b.ooo.wf(),
-        b.base == a.base,
-        b.ins@ == a.ins@.push((off as nat, d)),
-        rfc_contiguous(rfc_received(b.ins@)) == b.contig,
+        off + d.len() <= VARINT_MAX,
+        b.st.wf(),
+        b.st.view() == put(a.st.view(), a.contig as nat, off as nat, d),
         a.contig <= b.contig <= VARINT_MAX,
-        forall|k: nat| #[trigger]
-            b.ooo.view().contains_key(k) <==> rfc_received(b.ins@).contains_key(k) && k > b.contig,
-        forall|k: nat| #[trigger] b.ooo.view().contains_key(k) ==> mid.view().contains_key(k) && b.ooo.view()[k] == mid.view()[k],
-        b.ooo.held() <= a.ooo.held(),
-        b.ooo.count() <= a.ooo.count(),
-        b.buf@ == a.buf@ + Seq::new((b.contig - a.contig) as nat, |i: int| mid.view()[(a.contig + i) as nat]),
-        forall|k: nat| a.contig <= k < b.contig ==> #[trigger] mid.view().contains_key(k),
+        forall|k: nat| a.contig <= k < b.contig ==> #[trigger] b.st.view().contains_key(k),
+        !b.st.view().contains_key(b.contig as nat),
+        b.base == a.base,
+        b.hi == (if off + d.len() > a.hi { (off + d.len()) as u64 } else { a.hi }),
+        b.ins@ == a.ins@.push((off as nat, d)),
+        b.td == a.td,
     ensures
-        b.core(),
+        rfc_contiguous(rfc_received(b.ins@)) == b.contig,
+        b.contig >= off + d.len(),
+        b.contig <= b.hi,
+        forall|k: nat| #[trigger] rfc_received(b.ins@).contains_key(k) ==> k < b.hi,
+        b.hi > b.contig ==> rfc_received(b.ins@).contains_key((b.hi - 1) as nat),
+        forall|p: nat| #[trigger] b.st.view().contains_key(p) <==> rfc_received(b.ins@).contains_key(p) && p >= b.base,
+        forall|p: nat| #[trigger] b.st.view().contains_key(p) ==> b.st.view()[p] == rfc_received(b.ins@)[p],
 {
     hide(rfc_received);
     hide(rfc_contiguous);
     let m = rfc_received(a.ins@);
     let m2 = rfc_received(b.ins@);
-    let pm = mid.view();
-    lemma_put_bytes(a, off, d);
-    lemma_fill_buf(a, mid, b.buf@, b.contig as nat, off, d);
-    assert forall|p: nat| #[trigger] b.ooo.view().contains_key(p) implies b.ooo.view()[p] == m2[p] by {
-        assert(pm.contains_key(p));
-    }
-}
-
-/// The in-order buffer after a frame reaching the contiguous end holds the received bytes.
-proof fn lemma_fill_buf(a: CryptoStream, mid: Frags, buf: Seq<u8>, r: nat, off: u64, d: Seq<u8>)
-    requires
-        a.wf(),
-        mid.view() == put(a.ooo.view(), a.contig as nat, off as nat, d),
-        a.contig <= r,
-        buf == a.buf@ + Seq::new((r - a.contig) as nat, |i: int| mid.view()[(a.contig + i) as nat]),
-        forall|k: nat| a.contig <= k < r ==> #[trigger] mid.view().contains_key(k),
-    ensures
-        forall|i: int| 0 <= i < buf.len() ==> #[trigger] buf[i] == rfc_received(a.ins@.push((off as nat, d)))[(a.base + i) as nat],
-{
-    hide(rfc_received);
-    hide(rfc_contiguous);
-    let m = rfc_received(a.ins@);
-    let m2 = rfc_received(a.ins@.push((off as nat, d)));
-    let pm = mid.view();
+    let r = b.contig as nat;
+    let e = (off + d.len()) as nat;
     a.lemma_core();
-    lemma_put_bytes(a, off, d);
     lemma_received_push(a.ins@, off as nat, d);
-    assert forall|i: int| 0 <= i < buf.len() implies #[trigger] buf[i] == m2[(a.base + i) as nat] by {
-        if i < a.buf@.len() {
-            assert(buf[i] == a.buf@[i]);
-            assert(m.contains_key((a.base + i) as nat));
-            assert(m2.contains_key((a.base + i) as nat));
-        } else {
-            let k = (a.contig + (i - a.buf@.len())) as nat;
-            assert(buf[i] == pm[k]);
-            assert(pm.contains_key(k));
+    assert forall|p: nat| #[trigger] b.st.view().contains_key(p) <==> m2.contains_key(p) && p >= b.base by {
+        if m2.contains_key(p) && p >= b.base && !(off <= p < e) {
+            assert(a.st.view().contains_key(p));
         }
+        if m2.contains_key(p) && p >= b.base && off <= p < a.contig {
+            assert(m.contains_key(p));
+            assert(a.st.view().contains_key(p));
+        }
+    }
+    assert forall|p: nat| #[trigger] b.st.view().contains_key(p) implies b.st.view()[p] == m2[p] by {
+        if a.st.view().contains_key(p) {
+            assert(m.contains_key(p));
+        } else if m.contains_key(p) {
+            assert(p < a.base);
+        }
+    }
+    if r < e {
+        assert(b.st.view().contains_key(r));
+    }
+    assert forall|k: nat| k < r implies #[trigger] m2.contains_key(k) by {
+        if k >= a.contig {
+            assert(b.st.view().contains_key(k));
+        }
+    }
+    lemma_contiguous_is(m2, r);
+    if r > b.hi {
+        assert(b.st.view().contains_key(b.hi as nat));
+    }
+    if b.hi > b.contig && !(off <= b.hi - 1 < e) {
+        assert(m.contains_key((a.hi - 1) as nat));
     }
 }
 
@@ -783,6 +1199,7 @@ proof fn lemma_hist_step(a: CryptoStream, b: CryptoStream, off: u64, d: Seq<u8>)
         b.core(),
         b.ins@ == a.ins@.push((off as nat, d)),
         b.hist@ == a.hist@.push((off as nat, d)),
+        b.base == a.base,
     ensures
         b.wf(),
         forall|p: nat| #[trigger] a.received(p) ==> b.received(p),
@@ -793,7 +1210,7 @@ proof fn lemma_hist_step(a: CryptoStream, b: CryptoStream, off: u64, d: Seq<u8>)
     lemma_received_push(a.ins@, off as nat, d);
     lemma_received_push(a.hist@, off as nat, d);
     if a.end_spec() > 0 {
-        assert(rfc_received(b.ins@).contains_key((a.hi() - 1) as nat));
+        assert(rfc_received(b.ins@).contains_key((a.hi - 1) as nat));
     }
     let e = b.end_spec();
     if e > 0 && !(off <= e - 1 < off + d.len()) {
@@ -811,11 +1228,19 @@ proof fn lemma_hist_step(a: CryptoStream, b: CryptoStream, off: u64, d: Seq<u8>)
 } // verus!
 
 impl CryptoStream {
-    /// Test support: the allocated capacities of the in-order buffer and of the out-of-order
-    /// store. Verus models `Vec` length, not capacity (TRUSTED.md).
+    /// Test support: the allocated capacities of the store and of the teardown slot. Verus models `Vec` length, not
+    /// capacity (TRUSTED.md).
     #[doc(hidden)]
     pub fn capacities(&self) -> (usize, usize) {
-        (self.buf.capacity(), self.ooo.capacity())
+        fn go(t: &Tree<CapVec<u8>>) -> usize {
+            match t {
+                None => 0,
+                Some(b) => std::mem::size_of::<crate::avl::Node<CapVec<u8>>>() + b.val.capacity() + go(&b.left) + go(
+                    &b.right,
+                ),
+            }
+        }
+        (self.st.capacity(), go(&self.td))
     }
 }
 

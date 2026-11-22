@@ -1,9 +1,18 @@
+use byteq::capvec::CapVec;
+use quic::avl::{pop_some, Tree};
 use quic::frags::Frags;
 
+/// The whole run at `end` (a limit no run here reaches).
 fn front(f: &mut Frags, end: u64) -> (u64, Vec<u8>) {
-    let mut out = Vec::new();
-    let r = f.take_front(end, &mut out);
-    (r, out)
+    take(f, end, 1 << 16)
+}
+
+/// At most `max` bytes of the run at `st`, into an exact buffer of `max`.
+fn take(f: &mut Frags, st: u64, max: u64) -> (u64, Vec<u8>) {
+    let mut out = CapVec::new(max as usize);
+    let r = f.take_front(st, max, &mut out);
+    assert!(out.len() as u64 <= max);
+    (r, out.into_vec())
 }
 
 /// No chunk over `CAP` (256), every follower (a chunk starting where the previous one ends) at least `K` (128).
@@ -161,4 +170,102 @@ fn frags_big_frame_pieces() {
     assert_eq!((f.held(), f.count()), (550, 1));
     pieces_ok(&f);
     assert_eq!(f.chunk_lens(), vec![(0, 256), (256, 147), (403, 147)]);
+}
+
+#[test]
+fn frags_take_front_bounded() {
+    let mut f = Frags::new();
+    let d: Vec<u8> = (0..16384u32).map(|k| (k % 251) as u8).collect();
+    put(&mut f, 0, 0, &d);
+    assert_eq!(take(&mut f, 0, 1000), (1000, d[..1000].to_vec()));
+    assert_eq!((f.held(), f.count()), (15384, 1));
+    let l = f.chunk_lens();
+    assert_eq!(l[0].0, 1000);
+    assert_eq!(l.iter().map(|c| c.1).sum::<usize>(), 15384);
+    pieces_ok(&f);
+    assert_eq!(take(&mut f, 1000, 20000), (16384, d[1000..].to_vec()));
+    assert_eq!((f.held(), f.count()), (0, 0));
+    assert!(f.chunk_lens().is_empty());
+}
+
+#[test]
+fn frags_take_front_appends() {
+    // Into a buffer already holding bytes, with capacity to spare: the run follows them.
+    let mut f = Frags::new();
+    let d: Vec<u8> = (0..700u32).map(|k| (k % 251) as u8).collect();
+    put(&mut f, 0, 40, &d);
+    let mut out = CapVec::new(1000);
+    out.push_slice(&[9, 8, 7]);
+    assert_eq!(f.take_front(40, 500, &mut out), 540);
+    let mut want = vec![9, 8, 7];
+    want.extend_from_slice(&d[..500]);
+    assert_eq!(out.as_slice(), &want[..]);
+    assert_eq!(out.capacity(), 1000);
+    assert_eq!(f.take_front(540, 497, &mut out), 740);
+    want.extend_from_slice(&d[500..]);
+    assert_eq!(out.into_vec(), want);
+    assert_eq!((f.held(), f.count()), (0, 0));
+}
+
+#[test]
+fn frags_take_front_max_zero() {
+    let mut f = Frags::new();
+    put(&mut f, 0, 5, &[1; 600]);
+    put(&mut f, 0, 700, &[2; 3]);
+    let (h, c, l) = (f.held(), f.count(), f.chunk_lens());
+    assert_eq!(take(&mut f, 5, 0), (5, vec![]));
+    assert_eq!((f.held(), f.count(), f.chunk_lens()), (h, c, l));
+    // A limit at a chunk boundary leaves the run going on there.
+    let first = f.chunk_lens()[0].1 as u64;
+    assert_eq!(take(&mut f, 5, first), (5 + first, vec![1; first as usize]));
+    assert_eq!((f.held(), f.count()), (h - first, c));
+    pieces_ok(&f);
+}
+
+#[test]
+fn frags_run_end() {
+    let mut f = Frags::new();
+    put(&mut f, 0, 0, &[1; 300]);
+    put(&mut f, 0, 300, &[2; 300]);
+    put(&mut f, 0, 700, &[3; 100]);
+    assert_eq!(f.run_end(0), 600);
+    assert_eq!(f.run_end(450), 600);
+    assert_eq!(f.run_end(600), 600);
+    assert_eq!(f.run_end(650), 650);
+    assert_eq!(f.run_end(750), 800);
+    assert_eq!(f.run_end(800), 800);
+    // A long run of followers, walked across the whole tree.
+    let mut f = Frags::new();
+    put(&mut f, 0, 10, &[1; 16384]);
+    put(&mut f, 0, 20000, &[1; 5]);
+    assert_eq!(f.run_end(10), 16394);
+    assert_eq!(f.run_end(9000), 16394);
+    assert_eq!(f.run_end(20002), 20005);
+}
+
+fn nodes(t: &Tree<CapVec<u8>>) -> usize {
+    match t {
+        None => 0,
+        Some(b) => 1 + nodes(&b.left) + nodes(&b.right),
+    }
+}
+
+#[test]
+fn frags_pop_some_frees() {
+    let mut f = Frags::new();
+    put(&mut f, 0, 0, &[1; 16384]);
+    let mut t = f.into_tree();
+    let mut n = nodes(&t);
+    assert_eq!(n, 64);
+    let mut calls = 0;
+    while n > 0 {
+        // The least budget pop_some accepts: c_pop() * 127 + 2.
+        let _ = pop_some(&mut t, 6 * 127 + 2);
+        let m = nodes(&t);
+        assert!(m < n, "{m} >= {n}");
+        n = m;
+        calls += 1;
+    }
+    assert!(t.is_none());
+    assert!(calls > 1, "{calls}");
 }

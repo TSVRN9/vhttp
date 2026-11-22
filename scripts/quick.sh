@@ -6,7 +6,7 @@ set -o pipefail
 # dependencies type-checked only, <cargo's target dir>/verus-partial) at --rlimit 4, the full gate's limit.
 #   quick.sh                      every crate changed since `git merge-base HEAD main` (commits, edits, untracked files)
 #                                 and its dependents, dev-dependents too (tools/quick.py scope): Verus per crate
-#                                 (tools/rl.py --gate, the 8,000,000 cap on quic and quictls), their tests, the cheap gates,
+#                                 (tools/rl.py --gate, the 8,000,000 cap on quic, quictls and byteq), their tests, the cheap gates,
 #                                 and, when the paths call for them, ct-check + declassify, ct-binary, interop and gate-demos.
 #   quick.sh CRATE[/MOD[/FN]]..   Verus only, on each target: a whole crate, one module (--verify-only-module, e.g. quic/frags)
 #                                 or one fn in it (--verify-function, e.g. quic/conn/Connection::accept).
@@ -43,7 +43,7 @@ verus() {
     # shellcheck disable=SC2086 # $a is a word list
     (cd "crates/$1" && cargo verus focus -- --rlimit 4 $a --output-json --time-expanded) > "$b.json" 2> "$b.log" || { cat "$b.log" >&2; return 1; }
     if [ $# -eq 1 ]; then
-        case $1 in quic|quictls) lim="--max 8000000" ;; *) lim= ;; esac
+        case $1 in quic|quictls|byteq) lim="--max 8000000" ;; *) lim= ;; esac
         # shellcheck disable=SC2086
         python3 -I "$tools/rl.py" --gate "$1" --pin "$tools/verus-pin.txt" $lim "$b.json"
     else

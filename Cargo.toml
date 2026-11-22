@@ -15,6 +15,10 @@ overflow-checks = false
 overflow-checks = false
 
 # verified: Verus proves exec arithmetic does not overflow
+[profile.release.package.byteq]
+overflow-checks = false
+
+# verified: Verus proves exec arithmetic does not overflow
 [profile.release.package.quic]
 overflow-checks = false
 

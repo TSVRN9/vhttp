@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/crypto_stream.rs b/crates/quic/src/crypto_stream.rs
-index 84ffad2..b88d7ac 100644
+index 46567b3..fdc7d43 100644
 --- a/crates/quic/src/crypto_stream.rs
 +++ b/crates/quic/src/crypto_stream.rs
-@@ -45,7 +45,13 @@ pub open spec fn ooo_received(s: CryptoStream, off: u64, d: Seq<u8>) -> Set<nat>
+@@ -49,7 +49,13 @@ pub open spec fn ooo_received(s: CryptoStream, off: u64, d: Seq<u8>) -> Set<nat>
  //# received in out-of-order CRYPTO frames.
  /// The number of out-of-order bytes held once `d` at `off` is in.
  pub open spec fn ooo_held(s: CryptoStream, off: u64, d: Seq<u8>) -> nat {
@@ -18,10 +18,10 @@ index 84ffad2..b88d7ac 100644
  
  /// The number of maximal runs they form.
 diff --git a/crates/quic/src/frags.rs b/crates/quic/src/frags.rs
-index a863411..c979b8b 100644
+index 45e9f6e..0cd75d3 100644
 --- a/crates/quic/src/frags.rs
 +++ b/crates/quic/src/frags.rs
-@@ -4022,7 +4022,7 @@ impl Frags {
+@@ -5261,7 +5261,7 @@ impl Frags {
          let t = self.t.take();
          let (t2, hi, Ghost(c1)) = merge(t, self.hi, _lo, off, data, s, e, Ghost(f));
          self.t = t2;

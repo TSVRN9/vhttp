@@ -1,27 +1,12 @@
 diff --git a/crates/quic/src/reassembly.rs b/crates/quic/src/reassembly.rs
-index d9851c1..0168b73 100644
 --- a/crates/quic/src/reassembly.rs
 +++ b/crates/quic/src/reassembly.rs
-@@ -526,22 +526,7 @@ impl Reassembly {
-             } else {
-                 off + data@.len()
-             },
--            // An empty insert is a no-op but for the log, which records no byte.
--            data@.len() == 0 ==> {
--                &&& final(self).buf_len() == old(self).buf_len()
--                &&& final(self).phys_len() == old(self).phys_len()
--                &&& rfc_received(final(self).inserted()) == rfc_received(old(self).inserted())
--                &&& old(self).tight() ==> final(self).tight()
--            },
-     {
--        if data.len() == 0 {
--            proof {
--                lemma_received_push(self.ins@, off as nat, data@);
--                assert(rfc_received(self.ins@.push((off as nat, data@))) =~= rfc_received(self.ins@));
--            }
--            self.ins = Ghost(self.ins@.push((off as nat, data@)));
--            return;
--        }
-         let ghost m = rfc_received(self.ins@);
-         let ghost hw = (old(self).base + old(self).buf@.len() - old(self).head) as int;
-         let end = off + data.len() as u64;
+@@ -625,7 +625,7 @@
+         } else {
+             Ghost(0)
+         };
+-        if data.len() > 0 && end > self.end {
++        if end > self.end {
+             self.end = end;
+         }
+         self.ins = Ghost(self.ins@.push((off as nat, data@)));
