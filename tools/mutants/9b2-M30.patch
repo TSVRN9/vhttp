@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/streams.rs b/crates/quic/src/streams.rs
-index 960f864..bb4af03 100644
+index 9f781f6..a90feeb 100644
 --- a/crates/quic/src/streams.rs
 +++ b/crates/quic/src/streams.rs
-@@ -6344,9 +6344,6 @@ impl Streams {
+@@ -6351,9 +6351,6 @@ impl Streams {
                      Some(p) => p.has_td(),
                      None => false,
                  };
@@ -12,7 +12,7 @@ index 960f864..bb4af03 100644
                  let ghost ne = e;
                  proof {
                      assert(e0 == s0.entries@[i as int]);
-@@ -6365,9 +6362,6 @@ impl Streams {
+@@ -6372,9 +6369,6 @@ impl Streams {
                      lemma_reset_enqueue(s0, i as int, ne, enq);
                  }
                  self.entries.set_and_swap(i, &mut e);

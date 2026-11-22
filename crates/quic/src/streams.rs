@@ -3121,6 +3121,13 @@ impl Streams {
             proof {
                 lemma_gc(s0, *self, i as int, e);
                 lemma_gc_flight(s0, *self, i as int);
+                // The cost ensures, stated (9b3 Task 10: avl's move to byteq changed the SMT context and Z3 lost it).
+                assert(s0.n_entries() == self.n_entries() + 1);
+                assert(work <= (s0.n_entries() - self.n_entries()) * c_gc()) by (nonlinear_arith)
+                    requires
+                        s0.n_entries() - self.n_entries() == 1,
+                        work <= c_gc(),
+                ;
             }
         }
         Ghost(work)

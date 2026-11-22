@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 set -o pipefail
-# cost-charge.sh [ROOT]: the cost-charge gate (9b1 D6a; tools/cost_charge.py). In crates/quic/src/avl.rs, frags.rs and
+# cost-charge.sh [ROOT]: the cost-charge gate (9b1 D6a; tools/cost_charge.py). In crates/byteq/src/avl.rs, quic's frags.rs and
 # every crates/byteq/src/*.rs, inside verus!: every `while` has an invariant naming `work` and a body charging `work = work + E` (E not 0), every exec
 # fn that loops or recurses (a fn-level decreases) returns a Ghost<nat> cost its ensures read (a recursive one charges
 # work too), and every callee's Ghost<nat> cost is bound and mentioned in a charge, the returned cost or (frags.rs's public

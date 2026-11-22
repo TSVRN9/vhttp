@@ -18,10 +18,10 @@ index 46567b3..fdc7d43 100644
  
  /// The number of maximal runs they form.
 diff --git a/crates/quic/src/frags.rs b/crates/quic/src/frags.rs
-index 45e9f6e..0cd75d3 100644
+index f618219..b0c3377 100644
 --- a/crates/quic/src/frags.rs
 +++ b/crates/quic/src/frags.rs
-@@ -5261,7 +5261,7 @@ impl Frags {
+@@ -5252,7 +5252,7 @@ impl Frags {
          let t = self.t.take();
          let (t2, hi, Ghost(c1)) = merge(t, self.hi, _lo, off, data, s, e, Ghost(f));
          self.t = t2;

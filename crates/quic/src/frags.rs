@@ -3102,8 +3102,9 @@ proof fn lemma_mfacts(
     lemma_m_count(fm, s, e, lc);
 }
 
-/// The merged bytes are `put`'s: where `cl` holds a position its byte, else the frame's.
-proof fn lemma_src(
+/// The merged byte at `k` is `put`'s: where `cl` holds `k` its byte, else the frame's. (One position per call: 9b3
+/// Task 10 replaced the forall form, which failed under one Z3 seed once avl moved to byteq.)
+proof fn lemma_src_at(
     f: Seq<(nat, Seq<u8>)>,
     fa: Seq<(nat, Seq<u8>)>,
     cl: Seq<(nat, Seq<u8>)>,
@@ -3113,6 +3114,7 @@ proof fn lemma_src(
     lo: nat,
     off: nat,
     d: Seq<u8>,
+    k: nat,
 )
     requires
         ok(f),
@@ -3120,14 +3122,9 @@ proof fn lemma_src(
         ends_le(fa, s0),
         starts_ge(rest, me2),
         cov(cl, s0, me2, (if lo >= off { lo } else { off }), off + d.len()),
+        s0 <= k < me2,
     ensures
-        forall|k: nat|
-            s0 <= k < me2 ==> #[trigger] src(cl, d, off, k) == put(vw(f), lo, off, d)[k] && put(
-                vw(f),
-                lo,
-                off,
-                d,
-            ).contains_key(k),
+        src(cl, d, off, k) == put(vw(f), lo, off, d)[k] && put(vw(f), lo, off, d).contains_key(k),
 {
     let na = fa.len() as int;
     let nc = cl.len() as int;
@@ -3135,27 +3132,20 @@ proof fn lemma_src(
     lemma_ok_split(fa, cl);
     lemma_at_ok(f);
     lemma_at_ok(cl);
-    assert forall|k: nat| s0 <= k < me2 implies #[trigger] src(cl, d, off, k) == put(vw(f), lo, off, d)[k] && put(
-        vw(f),
-        lo,
-        off,
-        d,
-    ).contains_key(k) by {
-        if pos(cl).contains(k) {
-            let j = choose|j: int| inf(cl, j, k);
-            assert(f[na + j] == cl[j]);
-            assert(inf(f, na + j, k));
-        } else {
-            if pos(f).contains(k) {
-                let i = choose|i: int| inf(f, i, k);
-                if i < na {
-                    assert(f[i] == fa[i]);
-                } else if i < na + nc {
-                    assert(f[i] == cl[i - na]);
-                    assert(inf(cl, i - na, k));
-                } else {
-                    assert(f[i] == rest[i - na - nc]);
-                }
+    if pos(cl).contains(k) {
+        let j = choose|j: int| inf(cl, j, k);
+        assert(f[na + j] == cl[j]);
+        assert(inf(f, na + j, k));
+    } else {
+        if pos(f).contains(k) {
+            let i = choose|i: int| inf(f, i, k);
+            if i < na {
+                assert(f[i] == fa[i]);
+            } else if i < na + nc {
+                assert(f[i] == cl[i - na]);
+                assert(inf(cl, i - na, k));
+            } else {
+                assert(f[i] == rest[i - na - nc]);
             }
         }
     }
@@ -3244,7 +3234,6 @@ proof fn lemma_new_vals(
     let (na, np, nc) = (fa.len() as int, p.len() as int, cl.len() as int);
     lemma_at_ok(f);
     lemma_at_ok(g);
-    lemma_src(f, fa, cl, rest, s0, me2, lo, off, d);
     assert forall|k: nat| #[trigger] pos(g).contains(k) implies vw(g)[k] == pv[k] by {
         let i = choose|i: int| inf(g, i, k);
         if i < na {
@@ -3256,6 +3245,7 @@ proof fn lemma_new_vals(
             assert(end(g[i]) <= VARINT_MAX);
             assert(pos(p).contains(k));
             assert(s0 <= k < me2);
+            lemma_src_at(f, fa, cl, rest, s0, me2, lo, off, d, k);
             assert(src(cl, d, off, k) == pv[k]);
         } else {
             assert(g[i] == rest[i - na - np] && f[i - np + nc] == rest[i - na - np]);
@@ -3740,6 +3730,7 @@ fn close_up(
 }
 
 /// `merge_w`'s result: the chunks `fa`, `p`, `rest` are in order, hold `put`'s bytes, and end where `hi` says.
+#[verifier::spinoff_prover]
 proof fn lemma_merge_end(
     f: Seq<(nat, Seq<u8>)>,
     fa: Seq<(nat, Seq<u8>)>,

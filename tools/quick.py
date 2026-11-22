@@ -132,6 +132,7 @@ def selftest():
         (['crates/wire/src/varint.rs'], ['wire', 'h3', 'quic', 'quictls', 'server'], ['ct', 'interop']),
         (['crates/quictls/src/server.rs'], ['quictls', 'server'], ['interop']),
         (['crates/byteq/src/capvec.rs'], ['byteq', 'h3', 'tls', 'quic', 'quictls', 'server'], ['ct', 'interop']),
+        (['crates/byteq/src/avl.rs'], ['byteq', 'h3', 'tls', 'quic', 'quictls', 'server'], ['ct', 'interop']),
         (['crates/ctcore/src/lib.rs'], ['ctcore', 'ctmir'], ['ct']),
         (['crates/crypto/src/sha256.rs'], ['crypto', 'tls', 'quic', 'quictls', 'server'], ['ct', 'binary', 'interop']),
         (['Cargo.lock'], order(deps), ['ct', 'binary', 'interop']),

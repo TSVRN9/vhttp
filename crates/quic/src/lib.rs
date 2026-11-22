@@ -15,7 +15,7 @@ pub mod ack;
 pub mod ack_track;
 pub mod aead;
 pub mod amp;
-pub mod avl;
+pub use byteq::avl;
 pub mod cid;
 pub mod codes;
 pub mod conn;

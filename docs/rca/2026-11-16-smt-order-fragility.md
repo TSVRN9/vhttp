@@ -52,6 +52,18 @@ crate.
      query no longer depends on what the shared process verified before them: over seeds 0-4, `shutdown` 4.72M-6.10M
      (3.50M-4.73M at Task 8; spinning it off does not lower it, it pins it) and `uni_data` 2.63M-3.98M. `shutdown` joins
      the Residual's list below for the next restructuring.
+  7. 9b3 Task 10: moving `quic::avl` to `byteq::avl` (quic re-exports it) changed no proof text in quic but reordered
+     its SMT context. In quic, which the seed gate does not yet cover (Residual), `Streams::gc` failed its cost ensures
+     under seed 0 (1.19M, a real postcondition failure, not a timeout). The quic sweep at the move then failed
+     `frags::lemma_merge_end` (12,000,000 at seed 3; at most 2.68M over seeds 0-4 before) and `frags::lemma_src`
+     (postcondition, seed 3: Verus reported every sub-assertion proved, so the solver could not close an identical
+     forall), and `h3_server::H3Server::lemma_flushed` reached 8,145,648 (seed 1; at most 3.60M before). In byteq,
+     `avl::lemma_join_left`/`_right` doubled on every seed (max 0.58M/0.50M before, 1.23M/0.95M after). Fixes: `gc`
+     states its cost step (`nonlinear_arith`); `lemma_src` became the per-position `lemma_src_at`, which its one caller
+     invokes for its `k`; `lemma_flushed`'s per-stream body moved to `lemma_flushed_at`; `lemma_merge_end` is spun off
+     (pinned, not fixed at the source); each `lemma_join_*` lost its post-recursion implication to a `_cat` lemma that
+     `join` calls instead. No ensures was weakened. Caught by `scripts/quick.sh` (gc) and `rlimit-seeds.sh quic 5`, run
+     by hand because the gate covers h3 only.
 - **Escape**: the rlimit gate (`scripts/rlimit-gate.sh`, `tools/rl.py --gate`) and the ceilings ratchet
   (`scripts/rlimit-ceilings.sh`) measure one run under Z3's default seed. A number from one run says nothing about the
   margin: a proof can pass at 7.9M on that path and fail on the next. The ceilings file even recorded fns above the
@@ -92,7 +104,8 @@ crate.
     (0.48M-2.40M, 5.0x). `conn::H3Conn::uni_data` is spun off at 2.63M-3.98M. `shutdown` and `uni_data` are pinned by
     `spinoff_prover`, not fixed at the source. Carryover `rca-smt-conn-pinned` (owner 9b3) closes that pin: 9b3
     Task 11 rewrites conn's stream entry points and splits both. The next restructuring of h3's proofs should start
-    with those.
+    with those. quic's `frags::lemma_merge_end` is likewise pinned by `spinoff_prover` (incident 7, 1.00M-1.02M over
+    seeds 0-4); 9b4, which brings quic under the seed gate, owns fixing it at the source (one lemma per ensures).
 - **Evidence**:
   - Gate demos (`scripts/gate-demos.sh`): "rlimit-seeds: passes seed 0, FAIL row under seed 1", "rlimit-seeds: over
     the cap under seed 1 only", "rlimit-seeds: over its ceiling line", "rlimit-seeds: a malformed ceilings line",

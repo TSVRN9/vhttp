@@ -325,7 +325,7 @@ ccb=$tmp/cost/crates/byteq/src
 cct=$tmp/cost/crates/quictls/src
 cfresh() {
   rm -rf "${tmp:?}/cost"; mkdir -p "$ccq" "$ccb" "$cct"
-  cp "$root/crates/quic/src/avl.rs" "$root/crates/quic/src/frags.rs" "$root/crates/quic/src/crypto_stream.rs" "$root/crates/quic/src/conn.rs" "$ccq/"
+  cp "$root/crates/quic/src/frags.rs" "$root/crates/quic/src/crypto_stream.rs" "$root/crates/quic/src/conn.rs" "$ccq/"
   cp "$root/crates/quic/src/pipeline.rs" "$root/crates/quic/src/streams.rs" "$root/crates/quic/src/recv_stream.rs" "$ccq/"
   cp "$root/crates/quic/src/ack_track.rs" "$ccq/"
   cp "$root/crates/quic/src/ranges.rs" "$root/crates/quic/src/send_stream.rs" "$root/crates/quic/src/ring.rs" "$ccq/"
@@ -339,7 +339,7 @@ wl=$(grep -n '^    while j < n$' "$ccq/frags.rs" | cut -d: -f1)
 [ -n "$wl" ] || die "cost-charge demo: fill's while not found in the copy"
 expect_fail "cost-charge: a while whose invariant lacks work" "crates/quic/src/frags.rs:$wl: while without an invariant naming work" cc
 cfresh
-sed -i 's|^} // verus!$|fn depth<V>(t: \&Tree<V>) -> (r: u64)\n    decreases *t,\n{\n    match t {\n        None => 0,\n        Some(b) => depth(\&b.left),\n    }\n}\n\n} // verus!|' "$ccq/avl.rs"
+sed -i 's|^} // verus!$|fn depth<V>(t: \&Tree<V>) -> (r: u64)\n    decreases *t,\n{\n    match t {\n        None => 0,\n        Some(b) => depth(\&b.left),\n    }\n}\n\n} // verus!|' "$ccb/avl.rs"
 expect_fail "cost-charge: a recursive exec fn without a Ghost<nat> return" "depth recurses but returns no named Ghost<nat> cost" cc
 cfresh
 sed -i 's/^        r\.2@ <= n + 1,$/        true,/' "$ccq/frags.rs"
@@ -393,8 +393,8 @@ cfresh
 sed -i 's/^    let mut v: CapVec<u8> = CapVec::new(n as usize);$/&\n    for _x in 0..1u8 {}/' "$ccq/frags.rs"
 expect_fail "cost-charge: a for" "\`for\` in fill: only \`while\` loops are checked" cc
 cfresh
-rm "$ccq/avl.rs"
-expect_fail "cost-charge: a missing file" "cannot read crates/quic/src/avl.rs" cc
+rm "$ccb/avl.rs"
+expect_fail "cost-charge: a missing file" "cannot read crates/byteq/src/avl.rs" cc
 cfresh
 once '^                work = work \+ cj;$' "$ccq/crypto_stream.rs"
 sed -i 's/^                work = work + cj;$/                assert(cj >= 0);/' "$ccq/crypto_stream.rs"
@@ -453,8 +453,8 @@ cfresh
 sed -i 's/^            assert(refed ==> !keep);$/&\n        }\n        let ghost mut work: nat = 0;\n        proof {/' "$cct/server.rs"
 expect_fail "cost-charge: receive rebinds work after its charges (fix round 2)" "QuicServer::receive binds work again" cc
 cfresh
-once '^        \(mk\(l, k, v, r\), Ghost\(1\)\)$' "$ccq/avl.rs"
-sed -i 's/^        (mk(l, k, v, r), Ghost(1))$/        (mk(l, k, v, r), Ghost(1nat + 0))/' "$ccq/avl.rs"
+once '^        \(mk\(l, k, v, r\), Ghost\(1\)\)$' "$ccb/avl.rs"
+sed -i 's/^        (mk(l, k, v, r), Ghost(1))$/        (mk(l, k, v, r), Ghost(1nat + 0))/' "$ccb/avl.rs"
 expect_fail "cost-charge: a stale literal-return exemption (fix round 2)" "literal-return exemption for bal matches no literal cost" cc
 cfresh
 once '^                    let Ghost\(c4\) = free\(l3\);$' "$ccq/ranges.rs"

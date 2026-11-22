@@ -780,7 +780,7 @@ fn bal<V>(l: Tree<V>, k: u64, v: V, r: Tree<V>) -> (res: (Tree<V>, Ghost<nat>))
 }
 
 /// What `join` needs of `a`'s parts when it descends `a`'s right spine.
-proof fn lemma_join_right<V>(a: Tree<V>, k: u64, v: V, b: Tree<V>, c: Tree<V>)
+proof fn lemma_join_right<V>(a: Tree<V>, k: u64, v: V, b: Tree<V>)
     requires
         wf(a),
         wf(b),
@@ -798,24 +798,40 @@ proof fn lemma_join_right<V>(a: Tree<V>, k: u64, v: V, b: Tree<V>, c: Tree<V>)
             &&& ht(b) <= ht(ar) < ht(a)
             &&& ht(a) == 1 + vstd::math::max(ht(al) as int, ht(ar) as int)
             &&& ht(al) <= ht(ar) + 1 && ht(ar) <= ht(al) + 1
-            &&& seq(c) == seq(ar) + seq![(k, v)] + seq(b) ==> {
-                &&& keys_gt(c, ak)
-                &&& seq(al).len() + seq(c).len() + 1 < pow2(63)
-                &&& seq(al) + seq![(ak, av)] + seq(c) =~= seq(a) + seq![(k, v)] + seq(b)
-            }
         }),
 {
     let (al, ak, av, ar) = (a->0.left, a->0.key, a->0.val, a->0.right);
     assert(wf(al) && wf(ar) && keys_lt(al, ak) && keys_gt(ar, ak));
     lemma_seq_node(a);
     lemma_keys_cat(a, al, (ak, av), ar, k);
-    if seq(c) == seq(ar) + seq![(k, v)] + seq(b) {
-        lemma_keys_cat(c, ar, (k, v), b, ak);
-    }
+}
+
+/// `lemma_join_right`'s step once `c` holds `a`'s right subtree, `(k, v)` and `b` (split from it, 9b3 Task 10: the
+/// implication cost it twice the rlimit in byteq's SMT context).
+proof fn lemma_join_right_cat<V>(a: Tree<V>, k: u64, v: V, b: Tree<V>, c: Tree<V>)
+    requires
+        wf(a),
+        keys_lt(a, k),
+        keys_gt(b, k),
+        seq(a).len() + seq(b).len() + 1 < pow2(63),
+        a is Some,
+        seq(c) == seq(a->0.right) + seq![(k, v)] + seq(b),
+    ensures
+        ({
+            let (al, ak, av, ar) = (a->0.left, a->0.key, a->0.val, a->0.right);
+            &&& keys_gt(c, ak)
+            &&& seq(al).len() + seq(c).len() + 1 < pow2(63)
+            &&& seq(al) + seq![(ak, av)] + seq(c) =~= seq(a) + seq![(k, v)] + seq(b)
+        }),
+{
+    let (al, ak, av, ar) = (a->0.left, a->0.key, a->0.val, a->0.right);
+    lemma_seq_node(a);
+    lemma_keys_cat(a, al, (ak, av), ar, k);
+    lemma_keys_cat(c, ar, (k, v), b, ak);
 }
 
 /// The mirror of `lemma_join_right`, for descending `b`'s left spine.
-proof fn lemma_join_left<V>(a: Tree<V>, k: u64, v: V, b: Tree<V>, c: Tree<V>)
+proof fn lemma_join_left<V>(a: Tree<V>, k: u64, v: V, b: Tree<V>)
     requires
         wf(a),
         wf(b),
@@ -833,20 +849,35 @@ proof fn lemma_join_left<V>(a: Tree<V>, k: u64, v: V, b: Tree<V>, c: Tree<V>)
             &&& ht(a) <= ht(bl) < ht(b)
             &&& ht(b) == 1 + vstd::math::max(ht(bl) as int, ht(br) as int)
             &&& ht(bl) <= ht(br) + 1 && ht(br) <= ht(bl) + 1
-            &&& seq(c) == seq(a) + seq![(k, v)] + seq(bl) ==> {
-                &&& keys_lt(c, bk)
-                &&& seq(c).len() + seq(br).len() + 1 < pow2(63)
-                &&& seq(c) + seq![(bk, bv)] + seq(br) =~= seq(a) + seq![(k, v)] + seq(b)
-            }
         }),
 {
     let (bl, bk, bv, br) = (b->0.left, b->0.key, b->0.val, b->0.right);
     assert(wf(bl) && wf(br) && keys_lt(bl, bk) && keys_gt(br, bk));
     lemma_seq_node(b);
     lemma_keys_cat(b, bl, (bk, bv), br, k);
-    if seq(c) == seq(a) + seq![(k, v)] + seq(bl) {
-        lemma_keys_cat(c, a, (k, v), bl, bk);
-    }
+}
+
+/// The mirror of `lemma_join_right_cat`, once `c` holds `a`, `(k, v)` and `b`'s left subtree.
+proof fn lemma_join_left_cat<V>(a: Tree<V>, k: u64, v: V, b: Tree<V>, c: Tree<V>)
+    requires
+        wf(b),
+        keys_lt(a, k),
+        keys_gt(b, k),
+        seq(a).len() + seq(b).len() + 1 < pow2(63),
+        b is Some,
+        seq(c) == seq(a) + seq![(k, v)] + seq(b->0.left),
+    ensures
+        ({
+            let (bl, bk, bv, br) = (b->0.left, b->0.key, b->0.val, b->0.right);
+            &&& keys_lt(c, bk)
+            &&& seq(c).len() + seq(br).len() + 1 < pow2(63)
+            &&& seq(c) + seq![(bk, bv)] + seq(br) =~= seq(a) + seq![(k, v)] + seq(b)
+        }),
+{
+    let (bl, bk, bv, br) = (b->0.left, b->0.key, b->0.val, b->0.right);
+    lemma_seq_node(b);
+    lemma_keys_cat(b, bl, (bk, bv), br, k);
+    lemma_keys_cat(c, a, (k, v), bl, bk);
 }
 
 /// The tree of `a`'s entries, then `(k, v)`, then `b`'s. It descends the taller tree's inner spine to where the heights
@@ -874,11 +905,11 @@ pub fn join<V>(a: Tree<V>, k: u64, v: V, b: Tree<V>) -> (r: (Tree<V>, Ghost<nat>
         let n = a.unwrap();
         let Node { key: ak, val: av, h: _, left: al, right: ar } = *n;
         proof {
-            lemma_join_right(a0, k, v, b0, ar);
+            lemma_join_right(a0, k, v, b0);
         }
         let (c, Ghost(cc)) = join(ar, k, v, b);
         proof {
-            lemma_join_right(a0, k, v, b0, c);
+            lemma_join_right_cat(a0, k, v, b0, c);
         }
         let (t, Ghost(bc)) = bal(al, ak, av, c);
         proof {
@@ -889,11 +920,11 @@ pub fn join<V>(a: Tree<V>, k: u64, v: V, b: Tree<V>) -> (r: (Tree<V>, Ghost<nat>
         let n = b.unwrap();
         let Node { key: bk, val: bv, h: _, left: bl, right: br } = *n;
         proof {
-            lemma_join_left(a0, k, v, b0, bl);
+            lemma_join_left(a0, k, v, b0);
         }
         let (c, Ghost(cc)) = join(a, k, v, bl);
         proof {
-            lemma_join_left(a0, k, v, b0, c);
+            lemma_join_left_cat(a0, k, v, b0, c);
         }
         let (t, Ghost(bc)) = bal(c, bk, bv, br);
         proof {
@@ -1417,7 +1448,7 @@ pub fn join2<V>(a: Tree<V>, b: Tree<V>) -> (r: (Tree<V>, Ghost<nat>))
 }
 
 /// `drain` into an exact buffer: `out` has room for every entry, so no push reallocates (D2).
-pub fn drain_cap<V>(t: Tree<V>, out: &mut byteq::capvec::CapVec<(u64, V)>) -> (r: Ghost<nat>)
+pub fn drain_cap<V>(t: Tree<V>, out: &mut crate::capvec::CapVec<(u64, V)>) -> (r: Ghost<nat>)
     requires
         old(out).wf(),
         old(out)@.len() + seq(t).len() <= old(out).cap(),

@@ -1,5 +1,5 @@
 """Cost-charge gate (9b1 D6a). Usage: python3 -I tools/cost_charge.py ROOT
-In ROOT/crates/quic/src/avl.rs, ROOT/crates/quic/src/frags.rs, ROOT/crates/quic/src/crypto_stream.rs,
+In ROOT/crates/byteq/src/avl.rs (9b3 Task 10: moved from quic; named, so a missing one fails), ROOT/crates/quic/src/frags.rs, ROOT/crates/quic/src/crypto_stream.rs,
 ROOT/crates/quic/src/ranges.rs, ROOT/crates/quic/src/send_stream.rs (9b2 Task 8a), ROOT/crates/quic/src/ring.rs (9b2 Task 9) and every
 ROOT/crates/byteq/src/*.rs (found by listing the directory, so a new byteq file is gated; one with no `verus!` block may
 hold no fn), inside `verus!` (comments and strings blanked, fns found by tools/acceptance.py's parser):
@@ -51,7 +51,7 @@ import os, re, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import acceptance as acc  # noqa: E402
 
-FILES = ['crates/quic/src/avl.rs', 'crates/quic/src/frags.rs', 'crates/quic/src/crypto_stream.rs', 'crates/quic/src/ranges.rs',
+FILES = ['crates/byteq/src/avl.rs', 'crates/quic/src/frags.rs', 'crates/quic/src/crypto_stream.rs', 'crates/quic/src/ranges.rs',
          'crates/quic/src/send_stream.rs', 'crates/quic/src/ring.rs']
 DIRS = ['crates/byteq/src']
 # Per-fn files: only their cost-carrying fns (an exec fn returning a Ghost<nat>) and the callers of one are checked, by
@@ -65,7 +65,7 @@ CALLEE_ONLY = ['crates/quic/src/streams.rs', 'crates/quic/src/recv_stream.rs']
 # Cost fns whose match arms return a literal cost after a recursive arm's text (the literal-return rule's only
 # exemption, by (file, fn); an entry that no longer fires fails): their literal arms are cat-C15-semantic-cost's.
 LITERAL_OK = {
-    ('crates/quic/src/avl.rs', 'bal'),
+    ('crates/byteq/src/avl.rs', 'bal'),
     ('crates/quic/src/frags.rs', 'walk'),
     ('crates/quic/src/frags.rs', 'walk_run'),
 }
@@ -170,7 +170,7 @@ def bodies(root):
         except OSError as e:
             raise ValueError('cannot list %s: %s' % (d, e))
         if not rs: raise ValueError('%s: no .rs file' % d)
-        rels += [d + '/' + f for f in rs]
+        rels += [p for p in (d + '/' + f for f in rs) if p not in rels]  # a named file (byteq's avl.rs) once
     for rel in rels:
         full = os.path.join(root, rel)
         try:
