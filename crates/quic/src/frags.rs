@@ -2814,6 +2814,7 @@ proof fn lemma_gather_pop(
 /// D3 steps 3-4: `M`'s chunks into `mv` (its last, `Rc`, kept out as `z` if it runs past `e` with at least `K` bytes
 /// and is not `Lc`), then `B`'s first chunk into `mv` if it starts where the merged bytes end and holds fewer than
 /// `K`. `me2` ends the merged bytes; `rest` is `z` then what is left of `B`.
+#[verifier::spinoff_prover]
 fn gather(m: Tree<CapVec<u8>>, b: Tree<CapVec<u8>>, _s: u64, e: u64, _s0: u64, lc: bool) -> (r: (
     (Vec<(u64, CapVec<u8>)>, Option<(u64, CapVec<u8>)>),
     Tree<CapVec<u8>>,
