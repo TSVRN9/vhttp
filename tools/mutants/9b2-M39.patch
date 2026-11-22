@@ -1,8 +1,7 @@
 diff --git a/crates/quic/src/streams.rs b/crates/quic/src/streams.rs
-index 960f864..4667962 100644
 --- a/crates/quic/src/streams.rs
 +++ b/crates/quic/src/streams.rs
-@@ -3082,6 +3082,10 @@ impl Streams {
+@@ -3091,6 +3091,10 @@ impl Streams {
                  None => true,
              })
          };

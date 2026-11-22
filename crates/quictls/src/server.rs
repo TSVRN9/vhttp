@@ -2491,22 +2491,35 @@ proof fn lemma_one_rtt_rand_free(
     hide(spec_drain);
 }
 
-} // verus!
+impl<'a> QuicServer<'a> {
+    /// The CRYPTO bytes of level `l` handed to TLS so far.
+    pub closed spec fn fed_spec(&self, l: Level) -> nat {
+        tls_fed(*self, l)
+    }
 
-impl QuicServer<'_> {
     /// Which key slots hold keys.
     #[doc(hidden)]
-    pub fn key_slots(&self) -> [bool; 3] {
+    pub fn key_slots(&self) -> (r: [bool; 3])
+        ensures
+            r[0] == (self.keys_spec()[0] is Some),
+            r[1] == (self.keys_spec()[1] is Some),
+            r[2] == (self.keys_spec()[2] is Some),
+    {
         [self.keys[0].is_some(), self.keys[1].is_some(), self.keys[2].is_some()]
     }
 
     /// Test support: the Initial and Handshake CRYPTO bytes handed to TLS so far (`feed` hands TLS bytes only with a
     /// `Fed` log entry, so unchanged counts mean no `on_crypto` call).
     #[doc(hidden)]
-    pub fn fed_counts(&self) -> [u64; 2] {
+    pub fn fed_counts(&self) -> (r: [u64; 2])
+        ensures
+            r[0] == self.fed_spec(Level::Initial) && r[1] == self.fed_spec(Level::Handshake),
+    {
         [self.fed_i, self.fed_h]
     }
 }
+
+} // verus!
 
 
 // Requirements on clients, on specification authors, and on TLS records, which QUIC replaces

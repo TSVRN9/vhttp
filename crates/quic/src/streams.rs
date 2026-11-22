@@ -1805,6 +1805,15 @@ impl DeadStreams {
         self.entries@.len()
     }
 
+    /// Test support: the entries left.
+    #[doc(hidden)]
+    pub fn entries_left(&self) -> (r: usize)
+        ensures
+            r == self.len_spec(),
+    {
+        self.entries.len()
+    }
+
     /// No entry is left.
     pub fn is_empty(&self) -> (r: bool)
         ensures
@@ -7576,6 +7585,34 @@ proof fn lemma_push_local(s0: Streams, s1: Streams, e: Entry)
     }
 }
 
+impl Streams {
+    /// Test support: the nodes in stream `id`'s sending part's teardown slot (D10 (e)).
+    #[doc(hidden)]
+    pub fn send_td_len(&self, id: u64) -> (r: Option<usize>)
+        requires
+            self.wf(),
+        ensures
+            match self.tx_part(id) {
+                Some(p) => r matches Some(n) && n == p.td_nodes(),
+                None => r is None,
+            },
+    {
+        match self.find(id) {
+            Some(i) => {
+                proof {
+                    lemma_part_at(*self, i as int);
+                    assert(entry_ok(self.entries@[i as int], self.rx_bidi, self.rx_uni));
+                }
+                match &self.entries[i].send {
+                    Some(p) => Some(p.td_len()),
+                    None => None,
+                }
+            },
+            None => None,
+        }
+    }
+}
+
 } // verus!
 
 impl Streams {
@@ -7605,24 +7642,5 @@ impl Streams {
             }
         }
         None
-    }
-
-    /// Test support: the nodes in stream `id`'s sending part's teardown slot (D10 (e)).
-    #[doc(hidden)]
-    pub fn send_td_len(&self, id: u64) -> Option<usize> {
-        for e in &self.entries {
-            if e.id == id {
-                return e.send.as_ref().map(SendStream::td_len);
-            }
-        }
-        None
-    }
-}
-
-impl DeadStreams {
-    /// Test support: the entries left.
-    #[doc(hidden)]
-    pub fn entries_left(&self) -> usize {
-        self.entries.len()
     }
 }

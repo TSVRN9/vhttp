@@ -1,8 +1,7 @@
 diff --git a/crates/quic/src/send_stream.rs b/crates/quic/src/send_stream.rs
-index 8f85dee..d4021ff 100644
 --- a/crates/quic/src/send_stream.rs
 +++ b/crates/quic/src/send_stream.rs
-@@ -2607,7 +2607,7 @@ impl SendStream {
+@@ -2642,7 +2642,7 @@ impl SendStream {
              self.peak = 0;
          }
          self.acked_base = b;
