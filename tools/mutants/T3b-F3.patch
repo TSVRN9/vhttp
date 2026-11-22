@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index b23593b..47198e1 100644
+index 474335e..40c4800 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -5765,10 +5765,6 @@ impl Connection {
+@@ -5827,10 +5827,6 @@ impl Connection {
                  }
                  self.live_h = false;
                  self.sent_h.drain_inflight(&mut lost);

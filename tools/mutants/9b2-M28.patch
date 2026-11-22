@@ -1,8 +1,8 @@
 diff --git a/crates/quic/src/conn.rs b/crates/quic/src/conn.rs
-index b23593b..abaae85 100644
+index 474335e..18eac50 100644
 --- a/crates/quic/src/conn.rs
 +++ b/crates/quic/src/conn.rs
-@@ -6341,7 +6341,7 @@ impl Connection {
+@@ -6403,7 +6403,7 @@ impl Connection {
          } else if self.crx_1.has_td() {
              self.crx_1.free_some()
          } else {
