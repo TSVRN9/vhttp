@@ -105,7 +105,8 @@ crate.
     `spinoff_prover`, not fixed at the source. Carryover `rca-smt-conn-pinned` (owner 9b3) closes that pin: 9b3
     Task 11 rewrites conn's stream entry points and splits both. The next restructuring of h3's proofs should start
     with those. quic's `frags::lemma_merge_end` is likewise pinned by `spinoff_prover` (incident 7, 1.00M-1.02M over
-    seeds 0-4); 9b4, which brings quic under the seed gate, owns fixing it at the source (one lemma per ensures).
+    seeds 0-4); 9b4, which brings quic under the seed gate, owns fixing it at the source (one lemma per ensures): carryover
+    `rca-smt-quic-pinned`, which also owns extending `rlimit-seeds.sh` to every crate.
 - **Evidence**:
   - Gate demos (`scripts/gate-demos.sh`): "rlimit-seeds: passes seed 0, FAIL row under seed 1", "rlimit-seeds: over
     the cap under seed 1 only", "rlimit-seeds: over its ceiling line", "rlimit-seeds: a malformed ceilings line",

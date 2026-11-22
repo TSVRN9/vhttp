@@ -1,4 +1,4 @@
-//! `quic::ranges` (9b2 D10): merged range sets and exact piece sets on `quic::avl`.
+//! `quic::ranges` (9b2 D10): merged range sets and exact piece sets on `byteq::avl` (re-exported as `quic::avl`).
 use quic::ranges::{PieceSet, RangeSet};
 use std::collections::BTreeSet;
 
