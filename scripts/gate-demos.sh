@@ -1058,7 +1058,7 @@ mrepo() {  # mrepo <dir>: scripts, tools/mutants.py and the fixture, one commit 
     rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/tools"
     cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/mutants.py" "$root/tools/acceptance.py" "$root/tools/verus-pin.txt" "$tmp/$1/tools/"
     cp -r "$fx/mutants/Cargo.toml" "$fx/mutants/Cargo.lock" "$fx/mutants/crates" "$root/rust-toolchain.toml" "$tmp/$1/"
-    cp -r "$fx/mutants/tools/mutants.tsv" "$fx/mutants/tools/mutants" "$tmp/$1/tools/"
+    cp -r "$fx/mutants/tools/mutants.tsv" "$fx/mutants/tools/mutants-changes.txt" "$fx/mutants/tools/mutants" "$tmp/$1/tools/"
     cp "$fx/acceptance/crates/demo/src/lib.rs" "$tmp/$1/crates/demo/src/acc.rs"
     printf '/.worktrees/\n/target/\n' > "$tmp/$1/.gitignore"
     git -C "$tmp/$1" init -q -b main
@@ -1067,6 +1067,9 @@ mrepo() {  # mrepo <dir>: scripts, tools/mutants.py and the fixture, one commit 
     gitc "$1" checkout -qb feat
 }
 mut() { d=$1; shift; "$tmp/$d/scripts/mutants.sh" "$@"; }
+mchg() {  # mchg <dir> <id>: record <id>'s patch's changed-lines digest, as a reviewed new mutant would
+    printf '%s %s\n' "$2" "$(python3 -I "$root/tools/mutants.py" changes "$tmp/$1/tools/mutants/$2.patch")" >> "$tmp/$1/tools/mutants-changes.txt"
+}
 nowt() {  # nowt <dir> <name>: no mutants-* worktree left in $tmp/<dir> (a failing git worktree list is a failure)
     wl=$(git -C "$tmp/$1" worktree list --porcelain) || die "$2: git worktree list failed"
     case $wl in *"/mutants-"*) die "$2: worktree left behind:
@@ -1095,6 +1098,25 @@ expect_fail "mutants check: patch without a row" "patch without a row: D-live" m
 mrepo m2
 sed -i 's#crates/demo/#crates/wire/#g' "$tmp/m2/tools/mutants/D-kill.patch"
 expect_fail "mutants check: patch outside its row's crate" "outside crates/demo/ and its path dependencies (none)" mut m2 check
+# 9b3 Task 12 fix round 2b (RCA docs/rca/2026-11-23-mutant-patch-absorbs-edit.md): each patch's changed lines are
+# pinned in tools/mutants-changes.txt. A patch regenerated from a dirty tree (git apply, git diff, git checkout) carries
+# the tree's other edit and the source loses it: check fails. Regenerated from a clean tree after lines moved: passes.
+mrepo m2
+printf '// an edit not yet committed\n' >> "$tmp/m2/crates/demo/src/acc.rs"
+git -C "$tmp/m2" apply tools/mutants/D-kill.patch; git -C "$tmp/m2" diff -- crates/demo/src/acc.rs > "$tmp/m2/tools/mutants/D-kill.patch"
+git -C "$tmp/m2" checkout -q -- crates/demo/src/acc.rs
+expect_fail "mutants check: a patch regenerated from a dirty tree" "D-kill.patch: its changed lines differ from the ones recorded" mut m2 check
+mrepo m2
+sed -i '1i // a line that moves the mutation down' "$tmp/m2/crates/demo/src/acc.rs"; gitc m2 commit -qam moved
+git -C "$tmp/m2" apply -C1 tools/mutants/D-kill.patch; git -C "$tmp/m2" diff -- crates/demo/src/acc.rs > "$tmp/m2/tools/mutants/D-kill.patch"
+git -C "$tmp/m2" checkout -q -- crates/demo/src/acc.rs
+expect_pass "mutants check: a patch regenerated from a clean tree after its lines moved" mut m2 check
+mrepo m2
+sed -i '/^D-kill /d' "$tmp/m2/tools/mutants-changes.txt"
+expect_fail "mutants check: a row whose patch has no recorded changed lines" "no line for D-kill" mut m2 check
+mrepo m2
+rm "$tmp/m2/tools/mutants-changes.txt"
+expect_fail "mutants check: no tools/mutants-changes.txt" "cannot read" mut m2 check
 mrepo m2
 sed -i 's/postcondition not satisfied/postcondition (not/' "$tmp/m2/tools/mutants.tsv"
 expect_fail "mutants check: regex that does not compile" "regex does not compile" mut m2 check
@@ -1126,6 +1148,7 @@ mrepo m3j
 cp "$tmp/m3j/tools/mutants/D-kill.patch" "$tmp/m3j/tools/mutants/D-kill2.patch"
 awk -F'\t' -v OFS='\t' '{ print } $1 == "D-kill" { $1 = "D-kill2"; print }' "$tmp/m3j/tools/mutants.tsv" > "$tmp/m3j.tsv"
 mv "$tmp/m3j.tsv" "$tmp/m3j/tools/mutants.tsv"
+mchg m3j D-kill2
 git -C "$tmp/m3j" add -A
 gitc m3j commit -qm two
 mj() { MUTANTS_JOBS=2 mut m3j run; }
@@ -1195,6 +1218,7 @@ echo "gate-demos: mutants run: TERM mid-Verus, and again while stopping, stops t
 mrepo m4
 cp "$fx/mutants/live.patch" "$tmp/m4/tools/mutants/D-live.patch"
 printf 'D-live\tdemo\tacc\tdemo\t-\tpostcondition not satisfied\tgate-demos: n > 11 keeps the clause\n' >> "$tmp/m4/tools/mutants.tsv"
+mchg m4 D-live
 gitc m4 add -A; gitc m4 commit -qm live
 expect_fail "mutants run: a mutant that still verifies" "the mutant still verifies acc::demo" mut m4 run D-live
 nowt m4 "mutants run: after a failure"
@@ -1225,7 +1249,7 @@ mdrepo() {  # mdrepo <dir>: as mrepo, with the mutants-dep fixture
     rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/tools"
     cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/mutants.py" "$root/tools/acceptance.py" "$root/tools/verus-pin.txt" "$tmp/$1/tools/"
     cp -r "$fx/mutants-dep/Cargo.toml" "$fx/mutants-dep/Cargo.lock" "$fx/mutants-dep/crates" "$root/rust-toolchain.toml" "$tmp/$1/"
-    cp -r "$fx/mutants-dep/tools/mutants.tsv" "$fx/mutants-dep/tools/mutants" "$tmp/$1/tools/"
+    cp -r "$fx/mutants-dep/tools/mutants.tsv" "$fx/mutants-dep/tools/mutants-changes.txt" "$fx/mutants-dep/tools/mutants" "$tmp/$1/tools/"
     printf '/.worktrees/\n/target/\n' > "$tmp/$1/.gitignore"
     git -C "$tmp/$1" init -q -b main
     git -C "$tmp/$1" add -A
@@ -1244,6 +1268,7 @@ expect_fail "mutants check: the row's crate has no Cargo.toml" "cannot read" mut
 mdrepo d3
 cp "$fx/mutants-dep/depbad.patch" "$tmp/d3/tools/mutants/X-depbad.patch"
 printf 'X-depbad\ttop\tm\tquad\t-\tpostcondition not satisfied.*r == 4 \\* n\tgate-demos: double ensures 2n + 1, code unchanged\n' >> "$tmp/d3/tools/mutants.tsv"
+mchg d3 X-depbad
 gitc d3 add -A; gitc d3 commit -qm depbad
 expect_fail "mutants run: a dependency patch that breaks the dependency's own proof" "the patched dependency dep does not verify on its own" mut d3 run X-depbad
 
@@ -1358,6 +1383,7 @@ expect_fail "mutants verify: no main" "cannot resolve main" mut m3 verify
 mrepo m7
 cp "$fx/mutants/live.patch" "$tmp/m7/tools/mutants/D-live.patch"
 printf 'D-live\tdemo\tacc\tdemo\t-\tpostcondition not satisfied\tgate-demos: n > 11 keeps the clause\n' >> "$tmp/m7/tools/mutants.tsv"
+mchg m7 D-live
 gitc m7 add -A; gitc m7 commit -qm live
 {
     echo "# tools/mutants-last-run.txt: forged from git on 2026-11-09T00:00Z under Verus $pin_v; verify.sh's main gate reads it"

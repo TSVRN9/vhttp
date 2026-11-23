@@ -49,7 +49,7 @@ check() {
         n=$((n + 1))
     done
     [ "$n" -gt 0 ] || fail "no rows"
-    echo "mutants: check ok ($n mutants, every patch applies exactly, every allowed_*err predicate has a row)"
+    echo "mutants: check ok ($n mutants, every patch applies exactly with its recorded changed lines, every allowed_*err predicate has a row)"
 }
 
 # one BASE CRATE MODULE FN: run Verus on FN alone in the worktree; its JSON goes to BASE.json, its stderr to BASE.log.

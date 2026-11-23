@@ -1,8 +1,8 @@
 diff --git a/crates/h3/src/message.rs b/crates/h3/src/message.rs
-index 805cf3c..9919a78 100644
+index 4fbf956..735057b 100644
 --- a/crates/h3/src/message.rs
 +++ b/crates/h3/src/message.rs
-@@ -2313,7 +2313,7 @@ spec fn request_allowed_err(
+@@ -2315,7 +2315,7 @@ spec fn request_allowed_err(
      h: Option<Seq<u8>>,
      c: u64,
  ) -> bool {

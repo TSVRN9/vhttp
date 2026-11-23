@@ -1,0 +1,4 @@
+# demo fixture: each mutant's changed-lines digest
+X-before 723af39ee28f85cd
+X-dep 9e8481f02352ad0d
+X-end d1c205df0ffd86a6

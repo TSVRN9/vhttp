@@ -1,30 +1,8 @@
 diff --git a/crates/h3/src/message.rs b/crates/h3/src/message.rs
-index 805cf3c..59ae395 100644
+index 4fbf956..59ae395 100644
 --- a/crates/h3/src/message.rs
 +++ b/crates/h3/src/message.rs
-@@ -1499,10 +1499,12 @@ fn cl_ok_x(fields: &[FieldLine]) -> (r: (bool, Ghost<nat>))
-         }
-         if e {
-             let (pc, Ghost(wp)) = parse_cl_w(&f.value);
-+            let ghost mut cq: nat = 0;
-             let ok = match pc {
-                 Some(_) => {
-                     let (q, Ghost(wq)) = eq_bytes_w(&f.value, &fields[k].value);
-                     proof {
-+                        cq = wq;
-                         work = work + wq;
-                     }
-                     q
-@@ -1515,7 +1517,7 @@ fn cl_ok_x(fields: &[FieldLine]) -> (r: (bool, Ghost<nat>))
-             if !ok {
-                 proof {
-                     // the iteration's charges are in what the exit returns (rca-early-return-cost)
--                    crate::frame::lemma_paid(w_it, we + 15 + wp, work);
-+                    crate::frame::lemma_paid(w_it, we + 15 + cq + wp, work);
-                 }
-                 return (false, Ghost(work));
-             }
-@@ -2263,7 +2265,7 @@ fn build_headers(fields: &[FieldLine]) -> (r: (Vec<FieldLine>, Ghost<nat>))
+@@ -2265,7 +2265,7 @@ fn build_headers(fields: &[FieldLine]) -> (r: (Vec<FieldLine>, Ghost<nat>))
  /// request's `:authority` is absent or not authority-form (RFC 9114 §4.4, cited at `rfc_validate_request`: "A CONNECT
  /// request that does not conform to these restrictions is malformed").
  spec fn connect_allowed_err(a: Option<Seq<u8>>, c: u64) -> bool {
