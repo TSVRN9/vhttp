@@ -7,7 +7,8 @@
 #                            the patch: its file names and changed lines, not its offsets or context, so regenerating a
 #                            patch for moved lines keeps it, and a patch regenerated from a dirty tree, which absorbs the
 #                            tree's other edits as extra hunks, fails (9b3 Task 12 fix round 2b; RCA
-#                            docs/rca/2026-11-23-mutant-patch-absorbs-edit.md). A missing file or line fails
+#                            docs/rca/2026-11-23-mutant-patch-absorbs-edit.md). A missing file or line fails, and so does a line
+#                            whose id has no row (a stale pin; 9b3 final review B-M4)
 #   changes PATCH            print that digest (after a deliberate review of the patch's changed lines)
 #   clean BASE CRATE MOD FN  BASE.json (Verus --output-json --time-expanded) and BASE.log (its stderr): FN, and only FN,
 #                            was checked, and it verified (>= 1 verified, 0 errors), no rlimit text. clean, killed and
@@ -149,6 +150,9 @@ def rows(root, tsv, pdir):
         out.append((i, crate, mod, fn, tests, ','.join(sorted(deps)) or '-', rx))
     if not out:
         die('%s has no rows' % tsv)
+    stale = sorted(set(rec) - ids)
+    if stale:
+        die('%s: a line for %s, which has no row in %s (delete the line with its row)' % (cf, ' '.join(stale), tsv))
     have = sorted(x[:-6] for x in os.listdir(pdir) if x.endswith('.patch'))
     orphans = sorted(set(have) - ids)
     if orphans:

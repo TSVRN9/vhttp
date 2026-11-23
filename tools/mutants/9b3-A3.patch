@@ -1,8 +1,8 @@
 diff --git a/crates/h3/src/message.rs b/crates/h3/src/message.rs
-index 4fbf956..735057b 100644
+index 75dca98..7e31642 100644
 --- a/crates/h3/src/message.rs
 +++ b/crates/h3/src/message.rs
-@@ -2315,7 +2315,7 @@ spec fn request_allowed_err(
+@@ -2356,7 +2356,7 @@ spec fn request_allowed_err(
      h: Option<Seq<u8>>,
      c: u64,
  ) -> bool {
@@ -10,4 +10,4 @@ index 4fbf956..735057b 100644
 +    c == H3_MESSAGE_ERROR && (meth.len() > 0 && scheme.len() > 0 && path.len() > 0 && authority_ok(scheme, a, h))
  }
  
- /// A non-CONNECT request's head, given its method, scheme and path lines and the `:authority` and `host` values: the
+ /// `request_allowed_err` is not vacuous: `GET https /` with `:authority` `a` is never refused, nor is any code but

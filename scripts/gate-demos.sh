@@ -151,6 +151,13 @@ expect_fail "acceptance: spec(checked) allowed_ fn with body true" "vacuous allo
 afresh
 sed -i 's/^pub open spec fn allowed_demo_err(n: u64, c: u64) -> bool {$/pub open spec fn allowed_demo_err(n: u64, c: u64) -> bool\n    decreases (if n < 10 { 10 - n } else { 0 }),\n{/; s/    n > 10 \&\& c == 7/    true/' "$lib"
 expect_fail "acceptance: allowed_ fn with body true after a decreases clause holding a brace" "vacuous allowed spec fn" acc
+# rule 5's non-vacuity witness (9b3 final review A-I1): deleted, or ensuring no refused instance
+afresh
+sed -i '/^proof fn lemma_allowed_demo_err_rejects()$/,/^}$/d' "$lib"
+expect_fail "acceptance: allowed_ fn without a non-vacuity witness" "allowed spec fn without a non-vacuity witness" acc
+afresh
+sed -i 's/^        !allowed_demo_err(0, 7),$/        allowed_demo_err(12, 7),/' "$lib"
+expect_fail "acceptance: witness with no refused instance" "non-vacuity witness without a refused instance" acc
 # a same-line `ensures .. {` body must not hide the next fn (it used to credit `a` with `hidden`'s clause)
 afresh
 addfn 'pub fn a(n: u64) -> (r: Result<(), u64>) ensures r is Ok ==> n == 0 {
@@ -1114,6 +1121,10 @@ expect_pass "mutants check: a patch regenerated from a clean tree after its line
 mrepo m2
 sed -i '/^D-kill /d' "$tmp/m2/tools/mutants-changes.txt"
 expect_fail "mutants check: a row whose patch has no recorded changed lines" "no line for D-kill" mut m2 check
+# 9b3 final review B-M4: a digest line whose row was deleted is a stale pin
+mrepo m2
+printf 'D-gone 0123456789abcdef\n' >> "$tmp/m2/tools/mutants-changes.txt"
+expect_fail "mutants check: a recorded digest whose row was deleted" "a line for D-gone, which has no row" mut m2 check
 mrepo m2
 rm "$tmp/m2/tools/mutants-changes.txt"
 expect_fail "mutants check: no tools/mutants-changes.txt" "cannot read" mut m2 check

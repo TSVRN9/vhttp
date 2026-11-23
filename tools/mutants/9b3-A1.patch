@@ -1,5 +1,5 @@
 diff --git a/crates/h3/src/qpack/field_section.rs b/crates/h3/src/qpack/field_section.rs
-index 256b73d..aee1444 100644
+index e5730ef..bb8a825 100644
 --- a/crates/h3/src/qpack/field_section.rs
 +++ b/crates/h3/src/qpack/field_section.rs
 @@ -1146,7 +1146,7 @@ pub open spec fn line_bounded_ok(b: Seq<u8>, left: u64, r: Result<(FieldLine, us

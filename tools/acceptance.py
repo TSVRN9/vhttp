@@ -14,6 +14,11 @@ written `NAME(`. Fns without the clause must be listed in the baseline, one
   - an allowed spec fn body (found as fns() finds it, so a `{` in a decreases clause is not the
     body) is literally `true` (parentheses and braces stripped), a match with
     all arms `true`, or a match with a `_` or `Err(..)` arm that is `true`; or has no body;
+  - an allowed spec fn has no non-vacuity witness (rule 5): a `proof fn lemma_NAME_rejects` in the predicate's own file
+    whose ensures (after `ensures`, comment- and string-stripped) contain `!NAME(`, so at least one instance is proved
+    refused; a `NAME_from` predicate is covered by the witness of `NAME` in the same file, the predicate it is the
+    recursive step of (quic's `allowed_tp_err_from` under `allowed_tp_err`). This is a name check: Verus proves the
+    lemma, and what instance it picks is the reviewer's;
   - a `use .. as ..` renames Result, an Err/Error name or an alias (not resolved: refused);
   - no verus! block, no error-returning fn, a `verus!(..)`/`verus![..]` block, or an fn whose
     signature this parser cannot split (fail closed).
@@ -31,7 +36,7 @@ anything else raises. A fn is named by its crate, file module path, enclosing im
 only if all carry the clause). Out of scope: fns outside `verus!`, macro-generated fns, and error
 signals that are not a Result-like return type: `Option`/`None` returns (the wire/h3/quic parsers)
 and `close(..)` calls in ()-returning fns. The clause check is a name match, not a proof that the
-clause is meaningful (that is 9a's proof-side non-vacuity lemmas).
+clause is meaningful (that is the non-vacuity witnesses' proofs, whose presence this checks by name).
 """
 import os, re, subprocess, sys
 
@@ -40,6 +45,7 @@ ERR_SUBSTR = ['Result', 'Error', 'Err']
 ALLOWED_NAME = re.compile(r'^(?:allowed_\w*err(?:_from)?|\w+_allowed_err)$')
 CLAUSE = re.compile(r'\b(requires|ensures|recommends|decreases|opens_invariants|no_unwind|returns)\b')
 NEXTFN = re.compile(r'(?<![A-Za-z0-9_])fn\s+\w+')
+WITNESS = re.compile(r'(?<![A-Za-z0-9_])proof\s+fn\s+(lemma_\w+_rejects)\b')
 
 
 def strip(s):
@@ -295,6 +301,20 @@ def scan(root):
     return found, allowed, aliases, nblocks, examined, sites, apos
 
 
+def witnesses(root):
+    """{(crate/file, lemma name): (its ensures text, bodyless)} for every `proof fn lemma_*_rejects` in the crates' sources
+    (stripped text, so a commented-out lemma is not one)."""
+    out = {}
+    for crate, rel, full in rs_files(root):
+        s = strip(open(full, encoding='utf-8').read())
+        for m in WITNESS.finditer(s):
+            _, c, e, bodyless = sig_end(s, s.rfind('fn', m.start(), m.start(1)), m.end(1), len(s), full, m.group(1))
+            cl = s[c:e] if c is not None else ''
+            en = re.search(r'\bensures\b', cl)
+            out[(f'{crate}/{rel}', m.group(1))] = (cl[en.end():] if en else '', bodyless)
+    return out
+
+
 def error_re(aliases):
     names = {n for n, rhs in aliases.items() if any(t in rhs for t in ERR_SUBSTR)}
     while True:  # an alias of an error alias
@@ -373,6 +393,18 @@ def main(argv):
         for p in sorted(set(bl) - ob): fail.append(f'baseline line not in the merge-base baseline (the baseline only shrinks): {p}')
     for path, name, body in allowed:
         if vacuous(body): fail.append(f'vacuous allowed spec fn (body true, a match with all arms true, or a catch-all/Err arm true): {path}::{name}')
+    try:
+        wit = witnesses(root)
+    except (ValueError, OSError) as e:
+        print(f'acceptance: cannot parse: {e}', file=sys.stderr); return 1
+    preds = {(path, name) for path, name, _ in allowed}
+    for path, name, _ in allowed:
+        if name.endswith('_from') and (path, name[:-5]) in preds: continue  # covered by its base predicate's witness
+        w = wit.get((path, f'lemma_{name}_rejects'))
+        if w is None:
+            fail.append(f'allowed spec fn without a non-vacuity witness (rule 5: add `proof fn lemma_{name}_rejects` in its file, ensuring `!{name}(..)` of an instance): {path}::{name}')
+        elif w[1] or not re.search(r'!\s*%s\s*\(' % re.escape(name), w[0]):
+            fail.append(f'non-vacuity witness without a refused instance (its ensures must contain `!{name}(..)`): {path}::lemma_{name}_rejects')
     for f in fail: print(f'acceptance: {f}', file=sys.stderr)
     if fail: return 1
     print(f'acceptance: {len(carries)}/{len(err)} error-returning fns carry allowed_ clauses')
