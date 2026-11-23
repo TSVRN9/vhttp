@@ -49,7 +49,9 @@ structurally by h3's move onto the linear Budget (carryover `sc-h3-budget`).
       (message.rs `eq_bytes_w`, `field_name_ok_w`, `field_value_ok_w`, `pseudo_first_x`, `parse_cl_w`, `eq_ci_x`,
       `no_at_x`; int.rs `parse_prefix_int_w`) it is called with the units charged before this iteration (the exact
       invariant's `i + 1`, or `i`), `t = 1` and the `work` the exit returns, so an exit whose returned value lacks its
-      iteration's unit fails a precondition. At an exit that owes a term of its own (the free of what it drops:
+      iteration's unit fails a precondition. Every other costed loop snapshots `w_it = work` at the top of its body
+      and calls `lemma_paid(w_it, t, work)` at each exit with `t` the iteration's charges up to that exit (its
+      callees' costs and its step: `w + 1`, `1 + cp`, `cl`, `2 + cf`, `c1 + c2`, ...). At an exit that owes a term of its own (the free of what it drops:
       `c_pfree`, `c_hfree`, `lines_free(n)`), the returned value is one ghost `ret = work + t`, passed to
       `lemma_paid(work, t, ret)` (and in `parse_settings` to `lemma_pset_cost`) and returned as `Ghost(ret)`, so a
       `ret` that drops `t` fails a precondition whatever the margin. The first review found the earlier form
@@ -74,16 +76,16 @@ structurally by h3's move onto the linear Budget (carryover `sc-h3-budget`).
     The loops with early exits and no ghost cost (conn.rs `fits_peer_x`, message.rs `check_response`, qpack
     static_table.rs `find_static` and `bytes_eq`) are on the send side, whose costs are carryover cat-C15-9b4's.
   - Residual: a new costed loop is not checked for this shape; deleting an exit's `lemma_paid` call together with its
-    term still verifies; and an exit that returns `Ghost(work)` in place of `Ghost(ret)`, or a loop whose per-iteration
-    charges (instructions.rs, uni.rs, request.rs: callee costs, not units) move below an exit, verifies too, since the
-    fns' cost ensures are upper bounds. Both close when h3's costs move onto the linear Budget (carryover `sc-h3-budget`):
-    every operation then consumes budget, so no path can skip a charge. quic, quictls and byteq were not swept for
+    term still verifies; and an exit that returns `Ghost(work)` in place of `Ghost(ret)` still verifies, since the
+    fns' cost ensures are upper bounds. These close when h3's costs move onto the linear Budget (carryover
+    `sc-h3-budget`): every operation then consumes budget, so no path can skip a charge. quic, quictls and byteq were not swept for
     this class here (their costs are carryover cat-C15-semantic-cost's and the scaffold's FD-7).
 - **Evidence**:
   - 9b3 Task 12's commit (the sites above); `scripts/quick.sh h3` and `scripts/rlimit-seeds.sh h3 5` pass on it.
   - Hand checks (9b3 Task 12 fix round 1, not mutant rows): `parse_settings`' first exit with `ret = work` (the free
     dropped) fails `quick.sh h3/frame` with "precondition not satisfied" at `lemma_paid`; `eq_bytes_w` with its unit
-    moved back below the exit (8b760c5's body) fails `quick.sh h3/message` the same way; `parse_settings` returning
+    moved back below the exit (8b760c5's body) fails `quick.sh h3/message` the same way; `control_frames` with its
+    `w + 1` moved to the loop's end fails `quick.sh h3/uni` at the `lemma_paid` of both exits it then skips; `parse_settings` returning
     `Ghost(work)` with `ret` left as is verifies (the residual above).
   - Mutants `9b3-T9-5` (`c_step()` removed from `extra`) and `9b3-T9-6` (the `+ 1` free removed) both fail `deliver`
     with "precondition not satisfied" at the `lemma_answered_cost` call. The patches and logs are in the 9b3 workspace
