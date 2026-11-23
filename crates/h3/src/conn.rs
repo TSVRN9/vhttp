@@ -4320,6 +4320,8 @@ impl H3Conn {
     /// Sends GOAWAY with `goaway_id`: one past the highest request accepted (0 if none), never
     /// more than an earlier GOAWAY. Opens the control stream first if needed, so SETTINGS stays
     /// its first frame.
+    // No cost return, and `out` grows through `start` and `send_goaway` (`Vec::new` plus `push`): an application-API
+    // entry point, carryover cat-C15-9b4 (9b4).
     pub fn shutdown(&mut self, out: &mut Vec<Output>)
         requires
             old(self).wf(),

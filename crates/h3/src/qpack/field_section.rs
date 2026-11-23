@@ -1341,6 +1341,8 @@ fn decode_lines_bounded(lines: &[u8], budget: u64) -> (r: (Result<Vec<FieldLine>
         assert(fields_view(Seq::<FieldLine>::empty()) =~= Seq::empty());
     }
     let n = lines.len();
+    // Over-reserves for few long lines (up to 2,048 slots for one): cat-C15-9b3-slots, folded into
+    // cat-C15-stream-parse (9b5).
     let cap = if n as u64 <= budget / 32 {
         n
     } else {

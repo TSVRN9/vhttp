@@ -912,7 +912,20 @@ spec fn joined(s: Fields) -> Fields {
 //= https://www.rfc-editor.org/rfc/rfc9114#section-4.4
 //# A CONNECT request that does not conform
 //# to these restrictions is malformed.
-/// Any violation is `Err(H3_MESSAGE_ERROR)`.
+//= https://www.rfc-editor.org/rfc/rfc9114#section-4.1.2
+//# A malformed request or response is one that is an otherwise valid
+//# sequence of frames but is invalid due to:
+//# *  the presence of prohibited fields or pseudo-header fields,
+//# *  the absence of mandatory pseudo-header fields,
+//# *  invalid values for pseudo-header fields,
+//= https://www.rfc-editor.org/rfc/rfc9114#section-4.3.1
+//# ":path":  Contains the path and query parts of the target URI (the
+//# "path-absolute" production and optionally a ? character (ASCII
+//# 0x3f) followed by the "query" production; see Sections 3.3 and 3.4
+//# of [URI].
+/// Any violation is `Err(H3_MESSAGE_ERROR)`. An empty `:method`, `:scheme` or `:path` is an invalid value whatever the
+/// scheme (§4.1.2): `:path` is "path-absolute", a method a `token` (RFC 9110 §9.1), a scheme starts with a letter
+/// (RFC 3986 §3.1).
 pub open spec fn rfc_validate_request(f: Fields) -> Result<SpecRequestHead, u64> {
     if !common_ok(f) {
         Err(H3_MESSAGE_ERROR)
@@ -2318,9 +2331,23 @@ fn connect_x(av: Option<&[u8]>) -> (r: (Result<RequestHead, u64>, Ghost<nat>))
 //# request MUST contain either an :authority pseudo-header field or a
 //# Host header field.  If these fields are present, they MUST NOT be
 //# empty.  If both fields are present, they MUST contain the same value.
+//= https://www.rfc-editor.org/rfc/rfc9114#section-4.1.2
+//# A malformed request or response is one that is an otherwise valid
+//# sequence of frames but is invalid due to:
+//# *  the presence of prohibited fields or pseudo-header fields,
+//# *  the absence of mandatory pseudo-header fields,
+//# *  invalid values for pseudo-header fields,
+//= https://www.rfc-editor.org/rfc/rfc9114#section-4.3.1
+//# ":path":  Contains the path and query parts of the target URI (the
+//# "path-absolute" production and optionally a ? character (ASCII
+//# 0x3f) followed by the "query" production; see Sections 3.3 and 3.4
+//# of [URI].
 /// The error `request_x` may return, `validate_request`'s requirements restated: H3_MESSAGE_ERROR when `:method`,
 /// `:scheme` or `:path` is empty or the authority is not acceptable (RFC 9114 §4.3.1, cited at `rfc_validate_request`
-/// and `authority_ok`).
+/// and `authority_ok`). An empty value is invalid for each of the three, whatever the scheme (§4.1.2, "invalid values
+/// for pseudo-header fields"): `:path` is "path-absolute" (RFC 3986 §3.3: it starts with `/`), a method is a `token`
+/// (RFC 9110 §9.1, one or more characters) and a scheme starts with a letter (RFC 3986 §3.1). RFC 9110 and RFC 3986 are
+/// cited in plain comments: neither is in the Duvet config.
 spec fn request_allowed_err(
     meth: Seq<u8>,
     scheme: Seq<u8>,
