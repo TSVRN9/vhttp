@@ -43,39 +43,48 @@ structurally by h3's move onto the linear Budget (carryover `sc-h3-budget`).
     was added):
     - The iteration's terms are charged where they are incurred, before any exit that follows: each callee's `Ghost`
       is added to `work` as it returns, and the iteration's own unit at the top of the body (or after the read it pays
-      for). An exit then returns `work` itself, the same value the loop's end carries on, so no exit writes the
-      iteration's charge a second time and none can drift from it. This is stronger than a named term repeated at
-      both places, which deliver's shape needs only because its exit has terms of its own.
-    - An exit's own terms (frees of what it drops) are one ghost value `extra`, returned and passed to
-      `frame::lemma_exit_pays(t, extra)`, which requires `t <= extra` for the exit's named term `t` (`c_pfree`,
-      `c_hfree`, `lines_free(n)`); as at deliver, an exit that drops `t` fails a precondition whatever the margin.
+      for). An exit then returns `work` itself, the same value the loop's end carries on. This shape alone is a
+      convention: moving the unit back below the exit verifies (9b3 Task 12 review I2).
+    - What the verifier checks: `frame::lemma_paid(w, t, ret)` requires `w + t <= ret`. At a unit-step loop's exit
+      (message.rs `eq_bytes_w`, `field_name_ok_w`, `field_value_ok_w`, `pseudo_first_x`, `parse_cl_w`, `eq_ci_x`,
+      `no_at_x`; int.rs `parse_prefix_int_w`) it is called with the units charged before this iteration (the exact
+      invariant's `i + 1`, or `i`), `t = 1` and the `work` the exit returns, so an exit whose returned value lacks its
+      iteration's unit fails a precondition. At an exit that owes a term of its own (the free of what it drops:
+      `c_pfree`, `c_hfree`, `lines_free(n)`), the returned value is one ghost `ret = work + t`, passed to
+      `lemma_paid(work, t, ret)` (and in `parse_settings` to `lemma_pset_cost`) and returned as `Ghost(ret)`, so a
+      `ret` that drops `t` fails a precondition whatever the margin. The first review found the earlier form
+      (`lemma_exit_pays(t, extra)`, checking only `t <= t`) vacuous (I1).
   - The sites, each costed `while` with an early `return` (none uses `break`):
 
     | site | outcome |
     |---|---|
     | conn.rs `deliver` | the answered return: deliver's catch (Task 9); its two other returns follow `assert(false)` |
-    | frame.rs `parse_settings` (2 exits) | each `parse_varint_w` cost charged as it returns; the free of `pairs` via `c_pfree` and `lemma_exit_pays` |
-    | message.rs `eq_bytes_w`, `field_name_ok_w`, `field_value_ok_w`, `eq_ci_x`, `no_at_x`, `parse_cl_w` (2) | undercharge fixed: the unit charged at the body's top |
-    | message.rs `pseudo_first_x` | its exit wrote `work + 1` itself: the unit moved to the body's top |
+    | frame.rs `parse_settings` (2 exits) | each `parse_varint_w` cost charged as it returns; the free of `pairs` in `ret`, checked by `lemma_paid` and `lemma_pset_cost` |
+    | message.rs `eq_bytes_w`, `field_name_ok_w`, `field_value_ok_w`, `eq_ci_x`, `no_at_x`, `parse_cl_w` (2) | undercharge fixed: the unit charged at the body's top; `lemma_paid(i + 1, 1, work)` at the exit |
+    | message.rs `pseudo_first_x` | its exit wrote `work + 1` itself: the unit moved to the body's top; `lemma_paid` at the exit |
     | message.rs `syntax_ok_x`, `no_conn_x`, `cl_ok_x`, `validate_trailers` | already charged before the exit; no owned value dropped |
-    | qpack/field_section.rs `decode_lines`, `decode_lines_bounded` | the line's cost charged as it returns; the free of `out` via `lines_free` and `lemma_exit_pays` |
-    | qpack/huffman.rs `huffman_decode_w` (inner loop's exit) | the free of `out` via `c_hfree` and `lemma_exit_pays` (and charged at the `None` after the loop) |
+    | qpack/field_section.rs `decode_lines`, `decode_lines_bounded` | the line's cost charged as it returns; the free of `out` in `ret`, checked by `lemma_paid` |
+    | qpack/huffman.rs `huffman_decode_w` (inner loop's exit) | the free of `out` in `ret`, checked by `lemma_paid` (also at the `None` after the loop) |
     | qpack/instructions.rs `process_encoder_stream` (4 exits), `process_decoder_stream` (3) | per-exit `+ 1` and `+ cp + 1` replaced by charges at the body's top and after the parse |
-    | qpack/int.rs `parse_prefix_int_w` (3 exits) | undercharge fixed: byte i's unit charged after its read |
+    | qpack/int.rs `parse_prefix_int_w` (3 exits) | undercharge fixed: byte i's unit charged after its read; `lemma_paid(i, 1, work)` at the two exits after the read |
     | request.rs `run` | already charged before its exits |
     | request.rs `RequestStream::on_data` | `w + 1` charged before the match; the exit adds only `emit_body`'s cost, the same call the loop's end makes |
     | uni.rs `control_frames` (3 exits), `UniStream::consume_control`, `UniStream::consume_qpack` | per-exit charges replaced by one charge before the branch |
 
     The loops with early exits and no ghost cost (conn.rs `fits_peer_x`, message.rs `check_response`, qpack
     static_table.rs `find_static` and `bytes_eq`) are on the send side, whose costs are carryover cat-C15-9b4's.
-  - Residual: a new costed loop is not checked for this shape, and deleting an exit's `lemma_exit_pays` call together
-    with its term still verifies. Both close when h3's costs move onto the linear Budget (carryover `sc-h3-budget`):
+  - Residual: a new costed loop is not checked for this shape; deleting an exit's `lemma_paid` call together with its
+    term still verifies; and an exit that returns `Ghost(work)` in place of `Ghost(ret)`, or a loop whose per-iteration
+    charges (instructions.rs, uni.rs, request.rs: callee costs, not units) move below an exit, verifies too, since the
+    fns' cost ensures are upper bounds. Both close when h3's costs move onto the linear Budget (carryover `sc-h3-budget`):
     every operation then consumes budget, so no path can skip a charge. quic, quictls and byteq were not swept for
     this class here (their costs are carryover cat-C15-semantic-cost's and the scaffold's FD-7).
 - **Evidence**:
   - 9b3 Task 12's commit (the sites above); `scripts/quick.sh h3` and `scripts/rlimit-seeds.sh h3 5` pass on it.
-  - Hand check (9b3 Task 12, not a mutant row): `parse_settings`' first exit with `extra` set to 0 fails `quick.sh
-    h3/frame` with "precondition not satisfied" at its `lemma_exit_pays` call.
+  - Hand checks (9b3 Task 12 fix round 1, not mutant rows): `parse_settings`' first exit with `ret = work` (the free
+    dropped) fails `quick.sh h3/frame` with "precondition not satisfied" at `lemma_paid`; `eq_bytes_w` with its unit
+    moved back below the exit (8b760c5's body) fails `quick.sh h3/message` the same way; `parse_settings` returning
+    `Ghost(work)` with `ret` left as is verifies (the residual above).
   - Mutants `9b3-T9-5` (`c_step()` removed from `extra`) and `9b3-T9-6` (the `+ 1` free removed) both fail `deliver`
     with "precondition not satisfied" at the `lemma_answered_cost` call. The patches and logs are in the 9b3 workspace
     under mutants/.

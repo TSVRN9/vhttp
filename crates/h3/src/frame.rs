@@ -1358,6 +1358,7 @@ fn parse_settings(payload: &[u8]) -> (r: (Result<Frame, u64>, Ghost<nat>))
             work <= 1 + 9 * off,
         decreases payload@.len() - off,
     {
+        let ghost w_it: nat = work;
         let tail = slice_subrange(payload, off, payload.len());
         // Each callee's cost is charged where it returns, before the exit after it (rca-early-return-cost).
         let (p1, Ghost(c1)) = parse_varint_w(tail);
@@ -1372,6 +1373,10 @@ fn parse_settings(payload: &[u8]) -> (r: (Result<Frame, u64>, Ghost<nat>))
                 proof {
                     lemma_paid(work, c_pfree(), ret);
                     lemma_pset_cost(d, pairs@.len(), ret);
+                }
+                proof {
+                    // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                    crate::frame::lemma_paid(w_it, c1, work);
                 }
                 return (Err(H3_FRAME_ERROR), Ghost(ret));
             },
@@ -1391,6 +1396,10 @@ fn parse_settings(payload: &[u8]) -> (r: (Result<Frame, u64>, Ghost<nat>))
                 proof {
                     lemma_paid(work, c_pfree(), ret);
                     lemma_pset_cost(d, pairs@.len(), ret);
+                }
+                proof {
+                    // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                    crate::frame::lemma_paid(w_it, c1 + c2, work);
                 }
                 return (Err(H3_FRAME_ERROR), Ghost(ret));
             },

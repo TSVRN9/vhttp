@@ -130,12 +130,17 @@ pub fn process_encoder_stream(buf: &[u8]) -> (r: (Result<usize, u64>, Ghost<nat>
             rfc_encoder_stream(buf@) == add_ok(rfc_encoder_stream(buf@.skip(pos as int)), pos as nat),
         decreases buf.len() - pos,
     {
+        let ghost w_it: nat = work;
         proof {
             // this iteration's unit and, below, its parse's cost, each charged before the exits after it
             // (rca-early-return-cost)
             work = work + 1;
         }
         if buf[pos] & 0xE0 != 0x20 {
+            proof {
+                // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                crate::frame::lemma_paid(w_it, 1, work);
+            }
             return (Err(QPACK_ENCODER_STREAM_ERROR), Ghost(work));
         }
         let rest = slice_subrange(buf, pos, buf.len());
@@ -148,10 +153,26 @@ pub fn process_encoder_stream(buf: &[u8]) -> (r: (Result<usize, u64>, Ghost<nat>
             work = work + cp;
         }
         match pi {
-            PrefixInt::Incomplete => return (Ok(pos), Ghost(work)),
-            PrefixInt::TooLarge => return (Err(QPACK_ENCODER_STREAM_ERROR), Ghost(work)),
+            PrefixInt::Incomplete => {
+                proof {
+                    // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                    crate::frame::lemma_paid(w_it, 1 + cp, work);
+                }
+                return (Ok(pos), Ghost(work));
+            },
+            PrefixInt::TooLarge => {
+                proof {
+                    // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                    crate::frame::lemma_paid(w_it, 1 + cp, work);
+                }
+                return (Err(QPACK_ENCODER_STREAM_ERROR), Ghost(work));
+            },
             PrefixInt::Value { value, consumed } => {
                 if value > 0 {
+                    proof {
+                        // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                        crate::frame::lemma_paid(w_it, 1 + cp, work);
+                    }
                     return (Err(QPACK_ENCODER_STREAM_ERROR), Ghost(work));
                 }
                 proof {
@@ -264,12 +285,17 @@ pub fn process_decoder_stream(buf: &[u8]) -> (r: (Result<usize, u64>, Ghost<nat>
             rfc_decoder_stream(buf@) == add_ok(rfc_decoder_stream(buf@.skip(pos as int)), pos as nat),
         decreases buf.len() - pos,
     {
+        let ghost w_it: nat = work;
         proof {
             // this iteration's unit and, below, its parse's cost, each charged before the exits after it
             // (rca-early-return-cost)
             work = work + 1;
         }
         if buf[pos] & 0xC0 != 0x40 {
+            proof {
+                // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                crate::frame::lemma_paid(w_it, 1, work);
+            }
             return (Err(QPACK_DECODER_STREAM_ERROR), Ghost(work));
         }
         let rest = slice_subrange(buf, pos, buf.len());
@@ -282,8 +308,20 @@ pub fn process_decoder_stream(buf: &[u8]) -> (r: (Result<usize, u64>, Ghost<nat>
             work = work + cp;
         }
         match pi {
-            PrefixInt::Incomplete => return (Ok(pos), Ghost(work)),
-            PrefixInt::TooLarge => return (Err(QPACK_DECODER_STREAM_ERROR), Ghost(work)),
+            PrefixInt::Incomplete => {
+                proof {
+                    // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                    crate::frame::lemma_paid(w_it, 1 + cp, work);
+                }
+                return (Ok(pos), Ghost(work));
+            },
+            PrefixInt::TooLarge => {
+                proof {
+                    // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                    crate::frame::lemma_paid(w_it, 1 + cp, work);
+                }
+                return (Err(QPACK_DECODER_STREAM_ERROR), Ghost(work));
+            },
             PrefixInt::Value { value: _, consumed } => {
                 proof {
                     lemma_skip_skip(buf@, pos as int, consumed as int);

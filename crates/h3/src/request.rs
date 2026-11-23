@@ -1706,6 +1706,7 @@ fn run(
                 ),
         decreases s@.len() - pos,
     {
+        let ghost w_it: nat = work;
         let r = slice_subrange(s, pos, s.len());
         let ghost m1 = *mode;
         let ghost ph1 = *ph;
@@ -1755,9 +1756,17 @@ fn run(
         }
         match res {
             Err(e) => {
+                proof {
+                    // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                    crate::frame::lemma_paid(w_it, w + 1, work);
+                }
                 return (Err(e), Ghost(work));
             },
             Ok(None) => {
+                proof {
+                    // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                    crate::frame::lemma_paid(w_it, w + 1, work);
+                }
                 return (Ok(pos), Ghost(work));
             },
             Ok(Some(k)) => {
@@ -2033,6 +2042,7 @@ impl RequestStream {
                 ev_lines(views(events@.skip(ev0.len() as int))) + 77 * self.buf@.len() <= 77 * b0 + 77 * j,
             decreases data@.len() - j,
         {
+            let ghost w_it: nat = work;
             let ghost s1 = *self;
             let ghost e1 = events@;
             let (res, Ghost(w)) = self.advance(data, j, events, &mut body, Ghost(base));
@@ -2057,6 +2067,10 @@ impl RequestStream {
                         lemma_tally(e2, events@, ev0.len() as int);
                     }
                     self.done = true;
+                    proof {
+                        // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                        crate::frame::lemma_paid(w_it, w + 1, work);
+                    }
                     return (Err(e), Ghost(work + wb));
                 },
                 Ok(j2) => {

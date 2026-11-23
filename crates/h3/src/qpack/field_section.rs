@@ -1067,6 +1067,7 @@ fn decode_lines(lines: &[u8]) -> (r: (Option<Vec<FieldLine>>, Ghost<nat>))
             work <= 130 * pos + dec + 1,
         decreases lines@.len() - pos,
     {
+        let ghost w_it: nat = work;
         let tail = slice_subrange(lines, pos, lines.len());
         proof {
             assert(tail@ =~= lines@.skip(pos as int));
@@ -1094,6 +1095,10 @@ fn decode_lines(lines: &[u8]) -> (r: (Option<Vec<FieldLine>>, Ghost<nat>))
                 proof {
                     lemma_lines_none(lines@, pos as int, fields_view(out@));
                     crate::frame::lemma_paid(work, lines_free(out@.len() as nat), ret);
+                }
+                proof {
+                    // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                    crate::frame::lemma_paid(w_it, cl, work);
                 }
                 return (None, Ghost(ret));
             },
@@ -1328,6 +1333,7 @@ fn decode_lines_bounded(lines: &[u8], budget: u64) -> (r: (Result<Vec<FieldLine>
             work <= 130 * pos + (budget - left) + 1,
         decreases lines@.len() - pos,
     {
+        let ghost w_it: nat = work;
         let tail = slice_subrange(lines, pos, lines.len());
         proof {
             assert(tail@ =~= lines@.skip(pos as int));
@@ -1359,6 +1365,10 @@ fn decode_lines_bounded(lines: &[u8], budget: u64) -> (r: (Result<Vec<FieldLine>
                 proof {
                     lemma_lines_bounded_err(lines@, budget, pos as int, left, fields_view(out@), e);
                     crate::frame::lemma_paid(work, lines_free(out@.len() as nat), ret);
+                }
+                proof {
+                    // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                    crate::frame::lemma_paid(w_it, cl, work);
                 }
                 return (Err(e), Ghost(ret));
             },

@@ -1206,6 +1206,7 @@ fn syntax_ok_x(fields: &[FieldLine]) -> (r: (bool, Ghost<nat>))
             work <= c_syn() * (fields_bytes(fv.take(i as int)) + i) + 1,
         decreases fields.len() - i,
     {
+        let ghost w_it: nat = work;
         let f = &fields[i];
         proof {
             assert(fv[i as int] == fields@[i as int]@);
@@ -1222,6 +1223,10 @@ fn syntax_ok_x(fields: &[FieldLine]) -> (r: (bool, Ghost<nat>))
             work = work + w1 + w2 + w3 + 1;
         }
         if !((p || nm) && vl) {
+            proof {
+                // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                crate::frame::lemma_paid(w_it, w1 + w2 + w3 + 1, work);
+            }
             return (false, Ghost(work));
         }
         i += 1;
@@ -1326,6 +1331,7 @@ fn no_conn_x(fields: &[FieldLine]) -> (r: (bool, Ghost<nat>))
             work <= c_noconn() * i + 1,
         decreases fields.len() - i,
     {
+        let ghost w_it: nat = work;
         let f = &fields[i];
         proof {
             assert(fv[i as int] == fields@[i as int]@);
@@ -1337,6 +1343,10 @@ fn no_conn_x(fields: &[FieldLine]) -> (r: (bool, Ghost<nat>))
             work = work + w1 + w2 + w3 + 11;
         }
         if cs || (te && !tr) {
+            proof {
+                // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                crate::frame::lemma_paid(w_it, w1 + w2 + w3 + 11, work);
+            }
             return (false, Ghost(work));
         }
         i += 1;
@@ -1477,6 +1487,7 @@ fn cl_ok_x(fields: &[FieldLine]) -> (r: (bool, Ghost<nat>))
             work <= c_find() * fields.len() + 15 + 32 * i + 2 * fields_bytes(fv.take(i as int)),
         decreases fields.len() - i,
     {
+        let ghost w_it: nat = work;
         let f = &fields[i];
         proof {
             assert(fv[i as int] == fields@[i as int]@);
@@ -1502,6 +1513,10 @@ fn cl_ok_x(fields: &[FieldLine]) -> (r: (bool, Ghost<nat>))
                 work = work + wp;
             }
             if !ok {
+                proof {
+                    // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                    crate::frame::lemma_paid(w_it, we + 15 + wp, work);
+                }
                 return (false, Ghost(work));
             }
         }
@@ -2462,6 +2477,7 @@ pub fn validate_trailers(fields: &[FieldLine]) -> (r: (bool, Ghost<nat>))
             work <= c_tr() * (fields_bytes(fv.take(i as int)) + i) + 1,
         decreases fields.len() - i,
     {
+        let ghost w_it: nat = work;
         let f = &fields[i];
         proof {
             assert(fv[i as int] == fields@[i as int]@);
@@ -2475,6 +2491,10 @@ pub fn validate_trailers(fields: &[FieldLine]) -> (r: (bool, Ghost<nat>))
             work = work + w1 + w2 + w3 + w4 + 3;
         }
         if is_pseudo_x(&f.name) || !nm || !vl || cs || te {
+            proof {
+                // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                crate::frame::lemma_paid(w_it, w1 + w2 + w3 + w4 + 3, work);
+            }
             return (false, Ghost(work));
         }
         i += 1;

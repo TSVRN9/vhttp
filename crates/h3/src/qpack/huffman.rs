@@ -931,6 +931,7 @@ pub fn huffman_decode_w(input: &[u8]) -> (r: (Option<Vec<u8>>, Ghost<nat>))
                 work <= c_huff() * i + 2 + 3 * j,
             decreases 8 - j,
         {
+            let ghost w_it: nat = work;
             let bit = (byte >> (7 - j)) & 1 == 1;
             proof {
                 let t = 8 * i + j;
@@ -964,6 +965,10 @@ pub fn huffman_decode_w(input: &[u8]) -> (r: (Option<Vec<u8>>, Ghost<nat>))
                 let ghost ret: nat = work + c_hfree();
                 proof {
                     crate::frame::lemma_paid(work, c_hfree(), ret);
+                }
+                proof {
+                    // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                    crate::frame::lemma_paid(w_it, 2 + cf, work);
                 }
                 return (None, Ghost(ret));
             }

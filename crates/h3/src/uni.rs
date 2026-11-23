@@ -1339,6 +1339,7 @@ fn control_frames(buf: &[u8], st: &mut CtrlState, events: &mut CapVec<UniEvent>)
             ctrl_split(buf@, st0, views(events@.skip(ev0.len() as int)), buf@.skip(pos as int), *st),
         decreases buf@.len() - pos,
     {
+        let ghost w_it: nat = work;
         let rest = slice_subrange(buf, pos, buf.len());
         assert(rest@ =~= buf@.skip(pos as int));
         let ghost done = views(events@.skip(ev0.len() as int));
@@ -1364,6 +1365,10 @@ fn control_frames(buf: &[u8], st: &mut CtrlState, events: &mut CapVec<UniEvent>)
                         assert(rfc_control(rest@ + t, st1, f) == (Seq::<SpecUniEvent>::empty(), Some(e)));
                     }
                 }
+                proof {
+                    // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                    crate::frame::lemma_paid(w_it, w + 1, work);
+                }
                 return (Err(e), Ghost(work));
             },
             Ok((k, s)) => {
@@ -1387,6 +1392,10 @@ fn control_frames(buf: &[u8], st: &mut CtrlState, events: &mut CapVec<UniEvent>)
                             lemma_skipping_zero(*st, rest@, f);
                         }
                     }
+                    proof {
+                        // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                        crate::frame::lemma_paid(w_it, w + 1, work);
+                    }
                     return (Ok((pos, 0)), Ghost(work));
                 }
                 if s > 0 {
@@ -1407,6 +1416,10 @@ fn control_frames(buf: &[u8], st: &mut CtrlState, events: &mut CapVec<UniEvent>)
                             let x = skipping(s, st1, t, f);
                             assert(done + x.0 =~= done + x.0);
                         }
+                    }
+                    proof {
+                        // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                        crate::frame::lemma_paid(w_it, w + 1, work);
                     }
                     return (Ok((buf.len(), s)), Ghost(work));
                 }
@@ -1797,6 +1810,7 @@ impl UniStream {
                 2 * ev_pairs(views(events@.skip(old(events)@.len() as int))) + self.buf@.len() <= b0 + j,
             decreases seg@.len() - j,
         {
+            let ghost w_it: nat = work;
             let ghost s1 = *self;
             let ghost e1 = events@;
             let ghost all1 = self.all@;
@@ -1816,6 +1830,10 @@ impl UniStream {
                             self.emitted@,
                             Some(e),
                         ));
+                    }
+                    proof {
+                        // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                        crate::frame::lemma_paid(w_it, w + 1, work);
                     }
                     return (Err(e), Ghost(work));
                 },
@@ -2261,6 +2279,7 @@ impl UniStream {
                 work <= 183 * j,
             decreases seg@.len() - j,
         {
+            let ghost w_it: nat = work;
             let piece = slice_subrange(seg, j, j + 1);
             let ghost all1 = self.all@;
             let ghost b0 = self.buf@;
@@ -2298,6 +2317,10 @@ impl UniStream {
                     proof {
                         assert(all1 + piece@ + t =~= all0 + seg@);
                         lemma_qpack_dead(all1 + piece@, self.seen0@, self.emitted@, self.kind, self.ctrl, b, e, t);
+                    }
+                    proof {
+                        // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                        crate::frame::lemma_paid(w_it, wp + cs + 1, work);
                     }
                     return (Err(e), Ghost(work));
                 },
