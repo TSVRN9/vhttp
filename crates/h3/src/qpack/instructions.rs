@@ -130,8 +130,13 @@ pub fn process_encoder_stream(buf: &[u8]) -> (r: (Result<usize, u64>, Ghost<nat>
             rfc_encoder_stream(buf@) == add_ok(rfc_encoder_stream(buf@.skip(pos as int)), pos as nat),
         decreases buf.len() - pos,
     {
+        proof {
+            // this iteration's unit and, below, its parse's cost, each charged before the exits after it
+            // (rca-early-return-cost)
+            work = work + 1;
+        }
         if buf[pos] & 0xE0 != 0x20 {
-            return (Err(QPACK_ENCODER_STREAM_ERROR), Ghost(work + 1));
+            return (Err(QPACK_ENCODER_STREAM_ERROR), Ghost(work));
         }
         let rest = slice_subrange(buf, pos, buf.len());
         proof {
@@ -139,20 +144,20 @@ pub fn process_encoder_stream(buf: &[u8]) -> (r: (Result<usize, u64>, Ghost<nat>
             lemma_prefix_int_consumed(5, rest@);
         }
         let (pi, Ghost(cp)) = parse_prefix_int_w(5, rest);
+        proof {
+            work = work + cp;
+        }
         match pi {
-            PrefixInt::Incomplete => return (Ok(pos), Ghost(work + cp + 1)),
-            PrefixInt::TooLarge => return (Err(QPACK_ENCODER_STREAM_ERROR), Ghost(work + cp + 1)),
+            PrefixInt::Incomplete => return (Ok(pos), Ghost(work)),
+            PrefixInt::TooLarge => return (Err(QPACK_ENCODER_STREAM_ERROR), Ghost(work)),
             PrefixInt::Value { value, consumed } => {
                 if value > 0 {
-                    return (Err(QPACK_ENCODER_STREAM_ERROR), Ghost(work + cp + 1));
+                    return (Err(QPACK_ENCODER_STREAM_ERROR), Ghost(work));
                 }
                 proof {
                     lemma_skip_skip(buf@, pos as int, consumed as int);
                 }
                 pos += consumed;
-                proof {
-                    work = work + cp + 1;
-                }
             },
         }
     }
@@ -259,8 +264,13 @@ pub fn process_decoder_stream(buf: &[u8]) -> (r: (Result<usize, u64>, Ghost<nat>
             rfc_decoder_stream(buf@) == add_ok(rfc_decoder_stream(buf@.skip(pos as int)), pos as nat),
         decreases buf.len() - pos,
     {
+        proof {
+            // this iteration's unit and, below, its parse's cost, each charged before the exits after it
+            // (rca-early-return-cost)
+            work = work + 1;
+        }
         if buf[pos] & 0xC0 != 0x40 {
-            return (Err(QPACK_DECODER_STREAM_ERROR), Ghost(work + 1));
+            return (Err(QPACK_DECODER_STREAM_ERROR), Ghost(work));
         }
         let rest = slice_subrange(buf, pos, buf.len());
         proof {
@@ -268,17 +278,17 @@ pub fn process_decoder_stream(buf: &[u8]) -> (r: (Result<usize, u64>, Ghost<nat>
             lemma_prefix_int_consumed(6, rest@);
         }
         let (pi, Ghost(cp)) = parse_prefix_int_w(6, rest);
+        proof {
+            work = work + cp;
+        }
         match pi {
-            PrefixInt::Incomplete => return (Ok(pos), Ghost(work + cp + 1)),
-            PrefixInt::TooLarge => return (Err(QPACK_DECODER_STREAM_ERROR), Ghost(work + cp + 1)),
+            PrefixInt::Incomplete => return (Ok(pos), Ghost(work)),
+            PrefixInt::TooLarge => return (Err(QPACK_DECODER_STREAM_ERROR), Ghost(work)),
             PrefixInt::Value { value: _, consumed } => {
                 proof {
                     lemma_skip_skip(buf@, pos as int, consumed as int);
                 }
                 pos += consumed;
-                proof {
-                    work = work + cp + 1;
-                }
             },
         }
     }

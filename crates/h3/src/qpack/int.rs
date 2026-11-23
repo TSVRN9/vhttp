@@ -456,6 +456,10 @@ pub fn parse_prefix_int_w(n: u8, buf: &[u8]) -> (r: (PrefixInt, Ghost<nat>))
             return (PrefixInt::TooLarge, Ghost(work));
         }
         let byte = buf[i];
+        proof {
+            // byte i's unit, charged before the exits that follow its read (rca-early-return-cost)
+            work = work + 1;
+        }
         let d: u64 = (byte & 127) as u64;
         assert(d < 128) by (bit_vector)
             requires
@@ -516,9 +520,6 @@ pub fn parse_prefix_int_w(n: u8, buf: &[u8]) -> (r: (PrefixInt, Ghost<nat>))
             p = p * 128;
         }
         i += 1;
-        proof {
-            work = work + 1;
-        }
     }
     proof {
         assert(buf@.skip(i as int).len() == 0);

@@ -230,18 +230,26 @@ proof fn settings_pairs_decreases(p: Seq<u8>) {
 // Executable helpers
 // =============================================================================
 
-fn parse_exact_varint(p: &[u8]) -> (r: Option<u64>)
+/// `parse_exact_varint`'s cost: the varint parse and the length compare.
+pub open spec fn c_exact() -> nat {
+    c_varint() + 1
+}
+
+fn parse_exact_varint(p: &[u8]) -> (r: (Option<u64>, Ghost<nat>))
     ensures
-        r == rfc_exact_varint(p@),
+        r.0 == rfc_exact_varint(p@),
+        r.1@ <= c_exact(),
 {
-    match parse_varint(p) {
+    let (pv, Ghost(c)) = parse_varint_w(p);
+    let r = match pv {
         Some((n, v)) => if n == p.len() {
             Some(v)
         } else {
             None
         },
         None => None,
-    }
+    };
+    (r, Ghost(c + 1))
 }
 
 // -----------------------------------------------------------------------------
@@ -1022,6 +1030,52 @@ proof fn lemma_header_extends_len(b: Seq<u8>, n1: nat)
     assert(rfc_frame_header(b.add(ext)) is Some);
 }
 
+/// `parse_frame_header_w`'s cost: two varint parses and the split between them.
+pub open spec fn c_fhdr() -> nat {
+    2 * c_varint() + 1
+}
+
+/// `parse_frame_header` with its cost.
+pub fn parse_frame_header_w(buf: &[u8]) -> (r: (FrameHeader, Ghost<nat>))
+    ensures
+        match r.0 {
+            FrameHeader::Complete { ty, len, hdr_len } => rfc_frame_header(buf@) == Some(
+                (hdr_len as nat, ty, len),
+            ),
+            FrameHeader::Incomplete => {
+                &&& rfc_frame_header(buf@) is None
+                &&& exists|ext: Seq<u8>| #[trigger] rfc_frame_header(buf@.add(ext)) is Some
+            },
+        },
+        r.1@ <= c_fhdr(),
+{
+    let (p1, Ghost(c1)) = parse_varint_w(buf);
+    match p1 {
+        None => {
+            proof {
+                lemma_header_extends_type(buf@);
+            }
+            (FrameHeader::Incomplete, Ghost(c1))
+        },
+        Some((n1, ty)) => {
+            let rest = slice_subrange(buf, n1, buf.len());
+            proof {
+                assert(rest@ =~= buf@.skip(n1 as int));
+            }
+            let (p2, Ghost(c2)) = parse_varint_w(rest);
+            match p2 {
+                None => {
+                    proof {
+                        lemma_header_extends_len(buf@, n1 as nat);
+                    }
+                    (FrameHeader::Incomplete, Ghost(c1 + c2 + 1))
+                },
+                Some((n2, len)) => (FrameHeader::Complete { ty, len, hdr_len: n1 + n2 }, Ghost(c1 + c2 + 1)),
+            }
+        },
+    }
+}
+
 /// `Incomplete` only when `buf` is a strict prefix of some valid header.
 pub fn parse_frame_header(buf: &[u8]) -> (r: FrameHeader)
     ensures
@@ -1035,29 +1089,7 @@ pub fn parse_frame_header(buf: &[u8]) -> (r: FrameHeader)
             },
         },
 {
-    match parse_varint(buf) {
-        None => {
-            proof {
-                lemma_header_extends_type(buf@);
-            }
-            FrameHeader::Incomplete
-        },
-        Some((n1, ty)) => {
-            let rest = slice_subrange(buf, n1, buf.len());
-            proof {
-                assert(rest@ =~= buf@.skip(n1 as int));
-            }
-            match parse_varint(rest) {
-                None => {
-                    proof {
-                        lemma_header_extends_len(buf@, n1 as nat);
-                    }
-                    FrameHeader::Incomplete
-                },
-                Some((n2, len)) => FrameHeader::Complete { ty, len, hdr_len: n1 + n2 },
-            }
-        },
-    }
+    parse_frame_header_w(buf).0
 }
 
 /// Appends type and length as minimal varints.
@@ -1182,9 +1214,8 @@ pub fn put_frame(ty: u64, body: &Vec<u8>, out: &mut Vec<u8>)
 // Payload parsing
 // =============================================================================
 
-/// `parse_frame_payload`'s cost constant for every type but SETTINGS, over the payload length: a varint parse over the
-/// payload (its MIR bound is linear in the payload, expected-cost.txt), then a copy into an exact `CapVec` and its
-/// allocation (PUSH_PROMISE).
+/// `parse_frame_payload`'s cost constant for every type but SETTINGS, over the payload length: a varint parse
+/// (`parse_varint_w`, at most `c_exact()`), then a copy into an exact `CapVec` and its allocation (PUSH_PROMISE).
 pub open spec fn c_pfp() -> nat {
     10
 }
@@ -1218,8 +1249,6 @@ pub fn parse_frame_payload(ty: u64, payload: &[u8]) -> (r: (Result<Frame, u64>, 
         ty != FRAME_SETTINGS ==> r.1@ <= c_pfp() * (payload@.len() + 1),
         r.0 matches Ok(Frame::Settings(v)) ==> 2 * v@.len() <= payload@.len(),
 {
-    // A varint parse over the payload: linear in it on its MIR bound (expected-cost.txt).
-    let ghost cv: nat = payload@.len() + 9;
     if ty == FRAME_DATA {
         (Ok(Frame::Data), Ghost(0))
     } else if ty == FRAME_HEADERS {
@@ -1227,14 +1256,16 @@ pub fn parse_frame_payload(ty: u64, payload: &[u8]) -> (r: (Result<Frame, u64>, 
         let Ghost(wp) = v.push_slice(payload);
         (Ok(Frame::Headers(v.into_vec())), Ghost(wp + 1))
     } else if ty == FRAME_CANCEL_PUSH {
-        match parse_exact_varint(payload) {
+        let (pv, Ghost(cv)) = parse_exact_varint(payload);
+        match pv {
             Some(v) => (Ok(Frame::CancelPush(v)), Ghost(cv)),
             None => (Err(H3_FRAME_ERROR), Ghost(cv)),
         }
     } else if ty == FRAME_SETTINGS {
         parse_settings(payload)
     } else if ty == FRAME_PUSH_PROMISE {
-        match parse_varint(payload) {
+        let (pv, Ghost(cv)) = parse_varint_w(payload);
+        match pv {
             Some((n, id)) => {
                 let rest = slice_subrange(payload, n, payload.len());
                 let mut fs: CapVec<u8> = CapVec::new(rest.len());
@@ -1247,12 +1278,14 @@ pub fn parse_frame_payload(ty: u64, payload: &[u8]) -> (r: (Result<Frame, u64>, 
             None => (Err(H3_FRAME_ERROR), Ghost(cv)),
         }
     } else if ty == FRAME_GOAWAY {
-        match parse_exact_varint(payload) {
+        let (pv, Ghost(cv)) = parse_exact_varint(payload);
+        match pv {
             Some(v) => (Ok(Frame::Goaway(v)), Ghost(cv)),
             None => (Err(H3_FRAME_ERROR), Ghost(cv)),
         }
     } else if ty == FRAME_MAX_PUSH_ID {
-        match parse_exact_varint(payload) {
+        let (pv, Ghost(cv)) = parse_exact_varint(payload);
+        match pv {
             Some(v) => (Ok(Frame::MaxPushId(v)), Ghost(cv)),
             None => (Err(H3_FRAME_ERROR), Ghost(cv)),
         }
@@ -1263,11 +1296,11 @@ pub fn parse_frame_payload(ty: u64, payload: &[u8]) -> (r: (Result<Frame, u64>, 
     }
 }
 
-/// `parse_settings`' bound from its accounting: `t` is its charges besides the sort's (at most 3d + 22), `p` its pairs.
+/// `parse_settings`' bound from its accounting: `t` is its charges besides the sort's (at most 10d + 22), `p` its pairs.
 proof fn lemma_pset_cost(d: nat, p: nat, t: nat)
     requires
         2 * p <= d,
-        t <= c_sort() * (p * (clog2(p) + 1) + 1) + 3 * d + 22,
+        t <= c_sort() * (p * (clog2(p) + 1) + 1) + 10 * d + 22,
     ensures
         t <= c_pset() * (d * (clog2(d) + 1) + 1),
 {
@@ -1275,6 +1308,20 @@ proof fn lemma_pset_cost(d: nat, p: nat, t: nat)
     let (cp, cd) = (clog2(p), clog2(d));
     vstd::arithmetic::mul::lemma_mul_upper_bound(p as int, d as int, (cp + 1) as int, (cd + 1) as int);
     assert(d <= d * (cd + 1)) by (nonlinear_arith);
+}
+
+/// `parse_settings`' charge at an exit inside its loop: the free of `pairs`.
+spec fn c_pfree() -> nat {
+    1
+}
+
+/// rca-early-return-cost's catch at a costed loop's exit: the exit's own charge `extra` holds its named exit-only
+/// term `t`. Its other terms are callee costs with no lower bound, so an exit that drops `t` fails this precondition
+/// whatever the margin under the fn's bound.
+pub proof fn lemma_exit_pays(t: nat, extra: nat)
+    requires
+        t <= extra,
+{
 }
 
 fn parse_settings(payload: &[u8]) -> (r: (Result<Frame, u64>, Ghost<nat>))
@@ -1308,31 +1355,44 @@ fn parse_settings(payload: &[u8]) -> (r: (Result<Frame, u64>, Ghost<nat>))
             pairs.wf(),
             pairs.cap() == payload@.len() / 2,
             2 * pairs@.len() <= off,
-            work == 1 + off + pairs@.len(),
+            work <= 1 + 9 * off,
         decreases payload@.len() - off,
     {
         let tail = slice_subrange(payload, off, payload.len());
-        // a varint reads at most 8 bytes; the free of `pairs`
-        let (n1, id) = match parse_varint(tail) {
+        // Each callee's cost is charged where it returns, before the exit after it (rca-early-return-cost).
+        let (p1, Ghost(c1)) = parse_varint_w(tail);
+        proof {
+            work = work + c1;
+        }
+        let (n1, id) = match p1 {
             Some(x) => x,
             None => {
+                // the exit's own charge: the free of `pairs`
+                let ghost extra: nat = c_pfree();
                 proof {
-                    lemma_pset_cost(d, pairs@.len(), work + 9);
+                    lemma_exit_pays(c_pfree(), extra);
+                    lemma_pset_cost(d, pairs@.len(), work + extra);
                 }
-                return (Err(H3_FRAME_ERROR), Ghost(work + 9));
+                return (Err(H3_FRAME_ERROR), Ghost(work + extra));
             },
         };
         let tail2 = slice_subrange(tail, n1, tail.len());
         proof {
             lemma_decode_len_bounds(payload@.skip(off as int));
         }
-        let (n2, v) = match parse_varint(tail2) {
+        let (p2, Ghost(c2)) = parse_varint_w(tail2);
+        proof {
+            work = work + c2;
+        }
+        let (n2, v) = match p2 {
             Some(x) => x,
             None => {
+                let ghost extra: nat = c_pfree();
                 proof {
-                    lemma_pset_cost(d, pairs@.len(), (work + n1 + 9) as nat);
+                    lemma_exit_pays(c_pfree(), extra);
+                    lemma_pset_cost(d, pairs@.len(), work + extra);
                 }
-                return (Err(H3_FRAME_ERROR), Ghost((work + n1 + 9) as nat));
+                return (Err(H3_FRAME_ERROR), Ghost(work + extra));
             },
         };
         proof {
@@ -1347,7 +1407,7 @@ fn parse_settings(payload: &[u8]) -> (r: (Result<Frame, u64>, Ghost<nat>))
         pairs.push((id, v));
         off = off + n1 + n2;
         proof {
-            work = (work + n1 + n2 + 1) as nat;
+            work = work + 1;
             // unfold one step: rest(t_old) = [(id,v)] + rest(skip)
             match rfc_settings_pairs(payload@.skip(off as int)) {
                 Some(rest) => {

@@ -1098,13 +1098,14 @@ fn control_frame(b: &[u8], st: &mut CtrlState, events: &mut CapVec<UniEvent>) ->
         crate::request::lemma_header_take(b@, m as int);
         lemma_frame_header_bounds(b@);
     }
-    // The header parse reads at most 16 bytes: a constant charge on the MIR bound (expected-cost.txt:2).
-    let (ty, len, hdr_len) = match parse_frame_header(hp) {
+    // The header parse's proved cost: at most c_fhdr() (17).
+    let (fh, Ghost(ch)) = parse_frame_header_w(hp);
+    let (ty, len, hdr_len) = match fh {
         FrameHeader::Incomplete => {
             proof {
                 lemma_control_incomplete(b@, st1);
             }
-            return (Ok((0, 0)), Ghost(17));
+            return (Ok((0, 0)), Ghost(ch));
         },
         FrameHeader::Complete { ty, len, hdr_len } => (ty, len, hdr_len),
     };
@@ -1115,7 +1116,7 @@ fn control_frame(b: &[u8], st: &mut CtrlState, events: &mut CapVec<UniEvent>) ->
                 lemma_control_frame(b@, st1, hdr_len as nat, ty, len, t, f);
             }
         }
-        return (Err(e), Ghost(18));
+        return (Err(e), Ghost(ch + 1));
     }
     let avail = b.len() - hdr_len;
     if len > avail as u64 {
@@ -1124,7 +1125,7 @@ fn control_frame(b: &[u8], st: &mut CtrlState, events: &mut CapVec<UniEvent>) ->
             proof {
                 lemma_control_incomplete(b@, st1);
             }
-            return (Ok((0, 0)), Ghost(18));
+            return (Ok((0, 0)), Ghost(ch + 1));
         }
         // Unknown frame: drop the payload present and skip the rest as it arrives.
         proof {
@@ -1136,7 +1137,7 @@ fn control_frame(b: &[u8], st: &mut CtrlState, events: &mut CapVec<UniEvent>) ->
                 assert(Seq::<u8>::empty() + t =~= t);
             }
         }
-        return (Ok((b.len(), len - avail as u64)), Ghost(18));
+        return (Ok((b.len(), len - avail as u64)), Ghost(ch + 1));
     }
     let len = len as usize;
     let k = hdr_len + len;
@@ -1157,7 +1158,7 @@ fn control_frame(b: &[u8], st: &mut CtrlState, events: &mut CapVec<UniEvent>) ->
                     lemma_control_frame(b@, st1, hdr_len as nat, ty, len as u64, t, f);
                 }
             }
-            return (Err(e), Ghost(wp + 18));
+            return (Err(e), Ghost(wp + ch + 1));
         },
     };
     let ghost fv = frame@;
@@ -1194,7 +1195,7 @@ fn control_frame(b: &[u8], st: &mut CtrlState, events: &mut CapVec<UniEvent>) ->
                 lemma_control_frame(b@, st1, hdr_len as nat, ty, len as u64, t, f);
             }
         }
-        return (Err(H3_ID_ERROR), Ghost(wp + 20));
+        return (Err(H3_ID_ERROR), Ghost(wp + ch + 3));
     }
     proof {
         let (evs, st2) = rfc_control_frame(st1, fv)->Ok_0;
@@ -1217,7 +1218,7 @@ fn control_frame(b: &[u8], st: &mut CtrlState, events: &mut CapVec<UniEvent>) ->
             lemma_control_frame(b@, st1, hdr_len as nat, ty, len as u64, t, f);
         }
     }
-    (Ok((k, 0)), Ghost(wp + 20))
+    (Ok((k, 0)), Ghost(wp + ch + 3))
 }
 
 /// A control buffer that completes no frame: an incomplete header, or a frame that passed its header checks and whose
@@ -1349,6 +1350,8 @@ fn control_frames(buf: &[u8], st: &mut CtrlState, events: &mut CapVec<UniEvent>)
             lemma_views_split(ev1, events@, ev0.len() as int);
             let mine = views(events@.skip(ev1.len() as int));
             assert(views(events@.skip(ev0.len() as int)) == done + mine);
+            // this iteration's charge, before the exits after it (rca-early-return-cost)
+            work = work + w + 1;
         }
         match r {
             Err(e) => {
@@ -1361,7 +1364,7 @@ fn control_frames(buf: &[u8], st: &mut CtrlState, events: &mut CapVec<UniEvent>)
                         assert(rfc_control(rest@ + t, st1, f) == (Seq::<SpecUniEvent>::empty(), Some(e)));
                     }
                 }
-                return (Err(e), Ghost(work + w + 1));
+                return (Err(e), Ghost(work));
             },
             Ok((k, s)) => {
                 if k == 0 {
@@ -1384,7 +1387,7 @@ fn control_frames(buf: &[u8], st: &mut CtrlState, events: &mut CapVec<UniEvent>)
                             lemma_skipping_zero(*st, rest@, f);
                         }
                     }
-                    return (Ok((pos, 0)), Ghost(work + w + 1));
+                    return (Ok((pos, 0)), Ghost(work));
                 }
                 if s > 0 {
                     proof {
@@ -1405,7 +1408,7 @@ fn control_frames(buf: &[u8], st: &mut CtrlState, events: &mut CapVec<UniEvent>)
                             assert(done + x.0 =~= done + x.0);
                         }
                     }
-                    return (Ok((buf.len(), s)), Ghost(work + w + 1));
+                    return (Ok((buf.len(), s)), Ghost(work));
                 }
                 proof {
                     let mine = views(events@.skip(ev1.len() as int));
@@ -1417,7 +1420,6 @@ fn control_frames(buf: &[u8], st: &mut CtrlState, events: &mut CapVec<UniEvent>)
                         let x = rfc_control(next + t, *st, f);
                         assert(done + (mine + x.0) =~= (done + mine) + x.0);
                     }
-                    work = work + w + 1;
                 }
                 pos = pos + k;
             },
@@ -1670,14 +1672,15 @@ impl UniStream {
         let head = slice_subrange(data, 0, i);
         let Ghost(wp) = self.buf.push_slice(head);
         let ghost b = self.buf@;
-        // A varint parse over at most 8 bytes: a constant charge on its MIR bound (expected-cost.txt).
-        let (n, ty) = match parse_varint(self.buf.as_slice()) {
+        // The varint parse's proved cost: at most c_varint() (8).
+        let (pv, Ghost(cv)) = parse_varint_w(self.buf.as_slice());
+        let (n, ty) = match pv {
             None => {
                 self.all = Ghost(s0.all@ + data@);
                 proof {
-                    lemma_det_none(s0, *self, data@, i as nat, head@, seen0, (wp + 17) as nat);
+                    lemma_det_none(s0, *self, data@, i as nat, head@, seen0, (wp + cv) as nat);
                 }
-                return (Ok(None), Ghost(wp + 17));
+                return (Ok(None), Ghost(wp + cv));
             },
             Some(x) => x,
         };
@@ -1687,9 +1690,9 @@ impl UniStream {
             && seen.decoder) {
             self.all = Ghost(s0.all@ + data@);
             proof {
-                lemma_det_err(s0, *self, data@, i as nat, head@, n as nat, ty, seen0, (wp + 17) as nat);
+                lemma_det_err(s0, *self, data@, i as nat, head@, n as nat, ty, seen0, (wp + cv) as nat);
             }
-            return (Err(H3_STREAM_CREATION_ERROR), Ghost(wp + 17));
+            return (Err(H3_STREAM_CREATION_ERROR), Ghost(wp + cv));
         }
         seen.control = seen.control || ty == STREAM_CONTROL;
         seen.encoder = seen.encoder || ty == STREAM_QPACK_ENCODER;
@@ -1698,9 +1701,9 @@ impl UniStream {
         if let UniKind::Ignored = self.kind {
             self.all = Ghost(s0.all@ + data@);
             proof {
-                lemma_det_ignored(s0, *self, data@, i as nat, head@, b, n as nat, ty, seen0, *seen, (wp + wd + 17) as nat);
+                lemma_det_ignored(s0, *self, data@, i as nat, head@, b, n as nat, ty, seen0, *seen, (wp + wd + cv) as nat);
             }
-            return (Ok(None), Ghost(wp + wd + 17));
+            return (Ok(None), Ghost(wp + wd + cv));
         }
         proof {
             lemma_det_decoded(s0, data@, i as nat, head@, b, n as nat, ty);
@@ -1708,9 +1711,9 @@ impl UniStream {
         let k = n - bl;
         self.all = Ghost(s0.all@ + data@.take(k as int));
         proof {
-            lemma_det_some(s0, *self, data@, i as nat, head@, b, n as nat, ty, seen0, *seen, (wp + wd + 17) as nat);
+            lemma_det_some(s0, *self, data@, i as nat, head@, b, n as nat, ty, seen0, *seen, (wp + wd + cv) as nat);
         }
-        (Ok(Some(k)), Ghost(wp + wd + 17))
+        (Ok(Some(k)), Ghost(wp + wd + cv))
     }
 
     /// Feeds `seg` to a critical stream; then a FIN is H3_CLOSED_CRITICAL_STREAM.
@@ -1801,6 +1804,8 @@ impl UniStream {
                 lemma_pairs_split(e1, events@, old(events)@.len() as int);
                 lemma_grew_trans(*old(self), s1, *self, old(events)@, e1, events@);
                 assert(all1 + seg@.skip(j as int) =~= old(self).all@ + seg@);
+                // this iteration's charge, before the exits after it (rca-early-return-cost)
+                work = work + w + 1;
             }
             match r {
                 Err(e) => {
@@ -1811,7 +1816,7 @@ impl UniStream {
                             Some(e),
                         ));
                     }
-                    return (Err(e), Ghost(work + w + 1));
+                    return (Err(e), Ghost(work));
                 },
                 Ok(j2) => {
                     proof {
@@ -1820,7 +1825,6 @@ impl UniStream {
                         ));
                         assert(old(self).all@ + seg@.take(j as int) + seg@.subrange(j as int, j2 as int)
                             =~= old(self).all@ + seg@.take(j2 as int));
-                        work = work + w + 1;
                     }
                     j = j2;
                 },
@@ -2183,8 +2187,9 @@ impl UniStream {
             crate::request::lemma_header_take(q@, m as int);
             lemma_frame_header_bounds(q@);
         }
-        // The header parse reads at most 16 bytes: a constant charge on the MIR bound (expected-cost.txt:2).
-        let need: usize = match parse_frame_header(hp) {
+        // The header parse's proved cost: at most c_fhdr() (17).
+        let (fh, Ghost(ch)) = parse_frame_header_w(hp);
+        let need: usize = match fh {
             FrameHeader::Incomplete => 1,
             FrameHeader::Complete { len, hdr_len, .. } => hdr_len + len as usize - bl,
         };
@@ -2205,7 +2210,7 @@ impl UniStream {
         proof {
             lemma_split_append(all1, self.seen0@, self.emitted@, self.kind, self.ctrl, self.skip, buf1, piece@);
         }
-        (j + k, Ghost(wp + 17))
+        (j + k, Ghost(wp + ch))
     }
 
     /// QPACK streams emit no events, so only `buf` and the result change. While an instruction is held, one byte at a
@@ -2269,6 +2274,10 @@ impl UniStream {
             } else {
                 process_decoder_stream(self.buf.as_slice())
             };
+            proof {
+                // this iteration's charge, before the exits after it (rca-early-return-cost)
+                work = work + wp + cs + 1;
+            }
             match scanned {
                 Ok(n) => {
                     proof {
@@ -2276,7 +2285,7 @@ impl UniStream {
                     }
                     let Ghost(wd) = self.buf.drop_front(n);
                     proof {
-                        work = work + wp + cs + wd + 1;
+                        work = work + wd;
                     }
                     j = j + 1;
                 },
@@ -2287,7 +2296,7 @@ impl UniStream {
                         assert(all1 + piece@ + t =~= all0 + seg@);
                         lemma_qpack_dead(all1 + piece@, self.seen0@, self.emitted@, self.kind, self.ctrl, b, e, t);
                     }
-                    return (Err(e), Ghost(work + wp + cs + 1));
+                    return (Err(e), Ghost(work));
                 },
             }
         }

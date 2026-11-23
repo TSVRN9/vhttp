@@ -835,6 +835,11 @@ fn feed_bit(
     (ok, sym, Ghost(1))
 }
 
+/// `huffman_decode_w`'s charge where it returns `None`: the free of `out`.
+spec fn c_hfree() -> nat {
+    1
+}
+
 /// The cost constant of `huffman_decode_w`: per input byte, its read and 8 bit steps of at most 3 units.
 #[verifier::inline]
 pub open spec fn c_huff() -> nat {
@@ -925,7 +930,12 @@ pub fn huffman_decode_w(input: &[u8]) -> (r: (Option<Vec<u8>>, Ghost<nat>))
                         }
                     }
                 }
-                return (None, Ghost(work));
+                // the exit's own charge: the free of `out`
+                let ghost extra: nat = c_hfree();
+                proof {
+                    crate::frame::lemma_exit_pays(c_hfree(), extra);
+                }
+                return (None, Ghost(work + extra));
             }
             j += 1;
         }
@@ -952,7 +962,8 @@ pub fn huffman_decode_w(input: &[u8]) -> (r: (Option<Vec<u8>>, Ghost<nat>))
                 }
             }
         }
-        (None, Ghost(work))
+        // the free of `out`
+        (None, Ghost(work + c_hfree()))
     }
 }
 

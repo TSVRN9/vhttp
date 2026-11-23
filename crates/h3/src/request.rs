@@ -1527,14 +1527,15 @@ fn step_frame(
         assert(hp@ =~= r@.take(m as int));
         lemma_header_take(r@, m as int);
     }
-    // The header parse reads at most 16 bytes: a constant charge on the MIR bound (expected-cost.txt:2).
-    let (ty, len, hdr_len) = match parse_frame_header(hp) {
+    // The header parse's proved cost: at most c_fhdr() (17).
+    let (fh, Ghost(ch)) = parse_frame_header_w(hp);
+    let (ty, len, hdr_len) = match fh {
         FrameHeader::Incomplete => {
             proof {
                 assert forall|f: bool| #[trigger]
                     rest(*mode, *ph, a0, r@, f) == finish(*mode, *ph, a0, r@.len(), f) by {}
             }
-            return (Ok(None), Ghost(17));
+            return (Ok(None), Ghost(ch));
         },
         FrameHeader::Complete { ty, len, hdr_len } => (ty, len, hdr_len),
     };
@@ -1550,7 +1551,7 @@ fn step_frame(
             }
             lemma_err_ok(ev0, base, events.cap(), ph0, *body);
         }
-        return (Err(e), Ghost(18));
+        return (Err(e), Ghost(ch + 1));
     }
     if ty == FRAME_HEADERS {
         let avail = r.len() - hdr_len;
@@ -1561,7 +1562,7 @@ fn step_frame(
                     assert(r@.skip(hdr_len as int).len() < len);
                 }
             }
-            return (Ok(None), Ghost(18));
+            return (Ok(None), Ghost(ch + 1));
         }
         let end = hdr_len + len as usize;
         let payload = slice_subrange(r, hdr_len, end);
@@ -1579,8 +1580,8 @@ fn step_frame(
             lemma_tally(ev0, events@, base as int);
         }
         return match hr {
-            Err(e) => (Err(e), Ghost(wf + wh + 18)),
-            Ok(()) => (Ok(Some(end)), Ghost(wf + wh + 18)),
+            Err(e) => (Err(e), Ghost(wf + wh + ch + 1)),
+            Ok(()) => (Ok(Some(end)), Ghost(wf + wh + ch + 1)),
         };
     }
     let ghost m0 = *mode;
@@ -1604,7 +1605,7 @@ fn step_frame(
             }
         }
     }
-    (Ok(Some(hdr_len)), Ghost(18))
+    (Ok(Some(hdr_len)), Ghost(ch + 1))
 }
 
 /// Consumes `s` from `(mode, ph)`: payload bytes are skipped or passed on straight from `s` into the call's one
@@ -2039,6 +2040,8 @@ impl RequestStream {
                 lemma_bodies_trans(ev0.len() as int, e1, events@);
                 lemma_grew_trans(*old(self), s1, *self, ev0, e1, events@);
                 lemma_tally(e1, events@, ev0.len() as int);
+                // this iteration's charge, before the exits after it (rca-early-return-cost)
+                work = work + w + 1;
             }
             match res {
                 Err(e) => {
@@ -2054,13 +2057,12 @@ impl RequestStream {
                         lemma_tally(e2, events@, ev0.len() as int);
                     }
                     self.done = true;
-                    return (Err(e), Ghost(work + w + wb + 1));
+                    return (Err(e), Ghost(work + wb));
                 },
                 Ok(j2) => {
                     proof {
                         assert(all0 + data@.take(j as int) + data@.subrange(j as int, j2 as int)
                             =~= all0 + data@.take(j2 as int));
-                        work = work + w + 1;
                     }
                     j = j2;
                 },
@@ -2360,8 +2362,9 @@ impl RequestStream {
             assert(hp@ =~= q@.take(m as int));
             lemma_header_take(q@, m as int);
         }
-        // The header parse reads at most 16 bytes: a constant charge on the MIR bound (expected-cost.txt:2).
-        let need: usize = match parse_frame_header(hp) {
+        // The header parse's proved cost: at most c_fhdr() (17).
+        let (fh, Ghost(ch)) = parse_frame_header_w(hp);
+        let need: usize = match fh {
             FrameHeader::Incomplete => 16 - bl,
             FrameHeader::Complete { len, hdr_len, .. } => hdr_len + len as usize - bl,
         };
@@ -2374,7 +2377,7 @@ impl RequestStream {
         let piece = slice_subrange(data, j, j + k);
         let Ghost(wp) = self.buf.push_slice(piece);
         self.all = Ghost(self.all@ + piece@);
-        (k, Ghost(wp + 17))
+        (k, Ghost(wp + ch))
     }
 }
 

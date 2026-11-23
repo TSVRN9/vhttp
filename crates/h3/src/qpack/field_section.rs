@@ -1019,6 +1019,11 @@ proof fn lemma_lines_bounded_err(lines: Seq<u8>, budget: u64, pos: int, left: u6
     hide(rfc_field_line);
 }
 
+/// The buffers a dropped list of `n` decoded lines frees: the list's, and each line's name and value.
+spec fn lines_free(n: nat) -> nat {
+    2 * n + 1
+}
+
 /// The per-byte cost constant of `decode_lines` and `decode_lines_bounded`: each line's `c_line` per byte taken (2
 /// with its +1) and its push, plus its decoded bytes, at most 108 per byte taken with the 32 of overhead
 /// (`lemma_line_expansion`).
@@ -1067,6 +1072,10 @@ fn decode_lines(lines: &[u8]) -> (r: (Option<Vec<FieldLine>>, Ghost<nat>))
             assert(tail@ =~= lines@.skip(pos as int));
         }
         let (dl, Ghost(cl)) = decode_field_line(tail);
+        proof {
+            // the line's cost, charged before the exit after it (rca-early-return-cost)
+            work = work + cl;
+        }
         match dl {
             Some((f, k)) => {
                 proof {
@@ -1074,16 +1083,19 @@ fn decode_lines(lines: &[u8]) -> (r: (Option<Vec<FieldLine>>, Ghost<nat>))
                     lemma_line_expansion(tail@);
                     assert(fields_view(out@.push(f)) =~= fields_view(out@).push(f@));
                     dec = dec + line_bytes(f@);
-                    work = work + cl + 1;
+                    work = work + 1;
                 }
                 out.push(f);
                 pos += k;
             },
             None => {
+                // the exit's own charge: the free of `out` and its lines
+                let ghost extra: nat = lines_free(out@.len() as nat);
                 proof {
                     lemma_lines_none(lines@, pos as int, fields_view(out@));
+                    crate::frame::lemma_exit_pays(lines_free(out@.len() as nat), extra);
                 }
-                return (None, Ghost(work + cl));
+                return (None, Ghost(work + extra));
             },
         }
     }
@@ -1321,13 +1333,17 @@ fn decode_lines_bounded(lines: &[u8], budget: u64) -> (r: (Result<Vec<FieldLine>
             assert(tail@ =~= lines@.skip(pos as int));
         }
         let (lr, Ghost(cl)) = decode_field_line_bounded(tail, left);
+        proof {
+            // the line's cost, charged before the exit after it (rca-early-return-cost)
+            work = work + cl;
+        }
         match lr {
             Ok((f, k)) => {
                 proof {
                     lemma_lines_bounded_step(lines@, budget, pos as int, left, k as nat, fields_view(out@), f@);
                     lemma_line_expansion(tail@);
                     assert(fields_view(out@.push(f)) =~= fields_view(out@).push(f@));
-                    work = work + cl + 1;
+                    work = work + 1;
                 }
                 let ghost done = fields_view(out@);
                 left = left - f.name.len() as u64 - f.value.len() as u64 - 32;
@@ -1338,10 +1354,13 @@ fn decode_lines_bounded(lines: &[u8], budget: u64) -> (r: (Result<Vec<FieldLine>
                 }
             },
             Err(e) => {
+                // the exit's own charge: the free of `out` and its lines
+                let ghost extra: nat = lines_free(out@.len() as nat);
                 proof {
                     lemma_lines_bounded_err(lines@, budget, pos as int, left, fields_view(out@), e);
+                    crate::frame::lemma_exit_pays(lines_free(out@.len() as nat), extra);
                 }
-                return (Err(e), Ghost(work + cl));
+                return (Err(e), Ghost(work + extra));
             },
         }
     }

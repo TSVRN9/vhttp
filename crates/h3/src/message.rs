@@ -365,13 +365,14 @@ pub fn eq_bytes_w(a: &[u8], b: &[u8]) -> (r: (bool, Ghost<nat>))
             work == i + 1,
         decreases a.len() - i,
     {
+        proof {
+            // this iteration's unit, charged before any exit in it (rca-early-return-cost)
+            work = work + 1;
+        }
         if a[i] != b[i] {
             return (false, Ghost(work));
         }
         i += 1;
-        proof {
-            work = work + 1;
-        }
     }
     assert(a@ =~= b@);
     (true, Ghost(work))
@@ -459,13 +460,14 @@ pub fn field_name_ok_w(n: &[u8]) -> (r: (bool, Ghost<nat>))
             forall|k: int| 0 <= k < i ==> tchar_lc_spec(#[trigger] n@[k]),
         decreases n.len() - i,
     {
+        proof {
+            // this iteration's unit, charged before any exit in it (rca-early-return-cost)
+            work = work + 1;
+        }
         if !tchar_lc(n[i]) {
             return (false, Ghost(work));
         }
         i += 1;
-        proof {
-            work = work + 1;
-        }
     }
     (true, Ghost(work))
 }
@@ -498,13 +500,14 @@ pub fn field_value_ok_w(v: &[u8]) -> (r: (bool, Ghost<nat>))
             forall|k: int| 0 <= k < i ==> vchar_spec(#[trigger] v@[k]) || v@[k] == 32 || v@[k] == 9,
         decreases v.len() - i,
     {
+        proof {
+            // this iteration's unit, charged before any exit in it (rca-early-return-cost)
+            work = work + 1;
+        }
         if !(vchar(v[i]) || v[i] == 32 || v[i] == 9) {
             return (false, Ghost(work));
         }
         i += 1;
-        proof {
-            work = work + 1;
-        }
     }
     (true, Ghost(work))
 }
@@ -1237,6 +1240,10 @@ fn pseudo_first_x(fields: &[FieldLine]) -> (r: (bool, Ghost<nat>))
         decreases fields.len() - i,
     {
         proof {
+            // this iteration's unit, charged before any exit in it (rca-early-return-cost)
+            work = work + 1;
+        }
+        proof {
             assert(fv[i as int] == fields@[i as int]@);
         }
         let p = is_pseudo_x(&fields[i].name);
@@ -1249,15 +1256,12 @@ fn pseudo_first_x(fields: &[FieldLine]) -> (r: (bool, Ghost<nat>))
                     }
                 }
             }
-            return (false, Ghost(work + 1));
+            return (false, Ghost(work));
         }
         if !p {
             seen = true;
         }
         i += 1;
-        proof {
-            work = work + 1;
-        }
     }
     (true, Ghost(work))
 }
@@ -1368,6 +1372,10 @@ fn parse_cl_w(v: &[u8]) -> (r: (Option<u64>, Ghost<nat>))
             acc as int == digits_val(v@.take(i as int)),
         decreases v.len() - i,
     {
+        proof {
+            // this iteration's unit, charged before any exit in it (rca-early-return-cost)
+            work = work + 1;
+        }
         let b = v[i];
         if b < 48 || b > 57 {
             return (None, Ghost(work));
@@ -1386,9 +1394,6 @@ fn parse_cl_w(v: &[u8]) -> (r: (Option<u64>, Ghost<nat>))
         }
         acc = acc * 10 + d;
         i += 1;
-        proof {
-            work = work + 1;
-        }
     }
     assert(v@.take(v.len() as int) =~= v@);
     if v.len() == 0 {
@@ -1562,6 +1567,10 @@ fn eq_ci_x(s: &[u8], lit: &[u8]) -> (r: (bool, Ghost<nat>))
                 }) == lit@[k],
         decreases s.len() - i,
     {
+        proof {
+            // this iteration's unit, charged before any exit in it (rca-early-return-cost)
+            work = work + 1;
+        }
         let c = if 65 <= s[i] && s[i] <= 90 {
             s[i] + 32
         } else {
@@ -1571,9 +1580,6 @@ fn eq_ci_x(s: &[u8], lit: &[u8]) -> (r: (bool, Ghost<nat>))
             return (false, Ghost(work));
         }
         i += 1;
-        proof {
-            work = work + 1;
-        }
     }
     (true, Ghost(work))
 }
@@ -1611,13 +1617,14 @@ fn no_at_x(s: &[u8]) -> (r: (bool, Ghost<nat>))
             forall|k: int| 0 <= k < i ==> (#[trigger] s@[k]) != 64u8,
         decreases s.len() - i,
     {
+        proof {
+            // this iteration's unit, charged before any exit in it (rca-early-return-cost)
+            work = work + 1;
+        }
         if s[i] == 64 {
             return (false, Ghost(work));
         }
         i += 1;
-        proof {
-            work = work + 1;
-        }
     }
     (true, Ghost(work))
 }
