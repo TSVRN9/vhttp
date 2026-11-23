@@ -1090,12 +1090,12 @@ fn decode_lines(lines: &[u8]) -> (r: (Option<Vec<FieldLine>>, Ghost<nat>))
             },
             None => {
                 // the exit's own charge: the free of `out` and its lines
-                let ghost extra: nat = lines_free(out@.len() as nat);
+                let ghost ret: nat = work + lines_free(out@.len() as nat);
                 proof {
                     lemma_lines_none(lines@, pos as int, fields_view(out@));
-                    crate::frame::lemma_exit_pays(lines_free(out@.len() as nat), extra);
+                    crate::frame::lemma_paid(work, lines_free(out@.len() as nat), ret);
                 }
-                return (None, Ghost(work + extra));
+                return (None, Ghost(ret));
             },
         }
     }
@@ -1355,12 +1355,12 @@ fn decode_lines_bounded(lines: &[u8], budget: u64) -> (r: (Result<Vec<FieldLine>
             },
             Err(e) => {
                 // the exit's own charge: the free of `out` and its lines
-                let ghost extra: nat = lines_free(out@.len() as nat);
+                let ghost ret: nat = work + lines_free(out@.len() as nat);
                 proof {
                     lemma_lines_bounded_err(lines@, budget, pos as int, left, fields_view(out@), e);
-                    crate::frame::lemma_exit_pays(lines_free(out@.len() as nat), extra);
+                    crate::frame::lemma_paid(work, lines_free(out@.len() as nat), ret);
                 }
-                return (Err(e), Ghost(work + extra));
+                return (Err(e), Ghost(ret));
             },
         }
     }

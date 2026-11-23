@@ -1636,6 +1636,15 @@ corepo co1; corows; printf '// fixed under cat-C9.\n' >> "$tmp/co1/crates/a/src/
 expect_fail "carryovers: a crates comment citing a closed carryover id" "crates/a/src/lib.rs:5 cites carryover cat-C9, a closed row" co co1
 corepo co1; corows; printf '/// see carryover `x-gone`\n' >> "$tmp/co1/crates/a/src/lib.rs"
 expect_fail "carryovers: a prose prefix cited after carryover" "crates/a/src/lib.rs:5 cites carryover x-gone, which docs/carryovers.tsv does not have" co co1
+# fix round 1 (review I3, M3): the plural cue, a list's later id, a known closed x- id with no cue, a block comment.
+corepo co1; corows; printf '// carryovers: x-gone and cat-C9-open\n' >> "$tmp/co1/crates/a/src/lib.rs"
+expect_fail "carryovers: the plural cue with a colon" "crates/a/src/lib.rs:5 cites carryover x-gone, which docs/carryovers.tsv does not have" co co1
+corepo co1; corows; printf '// carryovers `cat-C9-open`, `x-gone`\n' >> "$tmp/co1/crates/a/src/lib.rs"
+expect_fail "carryovers: a list's later x- id" "crates/a/src/lib.rs:5 cites carryover x-gone, which docs/carryovers.tsv does not have" co co1
+corepo co1; corows; printf 'x-old\t1\tclosed\tdoc:TRUSTED.md\tdemo:9\ta closed x- row\n' >> "$tmp/co1/$cot"; printf '// as in x-old\n' >> "$tmp/co1/crates/a/src/lib.rs"
+expect_fail "carryovers: a known closed x- id with no cue" "crates/a/src/lib.rs:5 cites carryover x-old, a closed row" co co1
+corepo co1; corows; printf '/* owned by\n   carryover cat-C9-gone */\n' >> "$tmp/co1/crates/a/src/lib.rs"
+expect_fail "carryovers: an id in a block comment's second line" "crates/a/src/lib.rs:6 cites carryover cat-C9-gone, which docs/carryovers.tsv does not have" co co1
 corepo co1; sed -i '/^a\t/d' "$tmp/co1/$cot"; gitc co1 commit -qam "delete row a"
 expect_fail "carryovers: main, a row deleted across two commits" "a was removed" co co1
 corepo co1; gitc co1 checkout -qb feat; gitc co1 commit -q --allow-empty -m feat; sed -i '/^a\t/d' "$tmp/co1/$cot"

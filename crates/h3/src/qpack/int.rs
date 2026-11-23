@@ -482,6 +482,10 @@ pub fn parse_prefix_int_w(n: u8, buf: &[u8]) -> (r: (PrefixInt, Ghost<nat>))
                         p > 0,
                 ;
             }
+            proof {
+                // byte i's unit is in what the exit returns (rca-early-return-cost)
+                crate::frame::lemma_paid(i as nat, 1, work);
+            }
             return (PrefixInt::TooLarge, Ghost(work));
         }
         proof {
@@ -496,6 +500,9 @@ pub fn parse_prefix_int_w(n: u8, buf: &[u8]) -> (r: (PrefixInt, Ghost<nat>))
         }
         acc = acc + d * p;
         if byte & 128 == 0 {
+            proof {
+                crate::frame::lemma_paid(i as nat, 1, work);
+            }
             return (PrefixInt::Value { value: acc, consumed: i + 1 }, Ghost(work));
         }
         if i < PREFIX_INT_MAX_CONT {

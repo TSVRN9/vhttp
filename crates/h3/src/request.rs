@@ -2377,7 +2377,7 @@ impl RequestStream {
         let piece = slice_subrange(data, j, j + k);
         let Ghost(wp) = self.buf.push_slice(piece);
         self.all = Ghost(self.all@ + piece@);
-        (k, Ghost(wp + ch))
+        (k, Ghost(wp + ch + 1))
     }
 }
 

@@ -1672,15 +1672,16 @@ impl UniStream {
         let head = slice_subrange(data, 0, i);
         let Ghost(wp) = self.buf.push_slice(head);
         let ghost b = self.buf@;
-        // The varint parse's proved cost: at most c_varint() (8).
+        // The varint parse's proved cost (at most c_varint(), 8), and 1 for this fn's own steps (the head slice, the
+        // kind and `seen` checks).
         let (pv, Ghost(cv)) = parse_varint_w(self.buf.as_slice());
         let (n, ty) = match pv {
             None => {
                 self.all = Ghost(s0.all@ + data@);
                 proof {
-                    lemma_det_none(s0, *self, data@, i as nat, head@, seen0, (wp + cv) as nat);
+                    lemma_det_none(s0, *self, data@, i as nat, head@, seen0, (wp + cv + 1) as nat);
                 }
-                return (Ok(None), Ghost(wp + cv));
+                return (Ok(None), Ghost(wp + cv + 1));
             },
             Some(x) => x,
         };
@@ -1690,9 +1691,9 @@ impl UniStream {
             && seen.decoder) {
             self.all = Ghost(s0.all@ + data@);
             proof {
-                lemma_det_err(s0, *self, data@, i as nat, head@, n as nat, ty, seen0, (wp + cv) as nat);
+                lemma_det_err(s0, *self, data@, i as nat, head@, n as nat, ty, seen0, (wp + cv + 1) as nat);
             }
-            return (Err(H3_STREAM_CREATION_ERROR), Ghost(wp + cv));
+            return (Err(H3_STREAM_CREATION_ERROR), Ghost(wp + cv + 1));
         }
         seen.control = seen.control || ty == STREAM_CONTROL;
         seen.encoder = seen.encoder || ty == STREAM_QPACK_ENCODER;
@@ -1701,9 +1702,9 @@ impl UniStream {
         if let UniKind::Ignored = self.kind {
             self.all = Ghost(s0.all@ + data@);
             proof {
-                lemma_det_ignored(s0, *self, data@, i as nat, head@, b, n as nat, ty, seen0, *seen, (wp + wd + cv) as nat);
+                lemma_det_ignored(s0, *self, data@, i as nat, head@, b, n as nat, ty, seen0, *seen, (wp + wd + cv + 1) as nat);
             }
-            return (Ok(None), Ghost(wp + wd + cv));
+            return (Ok(None), Ghost(wp + wd + cv + 1));
         }
         proof {
             lemma_det_decoded(s0, data@, i as nat, head@, b, n as nat, ty);
@@ -1711,9 +1712,9 @@ impl UniStream {
         let k = n - bl;
         self.all = Ghost(s0.all@ + data@.take(k as int));
         proof {
-            lemma_det_some(s0, *self, data@, i as nat, head@, b, n as nat, ty, seen0, *seen, (wp + wd + cv) as nat);
+            lemma_det_some(s0, *self, data@, i as nat, head@, b, n as nat, ty, seen0, *seen, (wp + wd + cv + 1) as nat);
         }
-        (Ok(Some(k)), Ghost(wp + wd + cv))
+        (Ok(Some(k)), Ghost(wp + wd + cv + 1))
     }
 
     /// Feeds `seg` to a critical stream; then a FIN is H3_CLOSED_CRITICAL_STREAM.
@@ -2210,6 +2211,8 @@ impl UniStream {
         proof {
             lemma_split_append(all1, self.seen0@, self.emitted@, self.kind, self.ctrl, self.skip, buf1, piece@);
         }
+        // The header parse's and the push's costs; this fn's own constant steps are uncharged: the 21 of the bound has
+        // no room for them, and the Budget makes them explicit (carryover sc-h3-budget).
         (j + k, Ghost(wp + ch))
     }
 

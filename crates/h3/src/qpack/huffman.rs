@@ -961,11 +961,11 @@ pub fn huffman_decode_w(input: &[u8]) -> (r: (Option<Vec<u8>>, Ghost<nat>))
                     }
                 }
                 // the exit's own charge: the free of `out`
-                let ghost extra: nat = c_hfree();
+                let ghost ret: nat = work + c_hfree();
                 proof {
-                    crate::frame::lemma_exit_pays(c_hfree(), extra);
+                    crate::frame::lemma_paid(work, c_hfree(), ret);
                 }
-                return (None, Ghost(work + extra));
+                return (None, Ghost(ret));
             }
             j += 1;
         }
@@ -993,7 +993,11 @@ pub fn huffman_decode_w(input: &[u8]) -> (r: (Option<Vec<u8>>, Ghost<nat>))
             }
         }
         // the free of `out`
-        (None, Ghost(work + c_hfree()))
+        let ghost ret: nat = work + c_hfree();
+        proof {
+            crate::frame::lemma_paid(work, c_hfree(), ret);
+        }
+        (None, Ghost(ret))
     }
 }
 

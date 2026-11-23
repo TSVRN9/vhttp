@@ -370,6 +370,10 @@ pub fn eq_bytes_w(a: &[u8], b: &[u8]) -> (r: (bool, Ghost<nat>))
             work = work + 1;
         }
         if a[i] != b[i] {
+            proof {
+                // this iteration's unit is in what the exit returns (rca-early-return-cost)
+                crate::frame::lemma_paid((i + 1) as nat, 1, work);
+            }
             return (false, Ghost(work));
         }
         i += 1;
@@ -465,6 +469,10 @@ pub fn field_name_ok_w(n: &[u8]) -> (r: (bool, Ghost<nat>))
             work = work + 1;
         }
         if !tchar_lc(n[i]) {
+            proof {
+                // this iteration's unit is in what the exit returns (rca-early-return-cost)
+                crate::frame::lemma_paid((i + 1) as nat, 1, work);
+            }
             return (false, Ghost(work));
         }
         i += 1;
@@ -505,6 +513,10 @@ pub fn field_value_ok_w(v: &[u8]) -> (r: (bool, Ghost<nat>))
             work = work + 1;
         }
         if !(vchar(v[i]) || v[i] == 32 || v[i] == 9) {
+            proof {
+                // this iteration's unit is in what the exit returns (rca-early-return-cost)
+                crate::frame::lemma_paid((i + 1) as nat, 1, work);
+            }
             return (false, Ghost(work));
         }
         i += 1;
@@ -1256,6 +1268,10 @@ fn pseudo_first_x(fields: &[FieldLine]) -> (r: (bool, Ghost<nat>))
                     }
                 }
             }
+            proof {
+                // this iteration's unit is in what the exit returns (rca-early-return-cost)
+                crate::frame::lemma_paid((i + 1) as nat, 1, work);
+            }
             return (false, Ghost(work));
         }
         if !p {
@@ -1378,6 +1394,10 @@ fn parse_cl_w(v: &[u8]) -> (r: (Option<u64>, Ghost<nat>))
         }
         let b = v[i];
         if b < 48 || b > 57 {
+            proof {
+                // this iteration's unit is in what the exit returns (rca-early-return-cost)
+                crate::frame::lemma_paid((i + 1) as nat, 1, work);
+            }
             return (None, Ghost(work));
         }
         let d = (b - 48) as u64;
@@ -1389,6 +1409,10 @@ fn parse_cl_w(v: &[u8]) -> (r: (Option<u64>, Ghost<nat>))
                 assert(acc as int * 10 + d as int >= 0x1_0000_0000_0000_0000);
                 lemma_digits_mono(v@, i as int + 1, v@.len() as int);
                 assert(v@.take(v@.len() as int) =~= v@);
+            }
+            proof {
+                // this iteration's unit is in what the exit returns (rca-early-return-cost)
+                crate::frame::lemma_paid((i + 1) as nat, 1, work);
             }
             return (None, Ghost(work));
         }
@@ -1577,6 +1601,10 @@ fn eq_ci_x(s: &[u8], lit: &[u8]) -> (r: (bool, Ghost<nat>))
             s[i]
         };
         if c != lit[i] {
+            proof {
+                // this iteration's unit is in what the exit returns (rca-early-return-cost)
+                crate::frame::lemma_paid((i + 1) as nat, 1, work);
+            }
             return (false, Ghost(work));
         }
         i += 1;
@@ -1622,6 +1650,10 @@ fn no_at_x(s: &[u8]) -> (r: (bool, Ghost<nat>))
             work = work + 1;
         }
         if s[i] == 64 {
+            proof {
+                // this iteration's unit is in what the exit returns (rca-early-return-cost)
+                crate::frame::lemma_paid((i + 1) as nat, 1, work);
+            }
             return (false, Ghost(work));
         }
         i += 1;

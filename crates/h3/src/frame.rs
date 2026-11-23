@@ -1315,12 +1315,12 @@ spec fn c_pfree() -> nat {
     1
 }
 
-/// rca-early-return-cost's catch at a costed loop's exit: the exit's own charge `extra` holds its named exit-only
-/// term `t`. Its other terms are callee costs with no lower bound, so an exit that drops `t` fails this precondition
-/// whatever the margin under the fn's bound.
-pub proof fn lemma_exit_pays(t: nat, extra: nat)
+/// rca-early-return-cost's catch at a costed loop's exit: the charge `ret` the exit returns holds `w`, what was charged
+/// before, and `t`, the term this exit owes (its iteration's step, or the free of what it drops). Callers pass the
+/// value they return; an exit whose `ret` drops `t` fails this precondition whatever the margin under the fn's bound.
+pub proof fn lemma_paid(w: nat, t: nat, ret: nat)
     requires
-        t <= extra,
+        w + t <= ret,
 {
 }
 
@@ -1368,12 +1368,12 @@ fn parse_settings(payload: &[u8]) -> (r: (Result<Frame, u64>, Ghost<nat>))
             Some(x) => x,
             None => {
                 // the exit's own charge: the free of `pairs`
-                let ghost extra: nat = c_pfree();
+                let ghost ret: nat = work + c_pfree();
                 proof {
-                    lemma_exit_pays(c_pfree(), extra);
-                    lemma_pset_cost(d, pairs@.len(), work + extra);
+                    lemma_paid(work, c_pfree(), ret);
+                    lemma_pset_cost(d, pairs@.len(), ret);
                 }
-                return (Err(H3_FRAME_ERROR), Ghost(work + extra));
+                return (Err(H3_FRAME_ERROR), Ghost(ret));
             },
         };
         let tail2 = slice_subrange(tail, n1, tail.len());
@@ -1387,12 +1387,12 @@ fn parse_settings(payload: &[u8]) -> (r: (Result<Frame, u64>, Ghost<nat>))
         let (n2, v) = match p2 {
             Some(x) => x,
             None => {
-                let ghost extra: nat = c_pfree();
+                let ghost ret: nat = work + c_pfree();
                 proof {
-                    lemma_exit_pays(c_pfree(), extra);
-                    lemma_pset_cost(d, pairs@.len(), work + extra);
+                    lemma_paid(work, c_pfree(), ret);
+                    lemma_pset_cost(d, pairs@.len(), ret);
                 }
-                return (Err(H3_FRAME_ERROR), Ghost(work + extra));
+                return (Err(H3_FRAME_ERROR), Ghost(ret));
             },
         };
         proof {

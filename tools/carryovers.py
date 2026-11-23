@@ -12,10 +12,12 @@ Reads ROOT/docs/roadmap.md (the table `| id | title | status | order | plan / me
   before the first `(`);
 - no tracked `docs/rca/*.md` Evidence bullet (its line and indented continuation lines), TRUSTED.md, docs/requirements.md
   or crates/**/*.rs line cites `.worktrees/`, `.superpowers/`, `/tmp/` or a `vt-*-evidence` dir (untracked evidence);
-- every carryover id a comment (from `//` on) of a tracked crates/*/src .rs file cites is a row of the tsv, and an open
-  one (9b3 Task 12; the class of 9b3 Task 11 review I1: a site citing a missing or closed row passed every gate). An id
-  is a token `<prefix>-<word>[-<word>..]`, the longest one, whose prefix is one before the first `-` of a tsv id; the
-  prefixes in PROSE also begin English words (x-coordinate, cost-root), so theirs count only right after `carryover`.
+- every carryover id a comment (`//` to the line's end, or `/*` to `*/`, across lines) of a tracked crates/*/src .rs
+  file cites is a row of the tsv, and an open one (9b3 Task 12; the class of 9b3 Task 11 review I1: a site citing a
+  missing or closed row passed every gate). An id is a token `<prefix>-<word>[-<word>..]`, the longest one, whose prefix
+  is one before the first `-` of a tsv id. A token that is a tsv id is always checked. The prefixes in PROSE also begin
+  English words (x-coordinate, cost-root), so an unknown token of theirs fails only after the cue `carryover`,
+  `carryovers` or `carryover:`, directly or later in a list (`carryovers a, b and x-c`).
   This is a docs-integrity check, not a cost guarantee.
 A missing file, an empty table or tsv, or a git error fails. Row deletion and un-merging are checked by scripts/carryovers.sh."""
 import os, re, subprocess, sys
@@ -26,6 +28,8 @@ UNTRACKED = re.compile(r'\.worktrees/|\.superpowers/|/tmp/|vt-[^/\s`]*-evidence'
 EVIDENCE_LINE = re.compile(r'^\s*- \*\*Evidence(:\*\*|\*\*:)')
 NAME = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 PROSE = {'x', 'cost'}
+# the cue before a PROSE-prefixed id: `carryover`, `carryovers` or `carryover:`, then ids in a list (`a, b and c`)
+CUE = re.compile(r'carryovers?\s*:?\s*(?:`?[A-Za-z0-9-]+`?\s*(?:,|\band\b|\bor\b)\s*)*`?$')
 
 
 class Fail(Exception):
@@ -204,20 +208,46 @@ def check(root):
         for f in sorted(tracked):
             if not (re.match(r'^crates/[^/]+/src/', f) and f.endswith('.rs')):
                 continue
+            block = False
             for i, l in enumerate(read(root, f).splitlines(), 1):
-                c = l.find('//')
-                if c < 0:
-                    continue
-                com = l[c:]
-                for m in cite.finditer(com):
-                    if m.group(2) in PROSE and not re.search(r'carryover\s+`?$', com[:m.start()]):
-                        continue
-                    t = m.group(1)
-                    if t not in status_of:
-                        raise Fail('%s:%d cites carryover %s, which docs/carryovers.tsv does not have' % (f, i, t))
-                    if status_of[t] != 'open':
-                        raise Fail('%s:%d cites carryover %s, a closed row: cite the open row that owns the work, or drop the citation' % (f, i, t))
+                for com in comments(l, block):
+                    block = com.endswith('\0')
+                    for m in cite.finditer(com):
+                        t = m.group(1)
+                        if t not in status_of and m.group(2) in PROSE and not CUE.search(com[:m.start()]):
+                            continue
+                        check_cited(f, i, t, status_of)
     print('carryovers: %d rows (%d open), roadmap %d phases, ok' % (len(ids), n_open, len(phases)))
+
+
+def comments(l, block):
+    """The comment texts of line l: `//` to the end, `/*` to `*/`; `block` is true when l starts inside a `/*`. A
+    comment still open at the line's end is returned with a trailing NUL, which tells the caller the next line starts
+    inside it."""
+    out, pos = [], 0
+    while True:
+        if block:
+            e = l.find('*/', pos)
+            if e < 0:
+                out.append(l[pos:] + '\0')
+                return out
+            out.append(l[pos:e])
+            pos, block = e + 2, False
+            continue
+        a, b = l.find('//', pos), l.find('/*', pos)
+        if a >= 0 and (b < 0 or a < b):
+            out.append(l[a:])
+            return out
+        if b < 0:
+            return out
+        pos, block = b + 2, True
+
+
+def check_cited(f, i, t, status_of):
+    if t not in status_of:
+        raise Fail('%s:%d cites carryover %s, which docs/carryovers.tsv does not have' % (f, i, t))
+    if status_of[t] != 'open':
+        raise Fail('%s:%d cites carryover %s, a closed row: cite the open row that owns the work, or drop the citation' % (f, i, t))
 
 
 if __name__ == '__main__':
