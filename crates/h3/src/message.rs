@@ -1499,10 +1499,12 @@ fn cl_ok_x(fields: &[FieldLine]) -> (r: (bool, Ghost<nat>))
         }
         if e {
             let (pc, Ghost(wp)) = parse_cl_w(&f.value);
+            let ghost mut cq: nat = 0;
             let ok = match pc {
                 Some(_) => {
                     let (q, Ghost(wq)) = eq_bytes_w(&f.value, &fields[k].value);
                     proof {
+                        cq = wq;
                         work = work + wq;
                     }
                     q
@@ -1515,7 +1517,7 @@ fn cl_ok_x(fields: &[FieldLine]) -> (r: (bool, Ghost<nat>))
             if !ok {
                 proof {
                     // the iteration's charges are in what the exit returns (rca-early-return-cost)
-                    crate::frame::lemma_paid(w_it, we + 15 + wp, work);
+                    crate::frame::lemma_paid(w_it, we + 15 + cq + wp, work);
                 }
                 return (false, Ghost(work));
             }
