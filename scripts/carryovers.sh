@@ -4,7 +4,7 @@ set -o pipefail
 # carryovers.sh ROOT: docs/roadmap.md, docs/carryovers.tsv and TRUSTED.md agree (tools/carryovers.py check: owners are
 # roadmap ids, closed rows' evidence resolves, no merged phase owns an open row, TRUSTED removal cells name a phase or
 # `never (reason)`, merged phases name an ancestor commit and match the `Merge phase-<id>` commits, no tracked evidence
-# cites an untracked path). Rows are never deleted, only closed, and a merged phase stays merged: on a branch the tsv and
+# cites an untracked path, every carryover id a crates/*/src comment cites is an open row). Rows are never deleted, only closed, and a merged phase stays merged: on a branch the tsv and
 # the roadmap keep every id (and merged id) of the merge-base with main's copy (skipped, and said so, when that commit has
 # none); on main tools/ratchet_walk.py (ids, merged) keeps those of every first-parent copy.
 root=${1:?root}

@@ -925,7 +925,7 @@ impl SendStream {
     }
 
     /// The reservation the stream holds against `MAX_SEND_BUFFER` (`res_of` its peak); its queue's buffers are within
-    /// it (`lemma_held`), so the connection's sum bounds memory (carryover mem-9b2-send-cap).
+    /// it (`lemma_held`), so the connection's sum bounds memory (9b2 Task 8, `Streams::lemma_wf`).
     pub closed spec fn held_spec(&self) -> nat {
         res_of(self.peak as nat)
     }

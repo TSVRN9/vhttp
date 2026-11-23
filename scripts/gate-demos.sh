@@ -1625,6 +1625,17 @@ corepo co1; printf -- '- **Evidence**: see vt-8d-evidence/t2/probe.txt.\n' >> "$
 expect_fail "carryovers: the other Evidence spelling, a bare evidence dir name" "docs/rca/a.md:4 cites 'vt-8d-evidence'" co co1
 corepo co1; printf '/// steps from vt-8d-evidence/t2/core-steps.txt\n' >> "$tmp/co1/crates/a/src/lib.rs"
 expect_fail "carryovers: a crates .rs comment citing an evidence dir" "crates/a/src/lib.rs:5 cites 'vt-8d-evidence'" co co1
+# 9b3 Task 12 (the class of 9b3 Task 11 review I1): a carryover id cited in a crates/*/src comment names an open row;
+# the longest token counts (closed cat-C9 is a prefix of open cat-C9-open), and an x- word is an id only after "carryover".
+corows() { printf 'cat-C9-open\t2\topen\t-\tdemo:6\tan open row\ncat-C9\t1\tclosed\tdoc:TRUSTED.md\tdemo:7\ta closed row\nx-gate\t2\topen\t-\tdemo:8\tan x- row\n' >> "$tmp/co1/$cot"; }
+corepo co1; corows; printf '// owned by carryover cat-C9-open (2); the x-coordinate is prose\n' >> "$tmp/co1/crates/a/src/lib.rs"
+expect_pass "carryovers: a crates comment citing an open carryover id" co co1
+corepo co1; corows; printf '// owned by carryover cat-C9-gone (2)\n' >> "$tmp/co1/crates/a/src/lib.rs"
+expect_fail "carryovers: a crates comment citing a missing carryover id" "crates/a/src/lib.rs:5 cites carryover cat-C9-gone, which docs/carryovers.tsv does not have" co co1
+corepo co1; corows; printf '// fixed under cat-C9.\n' >> "$tmp/co1/crates/a/src/lib.rs"
+expect_fail "carryovers: a crates comment citing a closed carryover id" "crates/a/src/lib.rs:5 cites carryover cat-C9, a closed row" co co1
+corepo co1; corows; printf '/// see carryover `x-gone`\n' >> "$tmp/co1/crates/a/src/lib.rs"
+expect_fail "carryovers: a prose prefix cited after carryover" "crates/a/src/lib.rs:5 cites carryover x-gone, which docs/carryovers.tsv does not have" co co1
 corepo co1; sed -i '/^a\t/d' "$tmp/co1/$cot"; gitc co1 commit -qam "delete row a"
 expect_fail "carryovers: main, a row deleted across two commits" "a was removed" co co1
 corepo co1; gitc co1 checkout -qb feat; gitc co1 commit -q --allow-empty -m feat; sed -i '/^a\t/d' "$tmp/co1/$cot"

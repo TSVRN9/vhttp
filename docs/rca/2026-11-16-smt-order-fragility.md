@@ -64,6 +64,14 @@ crate.
      (pinned, not fixed at the source); each `lemma_join_*` lost its post-recursion implication to a `_cat` lemma that
      `join` calls instead. No ensures was weakened. Caught by `scripts/quick.sh` (gc) and `rlimit-seeds.sh quic 5`, run
      by hand because the gate covers h3 only.
+  8. 9b3 Task 12: a new spec fn in each module (`lines_free` in qpack/field_section.rs, `c_hfree` in qpack/huffman.rs)
+     and edits to other fns there sent two untouched lemmas up: `field_section::lemma_name_out` to 7,957,651 under seed
+     4 (0.35M-3.02M on seeds 0-3; at most 3.34M at 9b3 Task 6) and `huffman::lemma_code_inv` to 6,382,040 under seed 3
+     (2.35M on the others). Fixes at the source: `lemma_name_out`'s inline sequence regrouping moved to
+     `lemma_cat_assoc3` (now at most 79K on every seed); `lemma_code_inv`'s 256-entry table check is evaluated
+     (`by (compute_only)` over `code_inv_upto(256)`, then `lemma_code_inv_upto`; at most 1.14M), not searched. Splitting
+     the table into halves did not help (the upper half walks past the lower half's branches: 9.6M-12M). No ensures was
+     weakened. Caught by `rlimit-seeds.sh h3 5`.
 - **Escape**: the rlimit gate (`scripts/rlimit-gate.sh`, `tools/rl.py --gate`) and the ceilings ratchet
   (`scripts/rlimit-ceilings.sh`) measure one run under Z3's default seed. A number from one run says nothing about the
   margin: a proof can pass at 7.9M on that path and fail on the next. The ceilings file even recorded fns above the

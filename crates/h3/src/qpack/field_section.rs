@@ -1644,11 +1644,20 @@ proof fn lemma_name_out(o: Seq<u8>, out: Seq<u8>, i: u64, name: Seq<u8>, value: 
         rfc_field_line(out.skip(o.len() as int)) == Some(((name, value), (out.len() - o.len()) as nat)),
 {
     hide(rfc_field_line);
+    let (p, q) = (spec_prefix_int_bytes(4, 0x50, i), spec_prefix_int_bytes(7, 0x00, value.len() as u64));
     lemma_name_line_len(i, value);
-    let e = spec_prefix_int_bytes(4, 0x50, i) + (spec_prefix_int_bytes(7, 0x00, value.len() as u64) + value);
-    assert(out =~= o + e);
+    lemma_cat_assoc3(o, p, q, value);
     lemma_name_line(i, name, value);
-    lemma_line_out(o, out, e, (name, value));
+    lemma_line_out(o, out, p + (q + value), (name, value));
+}
+
+/// `o + a + b + v` regrouped, in its own small context (`lemma_name_out` varied 0.35M-7.96M over seeds 0-4 with the
+/// equality inline, 9b3 Task 12).
+proof fn lemma_cat_assoc3(o: Seq<u8>, a: Seq<u8>, b: Seq<u8>, v: Seq<u8>)
+    ensures
+        o.add(a) + b + v == o + (a + (b + v)),
+{
+    assert(o.add(a) + b + v =~= o + (a + (b + v)));
 }
 
 /// `encode_literal_line`'s bytes.

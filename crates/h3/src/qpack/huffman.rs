@@ -487,12 +487,42 @@ proof fn lemma_code_inv(a: nat)
     requires
         a < 256,
     ensures
-        ({
-            let (c, l) = spec_huff_code(a);
-            let (f, _n, o) = spec_huff_len_info(l);
-            spec_huff_sorted((o + c - f) as nat) == a
-        }),
+        code_inv(a),
 {
+    // Evaluated, not searched: the table as one SMT query ran 2.35M-6.38M over seeds 0-4 (9b3 Task 12).
+    assert(code_inv_upto(256)) by (compute_only);
+    lemma_code_inv_upto(256, a);
+}
+
+/// Byte `a` sits at its code's slot of `sorted`.
+spec fn code_inv(a: nat) -> bool {
+    let (c, l) = spec_huff_code(a);
+    let (f, _n, o) = spec_huff_len_info(l);
+    spec_huff_sorted((o + c - f) as nat) == a
+}
+
+/// `code_inv` for every byte below `n`.
+spec fn code_inv_upto(n: nat) -> bool
+    decreases n,
+{
+    if n == 0 {
+        true
+    } else {
+        code_inv_upto((n - 1) as nat) && code_inv((n - 1) as nat)
+    }
+}
+
+proof fn lemma_code_inv_upto(n: nat, a: nat)
+    requires
+        code_inv_upto(n),
+        a < n,
+    ensures
+        code_inv(a),
+    decreases n,
+{
+    if a < n - 1 {
+        lemma_code_inv_upto((n - 1) as nat, a);
+    }
 }
 
 proof fn lemma_code_inj(a: nat, b: nat)

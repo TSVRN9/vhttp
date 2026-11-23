@@ -11,7 +11,12 @@ Reads ROOT/docs/roadmap.md (the table `| id | title | status | order | plan / me
 - every TRUSTED.md table row has 4 cells and its last cell is `never (<reason>)` or starts with roadmap ids (every id
   before the first `(`);
 - no tracked `docs/rca/*.md` Evidence bullet (its line and indented continuation lines), TRUSTED.md, docs/requirements.md
-  or crates/**/*.rs line cites `.worktrees/`, `.superpowers/`, `/tmp/` or a `vt-*-evidence` dir (untracked evidence).
+  or crates/**/*.rs line cites `.worktrees/`, `.superpowers/`, `/tmp/` or a `vt-*-evidence` dir (untracked evidence);
+- every carryover id a comment (from `//` on) of a tracked crates/*/src .rs file cites is a row of the tsv, and an open
+  one (9b3 Task 12; the class of 9b3 Task 11 review I1: a site citing a missing or closed row passed every gate). An id
+  is a token `<prefix>-<word>[-<word>..]`, the longest one, whose prefix is one before the first `-` of a tsv id; the
+  prefixes in PROSE also begin English words (x-coordinate, cost-root), so theirs count only right after `carryover`.
+  This is a docs-integrity check, not a cost guarantee.
 A missing file, an empty table or tsv, or a git error fails. Row deletion and un-merging are checked by scripts/carryovers.sh."""
 import os, re, subprocess, sys
 
@@ -20,6 +25,7 @@ STATUSES = {'merged', 'in progress', 'planned', 'unplanned'}
 UNTRACKED = re.compile(r'\.worktrees/|\.superpowers/|/tmp/|vt-[^/\s`]*-evidence')
 EVIDENCE_LINE = re.compile(r'^\s*- \*\*Evidence(:\*\*|\*\*:)')
 NAME = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+PROSE = {'x', 'cost'}
 
 
 class Fail(Exception):
@@ -115,7 +121,7 @@ def check(root):
         raise Fail('docs/carryovers.tsv: the first line must be the header %r' % '\t'.join(HEADER))
     if len(rows) == 1:
         raise Fail('docs/carryovers.tsv has no rows')
-    ids, n_open = set(), 0
+    ids, n_open, status_of = set(), 0, {}
     for i, l in enumerate(rows[1:], 2):
         f = l.split('\t')
         if len(f) != 6 or not all(x.strip() for x in f):
@@ -124,6 +130,7 @@ def check(root):
         if rid in ids:
             raise Fail('docs/carryovers.tsv:%d: duplicate id %s' % (i, rid))
         ids.add(rid)
+        status_of[rid] = status
         if owner not in phases:
             raise Fail('docs/carryovers.tsv:%d: %s: owner %s is not a phase of docs/roadmap.md' % (i, rid, owner))
         if status == 'open':
@@ -191,6 +198,25 @@ def check(root):
             m = UNTRACKED.search(l)
             if m:
                 raise Fail('%s:%d cites %r, an untracked path: cite a test, a mutant id with `scripts/mutants.sh run`, a gate demo or a commit' % (f, i, m.group(0)))
+    prefixes = sorted({i.split('-')[0] for i in ids if '-' in i[1:]})
+    if prefixes:
+        cite = re.compile(r'(?<![A-Za-z0-9_-])((%s)-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)' % '|'.join(map(re.escape, prefixes)))
+        for f in sorted(tracked):
+            if not (re.match(r'^crates/[^/]+/src/', f) and f.endswith('.rs')):
+                continue
+            for i, l in enumerate(read(root, f).splitlines(), 1):
+                c = l.find('//')
+                if c < 0:
+                    continue
+                com = l[c:]
+                for m in cite.finditer(com):
+                    if m.group(2) in PROSE and not re.search(r'carryover\s+`?$', com[:m.start()]):
+                        continue
+                    t = m.group(1)
+                    if t not in status_of:
+                        raise Fail('%s:%d cites carryover %s, which docs/carryovers.tsv does not have' % (f, i, t))
+                    if status_of[t] != 'open':
+                        raise Fail('%s:%d cites carryover %s, a closed row: cite the open row that owns the work, or drop the citation' % (f, i, t))
     print('carryovers: %d rows (%d open), roadmap %d phases, ok' % (len(ids), n_open, len(phases)))
 
 
