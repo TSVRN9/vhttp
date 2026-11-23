@@ -352,7 +352,7 @@ fn get_end_to_end() {
     assert!(collect(&v, 0, &mut w));
     let FrameHeader::Complete { ty: 1, len, hdr_len } = parse_frame_header(&w) else { panic!("no HEADERS") };
     let end = hdr_len + len as usize;
-    let fields = decode_field_section(&w[hdr_len..end]).unwrap();
+    let fields = decode_field_section(&w[hdr_len..end]).0.unwrap();
     assert_eq!(fields.len(), 2);
     assert_eq!((&fields[0].name[..], &fields[0].value[..]), (&b":status"[..], &b"200"[..]));
     assert_eq!((&fields[1].name[..], &fields[1].value[..]), (&b"content-type"[..], &b"text/plain"[..]));
@@ -464,7 +464,7 @@ fn deferred_large_response() {
     assert!(collect(&all, 0, &mut w));
     let FrameHeader::Complete { ty: 1, len, hdr_len } = parse_frame_header(&w) else { panic!("no HEADERS") };
     let f = hdr_len + len as usize;
-    let fields = decode_field_section(&w[hdr_len..f]).unwrap();
+    let fields = decode_field_section(&w[hdr_len..f]).0.unwrap();
     assert_eq!(fields.len(), 1);
     assert_eq!((&fields[0].name[..], &fields[0].value[..]), (&b":status"[..], &b"200"[..]));
     let FrameHeader::Complete { ty: 0, len, hdr_len } = parse_frame_header(&w[f..]) else { panic!("no DATA") };

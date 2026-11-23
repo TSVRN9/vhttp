@@ -12,7 +12,7 @@ fn hex(h: &str) -> Vec<u8> {
 }
 
 fn dec(h: &str) -> Result<Pairs, u64> {
-    decode_field_section(&hex(h)).map(|v| v.into_iter().map(|f| (f.name, f.value)).collect())
+    decode_field_section(&hex(h)).0.map(|v| v.into_iter().map(|f| (f.name, f.value)).collect())
 }
 
 fn pair(n: &str, v: &str) -> (Vec<u8>, Vec<u8>) {
@@ -83,7 +83,7 @@ fn encode_roundtrip() {
     encode_field_section(&fields, &mut out);
     assert_eq!(out[0], 0xaa);
     assert_eq!(&out[1..4], &[0x00, 0x00, 0xd9]);
-    let got = decode_field_section(&out[1..])
+    let got = decode_field_section(&out[1..]).0
         .map(|v| v.into_iter().map(|f| (f.name, f.value)).collect::<Pairs>());
     assert_eq!(
         got,

@@ -1,6 +1,7 @@
 //! HPACK/QPACK Huffman string decoding (RFC 7541 §5.2, used by RFC 9204 §4.1.2), proved sound
 //! and complete against `rfc_huffman_decodes`. No encoder: responses use H=0 literals.
 use super::huffman_table::*;
+use byteq::capvec::CapVec;
 // Used only in ghost code, which a plain `cargo build` erases.
 #[allow(unused_imports)]
 use vstd::arithmetic::power2::*;
@@ -486,12 +487,42 @@ proof fn lemma_code_inv(a: nat)
     requires
         a < 256,
     ensures
-        ({
-            let (c, l) = spec_huff_code(a);
-            let (f, _n, o) = spec_huff_len_info(l);
-            spec_huff_sorted((o + c - f) as nat) == a
-        }),
+        code_inv(a),
 {
+    // Evaluated, not searched: the table as one SMT query ran 2.35M-6.38M over seeds 0-4 (9b3 Task 12).
+    assert(code_inv_upto(256)) by (compute_only);
+    lemma_code_inv_upto(256, a);
+}
+
+/// Byte `a` sits at its code's slot of `sorted`.
+spec fn code_inv(a: nat) -> bool {
+    let (c, l) = spec_huff_code(a);
+    let (f, _n, o) = spec_huff_len_info(l);
+    spec_huff_sorted((o + c - f) as nat) == a
+}
+
+/// `code_inv` for every byte below `n`.
+spec fn code_inv_upto(n: nat) -> bool
+    decreases n,
+{
+    if n == 0 {
+        true
+    } else {
+        code_inv_upto((n - 1) as nat) && code_inv((n - 1) as nat)
+    }
+}
+
+proof fn lemma_code_inv_upto(n: nat, a: nat)
+    requires
+        code_inv_upto(n),
+        a < n,
+    ensures
+        code_inv(a),
+    decreases n,
+{
+    if a < n - 1 {
+        lemma_code_inv_upto((n - 1) as nat, a);
+    }
 }
 
 proof fn lemma_code_inj(a: nat, b: nat)
@@ -547,6 +578,60 @@ proof fn lemma_ones_no_code(s: Seq<u8>, k: nat, k0: nat)
     lemma_short_not_ones(s[0] as nat);
 }
 
+/// Two codes that both start `w` are the same byte's (the code is prefix-free and injective).
+proof fn lemma_first_code(a1: nat, a2: nat, w: Seq<bool>)
+    requires
+        a1 < 256,
+        a2 < 256,
+        code_bits(a1).len() <= w.len(),
+        code_bits(a2).len() <= w.len(),
+        code_bits(a1) == w.subrange(0, code_bits(a1).len() as int),
+        code_bits(a2) == w.subrange(0, code_bits(a2).len() as int),
+    ensures
+        a1 == a2,
+{
+    let c1 = code_bits(a1);
+    let c2 = code_bits(a2);
+    lemma_code_len(a1);
+    lemma_code_len(a2);
+    if c1.len() < c2.len() {
+        assert(c2.subrange(0, c1.len() as int) =~= c1);
+        lemma_prefix_free(a1, a2);
+    } else if c2.len() < c1.len() {
+        assert(c1.subrange(0, c2.len() as int) =~= c2);
+        lemma_prefix_free(a2, a1);
+    } else {
+        assert(c1 =~= c2);
+    }
+    lemma_code_inj(a1, a2);
+}
+
+/// Two non-empty strings with equal padded codes start with the same byte, and their rests' padded codes are equal.
+proof fn lemma_unique_head(s1: Seq<u8>, k1: nat, s2: Seq<u8>, k2: nat)
+    requires
+        s1.len() > 0,
+        s2.len() > 0,
+        encode_bits(s1) + ones(k1) == encode_bits(s2) + ones(k2),
+    ensures
+        s1[0] == s2[0],
+        encode_bits(s1.drop_first()) + ones(k1) == encode_bits(s2.drop_first()) + ones(k2),
+{
+    let a1 = s1[0] as nat;
+    let a2 = s2[0] as nat;
+    let c1 = code_bits(a1);
+    let c2 = code_bits(a2);
+    let t1 = encode_bits(s1.drop_first()) + ones(k1);
+    let t2 = encode_bits(s2.drop_first()) + ones(k2);
+    let w = encode_bits(s1) + ones(k1);
+    assert(w =~= c1 + t1);
+    assert(w =~= c2 + t2);
+    assert(c1 =~= w.subrange(0, c1.len() as int));
+    assert(c2 =~= w.subrange(0, c2.len() as int));
+    lemma_first_code(a1, a2, w);
+    assert(t1 =~= w.subrange(c1.len() as int, w.len() as int));
+    assert(t2 =~= w.subrange(c2.len() as int, w.len() as int));
+}
+
 proof fn lemma_unique_bits(s1: Seq<u8>, k1: nat, s2: Seq<u8>, k2: nat)
     requires
         k1 <= 7,
@@ -565,31 +650,7 @@ proof fn lemma_unique_bits(s1: Seq<u8>, k1: nat, s2: Seq<u8>, k2: nat)
         assert(encode_bits(s2) + ones(k2) =~= ones(k2));
         lemma_ones_no_code(s1, k1, k2);
     } else {
-        let a1 = s1[0] as nat;
-        let a2 = s2[0] as nat;
-        let c1 = code_bits(a1);
-        let c2 = code_bits(a2);
-        let t1 = encode_bits(s1.drop_first()) + ones(k1);
-        let t2 = encode_bits(s2.drop_first()) + ones(k2);
-        let w = encode_bits(s1) + ones(k1);
-        assert(w =~= c1 + t1);
-        assert(w =~= c2 + t2);
-        lemma_code_len(a1);
-        lemma_code_len(a2);
-        if c1.len() < c2.len() {
-            assert(c2.subrange(0, c1.len() as int) =~= w.subrange(0, c1.len() as int));
-            assert(w.subrange(0, c1.len() as int) =~= c1);
-            lemma_prefix_free(a1, a2);
-        } else if c2.len() < c1.len() {
-            assert(c1.subrange(0, c2.len() as int) =~= w.subrange(0, c2.len() as int));
-            assert(w.subrange(0, c2.len() as int) =~= c2);
-            lemma_prefix_free(a2, a1);
-        }
-        assert(c1 =~= w.subrange(0, c1.len() as int));
-        assert(c2 =~= w.subrange(0, c2.len() as int));
-        lemma_code_inj(a1, a2);
-        assert(t1 =~= w.subrange(c1.len() as int, w.len() as int));
-        assert(t2 =~= w.subrange(c2.len() as int, w.len() as int));
+        lemma_unique_head(s1, k1, s2, k2);
         lemma_unique_bits(s1.drop_first(), k1, s2.drop_first(), k2);
         assert(s1 =~= seq![s1[0]] + s1.drop_first());
         assert(s2 =~= seq![s2[0]] + s2.drop_first());
@@ -607,6 +668,38 @@ pub proof fn lemma_huffman_unique(input: Seq<u8>, s1: Seq<u8>, s2: Seq<u8>)
     let k1 = choose|k: nat| k <= 7 && bytes_to_bits(input) == encode_bits(s1) + #[trigger] ones(k);
     let k2 = choose|k: nat| k <= 7 && bytes_to_bits(input) == encode_bits(s2) + #[trigger] ones(k);
     lemma_unique_bits(s1, k1, s2, k2);
+}
+
+/// Every byte's code is at least 5 bits (the table's shortest).
+proof fn lemma_code_len_ge5(sym: u8)
+    ensures
+        code_bits(sym as nat).len() >= 5,
+{
+    assert(spec_huff_code(sym as nat).1 >= 5);
+    lemma_bits_of_len(spec_huff_code(sym as nat).0 as nat, spec_huff_code(sym as nat).1);
+}
+
+proof fn lemma_encode_len(s: Seq<u8>)
+    ensures
+        encode_bits(s).len() >= 5 * s.len(),
+    decreases s.len(),
+{
+    if s.len() > 0 {
+        lemma_code_len_ge5(s[0]);
+        lemma_encode_len(s.drop_first());
+    }
+}
+
+/// A Huffman string of `len` bytes decodes to at most `8·len/5` bytes: `huffman_decode_w`'s capacity.
+pub proof fn lemma_decoded_len(input: Seq<u8>, s: Seq<u8>)
+    requires
+        rfc_huffman_decodes(input, s),
+    ensures
+        5 * s.len() <= 8 * input.len(),
+{
+    let k = choose|k: nat| k <= 7 && bytes_to_bits(input) == encode_bits(s) + #[trigger] ones(k);
+    lemma_encode_len(s);
+    assert(bytes_to_bits(input).len() == 8 * input.len());
 }
 
 spec fn state_ok(
@@ -663,23 +756,37 @@ fn lookup(acc: u32, len: u32) -> (r: Option<u8>)
     }
 }
 
-/// Consumes bit `bits[t]`. `false` means no byte string decodes from `bits`.
+/// The output after a step that completed `sym` (or none).
+spec fn stepped_out(out: Seq<u8>, sym: Option<u8>) -> Seq<u8> {
+    match sym {
+        Some(c) => out.push(c),
+        None => out,
+    }
+}
+
+/// Consumes bit `bits[t]` after the string `out` decoded so far: `(ok, the byte it completed)`, the caller appends the
+/// byte. `false` means no byte string decodes from `bits`. A completed code has at least 5 bits, so the string stays
+/// within `bits.len() / 5` bytes. One unit of cost: the step.
+// The completed byte is read only by proofs, which a plain `cargo build` erases.
+#[allow(unused_variables)]
 fn feed_bit(
-    out: &mut Vec<u8>,
     acc: &mut u32,
     len: &mut u32,
     all_ones: &mut bool,
     bit: bool,
+    Ghost(out): Ghost<Seq<u8>>,
     Ghost(bits): Ghost<Seq<bool>>,
     Ghost(t): Ghost<int>,
-) -> (ok: bool)
+) -> (r: (bool, Option<u8>, Ghost<nat>))
     requires
         0 <= t < bits.len(),
         bits[t] == bit,
-        state_ok(bits, t, old(out)@, *old(acc), *old(len), *old(all_ones)),
+        state_ok(bits, t, out, *old(acc), *old(len), *old(all_ones)),
     ensures
-        ok ==> state_ok(bits, t + 1, final(out)@, *final(acc), *final(len), *final(all_ones)),
-        !ok ==> !decodable(Seq::empty(), bits),
+        r.0 ==> state_ok(bits, t + 1, stepped_out(out, r.1), *final(acc), *final(len), *final(all_ones)),
+        !r.0 ==> !decodable(Seq::empty(), bits),
+        r.1 is Some ==> out.len() + 1 <= bits.len() / 5,
+        r.2@ <= 1,
 {
     let ghost p = bits_of(*acc as nat, *len as nat);
     let ghost q = p.push(bit);
@@ -687,7 +794,7 @@ fn feed_bit(
     proof {
         assert(bits.subrange(t, bits.len() as int) =~= seq![bit] + rem);
         assert(bits.subrange(0, t + 1) =~= bits.subrange(0, t).push(bit));
-        assert(encode_bits(old(out)@) + q =~= (encode_bits(old(out)@) + p).push(bit));
+        assert(encode_bits(out) + q =~= (encode_bits(out) + p).push(bit));
         lemma_pow2_unfold(*len as nat + 1);
         if *len < 29 {
             lemma_pow2_strictly_increases(*len as nat, 29);
@@ -712,23 +819,28 @@ fn feed_bit(
         assert(x / 2 == *old(acc) as nat && (x % 2 == 1) == bit);
         assert(bits_of(x, *len as nat) == q);
     }
-    match lookup(*acc, *len) {
+    let sym = lookup(*acc, *len);
+    // `ok` from the match, not a literal per arm: ct-front translates no tuple constant such as `(true, Ghost(1))`.
+    let ok = match sym {
         Some(c) => {
             proof {
-                lemma_encode_push(old(out)@, c);
+                lemma_encode_push(out, c);
                 lemma_no_code_prefix_empty();
                 if decodable(Seq::empty(), bits) {
                     lemma_step_hit(p, bit, rem, c as nat);
                 }
+                // The new string's codes end at bit t + 1, each at least 5 bits.
+                lemma_encode_len(out.push(c));
+                assert(encode_bits(out.push(c)) =~= bits.subrange(0, t + 1));
+                assert(out.len() + 1 <= bits.len() / 5);
             }
-            out.push(c);
             *acc = 0;
             *len = 0;
             *all_ones = true;
             proof {
                 lemma2_to64();
                 assert(bits_of(0, 0) =~= ones(0));
-                assert(bits.subrange(0, t + 1) =~= encode_bits(out@) + bits_of(0, 0));
+                assert(bits.subrange(0, t + 1) =~= encode_bits(out.push(c)) + bits_of(0, 0));
             }
             true
         },
@@ -749,22 +861,39 @@ fn feed_bit(
             }
             *len < 30
         },
-    }
+    };
+    (ok, sym, Ghost(1))
 }
 
-/// Decodes a Huffman-coded string literal (RFC 7541 §5.2); `None` on any decoding error.
-// ponytail: one bit per step with a per-length window lookup; a nibble/byte state table is the
-// upgrade if header decoding shows up in profiles.
-pub fn huffman_decode(input: &[u8]) -> (r: Option<Vec<u8>>)
+/// `huffman_decode_w`'s charge where it returns `None`: the free of `out`.
+spec fn c_hfree() -> nat {
+    1
+}
+
+/// The cost constant of `huffman_decode_w`: per input byte, its read and 8 bit steps of at most 3 units.
+#[verifier::inline]
+pub open spec fn c_huff() -> nat {
+    25
+}
+
+/// Decodes a Huffman-coded string literal (RFC 7541 §5.2); `None` on any decoding error. The output is created at its
+/// most, `8·len/5` bytes (every code is at least 5 bits), so no push reallocates.
+// ponytail: one bit per step with a per-length window lookup (a constant factor, cat-C15-stream-parse's rewrite);
+// a nibble/byte state table is the upgrade if header decoding shows up in profiles.
+pub fn huffman_decode_w(input: &[u8]) -> (r: (Option<Vec<u8>>, Ghost<nat>))
+    requires
+        input@.len() <= usize::MAX / 8,
     ensures
-        r matches Some(s) ==> rfc_huffman_decodes(input@, s@),
-        r is None ==> forall|s: Seq<u8>| !rfc_huffman_decodes(input@, s),
+        r.0 matches Some(s) ==> rfc_huffman_decodes(input@, s@),
+        r.0 is None ==> forall|s: Seq<u8>| !rfc_huffman_decodes(input@, s),
+        r.1@ <= c_huff() * (input@.len() + 1),
 {
     let ghost bits = bytes_to_bits(input@);
-    let mut out: Vec<u8> = Vec::new();
+    let mut out: CapVec<u8> = CapVec::new(8 * input.len() / 5);
     let mut acc: u32 = 0;
     let mut len: u32 = 0;
     let mut all_ones = true;
+    let ghost mut work: nat = 1;
     proof {
         lemma2_to64();
         lemma_no_code_prefix_empty();
@@ -777,12 +906,19 @@ pub fn huffman_decode(input: &[u8]) -> (r: Option<Vec<u8>>)
     while i < input.len()
         invariant
             i <= input.len(),
+            input@.len() <= usize::MAX / 8,
             bits == bytes_to_bits(input@),
             state_ok(bits, 8 * i, out@, acc, len, all_ones),
+            out.wf(),
+            out.cap() == bits.len() / 5,
+            work <= c_huff() * i + 1,
         decreases input.len() - i,
     {
         let byte = input[i];
         let mut j: u8 = 0;
+        proof {
+            work = work + 1;
+        }
         while j < 8
             invariant
                 i < input.len(),
@@ -790,23 +926,33 @@ pub fn huffman_decode(input: &[u8]) -> (r: Option<Vec<u8>>)
                 byte == input@[i as int],
                 bits == bytes_to_bits(input@),
                 state_ok(bits, 8 * i + j, out@, acc, len, all_ones),
+                out.wf(),
+                out.cap() == bits.len() / 5,
+                work <= c_huff() * i + 2 + 3 * j,
             decreases 8 - j,
         {
+            let ghost w_it: nat = work;
             let bit = (byte >> (7 - j)) & 1 == 1;
             proof {
                 let t = 8 * i + j;
                 assert(t / 8 == i && t % 8 == j as int);
                 assert(bits[t] == bit);
             }
-            let ok = feed_bit(
-                &mut out,
+            let (ok, sym, Ghost(cf)) = feed_bit(
                 &mut acc,
                 &mut len,
                 &mut all_ones,
                 bit,
+                Ghost(out@),
                 Ghost(bits),
                 Ghost(8 * i + j),
             );
+            if let Some(c) = sym {
+                out.push(c);
+            }
+            proof {
+                work = work + 2 + cf;
+            }
             if !ok {
                 proof {
                     assert forall|s: Seq<u8>| !rfc_huffman_decodes(input@, s) by {
@@ -815,7 +961,16 @@ pub fn huffman_decode(input: &[u8]) -> (r: Option<Vec<u8>>)
                         }
                     }
                 }
-                return None;
+                // the exit's own charge: the free of `out`
+                let ghost ret: nat = work + c_hfree();
+                proof {
+                    crate::frame::lemma_paid(work, c_hfree(), ret);
+                }
+                proof {
+                    // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                    crate::frame::lemma_paid(w_it, 2 + cf, work);
+                }
+                return (None, Ghost(ret));
             }
             j += 1;
         }
@@ -825,12 +980,13 @@ pub fn huffman_decode(input: &[u8]) -> (r: Option<Vec<u8>>)
         assert(bits.subrange(0, bits.len() as int) =~= bits);
         assert(bits.subrange(bits.len() as int, bits.len() as int) =~= Seq::<bool>::empty());
         assert(bits_of(acc as nat, len as nat) + Seq::empty() =~= bits_of(acc as nat, len as nat));
+        assert(c_huff() * input@.len() + 1 <= c_huff() * (input@.len() + 1)) by (nonlinear_arith);
     }
     if len <= 7 && all_ones {
         proof {
             assert(bits == encode_bits(out@) + ones(len as nat));
         }
-        Some(out)
+        (Some(out.into_vec()), Ghost(work))
     } else {
         proof {
             assert forall|s: Seq<u8>| !rfc_huffman_decodes(input@, s) by {
@@ -841,8 +997,23 @@ pub fn huffman_decode(input: &[u8]) -> (r: Option<Vec<u8>>)
                 }
             }
         }
-        None
+        // the free of `out`
+        let ghost ret: nat = work + c_hfree();
+        proof {
+            crate::frame::lemma_paid(work, c_hfree(), ret);
+        }
+        (None, Ghost(ret))
     }
+}
+
+pub fn huffman_decode(input: &[u8]) -> (r: Option<Vec<u8>>)
+    requires
+        input@.len() <= usize::MAX / 8,
+    ensures
+        r matches Some(s) ==> rfc_huffman_decodes(input@, s@),
+        r is None ==> forall|s: Seq<u8>| !rfc_huffman_decodes(input@, s),
+{
+    huffman_decode_w(input).0
 }
 
 } // verus!

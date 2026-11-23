@@ -1,4 +1,4 @@
-//! Byte-range sets on `quic::avl` (9b2 D10): `RangeSet`, merged ranges (sorted, disjoint, non-adjacent), and
+//! Byte-range sets on `byteq::avl` (9b2 D10): `RangeSet`, merged ranges (sorted, disjoint, non-adjacent), and
 //! `PieceSet`, disjoint pieces never merged; both keyed by start with the end as value, every op O(log n) with its
 //! cost in its ensures. With `lemma_bound`, the proved bound on `SendStream`'s acked, lost and in-flight sets: items of
 //! at least `FLOOR` bytes, or holding a whole open slot, number at most `W / FLOOR + slots` (D10 (d)).

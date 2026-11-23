@@ -3,8 +3,7 @@ use vstd::prelude::*;
 
 verus! {
 
-// ponytail: bounds the O(n^2) duplicate scan in `parse_frame_payload` to 512 pairs, and the
-// peer control stream's buffer (`h3::uni::UNI_BUF_CAP`); raise both if peers send larger SETTINGS.
+// Bounds the SETTINGS frame and the peer control stream's buffer (`h3::uni::UNI_BUF_CAP`).
 /// A larger SETTINGS frame is a connection error H3_EXCESSIVE_LOAD, decided from its header.
 pub const MAX_SETTINGS_FRAME: u64 = 1024;
 
@@ -16,7 +15,6 @@ pub const MAX_SETTINGS_FRAME: u64 = 1024;
 /// (`initial_max_streams_uni`): a control stream plus the QPACK encoder and decoder streams.
 pub const MIN_PEER_UNI_STREAMS: u64 = 3;
 
-// ponytail: caps the encoded size; RFC 9114 §4.2.2 measures the decoded size; refine if needed.
 /// Advertised as SETTINGS_MAX_FIELD_SECTION_SIZE. A larger HEADERS payload is a stream error
 /// H3_EXCESSIVE_LOAD, decided from its frame header. It is also the decoded budget,
 /// Σ(name + value + 32), enforced by `decode_field_section_bounded` (and the request stream's

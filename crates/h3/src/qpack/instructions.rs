@@ -104,42 +104,76 @@ pub open spec fn rfc_encoder_stream(b: Seq<u8>) -> Result<nat, u64>
     }
 }
 
+/// The cost constant of `process_encoder_stream` and `process_decoder_stream`: per instruction (at least one byte), a
+/// prefix integer (at most 11) and the step.
+#[verifier::inline]
+pub open spec fn c_instr() -> nat {
+    13
+}
+
 /// Scans the peer's encoder-stream bytes; see `rfc_encoder_stream`.
-pub fn process_encoder_stream(buf: &[u8]) -> (r: Result<usize, u64>)
+pub fn process_encoder_stream(buf: &[u8]) -> (r: (Result<usize, u64>, Ghost<nat>))
     ensures
-        result_view(r) == rfc_encoder_stream(buf@),
+        result_view(r.0) == rfc_encoder_stream(buf@),
+        r.1@ <= c_instr() * (buf@.len() + 1),
 {
     let mut pos: usize = 0;
+    let ghost mut work: nat = 1;
     proof {
         assert(buf@.skip(0) =~= buf@);
         lemma_add_ok_zero(rfc_encoder_stream(buf@));
     }
-    loop
+    while pos < buf.len()
         invariant
             pos <= buf.len(),
+            work <= 12 * pos + 1,
             rfc_encoder_stream(buf@) == add_ok(rfc_encoder_stream(buf@.skip(pos as int)), pos as nat),
         decreases buf.len() - pos,
     {
-        if pos == buf.len() {
-            proof {
-                assert(buf@.skip(pos as int).len() == 0);
-            }
-            return Ok(pos);
+        let ghost w_it: nat = work;
+        proof {
+            // this iteration's unit and, below, its parse's cost, each charged before the exits after it
+            // (rca-early-return-cost)
+            work = work + 1;
         }
         if buf[pos] & 0xE0 != 0x20 {
-            return Err(QPACK_ENCODER_STREAM_ERROR);
+            proof {
+                // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                crate::frame::lemma_paid(w_it, 1, work);
+            }
+            return (Err(QPACK_ENCODER_STREAM_ERROR), Ghost(work));
         }
         let rest = slice_subrange(buf, pos, buf.len());
         proof {
             assert(rest@ =~= buf@.skip(pos as int));
             lemma_prefix_int_consumed(5, rest@);
         }
-        match parse_prefix_int(5, rest) {
-            PrefixInt::Incomplete => return Ok(pos),
-            PrefixInt::TooLarge => return Err(QPACK_ENCODER_STREAM_ERROR),
+        let (pi, Ghost(cp)) = parse_prefix_int_w(5, rest);
+        proof {
+            work = work + cp;
+        }
+        match pi {
+            PrefixInt::Incomplete => {
+                proof {
+                    // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                    crate::frame::lemma_paid(w_it, 1 + cp, work);
+                }
+                return (Ok(pos), Ghost(work));
+            },
+            PrefixInt::TooLarge => {
+                proof {
+                    // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                    crate::frame::lemma_paid(w_it, 1 + cp, work);
+                }
+                return (Err(QPACK_ENCODER_STREAM_ERROR), Ghost(work));
+            },
             PrefixInt::Value { value, consumed } => {
                 if value > 0 {
-                    return Err(QPACK_ENCODER_STREAM_ERROR);
+                    proof {
+                        // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                        crate::frame::lemma_paid(w_it, 1 + cp, work);
+                    }
+                    return (Err(QPACK_ENCODER_STREAM_ERROR), Ghost(work));
                 }
                 proof {
                     lemma_skip_skip(buf@, pos as int, consumed as int);
@@ -148,6 +182,10 @@ pub fn process_encoder_stream(buf: &[u8]) -> (r: Result<usize, u64>)
             },
         }
     }
+    proof {
+        assert(buf@.skip(pos as int).len() == 0);
+    }
+    (Ok(pos), Ghost(work))
 }
 
 /// Split: once `b` scans to `Ok(n)`, bytes appended after it are scanned as if the first `n`
@@ -164,6 +202,7 @@ pub proof fn lemma_encoder_stream_split(b: Seq<u8>, t: Seq<u8>)
         }),
     decreases b.len(),
 {
+    hide(rfc_prefix_int);
     assert(b.skip(0) =~= b);
     if b.len() > 0 && b[0] & 0xE0u8 == 0x20u8 {
         assert((b + t)[0] == b[0]);
@@ -228,38 +267,61 @@ pub open spec fn rfc_decoder_stream(b: Seq<u8>) -> Result<nat, u64>
 }
 
 /// Scans the peer's decoder-stream bytes; see `rfc_decoder_stream`.
-pub fn process_decoder_stream(buf: &[u8]) -> (r: Result<usize, u64>)
+pub fn process_decoder_stream(buf: &[u8]) -> (r: (Result<usize, u64>, Ghost<nat>))
     ensures
-        result_view(r) == rfc_decoder_stream(buf@),
+        result_view(r.0) == rfc_decoder_stream(buf@),
+        r.1@ <= c_instr() * (buf@.len() + 1),
 {
     let mut pos: usize = 0;
+    let ghost mut work: nat = 1;
     proof {
         assert(buf@.skip(0) =~= buf@);
         lemma_add_ok_zero(rfc_decoder_stream(buf@));
     }
-    loop
+    while pos < buf.len()
         invariant
             pos <= buf.len(),
+            work <= 12 * pos + 1,
             rfc_decoder_stream(buf@) == add_ok(rfc_decoder_stream(buf@.skip(pos as int)), pos as nat),
         decreases buf.len() - pos,
     {
-        if pos == buf.len() {
-            proof {
-                assert(buf@.skip(pos as int).len() == 0);
-            }
-            return Ok(pos);
+        let ghost w_it: nat = work;
+        proof {
+            // this iteration's unit and, below, its parse's cost, each charged before the exits after it
+            // (rca-early-return-cost)
+            work = work + 1;
         }
         if buf[pos] & 0xC0 != 0x40 {
-            return Err(QPACK_DECODER_STREAM_ERROR);
+            proof {
+                // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                crate::frame::lemma_paid(w_it, 1, work);
+            }
+            return (Err(QPACK_DECODER_STREAM_ERROR), Ghost(work));
         }
         let rest = slice_subrange(buf, pos, buf.len());
         proof {
             assert(rest@ =~= buf@.skip(pos as int));
             lemma_prefix_int_consumed(6, rest@);
         }
-        match parse_prefix_int(6, rest) {
-            PrefixInt::Incomplete => return Ok(pos),
-            PrefixInt::TooLarge => return Err(QPACK_DECODER_STREAM_ERROR),
+        let (pi, Ghost(cp)) = parse_prefix_int_w(6, rest);
+        proof {
+            work = work + cp;
+        }
+        match pi {
+            PrefixInt::Incomplete => {
+                proof {
+                    // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                    crate::frame::lemma_paid(w_it, 1 + cp, work);
+                }
+                return (Ok(pos), Ghost(work));
+            },
+            PrefixInt::TooLarge => {
+                proof {
+                    // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                    crate::frame::lemma_paid(w_it, 1 + cp, work);
+                }
+                return (Err(QPACK_DECODER_STREAM_ERROR), Ghost(work));
+            },
             PrefixInt::Value { value: _, consumed } => {
                 proof {
                     lemma_skip_skip(buf@, pos as int, consumed as int);
@@ -268,6 +330,10 @@ pub fn process_decoder_stream(buf: &[u8]) -> (r: Result<usize, u64>)
             },
         }
     }
+    proof {
+        assert(buf@.skip(pos as int).len() == 0);
+    }
+    (Ok(pos), Ghost(work))
 }
 
 /// Split: once `b` scans to `Ok(n)`, bytes appended after it are scanned as if the first `n`
@@ -284,6 +350,7 @@ pub proof fn lemma_decoder_stream_split(b: Seq<u8>, t: Seq<u8>)
         }),
     decreases b.len(),
 {
+    hide(rfc_prefix_int);
     assert(b.skip(0) =~= b);
     if b.len() > 0 && b[0] & 0xC0u8 == 0x40u8 {
         assert((b + t)[0] == b[0]);
@@ -301,6 +368,48 @@ pub proof fn lemma_decoder_stream_split(b: Seq<u8>, t: Seq<u8>)
         }
     } else if b.len() == 0 {
         assert(b + t =~= t);
+    }
+}
+
+/// An encoder-stream error is decided by the bytes so far: what follows does not change it.
+pub proof fn lemma_encoder_stream_err(b: Seq<u8>, t: Seq<u8>)
+    requires
+        rfc_encoder_stream(b) is Err,
+    ensures
+        rfc_encoder_stream(b + t) == rfc_encoder_stream(b),
+    decreases b.len(),
+{
+    hide(rfc_prefix_int);
+    assert((b + t)[0] == b[0]);
+    if b[0] & 0xE0u8 == 0x20u8 {
+        lemma_prefix_int_settled(5, b, t);
+        if let PrefixIntSpec::Value { value, consumed: c } = rfc_prefix_int(5, b) {
+            if value == 0 {
+                lemma_prefix_int_consumed(5, b);
+                assert((b + t).skip(c as int) =~= b.skip(c as int) + t);
+                lemma_encoder_stream_err(b.skip(c as int), t);
+            }
+        }
+    }
+}
+
+/// A decoder-stream error is decided by the bytes so far: what follows does not change it.
+pub proof fn lemma_decoder_stream_err(b: Seq<u8>, t: Seq<u8>)
+    requires
+        rfc_decoder_stream(b) is Err,
+    ensures
+        rfc_decoder_stream(b + t) == rfc_decoder_stream(b),
+    decreases b.len(),
+{
+    hide(rfc_prefix_int);
+    assert((b + t)[0] == b[0]);
+    if b[0] & 0xC0u8 == 0x40u8 {
+        lemma_prefix_int_settled(6, b, t);
+        if let PrefixIntSpec::Value { value: _, consumed: c } = rfc_prefix_int(6, b) {
+            lemma_prefix_int_consumed(6, b);
+            assert((b + t).skip(c as int) =~= b.skip(c as int) + t);
+            lemma_decoder_stream_err(b.skip(c as int), t);
+        }
     }
 }
 

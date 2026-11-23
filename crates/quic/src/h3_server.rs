@@ -580,27 +580,58 @@ impl H3Server {
         }
         assert forall|j: u64| !self.dropped@.contains(j) implies (self.written@)(j) + #[trigger] tails(s1, j) == (
         self.emitted@)(j) by {
-            lemma_tails_head(s0, j);
-            let rest = tails(s0.remove(0), j);
-            assert(w0(j) + tails(s0, j) == (self.emitted@)(j));
-            if n < t.len() {
-                lemma_tails_head(s1, j);
-                assert(s1.remove(0) =~= s0.remove(0));
-            }
-            if j == id {
-                assert(piece(s0[0], j) =~= t);
-                if n == t.len() {
-                    assert((w0(j) + t.take(n)) + rest =~= w0(j) + (t + rest));
-                } else {
-                    assert(piece(s1[0], j) =~= t.skip(n));
-                    assert((w0(j) + t.take(n)) + (t.skip(n) + rest) =~= w0(j) + (t + rest));
-                }
+            self.lemma_flushed_at(s0, w0, id, t, n, off1, j);
+        }
+    }
+
+    /// `lemma_flushed`'s log step for one stream `j` (split out, 9b3 Task 10: the forall's body reached 8.15M under
+    /// one Z3 seed once avl moved to byteq).
+    proof fn lemma_flushed_at(
+        &self,
+        s0: Seq<Pending>,
+        w0: spec_fn(u64) -> Seq<u8>,
+        id: u64,
+        t: Seq<u8>,
+        n: int,
+        off1: usize,
+        j: u64,
+    )
+        requires
+            s0.len() > 0,
+            offs_ok(s0),
+            s0[0].id == id,
+            t == s0[0].data@.subrange(s0[0].off as int, s0[0].data@.len() as int),
+            0 <= n <= t.len(),
+            n == t.len() ==> self.pending@ == s0.remove(0),
+            n < t.len() ==> off1 == s0[0].off + n && self.pending@ == s0.update(0, Pending { off: off1, ..s0[0] }),
+            !self.dropped@.contains(j),
+            w0(j) + tails(s0, j) == (self.emitted@)(j),
+            (self.written@)(j) == if j == id { w0(j) + t.take(n) } else { w0(j) },
+        ensures
+            (self.written@)(j) + tails(self.pending@, j) == (self.emitted@)(j),
+    {
+        let s1 = self.pending@;
+        assert(s0[0].off <= s0[0].data@.len());
+        lemma_tails_head(s0, j);
+        let rest = tails(s0.remove(0), j);
+        assert(w0(j) + tails(s0, j) == (self.emitted@)(j));
+        if n < t.len() {
+            lemma_tails_head(s1, j);
+            assert(s1.remove(0) =~= s0.remove(0));
+        }
+        if j == id {
+            assert(piece(s0[0], j) =~= t);
+            if n == t.len() {
+                assert((w0(j) + t.take(n)) + rest =~= w0(j) + (t + rest));
             } else {
-                assert(piece(s0[0], j) =~= Seq::<u8>::empty());
-                assert(Seq::<u8>::empty() + rest =~= rest);
-                if n < t.len() {
-                    assert(piece(s1[0], j) =~= Seq::<u8>::empty());
-                }
+                assert(piece(s1[0], j) =~= t.skip(n));
+                assert((w0(j) + t.take(n)) + (t.skip(n) + rest) =~= w0(j) + (t + rest));
+            }
+        } else {
+            assert(piece(s0[0], j) =~= Seq::<u8>::empty());
+            assert(Seq::<u8>::empty() + rest =~= rest);
+            if n < t.len() {
+                assert(piece(s1[0], j) =~= Seq::<u8>::empty());
             }
         }
     }
@@ -907,9 +938,11 @@ impl H3Server {
         let ghost e_view = e@;
         let ghost e0 = self.emitted@;
         let ghost a0 = app@;
-        let mut outs: Vec<Output> = Vec::new();
+        let mut outs: byteq::capvec::CapVec<Output> = byteq::capvec::CapVec::new(MAX_OUTS);
         let ghost o0 = outs@;
         let mut aborted: Option<u64> = None;
+        // Each h3 call returns its cost (O(d + log n), h3's entry points); `feed` charges none of it: h3_server's input
+        // path, its pending queue included, is carryover cat-C15-9b4's (sweep Q9-Q12).
         match e {
             StreamEvent::Data { id, data, fin } => {
                 self.h3.on_stream_data(id, data.as_slice(), fin, &mut outs);
@@ -935,7 +968,7 @@ impl H3Server {
             assert(s1.skip(0) =~= s1);
             assert(added(o0, o1) =~= outs_view(s1));
         }
-        self.apply(outs, app);
+        self.apply(outs.into_vec(), app);
         // E7: every peer reset of a request stream. Over-reporting after a completed request is harmless.
         if let Some(id) = aborted {
             let ghost a1 = app@;

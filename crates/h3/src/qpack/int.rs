@@ -378,20 +378,52 @@ pub proof fn lemma_prefix_int_append(n: u8, b: Seq<u8>, t: Seq<u8>)
     lemma_cont_facts(b.skip(1), 0, b[0] as nat % pow2(n as nat), t);
 }
 
+/// Continuation bytes that decode or overflow decode the same whatever follows them.
+proof fn lemma_cont_settled(b: Seq<u8>, k: nat, acc: nat, t: Seq<u8>)
+    requires
+        !(rfc_prefix_cont(b, k, acc) is Incomplete),
+    ensures
+        rfc_prefix_cont(b + t, k, acc) == rfc_prefix_cont(b, k, acc),
+    decreases b.len(),
+{
+    assert((b + t)[0] == b[0]);
+    assert((b + t).skip(1) =~= b.skip(1) + t);
+    let nv = acc + (b[0] & 127u8) as nat * pow2(7 * k);
+    if k < PREFIX_INT_MAX_CONT && nv <= PREFIX_INT_MAX && b[0] & 128u8 != 0 {
+        lemma_cont_settled(b.skip(1), k + 1, nv, t);
+    }
+}
+
+/// Prefix stability of a decided integer: bytes after a complete or too-large integer don't change it.
+pub proof fn lemma_prefix_int_settled(n: u8, b: Seq<u8>, t: Seq<u8>)
+    requires
+        !(rfc_prefix_int(n, b) is Incomplete),
+    ensures
+        rfc_prefix_int(n, b + t) == rfc_prefix_int(n, b),
+{
+    assert((b + t)[0] == b[0]);
+    assert((b + t).skip(1) =~= b.skip(1) + t);
+    let i = b[0] as nat % pow2(n as nat);
+    if i >= pow2(n as nat) - 1 {
+        lemma_cont_settled(b.skip(1), 0, i, t);
+    }
+}
+
 // =============================================================================
 // Executable codec
 // =============================================================================
 
 /// Decodes an N-bit prefix integer from the front of `buf`; the high `8 - n` bits of
-/// `buf[0]` belong to the caller.
-pub fn parse_prefix_int(n: u8, buf: &[u8]) -> (r: PrefixInt)
+/// `buf[0]` belong to the caller. Its cost is at most one unit per byte read, and at most 11 (the loop's `i <= 11`).
+pub fn parse_prefix_int_w(n: u8, buf: &[u8]) -> (r: (PrefixInt, Ghost<nat>))
     requires
         1 <= n <= 8,
     ensures
-        r@ == rfc_prefix_int(n, buf@),
+        r.0@ == rfc_prefix_int(n, buf@),
+        r.1@ <= 11,
 {
     if buf.len() == 0 {
-        return PrefixInt::Incomplete;
+        return (PrefixInt::Incomplete, Ghost(1));
     }
     let mask: u8 = 0xffu8 >> (8 - n);
     proof {
@@ -399,35 +431,35 @@ pub fn parse_prefix_int(n: u8, buf: &[u8]) -> (r: PrefixInt)
     }
     let pre: u8 = buf[0] & mask;
     if pre < mask {
-        return PrefixInt::Value { value: pre as u64, consumed: 1 };
+        return (PrefixInt::Value { value: pre as u64, consumed: 1 }, Ghost(1));
     }
     let mut acc: u64 = pre as u64;
     let mut p: u64 = 1;
     let mut i: usize = 1;
+    let ghost mut work: nat = 1;
     proof {
         lemma2_to64();
         assert(buf@.skip(1) == buf@.skip(i as int));
     }
-    loop
+    while i < buf.len()
         invariant
             1 <= i <= buf@.len(),
             i <= 11,
+            work == i,
             acc <= PREFIX_INT_MAX,
             i <= 10 ==> p as nat == pow2(7 * (i - 1) as nat),
             i <= 10 ==> p > 0,
             rfc_prefix_int(n, buf@) == rfc_prefix_cont(buf@.skip(i as int), (i - 1) as nat, acc as nat),
         decreases buf@.len() - i,
     {
-        if i >= buf.len() {
-            proof {
-                assert(buf@.skip(i as int).len() == 0);
-            }
-            return PrefixInt::Incomplete;
-        }
         if i > PREFIX_INT_MAX_CONT {
-            return PrefixInt::TooLarge;
+            return (PrefixInt::TooLarge, Ghost(work));
         }
         let byte = buf[i];
+        proof {
+            // byte i's unit, charged before the exits that follow its read (rca-early-return-cost)
+            work = work + 1;
+        }
         let d: u64 = (byte & 127) as u64;
         assert(d < 128) by (bit_vector)
             requires
@@ -450,7 +482,11 @@ pub fn parse_prefix_int(n: u8, buf: &[u8]) -> (r: PrefixInt)
                         p > 0,
                 ;
             }
-            return PrefixInt::TooLarge;
+            proof {
+                // byte i's unit is in what the exit returns (rca-early-return-cost)
+                crate::frame::lemma_paid(i as nat, 1, work);
+            }
+            return (PrefixInt::TooLarge, Ghost(work));
         }
         proof {
             let x = (PREFIX_INT_MAX - acc) as nat;
@@ -464,7 +500,10 @@ pub fn parse_prefix_int(n: u8, buf: &[u8]) -> (r: PrefixInt)
         }
         acc = acc + d * p;
         if byte & 128 == 0 {
-            return PrefixInt::Value { value: acc, consumed: i + 1 };
+            proof {
+                crate::frame::lemma_paid(i as nat, 1, work);
+            }
+            return (PrefixInt::Value { value: acc, consumed: i + 1 }, Ghost(work));
         }
         if i < PREFIX_INT_MAX_CONT {
             proof {
@@ -489,6 +528,19 @@ pub fn parse_prefix_int(n: u8, buf: &[u8]) -> (r: PrefixInt)
         }
         i += 1;
     }
+    proof {
+        assert(buf@.skip(i as int).len() == 0);
+    }
+    (PrefixInt::Incomplete, Ghost(work))
+}
+
+pub fn parse_prefix_int(n: u8, buf: &[u8]) -> (r: PrefixInt)
+    requires
+        1 <= n <= 8,
+    ensures
+        r@ == rfc_prefix_int(n, buf@),
+{
+    parse_prefix_int_w(n, buf).0
 }
 
 /// Appends the minimal N-bit prefix encoding of `v` under `flags`.

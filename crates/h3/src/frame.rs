@@ -4,7 +4,8 @@
 #[allow(unused_imports)]
 use vest_lib::core::spec::*;
 use vstd::prelude::*;
-use vstd::slice::{slice_subrange, slice_to_vec};
+use byteq::capvec::CapVec;
+use vstd::slice::slice_subrange;
 pub use wire::varint::*;
 
 use crate::codes::*;
@@ -129,6 +130,9 @@ pub open spec fn rfc_settings_pairs(p: Seq<u8>) -> Option<Seq<(u64, u64)>>
 //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4
 //# The same setting identifier MUST NOT occur more than once in the
 //# SETTINGS frame.
+//= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4
+//# A receiver MAY treat the presence of duplicate
+//# setting identifiers as a connection error of type H3_SETTINGS_ERROR.
 //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4.1
 //# These reserved settings MUST NOT be sent, and
 //# their receipt MUST be treated as a connection error of type
@@ -226,63 +230,851 @@ proof fn settings_pairs_decreases(p: Seq<u8>) {
 // Executable helpers
 // =============================================================================
 
-fn parse_exact_varint(p: &[u8]) -> (r: Option<u64>)
+/// `parse_exact_varint`'s cost: the varint parse and the length compare.
+pub open spec fn c_exact() -> nat {
+    c_varint() + 1
+}
+
+fn parse_exact_varint(p: &[u8]) -> (r: (Option<u64>, Ghost<nat>))
     ensures
-        r == rfc_exact_varint(p@),
+        r.0 == rfc_exact_varint(p@),
+        r.1@ <= c_exact(),
 {
-    match parse_varint(p) {
+    let (pv, Ghost(c)) = parse_varint_w(p);
+    let r = match pv {
         Some((n, v)) => if n == p.len() {
             Some(v)
         } else {
             None
         },
         None => None,
+    };
+    (r, Ghost(c + 1))
+}
+
+// -----------------------------------------------------------------------------
+// SETTINGS duplicates: a bottom-up merge sort of the identifiers (O(p log p)),
+// then one pass over the sorted copy for equal neighbours.
+// -----------------------------------------------------------------------------
+
+/// The first clause of `rfc_settings_valid`: no identifier occurs twice.
+pub open spec fn ids_distinct(s: Seq<(u64, u64)>) -> bool {
+    forall|i: int, j: int| 0 <= i < j < s.len() ==> (#[trigger] s[i]).0 != (#[trigger] s[j]).0
+}
+
+pub open spec fn sorted_u64(s: Seq<u64>) -> bool {
+    forall|a: int, b: int| #![trigger s[a], s[b]] 0 <= a < b < s.len() ==> s[a] <= s[b]
+}
+
+/// Within every block of width `w`, nondecreasing. Opaque: revealed only in the merge lemmas.
+#[verifier::opaque]
+spec fn sorted_runs(s: Seq<u64>, w: int) -> bool {
+    forall|a: int, b: int|
+        #![trigger s[a], s[b]]
+        0 <= a < b < s.len() && a / w == b / w ==> s[a] <= s[b]
+}
+
+spec fn has_dup(s: Seq<u64>) -> bool {
+    exists|i: int, j: int| #![trigger s[i], s[j]] 0 <= i < j < s.len() && s[i] == s[j]
+}
+
+spec fn has_adj_dup(s: Seq<u64>) -> bool {
+    exists|i: int| 0 <= i && i + 1 < s.len() && #[trigger] s[i] == s[i + 1]
+}
+
+/// ⌈log2 p⌉: the number of merge passes that sort `p` elements.
+pub open spec fn clog2(p: nat) -> nat
+    decreases p,
+{
+    if p <= 1 {
+        0
+    } else {
+        1 + clog2(((p + 1) / 2) as nat)
     }
 }
 
-// ponytail: O(n^2) duplicate scan; SETTINGS frames are small
-fn settings_ok(v: &Vec<(u64, u64)>) -> (r: bool)
+/// `sort_ids_w`'s cost constant.
+pub open spec fn c_sort() -> nat {
+    3
+}
+
+/// `settings_ok`'s cost constant: per pair, one reserved check and one neighbour compare.
+pub open spec fn c_ok() -> nat {
+    2
+}
+
+/// `parse_settings`' cost constant, over the payload length.
+pub open spec fn c_pset() -> nat {
+    25
+}
+
+/// x lies in block q of width d exactly when x / d == q.
+proof fn lemma_block(x: int, d: int, q: int)
+    requires
+        d > 0,
+        x >= 0,
+        q >= 0,
     ensures
-        r == rfc_settings_valid(v@),
+        (q * d <= x && x < q * d + d) <==> x / d == q,
+{
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(x, d);
+    let r = x % d;
+    assert(0 <= r < d);
+    if q * d <= x && x < q * d + d {
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod_converse(x, d, q, x - q * d);
+    } else {
+        assert(x / d != q) by (nonlinear_arith)
+            requires
+                x == d * (x / d) + r,
+                0 <= r < d,
+                !(q * d <= x && x < q * d + d),
+        {}
+    }
+}
+
+/// Pushing `e` into block k (start lo) keeps sorted_runs(_, w2) when e is at least the block's last entry.
+proof fn lemma_push_runs(out: Seq<u64>, e: u64, w2: int, lo: int, k: int)
+    requires
+        w2 > 0,
+        k >= 0,
+        lo == k * w2,
+        sorted_runs(out, w2),
+        lo <= out.len() < lo + w2,
+        out.len() > lo ==> out.last() <= e,
+    ensures
+        sorted_runs(out.push(e), w2),
+{
+    reveal(sorted_runs);
+    let s = out.push(e);
+    let p = out.len() as int;
+    lemma_block(p, w2, k);
+    assert forall|a: int, b: int|
+        #![trigger s[a], s[b]]
+        0 <= a < b < s.len() && a / w2 == b / w2 implies s[a] <= s[b] by {
+        if b == p {
+            lemma_block(a, w2, k);
+            lemma_block(p - 1, w2, k);
+            assert(a >= lo);
+            if a < p - 1 {
+                assert(out[a] <= out[p - 1]);
+            }
+        } else {
+            assert(s[a] == out[a] && s[b] == out[b]);
+        }
+    }
+}
+
+proof fn lemma_runs_one(s: Seq<u64>)
+    ensures
+        sorted_runs(s, 1),
+{
+    reveal(sorted_runs);
+    assert forall|a: int, b: int|
+        #![trigger s[a], s[b]]
+        0 <= a < b < s.len() && a / 1 == b / 1 implies s[a] <= s[b] by {
+        assert(a / 1 == a && b / 1 == b);
+    }
+}
+
+/// One block covering the whole sequence: sorted, and so every width's runs are.
+proof fn lemma_runs_all(s: Seq<u64>, w: int, w2: int)
+    requires
+        w >= s.len(),
+        w > 0,
+        w2 > 0,
+        sorted_runs(s, w),
+    ensures
+        sorted_u64(s),
+        sorted_runs(s, w2),
+{
+    reveal(sorted_runs);
+    assert forall|a: int, b: int| #![trigger s[a], s[b]] 0 <= a < b < s.len() implies s[a] <= s[b] by {
+        lemma_block(a, w, 0);
+        lemma_block(b, w, 0);
+    }
+}
+
+/// A pass taken while the width 2^k is below p is one of at most clog2(p).
+proof fn lemma_clog2(k: nat, p: nat)
+    requires
+        vstd::arithmetic::power2::pow2(k) < p,
+    ensures
+        k < clog2(p),
+    decreases k,
+{
+    vstd::arithmetic::power2::lemma_pow2_pos(k);
+    if k == 0 {
+        vstd::arithmetic::power2::lemma_pow2(0);
+        vstd::arithmetic::power::lemma_pow0(2);
+    } else {
+        vstd::arithmetic::power2::lemma_pow2_unfold(k);
+        lemma_clog2((k - 1) as nat, ((p + 1) / 2) as nat);
+    }
+}
+
+proof fn lemma_clog2_mono(p: nat, q: nat)
+    requires
+        p <= q,
+    ensures
+        clog2(p) <= clog2(q),
+    decreases q,
+{
+    if p > 1 {
+        lemma_clog2_mono(((p + 1) / 2) as nat, ((q + 1) / 2) as nat);
+    }
+}
+
+/// D7's lemma_sorted_dup: in a sorted sequence an equal pair gives an equal adjacent pair.
+proof fn lemma_sorted_dup(s: Seq<u64>)
+    requires
+        sorted_u64(s),
+    ensures
+        has_dup(s) <==> has_adj_dup(s),
+{
+    if has_dup(s) {
+        let (i, j) = choose|i: int, j: int|
+            #![trigger s[i], s[j]]
+            0 <= i < j < s.len() && s[i] == s[j];
+        if i + 1 < j {
+            assert(s[i] <= s[i + 1] && s[i + 1] <= s[j]);
+        }
+        assert(s[i] == s[i + 1]);
+    }
+    if has_adj_dup(s) {
+        let i = choose|i: int| 0 <= i && i + 1 < s.len() && #[trigger] s[i] == s[i + 1];
+        assert(s[i] == s[i + 1]);
+    }
+}
+
+/// Some value occurs twice exactly when its count is at least 2.
+proof fn lemma_dup_count(s: Seq<u64>)
+    ensures
+        has_dup(s) <==> exists|x: u64| #[trigger] s.to_multiset().count(x) >= 2,
+    decreases s.len(),
+{
+    broadcast use vstd::multiset::group_multiset_axioms, vstd::seq_lib::group_to_multiset_ensures;
+
+    if s.len() == 0 {
+        assert(s.to_multiset() =~= vstd::multiset::Multiset::<u64>::empty());
+    } else {
+        let t = s.drop_last();
+        let a = s.last();
+        assert(s == t.push(a));
+        assert(t.push(a).to_multiset() =~= t.to_multiset().insert(a));
+        lemma_dup_count(t);
+        if has_dup(s) {
+            let (i, j) = choose|i: int, j: int|
+                #![trigger s[i], s[j]]
+                0 <= i < j < s.len() && s[i] == s[j];
+            if j < s.len() - 1 {
+                assert(t[i] == s[i] && t[j] == s[j]);
+                assert(has_dup(t));
+                let x = choose|x: u64| #[trigger] t.to_multiset().count(x) >= 2;
+                assert(s.to_multiset().count(x) >= 2);
+            } else {
+                assert(t[i] == a);
+                assert(t.contains(a));
+                assert(s.to_multiset().count(a) >= 2);
+            }
+        }
+        if exists|x: u64| #[trigger] s.to_multiset().count(x) >= 2 {
+            let x = choose|x: u64| #[trigger] s.to_multiset().count(x) >= 2;
+            if x == a {
+                assert(t.to_multiset().count(a) > 0);
+                assert(t.contains(a));
+                let i = choose|i: int| 0 <= i < t.len() && t[i] == a;
+                assert(s[i] == s[s.len() - 1]);
+            } else {
+                assert(t.to_multiset().count(x) >= 2);
+                let (i, j) = choose|i: int, j: int|
+                    #![trigger t[i], t[j]]
+                    0 <= i < j < t.len() && t[i] == t[j];
+                assert(s[i] == t[i] && s[j] == t[j]);
+            }
+        }
+    }
+}
+
+/// D7's conclusion: the sorted copy has equal neighbours exactly when `v` repeats an identifier.
+proof fn lemma_settings_dup(v: Seq<(u64, u64)>, srt: Seq<u64>)
+    requires
+        sorted_u64(srt),
+        srt.to_multiset() == v.map_values(|x: (u64, u64)| x.0).to_multiset(),
+    ensures
+        ids_distinct(v) <==> !has_adj_dup(srt),
+{
+    let ids = v.map_values(|x: (u64, u64)| x.0);
+    lemma_sorted_dup(srt);
+    lemma_dup_count(srt);
+    lemma_dup_count(ids);
+    if has_dup(ids) {
+        let (i, j) = choose|i: int, j: int|
+            #![trigger ids[i], ids[j]]
+            0 <= i < j < ids.len() && ids[i] == ids[j];
+        assert(v[i].0 == v[j].0);
+    }
+    if !ids_distinct(v) {
+        let (i, j) = choose|i: int, j: int|
+            0 <= i < j < v.len() && (#[trigger] v[i]).0 == (#[trigger] v[j]).0;
+        assert(ids[i] == ids[j]);
+    }
+}
+
+/// `sort_ids_w`'s bound from its accounting: the copy, the fill of the second buffer, its free, and
+/// `passes <= clog2(n)` merge passes of 2n.
+proof fn lemma_sort_cost(n: nat, passes: nat, work: nat)
+    requires
+        passes <= clog2(n),
+        work <= 2 * n + 3 + passes * (2 * n),
+    ensures
+        work <= c_sort() * (n * (clog2(n) + 1) + 1),
+{
+    let c = clog2(n);
+    vstd::arithmetic::mul::lemma_mul_inequality(passes as int, c as int, (2 * n) as int);
+    assert(2 * n + 3 + c * (2 * n) <= 3 * (n * (c + 1) + 1)) by (nonlinear_arith);
+}
+
+/// One step of `merge_runs`: the smaller head `e` (the left run's when `left`) keeps the merged prefix in runs of 2w
+/// and at most both remaining heads.
+proof fn lemma_merge_order(
+    o0: Seq<u64>,
+    e: u64,
+    src: Seq<u64>,
+    w: int,
+    kk: int,
+    lo: int,
+    i: int,
+    mid: int,
+    j: int,
+    hi: int,
+    left: bool,
+)
+    requires
+        1 <= w,
+        kk >= 0,
+        lo == kk * (2 * w),
+        lo == (2 * kk) * w,
+        lo <= i <= mid <= j <= hi <= src.len(),
+        mid <= lo + w,
+        hi <= lo + 2 * w,
+        mid < hi ==> mid == lo + w,
+        sorted_runs(src, w),
+        sorted_runs(o0, 2 * w),
+        o0.len() == i + j - mid,
+        o0.len() > lo ==> (i < mid ==> o0.last() <= src[i]) && (j < hi ==> o0.last() <= src[j]),
+        i < mid || j < hi,
+        left == (i < mid && (j >= hi || src[i] <= src[j])),
+        e == (if left {
+            src[i]
+        } else {
+            src[j]
+        }),
+    ensures
+        sorted_runs(o0.push(e), 2 * w),
+        left ==> (i + 1 < mid ==> e <= src[i + 1]) && (j < hi ==> e <= src[j]),
+        !left ==> (i < mid ==> e <= src[i]) && (j + 1 < hi ==> e <= src[j + 1]),
+{
+    reveal(sorted_runs);
+    lemma_push_runs(o0, e, 2 * w, lo, kk);
+    if left {
+        if i + 1 < mid {
+            lemma_block(i, w, 2 * kk);
+            lemma_block(i + 1, w, 2 * kk);
+        }
+    } else {
+        if j + 1 < hi {
+            lemma_block(j, w, 2 * kk + 1);
+            lemma_block(j + 1, w, 2 * kk + 1);
+            assert((2 * kk + 1) * w == (2 * kk) * w + w) by (nonlinear_arith);
+        }
+    }
+}
+
+/// One step of `merge_runs`: writing `e` (from the left run when `left`, else the right) at `o0.len()` extends the
+/// merged prefix and its multiset.
+proof fn lemma_merge_step(
+    before: Seq<u64>,
+    o0: Seq<u64>,
+    e: u64,
+    src: Seq<u64>,
+    i: int,
+    mid: int,
+    j: int,
+    left: bool,
+)
+    requires
+        o0.len() < before.len(),
+        before.subrange(0, o0.len() as int) == o0,
+        0 <= i <= mid <= j <= src.len(),
+        left ==> i < mid && e == src[i],
+        !left ==> j < src.len() && e == src[j],
+        o0.to_multiset() == src.subrange(0, i).to_multiset().add(src.subrange(mid, j).to_multiset()),
+    ensures
+        before.update(o0.len() as int, e).subrange(0, o0.len() as int + 1) == o0.push(e),
+        left ==> o0.push(e).to_multiset() == src.subrange(0, i + 1).to_multiset().add(
+            src.subrange(mid, j).to_multiset(),
+        ),
+        !left ==> o0.push(e).to_multiset() == src.subrange(0, i).to_multiset().add(
+            src.subrange(mid, j + 1).to_multiset(),
+        ),
+{
+    broadcast use vstd::seq_lib::group_to_multiset_ensures;
+
+    assert(before.update(o0.len() as int, e).subrange(0, o0.len() as int + 1) =~= o0.push(e));
+    if left {
+        assert(src.subrange(0, i + 1) =~= src.subrange(0, i).push(e));
+        assert(o0.push(e).to_multiset() =~= src.subrange(0, i + 1).to_multiset().add(
+            src.subrange(mid, j).to_multiset(),
+        ));
+    } else {
+        assert(src.subrange(mid, j + 1) =~= src.subrange(mid, j).push(e));
+        assert(o0.push(e).to_multiset() =~= src.subrange(0, i).to_multiset().add(
+            src.subrange(mid, j + 1).to_multiset(),
+        ));
+    }
+}
+
+/// Merges the runs `src[lo..mid)` and `src[mid..hi)` (block k of width 2w) into `out[lo..hi)`, in place.
+fn merge_runs(
+    src: &[u64],
+    lo: usize,
+    mid: usize,
+    hi: usize,
+    out: &mut CapVec<u64>,
+    _w: Ghost<int>,
+    _k: Ghost<int>,
+) -> (r: Ghost<nat>)
+    requires
+        1 <= _w@,
+        _k@ >= 0,
+        lo == _k@ * (2 * _w@),
+        lo <= mid <= hi <= src.len(),
+        mid <= lo + _w@,
+        hi <= lo + 2 * _w@,
+        mid < hi ==> mid == lo + _w@,
+        sorted_runs(src@, _w@),
+        old(out).wf(),
+        hi <= old(out)@.len(),
+        old(out)@.subrange(0, lo as int).to_multiset() == src@.subrange(0, lo as int).to_multiset(),
+        sorted_runs(old(out)@.subrange(0, lo as int), 2 * _w@),
+    ensures
+        final(out).wf(),
+        final(out)@.len() == old(out)@.len(),
+        final(out)@.subrange(0, hi as int).to_multiset() == src@.subrange(0, hi as int).to_multiset(),
+        sorted_runs(final(out)@.subrange(0, hi as int), 2 * _w@),
+        r@ <= 2 * (hi - lo),
+{
+    let ghost w = _w@;
+    let ghost w2 = 2 * w;
+    let ghost kk = _k@;
+    let ghost mut o = out@.subrange(0, lo as int);
+    let ghost mut work: nat = 0;
+    let mut i = lo;
+    let mut j = mid;
+    proof {
+        assert(kk * w2 == (2 * kk) * w) by (nonlinear_arith)
+            requires
+                w2 == 2 * w,
+        {}
+        assert(src@.subrange(mid as int, mid as int) =~= Seq::<u64>::empty());
+        assert(Seq::<u64>::empty().to_multiset() =~= vstd::multiset::Multiset::<u64>::empty()) by {
+            broadcast use vstd::multiset::group_multiset_axioms, vstd::seq_lib::group_to_multiset_ensures;
+
+        }
+        assert(o.to_multiset().add(vstd::multiset::Multiset::empty()) =~= o.to_multiset());
+    }
+    while i < mid || j < hi
+        invariant
+            1 <= w,
+            w2 == 2 * w,
+            sorted_runs(src@, w),
+            kk >= 0,
+            lo == kk * w2,
+            lo == (2 * kk) * w,
+            lo <= i <= mid <= j <= hi <= src.len(),
+            mid <= lo + w,
+            hi <= lo + 2 * w,
+            mid < hi ==> mid == lo + w,
+            out.wf(),
+            out@.len() == old(out)@.len(),
+            hi <= out@.len(),
+            o.len() == i + j - mid,
+            out@.subrange(0, o.len() as int) == o,
+            o.to_multiset() == src@.subrange(0, i as int).to_multiset().add(
+                src@.subrange(mid as int, j as int).to_multiset(),
+            ),
+            sorted_runs(o, w2),
+            o.len() > lo ==> (i < mid ==> o.last() <= src@[i as int]) && (j < hi ==> o.last()
+                <= src@[j as int]),
+            work == 2 * (o.len() - lo),
+        decreases (mid - i) + (hi - j),
+    {
+        let ghost o0 = o;
+        let k = i + (j - mid);
+        if i < mid && (j >= hi || src[i] <= src[j]) {
+            let e = src[i];
+            proof {
+                lemma_merge_order(o0, e, src@, w, kk, lo as int, i as int, mid as int, j as int, hi as int, true);
+            }
+            let ghost before = out@;
+            out.set(k, e);
+            i += 1;
+            proof {
+                lemma_merge_step(before, o0, e, src@, (i - 1) as int, mid as int, j as int, true);
+                o = o0.push(e);
+            }
+        } else {
+            let e = src[j];
+            proof {
+                lemma_merge_order(o0, e, src@, w, kk, lo as int, i as int, mid as int, j as int, hi as int, false);
+            }
+            let ghost before = out@;
+            out.set(k, e);
+            j += 1;
+            proof {
+                lemma_merge_step(before, o0, e, src@, i as int, mid as int, (j - 1) as int, false);
+                o = o0.push(e);
+            }
+        }
+        // one compare and one copy
+        proof {
+            work = work + 2;
+        }
+    }
+    proof {
+        broadcast use vstd::seq_lib::lemma_multiset_commutative;
+
+        assert(src@.subrange(0, hi as int) =~= src@.subrange(0, mid as int) + src@.subrange(
+            mid as int,
+            hi as int,
+        ));
+    }
+    Ghost(work)
+}
+
+/// One pass: merges the runs of width w of `src` into runs of width 2w, written over `dst` (no allocation).
+fn merge_pass(src: &[u64], w: usize, dst: &mut CapVec<u64>) -> (r: Ghost<nat>)
+    requires
+        1 <= w,
+        sorted_runs(src@, w as int),
+        old(dst).wf(),
+        old(dst)@.len() == src.len(),
+    ensures
+        final(dst).wf(),
+        final(dst)@.len() == src.len(),
+        final(dst)@.to_multiset() == src@.to_multiset(),
+        sorted_runs(final(dst)@, 2 * w),
+        r@ <= 2 * src.len(),
+{
+    let n = src.len();
+    let ghost mut work: nat = 0;
+    let mut lo: usize = 0;
+    let ghost mut k: int = 0;
+    proof {
+        reveal(sorted_runs);
+        assert(dst@.subrange(0, 0) =~= src@.subrange(0, 0));
+    }
+    while lo < n
+        invariant
+            n == src.len(),
+            1 <= w,
+            sorted_runs(src@, w as int),
+            lo <= n,
+            k >= 0,
+            lo < n ==> lo == k * (2 * w),
+            dst.wf(),
+            dst@.len() == n,
+            dst@.subrange(0, lo as int).to_multiset() == src@.subrange(0, lo as int).to_multiset(),
+            sorted_runs(dst@.subrange(0, lo as int), 2 * w),
+            work <= 2 * lo,
+        decreases n - lo,
+    {
+        let mid = if w < n - lo {
+            lo + w
+        } else {
+            n
+        };
+        let hi = if w < n - mid {
+            mid + w
+        } else {
+            n
+        };
+        let Ghost(c) = merge_runs(src, lo, mid, hi, dst, Ghost(w as int), Ghost(k));
+        proof {
+            if hi < n {
+                assert((k + 1) * (2 * w) == k * (2 * w) + 2 * w) by (nonlinear_arith);
+            }
+            k = k + 1;
+            work = work + c;
+        }
+        lo = hi;
+    }
+    proof {
+        assert(src@.subrange(0, n as int) =~= src@);
+        assert(dst@.subrange(0, n as int) =~= dst@);
+    }
+    Ghost(work)
+}
+
+/// Copies the identifiers of `v` and sorts them by bottom-up merging: widths 1, 2, 4, .. below p, ping-ponging
+/// between two buffers (the copy and one more, filled once), so the sort allocates two buffers in all.
+fn sort_ids_w(v: &[(u64, u64)]) -> (r: (CapVec<u64>, Ghost<nat>))
+    ensures
+        r.0.wf(),
+        sorted_u64(r.0@),
+        r.0@.to_multiset() == v@.map_values(|x: (u64, u64)| x.0).to_multiset(),
+        r.1@ <= c_sort() * (v@.len() * (clog2(v@.len() as nat) + 1) + 1),
 {
     let n = v.len();
+    let ghost ids = v@.map_values(|x: (u64, u64)| x.0);
+    let mut a: CapVec<u64> = CapVec::new(n);
+    let ghost mut work: nat = 1;
     let mut i: usize = 0;
     while i < n
         invariant
             n == v@.len(),
+            ids == v@.map_values(|x: (u64, u64)| x.0),
             i <= n,
-            forall|a: int, b: int|
-                0 <= a < i && a < b < n ==> #[trigger] v@[a].0 != #[trigger] v@[b].0,
-            forall|a: int| 0 <= a < i ==> !is_h2_reserved_setting_spec(#[trigger] v@[a].0),
+            a.wf(),
+            a.cap() == n,
+            a@ == ids.take(i as int),
+            work == 1 + i,
         decreases n - i,
     {
-        if is_h2_reserved_setting(v[i].0) {
-            return false;
-        }
-        let mut j: usize = i + 1;
-        while j < n
-            invariant
-                n == v@.len(),
-                i < n,
-                i < j <= n,
-                forall|a: int, b: int|
-                    0 <= a < i && a < b < n ==> #[trigger] v@[a].0 != #[trigger] v@[b].0,
-                forall|b: int| i < b < j ==> v@[i as int].0 != #[trigger] v@[b].0,
-            decreases n - j,
-        {
-            if v[j].0 == v[i].0 {
-                return false;
-            }
-            j += 1;
+        a.push(v[i].0);
+        proof {
+            assert(ids.take(i + 1) =~= ids.take(i as int).push(v@[i as int].0));
         }
         i += 1;
+        proof {
+            work = work + 1;
+        }
     }
-    true
+    // the second buffer, filled once so each pass can write it in place
+    let mut b: CapVec<u64> = CapVec::new(n);
+    let mut f: usize = 0;
+    proof {
+        work = work + 1;
+    }
+    while f < n
+        invariant
+            n == v@.len(),
+            f <= n,
+            b.wf(),
+            b.cap() == n,
+            b@.len() == f,
+            work == 2 + n + f,
+        decreases n - f,
+    {
+        b.push(0);
+        f += 1;
+        proof {
+            work = work + 1;
+        }
+    }
+    proof {
+        assert(ids.take(n as int) =~= ids);
+        lemma_runs_one(a@);
+        vstd::arithmetic::power2::lemma2_to64();
+    }
+    let mut w: usize = 1;
+    let ghost mut passes: nat = 0;
+    while w < n
+        invariant
+            n == v@.len(),
+            ids == v@.map_values(|x: (u64, u64)| x.0),
+            1 <= w,
+            w < n ==> w as nat == vstd::arithmetic::power2::pow2(passes),
+            passes == 0 || vstd::arithmetic::power2::pow2((passes - 1) as nat) < n,
+            a.wf(),
+            a@.len() == n,
+            b.wf(),
+            b@.len() == n,
+            a@.to_multiset() == ids.to_multiset(),
+            sorted_runs(a@, w as int),
+            work <= 2 * n + 2 + passes * (2 * n),
+        decreases n - w,
+    {
+        proof {
+            lemma_clog2(passes, n as nat);
+        }
+        let Ghost(c) = merge_pass(a.as_slice(), w, &mut b);
+        let t = a;
+        a = b;
+        b = t;
+        proof {
+            assert(work + c <= 2 * n + 2 + (passes + 1) * (2 * n)) by (nonlinear_arith)
+                requires
+                    work <= 2 * n + 2 + passes * (2 * n),
+                    c <= 2 * n,
+            {}
+            work = work + c;
+            passes = passes + 1;
+        }
+        if w <= (n - 1) / 2 {
+            proof {
+                vstd::arithmetic::power2::lemma_pow2_unfold(passes);
+            }
+            w = 2 * w;
+        } else {
+            proof {
+                lemma_runs_all(a@, 2 * w as int, n as int);
+            }
+            w = n;
+        }
+    }
+    // `b` is freed here
+    proof {
+        work = work + 1;
+        lemma_runs_all(a@, w as int, 1);
+        if passes > 0 {
+            lemma_clog2((passes - 1) as nat, n as nat);
+        }
+        lemma_sort_cost(n as nat, passes, work);
+    }
+    (a, Ghost(work))
+}
+
+/// One pass: reserved identifiers in `v`, equal neighbours in its sorted copy `sorted`.
+fn settings_ok(v: &Vec<(u64, u64)>, sorted: &[u64]) -> (r: (bool, Ghost<nat>))
+    requires
+        sorted_u64(sorted@),
+        sorted@.to_multiset() == v@.map_values(|x: (u64, u64)| x.0).to_multiset(),
+    ensures
+        r.0 == rfc_settings_valid(v@),
+        r.1@ <= c_ok() * (v@.len() + 1),
+{
+    let n = v.len();
+    proof {
+        broadcast use vstd::seq_lib::group_to_multiset_ensures;
+
+        assert(sorted@.to_multiset().len() == v@.map_values(|x: (u64, u64)| x.0).to_multiset().len());
+        assert(sorted@.to_multiset().len() == sorted@.len());
+        assert(v@.map_values(|x: (u64, u64)| x.0).to_multiset().len() == v@.map_values(|x: (u64, u64)| x.0).len());
+        assert(sorted@.len() == n);
+        lemma_settings_dup(v@, sorted@);
+    }
+    let ghost mut work: nat = 0;
+    let mut i: usize = 0;
+    // one exit, so the result is not a constant tuple (ct-front translates none)
+    while i < n && !is_h2_reserved_setting(v[i].0) && !(i + 1 < n && sorted[i] == sorted[i + 1])
+        invariant
+            n == v@.len(),
+            sorted@.len() == n,
+            ids_distinct(v@) <==> !has_adj_dup(sorted@),
+            i <= n,
+            forall|a: int| 0 <= a < i ==> !is_h2_reserved_setting_spec(#[trigger] v@[a].0),
+            forall|a: int| 0 <= a < i && a + 1 < n ==> #[trigger] sorted@[a] != sorted@[a + 1],
+            work == 2 * i,
+        decreases n - i,
+    {
+        i += 1;
+        proof {
+            work = work + 2;
+        }
+    }
+    proof {
+        if i == n {
+            if has_adj_dup(sorted@) {
+                let a = choose|a: int| 0 <= a && a + 1 < sorted@.len() && #[trigger] sorted@[a] == sorted@[a + 1];
+                assert(sorted@[a] != sorted@[a + 1]);
+            }
+            assert(ids_distinct(v@));
+        } else if !is_h2_reserved_setting_spec(v@[i as int].0) {
+            assert(sorted@[i as int] == sorted@[i + 1]);
+            assert(has_adj_dup(sorted@));
+        }
+    }
+    // the last check: one reserved test, one compare
+    (i == n, Ghost(work + 2))
 }
 
 // =============================================================================
 // Header codec
 // =============================================================================
+
+/// A buffer without a whole type varint extends to a complete header.
+proof fn lemma_header_extends_type(b: Seq<u8>)
+    requires
+        rfc_varint_decode(b) is None,
+    ensures
+        rfc_frame_header(b) is None,
+        exists|ext: Seq<u8>| #[trigger] rfc_frame_header(b.add(ext)) is Some,
+{
+    lemma_decode_extend(b);
+    let ext1 = choose|ext: Seq<u8>| completes(b, ext);
+    let ext = ext1.add(seq![0u8]);
+    let full = b.add(ext1);
+    let n1 = rfc_varint_decode(full).unwrap().0;
+    assert(b.add(ext) =~= full.add(seq![0u8]));
+    lemma_decode_prefix(full, seq![0u8]);
+    assert(b.add(ext).skip(n1 as int) =~= seq![0u8]);
+    lemma_decode_zero();
+    assert(rfc_frame_header(b.add(ext)) is Some);
+}
+
+/// A buffer with a whole type varint (`n1` bytes) but no whole length varint extends to a complete header.
+proof fn lemma_header_extends_len(b: Seq<u8>, n1: nat)
+    requires
+        rfc_varint_decode(b) matches Some((n, _)) && n == n1,
+        rfc_varint_decode(b.skip(n1 as int)) is None,
+    ensures
+        rfc_frame_header(b) is None,
+        exists|ext: Seq<u8>| #[trigger] rfc_frame_header(b.add(ext)) is Some,
+{
+    let s2 = b.skip(n1 as int);
+    lemma_decode_extend(s2);
+    let ext = choose|ext: Seq<u8>| completes(s2, ext);
+    lemma_decode_prefix(b, ext);
+    assert(b.add(ext).skip(n1 as int) =~= s2.add(ext));
+    assert(rfc_frame_header(b.add(ext)) is Some);
+}
+
+/// `parse_frame_header_w`'s cost: two varint parses and the split between them.
+pub open spec fn c_fhdr() -> nat {
+    2 * c_varint() + 1
+}
+
+/// `parse_frame_header` with its cost.
+pub fn parse_frame_header_w(buf: &[u8]) -> (r: (FrameHeader, Ghost<nat>))
+    ensures
+        match r.0 {
+            FrameHeader::Complete { ty, len, hdr_len } => rfc_frame_header(buf@) == Some(
+                (hdr_len as nat, ty, len),
+            ),
+            FrameHeader::Incomplete => {
+                &&& rfc_frame_header(buf@) is None
+                &&& exists|ext: Seq<u8>| #[trigger] rfc_frame_header(buf@.add(ext)) is Some
+            },
+        },
+        r.1@ <= c_fhdr(),
+{
+    let (p1, Ghost(c1)) = parse_varint_w(buf);
+    match p1 {
+        None => {
+            proof {
+                lemma_header_extends_type(buf@);
+            }
+            (FrameHeader::Incomplete, Ghost(c1))
+        },
+        Some((n1, ty)) => {
+            let rest = slice_subrange(buf, n1, buf.len());
+            proof {
+                assert(rest@ =~= buf@.skip(n1 as int));
+            }
+            let (p2, Ghost(c2)) = parse_varint_w(rest);
+            match p2 {
+                None => {
+                    proof {
+                        lemma_header_extends_len(buf@, n1 as nat);
+                    }
+                    (FrameHeader::Incomplete, Ghost(c1 + c2 + 1))
+                },
+                Some((n2, len)) => (FrameHeader::Complete { ty, len, hdr_len: n1 + n2 }, Ghost(c1 + c2 + 1)),
+            }
+        },
+    }
+}
 
 /// `Incomplete` only when `buf` is a strict prefix of some valid header.
 pub fn parse_frame_header(buf: &[u8]) -> (r: FrameHeader)
@@ -297,43 +1089,7 @@ pub fn parse_frame_header(buf: &[u8]) -> (r: FrameHeader)
             },
         },
 {
-    match parse_varint(buf) {
-        None => {
-            proof {
-                lemma_decode_extend(buf@);
-                let ext1 = choose|ext: Seq<u8>| completes(buf@, ext);
-                let ext = ext1.add(seq![0u8]);
-                let full = buf@.add(ext1);
-                let n1 = rfc_varint_decode(full).unwrap().0;
-                assert(buf@.add(ext) =~= full.add(seq![0u8]));
-                lemma_decode_prefix(full, seq![0u8]);
-                assert(buf@.add(ext).skip(n1 as int) =~= seq![0u8]);
-                lemma_decode_zero();
-                assert(rfc_frame_header(buf@.add(ext)) is Some);
-            }
-            FrameHeader::Incomplete
-        },
-        Some((n1, ty)) => {
-            let rest = slice_subrange(buf, n1, buf.len());
-            proof {
-                assert(rest@ =~= buf@.skip(n1 as int));
-            }
-            match parse_varint(rest) {
-                None => {
-                    proof {
-                        let s2 = buf@.skip(n1 as int);
-                        lemma_decode_extend(s2);
-                        let ext = choose|ext: Seq<u8>| completes(s2, ext);
-                        lemma_decode_prefix(buf@, ext);
-                        assert(buf@.add(ext).skip(n1 as int) =~= s2.add(ext));
-                        assert(rfc_frame_header(buf@.add(ext)) is Some);
-                    }
-                    FrameHeader::Incomplete
-                },
-                Some((n2, len)) => FrameHeader::Complete { ty, len, hdr_len: n1 + n2 },
-            }
-        },
-    }
+    parse_frame_header_w(buf).0
 }
 
 /// Appends type and length as minimal varints.
@@ -458,60 +1214,129 @@ pub fn put_frame(ty: u64, body: &Vec<u8>, out: &mut Vec<u8>)
 // Payload parsing
 // =============================================================================
 
+/// `parse_frame_payload`'s cost constant for every type but SETTINGS, over the payload length: a varint parse
+/// (`parse_varint_w`, at most `c_exact()`), then a copy into an exact `CapVec` and its allocation (PUSH_PROMISE).
+pub open spec fn c_pfp() -> nat {
+    10
+}
+
+/// A SETTINGS payload within `MAX_SETTINGS_FRAME` sorts in linear time: `clog2(d) <= clog2(1024) == 10`.
+pub proof fn lemma_settings_cost(d: nat)
+    requires
+        d <= crate::limits::MAX_SETTINGS_FRAME,
+    ensures
+        c_pset() * (d * (clog2(d) + 1) + 1) <= 275 * d + 25,
+{
+    lemma_clog2_mono(d, 1024);
+    reveal_with_fuel(clog2, 12);
+    assert(clog2(1024) == 10);
+    assert(d * (clog2(d) + 1) <= d * 11) by (nonlinear_arith)
+        requires
+            clog2(d) <= 10,
+    ;
+}
+
 /// Consumes `payload` exactly: a frame whose fields do not fill it, or overrun it, is
 /// `H3_FRAME_ERROR`; a duplicate or HTTP/2-reserved SETTINGS identifier is
-/// `H3_SETTINGS_ERROR`.
-pub fn parse_frame_payload(ty: u64, payload: &[u8]) -> (r: Result<Frame, u64>)
+/// `H3_SETTINGS_ERROR`. Its cost is `parse_settings`' for SETTINGS, else linear in the payload.
+pub fn parse_frame_payload(ty: u64, payload: &[u8]) -> (r: (Result<Frame, u64>, Ghost<nat>))
     ensures
-        match r {
+        match r.0 {
             Ok(f) => rfc_frame_payload(ty, payload@) == Ok::<SpecFrame, u64>(f@),
             Err(e) => rfc_frame_payload(ty, payload@) == Err::<SpecFrame, u64>(e),
         },
+        ty == FRAME_SETTINGS ==> r.1@ <= c_pset() * (payload@.len() * (clog2(payload@.len() as nat) + 1) + 1),
+        ty != FRAME_SETTINGS ==> r.1@ <= c_pfp() * (payload@.len() + 1),
+        r.0 matches Ok(Frame::Settings(v)) ==> 2 * v@.len() <= payload@.len(),
 {
     if ty == FRAME_DATA {
-        Ok(Frame::Data)
+        (Ok(Frame::Data), Ghost(0))
     } else if ty == FRAME_HEADERS {
-        Ok(Frame::Headers(slice_to_vec(payload)))
+        let mut v: CapVec<u8> = CapVec::new(payload.len());
+        let Ghost(wp) = v.push_slice(payload);
+        (Ok(Frame::Headers(v.into_vec())), Ghost(wp + 1))
     } else if ty == FRAME_CANCEL_PUSH {
-        match parse_exact_varint(payload) {
-            Some(v) => Ok(Frame::CancelPush(v)),
-            None => Err(H3_FRAME_ERROR),
+        let (pv, Ghost(cv)) = parse_exact_varint(payload);
+        match pv {
+            Some(v) => (Ok(Frame::CancelPush(v)), Ghost(cv)),
+            None => (Err(H3_FRAME_ERROR), Ghost(cv)),
         }
     } else if ty == FRAME_SETTINGS {
         parse_settings(payload)
     } else if ty == FRAME_PUSH_PROMISE {
-        match parse_varint(payload) {
+        let (pv, Ghost(cv)) = parse_varint_w(payload);
+        match pv {
             Some((n, id)) => {
-                let fs = slice_to_vec(slice_subrange(payload, n, payload.len()));
-                Ok(Frame::PushPromise { push_id: id, field_section: fs })
+                let rest = slice_subrange(payload, n, payload.len());
+                let mut fs: CapVec<u8> = CapVec::new(rest.len());
+                let Ghost(wp) = fs.push_slice(rest);
+                proof {
+                    assert(fs@ =~= payload@.skip(n as int));
+                }
+                (Ok(Frame::PushPromise { push_id: id, field_section: fs.into_vec() }), Ghost(cv + wp + 1))
             },
-            None => Err(H3_FRAME_ERROR),
+            None => (Err(H3_FRAME_ERROR), Ghost(cv)),
         }
     } else if ty == FRAME_GOAWAY {
-        match parse_exact_varint(payload) {
-            Some(v) => Ok(Frame::Goaway(v)),
-            None => Err(H3_FRAME_ERROR),
+        let (pv, Ghost(cv)) = parse_exact_varint(payload);
+        match pv {
+            Some(v) => (Ok(Frame::Goaway(v)), Ghost(cv)),
+            None => (Err(H3_FRAME_ERROR), Ghost(cv)),
         }
     } else if ty == FRAME_MAX_PUSH_ID {
-        match parse_exact_varint(payload) {
-            Some(v) => Ok(Frame::MaxPushId(v)),
-            None => Err(H3_FRAME_ERROR),
+        let (pv, Ghost(cv)) = parse_exact_varint(payload);
+        match pv {
+            Some(v) => (Ok(Frame::MaxPushId(v)), Ghost(cv)),
+            None => (Err(H3_FRAME_ERROR), Ghost(cv)),
         }
     } else if is_h2_reserved_frame(ty) {
-        Ok(Frame::H2Reserved(ty))
+        (Ok(Frame::H2Reserved(ty)), Ghost(0))
     } else {
-        Ok(Frame::Unknown(ty))
+        (Ok(Frame::Unknown(ty)), Ghost(0))
     }
 }
 
-fn parse_settings(payload: &[u8]) -> (r: Result<Frame, u64>)
+/// `parse_settings`' bound from its accounting: `t` is its charges besides the sort's (at most 10d + 22), `p` its pairs.
+proof fn lemma_pset_cost(d: nat, p: nat, t: nat)
+    requires
+        2 * p <= d,
+        t <= c_sort() * (p * (clog2(p) + 1) + 1) + 10 * d + 22,
     ensures
-        match r {
+        t <= c_pset() * (d * (clog2(d) + 1) + 1),
+{
+    lemma_clog2_mono(p, d);
+    let (cp, cd) = (clog2(p), clog2(d));
+    vstd::arithmetic::mul::lemma_mul_upper_bound(p as int, d as int, (cp + 1) as int, (cd + 1) as int);
+    assert(d <= d * (cd + 1)) by (nonlinear_arith);
+}
+
+/// `parse_settings`' charge at an exit inside its loop: the free of `pairs`.
+spec fn c_pfree() -> nat {
+    1
+}
+
+/// rca-early-return-cost's catch at a costed loop's exit: the charge `ret` the exit returns holds `w`, what was charged
+/// before, and `t`, the term this exit owes (its iteration's step, or the free of what it drops). Callers pass the
+/// value they return; an exit whose `ret` drops `t` fails this precondition whatever the margin under the fn's bound.
+pub proof fn lemma_paid(w: nat, t: nat, ret: nat)
+    requires
+        w + t <= ret,
+{
+}
+
+fn parse_settings(payload: &[u8]) -> (r: (Result<Frame, u64>, Ghost<nat>))
+    ensures
+        match r.0 {
             Ok(f) => rfc_frame_payload(FRAME_SETTINGS, payload@) == Ok::<SpecFrame, u64>(f@),
             Err(e) => rfc_frame_payload(FRAME_SETTINGS, payload@) == Err::<SpecFrame, u64>(e),
         },
+        r.1@ <= c_pset() * (payload@.len() * (clog2(payload@.len() as nat) + 1) + 1),
+        r.0 matches Ok(Frame::Settings(v)) ==> 2 * v@.len() <= payload@.len(),
 {
-    let mut pairs: Vec<(u64, u64)> = Vec::new();
+    let ghost d = payload@.len() as nat;
+    // a pair takes at least two bytes
+    let mut pairs: CapVec<(u64, u64)> = CapVec::new(payload.len() / 2);
+    let ghost mut work: nat = 1;
     let mut off: usize = 0;
     proof {
         assert(payload@.skip(0) =~= payload@);
@@ -521,22 +1346,63 @@ fn parse_settings(payload: &[u8]) -> (r: Result<Frame, u64>)
     }
     while off < payload.len()
         invariant
+            d == payload@.len(),
             off <= payload@.len(),
             rfc_settings_pairs(payload@) == (match rfc_settings_pairs(payload@.skip(off as int)) {
                 Some(rest) => Some(pairs@.add(rest)),
                 None => None,
             }),
+            pairs.wf(),
+            pairs.cap() == payload@.len() / 2,
+            2 * pairs@.len() <= off,
+            work <= 1 + 9 * off,
         decreases payload@.len() - off,
     {
+        let ghost w_it: nat = work;
         let tail = slice_subrange(payload, off, payload.len());
-        let (n1, id) = match parse_varint(tail) {
+        // Each callee's cost is charged where it returns, before the exit after it (rca-early-return-cost).
+        let (p1, Ghost(c1)) = parse_varint_w(tail);
+        proof {
+            work = work + c1;
+        }
+        let (n1, id) = match p1 {
             Some(x) => x,
-            None => return Err(H3_FRAME_ERROR),
+            None => {
+                // the exit's own charge: the free of `pairs`
+                let ghost ret: nat = work + c_pfree();
+                proof {
+                    lemma_paid(work, c_pfree(), ret);
+                    lemma_pset_cost(d, pairs@.len(), ret);
+                }
+                proof {
+                    // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                    crate::frame::lemma_paid(w_it, c1, work);
+                }
+                return (Err(H3_FRAME_ERROR), Ghost(ret));
+            },
         };
         let tail2 = slice_subrange(tail, n1, tail.len());
-        let (n2, v) = match parse_varint(tail2) {
+        proof {
+            lemma_decode_len_bounds(payload@.skip(off as int));
+        }
+        let (p2, Ghost(c2)) = parse_varint_w(tail2);
+        proof {
+            work = work + c2;
+        }
+        let (n2, v) = match p2 {
             Some(x) => x,
-            None => return Err(H3_FRAME_ERROR),
+            None => {
+                let ghost ret: nat = work + c_pfree();
+                proof {
+                    lemma_paid(work, c_pfree(), ret);
+                    lemma_pset_cost(d, pairs@.len(), ret);
+                }
+                proof {
+                    // the iteration's charges are in what the exit returns (rca-early-return-cost)
+                    crate::frame::lemma_paid(w_it, c1 + c2, work);
+                }
+                return (Err(H3_FRAME_ERROR), Ghost(ret));
+            },
         };
         proof {
             let t = payload@.skip(off as int);
@@ -550,7 +1416,7 @@ fn parse_settings(payload: &[u8]) -> (r: Result<Frame, u64>)
         pairs.push((id, v));
         off = off + n1 + n2;
         proof {
-            let t_old = payload@.skip((off - n1 - n2) as int);
+            work = work + 1;
             // unfold one step: rest(t_old) = [(id,v)] + rest(skip)
             match rfc_settings_pairs(payload@.skip(off as int)) {
                 Some(rest) => {
@@ -564,10 +1430,17 @@ fn parse_settings(payload: &[u8]) -> (r: Result<Frame, u64>)
         assert(payload@.skip(off as int) =~= Seq::<u8>::empty());
         assert(pairs@.add(Seq::empty()) =~= pairs@);
     }
-    if settings_ok(&pairs) {
-        Ok(Frame::Settings(pairs))
+    let pairs = pairs.into_vec();
+    let (sorted, Ghost(cs)) = sort_ids_w(pairs.as_slice());
+    let (ok, Ghost(co)) = settings_ok(&pairs, sorted.as_slice());
+    // the free of `sorted`, and of `pairs` on the error
+    proof {
+        lemma_pset_cost(d, pairs@.len(), work + cs + co + 2);
+    }
+    if ok {
+        (Ok(Frame::Settings(pairs)), Ghost(work + cs + co + 1))
     } else {
-        Err(H3_SETTINGS_ERROR)
+        (Err(H3_SETTINGS_ERROR), Ghost(work + cs + co + 2))
     }
 }
 

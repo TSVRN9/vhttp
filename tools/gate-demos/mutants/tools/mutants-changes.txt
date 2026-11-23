@@ -1,0 +1,2 @@
+# demo fixture: each mutant's changed-lines digest
+D-kill a8ad87d9e18c43de

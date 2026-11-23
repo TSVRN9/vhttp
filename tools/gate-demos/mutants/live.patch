@@ -1,8 +1,8 @@
 diff --git a/crates/demo/src/acc.rs b/crates/demo/src/acc.rs
-index 99a3251..7914a1c 100644
+index 7cfb5da..2a9caaf 100644
 --- a/crates/demo/src/acc.rs
 +++ b/crates/demo/src/acc.rs
-@@ -10,7 +10,7 @@ pub fn demo(n: u64) -> (r: Result<(), u64>)
+@@ -17,7 +17,7 @@ pub fn demo(n: u64) -> (r: Result<(), u64>)
      ensures
          r is Err ==> allowed_demo_err(n, r->Err_0),
  {

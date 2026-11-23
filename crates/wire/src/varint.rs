@@ -990,38 +990,13 @@ impl<'i, const MINIMAL: bool> Parser<&'i [u8]> for QuicVarInt<MINIMAL> {
         proof {
             lemma_parse_matches_rfc::<MINIMAL>(b@);
         }
-        if b.len() == 0 {
-            return Err(ParseError::unexpected_eof());
-        }
-        let b0 = b[0];
-        let n = exec_len(b0);
-        if b.len() < n {
-            return Err(ParseError::unexpected_eof());
-        }
-        let mut v: u64 = (b0 & 0x3f) as u64;
-        let mut i: usize = 1;
-        while i < n
-            invariant
-                1 <= i <= n <= b@.len(),
-                v == rfc_varint_read_remaining((b0 & 0x3f) as u64, b@.subrange(1, i as int)),
-            decreases n - i,
-        {
-            proof {
-                lemma_read_push((b0 & 0x3f) as u64, b@.subrange(1, i as int), b@[i as int]);
-                bv_shl_or(v, b@[i as int]);
-                assert(b@.subrange(1, i as int).push(b@[i as int]) =~= b@.subrange(
-                    1,
-                    i as int + 1,
-                ));
-            }
-            v = (v << 8) | (b[i] as u64);
-            i += 1;
-        }
-        assert(b@.subrange(1, n as int) == b@.subrange(1, i as int));
-        if MINIMAL && n != exec_min_len(v) {
-            Err(ParseError::non_canonical())
-        } else {
-            Ok((n, v))
+        match parse_varint_w(b).0 {
+            None => Err(ParseError::unexpected_eof()),
+            Some((n, v)) => if MINIMAL && n != exec_min_len(v) {
+                Err(ParseError::non_canonical())
+            } else {
+                Ok((n, v))
+            },
         }
     }
 }
@@ -1201,6 +1176,53 @@ pub proof fn lemma_decode_extend(b: Seq<u8>)
         assert(b.add(ext)[0] == b[0]);
         assert(completes(b, ext));
     }
+}
+
+/// `parse_varint_w`'s cost: one unit for the length checks and the result, and one per byte read after the first (at
+/// most 7: `exec_len` is at most 8). Its link to MIR steps is carryover cat-C15-mir-cost's.
+pub open spec fn c_varint() -> nat {
+    8
+}
+
+/// `parse_varint` with its cost. The decode loop's only copy: `QuicVarInt::parse` calls it too.
+pub fn parse_varint_w(b: &[u8]) -> (r: (Option<(usize, u64)>, Ghost<nat>))
+    ensures
+        match r.0 {
+            Some((n, v)) => rfc_varint_decode(b@) == Some((n as nat, v)) && 1 <= n <= b@.len(),
+            None => rfc_varint_decode(b@) is None,
+        },
+        r.1@ <= c_varint(),
+{
+    if b.len() == 0 {
+        return (None, Ghost(1));
+    }
+    let b0 = b[0];
+    let n = exec_len(b0);
+    if b.len() < n {
+        return (None, Ghost(1));
+    }
+    let mut v: u64 = (b0 & 0x3f) as u64;
+    let mut i: usize = 1;
+    let ghost mut work: nat = 1;
+    while i < n
+        invariant
+            1 <= i <= n <= b@.len(),
+            n <= 8,
+            v == rfc_varint_read_remaining((b0 & 0x3f) as u64, b@.subrange(1, i as int)),
+            work == i,
+        decreases n - i,
+    {
+        proof {
+            lemma_read_push((b0 & 0x3f) as u64, b@.subrange(1, i as int), b@[i as int]);
+            bv_shl_or(v, b@[i as int]);
+            assert(b@.subrange(1, i as int).push(b@[i as int]) =~= b@.subrange(1, i as int + 1));
+            work = work + 1;
+        }
+        v = (v << 8) | (b[i] as u64);
+        i += 1;
+    }
+    assert(b@.subrange(1, n as int) == b@.subrange(1, i as int));
+    (Some((n, v)), Ghost(work))
 }
 
 pub fn parse_varint(b: &[u8]) -> (r: Option<(usize, u64)>)

@@ -2,7 +2,7 @@ byteq: vstd
 crypto: vstd
 ctcore: vstd
 ctmir: ctcore vstd
-h3: vest_lib vstd wire
+h3: byteq vest_lib vstd wire
 quic: byteq crypto h3 vest_lib vstd wire
 quictls: crypto h3 quic tls vstd
 server: h3 libc quic quictls tls

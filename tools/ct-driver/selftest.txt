@@ -59,22 +59,22 @@ crypto::rsa::rsa_pss_sign_inner b0f9e81943a7ae9892aade17ca7c40f8744fed2f8148e6c8
 # RFC 9000 A.1: 0x9d.. is a 4-byte varint (rfc_a1_samples in crates/wire/tests/varint.rs)
 wire::varint::exec_len 0x9du8 => 0x4usize
 # GOAWAY(4) payload [04] is exactly one varint (roundtrip_send_frames in crates/h3/tests/frame.rs);
-# through parse_varint's vest_lib parser: &str, encoded upstream MIR, ADT constants
-h3::frame::parse_exact_varint 04 => Some(0x4u64)
+# through parse_varint_w's decode loop (the vest_lib trait path is the parse_varint vector below)
+h3::frame::parse_exact_varint 04 => (Some(0x4u64),())
 # GOAWAY payload [04 00] has a trailing byte => H3_FRAME_ERROR (frame_layout_errors, same file)
-h3::frame::parse_exact_varint 0400 => None
+h3::frame::parse_exact_varint 0400 => (None,())
 # SETTINGS [(6, 0x400)] ok; setting 6 twice => H3_SETTINGS_ERROR (settings_rules, same file)
-h3::frame::settings_ok [(0x6u64,0x400u64)] => true
-h3::frame::settings_ok [(0x6u64,0x1u64),(0x6u64,0x2u64)] => false
+h3::frame::settings_ok [(0x6u64,0x400u64)] [0x6u64] => (true,())
+h3::frame::settings_ok [(0x6u64,0x1u64),(0x6u64,0x2u64)] [0x6u64,0x6u64] => (false,())
 # RFC 7541 C.1.2: 1337 with a 5-bit prefix (rfc7541_c1 in crates/h3/tests/qpack_int.rs)
 h3::qpack::int::parse_prefix_int 0x5u8 1f9a0a => #1(0x539u64,0x3usize)
 # RFC 7541 C.4.1: www.example.com (rfc7541_c4_strings in crates/h3/tests/huffman.rs)
 h3::qpack::huffman::huffman_decode f1e3c2e5f23a6ba0ab90f4ff => Some(7777772e6578616d706c652e636f6d)
 # RFC 9204 B.1: :path /index.html (rfc9204_b1 in crates/h3/tests/field_section.rs); with no
 # budget left it is OverBudget, dropping the scanned Option<Vec<u8>> (decoded_budget in
-# crates/h3/tests/request.rs)
-h3::qpack::field_section::decode_field_line_bounded 510b2f696e6465782e68746d6c 0x10000u64 => #0((#0(3a70617468,2f696e6465782e68746d6c),0xdusize))
-h3::qpack::field_section::decode_field_line_bounded 510b2f696e6465782e68746d6c 0x0u64 => #1(#1())
+# crates/h3/tests/request.rs); the Ghost cost after the result is `()`
+h3::qpack::field_section::decode_field_line_bounded 510b2f696e6465782e68746d6c 0x10000u64 => (#0((#0(3a70617468,2f696e6465782e68746d6c),0xdusize)),())
+h3::qpack::field_section::decode_field_line_bounded 510b2f696e6465782e68746d6c 0x0u64 => (#1(#1()),())
 # Request-stream frame rules, niche-encoded Option<ReqError> constants: SETTINGS => H3_FRAME_UNEXPECTED
 # (frame_order), HEADERS over MAX_FIELD_SECTION_SIZE => H3_EXCESSIVE_LOAD (decoded_budget), a
 # small HEADERS frame is accepted (simple_get), all in crates/h3/tests/request.rs
@@ -97,8 +97,9 @@ wire::varint::parse_varint 0400 => Some((0x1usize,0x4u64))
 # the same test's parse_frame_header([04 00]) == Complete { ty: 4, len: 0, hdr_len: 2 }
 h3::frame::parse_frame_header 0400 => #1(0x4u64,0x0u64,0x2usize)
 # hand-traced (no public test shows this state): rfc7541_c4_strings in crates/h3/tests/huffman.rs, www.example.com = f1 e3 ..: the 7th bit of f1 completes
-# 'w' (code 1111000): the state after bits 111100 is acc 0x3c, len 6, not all ones; bit 0 appends 0x77 and resets it
-h3::qpack::huffman::feed_bit mut:- mut:0x3cu32 mut:0x6u32 mut:false false () () => true 77 0x0u32 0x0u32 true
+# 'w' (code 1111000): the state after bits 111100 is acc 0x3c, len 6, not all ones; bit 0 completes 0x77 (returned for
+# huffman_decode_w to append; the three Ghost arguments are `()`) and resets it
+h3::qpack::huffman::feed_bit mut:0x3cu32 mut:0x6u32 mut:false false () () () => (true,Some(0x77u8),()) 0x0u32 0x0u32 true
 # hand-traced (no public test shows this state): the same decode at 'w', the lookup of the completed code (acc 0x78, len 7) hits 'w'
 h3::qpack::huffman::lookup 0x78u32 0x7u32 => Some(0x77u8)
 # small_frames in crates/quic/tests/frame.rs: parse_frame([04 04 07 52 34]) hands parse_reset_stream the body 04 07 52 34

@@ -4,7 +4,7 @@ set -o pipefail
 # gate-demos.sh: each cheap gate gets a canned bad input (a temp copy of a fixture in
 # tools/gate-demos/ with one change applied) and must exit non-zero with its message; every fixture
 # first passes unchanged, so a demo cannot fail for the wrong reason. Covers lint-scripts,
-# check-quotes, the citation gate, the RFC-quantity gate (its git demos in throwaway repos), acceptance (many bad changes, including real-git runs), escape-gate (three), the cost-charge gate, crypto_cost's realloc count (a debug build of a workspace copy), the rlimit gate and the mutant registry (scripts/mutants.sh; its run demos call Verus
+# check-quotes, the citation gate, the RFC-quantity gate (its git demos in throwaway repos), acceptance (many bad changes, including real-git runs), escape-gate (three), the cost-charge gate, crypto_cost's realloc count (a debug build of a workspace copy), the rlimit gate, the seed gate (tools/rlseeds.py) and the mutant registry (scripts/mutants.sh; its run demos call Verus
 # on the fixture crate), the declassify and deps gates, ct-check's report reader (ct-report.sh), ct-binary (against its real build), the test gate, the carryover gate and the requirements status gate (throwaway repos). Takes a few seconds, plus about a minute the first time vstd builds in target/mutants-demo (and a debug build in
 # target/realloc-demo).
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -151,6 +151,13 @@ expect_fail "acceptance: spec(checked) allowed_ fn with body true" "vacuous allo
 afresh
 sed -i 's/^pub open spec fn allowed_demo_err(n: u64, c: u64) -> bool {$/pub open spec fn allowed_demo_err(n: u64, c: u64) -> bool\n    decreases (if n < 10 { 10 - n } else { 0 }),\n{/; s/    n > 10 \&\& c == 7/    true/' "$lib"
 expect_fail "acceptance: allowed_ fn with body true after a decreases clause holding a brace" "vacuous allowed spec fn" acc
+# rule 5's non-vacuity witness (9b3 final review A-I1): deleted, or ensuring no refused instance
+afresh
+sed -i '/^proof fn lemma_allowed_demo_err_rejects()$/,/^}$/d' "$lib"
+expect_fail "acceptance: allowed_ fn without a non-vacuity witness" "allowed spec fn without a non-vacuity witness" acc
+afresh
+sed -i 's/^        !allowed_demo_err(0, 7),$/        allowed_demo_err(12, 7),/' "$lib"
+expect_fail "acceptance: witness with no refused instance" "non-vacuity witness without a refused instance" acc
 # a same-line `ensures .. {` body must not hide the next fn (it used to credit `a` with `hidden`'s clause)
 afresh
 addfn 'pub fn a(n: u64) -> (r: Result<(), u64>) ensures r is Ok ==> n == 0 {
@@ -325,7 +332,7 @@ ccb=$tmp/cost/crates/byteq/src
 cct=$tmp/cost/crates/quictls/src
 cfresh() {
   rm -rf "${tmp:?}/cost"; mkdir -p "$ccq" "$ccb" "$cct"
-  cp "$root/crates/quic/src/avl.rs" "$root/crates/quic/src/frags.rs" "$root/crates/quic/src/crypto_stream.rs" "$root/crates/quic/src/conn.rs" "$ccq/"
+  cp "$root/crates/quic/src/frags.rs" "$root/crates/quic/src/crypto_stream.rs" "$root/crates/quic/src/conn.rs" "$ccq/"
   cp "$root/crates/quic/src/pipeline.rs" "$root/crates/quic/src/streams.rs" "$root/crates/quic/src/recv_stream.rs" "$ccq/"
   cp "$root/crates/quic/src/ack_track.rs" "$ccq/"
   cp "$root/crates/quic/src/ranges.rs" "$root/crates/quic/src/send_stream.rs" "$root/crates/quic/src/ring.rs" "$ccq/"
@@ -339,7 +346,7 @@ wl=$(grep -n '^    while j < n$' "$ccq/frags.rs" | cut -d: -f1)
 [ -n "$wl" ] || die "cost-charge demo: fill's while not found in the copy"
 expect_fail "cost-charge: a while whose invariant lacks work" "crates/quic/src/frags.rs:$wl: while without an invariant naming work" cc
 cfresh
-sed -i 's|^} // verus!$|fn depth<V>(t: \&Tree<V>) -> (r: u64)\n    decreases *t,\n{\n    match t {\n        None => 0,\n        Some(b) => depth(\&b.left),\n    }\n}\n\n} // verus!|' "$ccq/avl.rs"
+sed -i 's|^} // verus!$|fn depth<V>(t: \&Tree<V>) -> (r: u64)\n    decreases *t,\n{\n    match t {\n        None => 0,\n        Some(b) => depth(\&b.left),\n    }\n}\n\n} // verus!|' "$ccb/avl.rs"
 expect_fail "cost-charge: a recursive exec fn without a Ghost<nat> return" "depth recurses but returns no named Ghost<nat> cost" cc
 cfresh
 sed -i 's/^        r\.2@ <= n + 1,$/        true,/' "$ccq/frags.rs"
@@ -393,8 +400,8 @@ cfresh
 sed -i 's/^    let mut v: CapVec<u8> = CapVec::new(n as usize);$/&\n    for _x in 0..1u8 {}/' "$ccq/frags.rs"
 expect_fail "cost-charge: a for" "\`for\` in fill: only \`while\` loops are checked" cc
 cfresh
-rm "$ccq/avl.rs"
-expect_fail "cost-charge: a missing file" "cannot read crates/quic/src/avl.rs" cc
+rm "$ccb/avl.rs"
+expect_fail "cost-charge: a missing file" "cannot read crates/byteq/src/avl.rs" cc
 cfresh
 once '^                work = work \+ cj;$' "$ccq/crypto_stream.rs"
 sed -i 's/^                work = work + cj;$/                assert(cj >= 0);/' "$ccq/crypto_stream.rs"
@@ -453,8 +460,8 @@ cfresh
 sed -i 's/^            assert(refed ==> !keep);$/&\n        }\n        let ghost mut work: nat = 0;\n        proof {/' "$cct/server.rs"
 expect_fail "cost-charge: receive rebinds work after its charges (fix round 2)" "QuicServer::receive binds work again" cc
 cfresh
-once '^        \(mk\(l, k, v, r\), Ghost\(1\)\)$' "$ccq/avl.rs"
-sed -i 's/^        (mk(l, k, v, r), Ghost(1))$/        (mk(l, k, v, r), Ghost(1nat + 0))/' "$ccq/avl.rs"
+once '^        \(mk\(l, k, v, r\), Ghost\(1\)\)$' "$ccb/avl.rs"
+sed -i 's/^        (mk(l, k, v, r), Ghost(1))$/        (mk(l, k, v, r), Ghost(1nat + 0))/' "$ccb/avl.rs"
 expect_fail "cost-charge: a stale literal-return exemption (fix round 2)" "literal-return exemption for bal matches no literal cost" cc
 cfresh
 once '^                    let Ghost\(c4\) = free\(l3\);$' "$ccq/ranges.rs"
@@ -541,6 +548,55 @@ printf 'version 0.2026.10.04.426d8b0\n' > "$tmp/short-pin"; pin=$tmp/short-pin
 expect_fail "rlimit-gate: pin file without commit and toolchain" "lacks a version, commit or toolchain" rl
 pin=$root/tools/verus-pin.txt
 expect_fail "rlimit-gate: no --pin" "no --pin FILE given" python3 -I "$root/tools/rl.py" --gate quic "$tmp/rl.json"
+
+# Seed gate (tools/rlseeds.py, run by scripts/rlimit-seeds.sh; RCA docs/rca/2026-11-16-smt-order-fragility.md): a fn
+# that verifies under seed 0 and fails or exceeds its cap or ceiling under another seed is caught. The fixture is the
+# rlimit gate's log renamed to h3 (the ceilings file may not hold quic lines); seed 1's copy differs in one rlimit.
+sed 's/quic::/h3::/g; s/"module": "quic"/"module": "h3"/' "$tmp/rlimit/quic.json" > "$tmp/rs-base.json"
+rs1() { sed 's/"rlimit": 120000, "success": true/"rlimit": 120001, "success": true/' "$tmp/rs-base.json" > "$tmp/rs-1.json"; }
+printf 'h3 h3::conn::edge 8000000\n' > "$tmp/rs-ceil.txt"
+rs() { python3 -I "$root/tools/rlseeds.py" h3 --pin "$pin" --ceilings "$tmp/rs-ceil.txt" "$tmp/rs-0.json" "$tmp/rs-1.json"; }
+cp "$tmp/rs-base.json" "$tmp/rs-0.json"; rs1
+expect_pass "rlimit-seeds" rs
+cp "$tmp/rs-base.json" "$tmp/rs-1.json"
+expect_fail "rlimit-seeds: identical runs (the seed had no effect)" "the seed option had no effect" rs
+rs1; sed -i 's/"rlimit": 120001, "success": true/"rlimit": 12000000, "success": false/' "$tmp/rs-1.json"
+expect_fail "rlimit-seeds: passes seed 0, FAIL row under seed 1" "seed 1: FAIL row h3::conn::small" rs
+rs1; sed -i 's/"rlimit": 7630000/"rlimit": 8000001/' "$tmp/rs-1.json"
+expect_fail "rlimit-seeds: over the cap under seed 1 only" "h3::conn::poll_max_data at 8000001 (seed 1) is above its cap" rs
+rs1; printf 'h3 h3::conn::edge 7999999\n' > "$tmp/rs-ceil.txt"
+expect_fail "rlimit-seeds: over its ceiling line" "h3::conn::edge at 8000000 (seed 0) is above its ceiling 7999999" rs
+printf 'h3 h3::conn::edge\n' > "$tmp/rs-ceil.txt"
+expect_fail "rlimit-seeds: a malformed ceilings line" "malformed line" rs
+printf 'h3 h3::conn::edge 8000000\n' > "$tmp/rs-ceil.txt"; sed -i 's/"errors": 0/"errors": 1/' "$tmp/rs-1.json"
+expect_fail "rlimit-seeds: a seed's run not clean" "seed 1: run not clean" rs
+rs1; sed -i 's/"verified": [0-9]*/"verified": 0/' "$tmp/rs-1.json"
+expect_fail "rlimit-seeds: a seed that verified nothing" "seed 1: run not clean" rs
+: > "$tmp/rs-1.json"
+expect_fail "rlimit-seeds: an empty seed log" "seed 1: 0 verification-results objects" rs
+# rlimit-seeds.sh itself, in a copy of the tree with a stub `cargo` (VERUS_HOME leads PATH): each seed's run prints the
+# fixture (seed 1's perturbed); a non-zero exit under one seed fails the gate after every seed is read.
+rsd=$tmp/rsd
+mkdir -p "$rsd/scripts" "$rsd/tools" "$rsd/crates/h3/src" "$rsd/bin"
+cp "$root/scripts/rlimit-seeds.sh" "$rsd/scripts/"; cp "$root/tools/rlseeds.py" "$root/tools/verus-pin.txt" "$rsd/tools/"
+: > "$rsd/tools/rlimit-ceilings.txt"
+cp "$tmp/rs-base.json" "$rsd/fixture.json"
+cat > "$rsd/bin/cargo" <<'STUB'
+#!/bin/sh
+case $1 in
+    metadata) printf '{"target_directory": "%s/target"}\n' "$RSD" ;;
+    clean) ;;
+    verus)
+        s=0
+        for a in "$@"; do case $a in smt.random_seed=*) s=${a#*=} ;; esac; done
+        sed "s/\"rlimit\": 120000,/\"rlimit\": 12000$s,/" "$RSD/fixture.json"
+        if [ "$s" = "${RSD_FAIL:-none}" ]; then exit 1; fi ;;
+esac
+STUB
+chmod +x "$rsd/bin/cargo"
+rsh() { env RSD="$rsd" RSD_FAIL="${1:-none}" VERUS_HOME="$rsd/bin" RS_OUT="$rsd/out" "$rsd/scripts/rlimit-seeds.sh" h3 3; }
+expect_pass "rlimit-seeds.sh (stub cargo)" rsh
+expect_fail "rlimit-seeds.sh: verus exits non-zero under seed 2 only" "verus exited non-zero under seed(s) 2" rsh 2
 
 # clean-tree.sh (F5): an untracked file, a modified tracked file and a non-repo dir fail; a clean repo passes.
 ct() { "$root/scripts/clean-tree.sh" "$tmp/ctree"; }
@@ -1009,7 +1065,7 @@ mrepo() {  # mrepo <dir>: scripts, tools/mutants.py and the fixture, one commit 
     rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/tools"
     cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/mutants.py" "$root/tools/acceptance.py" "$root/tools/verus-pin.txt" "$tmp/$1/tools/"
     cp -r "$fx/mutants/Cargo.toml" "$fx/mutants/Cargo.lock" "$fx/mutants/crates" "$root/rust-toolchain.toml" "$tmp/$1/"
-    cp -r "$fx/mutants/tools/mutants.tsv" "$fx/mutants/tools/mutants" "$tmp/$1/tools/"
+    cp -r "$fx/mutants/tools/mutants.tsv" "$fx/mutants/tools/mutants-changes.txt" "$fx/mutants/tools/mutants" "$tmp/$1/tools/"
     cp "$fx/acceptance/crates/demo/src/lib.rs" "$tmp/$1/crates/demo/src/acc.rs"
     printf '/.worktrees/\n/target/\n' > "$tmp/$1/.gitignore"
     git -C "$tmp/$1" init -q -b main
@@ -1018,6 +1074,9 @@ mrepo() {  # mrepo <dir>: scripts, tools/mutants.py and the fixture, one commit 
     gitc "$1" checkout -qb feat
 }
 mut() { d=$1; shift; "$tmp/$d/scripts/mutants.sh" "$@"; }
+mchg() {  # mchg <dir> <id>: record <id>'s patch's changed-lines digest, as a reviewed new mutant would
+    printf '%s %s\n' "$2" "$(python3 -I "$root/tools/mutants.py" changes "$tmp/$1/tools/mutants/$2.patch")" >> "$tmp/$1/tools/mutants-changes.txt"
+}
 nowt() {  # nowt <dir> <name>: no mutants-* worktree left in $tmp/<dir> (a failing git worktree list is a failure)
     wl=$(git -C "$tmp/$1" worktree list --porcelain) || die "$2: git worktree list failed"
     case $wl in *"/mutants-"*) die "$2: worktree left behind:
@@ -1046,6 +1105,29 @@ expect_fail "mutants check: patch without a row" "patch without a row: D-live" m
 mrepo m2
 sed -i 's#crates/demo/#crates/wire/#g' "$tmp/m2/tools/mutants/D-kill.patch"
 expect_fail "mutants check: patch outside its row's crate" "outside crates/demo/ and its path dependencies (none)" mut m2 check
+# 9b3 Task 12 fix round 2b (RCA docs/rca/2026-11-23-mutant-patch-absorbs-edit.md): each patch's changed lines are
+# pinned in tools/mutants-changes.txt. A patch regenerated from a dirty tree (git apply, git diff, git checkout) carries
+# the tree's other edit and the source loses it: check fails. Regenerated from a clean tree after lines moved: passes.
+mrepo m2
+printf '// an edit not yet committed\n' >> "$tmp/m2/crates/demo/src/acc.rs"
+git -C "$tmp/m2" apply tools/mutants/D-kill.patch; git -C "$tmp/m2" diff -- crates/demo/src/acc.rs > "$tmp/m2/tools/mutants/D-kill.patch"
+git -C "$tmp/m2" checkout -q -- crates/demo/src/acc.rs
+expect_fail "mutants check: a patch regenerated from a dirty tree" "D-kill.patch: its changed lines differ from the ones recorded" mut m2 check
+mrepo m2
+sed -i '1i // a line that moves the mutation down' "$tmp/m2/crates/demo/src/acc.rs"; gitc m2 commit -qam moved
+git -C "$tmp/m2" apply -C1 tools/mutants/D-kill.patch; git -C "$tmp/m2" diff -- crates/demo/src/acc.rs > "$tmp/m2/tools/mutants/D-kill.patch"
+git -C "$tmp/m2" checkout -q -- crates/demo/src/acc.rs
+expect_pass "mutants check: a patch regenerated from a clean tree after its lines moved" mut m2 check
+mrepo m2
+sed -i '/^D-kill /d' "$tmp/m2/tools/mutants-changes.txt"
+expect_fail "mutants check: a row whose patch has no recorded changed lines" "no line for D-kill" mut m2 check
+# 9b3 final review B-M4: a digest line whose row was deleted is a stale pin
+mrepo m2
+printf 'D-gone 0123456789abcdef\n' >> "$tmp/m2/tools/mutants-changes.txt"
+expect_fail "mutants check: a recorded digest whose row was deleted" "a line for D-gone, which has no row" mut m2 check
+mrepo m2
+rm "$tmp/m2/tools/mutants-changes.txt"
+expect_fail "mutants check: no tools/mutants-changes.txt" "cannot read" mut m2 check
 mrepo m2
 sed -i 's/postcondition not satisfied/postcondition (not/' "$tmp/m2/tools/mutants.tsv"
 expect_fail "mutants check: regex that does not compile" "regex does not compile" mut m2 check
@@ -1077,6 +1159,7 @@ mrepo m3j
 cp "$tmp/m3j/tools/mutants/D-kill.patch" "$tmp/m3j/tools/mutants/D-kill2.patch"
 awk -F'\t' -v OFS='\t' '{ print } $1 == "D-kill" { $1 = "D-kill2"; print }' "$tmp/m3j/tools/mutants.tsv" > "$tmp/m3j.tsv"
 mv "$tmp/m3j.tsv" "$tmp/m3j/tools/mutants.tsv"
+mchg m3j D-kill2
 git -C "$tmp/m3j" add -A
 gitc m3j commit -qm two
 mj() { MUTANTS_JOBS=2 mut m3j run; }
@@ -1146,6 +1229,7 @@ echo "gate-demos: mutants run: TERM mid-Verus, and again while stopping, stops t
 mrepo m4
 cp "$fx/mutants/live.patch" "$tmp/m4/tools/mutants/D-live.patch"
 printf 'D-live\tdemo\tacc\tdemo\t-\tpostcondition not satisfied\tgate-demos: n > 11 keeps the clause\n' >> "$tmp/m4/tools/mutants.tsv"
+mchg m4 D-live
 gitc m4 add -A; gitc m4 commit -qm live
 expect_fail "mutants run: a mutant that still verifies" "the mutant still verifies acc::demo" mut m4 run D-live
 nowt m4 "mutants run: after a failure"
@@ -1176,7 +1260,7 @@ mdrepo() {  # mdrepo <dir>: as mrepo, with the mutants-dep fixture
     rm -rf "${tmp:?}/$1"; mkdir -p "$tmp/$1/tools"
     cp -r "$root/scripts" "$tmp/$1/scripts"; cp "$root/tools/mutants.py" "$root/tools/acceptance.py" "$root/tools/verus-pin.txt" "$tmp/$1/tools/"
     cp -r "$fx/mutants-dep/Cargo.toml" "$fx/mutants-dep/Cargo.lock" "$fx/mutants-dep/crates" "$root/rust-toolchain.toml" "$tmp/$1/"
-    cp -r "$fx/mutants-dep/tools/mutants.tsv" "$fx/mutants-dep/tools/mutants" "$tmp/$1/tools/"
+    cp -r "$fx/mutants-dep/tools/mutants.tsv" "$fx/mutants-dep/tools/mutants-changes.txt" "$fx/mutants-dep/tools/mutants" "$tmp/$1/tools/"
     printf '/.worktrees/\n/target/\n' > "$tmp/$1/.gitignore"
     git -C "$tmp/$1" init -q -b main
     git -C "$tmp/$1" add -A
@@ -1195,6 +1279,7 @@ expect_fail "mutants check: the row's crate has no Cargo.toml" "cannot read" mut
 mdrepo d3
 cp "$fx/mutants-dep/depbad.patch" "$tmp/d3/tools/mutants/X-depbad.patch"
 printf 'X-depbad\ttop\tm\tquad\t-\tpostcondition not satisfied.*r == 4 \\* n\tgate-demos: double ensures 2n + 1, code unchanged\n' >> "$tmp/d3/tools/mutants.tsv"
+mchg d3 X-depbad
 gitc d3 add -A; gitc d3 commit -qm depbad
 expect_fail "mutants run: a dependency patch that breaks the dependency's own proof" "the patched dependency dep does not verify on its own" mut d3 run X-depbad
 
@@ -1309,6 +1394,7 @@ expect_fail "mutants verify: no main" "cannot resolve main" mut m3 verify
 mrepo m7
 cp "$fx/mutants/live.patch" "$tmp/m7/tools/mutants/D-live.patch"
 printf 'D-live\tdemo\tacc\tdemo\t-\tpostcondition not satisfied\tgate-demos: n > 11 keeps the clause\n' >> "$tmp/m7/tools/mutants.tsv"
+mchg m7 D-live
 gitc m7 add -A; gitc m7 commit -qm live
 {
     echo "# tools/mutants-last-run.txt: forged from git on 2026-11-09T00:00Z under Verus $pin_v; verify.sh's main gate reads it"
@@ -1576,6 +1662,26 @@ corepo co1; printf -- '- **Evidence**: see vt-8d-evidence/t2/probe.txt.\n' >> "$
 expect_fail "carryovers: the other Evidence spelling, a bare evidence dir name" "docs/rca/a.md:4 cites 'vt-8d-evidence'" co co1
 corepo co1; printf '/// steps from vt-8d-evidence/t2/core-steps.txt\n' >> "$tmp/co1/crates/a/src/lib.rs"
 expect_fail "carryovers: a crates .rs comment citing an evidence dir" "crates/a/src/lib.rs:5 cites 'vt-8d-evidence'" co co1
+# 9b3 Task 12 (the class of 9b3 Task 11 review I1): a carryover id cited in a crates/*/src comment names an open row;
+# the longest token counts (closed cat-C9 is a prefix of open cat-C9-open), and an x- word is an id only after "carryover".
+corows() { printf 'cat-C9-open\t2\topen\t-\tdemo:6\tan open row\ncat-C9\t1\tclosed\tdoc:TRUSTED.md\tdemo:7\ta closed row\nx-gate\t2\topen\t-\tdemo:8\tan x- row\n' >> "$tmp/co1/$cot"; }
+corepo co1; corows; printf '// owned by carryover cat-C9-open (2); the x-coordinate is prose\n' >> "$tmp/co1/crates/a/src/lib.rs"
+expect_pass "carryovers: a crates comment citing an open carryover id" co co1
+corepo co1; corows; printf '// owned by carryover cat-C9-gone (2)\n' >> "$tmp/co1/crates/a/src/lib.rs"
+expect_fail "carryovers: a crates comment citing a missing carryover id" "crates/a/src/lib.rs:5 cites carryover cat-C9-gone, which docs/carryovers.tsv does not have" co co1
+corepo co1; corows; printf '// fixed under cat-C9.\n' >> "$tmp/co1/crates/a/src/lib.rs"
+expect_fail "carryovers: a crates comment citing a closed carryover id" "crates/a/src/lib.rs:5 cites carryover cat-C9, a closed row" co co1
+corepo co1; corows; printf '/// see carryover `x-gone`\n' >> "$tmp/co1/crates/a/src/lib.rs"
+expect_fail "carryovers: a prose prefix cited after carryover" "crates/a/src/lib.rs:5 cites carryover x-gone, which docs/carryovers.tsv does not have" co co1
+# fix round 1 (review I3, M3): the plural cue, a list's later id, a known closed x- id with no cue, a block comment.
+corepo co1; corows; printf '// carryovers: x-gone and cat-C9-open\n' >> "$tmp/co1/crates/a/src/lib.rs"
+expect_fail "carryovers: the plural cue with a colon" "crates/a/src/lib.rs:5 cites carryover x-gone, which docs/carryovers.tsv does not have" co co1
+corepo co1; corows; printf '// carryovers `cat-C9-open`, `x-gone`\n' >> "$tmp/co1/crates/a/src/lib.rs"
+expect_fail "carryovers: a list's later x- id" "crates/a/src/lib.rs:5 cites carryover x-gone, which docs/carryovers.tsv does not have" co co1
+corepo co1; corows; printf 'x-old\t1\tclosed\tdoc:TRUSTED.md\tdemo:9\ta closed x- row\n' >> "$tmp/co1/$cot"; printf '// as in x-old\n' >> "$tmp/co1/crates/a/src/lib.rs"
+expect_fail "carryovers: a known closed x- id with no cue" "crates/a/src/lib.rs:5 cites carryover x-old, a closed row" co co1
+corepo co1; corows; printf '/* owned by\n   carryover cat-C9-gone */\n' >> "$tmp/co1/crates/a/src/lib.rs"
+expect_fail "carryovers: an id in a block comment's second line" "crates/a/src/lib.rs:6 cites carryover cat-C9-gone, which docs/carryovers.tsv does not have" co co1
 corepo co1; sed -i '/^a\t/d' "$tmp/co1/$cot"; gitc co1 commit -qam "delete row a"
 expect_fail "carryovers: main, a row deleted across two commits" "a was removed" co co1
 corepo co1; gitc co1 checkout -qb feat; gitc co1 commit -q --allow-empty -m feat; sed -i '/^a\t/d' "$tmp/co1/$cot"

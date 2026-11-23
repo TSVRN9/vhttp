@@ -1,0 +1,13 @@
+diff --git a/crates/h3/src/qpack/field_section.rs b/crates/h3/src/qpack/field_section.rs
+index e5730ef..a0c0c42 100644
+--- a/crates/h3/src/qpack/field_section.rs
++++ b/crates/h3/src/qpack/field_section.rs
+@@ -1388,7 +1388,7 @@ fn decode_lines_bounded(lines: &[u8], budget: u64) -> (r: (Result<Vec<FieldLine>
+                     work = work + 1;
+                 }
+                 let ghost done = fields_view(out@);
+-                left = left - f.name.len() as u64 - f.value.len() as u64 - 32;
++                left = left - f.name.len() as u64 - f.value.len() as u64;
+                 out.push(f);
+                 pos += k;
+                 proof {

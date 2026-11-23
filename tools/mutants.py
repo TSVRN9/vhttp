@@ -2,7 +2,14 @@
 #   rows ROOT TSV PATCHDIR   validate the registry, print one tab-separated row per line (id crate module fn tests deps
 #                            regex). A patch touches crates/<crate>/ and may touch crates/<d>/ for a path dependency <d>
 #                            of <crate> (its [dependencies] in ROOT/crates/<crate>/Cargo.toml); deps lists those <d> (- if
-#                            none), for run to check that each still verifies on its own with the patch
+#                            none), for run to check that each still verifies on its own with the patch. Every row's patch
+#                            has a line `<id> <digest>` in mutants-changes.txt (next to TSV) whose digest is `changes` of
+#                            the patch: its file names and changed lines, not its offsets or context, so regenerating a
+#                            patch for moved lines keeps it, and a patch regenerated from a dirty tree, which absorbs the
+#                            tree's other edits as extra hunks, fails (9b3 Task 12 fix round 2b; RCA
+#                            docs/rca/2026-11-23-mutant-patch-absorbs-edit.md). A missing file or line fails, and so does a line
+#                            whose id has no row (a stale pin; 9b3 final review B-M4)
+#   changes PATCH            print that digest (after a deliberate review of the patch's changed lines)
 #   clean BASE CRATE MOD FN  BASE.json (Verus --output-json --time-expanded) and BASE.log (its stderr): FN, and only FN,
 #                            was checked, and it verified (>= 1 verified, 0 errors), no rlimit text. clean, killed and
 #                            depok also require the JSON's verus object to match tools/verus-pin.txt (version, commit,
@@ -73,8 +80,27 @@ def path_deps(root, crate):
     return out
 
 
+def changed(text):
+    """A patch's file names and changed lines, in order: what the mutation is, without offsets or context."""
+    return [('F ' + l[4:]) if l.startswith('+++ ') else l for l in text.split('\n')
+            if l.startswith('+++ ') or (l[:1] in ('+', '-') and not l.startswith('--- '))]
+
+
+def digest(text):
+    return hashlib.sha256('\n'.join(changed(text)).encode()).hexdigest()[:16]
+
+
 def rows(root, tsv, pdir):
     out, ids = [], set()
+    cf = os.path.join(os.path.dirname(tsv), 'mutants-changes.txt')
+    rec = {}
+    for n, line in enumerate(read(cf).split('\n'), 1):
+        if not line.strip() or line.startswith('#'):
+            continue
+        f = line.split()
+        if len(f) != 2 or f[0] in rec or not re.fullmatch(r'[0-9a-f]{16}', f[1]):
+            die('%s:%d: want `<id> <16 hex digits>`, each id once' % (cf, n))
+        rec[f[0]] = f[1]
     for n, line in enumerate(read(tsv).split('\n'), 1):
         if not line.strip() or line.startswith('#'):
             continue
@@ -114,9 +140,19 @@ def rows(root, tsv, pdir):
                 die('%s: touches %s, outside crates/%s/ and its path dependencies (%s): the row verifies only those'
                     % (p, x, crate, ' '.join(sorted(pd)) or 'none'))
             deps.add(m.group(1))
+        if i not in rec:
+            die('%s: no line for %s: review the patch\'s changed lines, then add `%s <python3 -I tools/mutants.py changes %s>`'
+                % (cf, i, i, p))
+        if digest(text) != rec[i]:
+            die('%s: its changed lines differ from the ones recorded in %s (%s). Regenerating a patch for moved lines keeps '
+                'them; a patch regenerated from a dirty tree absorbs that tree\'s other edits. Its changed lines now:\n%s'
+                % (p, cf, rec[i], '\n'.join(changed(text))))
         out.append((i, crate, mod, fn, tests, ','.join(sorted(deps)) or '-', rx))
     if not out:
         die('%s has no rows' % tsv)
+    stale = sorted(set(rec) - ids)
+    if stale:
+        die('%s: a line for %s, which has no row in %s (delete the line with its row)' % (cf, ' '.join(stale), tsv))
     have = sorted(x[:-6] for x in os.listdir(pdir) if x.endswith('.patch'))
     orphans = sorted(set(have) - ids)
     if orphans:
@@ -364,6 +400,8 @@ def main(a):
         print(tree(a[1], a[2]))
     elif a[:1] == ['assemble'] and len(a) >= 3:
         assemble(*a[1:])
+    elif a[:1] == ['changes'] and len(a) == 2:
+        print(digest(read(a[1])))
     elif a[:1] == ['allowed'] and len(a) == 3:
         allowed(a[1], a[2])
     else:

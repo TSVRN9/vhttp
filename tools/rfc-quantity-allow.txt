@@ -17,6 +17,9 @@ root	quic::tp::allowed_tp_err_from	897e3fd606b35f770fee348b3adf2eaffdab6b8d30f22
 root	quictls::server::tp_allowed_err	3a9636c51990246d9d434cd941f14454024940a53e81af576829cfc94ea74278
 root	quictls::server::superseded_allowed_err	ff54e6e2df0c2a6b8d02d8ca1a36291494177322d59ff2dc01203de30bac6fa6
 root	quictls::server::key_changes_allowed_err	b87ee603c4985015d33af86928918fe18db6f1c6b199e8bc0c3c6242f1de40e3
+root	h3::qpack::field_section::line_allowed_err	f036ffd3c4b413d52a999fe6d5faf852e95e6541fad7bca1963f37c797af1a16
+root	h3::message::connect_allowed_err	04f9eadb96674fdd863e8192d9f6d60068931dd4c9d97716d3439f638c63d8cf
+root	h3::message::request_allowed_err	9b2695f3d6f1c48794f8409828ccdeb55bbadcddc70f4daeb2821f49b6356f06
 pin	quic::crypto_stream::crypto_allowed_err	quic::crypto_stream::CryptoStream::on_crypto
 pin	quic::crypto_stream::crypto_allowed_err	quic::crypto_stream::CryptoStream::on_crypto_c
 pin	quic::crypto_stream::crypto_allowed_err	quic::crypto_stream::CryptoStream::retire
@@ -95,3 +98,19 @@ call	quictls::server::key_changes_allowed_err	quictls::server::key_changes_allow
 name	quictls::server::key_changes_allowed_err	quictls::server::tls_fed	l	the encryption level whose data is checked, Level::Initial or Level::Handshake as key_changes_allowed_err passes it through tls_unconsumed (RFC 9001 §4.1.3)
 name	quictls::server::key_changes_allowed_err	quictls::server::tls_fed	s.fed_i	the CRYPTO bytes of that level handed to TLS's on_crypto so far: feed adds exactly the bytes crypto_read returned (at most max of them, D6), which feed_tls passes to on_crypto (T5-M16), and core_ok ties it to the level's read offset while the space is live and open (T5-M14, T5-M15), so TLS has been given [0, it) of the stream: the end of what TLS can have consumed (RFC 9001 §4.1.3)
 name	quictls::server::key_changes_allowed_err	quictls::server::tls_fed	s.fed_h	the CRYPTO bytes of that level handed to TLS's on_crypto so far: feed adds exactly the bytes crypto_read returned (at most max of them, D6), which feed_tls passes to on_crypto (T5-M16), and core_ok ties it to the level's read offset while the space is live and open (T5-M14, T5-M15), so TLS has been given [0, it) of the stream: the end of what TLS can have consumed (RFC 9001 §4.1.3)
+pin	h3::qpack::field_section::line_allowed_err	h3::qpack::field_section::decode_lines_bounded
+pin	h3::message::connect_allowed_err	h3::message::validate_request
+pin	h3::message::request_allowed_err	h3::message::validate_request
+call	h3::qpack::field_section::line_allowed_err	h3::qpack::field_section::line_allowed_err	h3::qpack::field_section::rfc_field_line	the field line representation at the front of b, decoded as RFC 9204 transcribes it at dynamic table capacity 0: None when no valid representation decodes (RFC 9204 §4.5, §2.2.3, §3.1, §7.4)
+call	h3::qpack::field_section::line_allowed_err	h3::qpack::field_section::line_allowed_err	h3::qpack::field_section::field_line_size	a field line's size, its name and value lengths plus 32 bytes of overhead (RFC 9114 §4.2.2)
+name	h3::qpack::field_section::line_allowed_err	h3::qpack::field_section::line_allowed_err	e	the error the field-line decoder returns: a QPACK connection error code, or the field section exceeding its size limit (RFC 9204 §2.2.3, RFC 9114 §4.2.2)
+name	h3::qpack::field_section::line_allowed_err	h3::qpack::field_section::line_allowed_err	c	the error code in that QPACK error, compared with the RFC's QPACK_DECOMPRESSION_FAILED (RFC 9204 §6)
+name	h3::qpack::field_section::line_allowed_err	h3::qpack::field_section::line_allowed_err	left	what remains of the field section size limit the server imposes (MAX_FIELD_SECTION_SIZE, advertised as SETTINGS_MAX_FIELD_SECTION_SIZE) after the lines before this one: decode_lines_bounded (pinned) proves the loop invariant left == budget - lines_size(acc), lines_size being the sum of field_line_size over the lines decoded so far, and lines_bounded_inv ties it to rfc_field_lines_bounded; mutant 9b3-A4 (left charged without the 32 bytes) is refused (RFC 9114 §4.2.2)
+call	h3::message::connect_allowed_err	h3::message::connect_allowed_err	h3::message::authority_form	the CONNECT authority-form, uri-host ":" port with no userinfo (RFC 9114 §4.4, RFC 9110 §7.1)
+name	h3::message::connect_allowed_err	h3::message::connect_allowed_err	a	the :authority pseudo-header field's value, if present, as validate_request passes it from lookup (RFC 9114 §4.4)
+name	h3::message::connect_allowed_err	h3::message::connect_allowed_err	c	the error code connect_x returns, compared with the RFC's H3_MESSAGE_ERROR for a malformed request (RFC 9114 §4.1.2, §8.1)
+call	h3::message::request_allowed_err	h3::message::request_allowed_err	h3::message::authority_ok	the authority requirements on :authority and Host for the request's scheme (RFC 9114 §4.3.1)
+name	h3::message::request_allowed_err	h3::message::request_allowed_err	meth	the :method pseudo-header field's value, as validate_request passes it from lookup (RFC 9114 §4.3.1)
+name	h3::message::request_allowed_err	h3::message::request_allowed_err	scheme	the :scheme pseudo-header field's value, as validate_request passes it from lookup (RFC 9114 §4.3.1)
+name	h3::message::request_allowed_err	h3::message::request_allowed_err	path	the :path pseudo-header field's value, as validate_request passes it from lookup (RFC 9114 §4.3.1)
+name	h3::message::request_allowed_err	h3::message::request_allowed_err	c	the error code request_x returns, compared with the RFC's H3_MESSAGE_ERROR for a malformed request (RFC 9114 §4.1.2, §8.1)
