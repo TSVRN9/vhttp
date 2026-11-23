@@ -319,7 +319,7 @@ expect_fail "escape-gate: assume_specification" "unaccounted escape" esc
 # refeed's OneRtt feed cost stubbed to 0 behind `let _ =` (the call kept), the T3b-F1 mutant patch itself (the call
 # deleted, its cost a literal ghost 0), receive's returned cost
 # stubbed to `Ghost(0)`, crypto_drop dropping a retire's cost; fix round
-# 2, each passed by b937472's tool: retire returning a literal `Ghost(1)`, `work = 0;` in receive's proof block, a second
+# 2, each passed by 58b6149's tool: retire returning a literal `Ghost(1)`, `work = 0;` in receive's proof block, a second
 # `let ghost mut work` in receive, a stale LITERAL_OK entry (bal's arm no longer literal); 9b2 Task 10d, each passed by
 # the tool before it (which allowed validate_hs_path's drop and did not read pipeline.rs): validate_hs_path dropping
 # discard's cost as a statement, refeed_one_rtt dropping on_datagram's cost (pipeline.rs, a per-fn file now), a stale
@@ -788,11 +788,11 @@ RR=quic::recv_stream::recv_allowed_err
 fresh rfcq
 expect_pass "rfc-quantity" rq
 fresh rfcq; cp "$tmp/rfcq/bad/t6-recv_stream.rs" "$qx/recv_stream.rs"
-expect_fail "rfc-quantity: T6's original recv_allowed_err (8f6b48e) reads the running high" "final_size_trigger (from recv_allowed_err) reads \`s.high\` (a struct field)" rq
+expect_fail "rfc-quantity: T6's original recv_allowed_err (0ae6d1c) reads the running high" "final_size_trigger (from recv_allowed_err) reads \`s.high\` (a struct field)" rq
 fresh rfcq; cp "$tmp/rfcq/bad/t4-tp.rs" "$qx/tp.rs"
-expect_fail "rfc-quantity: T4's original duplicate rule (6594f10) reads the seen mask" "allowed_tp_err_from reads \`seen\` (a name used other than" rq
+expect_fail "rfc-quantity: T4's original duplicate rule (7cd8b77) reads the seen mask" "allowed_tp_err_from reads \`seen\` (a name used other than" rq
 fresh rfcq; cp "$tmp/rfcq/bad/t3-crypto_stream.rs" "$qx/crypto_stream.rs"
-expect_fail "rfc-quantity: T3's original crypto window (fcf9ff0^) reads the read offset" "crypto_allowed_err reads \`s.reassembly()\` (a method" rq
+expect_fail "rfc-quantity: T3's original crypto window (b933571^) reads the read offset" "crypto_allowed_err reads \`s.reassembly()\` (a method" rq
 # review probes A, B, H: one-token edits that change no list; each changes its root's digest, so the vouches are re-reviewed
 fresh rfcq; sed -i 's/                            None => false,/                            None => true,/' "$qx/tp.rs"
 expect_fail "rfc-quantity: probe A, allowed_tp_err_from's walk arm None => true (the code's model decides)" "re-review the vouches for quic::tp::allowed_tp_err_from" rq

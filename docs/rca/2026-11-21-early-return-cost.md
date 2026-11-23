@@ -11,7 +11,7 @@ structurally by h3's move onto the linear Budget (carryover `sc-h3-budget`).
   - 9b3 Task 7 charged the return as `work + 32 + frees(..)`, where the `32` was a placeholder for `answer`.
   - Task 9 replaced the placeholder with the bound costs of `is_http_scheme` and `answer` (`cs + ca`), and the frees.
     In doing so it dropped what the placeholder had silently covered:
-    1. the free of the reversed buffer `rv`, found by the Task 9 self-check and fixed in e87e29b;
+    1. the free of the reversed buffer `rv`, found by the Task 9 self-check and fixed in 7af3915;
     2. the pop of event k, which the Task 9 review found (I1).
   - Both units still verified: the return's bound has at least 20 units of margin.
 - **Incidents**: the two misses above, at the same return, in one task. The Task 7 review's I1 was the same kind of
@@ -84,11 +84,11 @@ structurally by h3's move onto the linear Budget (carryover `sc-h3-budget`).
   - 9b3 Task 12's commit (the sites above); `scripts/quick.sh h3` and `scripts/rlimit-seeds.sh h3 5` pass on it.
   - Hand checks (9b3 Task 12 fix round 1, not mutant rows): `parse_settings`' first exit with `ret = work` (the free
     dropped) fails `quick.sh h3/frame` with "precondition not satisfied" at `lemma_paid`; `eq_bytes_w` with its unit
-    moved back below the exit (8b760c5's body) fails `quick.sh h3/message` the same way; `control_frames` with its
+    moved back below the exit (b6b00ab's body) fails `quick.sh h3/message` the same way; `control_frames` with its
     `w + 1` moved to the loop's end fails `quick.sh h3/uni` at the `lemma_paid` of both exits it then skips; `parse_settings` returning
     `Ghost(work)` with `ret` left as is verifies (the residual above).
   - Mutants `9b3-T9-5` (`c_step()` removed from `extra`) and `9b3-T9-6` (the `+ 1` free removed) both fail `deliver`
-    with "precondition not satisfied" at the `lemma_answered_cost` call. Applied by hand to e87e29b's `deliver` (this
-    RCA, 0b666d7), not registered (owner 2026-11-21).
+    with "precondition not satisfied" at the `lemma_answered_cost` call. Applied by hand to 7af3915's `deliver` (this
+    RCA, cd431a6), not registered (owner 2026-11-21).
   - Before the lower bound existed, `9b3-T9-5`'s mutation verified (`quick.sh h3/conn/deliver` ok). That is the escape,
     reproduced.

@@ -1,4 +1,4 @@
-// rfc-quantity gate fixture: allowed_tp_err and allowed_tp_err_from as on main ed35647 (9a 9afdf5e); the RFC fns they call are stubs.
+// rfc-quantity gate fixture: allowed_tp_err and allowed_tp_err_from as on main 8cbb45e (9a de1b655); the RFC fns they call are stubs.
 use vstd::prelude::*;
 
 verus! {

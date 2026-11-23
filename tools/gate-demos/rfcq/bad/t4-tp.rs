@@ -1,4 +1,4 @@
-// rfc-quantity gate demo: allowed_tp_err and allowed_tp_err_from verbatim from 6594f10 (9a T4 review I1), the duplicate rule
+// rfc-quantity gate demo: allowed_tp_err and allowed_tp_err_from verbatim from 7cd8b77 (9a T4 review I1), the duplicate rule
 // reading the code's `seen` mask instead of the IDs earlier in the bytes.
 use vstd::prelude::*;
 

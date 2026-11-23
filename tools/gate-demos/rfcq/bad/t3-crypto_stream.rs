@@ -1,4 +1,4 @@
-// rfc-quantity gate demo: crypto_allowed_err and crypto_window_exceeded verbatim from fcf9ff0^ (9a T3 review I2), the
+// rfc-quantity gate demo: crypto_allowed_err and crypto_window_exceeded verbatim from b933571^ (9a T3 review I2), the
 // window anchored at the read offset `s.reassembly().base()`, the code's bookkeeping.
 use vstd::prelude::*;
 

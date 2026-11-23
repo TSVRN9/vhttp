@@ -1,6 +1,6 @@
 # Byte buffers on input paths (C15): growth by std's strategy and eager delivery (phase 9b2)
 
-Status: complete (9b2 Task 11, 2026-11-21, phase-9b2 at 0d11928): the fix is in (Tasks 2-10d); the measurement
+Status: complete (9b2 Task 11, 2026-11-21, phase-9b2 at d77e4ef): the fix is in (Tasks 2-10d); the measurement
 below is Task 1's, with the final counts beside it. The plan's cost-charge demos for byteq and the ring and its mutants
 9b2-M1..M15 were dropped from Task 11 when it was rescoped under the owner's rules (mutants are sanity checks, and no
 unverified script is extended); they are open work of the scaffold phase (`sc-9b2-cost-demos`, `sc-9b2-mutants`), not
@@ -33,7 +33,7 @@ part of this entry's catch.
   fns of streams.rs or recv_stream.rs (callee-only to the gate), an implicit `Drop`, and an undercharged amount
   (`cat-C15-semantic-cost`, 9b4; TRUSTED.md's Vec row names the frees still uncharged). For the class (a byte buffer
   growing by std's strategy on an input path), the sweep's status table (`docs/rca/2026-11-12-cost-sweep.md`, "Status
-  of 9b2's rows") greps each converted fn for the growth and shift patterns at 0d11928: none is left on a converted byte buffer;
+  of 9b2's rows") greps each converted fn for the growth and shift patterns at d77e4ef: none is left on a converted byte buffer;
   the only hits are `build_flight`'s five `Vec::new()` outbound message builders (T11, class B, `cat-C15-9b4`).
 - **Evidence**: the measurement below and its final counts; tests `capvec_allocs_exact` and `queue_model_random`
   (`crates/byteq/tests/alloc.rs`), `crypto_one_byte_frames`, `crypto_runs_then_fill`, `send_ack_1k`,
@@ -41,13 +41,13 @@ part of this entry's catch.
   (`crates/tls/tests/reader_cost.rs`); mutants 9b2-M16..M44, each killed by Verus under `scripts/mutants.sh run` in the
   task that added it; carryover `cat-C15-9b2` (closed).
 
-## Sweep rows re-read (9b2 Task 1, merged tip 0d7c37c)
+## Sweep rows re-read (9b2 Task 1, merged tip 0deb487)
 
-Each 9b2 row of the sweep, read line by line at 0d7c37c (main a293f81 with 9b1 merged in). None of these files changed
-between d0f4392 (the spec's line numbers) and 0d7c37c except `frags.rs` (9b1's AVL), so every site is where the spec's
+Each 9b2 row of the sweep, read line by line at 0deb487 (main 629dbc2 with 9b1 merged in). None of these files changed
+between 3398032 (the spec's line numbers) and 0deb487 except `frags.rs` (9b1's AVL), so every site is where the spec's
 table puts it; the cost column says where the re-read and the measurement refine the spec's text.
 
-| row | site (spec, d0f4392) | site at 0d7c37c | cost, re-read |
+| row | site (spec, 3398032) | site at 0deb487 | cost, re-read |
 |---|---|---|---|
 | Q4 | `CryptoStream::read`, crypto_stream.rs:491 | same (fn at :471, `out.append(&mut self.buf)` at :491, `self.buf = Vec::new()` at :493) | as the spec: hands over every unread byte. "std's growth of `out`": quictls passes a fresh empty `b` (Q-T1), and `append` into an empty `Vec` reserves once (one alloc, no realloc); growth happens only into a non-empty `out`, i.e. `crypto_drop`'s `sink` (Q6) |
 | Q5 | `CryptoStream::on_fill`, crypto_stream.rs:457 | same (`on_fill` at :443, `self.ooo.take_front(self.contig, &mut self.buf)` at :457); `Frags::take_front` is now 9b1's at frags.rs:4164 (`take_front_w`) | as the spec: the newly contiguous run is pushed into `buf`, whose reallocs copy the unread bytes (3-5 reallocs per fill, measured below). Bounded by `MAX_CRYPTO_BUFFER` held bytes plus the frame |
@@ -65,7 +65,7 @@ table puts it; the cost column says where the re-read and the measurement refine
 | Q7 | `SendStream::on_data_acked`, send_stream.rs:1023 | same (`ponytail:` at :984, `split_off((nb - ab))` at :1023) | as the spec: the largest 1 KiB ACK requested 131136, 262208, 524352 bytes (half the stream plus 64) for 256 KiB, 512 KiB, 1 MiB; each `split_off` is a fresh allocation, not a realloc |
 | Q8 | `SendStream::write`, send_stream.rs:519 | same (`extend_from_slice(data)` at :519) | as the spec, but only from the second write on: a first write into the empty `buf` is one exact allocation (`send_ack_1k` writes once, so it does not exercise Q8) |
 
-## Measured (9b2 Task 1, release, code at 0d7c37c, tests as committed with this file)
+## Measured (9b2 Task 1, release, code at 0deb487, tests as committed with this file)
 
 `crates/quic/tests/input_cost.rs` and `crates/tls/tests/reader_cost.rs` (all `#[ignore]`d; run with
 `cargo test --release -p quic --test input_cost -- --ignored --test-threads=1 --nocapture` and
@@ -129,7 +129,7 @@ Per call kind: `crypto_one_byte_frames`' 1-byte frames that do not close a gap r
 cost is the push reallocs (T1). The patterns do not exercise Q2 (one pop takes everything), Q8 (one write) or T2 (no
 tail).
 
-### Final counts (9b2 Task 11, release, phase-9b2 at 0d11928)
+### Final counts (9b2 Task 11, release, phase-9b2 at d77e4ef)
 
 The same patterns, now passing (each test asserts the per-call and across-size bounds above; the time bounds of Task 1
 are gone from the tests, which count and never time). "largest call" is the most bytes requested by one call of that
@@ -165,7 +165,7 @@ nodes), against half the stream at Task 1.
 
 ## mem-9b2-send-cap: send room counted lengths, the allocator held capacity (9b2 Task 8)
 
-- **Defect**: once `SendStream`'s buffer became a `ByteQueue` (Task 8, 60d5cc3), `Streams::send_room` and the
+- **Defect**: once `SendStream`'s buffer became a `ByteQueue` (Task 8, 8b3be30), `Streams::send_room` and the
   `MAX_SEND_BUFFER` sum in `Streams::wf` still counted buffered lengths, while a queue keeps both of its buffers until it
   is empty (D4: `drop_front` frees nothing; capacity up to `2·max(MIN_CAP, 3·peak)`). Measured: 64 KiB written, every
   1 KiB piece but the last acknowledged, 310,272 bytes held for 1,024 buffered; a peer withholding one ACK per stream
@@ -229,14 +229,14 @@ nodes), against half the stream at Task 1.
 - **Evidence**: tests `ranges::ranges_model`, `send_stream::partition_never_forgets`,
   `send_stream::send_ranges_bounded_under_selective_acks`, `send_stream::range_gate_closes`,
   `input_cost::send_selective_acks`; mutants 9b2-M16..M19, `scripts/mutants.sh run 9b2-M16 9b2-M17 9b2-M18 9b2-M19` at
-  e0037c5: "mutants: run ok (4 mutants killed)" (M16 at `SendStream::retransmit`, resend_piece's item rule; M17 at
+  f08e983: "mutants: run ok (4 mutants killed)" (M16 at `SendStream::retransmit`, resend_piece's item rule; M17 at
   `push_piece`; M18 at `ack_piece`; M19 at `drop_prefix`); spec D10, D15, D16.
 
 ## 9b2-M22's regex was predicted, not read from a run (9b2 Task 9)
 
-- **What**: 9b2-M22 (Page::write_new loses first-writer-wins) was committed (a9011bc) with a regex naming the loop
+- **What**: 9b2-M22 (Page::write_new loses first-writer-wins) was committed (c939cef) with a regex naming the loop
   invariant the author expected to fail; `mutants.sh run` killed it at the in-loop `bytes` assertion instead, so the row
-  failed as written until 0dee01b took the regex from the run. **Why**: the regex was written before the run, from the
+  failed as written until fe2837f took the regex from the run. **Why**: the regex was written before the run, from the
   proof's shape. **Catch**: `scripts/mutants.sh run <id>` fails a row whose regex matches no error block of the mutated
   verification (it did here), and every new or retargeted row is run before its task commits.
 

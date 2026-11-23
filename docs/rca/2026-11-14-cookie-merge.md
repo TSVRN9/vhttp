@@ -1,8 +1,8 @@
 # The cookie merge: a quadratic copy in the call that completes a request's HEADERS frame (C15, phase 9b3)
 
 Status: complete (9b3 Task 13). Written with the 9b3 spec (`docs/superpowers/specs/2026-11-14-phase-9b3-h3-input-costs-design.md`,
-D5, D13) before the fix; Task 1 committed the failing test (1271446), Task 4 the fix (05adcf1). Line numbers in
-Defect through Escape are at e8d97e5 (phase-9b2's tip; h3 is unchanged from main a293f81).
+D5, D13) before the fix; Task 1 committed the failing test (89a7872), Task 4 the fix (170a39b). Line numbers in
+Defect through Escape are at bf7822d (phase-9b2's tip; h3 is unchanged from main 629dbc2).
 
 - **Defect**: `build_headers` (crates/h3/src/message.rs:1374-1436) builds `Request.headers` for every request HEADERS
   frame. `validate_request` calls it at :1493, and `headers_frame` (request.rs:839) calls `validate_request`. It merges
@@ -30,7 +30,7 @@ Defect through Escape are at e8d97e5 (phase-9b2's tip; h3 is unchanged from main
   The cost is per call. A HEADERS frame that arrives over many calls is decoded and merged in the one call that
   delivers its last byte (`RequestStream::top_up` and `run`, request.rs:1695 and :1210), so a call given `d = 1`
   pays all of it.
-- **Incidents**: introduced in 7feebeb (2026-10-28, phase 2b, "verified request/response field validation") along with
+- **Incidents**: introduced in e699d9c (2026-10-28, phase 2b, "verified request/response field validation") along with
   the comment at :1372. Found 2026-11-12 by the cost sweep (`docs/rca/2026-11-12-cost-sweep.md` rows H1 and H2; the
   sweep's §F notes that the comment leaves out the copy). No test or interop run has triggered it: `cookie_merge`
   (crates/h3/tests/message.rs) merges two lines.
@@ -55,14 +55,14 @@ Defect through Escape are at e8d97e5 (phase-9b2's tip; h3 is unchanged from main
   - (a) work hidden in an unproved "completed unit" term, or in a callee with no cost contract;
   - (b) comments that admit a cost but have no tracker.
 - **Catch** (as built; the spec proposed a cost-charge gate, which Task 12 retired, below):
-  1. A proof (README order 1), 05adcf1. `build_headers` merges in two passes into exact `CapVec`s (`cookie_scan` counts
+  1. A proof (README order 1), 170a39b. `build_headers` merges in two passes into exact `CapVec`s (`cookie_scan` counts
      the merged length, `build_headers` pushes at most that many bytes, so no push reallocates). It returns a
      `Ghost<nat>` with ensures `r.1@ <= c_bh()·(fields_size(fv) + n + 1)`, `c_bh() = 20`, and `eq_bytes_w`,
      `copy_line` and `cookie_scan` carry their own. The bound is part of D9's completed-frame term: `validate_request`
-     binds it, `headers_frame` and `RequestStream::on_data` (1bdd1ff, b790f8e) carry it into their ensures, and
-     `H3Conn::on_stream_data`, `on_stream_reset` and `on_stop_sending` (c3072f4) prove the per-call bound over it, so
+     binds it, `headers_frame` and `RequestStream::on_data` (8755ee5, b0e1992) carry it into their ensures, and
+     `H3Conn::on_stream_data`, `on_stream_reset` and `on_stop_sending` (e5e3ce8) prove the per-call bound over it, so
      every call that completes a HEADERS frame has a proved bound linear in the frame, with the stream table's
-     `log n` and N6's `removed_fields` term named. The decoder under it is proved too (0f7e4fe: `decode_lines_bounded`,
+     `log n` and N6's `removed_fields` term named. The decoder under it is proved too (98765cc: `decode_lines_bounded`,
      `huffman_decode_w`, `decode_string`, each on an exact `CapVec`).
   2. The gate (the spec's order 3, D13) is retired. Task 12 recorded the coordinator's ruling of 2026-11-21 that
      `cost_charge.py` is being retired, so it was not extended to h3. What replaces it for sub-class (a):
@@ -102,14 +102,14 @@ Defect through Escape are at e8d97e5 (phase-9b2's tip; h3 is unchanged from main
      cost returns), `rca-early-return-cost` (exits), and `cat-C15-mir-cost` (the MIR step cross-check of the bounds
      Verus proves as ghost costs: `parse_varint_w`'s constant, `sort_ids_w`, the QPACK decode fns).
 - **Evidence**:
-  - Fix: 05adcf1, `build_headers` in two passes into exact buffers. The surrounding chain: 0f7e4fe (QPACK decode and
-    Huffman on exact `CapVec`s with proved costs), 1bdd1ff (request buffer on `ByteQueue`, one `Body` per call),
-    82c71ef (uni streams), c3072f4 (stream table on `byteq::avl`, the per-call bound), 4261fd4 (constant-size answers).
-  - Task 1's failing test (1271446; log: `cookie_lines_linear`, `cookie_rescans_linear`, `control_bytewise` failed on
-    the code of e8d97e5) and Task 4's and the tip's numbers, release build, requested bytes (reallocs in the whole
+  - Fix: 170a39b, `build_headers` in two passes into exact buffers. The surrounding chain: 98765cc (QPACK decode and
+    Huffman on exact `CapVec`s with proved costs), 8755ee5 (request buffer on `ByteQueue`, one `Body` per call),
+    11faf1e (uni streams), e5e3ce8 (stream table on `byteq::avl`, the per-call bound), 317480a (constant-size answers).
+  - Task 1's failing test (89a7872; log: `cookie_lines_linear`, `cookie_rescans_linear`, `control_bytewise` failed on
+    the code of bf7822d) and Task 4's and the tip's numbers, release build, requested bytes (reallocs in the whole
     run):
 
-    | test (n) | Task 1 (before) | Task 4 (after) | tip (6a43542) |
+    | test (n) | Task 1 (before) | Task 4 (after) | tip (9bd1b68) |
     |---|---|---|---|
     | `cookie_lines_linear` whole, 226 | 2,780,221 (232) | 53,133 (6) | 127,053 (0) |
     | whole, 452 | 11,075,945 (459) | 105,733 (7) | 155,077 (0) |
@@ -130,7 +130,7 @@ Defect through Escape are at e8d97e5 (phase-9b2's tip; h3 is unchanged from main
     `cookie_empty_values`, `cookie_alternating_matches_model` (a model merge in the test), `cookie_merge` kept.
   - The residual `cat-C15-semantic-cost` and its successors in Catch 6, all open rows.
 
-## Measured (9b3 spec, release build of h3 at e8d97e5)
+## Measured (9b3 spec, release build of h3 at bf7822d)
 
 Method: one HEADERS frame on a fresh `h3::request::RequestStream`, fed whole to `on_data`.
 - The frame holds `:method GET`, `:scheme https` and `:path /` (static indexed lines), `:authority a` (a name

@@ -13,7 +13,7 @@ Not exhaustively verified line-by-line: ghost `Seq::push/remove/insert` in verus
 | Q2 | quic/src/reassembly.rs:688-691 (`pop`) | `buf.split_off(head)`, `have.split_off(head)` when head >= len-head | in-order delivery on STREAM frame | no | whole unread tail (<= half of buf, <= ~16 KiB) | same window; doc says amortized O(1) |
 | Q3 | quic/src/reassembly.rs:620 (`run_end`) | `out.push(buf[n])` per byte into fresh Vec | delivery | no | O(delivered) plus Vec growth reallocs | window |
 | Q4 | quic/src/crypto_stream.rs:491 (`read`) | `out.append(&mut self.buf)` | every datagram via quictls feed (quictls/src/server.rs:1084-1090) | YES (Initial/Handshake CRYPTO) | copies whole buf; `out` is fresh/empty each call so cost = bytes read | buf holds contiguous bytes since last read; drained every datagram (crypto_drained) |
-| Q5 | quic/src/frags.rs `take_front` (frags.rs:1373 at bd2708a; an AVL of chunks since 9b1) via crypto_stream.rs:455 (`on_fill`) | appends the whole contiguous ooo run to `self.buf` | CRYPTO frame closing a gap | YES | up to all held out-of-order bytes (not "bytes given") | MAX_CRYPTO_BUFFER = 16384 (crypto_stream.rs:21), MAX_CRYPTO_RANGES = 4096. frags.rs being rewritten in 9b1; skipped otherwise |
+| Q5 | quic/src/frags.rs `take_front` (frags.rs:1373 at 58e6d14; an AVL of chunks since 9b1) via crypto_stream.rs:455 (`on_fill`) | appends the whole contiguous ooo run to `self.buf` | CRYPTO frame closing a gap | YES | up to all held out-of-order bytes (not "bytes given") | MAX_CRYPTO_BUFFER = 16384 (crypto_stream.rs:21), MAX_CRYPTO_RANGES = 4096. frags.rs being rewritten in 9b1; skipped otherwise |
 | Q6 | quic/src/conn.rs:3392-3396 | `shortcut:` copy-and-drop of all three CRYPTO streams into `sink` on discard/close | key discard / close | YES | all unread CRYPTO bytes (<= 16 KiB + one datagram) | as Q4/Q5 |
 | Q7 | quic/src/send_stream.rs:1023 | `buf.split_off(nb-ab)` trimming acked prefix (ponytail at :984) | incoming ACK frame | no (1-RTT) | tail copy up to ~half the stream's unacked data: up to ~512 KiB from one ACK | Σ send buffers <= MAX_SEND_BUFFER = 1<<20 (streams.rs:72); ranges <= MAX_SEND_RANGES = 64 (send_stream.rs:187) |
 | Q8 | quic/src/send_stream.rs:519 | `buf.extend_from_slice(data)` past capacity | app response writes (not wire-driven, but reached from request) | no | realloc moves whole send buffer (<= 1 MiB) | MAX_SEND_BUFFER |
@@ -96,7 +96,7 @@ No exec drain/insert(0)/rotate/remove(0) in quictls.
 - quic/src/send_stream.rs:984 ponytail: split_off trim, up to 2x slack (Q7). :92, :184 O(ranges).
 - quic/src/conn.rs:3392 shortcut: crypto bytes copied out and dropped (Q6).
 - quic/src/crypto_stream.rs:20 shortcut: fixed 16 KiB ooo hold (bound for Q5).
-- quic/src/frags.rs:1147 (at bd2708a) shortcut: frame adding positions copies touched fragments and moves list; 0.2 s/1 s/1.8 s per connection (Initial, pre-auth). Closed by 9b1: the comment is gone, `insert` is O(log n + d) per frame, proved (`cat-C15`).
+- quic/src/frags.rs:1147 (at 58e6d14) shortcut: frame adding positions copies touched fragments and moves list; 0.2 s/1 s/1.8 s per connection (Initial, pre-auth). Closed by 9b1: the comment is gone, `insert` is O(log n + d) per frame, proved (`cat-C15`).
 - quic/src/path.rs:930 ponytail: shifts at most MAX_RESPONSES-1 (Q17).
 - quic/src/ack_track.rs:438 ponytail: O(ranges) insert, <= 32 (Q15).
 - quic/src/sent.rs:301 ponytail: O(inflight x 65) per ACK (Q16).
@@ -110,7 +110,7 @@ No exec drain/insert(0)/rotate/remove(0) in quictls.
 - h3/src/conn.rs:2159 ponytail: linear lookup over open streams (H10).
 - quic/src/cid.rs:51, quic/src/stream_id.rs:55, quic/src/recovery.rs:12 (placeholder), lifecycle.rs:442,494: not copy costs.
 
-## Status of 9b2's rows (9b2 Task 11, 2026-11-21, phase-9b2 at 0d11928)
+## Status of 9b2's rows (9b2 Task 11, 2026-11-21, phase-9b2 at d77e4ef)
 
 The rows 9b2 closed (spec `docs/superpowers/specs/2026-11-12-phase-9b2-byte-queue-design.md`, Coverage), each with its
 status and evidence, and the rows it marks unchanged. A column per row in the tables above would break their raw
@@ -119,7 +119,7 @@ this commit for the patterns that grew or shifted a byte `Vec` (`extend_from_sli
 `insert(0`, `remove(0`, `Vec::new()` and `vec![`, the start of a push loop into a fresh `Vec`). The cost tests named
 below count allocations and bytes (a counting allocator, release build); none times anything.
 
-| row | status | fn at 0d11928 | forbidden patterns in its body | evidence |
+| row | status | fn at d77e4ef | forbidden patterns in its body | evidence |
 |---|---|---|---|---|
 | Q1 | closed (D11, D12) | `Reassembly::insert`, quic/src/reassembly.rs:560 | none | the stream's bytes are a `quic::ring::Ring` of 256-byte pages, each an exact `CapVec`, written in place (`Ring::wf`: a page is allocated iff it holds a byte at or past `base`); `input_cost::stream_reverse_fill`: 0 reallocs, largest frame call 2624 bytes at 64 KiB (Task 1: 262128 bytes for 1) |
 | Q2 | closed (D11, D12) | `Reassembly::pop`, reassembly.rs:660 | none | delivers at most `max` bytes per call through `Ring::deliver` (ring.rs:1658) into one exact `CapVec`; `stream_reverse_fill`: no call hands over more than it was given |
@@ -142,7 +142,7 @@ below count allocations and bytes (a counting allocator, release build); none ti
 Rows not 9b2's keep their owners: Q9-Q22, Q24-Q27, T7, T8, T11, S1-S9 and class B (`cat-C15-9b4`), T6, T9 and T10
 (`cat-C15-stream-parse`, 9b5; T6's chain hashing also `cat-C15-9b4-chain`), H1-H12 (`cat-C15-9b3`).
 
-## Status of 9b3's rows (9b3 Task 13, 2026-11-23, phase-9b3 at 6a43542)
+## Status of 9b3's rows (9b3 Task 13, 2026-11-23, phase-9b3 at 9bd1b68)
 
 The h3 rows of §D, the four h3_server rows of §A and the sites the 9b3 spec added (N1-N6; spec
 `docs/superpowers/specs/2026-11-14-phase-9b3-h3-input-costs-design.md`, "The cost today"), each with its status and
@@ -154,25 +154,25 @@ in the frame and stays O(frame) in the call that completes it until 9b5's increm
 
 | row | status | evidence |
 |---|---|---|
-| H1 | closed by 9b3 (05adcf1) | `build_headers` merges in two passes into exact `CapVec`s (`cookie_scan`, then pushes): `r.1@ <= c_bh()·(fields_size + n + 1)`; `input_cost::cookie_lines_linear`: 0 reallocs, 211,125 bytes for 32,557 (Task 1: 44,216,017); the RCA `docs/rca/2026-11-14-cookie-merge.md` |
-| H2 | closed by 9b3 (05adcf1) | the rescan is gone (pass 1 counts the merged length, pass 2 tracks the first cookie's index); `input_cost::cookie_rescans_linear` |
-| H3 | closed by 9b3 (1bdd1ff) | the sweep's claim was corrected in the spec (at most `d`, 15 bytes); `RequestStream.buf` is a `byteq::queue::ByteQueue`, no `slice_to_vec` of the remainder; `input_cost::headers_bytewise` |
-| H4 | closed by 9b3 (1bdd1ff) | `top_up` pushes into the `ByteQueue` (`push_slice`, no realloc, the migration charged); the header parse reads `as_slice()[..min(16, len)]` (N5); `input_cost::headers_bytewise`: 0 reallocs over 50,399 calls |
-| H5 | closed by 9b3 (1bdd1ff, 4261fd4) | events in an exact `CapVec<ReqEvent>` of `MAX_REQ_EVENTS`, one `Body` per call; `input_cost::data_frames_events` |
-| H6 | closed by 9b3 (82c71ef) | the stream type is read through the `ByteQueue` (at most 8 bytes); `input_cost::control_bytewise` |
-| H7 | closed by 9b3 (82c71ef) | control and QPACK stream buffers are `ByteQueue`s with no remainder copy; `UniStream::on_data` costs `c_uni·(d + 16) + c_uni_frame·buffered`; `input_cost::control_bytewise`, `control_preamble_one_call`, `qpack_bytewise` |
-| H8 | closed by 9b3 (d9e6915) | `sort_ids_w` (a verified merge sort on two `CapVec<u64>`), `settings_ok` and `parse_settings` return proved costs, O(p log p); the MIR analysis now reports `settings_ok deg=1` (was `deg=2`, expected-cost.txt); H3_SETTINGS_ERROR kept (RFC 9114 §7.2.4's receiver MAY, N2) |
-| H9 | closed by 9b3 for growth and the proof of linearity (0f7e4fe); parsing open | `decode_lines_bounded`, `huffman_decode_w`, `decode_string`, `scan_string` and `decode_field_line` on exact `CapVec`s with proved costs; `input_cost::huffman_max_expansion`; the O(frame) parse in the completing call is `cat-C15-stream-parse` (9b5) |
-| H10 | closed by 9b3 (c3072f4) | `H3Conn`'s request and uni tables are `byteq::avl` trees keyed by id, an update is take and put (no remove plus insert, no `find_req` scan); `on_stream_data`, `on_stream_reset` and `on_stop_sending` prove `O(d + log n)` per call with the height from `lemma_ht_of`; `input_cost::stream_table_flat` |
-| H11 | input part closed by 9b3 (80b2688, 4261fd4, e87e29b); the rest open | `rev` and `deliver` on exact `CapVec`s with proved costs and the answered return's `c_step`; constant-size answers (`input_cost::answers_constant`). Response building for `send_response` (`status_line`, `copy_fields`, `fits_peer_x`, `write_response`, `start`, `send_goaway`) is not a network-input call but is an application-API entry point, so it is `cat-C15-9b4`'s (scaffold H3-7) |
+| H1 | closed by 9b3 (170a39b) | `build_headers` merges in two passes into exact `CapVec`s (`cookie_scan`, then pushes): `r.1@ <= c_bh()·(fields_size + n + 1)`; `input_cost::cookie_lines_linear`: 0 reallocs, 211,125 bytes for 32,557 (Task 1: 44,216,017); the RCA `docs/rca/2026-11-14-cookie-merge.md` |
+| H2 | closed by 9b3 (170a39b) | the rescan is gone (pass 1 counts the merged length, pass 2 tracks the first cookie's index); `input_cost::cookie_rescans_linear` |
+| H3 | closed by 9b3 (8755ee5) | the sweep's claim was corrected in the spec (at most `d`, 15 bytes); `RequestStream.buf` is a `byteq::queue::ByteQueue`, no `slice_to_vec` of the remainder; `input_cost::headers_bytewise` |
+| H4 | closed by 9b3 (8755ee5) | `top_up` pushes into the `ByteQueue` (`push_slice`, no realloc, the migration charged); the header parse reads `as_slice()[..min(16, len)]` (N5); `input_cost::headers_bytewise`: 0 reallocs over 50,399 calls |
+| H5 | closed by 9b3 (8755ee5, 317480a) | events in an exact `CapVec<ReqEvent>` of `MAX_REQ_EVENTS`, one `Body` per call; `input_cost::data_frames_events` |
+| H6 | closed by 9b3 (11faf1e) | the stream type is read through the `ByteQueue` (at most 8 bytes); `input_cost::control_bytewise` |
+| H7 | closed by 9b3 (11faf1e) | control and QPACK stream buffers are `ByteQueue`s with no remainder copy; `UniStream::on_data` costs `c_uni·(d + 16) + c_uni_frame·buffered`; `input_cost::control_bytewise`, `control_preamble_one_call`, `qpack_bytewise` |
+| H8 | closed by 9b3 (aa1417a) | `sort_ids_w` (a verified merge sort on two `CapVec<u64>`), `settings_ok` and `parse_settings` return proved costs, O(p log p); the MIR analysis now reports `settings_ok deg=1` (was `deg=2`, expected-cost.txt); H3_SETTINGS_ERROR kept (RFC 9114 §7.2.4's receiver MAY, N2) |
+| H9 | closed by 9b3 for growth and the proof of linearity (98765cc); parsing open | `decode_lines_bounded`, `huffman_decode_w`, `decode_string`, `scan_string` and `decode_field_line` on exact `CapVec`s with proved costs; `input_cost::huffman_max_expansion`; the O(frame) parse in the completing call is `cat-C15-stream-parse` (9b5) |
+| H10 | closed by 9b3 (e5e3ce8) | `H3Conn`'s request and uni tables are `byteq::avl` trees keyed by id, an update is take and put (no remove plus insert, no `find_req` scan); `on_stream_data`, `on_stream_reset` and `on_stop_sending` prove `O(d + log n)` per call with the height from `lemma_ht_of`; `input_cost::stream_table_flat` |
+| H11 | input part closed by 9b3 (808aa19, 317480a, 7af3915); the rest open | `rev` and `deliver` on exact `CapVec`s with proved costs and the answered return's `c_step`; constant-size answers (`input_cost::answers_constant`). Response building for `send_response` (`status_line`, `copy_fields`, `fits_peer_x`, `write_response`, `start`, `send_goaway`) is not a network-input call but is an application-API entry point, so it is `cat-C15-9b4`'s (scaffold H3-7) |
 | H12 | open, `cat-C15-9b4` (scaffold H3-7, `mem-fs-copy`) | encode only (`encode_string`, `serialize_prefix_int`): output, not network input; unchanged |
 | Q9 | open, `cat-C15-9b4` | h3_server.rs `pending.remove(0)`; 9b3 touched h3_server.rs only at `lemma_flushed` (a lemma split for rlimit) |
 | Q10 | open, `cat-C15-9b4` | `kept`/`purge` |
 | Q11 | open, `cat-C15-9b4` | `apply_one`'s `pending.push` |
 | Q12 | open, `cat-C15-9b4` | `apply_one`'s and `feed`'s `app.push` |
 | N1 | open, `cat-C15-9b4` | `H3Server::flush` from an ACK or MAX_STREAM_DATA: output moved by an input call (O7, the flush budget) |
-| N2 | closed by 9b3 (d9e6915) | the duplicate-SETTINGS error is kept and its citation gains the receiver's MAY (frame.rs:134-139); no bug section |
+| N2 | closed by 9b3 (aa1417a) | the duplicate-SETTINGS error is kept and its citation gains the receiver's MAY (frame.rs:134-139); no bug section |
 | N3 | open, `cat-C15-9b4` (the whole of it) | 9b3 makes the cost independent of the stream count (an `avl` tree, `log n`); the memory bound on tracked streams and h3_server's queue, proved against QUIC's stream limits, is 9b4's (TRUSTED.md line 7's pending-queue sentence stays) |
 | N4 | huffman.rs:756 (now :881) to `cat-C15-stream-parse`; limits.rs:19 corrected (Task 13: the stale comment deleted, the doc comment under it states the decoded budget); h3_server.rs:649 open, `cat-C15-9b4`; static_table.rs:361 no change | static_table.rs:361 is a constant scan over 99 entries on the encode side, not an input path |
-| N5 | closed by 9b3 (1bdd1ff, 82c71ef) | `parse_frame_header` reads a prefix of at most 16 bytes: request.rs's `min(16, len)` lemma and uni.rs's control preamble; costs `c_fhdr() == 17` from `parse_frame_header_w` (f486bc9) |
-| N6 | open, `cat-C15-teardown` (9b4) | removing an entry frees its trailer lines in the removing call; charged as the `removed_fields` term of `on_stream_data`, `on_stream_reset` and `on_stop_sending` (39dcdc3), excluded from the O(d + log n) bound; the API is 9b4's |
+| N5 | closed by 9b3 (8755ee5, 11faf1e) | `parse_frame_header` reads a prefix of at most 16 bytes: request.rs's `min(16, len)` lemma and uni.rs's control preamble; costs `c_fhdr() == 17` from `parse_frame_header_w` (3468ebf) |
+| N6 | open, `cat-C15-teardown` (9b4) | removing an entry frees its trailer lines in the removing call; charged as the `removed_fields` term of `on_stream_data`, `on_stream_reset` and `on_stop_sending` (85ffc05), excluded from the O(d + log n) bound; the API is 9b4's |

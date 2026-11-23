@@ -1,4 +1,4 @@
-// rfc-quantity gate fixture: recv_allowed_err and its helpers as on main ed35647 (9a 0a8c534), comments dropped.
+// rfc-quantity gate fixture: recv_allowed_err and its helpers as on main 8cbb45e (9a bd4b40d), comments dropped.
 use vstd::prelude::*;
 
 verus! {

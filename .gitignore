@@ -6,3 +6,7 @@
 /tools/*/target
 /tools/ct-fixtures/semconf/target
 __pycache__/
+
+# Design notes and agent ledgers are local only (owner, 2026-11-21)
+/docs/superpowers/
+/.superpowers/

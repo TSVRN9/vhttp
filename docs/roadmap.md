@@ -15,40 +15,40 @@ send and recovery paths; parts of 9b/9c that do not touch them may go earlier. P
 
 | id | title | status | order | plan / merge |
 |---|---|---|---|---|
-| 0-1 | toolchain, workspace and `wire` varint | merged | - | `2026-10-27-phase-0-1-toolchain-and-varint.md`; committed on main, last 1833f2f |
-| 2a | h3 frame and QPACK codecs | merged | - | `2026-10-27-phase-2a-h3-qpack-codecs.md`; 7055ab3 |
-| 2b | h3 connection layer | merged | - | `2026-10-27-phase-2b-h3-connection.md`; cc9389e |
-| 3a | crypto specs and RustCrypto shims | merged | - | `2026-10-27-phase-3a-crypto-specs.md`; 5465de7 |
-| 3b | QUIC codecs | merged | - | `2026-10-27-phase-3b-quic-codecs.md`; fa472e2 |
-| 3c | QUIC streams and flow control | merged | - | `2026-10-28-phase-3c-quic-streams.md`; c7ef8f0 |
-| 3d | QUIC connection building blocks | merged | - | `2026-10-29-phase-3d-quic-connection.md`; 510aac3 |
-| 3d2 | QUIC Connection and the H3 adapter | merged | - | `2026-10-29-phase-3d2-quic-connection-integration.md`; 55d9f55 |
-| 3e | packet protection and the server shell | merged | - | `2026-11-03-phase-3e-packet-protection-shell.md`; c1329b9 |
-| 4a | TLS 1.3 message codecs | merged | - | `2026-10-28-phase-4a-tls-codecs.md`; e1bb618 |
-| 4b | TLS 1.3 server handshake | merged | - | `2026-10-28-phase-4b-tls-handshake.md`; ee72841 |
-| 4c | QUIC-TLS glue, shell, first interop | merged | - | `2026-11-05-phase-4c-quic-tls-glue.md`; ecd54a2, quiche d06282e |
+| 0-1 | toolchain, workspace and `wire` varint | merged | - | `2026-10-27-phase-0-1-toolchain-and-varint.md`; committed on main, last 0cb40c1 |
+| 2a | h3 frame and QPACK codecs | merged | - | `2026-10-27-phase-2a-h3-qpack-codecs.md`; 9896ba9 |
+| 2b | h3 connection layer | merged | - | `2026-10-27-phase-2b-h3-connection.md`; b9ecfd1 |
+| 3a | crypto specs and RustCrypto shims | merged | - | `2026-10-27-phase-3a-crypto-specs.md`; a699c14 |
+| 3b | QUIC codecs | merged | - | `2026-10-27-phase-3b-quic-codecs.md`; 670eeb7 |
+| 3c | QUIC streams and flow control | merged | - | `2026-10-28-phase-3c-quic-streams.md`; 9d1f943 |
+| 3d | QUIC connection building blocks | merged | - | `2026-10-29-phase-3d-quic-connection.md`; 2331373 |
+| 3d2 | QUIC Connection and the H3 adapter | merged | - | `2026-10-29-phase-3d2-quic-connection-integration.md`; e234106 |
+| 3e | packet protection and the server shell | merged | - | `2026-11-03-phase-3e-packet-protection-shell.md`; bc037c9 |
+| 4a | TLS 1.3 message codecs | merged | - | `2026-10-28-phase-4a-tls-codecs.md`; 204a1cd |
+| 4b | TLS 1.3 server handshake | merged | - | `2026-10-28-phase-4b-tls-handshake.md`; 1f49e01 |
+| 4c | QUIC-TLS glue, shell, first interop | merged | - | `2026-11-05-phase-4c-quic-tls-glue.md`; 362cea1, quiche 3f86b38 |
 | 4d | QUIC key update and AEAD limits | unplanned | 8 | none; `2026-11-05-phase-4c-quic-tls-glue.md:674-679` |
-| 5a | verified SHA-256, HMAC, HKDF | merged | - | `2026-10-28-phase-5a-hash-kdf.md`; 9af3a0d |
-| 5b | verified AES-128 and GCM | merged | - | `2026-10-28-phase-5b-aes-gcm.md`; 60b940d |
-| 5c | verified P-256, ECDH, ECDSA | merged | - | `2026-10-28-phase-5c-p256.md`; 11fdf92 |
-| 5d | P-256 group law | merged | - | `2026-10-28-phase-5d-group-law.md`; c5aecf9 |
-| 5e | verified RSA-PSS signing, vectors | merged | - | `2026-11-02-phase-5e-rsa-vectors.md`; 4ac8251 |
+| 5a | verified SHA-256, HMAC, HKDF | merged | - | `2026-10-28-phase-5a-hash-kdf.md`; 2c51c3a |
+| 5b | verified AES-128 and GCM | merged | - | `2026-10-28-phase-5b-aes-gcm.md`; 95a560d |
+| 5c | verified P-256, ECDH, ECDSA | merged | - | `2026-10-28-phase-5c-p256.md`; ce000b2 |
+| 5d | P-256 group law | merged | - | `2026-10-28-phase-5d-group-law.md`; 919aa16 |
+| 5e | verified RSA-PSS signing, vectors | merged | - | `2026-11-02-phase-5e-rsa-vectors.md`; de3ff96 |
 | 6 | loss recovery and congestion control (RFC 9002) | unplanned | 5 | none; design spec `:118-119` |
-| 7a | binary CT gate and timing tests | merged | - | `2026-11-03-phase-7a-binary-ct-gate.md`; 7e95f7f |
+| 7a | binary CT gate and timing tests | merged | - | `2026-11-03-phase-7a-binary-ct-gate.md`; cf48393 |
 | 7 | full conformance and browsers (rest of Phase 7) | unplanned | 9 | none; design spec `:120-122` |
-| 8a | verified constant-time checker | merged | - | `2026-10-28-phase-8a-ct-checker.md`; 6641fa2 |
-| 8b | verified step-bound analyser | merged | - | `2026-10-28-phase-8b-cost-analyser.md`; e6c1c00 |
-| 8c | verified MIR front end | merged | - | `2026-11-03-phase-8c-verified-front-end.md`; 0b0061c |
-| 8d | verified MIR evaluator | merged | - | `2026-11-05-phase-8d-mir-evaluator.md`; 73cc244 |
-| 9r | RCA catalog and first class catches | merged | - | `2026-11-06-phase-9r-rca-catches.md`; 244e61b |
-| 9r2 | class catches in verify.sh | merged | - | `2026-11-07-phase-9r2-class-catches.md`; f4f0c9c |
-| 9r3 | audit gates and the roadmap | merged | - | `2026-11-09-phase-9r3-audit-gates-and-roadmap.md`; d416f34 |
-| 9a | acceptance pilot, Tasks 0-4 and 6 | merged | - | `2026-11-05-phase-9a-acceptance-pilot.md`; ed35647 |
-| 9a2 | acceptance pilot, Tasks 3b, 5, 3c' (sparse CRYPTO store) | merged | - | `2026-11-05-phase-9a-acceptance-pilot.md`; 680a3f0 |
+| 8a | verified constant-time checker | merged | - | `2026-10-28-phase-8a-ct-checker.md`; ab6434e |
+| 8b | verified step-bound analyser | merged | - | `2026-10-28-phase-8b-cost-analyser.md`; 8519022 |
+| 8c | verified MIR front end | merged | - | `2026-11-03-phase-8c-verified-front-end.md`; 65500e1 |
+| 8d | verified MIR evaluator | merged | - | `2026-11-05-phase-8d-mir-evaluator.md`; 73e093e |
+| 9r | RCA catalog and first class catches | merged | - | `2026-11-06-phase-9r-rca-catches.md`; fef483a |
+| 9r2 | class catches in verify.sh | merged | - | `2026-11-07-phase-9r2-class-catches.md`; ec7427e |
+| 9r3 | audit gates and the roadmap | merged | - | `2026-11-09-phase-9r3-audit-gates-and-roadmap.md`; 13a423d |
+| 9a | acceptance pilot, Tasks 0-4 and 6 | merged | - | `2026-11-05-phase-9a-acceptance-pilot.md`; 8cbb45e |
+| 9a2 | acceptance pilot, Tasks 3b, 5, 3c' (sparse CRYPTO store) | merged | - | `2026-11-05-phase-9a-acceptance-pilot.md`; 9438a61 |
 | 9b | spec-only acceptance lemmas, rule 2(b) | unplanned | 4 (P3), 6 (P4) | none; Phase 9 spec `:50`, `:131-141` |
-| 9b1 | a Frags index: the out-of-order CRYPTO store on a verified AVL of chunks, cost proved per call (C15) | merged | 4 | `2026-11-12-phase-9b1-frags-index.md`; 1875a00 |
-| 9b2 | verified byte queue and lazy delivery (`crates/byteq`, `quic::ring`): CryptoStream, HsReader, the TLS transcript, SendStream, Reassembly, `pump_backlog` | merged | - | `2026-11-13-phase-9b2-byte-queue.md`; e46a2e8 |
-| 9b3 | h3 input costs: cookie merge linear, SETTINGS duplicates by merge sort, frame buffers on `ByteQueue`, stream table on `byteq::avl`, completed-frame work proved linear | merged | - | `2026-11-14-phase-9b3-h3-input-costs.md`; 9b1 spec D10 (owner decision 2026-11-12); `docs/rca/2026-11-12-cost-sweep.md`; 0983eb6 |
+| 9b1 | a Frags index: the out-of-order CRYPTO store on a verified AVL of chunks, cost proved per call (C15) | merged | 4 | `2026-11-12-phase-9b1-frags-index.md`; 31c631b |
+| 9b2 | verified byte queue and lazy delivery (`crates/byteq`, `quic::ring`): CryptoStream, HsReader, the TLS transcript, SendStream, Reassembly, `pump_backlog` | merged | - | `2026-11-13-phase-9b2-byte-queue.md`; 5f1d93a |
+| 9b3 | h3 input costs: cookie merge linear, SETTINGS duplicates by merge sort, frame buffers on `ByteQueue`, stream table on `byteq::avl`, completed-frame work proved linear | merged | - | `2026-11-14-phase-9b3-h3-input-costs.md`; 9b1 spec D10 (owner decision 2026-11-12); `docs/rca/2026-11-12-cost-sweep.md`; 57b98ba |
 | 9b4 | the remaining sites of docs/rca/2026-11-12-cost-sweep.md (server conns table, tls ext bitmap, ack/inflight/route tables, builders) and the sweep as a gate; a semantic check of 9b1's cost charge (MIR-step bounds for Frags::insert/after_insert/take_front by ctmir's verified cost analysis, or a ghost-cost discipline Verus enforces) | unplanned | 4 (after 9b1, before Phase 6) | none; 9b1 spec D10 (owner decision 2026-11-12); `docs/rca/2026-11-12-cost-sweep.md` |
 | 9b5 | incremental parsing: TLS handshake messages, h3 frames and QPACK field sections parsed as bytes arrive, so no call does more than O(d + log n) | unplanned | 4 (after 9b4, before Phase 6) | none; owner decision 2026-11-12 |
 | sc | scaffold: every remaining interface specified and stubbed top-down from the end-to-end theorem, bodies filled against frozen interfaces; supersedes 9b4's Tasks 4-16 and 9b5's Tasks 8-fix to 19 | unplanned | 4 (after 9b2 and 9b3 merge) | none; scaffold design spec of 2026-11-21 (drafting) |
@@ -66,8 +66,8 @@ send and recovery paths; parts of 9b/9c that do not touch them may go earlier. P
 | 11 | composed end-to-end theorem | unplanned | 10 | none; audit F8 |
 | 12 | production readiness | unplanned | 11 | none; audit F10 |
 | t1 | toolchain upgrade procedure (design only) | unplanned | - | none; audit F12 |
-| q1 | scripts/quick.sh, a scoped inner-loop check (owner request 2026-11-10) | merged | - | none (owner request); aed556e |
-| q2 | mutants.sh run in parallel worktrees (owner request 2026-11-10) | merged | - | none (owner request); 908b2ac |
+| q1 | scripts/quick.sh, a scoped inner-loop check (owner request 2026-11-10) | merged | - | none (owner request); ef028ea |
+| q2 | mutants.sh run in parallel worktrees (owner request 2026-11-10) | merged | - | none (owner request); 8f50ea8 |
 
 "design spec" is `docs/superpowers/specs/2026-10-27-verified-http3-design.md`; "Phase 9 spec" is
 `docs/superpowers/specs/2026-11-05-phase-9-acceptance-and-closes-design.md`; "audit" is `docs/audit-2026-11-09.md`.
@@ -239,5 +239,5 @@ Each is its own sub-phase with a plan, after 9c (Phase 9 spec `:270-276`).
   `scripts/carryovers.sh`; row `aud-F18`.
 - F19 (old evidence worktrees): the owner had them deleted; the committed citations of their logs are rewritten and
   gated (row `aud-F19`); 9a2's own citation was rewritten on its branch (row `x-9a2-evidence`, closed
-  with fceacf3 by the merge of main into 9r3).
+  with 085b46f by the merge of main into 9r3).
 - Smaller items: `aud-s1`, `aud-s2`, `aud-s3`, `aud-s5` (phase 12), `aud-s4`, `aud-s6` (phase 10a).

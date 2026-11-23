@@ -107,7 +107,7 @@ scripts/gate-demos.sh, RFC-quantity section, each checked against the tool befor
 
 ## Re-pin
 
-Fix round 3 (commit 9962805) moved all seven root digests: each new hashed body was the old one with lines removed and
+Fix round 3 (commit 36eed32) moved all seven root digests: each new hashed body was the old one with lines removed and
 none added (bodies diffed): crypto_allowed_err and recv_allowed_err lost tls's duplicate code and the tests' `const A`;
 allowed_tp_err, allowed_tp_err_from and tp_allowed_err also lost `N` (the test const and the generic-parameter chunks)
 and `T4`; superseded_allowed_err lost tls's `H3_ALPN` and `PROTOCOL_VIOLATION`; key_changes_allowed_err tls's

@@ -14,7 +14,7 @@ use quic::tp::*;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-/// Calibrated at 7d4d174 plus fix round 1: 16 bytes around the PING. A tail copy allocates about 2 MiB.
+/// Calibrated at 4455502 plus fix round 1: 16 bytes around the PING. A tail copy allocates about 2 MiB.
 const LIMIT: usize = 64 << 10;
 
 struct Counting;

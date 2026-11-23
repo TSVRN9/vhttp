@@ -1,4 +1,4 @@
-// rfc-quantity gate demo: recv_allowed_err and its helpers verbatim from 8f6b48e (9a T6 review I1), reading rfc_recv's
+// rfc-quantity gate demo: recv_allowed_err and its helpers verbatim from 0ae6d1c (9a T6 review I1), reading rfc_recv's
 // running `high` (and `counted`, over `high`) instead of the RFC's largest received offset.
 use vstd::prelude::*;
 

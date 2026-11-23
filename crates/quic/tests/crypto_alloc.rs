@@ -1,6 +1,6 @@
 //! 9a T7 fix round 1 (review I1): an out-of-order CRYPTO frame whose bytes are all held already
 //! must not copy or allocate. CRYPTO has no flow control, so a peer may send such frames without
-//! limit; at edeca5c each one copied the whole fragment it touched.
+//! limit; at 725ea37 each one copied the whole fragment it touched.
 // One test in this binary; the counter is per thread anyway, since libtest runs tests on threads.
 use quic::crypto_stream::CryptoStream;
 use std::alloc::{GlobalAlloc, Layout, System};

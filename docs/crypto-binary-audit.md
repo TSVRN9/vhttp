@@ -1,6 +1,6 @@
-# Binary constant-time audit of crates/crypto (main at e6c1c00)
+# Binary constant-time audit of crates/crypto (main at 8519022)
 
-**Status at 8b32220.** The body below is the audit of e6c1c00, unedited. Since then the shim is deleted (F2 and G1 are obsolete; the "Phase 5" deployment line it quotes is superseded by TRUSTED's RSA row). F1 is closed by `#[inline(never)]` on `scalar_in_range`. The shipped rlib is now 2 units; 7 of the 30 functions changed and were re-read, the other 23 have the same opcodes. The RSA read is the next section. Where the bodies below say verify.sh re-checks none of this, they predate the gate in the next section. Where they say no timing was measured, they predate "Timing tests" below.
+**Status at ccd5a8f.** The body below is the audit of 8519022, unedited. Since then the shim is deleted (F2 and G1 are obsolete; the "Phase 5" deployment line it quotes is superseded by TRUSTED's RSA row). F1 is closed by `#[inline(never)]` on `scalar_in_range`. The shipped rlib is now 2 units; 7 of the 30 functions changed and were re-read, the other 23 have the same opcodes. The RSA read is the next section. Where the bodies below say verify.sh re-checks none of this, they predate the gate in the next section. Where they say no timing was measured, they predate "Timing tests" below.
 
 ## Gate (Phase 7a)
 
@@ -11,7 +11,7 @@
 - It runs the recipe's build: a plain workspace `cargo build --release --locked`, in `target/ct-binary` (fixed, not configurable). The dir is kept warm behind a content stamp: a sha256 over every non-test file under `crates/` (`crates/*/tests` and `crates/*/target` excluded), `Cargo.toml`, `Cargo.lock` and `rust-toolchain.toml`. Any change to that content wipes the dir, so the build is fresh whenever a source changed, whatever its mtime (cargo alone trusts mtimes for path packages). Otherwise the build is warm, and cargo's fingerprints cover toolchain and profile changes.
 - It refuses to run if `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_*`, `CARGO_PROFILE_*`, `CARGO_TARGET_*_RUSTFLAGS`, `CARGO_INCREMENTAL`, `RUSTC` or a `RUSTC_*WRAPPER` is set. It does not look at cargo config files, `CARGO_HOME` or `RUSTUP_TOOLCHAIN` (none is in use today). In normal mode a build they change shows as a digest diff, but `--update` would record it as if it were the shipped build.
 - The rlib holds only `lib.rmeta`, `lib.rmeta-link` and `.rcgu.o` units, and the unit count equals the `units` line of `docs/crypto-binary-digests.txt`, today 2. The `objdump` line records `objdump --version`, because the digests hash objdump's text: a binutils update (a distro rebuild included, since the line carries the package release) can move every digest with no code change, and the message then points to update protocol step 7.
-- It disassembles each unit with `objdump -dr --no-show-raw-insn -C`, splits the output per function symbol and normalises each function. It then diffs one `<sha256> <symbol>` line per function against `docs/crypto-binary-digests.txt`. That covers every function in both units, 49 at 8b32220's source: the 30 non-RSA functions, the RSA and bignum functions, and the 9 `alloc`/`vstd` instantiations (read below).
+- It disassembles each unit with `objdump -dr --no-show-raw-insn -C`, splits the output per function symbol and normalises each function. It then diffs one `<sha256> <symbol>` line per function against `docs/crypto-binary-digests.txt`. That covers every function in both units, 49 at ccd5a8f's source: the 30 non-RSA functions, the RSA and bignum functions, and the 9 `alloc`/`vstd` instantiations (read below).
 - Normalisation:
   - drops the file-format and section headers, which carry paths and mangled crate hashes;
   - drops each line's offset column and objdump's `# ...` comments;
@@ -56,8 +56,8 @@
 
 ### Gate records
 
-- **2026-11-03, b3b5d8a (crates/crypto source as at 8b32220), rustc 1.98.1, GNU objdump 2.46.1.** Normalisation-only re-digest (step 6): `.Lanon.<hash>.N` lost its unit hash, and the `objdump` line and the `U` block were added. The recipe's md5 on the gate's own units is still `a247bd0fc9216f57f9ba2fe5fc376e88`, and the previous rules applied to this build reproduce the previous 49 digest lines byte for byte.
-- **2026-11-03, b3b5d8a, same toolchain.** Whole read of the 9 `alloc`/`vstd` instantiations (each at most 52 instructions). Every conditional jump below is on a length, a capacity, an index or an allocator result. Under spec D7 and the MIR leakage model, lengths, capacities (allocation sizes), indices and subslice bounds are public, and allocation failure is a public abort. The indirect `call/jmp *0x0(%rip)` are GOT loads of fixed symbols. **Clean.**
+- **2026-11-03, 5663781 (crates/crypto source as at ccd5a8f), rustc 1.98.1, GNU objdump 2.46.1.** Normalisation-only re-digest (step 6): `.Lanon.<hash>.N` lost its unit hash, and the `objdump` line and the `U` block were added. The recipe's md5 on the gate's own units is still `a247bd0fc9216f57f9ba2fe5fc376e88`, and the previous rules applied to this build reproduce the previous 49 digest lines byte for byte.
+- **2026-11-03, 5663781, same toolchain.** Whole read of the 9 `alloc`/`vstd` instantiations (each at most 52 instructions). Every conditional jump below is on a length, a capacity, an index or an allocator result. Under spec D7 and the MIR leakage model, lengths, capacities (allocation sizes), indices and subslice bounds are public, and allocation failure is a public abort. The indirect `call/jmp *0x0(%rip)` are GOT loads of fixed symbols. **Clean.**
 
   | Instantiation | Instructions | Jumps (conditional + `jmp`) | Each conditional jump and its flag producer |
   |---|---|---|---|
@@ -71,9 +71,9 @@
   | `Vec<u8>::drop` | 1 | 0 | `ret` |
   | `drop_glue::<Vec<u8>>` | 7 | 1 + 1 | Same instructions as `RawVec<u8>::drop` |
 
-- **2026-11-03, this commit on base 7e95f7f, rustc 1.98.1, GNU objdump 2.46.1.** Dependent added: quic (Phase 3e Task 1, `quic::hp::hp_mask`), 1 `U` line (`U quic crypto::aes::aes128_encrypt_block`), no `D` line, digests unchanged. Protocol step 2: the line is `U`, a call (`nm -C libquic.rlib` shows no defined `crypto::` symbol, so nothing was inlined); no crypto symbol changed, so no symbol read is due.
-- **2026-11-03, this commit on base 7e95f7f, rustc 1.98.1, GNU objdump 2.46.1.** Dependent extended: quic (Phase 3e Task 2, `quic::aead::{seal_packet, open_packet}`), 2 `U` lines (`U quic crypto::gcm::aes128_gcm_open`, `U quic crypto::gcm::aes128_gcm_seal`), no `D` line, digests unchanged. Protocol step 2: both lines are `U`, calls (`nm -C libquic.rlib` shows no defined `crypto::` symbol, so nothing was inlined); no crypto symbol changed, so no symbol read is due.
-- **2026-11-05, this commit on base c1329b9, rustc 1.98.1, GNU objdump 2.46.1.** Dependent added: quictls (Phase 4c Task 1, `quictls::keys::initial_keys`), 1 `U` line (`U quictls crypto::hkdf::hkdf_extract`), no `D` line, digests unchanged. Protocol step 2: the line is `U`, a call (the dependents' `D` check passes, so no `crypto::` symbol is defined in libquictls and nothing was inlined); no crypto symbol changed, so no symbol read is due.
+- **2026-11-03, this commit on base cf48393, rustc 1.98.1, GNU objdump 2.46.1.** Dependent added: quic (Phase 3e Task 1, `quic::hp::hp_mask`), 1 `U` line (`U quic crypto::aes::aes128_encrypt_block`), no `D` line, digests unchanged. Protocol step 2: the line is `U`, a call (`nm -C libquic.rlib` shows no defined `crypto::` symbol, so nothing was inlined); no crypto symbol changed, so no symbol read is due.
+- **2026-11-03, this commit on base cf48393, rustc 1.98.1, GNU objdump 2.46.1.** Dependent extended: quic (Phase 3e Task 2, `quic::aead::{seal_packet, open_packet}`), 2 `U` lines (`U quic crypto::gcm::aes128_gcm_open`, `U quic crypto::gcm::aes128_gcm_seal`), no `D` line, digests unchanged. Protocol step 2: both lines are `U`, calls (`nm -C libquic.rlib` shows no defined `crypto::` symbol, so nothing was inlined); no crypto symbol changed, so no symbol read is due.
+- **2026-11-05, this commit on base bc037c9, rustc 1.98.1, GNU objdump 2.46.1.** Dependent added: quictls (Phase 4c Task 1, `quictls::keys::initial_keys`), 1 `U` line (`U quictls crypto::hkdf::hkdf_extract`), no `D` line, digests unchanged. Protocol step 2: the line is `U`, a call (the dependents' `D` check passes, so no `crypto::` symbol is defined in libquictls and nothing was inlined); no crypto symbol changed, so no symbol read is due.
 
 ## Timing tests (Phase 7a)
 
@@ -125,7 +125,7 @@ Each run fails unless `/proc/self/status`'s `Cpus_allowed_list` is a single CPU.
 
 ### Timing records
 
-- **2026-11-03, tree 0b846ce plus the test file (crates/crypto source as at 8b32220, gate digests unchanged), rustc 1.98.1, Intel Core Ultra 7 258V (Lunar Lake; P-cores 0-3, no SMT).** The timed `libcrypto` rlib is byte-identical to the gate's (`cmp`, checked after the run by the Task 2 review and again on 2026-11-03 before fix round 1); the timed regions call all six targets out of line (the review's disassembly of the test binary). The runs went in parallel on P-cores 1, 2 and 3, one `taskset -c` process each, with the documented command filtered by test name. Load is the 1-minute average at start and end. It includes these three runs, so about 3 when all three were going. The TSC runs at about 3.3 GHz (ticks over wall time). **All pass.**
+- **2026-11-03, tree 00e78ad plus the test file (crates/crypto source as at ccd5a8f, gate digests unchanged), rustc 1.98.1, Intel Core Ultra 7 258V (Lunar Lake; P-cores 0-3, no SMT).** The timed `libcrypto` rlib is byte-identical to the gate's (`cmp`, checked after the run by the Task 2 review and again on 2026-11-03 before fix round 1); the timed regions call all six targets out of line (the review's disassembly of the test binary). The runs went in parallel on P-cores 1, 2 and 3, one `taskset -c` process each, with the documented command filtered by test name. Load is the 1-minute average at start and end. It includes these three runs, so about 3 when all three were going. The TSC runs at about 3.3 GHz (ticks over wall time). **All pass.**
 
   | Target | n measured / kept | \|t\| | Mean fixed / random (ticks) | 10 SE (ticks) | Wall | CPU | Load |
   |---|---|---|---|---|---|---|---|
@@ -140,16 +140,16 @@ Each run fails unless `/proc/self/status`'s `Cpus_allowed_list` is a single CPU.
 
   10 SE as a fraction of the call: AES 0.05%, GHASH 0.05%, tag compare 0.05%, ECDSA 0.05%, ECDH 0.06%, RSA 0.37%. In absolute terms that is about 6 ns, 85 ns, 10 ns, 2.4 µs, 3.1 µs and 23 µs. The P-256 calls take about 5 ms each here, as long as an RSA signature. They ran at the brief's 10^6 anyway: about 90 min each.
 
-## RSA object read (Phase 5e, source 8b32220)
+## RSA object read (Phase 5e, source ccd5a8f)
 
-The object code of `crates/crypto` at 8b32220, rustc 1.98.1 / x86-64-unknown-linux-gnu, as a plain workspace build ships it. **Result: no secret-dependent branch or index in anything read, and `ct_mask` stays a real call. Without it, the branches on the exponent bit and the final subtraction return.**
+The object code of `crates/crypto` at ccd5a8f, rustc 1.98.1 / x86-64-unknown-linux-gnu, as a plain workspace build ships it. **Result: no secret-dependent branch or index in anything read, and `ct_mask` stays a real call. Without it, the branches on the exponent bit and the final subtraction return.**
 
 This is evidence about this source and build only. Any edit to `crates/crypto`, the toolchain or the profile can move inlining, and `verify.sh` re-checks none of it. It is not a dudect result: no timing was measured. Registers feeding jumps were traced by loop shape and flag producer, not by whole-function dataflow.
 
 ### Recipe
 
 ```sh
-git checkout 8b32220   # or any commit with the same crates/crypto non-test source, toolchain and profile
+git checkout ccd5a8f   # or any commit with the same crates/crypto non-test source, toolchain and profile
 T=<fresh absolute dir>; A=<empty dir>
 cargo build --release --target-dir "$T"
 cd "$A" && ar x "$T/release/libcrypto.rlib"
@@ -220,9 +220,9 @@ In the 1-unit `--emit=obj` the verdict is the same: 127 signer jumps of the same
 
 ### Non-RSA symbols re-read
 
-An opcode comparison with a rebuilt e6c1c00 (5 units) over the 30 functions gives 23 the same (their text also matches once addresses and relocations are stripped, so the body's reading carries), and these 7 different. `scalar_in_range` is a new symbol.
+An opcode comparison with a rebuilt 8519022 (5 units) over the 30 functions gives 23 the same (their text also matches once addresses and relocations are stripped, so the body's reading carries), and these 7 different. `scalar_in_range` is a new symbol.
 
-| Symbol | Instructions, e6c1c00 -> now | Jumps now | Verdict |
+| Symbol | Instructions, 8519022 -> now | Jumps now | Verdict |
 |---|---|---|---|
 | `p256_ecdsa_sign` | 1408 -> 1259 | 29 (was 31) | Clean. `test %al; je` after each `scalar_in_range` call (`#1`, `#2`); `or`s of r and s, `je` (`#3`, `#4`); the rest HMAC pad counters and 32-byte copy bounds |
 | `p256_public_key` | 366 -> 287 | 1 (was 2) | Clean. `call scalar_in_range; test %al,%al; je` |
@@ -269,7 +269,7 @@ Workspace rlib:
 
 ---
 
-## Audit of e6c1c00
+## Audit of 8519022
 
 Date: 2026-11-02. Toolchain: rustc 1.98.1 / LLVM 22.1.8, x86-64-unknown-linux-gnu, no `target-cpu`, no `.cargo/config`.
 
@@ -414,5 +414,5 @@ The `sext(i1)` select pattern is reachable here too: `select4`, `mont_mul`'s sub
 
 ## Method notes
 
-- Worktree at e6c1c00, plain build, `ar x`, `objdump -dr --no-show-raw-insn -C`, split per function. Nothing committed; fixes were built in a throwaway copy under the session scratchpad.
+- Worktree at 8519022, plain build, `ar x`, `objdump -dr --no-show-raw-insn -C`, split per function. Nothing committed; fixes were built in a throwaway copy under the session scratchpad.
 - Conditional jumps counted by `j*` other than `jmp`. Panic stubs filtered from views after their addresses were listed; all are `panic_bounds_check` on the public-length checks above.

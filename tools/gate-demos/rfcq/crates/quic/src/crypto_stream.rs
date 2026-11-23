@@ -1,4 +1,4 @@
-// rfc-quantity gate fixture: crypto_allowed_err as fixed in 9a (fcf9ff0), with stub bookkeeping.
+// rfc-quantity gate fixture: crypto_allowed_err as fixed in 9a (b933571), with stub bookkeeping.
 use vstd::prelude::*;
 
 verus! {

@@ -4,14 +4,14 @@ Status: fixed for h3 in phase 9b3 Task 4b (the commit that adds this file). The 
 crate.
 
 - **Defect**: several h3 proofs verified only on the path Z3 happened to take. Any edit that changed the SMT query's
-  shape (not its meaning) sent them past `--rlimit 4` or far up toward it. The trigger was 9b3 Task 4 (05adcf1), which
+  shape (not its meaning) sent them past `--rlimit 4` or far up toward it. The trigger was 9b3 Task 4 (170a39b), which
   rewrote `build_headers` and removed h3's last `Vec::extend_from_slice` call. vstd's `extend_from_slice` spec was the
   only reachable item that put `View::view` before `Seq::new` and `array_view` in the crate's declaration order. Without
   it, every h3 module's SMT prelude lists the same declarations and axioms in a different order. The content is
   identical; only the order changes. To reproduce: run `cargo verus focus -- --rlimit 4 --verify-only-module
-  qpack::field_section --log smt --log-dir DIR` in crates/h3 at 12ec841 (before) and at 05adcf1 with
+  qpack::field_section --log smt --log-dir DIR` in crates/h3 at 71994e6 (before) and at 170a39b with
   `smt_order_anchor` deleted (after), then diff `DIR/qpack__field_section.smt2`: only moved lines differ. The table is
-  `scripts/quick.sh h3` (one crate run, seed 0) at 12ec841 and at 05adcf1 without the anchor:
+  `scripts/quick.sh h3` (one crate run, seed 0) at 71994e6 and at 170a39b without the anchor:
 
   | fn | before | after the reorder |
   |---|---:|---:|
@@ -95,7 +95,7 @@ crate.
     `rfc_decode_field_section`, `spec_prefix_int_bytes`, `rfc_req`, `rfc_headers`, `ctrl_preamble`, `goaway_frames`,
     `spec_frame_bytes`, `spec_varint`, `rfc_control`, ...). The profile of `send_response` showed why: 72% of its
     quantifier instantiations were vstd's `array_index` and `Seq::new` index axioms, reached through the control
-    stream's serialization specs, which it never needs to unfold. To reproduce: at 4bf5976 with `smt_order_anchor`
+    stream's serialization specs, which it never needs to unfold. To reproduce: at a76cacb with `smt_order_anchor`
     deleted, run `cargo verus focus -- --rlimit 4 --verify-only-module conn --verify-function H3Conn::send_response
     --profile --smt-option smt.random_seed=0` in crates/h3 (the top two quantifiers are vstd array.rs:57 and
     seq.rs:1403).
@@ -132,7 +132,7 @@ crate.
     log", "rlimit-seeds: identical runs (the seed had no effect)", each after "rlimit-seeds: unchanged fixture passes";
     and "rlimit-seeds.sh: verus exits non-zero under seed 2 only" (the script with a stub `cargo`), after
     "rlimit-seeds.sh (stub cargo)".
-  - The h3 sweep: before this commit (05adcf1/4bf5976 sources, anchor in place) `scripts/rlimit-seeds.sh h3 5` failed
+  - The h3 sweep: before this commit (170a39b/a76cacb sources, anchor in place) `scripts/rlimit-seeds.sh h3 5` failed
     on the 10 fns above; after it, `rlimit-seeds: h3 5 seeds ok`, with the per-fn maxima in the table below.
 
   | fn | max over seeds 0-4 before, anchor in | before, no anchor | after (no anchor) |
