@@ -102,7 +102,7 @@ crate.
   - `smt_order_anchor` is deleted. h3 passes 5 seeds with the reorder in force, and also with the anchor added back
     (both orders checked).
   - h3's ceiling lines are all deleted: every fn is now below 8,000,000 under every seed.
-  - Residual (owner 9b4): the gate runs on h3 only. Every other crate is still measured on one path; 9b4 extends
+  - Residual (owner 9b4, fill task GT-2): the gate runs on h3 only. Every other crate is still measured on one path; 9b4 extends
     `rlimit-seeds.sh` to every crate (and carries tls `build_flight` and the crypto/ctcore ceilings into it).
     Seeds are a sample, not a proof of robustness: 5 seeds bound the cost of the gate (about 2 minutes for h3). At
     9b3 Task 9's fix round (5 seeds): the h3 maximum is `conn::H3Conn::shutdown` at about 6.10M (text unchanged; it
@@ -123,7 +123,8 @@ crate.
     `lemma_feed_done` and `lemma_new_done` went from 5.4M to 1.7M and 2.5M when their 3 hides went. So hide only what
     would otherwise unfold, and measure: an opaque spec fn revealed in its own lemmas costs nothing at the use site. quic's `frags::lemma_merge_end` is likewise pinned by `spinoff_prover` (incident 7, 1.00M-1.02M over
     seeds 0-4); 9b4, which brings quic under the seed gate, owns fixing it at the source (one lemma per ensures): carryover
-    `rca-smt-quic-pinned`, which also owns extending `rlimit-seeds.sh` to every crate.
+    `rca-smt-quic-pinned`, which also owns extending `rlimit-seeds.sh` to every crate. Both are the scaffold's fill task
+    GT-2 (9b4 Task 4 maps to SH-1 and GT-2; ruling 2026-11-23, 9b3 final review B-I4).
 - **Evidence**:
   - Gate demos (`scripts/gate-demos.sh`): "rlimit-seeds: passes seed 0, FAIL row under seed 1", "rlimit-seeds: over
     the cap under seed 1 only", "rlimit-seeds: over its ceiling line", "rlimit-seeds: a malformed ceilings line",

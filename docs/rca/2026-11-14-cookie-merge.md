@@ -69,7 +69,7 @@ Defect through Escape are at e8d97e5 (phase-9b2's tip; h3 is unchanged from main
      - the proved cost ensures above: a quadratic body cannot meet `c_bh()·(fields_size + n + 1)`, and every caller up
        to `H3Conn`'s entry points sums its callees' returned costs;
      - the same shape at every costed loop with an early exit (`frame::lemma_paid`; `rca-early-return-cost`, the RCA
-       2026-11-21-early-return-cost.md) and `carryovers.py`'s cited-id check;
+       2026-11-21-early-return-cost.md);
      - the linear `Budget` of the scaffold (row `sc-h3-budget`, owner sc), which closes by construction what the ghost
        returns leave to convention: uncounted std copies, dropped callee `Ghost`s and uncharged looping callees.
      No `tools/cost-uncharged.txt` exists and the cost-gate demos were never written for h3.

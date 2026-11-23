@@ -88,7 +88,7 @@ structurally by h3's move onto the linear Budget (carryover `sc-h3-budget`).
     `w + 1` moved to the loop's end fails `quick.sh h3/uni` at the `lemma_paid` of both exits it then skips; `parse_settings` returning
     `Ghost(work)` with `ret` left as is verifies (the residual above).
   - Mutants `9b3-T9-5` (`c_step()` removed from `extra`) and `9b3-T9-6` (the `+ 1` free removed) both fail `deliver`
-    with "precondition not satisfied" at the `lemma_answered_cost` call. The patches and logs are in the 9b3 workspace
-    under mutants/.
+    with "precondition not satisfied" at the `lemma_answered_cost` call. Applied by hand to e87e29b's `deliver` (this
+    RCA, 0b666d7), not registered (owner 2026-11-21).
   - Before the lower bound existed, `9b3-T9-5`'s mutation verified (`quick.sh h3/conn/deliver` ok). That is the escape,
     reproduced.
