@@ -1,7 +1,8 @@
 diff --git a/crates/quic/src/streams.rs b/crates/quic/src/streams.rs
+index 7829de1..8cf9faf 100644
 --- a/crates/quic/src/streams.rs
 +++ b/crates/quic/src/streams.rs
-@@ -7321,7 +7321,8 @@ impl Streams {
+@@ -7328,7 +7328,8 @@ impl Streams {
          let ghost mut work: nat = 0;
          if let Some(i) = self.find(id) {
              self.send_op_at(i, op, off, len, fin);
