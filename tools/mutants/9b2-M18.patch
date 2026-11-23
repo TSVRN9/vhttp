@@ -1,8 +1,7 @@
 diff --git a/crates/quic/src/send_stream.rs b/crates/quic/src/send_stream.rs
-index 8f85dee..8e45ff2 100644
 --- a/crates/quic/src/send_stream.rs
 +++ b/crates/quic/src/send_stream.rs
-@@ -2788,6 +2788,7 @@ impl SendStream {
+@@ -2823,6 +2823,7 @@ impl SendStream {
              }
              return (false, Ghost(work));
          }

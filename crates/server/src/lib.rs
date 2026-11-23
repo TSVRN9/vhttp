@@ -21,8 +21,9 @@ use tls::config::{build_config, p256_signing_key, CertChain, ServerConfig};
 
 pub const MAX_POLLS: usize = 1024;
 
-/// D13: `pump_backlog` calls per connection per loop turn: 32 · `B_PUMP` = 128 KiB, enough for one datagram's
-/// CRYPTO backlog at every level; a connection with backlog left gets its next 32 on the next turn.
+/// D13: `pump_backlog` calls per `on_datagram` or `on_wake` call on a connection (so at most 2 · `MAX_PUMPS` per loop
+/// turn for the routed connection): 32 · `B_PUMP` = 128 KiB, enough for one datagram's CRYPTO backlog at every level; a
+/// connection with backlog left gets its next 32 on the next call.
 pub const MAX_PUMPS: usize = 32;
 
 fn setopt(fd: i32, level: i32, name: i32, val: i32) -> io::Result<()> {

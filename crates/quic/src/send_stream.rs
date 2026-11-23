@@ -950,6 +950,11 @@ impl SendStream {
         self.acked@.len() + self.lost@.len() + self.flight@.len()
     }
 
+    /// The acked and lost sets' and the in-flight set's lengths.
+    pub closed spec fn range_counts_spec(&self) -> (nat, nat, nat) {
+        (self.acked@.len(), self.lost@.len(), self.flight@.len())
+    }
+
     /// The nodes in the teardown slot.
     pub closed spec fn td_nodes(&self) -> nat {
         td_count(self.td)
@@ -1351,6 +1356,36 @@ impl SendStream {
             byteq::queue::MAX_QUEUE as int,
             FLOOR as int,
         );
+    }
+
+    /// Test support: the acked and lost sets' and the in-flight set's lengths.
+    #[doc(hidden)]
+    pub fn range_counts(&self) -> (r: (usize, usize, usize))
+        requires
+            self.wf(),
+        ensures
+            r.0 == self.range_counts_spec().0 && r.1 == self.range_counts_spec().1 && r.2 == self.range_counts_spec().2,
+            r.0 + r.1 + r.2 == self.ranges_held(),
+    {
+        proof {
+            self.lemma_weight_max();
+        }
+        (self.acked.len() as usize, self.lost.len() as usize, self.flight.len() as usize)
+    }
+
+    /// Test support: the nodes in the teardown slot.
+    #[doc(hidden)]
+    pub fn td_len(&self) -> (r: usize)
+        requires
+            self.wf(),
+        ensures
+            r == self.td_nodes(),
+    {
+        proof {
+            self.lemma_weight_max();
+            reveal(td_ok);
+        }
+        (self.td.acked.len() + self.td.lost.len() + self.td.flight.len()) as usize
     }
 
     pub fn room(&self, b: u64) -> (r: u64)
@@ -2959,18 +2994,6 @@ impl SendStream {
     pub fn buf_capacity(&self) -> usize {
         let (a, b) = self.buf.caps();
         a + b
-    }
-
-    /// Test support: the acked and lost sets' and the in-flight set's lengths.
-    #[doc(hidden)]
-    pub fn range_counts(&self) -> (usize, usize, usize) {
-        (self.acked.len() as usize, self.lost.len() as usize, self.flight.len() as usize)
-    }
-
-    /// Test support: the nodes in the teardown slot.
-    #[doc(hidden)]
-    pub fn td_len(&self) -> usize {
-        (self.td.acked.len() + self.td.lost.len() + self.td.flight.len()) as usize
     }
 
     /// Test support: the acked and lost ranges and the pieces in flight.

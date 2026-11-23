@@ -13762,6 +13762,84 @@ proof fn lemma_crypto_len(off: u64, d: Seq<u8>)
     theorem_serialize_matches_rfc(d.len() as u64);
 }
 
+impl Connection {
+    /// The nodes in level `k`'s CRYPTO send context's teardown slot; none at 1-RTT.
+    pub closed spec fn crypto_send_td_spec(&self, k: PacketKind) -> nat {
+        match k {
+            PacketKind::Initial => self.ctx_i.td_nodes(),
+            PacketKind::Handshake => self.ctx_h.td_nodes(),
+            PacketKind::OneRtt => 0,
+        }
+    }
+
+    /// The ranges and pieces level `k`'s CRYPTO send context holds outside its slot; none at 1-RTT.
+    pub closed spec fn crypto_send_ranges_spec(&self, k: PacketKind) -> nat {
+        match k {
+            PacketKind::Initial => self.ctx_i.ranges_held(),
+            PacketKind::Handshake => self.ctx_h.ranges_held(),
+            PacketKind::OneRtt => 0,
+        }
+    }
+
+    /// The closed connection's streams left to free, if it has any.
+    pub closed spec fn dead_len_spec(&self) -> Option<nat> {
+        match self.dead {
+            Some(d) => Some(d.len_spec()),
+            None => None,
+        }
+    }
+
+    /// Test support: the nodes in level `k`'s CRYPTO send context's teardown slot (D10 (e)); none at 1-RTT.
+    #[doc(hidden)]
+    pub fn crypto_send_td(&self, k: PacketKind) -> (r: usize)
+        requires
+            self.wf(),
+        ensures
+            r == self.crypto_send_td_spec(k),
+    {
+        match k {
+            PacketKind::Initial => self.ctx_i.td_len(),
+            PacketKind::Handshake => self.ctx_h.td_len(),
+            PacketKind::OneRtt => 0,
+        }
+    }
+
+    /// Test support: the acked, lost and in-flight ranges level `k`'s CRYPTO send context holds outside its slot.
+    #[doc(hidden)]
+    pub fn crypto_send_ranges(&self, k: PacketKind) -> (r: usize)
+        requires
+            self.wf(),
+        ensures
+            r == self.crypto_send_ranges_spec(k),
+    {
+        proof {
+            self.ctx_i.lemma_weight_max();
+            self.ctx_h.lemma_weight_max();
+        }
+        let (a, l, f) = match k {
+            PacketKind::Initial => self.ctx_i.range_counts(),
+            PacketKind::Handshake => self.ctx_h.range_counts(),
+            PacketKind::OneRtt => (0, 0, 0),
+        };
+        a + l + f
+    }
+
+    /// Test support: a closed connection's streams left to free (D13), if any.
+    #[doc(hidden)]
+    pub fn dead_entries(&self) -> (r: Option<usize>)
+        ensures
+            match self.dead_len_spec() {
+                Some(n) => r matches Some(m) && m == n,
+                None => r is None,
+            },
+    {
+        match &self.dead {
+            Some(d) => Some(d.entries_left()),
+            None => None,
+        }
+    }
+}
+
 } // verus!
 
 impl Connection {
@@ -13775,33 +13853,6 @@ impl Connection {
             PacketKind::OneRtt => (self.crx_1.capacities(), 0),
         };
         c.0.saturating_add(c.1).saturating_add(tx)
-    }
-
-    /// Test support: the nodes in level `k`'s CRYPTO send context's teardown slot (D10 (e)); none at 1-RTT.
-    #[doc(hidden)]
-    pub fn crypto_send_td(&self, k: PacketKind) -> usize {
-        match k {
-            PacketKind::Initial => self.ctx_i.td_len(),
-            PacketKind::Handshake => self.ctx_h.td_len(),
-            PacketKind::OneRtt => 0,
-        }
-    }
-
-    /// Test support: the acked, lost and in-flight ranges level `k`'s CRYPTO send context holds outside its slot.
-    #[doc(hidden)]
-    pub fn crypto_send_ranges(&self, k: PacketKind) -> usize {
-        let (a, l, f) = match k {
-            PacketKind::Initial => self.ctx_i.range_counts(),
-            PacketKind::Handshake => self.ctx_h.range_counts(),
-            PacketKind::OneRtt => (0, 0, 0),
-        };
-        a + l + f
-    }
-
-    /// Test support: a closed connection's streams left to free (D13), if any.
-    #[doc(hidden)]
-    pub fn dead_entries(&self) -> Option<usize> {
-        self.dead.as_ref().map(DeadStreams::entries_left)
     }
 
     /// Test support: stream `id`'s acked, lost and in-flight send-range counts (3d Task 1, 9b2 Task 8a).
