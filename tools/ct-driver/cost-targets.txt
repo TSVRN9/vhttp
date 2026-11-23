@@ -8,16 +8,16 @@ cost-root wire::varint::parse_varint  # predicted: bounded; orig: Some
 cost-root h3::frame::parse_frame_header  # predicted: bounded; orig: Some
 cost-root h3::frame::parse_exact_varint  # predicted: bounded; orig: Some
 cost-root h3::frame::settings_ok  # predicted: bounded; orig: Some
-cost-root h3::frame::sort_ids_w  # predicted: none (generic CapVec<u64>: ambiguous key byteq::capvec::CapVec::new); bound proved by Verus as a ghost cost: sort_ids_w ensures r.1@ <= c_sort() * (p * (clog2(p) + 1) + 1) (9b3 D7); MIR cross-check: 9b4 cat-C15-mir-cost; orig: -
+cost-root h3::frame::sort_ids_w  # predicted: none (generic CapVec<u64>: ambiguous key byteq::capvec::CapVec::new); bound proved by Verus as a ghost cost: sort_ids_w ensures r.1@ <= c_sort() * (p * (clog2(p) + 1) + 1) (9b3 D7); MIR cross-check: cat-C15-mir-cost (sc); orig: -
 cost-root h3::frame::parse_settings  # predicted: none (non-unit step (off += n1 + n2); original None); orig: None
 cost-root h3::frame::parse_frame_payload  # predicted: none (calls parse_settings); orig: None
 cost-root h3::qpack::int::parse_prefix_int  # predicted: bounded; orig: Some
 cost-root h3::qpack::huffman::lookup  # predicted: bounded; orig: Some
 cost-root h3::qpack::huffman::feed_bit  # predicted: bounded; orig: Some
-cost-root h3::qpack::huffman::huffman_decode  # predicted: none (9b3 Task 6: huffman_decode_w's CapVec<u8>: ambiguous key byteq::capvec::CapVec::new; was NotCounted); bound proved by Verus as a ghost cost: huffman_decode_w ensures r.1@ <= c_huff() * (input@.len() + 1); MIR cross-check: 9b4 cat-C15-mir-cost; orig: Some
-cost-root h3::qpack::field_section::scan_string  # predicted: none (9b3 Task 6: calls huffman_decode_w, ambiguous key byteq::capvec::CapVec::new; was CalleeNone); bound proved by Verus as a ghost cost: scan_string ensures r.1@ <= c_str() * (b@.len() + 1); MIR cross-check: 9b4 cat-C15-mir-cost; orig: Some
-cost-root h3::qpack::field_section::decode_string  # predicted: none (9b3 Task 6: calls huffman_decode_w, ambiguous key byteq::capvec::CapVec::new; was CalleeNone); bound proved by Verus as a ghost cost: decode_string ensures r.1@ <= c_dstr() * (b@.len() + 1); MIR cross-check: 9b4 cat-C15-mir-cost; orig: Some
-cost-root h3::qpack::field_section::decode_field_line  # predicted: none (9b3 Task 6: calls huffman_decode_w, ambiguous key byteq::capvec::CapVec::new; was Validator); bound proved by Verus as a ghost cost: decode_field_line ensures r.1@ <= c_line() * (c + 1) + line_bytes(f@) per line (c bytes taken, at most 76 decoded per byte, lemma_line_expansion), else c_line() * (b@.len() + 1); MIR cross-check: 9b4 cat-C15-mir-cost; orig: Some
+cost-root h3::qpack::huffman::huffman_decode  # predicted: none (9b3 Task 6: huffman_decode_w's CapVec<u8>: ambiguous key byteq::capvec::CapVec::new; was NotCounted); bound proved by Verus as a ghost cost: huffman_decode_w ensures r.1@ <= c_huff() * (input@.len() + 1); MIR cross-check: cat-C15-mir-cost (sc); orig: Some
+cost-root h3::qpack::field_section::scan_string  # predicted: none (9b3 Task 6: calls huffman_decode_w, ambiguous key byteq::capvec::CapVec::new; was CalleeNone); bound proved by Verus as a ghost cost: scan_string ensures r.1@ <= c_str() * (b@.len() + 1); MIR cross-check: cat-C15-mir-cost (sc); orig: Some
+cost-root h3::qpack::field_section::decode_string  # predicted: none (9b3 Task 6: calls huffman_decode_w, ambiguous key byteq::capvec::CapVec::new; was CalleeNone); bound proved by Verus as a ghost cost: decode_string ensures r.1@ <= c_dstr() * (b@.len() + 1); MIR cross-check: cat-C15-mir-cost (sc); orig: Some
+cost-root h3::qpack::field_section::decode_field_line  # predicted: none (9b3 Task 6: calls huffman_decode_w, ambiguous key byteq::capvec::CapVec::new; was Validator); bound proved by Verus as a ghost cost: decode_field_line ensures r.1@ <= c_line() * (c + 1) + line_bytes(f@) per line (c bytes taken, at most 76 decoded per byte, lemma_line_expansion), else c_line() * (b@.len() + 1); MIR cross-check: cat-C15-mir-cost (sc); orig: Some
 cost-root h3::qpack::field_section::decode_lines  # predicted: none (pos += consumed); orig: None
 cost-root h3::qpack::field_section::decode_lines_bounded  # predicted: none (pos += consumed); orig: None
 cost-root h3::qpack::field_section::decode_field_section  # predicted: none (pos += consumed); orig: None

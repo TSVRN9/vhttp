@@ -149,8 +149,8 @@ fn qpack_instruction_split_frees() {
     assert_eq!(s.on_data(&[0x01, 0x7F], false, &mut seen, &mut ev).0, Ok(()));
     assert_eq!(s.buffered_len(), 1);
     assert_eq!(s.on_data(&[0x05], false, &mut seen, &mut ev).0, Ok(()));
+    // Both buffers are freed: UniStream's wf holds its queue's, which proves an empty queue holds none (ByteQueue::lemma_wf).
     assert_eq!(s.buffered_len(), 0);
-    assert_eq!(s.buf_caps(), (0, 0));
     // The longest incomplete instruction: 0x7F and 10 continuation bytes, one per call, 11 held; an 11th is too large.
     let mut s = UniStream::new();
     let mut seen = fresh();

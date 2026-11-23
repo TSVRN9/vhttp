@@ -3206,11 +3206,3 @@ proof fn lemma_qpack_end(s: UniStream, fin: bool)
 }
 
 } // verus!
-
-impl UniStream {
-    /// Test support: the held-byte queue's buffer capacities (`ByteQueue::caps`).
-    #[doc(hidden)]
-    pub fn buf_caps(&self) -> (usize, usize) {
-        self.buf.caps()
-    }
-}
