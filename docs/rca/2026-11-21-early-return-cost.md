@@ -26,7 +26,8 @@ structurally by h3's move onto the linear Budget (carryover `sc-h3-budget`).
 - **Escape**:
   - The ensures is an upper bound with margin. A charge left out of an expression under the bound verifies, so Verus
     cannot see it.
-  - The structural rules (until Task 12's gate, followed by hand) check that every `while` names `work`, and that
+  - The structural rules (followed by hand in h3; `tools/cost_charge.py` covers quic and byteq only and is being retired, so
+    no script rule was added for h3) check that every `while` names `work`, and that
     every callee's `Ghost` is bound. Neither looks at primitive operations on a path that leaves the loop early.
   - The loop's lump and the return's charge were written separately, so nothing tied them together.
 - **Class**: C15 (algorithmic cost not in contracts), in its accounting form: a charge written per path drifts between
@@ -73,6 +74,8 @@ structurally by h3's move onto the linear Budget (carryover `sc-h3-budget`).
     this class here (their costs are carryover cat-C15-semantic-cost's and the scaffold's FD-7).
 - **Evidence**:
   - 9b3 Task 12's commit (the sites above); `scripts/quick.sh h3` and `scripts/rlimit-seeds.sh h3 5` pass on it.
+  - Hand check (9b3 Task 12, not a mutant row): `parse_settings`' first exit with `extra` set to 0 fails `quick.sh
+    h3/frame` with "precondition not satisfied" at its `lemma_exit_pays` call.
   - Mutants `9b3-T9-5` (`c_step()` removed from `extra`) and `9b3-T9-6` (the `+ 1` free removed) both fail `deliver`
     with "precondition not satisfied" at the `lemma_answered_cost` call. The patches and logs are in the 9b3 workspace
     under mutants/.
