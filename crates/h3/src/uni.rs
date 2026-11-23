@@ -2191,7 +2191,7 @@ impl UniStream {
             final(self).buf@ == old(self).buf@ + seg@.subrange(j as int, r.0 as int),
             live_s(*final(self)),
             at_most_one(final(self).buf@),
-            r.1@ <= 7 * (r.0 - j) + 21,
+            r.1@ <= 7 * (r.0 - j) + 22,
     {
         let bl = self.buf.len();
         let q = self.buf.as_slice();
@@ -2229,9 +2229,8 @@ impl UniStream {
         proof {
             lemma_split_append(all1, self.seen0@, self.emitted@, self.kind, self.ctrl, self.skip, buf1, piece@);
         }
-        // The header parse's and the push's costs; this fn's own constant steps are uncharged: the 21 of the bound has
-        // no room for them, and the Budget makes them explicit (carryover sc-h3-budget).
-        (j + k, Ghost(wp + ch))
+        // The header parse's and the push's costs, and 1 for this fn's own steps.
+        (j + k, Ghost(wp + ch + 1))
     }
 
     /// QPACK streams emit no events, so only `buf` and the result change. While an instruction is held, one byte at a
