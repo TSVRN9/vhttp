@@ -878,8 +878,8 @@ pub open spec fn c_huff() -> nat {
 
 /// Decodes a Huffman-coded string literal (RFC 7541 §5.2); `None` on any decoding error. The output is created at its
 /// most, `8·len/5` bytes (every code is at least 5 bits), so no push reallocates.
-// ponytail: one bit per step with a per-length window lookup; a nibble/byte state table is the
-// upgrade if header decoding shows up in profiles.
+// ponytail: one bit per step with a per-length window lookup (a constant factor, cat-C15-stream-parse's rewrite);
+// a nibble/byte state table is the upgrade if header decoding shows up in profiles.
 pub fn huffman_decode_w(input: &[u8]) -> (r: (Option<Vec<u8>>, Ghost<nat>))
     requires
         input@.len() <= usize::MAX / 8,

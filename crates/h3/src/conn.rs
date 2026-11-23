@@ -2819,6 +2819,7 @@ fn deliver(
             // This event's step, as at the loop's end, its scheme check and answer, and the reversed buffer's free (1);
             // `lemma_answered_cost` requires the step and the free to be in it. The answered event and those after it
             // are dropped here.
+            // c_step double-counts the push/move the answer also counts (a 6-unit split): loose by design here.
             let ghost extra: nat = c_step() + cs + ca + 1;
             proof {
                 lemma_answered_ret(id, ev, k as int, tr, tr0, err, cx, status, o0, o1, out@);

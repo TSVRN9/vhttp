@@ -3,7 +3,7 @@
 //! Per call: no `realloc`, and requested bytes at most `COST_A·d + COST_B`, but for one queue buffer of a call given
 //! bytes, and, for the call that completes a buffered frame of `f` bytes, `fa·f + COST_B` more (`per_call_ok`): `fa` is
 //! `H3_F` for a request stream's frame (QPACK decode expands it), `COST_A` elsewhere.
-//! Each test is ignored until the task that makes it pass.
+//! None is ignored; Task 1 committed them against the pre-9b3 code.
 use h3::conn::{H3Conn, Output, MAX_OUTS};
 use h3::frame::serialize_frame_header;
 use h3::message::RequestHead;
