@@ -1,8 +1,8 @@
 diff --git a/crates/h3/src/qpack/field_section.rs b/crates/h3/src/qpack/field_section.rs
-index aa80986..ba7b392 100644
+index 256b73d..aee1444 100644
 --- a/crates/h3/src/qpack/field_section.rs
 +++ b/crates/h3/src/qpack/field_section.rs
-@@ -1141,7 +1141,7 @@ pub open spec fn line_bounded_ok(b: Seq<u8>, left: u64, r: Result<(FieldLine, us
+@@ -1146,7 +1146,7 @@ pub open spec fn line_bounded_ok(b: Seq<u8>, left: u64, r: Result<(FieldLine, us
  /// section's size limit (RFC 9114 §4.2.2, cited at `field_line_size`).
  pub open spec fn line_allowed_err(b: Seq<u8>, left: u64, e: BoundedError) -> bool {
      match e {

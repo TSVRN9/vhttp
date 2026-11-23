@@ -1,8 +1,8 @@
 diff --git a/crates/h3/src/qpack/field_section.rs b/crates/h3/src/qpack/field_section.rs
-index aa80986..0b12b0c 100644
+index 256b73d..bbe7cd5 100644
 --- a/crates/h3/src/qpack/field_section.rs
 +++ b/crates/h3/src/qpack/field_section.rs
-@@ -1346,7 +1346,7 @@ fn decode_lines_bounded(lines: &[u8], budget: u64) -> (r: (Result<Vec<FieldLine>
+@@ -1352,7 +1352,7 @@ fn decode_lines_bounded(lines: &[u8], budget: u64) -> (r: (Result<Vec<FieldLine>
                      work = work + 1;
                  }
                  let ghost done = fields_view(out@);

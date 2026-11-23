@@ -1,8 +1,8 @@
 diff --git a/crates/h3/src/message.rs b/crates/h3/src/message.rs
-index 172da11..c7c28af 100644
+index 805cf3c..282afd8 100644
 --- a/crates/h3/src/message.rs
 +++ b/crates/h3/src/message.rs
-@@ -2216,7 +2216,7 @@ fn build_headers(fields: &[FieldLine]) -> (r: (Vec<FieldLine>, Ghost<nat>))
+@@ -2263,7 +2263,7 @@ fn build_headers(fields: &[FieldLine]) -> (r: (Vec<FieldLine>, Ghost<nat>))
  /// request's `:authority` is absent or not authority-form (RFC 9114 §4.4, cited at `rfc_validate_request`: "A CONNECT
  /// request that does not conform to these restrictions is malformed").
  spec fn connect_allowed_err(a: Option<Seq<u8>>, c: u64) -> bool {
