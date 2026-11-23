@@ -1800,6 +1800,37 @@ fn run(
     (Ok(pos), Ghost(work))
 }
 
+/// What `RequestStream::on_data` guarantees, from `s0` (events `e0`) to `s1` (`e1`), having fed `data` and returned `r`
+/// at `cost`.
+pub open spec fn fed(
+    s0: RequestStream,
+    s1: RequestStream,
+    data: Seq<u8>,
+    fin: bool,
+    e0: CapVec<ReqEvent>,
+    e1: CapVec<ReqEvent>,
+    r: Result<(), ReqError>,
+    cost: nat,
+) -> bool {
+    &&& s1.wf()
+    &&& s1.all() == s0.all() + data
+    &&& s1.done() == (r is Err || fin)
+    &&& !s1.done() ==> s1.buffered() < REQ_BUF_CAP
+    &&& e1.wf()
+    &&& e1.cap() == e0.cap()
+    &&& e1@.len() >= e0@.len()
+    &&& e1@.len() <= e0@.len() + MAX_REQ_EVENTS
+    &&& e1@.take(e0@.len() as int) == e0@
+    &&& s1.emitted() == s0.emitted() + views(e1@.skip(e0@.len() as int))
+    &&& bodies_from(e1@, e0@.len() as int)
+    &&& rfc_request_stream(s1.all(), fin) == (concat_bodies(s1.emitted()), err_of(r))
+    // `c_frame()·s0.buffered()` is F, linear in the completed frame: F's excess over d is carryover
+    // cat-C15-stream-parse (9b5).
+    &&& cost <= c_req() * (data.len() + 16) + c_frame() * s0.buffered()
+    &&& ev_lines(views(e1@.skip(e0@.len() as int))) <= 77 * (data.len() + 16 + s0.buffered())
+    &&& nbody(views(e1@.skip(e0@.len() as int))) <= 1
+}
+
 /// One client request stream.
 pub struct RequestStream {
     phase: Phase,
@@ -1962,6 +1993,17 @@ impl RequestStream {
         self.buf.len()
     }
 
+    /// A stream still taking data holds fewer than REQ_BUF_CAP bytes: the cap of the entry points' `F` term (one
+    /// HEADERS frame at most).
+    pub proof fn lemma_buffered(&self)
+        requires
+            self.wf(),
+            !self.done(),
+        ensures
+            self.buffered() < REQ_BUF_CAP,
+    {
+    }
+
     /// Feeds the next `data` (`fin`: the stream ends after it). Afterwards the cumulative events,
     /// with body chunks concatenated, and the error are exactly `rfc_request_stream` of every
     /// byte received, so they don't depend on how the bytes were chunked. A call returns at most
@@ -1977,27 +2019,7 @@ impl RequestStream {
             old(events).wf(),
             old(events)@.len() + MAX_REQ_EVENTS <= old(events).cap(),
         ensures
-            final(self).wf(),
-            final(self).all() == old(self).all() + data@,
-            final(self).done() == (r.0 is Err || fin),
-            !final(self).done() ==> final(self).buffered() < REQ_BUF_CAP,
-            final(events).wf(),
-            final(events).cap() == old(events).cap(),
-            final(events)@.len() >= old(events)@.len(),
-            final(events)@.len() <= old(events)@.len() + MAX_REQ_EVENTS,
-            final(events)@.take(old(events)@.len() as int) == old(events)@,
-            final(self).emitted() == old(self).emitted() + views(
-                final(events)@.skip(old(events)@.len() as int),
-            ),
-            bodies_from(final(events)@, old(events)@.len() as int),
-            rfc_request_stream(final(self).all(), fin) == (
-                concat_bodies(final(self).emitted()),
-                err_of(r.0),
-            ),
-            r.1@ <= c_req() * (data@.len() + 16) + c_frame() * old(self).buffered(),
-            ev_lines(views(final(events)@.skip(old(events)@.len() as int))) <= 77 * (data@.len() + 16
-                + old(self).buffered()),
-            nbody(views(final(events)@.skip(old(events)@.len() as int))) <= 1,
+            fed(*old(self), *final(self), data@, fin, *old(events), *final(events), r.0, r.1@),
     {
         hide(rfc_req);
         hide(rfc_skip);

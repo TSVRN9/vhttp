@@ -3669,6 +3669,32 @@ pub proof fn lemma_ht_of(c: H3Conn, id: u64)
     assert(c.rstate@.dom() == tv(c.reqs).dom());
 }
 
+/// The `F` term's cap: a connection holds fewer than REQ_BUF_CAP bytes for a request stream it still receives (one
+/// HEADERS frame at most), fewer than UNI_BUF_CAP for a uni stream (one control frame or QPACK instruction at most), so
+/// `c_held()·buffered_of` is a constant per call. Linear in the completed frame, not in the call's bytes: F's excess over
+/// d is carryover cat-C15-stream-parse (9b5).
+pub proof fn lemma_buffered_of(c: H3Conn, id: u64)
+    requires
+        c.wf(),
+    ensures
+        c.buffered_of(id) < if id % 4 == 2 {
+            uni::UNI_BUF_CAP as nat
+        } else {
+            request::REQ_BUF_CAP as nat
+        },
+{
+    if !c.closed {
+        lemma_tables_open(c.reqs, c.unis, c.rhist@, c.uhist@, c.rstate@, c.uset@);
+        reveal(reqs_ok);
+        reveal(unis_ok);
+        if id % 4 == 0 && tv(c.reqs).contains_key(id) && tv(c.reqs)[id].rx_open {
+            tv(c.reqs)[id].stream.lemma_buffered();
+        } else if id % 4 == 2 && tv(c.unis).contains_key(id) {
+            tv(c.unis)[id].stream.lemma_buffered();
+        }
+    }
+}
+
 /// What `request_data` and its parts ensure, their costs aside.
 #[verifier::opaque]
 spec fn req_done(c0: H3Conn, c1: H3Conn, o0: CapVec<Output>, o1: CapVec<Output>, id: u64, data: Seq<u8>, fin: bool) -> bool {
@@ -4042,10 +4068,13 @@ impl H3Conn {
         self.rhist@[id]
     }
 
-    /// The bytes stream `id`'s machine holds from earlier calls: the frame a call may complete from them is the
-    /// entry points' `F` term.
+    /// The bytes stream `id`'s machine holds from earlier calls, while the connection is open and the stream is still
+    /// received: the frame a call may complete from them is the entry points' `F` term, under REQ_BUF_CAP (UNI_BUF_CAP
+    /// for a uni stream) by `lemma_buffered_of`.
     pub closed spec fn buffered_of(&self, id: u64) -> nat {
-        if id % 4 == 0 && tv(self.reqs).contains_key(id) {
+        if self.closed {
+            0
+        } else if id % 4 == 0 && tv(self.reqs).contains_key(id) && tv(self.reqs)[id].rx_open {
             tv(self.reqs)[id].stream.buffered()
         } else if id % 4 == 2 && tv(self.unis).contains_key(id) {
             tv(self.unis)[id].stream.buffered()
@@ -4600,6 +4629,8 @@ impl H3Conn {
                 self,
             ).uni_seen(),
             // `removed_fields` is not bounded by the call's input: N6, owned by carryover cat-C15-teardown (9b4).
+            // `buffered_of` (under a constant: `lemma_buffered_of`) is F, linear in the completed frame: F's excess over
+            // d is carryover cat-C15-stream-parse (9b5).
             r@ <= c_in() * (data@.len() + 1) + c_map() * (ht_of(*old(self), stream_id) + 1) + c_held()
                 * old(self).buffered_of(stream_id) + c_free() * removed_fields(*old(self), *final(self), stream_id),
     {

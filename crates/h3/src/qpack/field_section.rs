@@ -1151,6 +1151,40 @@ pub open spec fn line_allowed_err(b: Seq<u8>, left: u64, e: BoundedError) -> boo
     }
 }
 
+/// Static entry 17 is `:method GET`.
+proof fn lemma_entry_17()
+    ensures
+        spec_static_entry(17) == Some((seq![58u8, 109u8, 101u8, 116u8, 104u8, 111u8, 100u8], seq![71u8, 69u8, 84u8])),
+{
+    assert(spec_static_entry(17) == Some((seq![58u8, 109u8, 101u8, 116u8, 104u8, 111u8, 100u8], seq![71u8, 69u8, 84u8])))
+        by (compute_only);
+}
+
+/// `line_allowed_err` is not vacuous: the indexed line `D1` (static entry 17, `:method GET`, a field line size of 42)
+/// decodes, so it is never refused as QPACK_DECOMPRESSION_FAILED, nor as over a budget of 1000; over a budget of 41 it
+/// may be refused, and the dynamic-table reference `80` (T = 0), which decodes to nothing, may be refused as
+/// QPACK_DECOMPRESSION_FAILED.
+proof fn lemma_line_allowed_err_rejects()
+    ensures
+        !line_allowed_err(seq![0xD1u8], 1000, BoundedError::OverBudget),
+        !line_allowed_err(seq![0xD1u8], 1000, BoundedError::Qpack(QPACK_DECOMPRESSION_FAILED)),
+        line_allowed_err(seq![0xD1u8], 41, BoundedError::OverBudget),
+        line_allowed_err(seq![0x80u8], 1000, BoundedError::Qpack(QPACK_DECOMPRESSION_FAILED)),
+{
+    hide(spec_static_entry);
+    hide(rfc_prefix_int);
+    lemma2_to64();
+    lemma_entry_17();
+    assert(0xffu8 >> 2u8 == 63u8) by (bit_vector);
+    assert(0xc0u8 | 17u8 == 0xD1u8) by (bit_vector);
+    assert(spec_prefix_int_bytes(6, 0xc0, 17) =~= seq![0xD1u8]);
+    theorem_prefix_int_roundtrip(6, 0xc0, 17);
+    assert(0xD1u8 & 0x80u8 != 0u8) by (bit_vector);
+    assert(0xD1u8 & 0x40u8 != 0u8) by (bit_vector);
+    assert(0x80u8 & 0x80u8 != 0u8) by (bit_vector);
+    assert(0x80u8 & 0x40u8 == 0u8) by (bit_vector);
+}
+
 /// An indexed field line (`1 1 Index(6+)`): the static entry, copied once it fits.
 fn indexed_line(b: &[u8], left: u64) -> (r: (Result<(FieldLine, usize), BoundedError>, Ghost<nat>))
     requires

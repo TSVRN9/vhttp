@@ -1540,6 +1540,17 @@ impl UniStream {
         self.buf.len()
     }
 
+    /// A stream still taking data holds fewer than UNI_BUF_CAP bytes: the cap of the entry points' `F` term (one
+    /// control frame or QPACK instruction at most).
+    pub proof fn lemma_buffered(&self)
+        requires
+            self.wf(),
+            !self.done(),
+        ensures
+            self.buffered() < UNI_BUF_CAP,
+    {
+    }
+
     pub fn kind(&self) -> (k: UniKind)
         requires
             self.wf(),
@@ -2643,6 +2654,8 @@ pub open spec fn fed(
     &&& rfc_uni_stream(s1.all(), fin, s1.seen_before()) == (s1.emitted(), err_of(r))
     &&& kind_of_bytes(s0.all()) is Undetermined ==> s1.seen_before() == seen0 && seen1 == seen_after(seen0, s1.all())
     &&& !(kind_of_bytes(s0.all()) is Undetermined) ==> s1.seen_before() == s0.seen_before() && seen1 == seen0
+    // `c_uni_frame()·s0.buffered()` is F, linear in the completed frame: F's excess over d is carryover
+    // cat-C15-stream-parse (9b5).
     &&& cost <= c_uni() * (data.len() + 16) + c_uni_frame() * s0.buffered()
     &&& 2 * ev_pairs(views(e1@.skip(e0@.len() as int))) <= data.len() + s0.buffered()
 }

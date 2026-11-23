@@ -2268,6 +2268,20 @@ spec fn connect_allowed_err(a: Option<Seq<u8>>, c: u64) -> bool {
     c == H3_MESSAGE_ERROR && !(a matches Some(x) && authority_form(x))
 }
 
+/// `connect_allowed_err` is not vacuous: an authority-form `:authority` (`a:1`) is never refused, nor is any code but
+/// H3_MESSAGE_ERROR; a CONNECT request with no `:authority` may be refused.
+proof fn lemma_connect_allowed_err_rejects()
+    ensures
+        !connect_allowed_err(Some(seq![97u8, 58u8, 49u8]), H3_MESSAGE_ERROR),
+        !connect_allowed_err(None, crate::codes::H3_FRAME_ERROR),
+        connect_allowed_err(None, H3_MESSAGE_ERROR),
+{
+    let a = seq![97u8, 58u8, 49u8];
+    assert(a.drop_last() =~= seq![97u8, 58u8]);
+    reveal_with_fuel(trailing_digits, 2);
+    assert(trailing_digits(a) == 1);
+}
+
 /// A CONNECT request's head: the `:authority` value in authority-form, copied.
 fn connect_x(av: Option<&[u8]>) -> (r: (Result<RequestHead, u64>, Ghost<nat>))
     ensures
@@ -2316,6 +2330,18 @@ spec fn request_allowed_err(
     c: u64,
 ) -> bool {
     c == H3_MESSAGE_ERROR && !(meth.len() > 0 && scheme.len() > 0 && path.len() > 0 && authority_ok(scheme, a, h))
+}
+
+/// `request_allowed_err` is not vacuous: `GET https /` with `:authority` `a` is never refused, nor is any code but
+/// H3_MESSAGE_ERROR; the same request with an empty `:path` may be refused.
+proof fn lemma_request_allowed_err_rejects()
+    ensures
+        !request_allowed_err(seq![71u8, 69u8, 84u8], lit_https(), seq![47u8], Some(seq![97u8]), None, H3_MESSAGE_ERROR),
+        !request_allowed_err(Seq::empty(), Seq::empty(), Seq::empty(), None, None, crate::codes::H3_FRAME_ERROR),
+        request_allowed_err(seq![71u8, 69u8, 84u8], lit_https(), Seq::empty(), Some(seq![97u8]), None, H3_MESSAGE_ERROR),
+{
+    assert(eq_ci(lit_https(), lit_https()));
+    assert(no_at(seq![97u8]));
 }
 
 /// A non-CONNECT request's head, given its method, scheme and path lines and the `:authority` and `host` values: the
